@@ -31,7 +31,7 @@ const CATEGORY_LABEL = {
   other:      '🛠 อื่นๆ',
 };
 
-function PageMaintenance({ addActivity, setToast }) {
+function PageMaintenance({ rooms, setRooms, addActivity, setToast }) {
   const C = window.ADMIN_C;
   const { Card, SectionHeading, Btn, Pill, EmptyState, PageContainer, PageHeader, Modal, Drawer, Select, Input, Textarea } = window;
 
@@ -104,6 +104,35 @@ function PageMaintenance({ addActivity, setToast }) {
       }
       setTickets((prev) => prev.map((t) => (t.id === id ? data.ticket : t)));
       if (selected && selected.id === id) setSelected(data.ticket);
+
+      // When a ticket transitions to 'completed' AND has a cost > 0, push the
+      // cost onto the room's pendingCharges array so it shows up on the next
+      // bill. Idempotent — keyed by ticket_no, so completing twice doesn't
+      // double-charge.
+      if (
+        data.ticket.status === 'completed' &&
+        Number(data.ticket.cost) > 0 &&
+        setRooms && rooms && rooms[data.ticket.room_id]
+      ) {
+        setRooms((prev) => {
+          const r = prev[data.ticket.room_id];
+          if (!r) return prev;
+          const charges = Array.isArray(r.pendingCharges) ? [...r.pendingCharges] : [];
+          if (charges.find((c) => c.refId === data.ticket.ticket_no)) return prev;
+          charges.push({
+            refId: data.ticket.ticket_no,
+            label: `ค่าซ่อม ${data.ticket.title || data.ticket.ticket_no}`,
+            amount: Number(data.ticket.cost),
+            createdAt: new Date().toISOString(),
+          });
+          return { ...prev, [data.ticket.room_id]: { ...r, pendingCharges: charges } };
+        });
+        addActivity && addActivity({
+          icon: '💰',
+          text: `เพิ่มค่าซ่อม ${data.ticket.cost} บาทเข้าบิลห้อง ${data.ticket.room_id}`,
+          type: 'maintenance',
+        });
+      }
       return data.ticket;
     } catch (err) {
       console.error('update ticket failed', err);

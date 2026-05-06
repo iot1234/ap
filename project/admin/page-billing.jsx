@@ -28,7 +28,11 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         const water = (r.waterUnits || 0) * waterRate;
         const elec  = (r.elecUnits  || 0) * elecRate;
         const wifi  = (r.wifi != null && r.wifi !== 0) ? r.wifi : wifiFee;
-        const total = r.rent + water + elec + wifi;
+        // Pending charges are tickets-completed-with-cost that haven't been
+        // settled yet. Each charge becomes a line on this month's bill.
+        const charges = Array.isArray(r.pendingCharges) ? r.pendingCharges : [];
+        const chargesTotal = charges.reduce((s, c) => s + (Number(c.amount) || 0), 0);
+        const total = r.rent + water + elec + wifi + chargesTotal;
         const overdue = r.status === 'overdue';
         const penalty = overdue ? (r.overdueDays || 0) * (config.fees?.latePenaltyPerDay || 0) : 0;
         const grandTotal = total + penalty;
@@ -43,6 +47,8 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
           water, elec, wifi,
           waterUnits: r.waterUnits,
           elecUnits: r.elecUnits,
+          charges,
+          chargesTotal,
           subtotal: total,
           penalty,
           total: grandTotal,
@@ -102,6 +108,22 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
     }));
     addActivity && addActivity({ icon: '💳', text: `รับชำระบิล ${id} จำนวน ${fmtCurrency(bill.total)}`, type: 'payment' });
     setToast && setToast({ kind: 'success', message: `บันทึกชำระห้อง ${bill.roomId} แล้ว` });
+  };
+
+  // Undo a mark-paid. Clears billPaidAt + billStatus so the next bill recompute
+  // returns this room to the unpaid bucket. Use case: admin clicked the wrong
+  // row, or a payment turned out to bounce.
+  const handleUnmarkPaid = (id) => {
+    const bill = bills.find(b => b.id === id);
+    if (!bill) return;
+    setRooms(prev => {
+      const r = prev[bill.roomId];
+      if (!r) return prev;
+      const { billPaidAt, billStatus, ...rest } = r;
+      return { ...prev, [bill.roomId]: rest };
+    });
+    addActivity && addActivity({ icon: '↺', text: `ยกเลิกการชำระบิล ${id}`, type: 'payment' });
+    setToast && setToast({ kind: 'info', message: `ยกเลิกการบันทึกชำระห้อง ${bill.roomId}` });
   };
 
   const handleSendReminder = (id) => {
@@ -179,6 +201,9 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
               <IconBtn icon="✓" label="บันทึกชำระ" onClick={() => handleMarkPaid(b.id)} />
             </>
           )}
+          {b.status === 'paid' && (
+            <IconBtn icon="↺" label="ยกเลิกการชำระ" onClick={() => handleUnmarkPaid(b.id)} />
+          )}
         </div>
       ),
     },
@@ -233,10 +258,35 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
             เลือกแล้ว {selected.size} รายการ
           </span>
           <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
-            <Btn variant="soft" size="sm" icon="🔔" onClick={() => {
+            <Btn variant="soft" size="sm" icon="🔔" onClick={async () => {
               const ids = [...selected];
-              ids.forEach(id => addActivity && addActivity({ icon: '🔔', text: `ส่งเตือนชำระบิล ${id}`, type: 'system' }));
-              setToast && setToast({ kind: 'success', message: `ส่งเตือน ${ids.length} รายการเรียบร้อย` });
+              const targets = bills.filter((b) => ids.includes(b.id));
+              let okCount = 0, failCount = 0, skip = false;
+              for (const b of targets) {
+                try {
+                  const r = await fetch('/api/notify/bill', {
+                    method: 'POST',
+                    credentials: 'include',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      billNo: b.id, roomId: b.roomId, tenantName: b.tenant,
+                      period: b.period, total: b.total,
+                    }),
+                  });
+                  if (r.status === 503) { skip = true; break; }
+                  if (r.ok) {
+                    okCount++;
+                    addActivity && addActivity({ icon: '🔔', text: `ส่งเตือนชำระบิล ${b.id}`, type: 'system' });
+                  } else failCount++;
+                } catch { failCount++; }
+              }
+              if (skip) {
+                setToast && setToast({ kind: 'error', message: 'ระบบยังไม่ได้ตั้งค่า LINE — ตั้งค่าก่อนใช้บัลก์' });
+              } else if (failCount === 0) {
+                setToast && setToast({ kind: 'success', message: `ส่งเตือน ${okCount} รายการเรียบร้อย` });
+              } else {
+                setToast && setToast({ kind: 'info', message: `สำเร็จ ${okCount} · ล้มเหลว ${failCount}` });
+              }
               setSelected(new Set());
             }}>ส่งเตือนทั้งหมด</Btn>
             <Btn variant="soft" size="sm" icon="📥" onClick={() => {
@@ -306,11 +356,23 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
                 { label: 'ค่าไฟฟ้า', qty: `${b.elecUnits || 0} หน่วย`, amount: b.elec || 0 },
                 { label: 'ค่า Wi-Fi', amount: b.wifi || 0 },
               ];
+              // Maintenance / repair charges from completed tickets.
+              if (Array.isArray(b.charges)) {
+                b.charges.forEach((c) => items.push({ label: c.label, amount: Number(c.amount) || 0 }));
+              }
               if (b.penalty > 0) {
                 items.push({ label: `ค่าปรับล่าช้า (${b.overdueDays || 0} วัน)`, amount: b.penalty });
               }
+              // Single source of truth: config.payment.promptpay (set in
+               // Settings → การชำระเงิน). Older fields kept as fallbacks for
+               // backward compat with any pre-existing config blobs.
               const billing = (config && config.billing) || {};
-              const promptpayTarget = billing.promptpayTarget || (config && config.payments && config.payments.promptpayTarget) || '';
+              const payment = (config && config.payment) || {};
+              const promptpayTarget =
+                payment.promptpay ||
+                billing.promptpayTarget ||
+                (config && config.payments && config.payments.promptpayTarget) ||
+                '';
               const payload = {
                 billNo: b.id,
                 roomId: b.roomId,

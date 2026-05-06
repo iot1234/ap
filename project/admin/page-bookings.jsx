@@ -4,7 +4,7 @@
 
 const { useState, useMemo } = React;
 
-function PageBookings({ bookings, setBookings, addActivity, setToast }) {
+function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, setToast }) {
   const C = window.ADMIN_C;
   const ADMIN_ROOM_TYPES = window.ADMIN_ROOM_TYPES;
   const { fmt, fmtCurrency, fmtDateTH, relTime } = window;
@@ -34,9 +34,55 @@ function PageBookings({ bookings, setBookings, addActivity, setToast }) {
   };
 
   const handleApprove = (id) => {
+    const booking = bookings.find(b => b.id === id);
+    if (!booking) return;
     updateStatus(id, 'approved');
-    addActivity && addActivity({ icon: '✅', text: `อนุมัติการจอง ${id}`, type: 'booking' });
-    setToast && setToast({ kind: 'success', message: 'อนุมัติการจองเรียบร้อย' });
+
+    // Find a vacant room of the requested type+floor (best fit). If found,
+    // mark it as 'reserved' and seed tenant info from the booking. Admin can
+    // change the assignment in /admin#rooms after this — this just removes
+    // the manual data-entry duplication on approval.
+    const want = (b) => (
+      (!booking.wantType || b.type === booking.wantType) &&
+      (!booking.wantFloor || b.floor === Number(booking.wantFloor))
+    );
+    const candidate = Object.values(rooms || {})
+      .filter((r) => r.status === 'vacant' && want(r))
+      .sort((a, b) => String(a.id).localeCompare(String(b.id)))[0];
+
+    let assignedRoomId = null;
+    if (candidate && setRooms) {
+      assignedRoomId = candidate.id;
+      setRooms((prev) => ({
+        ...prev,
+        [candidate.id]: {
+          ...prev[candidate.id],
+          status: 'reserved',
+          tenant: {
+            name: booking.name,
+            phone: booking.phone || '',
+            email: booking.email || '',
+            occupation: '',
+            score: 'A',
+            since: new Date().toISOString().slice(0, 10),
+          },
+        },
+      }));
+    }
+
+    addActivity && addActivity({
+      icon: '✅',
+      text: assignedRoomId
+        ? `อนุมัติการจอง ${id} → จองห้อง ${assignedRoomId}`
+        : `อนุมัติการจอง ${id} (ยังไม่ได้กำหนดห้อง — ไม่มีห้องว่างตรงเงื่อนไข)`,
+      type: 'booking',
+    });
+    setToast && setToast({
+      kind: 'success',
+      message: assignedRoomId
+        ? `อนุมัติแล้ว — กำหนดห้อง ${assignedRoomId}`
+        : 'อนุมัติแล้ว — กรุณากำหนดห้องด้วยตนเอง',
+    });
     setActiveId(null); setConfirmAction(null);
   };
   const handleReject = (id) => {
