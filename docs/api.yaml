@@ -1,0 +1,382 @@
+openapi: 3.0.3
+info:
+  title: บ้านกาญจน์ เรสซิเดนซ์ API
+  version: 1.0.0
+  description: |
+    REST API for the บ้านกาญจน์ dormitory management system.
+    Public endpoints (booking, maintenance) are rate-limited per IP.
+    Admin endpoints require a session cookie obtained via /api/auth/login.
+
+servers:
+  - url: https://ap-production-bba9.up.railway.app
+    description: Production
+  - url: http://localhost:3000
+    description: Local development
+
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: connect.sid
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+    Booking:
+      type: object
+      properties:
+        id: { type: string }
+        roomId: { type: string }
+        tenantName: { type: string }
+        phone: { type: string }
+        email: { type: string }
+        checkInDate: { type: string }
+        floor: { type: string }
+        roomType: { type: string }
+        message: { type: string }
+        status: { type: string, enum: [pending, reviewing, approved, rejected] }
+        createdAt: { type: string, format: date-time }
+    Ticket:
+      type: object
+      properties:
+        id: { type: integer }
+        ticket_no: { type: string }
+        room_id: { type: string }
+        tenant_name: { type: string }
+        tenant_phone: { type: string }
+        category:
+          type: string
+          enum: [electrical, plumbing, aircon, furniture, appliance, door_lock, wifi, other]
+        priority:
+          type: string
+          enum: [critical, high, medium, low]
+        status:
+          type: string
+          enum: [open, assigned, in_progress, awaiting_parts, completed, cancelled]
+        title: { type: string }
+        description: { type: string }
+        rating: { type: integer, minimum: 1, maximum: 5 }
+        cost: { type: number }
+        created_at: { type: string, format: date-time }
+
+paths:
+  /health:
+    get:
+      summary: Health check (DB ping)
+      responses:
+        '200': { description: OK }
+        '503': { description: DB unreachable }
+
+  /api/auth/login:
+    post:
+      summary: Authenticate admin
+      description: Rate-limited 10/15min per IP.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string }
+                password: { type: string, format: password }
+      responses:
+        '200': { description: Session created }
+        '401': { description: Invalid credentials }
+        '429': { description: Too many attempts }
+
+  /api/auth/me:
+    get:
+      summary: Current session user
+      responses:
+        '200':
+          description: User if logged in, null otherwise
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user:
+                    type: object
+                    nullable: true
+
+  /api/auth/logout:
+    post:
+      summary: Destroy session
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200': { description: OK }
+
+  /api/data:
+    get:
+      summary: Read all whitelisted JSONB blobs at once
+      description: Public — used by api-client.js for hydration.
+      responses:
+        '200':
+          description: Map of key→value
+
+  /api/data/{key}:
+    get:
+      summary: Read one JSONB blob
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [baankarn_rooms_v1, baankarn_config_v1, baankarn_bookings_v1, baankarn_activities_v1, baankarn_users_v1]
+      responses:
+        '200': { description: OK }
+    put:
+      summary: Write one JSONB blob (admin)
+      security: [{ sessionCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                value:
+                  description: Any JSON value (object, array, etc.)
+      responses:
+        '200': { description: Saved }
+        '400': { description: Invalid key or null value (use DELETE) }
+        '401': { description: Unauthorized }
+        '403': { description: Cross-origin blocked }
+    delete:
+      summary: Delete one JSONB blob (admin)
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200': { description: OK }
+
+  /api/bookings/public:
+    post:
+      summary: Submit a booking request (public)
+      description: Rate-limited 5/min/IP. Sends LINE notification to owner if configured.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [roomId, tenantName]
+              properties:
+                roomId: { type: string }
+                tenantName: { type: string }
+                phone: { type: string }
+                email: { type: string }
+                checkInDate: { type: string }
+                floor: { type: string }
+                roomType: { type: string }
+                message: { type: string }
+      responses:
+        '200':
+          description: Booking accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  booking: { $ref: '#/components/schemas/Booking' }
+        '400': { description: Missing required fields }
+        '429': { description: Rate limit exceeded }
+
+  /api/bills/render:
+    post:
+      summary: Render a bill as PDF with embedded PromptPay QR
+      security: [{ sessionCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                bill:
+                  type: object
+                  required: [tenantName, total]
+                  properties:
+                    billNo: { type: string }
+                    roomId: { type: string }
+                    tenantName: { type: string }
+                    tenantPhone: { type: string }
+                    period: { type: string }
+                    dueDate: { type: string }
+                    items:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          label: { type: string }
+                          qty: { type: string }
+                          amount: { type: number }
+                    total: { type: number }
+                    building: { type: object }
+                    promptpayTarget: { type: string }
+      responses:
+        '200':
+          description: PDF stream
+          content:
+            application/pdf: {}
+
+  /api/promptpay/qr:
+    get:
+      summary: Render PromptPay QR
+      parameters:
+        - name: target
+          in: query
+          required: true
+          schema: { type: string }
+          description: 10-digit phone or 13-digit citizen ID
+        - name: amount
+          in: query
+          schema: { type: number }
+        - name: format
+          in: query
+          schema: { type: string, enum: [png, json], default: png }
+      responses:
+        '200':
+          description: PNG image or { dataUrl } JSON
+
+  /api/maintenance:
+    post:
+      summary: Submit a maintenance ticket (public)
+      description: Rate-limited 5/min/IP. Sends LINE notification.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [roomId, title, category]
+              properties:
+                roomId: { type: string }
+                tenantName: { type: string }
+                tenantPhone: { type: string }
+                title: { type: string }
+                description: { type: string }
+                category: { type: string }
+                priority: { type: string }
+      responses:
+        '200':
+          description: Ticket created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  ticket: { $ref: '#/components/schemas/Ticket' }
+    get:
+      summary: List all maintenance tickets (admin)
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string }
+      responses:
+        '200': { description: Array of tickets }
+
+  /api/maintenance/lookup:
+    get:
+      summary: Tenant looks up own tickets
+      description: Requires both phone AND roomId to prevent enumeration.
+      parameters:
+        - name: phone
+          in: query
+          required: true
+          schema: { type: string }
+        - name: roomId
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Array of own tickets }
+
+  /api/maintenance/{id}:
+    put:
+      summary: Update a ticket (admin)
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status: { type: string }
+                priority: { type: string }
+                assignedTo: { type: string }
+                scheduledAt: { type: string, format: date-time }
+                cost: { type: number }
+      responses:
+        '200': { description: Updated ticket }
+        '404': { description: Not found }
+
+  /api/maintenance/{id}/rate:
+    post:
+      summary: Tenant rates a completed ticket
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone, rating]
+              properties:
+                phone: { type: string }
+                rating: { type: integer, minimum: 1, maximum: 5 }
+                comment: { type: string }
+
+  /api/notify/bill:
+    post:
+      summary: Send LINE notification for a bill (admin)
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200': { description: ok flag }
+        '503': { description: LINE not configured }
+
+  /api/audit:
+    get:
+      summary: Audit log viewer (admin)
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, default: 100, maximum: 500 }
+        - name: before
+          in: query
+          schema: { type: string, format: date-time }
+      responses:
+        '200': { description: Audit log entries }
+
+  /api/reports/overview:
+    get:
+      summary: Aggregated room/booking counts and revenue snapshot (admin)
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200':
+          description: Counts + revenue + booking summary
+
+  /api/reports/maintenance:
+    get:
+      summary: Maintenance ticket stats (admin)
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200':
+          description: Counts by status + average rating
