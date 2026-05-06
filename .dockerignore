@@ -1,0 +1,12 @@
+node_modules
+npm-debug.log
+.env
+.env.local
+.git
+.gitignore
+backups/
+chats/
+docs/
+scripts/smoke-test.sh
+*.md
+.DS_Store
