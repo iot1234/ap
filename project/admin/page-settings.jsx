@@ -61,6 +61,7 @@ function PageSettings({ rooms, setRooms, config, setConfig, bookings, setBooking
           { value: 'notify',   label: 'การแจ้งเตือน', icon: '🔔' },
           { value: 'auto',     label: 'อัตโนมัติ',     icon: '🤖' },
           { value: 'users',    label: 'ผู้ใช้งาน',     icon: '👥' },
+          { value: 'audit',    label: 'Audit log',     icon: '📜' },
           { value: 'system',   label: 'ระบบ',           icon: '⚙️' },
         ]}
         value={tab}
@@ -74,6 +75,7 @@ function PageSettings({ rooms, setRooms, config, setConfig, bookings, setBooking
       {tab === 'notify'   && <TabNotify   draft={draft} updatePath={updatePath} />}
       {tab === 'auto'     && <TabAuto     draft={draft} updatePath={updatePath} />}
       {tab === 'users'    && <TabUsers    setToast={setToast} addActivity={addActivity} />}
+      {tab === 'audit'    && <TabAudit    setToast={setToast} />}
       {tab === 'system'   && <TabSystem
                                 onResetAll={() => setConfirmReset(true)}
                                 rooms={rooms} setRooms={setRooms}
@@ -406,6 +408,105 @@ function TabUsers({ setToast, addActivity }) {
           ต้องการลบผู้ใช้ <b style={{ color: C.ink }}>{users.find(u => u.id === confirmDel)?.name}</b> ใช่หรือไม่?
         </div>
       </Modal>
+    </Card>
+  );
+}
+
+// ============================================================
+function TabAudit({ setToast }) {
+  const C = window.ADMIN_C;
+  const { Card, Btn, EmptyState, Pill } = window;
+  const { useState, useEffect } = React;
+  const [logs, setLogs] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  const reload = async () => {
+    setLoading(true);
+    try {
+      const res = await fetch('/api/audit?limit=100', { credentials: 'include' });
+      const data = await res.json();
+      if (data.ok) setLogs(data.logs || []);
+    } catch (err) {
+      console.error('audit reload failed', err);
+      setToast && setToast({ kind: 'error', message: 'โหลด audit log ไม่สำเร็จ' });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { reload(); }, []);
+
+  const actionColor = (action) => {
+    if (!action) return C.muted;
+    if (action.startsWith('auth.')) return C.info;
+    if (action.startsWith('data.delete')) return C.danger;
+    if (action.startsWith('data.')) return C.success;
+    if (action.startsWith('maintenance.')) return C.purple;
+    return C.ink2;
+  };
+
+  return (
+    <Card padding={0}>
+      <div style={{
+        padding: '14px 18px', borderBottom: `1px solid ${C.border}`,
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+      }}>
+        <div>
+          <div style={{ fontSize: 14, fontWeight: 600, color: C.ink }}>บันทึกการใช้งาน</div>
+          <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>
+            แสดง 100 รายการล่าสุด · ทุกการเปลี่ยนแปลงข้อมูลและการเข้าระบบ
+          </div>
+        </div>
+        <Btn variant="secondary" icon="🔄" onClick={reload}>รีเฟรช</Btn>
+      </div>
+
+      {loading && logs.length === 0 && (
+        <div style={{ padding: 40, textAlign: 'center', color: C.muted }}>กำลังโหลด…</div>
+      )}
+
+      {!loading && logs.length === 0 && (
+        <EmptyState icon="📜" title="ยังไม่มีบันทึก" description="กิจกรรมจะปรากฏที่นี่หลังการใช้งาน" />
+      )}
+
+      {logs.length > 0 && (
+        <div style={{ maxHeight: '60vh', overflowY: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
+            <thead>
+              <tr style={{ background: C.surfaceAlt, color: C.muted, fontSize: 11.5 }}>
+                <th style={{ padding: '10px 14px', textAlign: 'left', fontWeight: 500 }}>เวลา</th>
+                <th style={{ padding: '10px 14px', textAlign: 'left', fontWeight: 500 }}>ผู้ใช้</th>
+                <th style={{ padding: '10px 14px', textAlign: 'left', fontWeight: 500 }}>การกระทำ</th>
+                <th style={{ padding: '10px 14px', textAlign: 'left', fontWeight: 500 }}>เป้าหมาย</th>
+                <th style={{ padding: '10px 14px', textAlign: 'left', fontWeight: 500 }}>IP</th>
+              </tr>
+            </thead>
+            <tbody>
+              {logs.map((log) => (
+                <tr key={log.id} style={{ borderBottom: `1px solid ${C.border}` }}>
+                  <td style={{ padding: '10px 14px', color: C.ink2, whiteSpace: 'nowrap' }}>
+                    {new Date(log.created_at).toLocaleString('th-TH')}
+                  </td>
+                  <td style={{ padding: '10px 14px', color: C.ink, fontWeight: 500 }}>
+                    {log.user_id || '—'}
+                  </td>
+                  <td style={{ padding: '10px 14px' }}>
+                    <span style={{
+                      color: actionColor(log.action), fontWeight: 600,
+                      fontFamily: 'JetBrains Mono, monospace', fontSize: 11.5,
+                    }}>{log.action}</span>
+                  </td>
+                  <td style={{ padding: '10px 14px', color: C.ink2 }}>
+                    {log.entity_type ? `${log.entity_type}/${log.entity_id || '—'}` : '—'}
+                  </td>
+                  <td style={{ padding: '10px 14px', color: C.muted, fontFamily: 'JetBrains Mono, monospace', fontSize: 11 }}>
+                    {(log.ip || '—').replace(/^::ffff:/, '')}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </Card>
   );
 }
