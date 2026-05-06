@@ -136,11 +136,17 @@ app.use(helmet({
       styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
       fontSrc: ["'self'", 'https://fonts.gstatic.com', 'data:'],
       imgSrc: ["'self'", 'data:', 'blob:'],
-      connectSrc: ["'self'"],
+      // blob: needed by admin PDF download (URL.createObjectURL).
+      // connect-src 'self' is enough for fetch; we add blob: defensively
+      // so the browser doesn't block the blob URL when assigned to <a href>.
+      connectSrc: ["'self'", 'blob:'],
+      objectSrc: ["'none'"],
       frameAncestors: ["'self'"],
     },
   },
-  crossOriginEmbedderPolicy: false,  // unpkg / Google Fonts can't ship COEP headers
+  crossOriginEmbedderPolicy: false,
+  // Allow same-origin blob/data URLs to open in popups (PDF preview).
+  crossOriginOpenerPolicy: { policy: 'same-origin-allow-popups' },
 }));
 
 // Rate-limit login attempts per IP — 10 per 15 minutes is plenty for humans
@@ -363,11 +369,29 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBooking, async (req, res) 
       ['baankarn_bookings_v1']
     );
     const list = (rows.length && Array.isArray(rows[0].value)) ? rows[0].value : [];
+    // Normalize to the shape that admin/page-bookings.jsx expects (it iterates
+    // over bookings rendering b.wantType/b.wantFloor/b.moveIn/b.months).
+    // Public booking form uses tenantName/roomType/floor/checkInDate, so map.
+    const VALID_TYPES = ['standard', 'deluxe', 'suite', 'studio'];
+    const wantType = VALID_TYPES.includes(cleaned.roomType) ? cleaned.roomType : 'standard';
+    const wantFloor = Number(cleaned.floor) || null;
     const newBooking = {
-      id: 'b' + Date.now(),
-      ...cleaned,
+      // admin schema
+      id: 'BK-PUB-' + Date.now(),
+      name: cleaned.tenantName,
+      phone: cleaned.phone,
+      wantType,
+      wantFloor,
+      moveIn: cleaned.checkInDate || null,
+      months: 12,
+      deposit: 0,
       status: 'pending',
       createdAt: new Date().toISOString(),
+      // keep the public-only fields too so admin can see them in detail drawer
+      email: cleaned.email,
+      message: cleaned.message,
+      source: 'public-form',
+      roomId: cleaned.roomId,
     };
     list.unshift(newBooking);
     await pool.query(
@@ -732,6 +756,104 @@ app.get('/api/reports/overview', requireAuth, async (_req, res) => {
   } catch (err) {
     console.error('reports overview error:', err);
     res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// GET /api/reports/aged-receivable — admin-auth. Bins overdue rooms by how
+// many days overdue. Reads from app_data rooms (which carry overdueDays).
+app.get('/api/reports/aged-receivable', requireAuth, async (_req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT value FROM app_data WHERE key='baankarn_rooms_v1'`
+    );
+    const roomsObj = rows.length ? rows[0].value : {};
+    const buckets = {
+      'current': { range: '0-30', rooms: 0, amount: 0 },
+      'late_30': { range: '31-60', rooms: 0, amount: 0 },
+      'late_60': { range: '61-90', rooms: 0, amount: 0 },
+      'late_90': { range: '90+',   rooms: 0, amount: 0 },
+    };
+    Object.values(roomsObj || {}).forEach((r) => {
+      if (r.status !== 'overdue') return;
+      const days = Number(r.overdueDays) || 0;
+      const amt = Number(r.rent) || 0;
+      let key = 'current';
+      if (days > 90)      key = 'late_90';
+      else if (days > 60) key = 'late_60';
+      else if (days > 30) key = 'late_30';
+      buckets[key].rooms += 1;
+      buckets[key].amount += amt;
+    });
+    res.json({ ok: true, buckets: Object.values(buckets) });
+  } catch (err) {
+    console.error('reports aged-receivable error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// GET /api/reports/bills.xlsx — admin-auth. Streams an Excel workbook of
+// the current-month bill estimates for every room.
+app.get('/api/reports/bills.xlsx', requireAuth, async (_req, res) => {
+  let ExcelJS;
+  try { ExcelJS = require('exceljs'); }
+  catch (e) { return res.status(500).json({ error: 'exceljs not installed' }); }
+  try {
+    const [roomsRow, configRow] = await Promise.all([
+      pool.query(`SELECT value FROM app_data WHERE key='baankarn_rooms_v1'`),
+      pool.query(`SELECT value FROM app_data WHERE key='baankarn_config_v1'`),
+    ]);
+    const rooms = Object.values(roomsRow.rows.length ? roomsRow.rows[0].value : {});
+    const config = configRow.rows.length ? configRow.rows[0].value : {};
+    const waterRate = config?.utilities?.waterRate ?? 18;
+    const elecRate  = config?.utilities?.elecRate  ?? 8;
+    const wifiFee   = config?.utilities?.wifi      ?? 250;
+
+    const wb = new ExcelJS.Workbook();
+    wb.creator = config?.building?.name || 'บ้านกาญจน์ เรสซิเดนซ์';
+    wb.created = new Date();
+    const ws = wb.addWorksheet('บิลรอบนี้');
+    ws.columns = [
+      { header: 'ห้อง', key: 'room', width: 8 },
+      { header: 'ผู้เช่า', key: 'tenant', width: 28 },
+      { header: 'สถานะ', key: 'status', width: 12 },
+      { header: 'ค่าเช่า', key: 'rent', width: 12, style: { numFmt: '#,##0.00' } },
+      { header: 'ค่าน้ำ', key: 'water', width: 12, style: { numFmt: '#,##0.00' } },
+      { header: 'ค่าไฟ', key: 'elec', width: 12, style: { numFmt: '#,##0.00' } },
+      { header: 'Wi-Fi', key: 'wifi', width: 10, style: { numFmt: '#,##0.00' } },
+      { header: 'รวม', key: 'total', width: 14, style: { numFmt: '#,##0.00' } },
+    ];
+    ws.getRow(1).font = { bold: true };
+    ws.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFAF6EE' } };
+    ws.views = [{ state: 'frozen', ySplit: 1 }];
+
+    rooms
+      .sort((a, b) => String(a.id).localeCompare(String(b.id)))
+      .forEach((r) => {
+        const water = (Number(r.waterUnits) || 0) * waterRate;
+        const elec  = (Number(r.elecUnits)  || 0) * elecRate;
+        const total = (Number(r.rent) || 0) + water + elec + wifiFee;
+        ws.addRow({
+          room: r.id,
+          tenant: r.tenant?.name || '—',
+          status: r.status || '—',
+          rent: Number(r.rent) || 0,
+          water,
+          elec,
+          wifi: wifiFee,
+          total,
+        });
+      });
+
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    );
+    res.setHeader('Content-Disposition', `attachment; filename="bills-${new Date().toISOString().slice(0,10)}.xlsx"`);
+    await wb.xlsx.write(res);
+    res.end();
+  } catch (err) {
+    console.error('reports xlsx error:', err);
+    if (!res.headersSent) res.status(500).json({ error: 'internal error' });
   }
 });
 

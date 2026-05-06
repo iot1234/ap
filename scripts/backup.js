@@ -75,9 +75,18 @@ async function main() {
 
   // Optional: upload to S3-compatible storage if credentials present
   if (process.env.R2_ACCESS_KEY_ID && process.env.R2_BUCKET) {
+    let S3Client, PutObjectCommand;
     try {
-      // Lazy-load aws-sdk only when actually uploading
-      const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
+      ({ S3Client, PutObjectCommand } = require('@aws-sdk/client-s3'));
+    } catch (err) {
+      console.error('[backup] @aws-sdk/client-s3 is not installed.');
+      console.error('  Run: npm install @aws-sdk/client-s3');
+      console.error('  (it is intentionally not in default deps to keep the prod image small)');
+      console.error('  Skipping cloud upload; local backup file is still good.');
+      await pool.end();
+      return;
+    }
+    try {
       const client = new S3Client({
         endpoint: process.env.R2_ENDPOINT,
         region: process.env.R2_REGION || 'auto',
@@ -95,7 +104,6 @@ async function main() {
       console.log(`[backup] uploaded to ${process.env.R2_BUCKET}/backup-${stamp}.json`);
     } catch (err) {
       console.error('[backup] upload failed:', err.message);
-      console.error('  (install @aws-sdk/client-s3 to enable upload)');
     }
   } else {
     console.log('[backup] R2_* env not set — skipping cloud upload');

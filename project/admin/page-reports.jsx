@@ -115,6 +115,10 @@ function PageReports({ rooms, config, addActivity, setToast }) {
               addActivity && addActivity({ icon: '📥', text: 'พิมพ์/ส่งออกรายงานเป็น PDF', type: 'system' });
               setTimeout(() => window.printPage(), 300);
             }}>ส่งออก PDF</Btn>
+            <Btn variant="secondary" icon="📊" onClick={() => {
+              window.open('/api/reports/bills.xlsx', '_blank');
+              addActivity && addActivity({ icon: '📊', text: 'ดาวน์โหลดบิลทั้งหอเป็น Excel', type: 'system' });
+            }}>Excel บิลทั้งหอ</Btn>
           </>
         }
       />

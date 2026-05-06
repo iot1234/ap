@@ -72,12 +72,27 @@ function PageBookings({ bookings, setBookings, addActivity, setToast }) {
     },
     {
       key: 'wantType', label: 'ห้องที่จอง', minWidth: 160,
-      render: b => (
-        <div>
-          <div style={{ fontSize: 12.5, color: C.ink }}>{ADMIN_ROOM_TYPES[b.wantType].th}</div>
-          <div style={{ fontSize: 11.5, color: C.muted }}>ชั้น {b.wantFloor} · {b.months} เดือน</div>
-        </div>
-      ),
+      render: b => {
+        const typeMeta = ADMIN_ROOM_TYPES[b.wantType] || ADMIN_ROOM_TYPES.standard;
+        const floorTxt = b.wantFloor ? `ชั้น ${b.wantFloor}` : 'ไม่ระบุชั้น';
+        const monthsTxt = b.months ? `${b.months} เดือน` : '—';
+        const sourceTag = b.source === 'public-form' ? (
+          <span style={{
+            display: 'inline-block', marginLeft: 6,
+            background: '#fbf1de', color: '#5a3a0d',
+            fontSize: 10, fontWeight: 600,
+            padding: '1px 6px', borderRadius: 4,
+          }}>หน้าจอง</span>
+        ) : null;
+        return (
+          <div>
+            <div style={{ fontSize: 12.5, color: C.ink }}>
+              {typeMeta.th}{sourceTag}
+            </div>
+            <div style={{ fontSize: 11.5, color: C.muted }}>{floorTxt} · {monthsTxt}</div>
+          </div>
+        );
+      },
     },
     {
       key: 'moveIn', label: 'ย้ายเข้า', minWidth: 110,
@@ -233,12 +248,14 @@ function BookingDetail({ b }) {
           columns={2}
           items={[
             { label: 'รหัสการจอง',    value: b.id, bold: true },
-            { label: 'ประเภทห้อง',    value: ADMIN_ROOM_TYPES[b.wantType].th },
-            { label: 'ชั้นที่ต้องการ', value: `ชั้น ${b.wantFloor}` },
-            { label: 'ระยะเวลาเช่า',  value: `${b.months} เดือน` },
-            { label: 'วันที่ย้ายเข้า', value: fmtDateTH(b.moveIn) },
-            { label: 'เงินมัดจำ',      value: fmtCurrency(b.deposit), bold: true },
+            { label: 'ประเภทห้อง',    value: (ADMIN_ROOM_TYPES[b.wantType] || ADMIN_ROOM_TYPES.standard).th },
+            { label: 'ชั้นที่ต้องการ', value: b.wantFloor ? `ชั้น ${b.wantFloor}` : 'ไม่ระบุ' },
+            { label: 'ระยะเวลาเช่า',  value: b.months ? `${b.months} เดือน` : '—' },
+            { label: 'วันที่ย้ายเข้า', value: b.moveIn ? fmtDateTH(b.moveIn) : '—' },
+            { label: 'เงินมัดจำ',      value: fmtCurrency(b.deposit || 0), bold: true },
             { label: 'จองเมื่อ',         value: relTime(b.createdAt) },
+            ...(b.email ? [{ label: 'อีเมล', value: b.email }] : []),
+            ...(b.message ? [{ label: 'ข้อความ', value: b.message }] : []),
           ]}
         />
       </div>
