@@ -12,6 +12,7 @@ const session = require('express-session');
 const PgSession = require('connect-pg-simple')(session);
 const { renderBillPdf } = require('./services/pdf');
 const { renderQrPng, renderQrDataUrl } = require('./services/promptpay');
+const lineNotify = require('./services/line');
 
 const PORT = process.env.PORT || 3000;
 const NODE_ENV = process.env.NODE_ENV || 'production';
@@ -279,11 +280,46 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBooking, async (req, res) 
        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW(), updated_by = 'public'`,
       ['baankarn_bookings_v1', JSON.stringify(list)]
     );
+
+    // Fire-and-forget LINE notification to owner. Don't await/block: response
+    // ships immediately, the push runs on the event loop. Failures are caught
+    // and logged inside the service.
+    lineNotify
+      .notifyOwner(
+        `📋 ผู้เช่าใหม่ขอจอง\nชื่อ: ${cleaned.tenantName}\nโทร: ${cleaned.phone || '-'}\nห้อง: ${cleaned.roomId}\nวันเข้าพัก: ${cleaned.checkInDate || '-'}\nรหัสการจอง: ${newBooking.id}`
+      )
+      .catch(() => {});
+
     res.json({ ok: true, booking: newBooking });
   } catch (err) {
     console.error('public booking error:', err);
     res.status(500).json({ error: 'internal error' });
   }
+});
+
+// POST /api/notify/bill — admin-auth. Trigger a LINE notification for a bill
+// the admin just sent. Body: { tenantName, roomId, period, total, billNo,
+// recipientUserId? } — if recipientUserId omitted, falls back to LINE_OWNER_USER_ID.
+app.post('/api/notify/bill', sameOrigin, requireAuth, async (req, res) => {
+  const b = req.body || {};
+  if (!b.tenantName || !b.total) {
+    return res.status(400).json({ error: 'tenantName and total required' });
+  }
+  const recipient = b.recipientUserId || process.env.LINE_OWNER_USER_ID;
+  if (!recipient) return res.status(400).json({ error: 'no LINE recipient configured' });
+  if (!lineNotify.isConfigured()) {
+    return res.status(503).json({ error: 'LINE not configured on server' });
+  }
+  const text = [
+    `💰 ออกบิลใหม่`,
+    `ผู้เช่า: ${b.tenantName}`,
+    b.roomId ? `ห้อง: ${b.roomId}` : null,
+    b.period ? `รอบบิล: ${b.period}` : null,
+    `จำนวน: ฿${Number(b.total).toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+    b.billNo ? `เลขที่: ${b.billNo}` : null,
+  ].filter(Boolean).join('\n');
+  const ok = await lineNotify.pushText(recipient, text);
+  res.json({ ok });
 });
 
 // --- Bills: PDF rendering + PromptPay QR ----------------------------------

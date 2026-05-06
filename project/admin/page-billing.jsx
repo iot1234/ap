@@ -335,10 +335,37 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
                 setToast && setToast({ kind: 'error', message: 'ดาวน์โหลดบิลไม่สำเร็จ' });
               }
             }}>ดาวน์โหลด PDF</Btn>
-            <Btn variant="primary" icon="📨" onClick={() => {
-              setToast && setToast({ kind: 'success', message: `ส่งบิล ${previewBill.id} ทาง LINE/Email แล้ว` });
-              addActivity && addActivity({ icon: '📨', text: `ส่งบิล ${previewBill.id} ให้ ${previewBill.tenant}`, type: 'billing' });
-              setPreviewBill(null);
+            <Btn variant="primary" icon="📨" onClick={async () => {
+              const b = previewBill;
+              try {
+                const res = await fetch('/api/notify/bill', {
+                  method: 'POST',
+                  credentials: 'include',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    billNo: b.id,
+                    roomId: b.roomId,
+                    tenantName: b.tenant,
+                    period: b.period,
+                    total: b.total,
+                  }),
+                });
+                const data = await res.json().catch(() => ({}));
+                if (res.status === 503) {
+                  setToast && setToast({ kind: 'error', message: 'ระบบยังไม่ได้ตั้งค่า LINE' });
+                  return;
+                }
+                if (!res.ok || !data.ok) {
+                  setToast && setToast({ kind: 'error', message: data.error || 'ส่งแจ้งเตือนไม่สำเร็จ' });
+                  return;
+                }
+                setToast && setToast({ kind: 'success', message: `ส่งบิล ${b.id} ทาง LINE แล้ว` });
+                addActivity && addActivity({ icon: '📨', text: `ส่งบิล ${b.id} ให้ ${b.tenant}`, type: 'billing' });
+                setPreviewBill(null);
+              } catch (err) {
+                console.error('notify bill failed:', err);
+                setToast && setToast({ kind: 'error', message: 'เชื่อมต่อเซิร์ฟเวอร์ไม่ได้' });
+              }
             }}>ส่งให้ผู้เช่า</Btn>
           </>
         )}
