@@ -13,6 +13,26 @@ function PageReports({ rooms, config, addActivity, setToast }) {
           PageContainer, PageHeader, SectionHeading, DataTable, Select } = window;
 
   const [range, setRange] = useState('6m');
+  const [liveOverview, setLiveOverview] = React.useState(null);
+  const [agedReceivable, setAgedReceivable] = React.useState(null);
+
+  // Pull live aggregates from the server. Falls back gracefully to local
+  // computeStats if the server is unreachable.
+  React.useEffect(() => {
+    let cancel = false;
+    (async () => {
+      try {
+        const [oRes, aRes] = await Promise.all([
+          fetch('/api/reports/overview', { credentials: 'include' }),
+          fetch('/api/reports/aged-receivable', { credentials: 'include' }),
+        ]);
+        if (cancel) return;
+        if (oRes.ok) setLiveOverview(await oRes.json());
+        if (aRes.ok) setAgedReceivable(await aRes.json());
+      } catch {}
+    })();
+    return () => { cancel = true; };
+  }, []);
 
   const stats = useMemo(() => computeStats(rooms, config), [rooms, config]);
   const list = useMemo(() => Object.values(rooms), [rooms]);
@@ -224,6 +244,48 @@ function PageReports({ rooms, config, addActivity, setToast }) {
             density="compact"
           />
         </Card>
+
+        {agedReceivable && Array.isArray(agedReceivable.buckets) && (
+          <Card>
+            <SectionHeading title="ลูกหนี้ค้างชำระแยกอายุ" subtitle="Aged receivable" level={3} />
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+              {agedReceivable.buckets.map((b) => (
+                <div key={b.range} style={{
+                  padding: 14, background: C.surfaceAlt, border: `1px solid ${C.border}`,
+                  borderRadius: 10,
+                }}>
+                  <div style={{ fontSize: 11.5, color: C.muted, fontWeight: 500 }}>{b.range} วัน</div>
+                  <div style={{ fontSize: 22, fontWeight: 600, color: C.ink, fontFamily: 'Sora, sans-serif', marginTop: 4 }}>
+                    {fmtCurrency(b.amount)}
+                  </div>
+                  <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>{b.rooms} ห้อง</div>
+                </div>
+              ))}
+            </div>
+          </Card>
+        )}
+
+        {liveOverview && liveOverview.counts && (
+          <Card>
+            <SectionHeading title="สรุปสถานะปัจจุบัน (Live)" subtitle="ดึงจาก DB ทันทีที่เปิดหน้า" level={3} />
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12, fontSize: 12 }}>
+              {[
+                { k: 'occupied', l: 'มีผู้เช่า', c: '#475569' },
+                { k: 'overdue', l: 'ค้างชำระ', c: '#b54639' },
+                { k: 'reserved', l: 'จองแล้ว', c: '#c98a2b' },
+                { k: 'vacant', l: 'ว่าง', c: '#2e9b6a' },
+                { k: 'maintenance', l: 'ปรับปรุง', c: '#7a6c54' },
+              ].map((it) => (
+                <div key={it.k} style={{ padding: 12, background: '#fff', border: `1px solid ${C.border}`, borderRadius: 10 }}>
+                  <div style={{ fontSize: 11, color: C.muted }}>{it.l}</div>
+                  <div style={{ fontSize: 22, fontWeight: 600, color: it.c, fontFamily: 'Sora, sans-serif', marginTop: 2 }}>
+                    {liveOverview.counts[it.k] || 0}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </Card>
+        )}
       </div>
     </PageContainer>
   );

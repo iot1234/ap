@@ -445,6 +445,42 @@ function App() {
   useEffect(() => { saveBookings(bookings); },     [bookings]);
   useEffect(() => { saveActivities(activities); }, [activities]);
 
+  // --- Live data polling -----------------------------------------------
+  // Public bookings + maintenance tickets arrive without an admin reload,
+  // so poll every 30s. Both endpoints are cheap (one row each).
+  const [tickets, setTickets] = useState([]);
+  useEffect(() => {
+    let cancel = false;
+    const refresh = async () => {
+      try {
+        const [bRes, tRes] = await Promise.all([
+          fetch('/api/data/baankarn_bookings_v1', { credentials: 'include' }),
+          fetch('/api/maintenance', { credentials: 'include' }),
+        ]);
+        if (cancel) return;
+        if (bRes.ok) {
+          const bd = await bRes.json();
+          if (Array.isArray(bd?.value)) {
+            setBookings((prev) => {
+              // Merge: keep admin's local edits but pick up new public-form
+              // submissions (those start with BK-PUB-).
+              const known = new Set(prev.map((b) => b.id));
+              const additions = bd.value.filter((b) => !known.has(b.id));
+              return additions.length ? [...additions, ...prev] : prev;
+            });
+          }
+        }
+        if (tRes.ok) {
+          const td = await tRes.json();
+          if (Array.isArray(td?.tickets)) setTickets(td.tickets);
+        }
+      } catch {}
+    };
+    refresh();
+    const t = setInterval(refresh, 30_000);
+    return () => { cancel = true; clearInterval(t); };
+  }, []);
+
   // --- Auth: load current user info for the sidebar ---
   // Auth is already enforced before this component mounts (see __bootAdmin
   // at the bottom of this file), so this just fetches the user object for
@@ -526,8 +562,20 @@ function App() {
         target: { page: 'bookings' },
       });
     });
+    // Open + assigned tickets surface as notifications until completed.
+    (tickets || [])
+      .filter((t) => t.status === 'open' || t.status === 'assigned')
+      .slice(0, 10)
+      .forEach((t) => {
+        items.push({
+          kind: 'ticket', icon: '🛠',
+          title: `แจ้งซ่อม ${t.ticket_no}`,
+          subtitle: `ห้อง ${t.room_id} · ${t.title}`,
+          target: { page: 'maintenance' },
+        });
+      });
     return items;
-  }, [rooms, bookings]);
+  }, [rooms, bookings, tickets]);
   const notifCount = notifItems.length;
 
   // Build search results
@@ -578,8 +626,22 @@ function App() {
         if (results.length >= 14) break;
       }
     }
-    return results.slice(0, 14);
-  }, [search, rooms, bookings]);
+    // Maintenance tickets
+    for (const t of (tickets || [])) {
+      const hay = `${t.ticket_no} ${t.title || ''} ${t.room_id || ''} ${t.tenant_name || ''}`.toLowerCase();
+      if (hay.includes(q)) {
+        results.push({
+          kind: 'แจ้งซ่อม',
+          icon: '🛠',
+          title: t.ticket_no + ' · ' + (t.title || ''),
+          subtitle: `ห้อง ${t.room_id} · ${t.status}`,
+          target: { page: 'maintenance' },
+        });
+        if (results.length >= 18) break;
+      }
+    }
+    return results.slice(0, 18);
+  }, [search, rooms, bookings, tickets]);
 
   const handleNotifClick = (n) => { if (n?.target?.page) setPage(n.target.page); };
   const handleSelectResult = (r) => { if (r?.target?.page) setPage(r.target.page); };

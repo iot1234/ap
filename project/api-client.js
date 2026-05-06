@@ -72,6 +72,31 @@
   }
 
   // --- Debounced PUT to API ------------------------------------------------
+  // Queue holds the most recent value per key that failed to PUT (typically
+  // due to 401 — admin's session expired mid-edit). When auth is restored
+  // (next AP.me() / AP.login() returns truthy), we flush this queue.
+  const retryQueue = new Map();
+
+  async function flushRetryQueue() {
+    if (!isAuthenticated) return;
+    const entries = Array.from(retryQueue.entries());
+    retryQueue.clear();
+    for (const [key, value] of entries) {
+      try {
+        const r = await fetch(`/api/data/${encodeURIComponent(key)}`, {
+          method: 'PUT',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ value }),
+        });
+        if (!r.ok) console.warn(`[api-client] retry PUT ${key} failed`, r.status);
+      } catch (err) {
+        console.warn(`[api-client] retry PUT ${key} error`, err);
+        retryQueue.set(key, value); // keep for next attempt
+      }
+    }
+  }
+
   function pushToApi(key, rawJson) {
     if (pendingTimers.has(key)) clearTimeout(pendingTimers.get(key));
     const timer = setTimeout(async () => {
@@ -87,8 +112,11 @@
           body: JSON.stringify({ value }),
         });
         if (res.status === 401) {
-          // Not logged in — silently ignore. Keeps tenant pages working.
-          // Admin pages will be redirected to /login by server route guard.
+          // Session expired or never authenticated. Stash the value so we
+          // don't lose admin's edit on the next page load — flushed by
+          // login() or me() when auth is restored.
+          retryQueue.set(key, value);
+          isAuthenticated = false;
         } else if (!res.ok) {
           console.warn(`[api-client] PUT ${key} failed`, res.status);
         }
@@ -147,7 +175,11 @@
         body: JSON.stringify({ username, password }),
       });
       const data = await res.json();
-      if (res.ok && data.user) isAuthenticated = true;
+      if (res.ok && data.user) {
+        isAuthenticated = true;
+        // Drain anything that failed with 401 while logged out.
+        flushRetryQueue();
+      }
       return data;
     },
     async logout() {
@@ -158,7 +190,10 @@
     async me() {
       const res = await fetch('/api/auth/me', { credentials: 'include' });
       const data = await res.json();
+      const wasAuth = isAuthenticated;
       isAuthenticated = !!(data && data.user);
+      // Auth state transitioned false→true → flush any pending writes.
+      if (!wasAuth && isAuthenticated) flushRetryQueue();
       return data;
     },
     async submitPublicBooking(booking) {

@@ -163,6 +163,17 @@ function TweaksPanel({ title = 'Tweaks', children }) {
   const offsetRef = React.useRef({ x: 16, y: 16 });
   const PAD = 16;
 
+  // Production gate: render nothing unless explicitly enabled by query param
+  // (?tweaks=1) or running on a localhost-style host. Otherwise this dev
+  // panel ships to every visitor on the public site, which we don't want.
+  const _tweaksEnabled = (() => {
+    if (typeof window === 'undefined') return false;
+    if (/[?&]tweaks=1\b/.test(window.location.search)) return true;
+    const h = window.location.hostname || '';
+    return h === 'localhost' || h === '127.0.0.1' || h.endsWith('.local');
+  })();
+  if (!_tweaksEnabled) return null;
+
   const clampToViewport = React.useCallback(() => {
     const panel = dragRef.current;
     if (!panel) return;

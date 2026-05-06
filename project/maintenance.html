@@ -86,6 +86,16 @@
   .pill-cancelled { background: #f3ece0; color: #5b4f40; }
   .ticket-title { font-size: 14px; color: #2c241b; font-weight: 500; margin-top: 6px; }
   .ticket-meta { font-size: 12px; color: #8a7d6b; margin-top: 4px; }
+  .rate-block { margin-top: 10px; padding-top: 10px; border-top: 1px solid #ece4d4; }
+  .rate-prompt { font-size: 12px; color: #5b4f40; margin-bottom: 6px; }
+  .rate-stars { display: flex; gap: 4px; }
+  .rate-star {
+    background: transparent; border: 1px solid #ece4d4; border-radius: 7px;
+    width: 36px; height: 36px; font-size: 16px; cursor: pointer;
+    color: #d9cdb5; transition: color .15s, border-color .15s;
+  }
+  .rate-star:hover:not(:disabled) { color: #c98a2b; border-color: #c98a2b; }
+  .rate-star:disabled { opacity: 0.5; cursor: not-allowed; }
   .success-card { background: #fff; border: 1px solid #ece4d4; border-radius: 14px; padding: 36px 28px; text-align: center; }
   .success-icon {
     width: 64px; height: 64px; border-radius: 50%; background: #e6f4ec; color: #2e9b6a;
@@ -299,20 +309,60 @@
         open: 'เปิดใหม่', assigned: 'มอบหมายแล้ว', in_progress: 'กำลังดำเนินการ',
         awaiting_parts: 'รออะไหล่', completed: 'เสร็จสิ้น', cancelled: 'ยกเลิก',
       };
-      ticketList.innerHTML = data.tickets.map(t => `
-        <div class="ticket">
-          <div class="ticket-header">
-            <span class="ticket-no">${t.ticket_no}</span>
-            <span class="pill pill-${t.status}">${STATUS_LABEL[t.status] || t.status}</span>
+      ticketList.innerHTML = data.tickets.map(t => {
+        const isCompletedNoRating = t.status === 'completed' && !t.rating;
+        const rateBlock = isCompletedNoRating
+          ? `<div class="rate-block" data-tid="${t.id}">
+               <div class="rate-prompt">ให้คะแนนการบริการ:</div>
+               <div class="rate-stars">
+                 ${[1,2,3,4,5].map(n => `<button type="button" class="rate-star" data-tid="${t.id}" data-n="${n}" aria-label="${n} ดาว">★</button>`).join('')}
+               </div>
+             </div>`
+          : '';
+        return `
+          <div class="ticket">
+            <div class="ticket-header">
+              <span class="ticket-no">${t.ticket_no}</span>
+              <span class="pill pill-${t.status}">${STATUS_LABEL[t.status] || t.status}</span>
+            </div>
+            <div class="ticket-title">${escapeHtml(t.title)}</div>
+            <div class="ticket-meta">
+              ห้อง ${escapeHtml(t.room_id)} · แจ้งเมื่อ ${new Date(t.created_at).toLocaleDateString('th-TH')}
+              ${t.completed_at ? ` · เสร็จเมื่อ ${new Date(t.completed_at).toLocaleDateString('th-TH')}` : ''}
+              ${t.rating ? ` · ${'★'.repeat(t.rating)}${'☆'.repeat(5-t.rating)}` : ''}
+            </div>
+            ${rateBlock}
           </div>
-          <div class="ticket-title">${escapeHtml(t.title)}</div>
-          <div class="ticket-meta">
-            ห้อง ${escapeHtml(t.room_id)} · แจ้งเมื่อ ${new Date(t.created_at).toLocaleDateString('th-TH')}
-            ${t.completed_at ? ` · เสร็จเมื่อ ${new Date(t.completed_at).toLocaleDateString('th-TH')}` : ''}
-            ${t.rating ? ` · ${'★'.repeat(t.rating)}${'☆'.repeat(5-t.rating)}` : ''}
-          </div>
-        </div>
-      `).join('');
+        `;
+      }).join('');
+
+      // Wire up the per-card rating buttons after DOM update.
+      const phoneNow = document.getElementById('hPhone').value.trim();
+      ticketList.querySelectorAll('.rate-star').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          const tid = Number(btn.dataset.tid);
+          const rating = Number(btn.dataset.n);
+          btn.parentElement.querySelectorAll('.rate-star').forEach(b => b.disabled = true);
+          try {
+            const res = await fetch(`/api/maintenance/${tid}/rate`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ phone: phoneNow, rating }),
+            });
+            const out = await res.json();
+            if (!res.ok || !out.ok) {
+              alert(out.error || 'บันทึกคะแนนไม่สำเร็จ');
+              btn.parentElement.querySelectorAll('.rate-star').forEach(b => b.disabled = false);
+              return;
+            }
+            // Re-trigger lookup to refresh UI
+            document.getElementById('lookupBtn').click();
+          } catch (err) {
+            alert('เชื่อมต่อเซิร์ฟเวอร์ไม่ได้');
+            btn.parentElement.querySelectorAll('.rate-star').forEach(b => b.disabled = false);
+          }
+        });
+      });
     } catch (err) {
       ticketList.innerHTML = '<div style="text-align:center;color:#5a1a13;padding:24px">เชื่อมต่อเซิร์ฟเวอร์ไม่ได้</div>';
     }

@@ -146,6 +146,17 @@ async function migrate() {
 // --- App setup ------------------------------------------------------------
 const app = express();
 app.set('trust proxy', 1);
+
+// Lightweight correlation ID — every request gets a short id echoed in the
+// X-Request-ID response header and prefixed onto any error logs we emit.
+// Helps trace a 500 back to a specific request when staring at Railway logs.
+let _reqCounter = 0;
+app.use((req, res, next) => {
+  const id = (Date.now().toString(36) + (_reqCounter++).toString(36)).slice(-10);
+  req.id = id;
+  res.setHeader('X-Request-ID', id);
+  next();
+});
 // 1MB is plenty for our largest JSON payload (config save). Lower limit
 // reduces memory pressure under attack — 100 concurrent 5MB POSTs vs 1MB
 // makes a 5x difference in worst-case memory.
@@ -516,6 +527,23 @@ app.post('/api/notify/bill', sameOrigin, requireAuth, async (req, res) => {
 });
 
 // --- Bills: PDF rendering + PromptPay QR ----------------------------------
+// PDFKit + QR encoding are both CPU-bound. On a single Railway replica,
+// concurrent requests block the event loop and downstream requests time out.
+// Limit to MAX_PDF_CONCURRENCY in-flight PDFs at once; queued requests wait.
+const MAX_PDF_CONCURRENCY = 3;
+let _pdfActive = 0;
+const _pdfWaiters = [];
+function acquirePdfSlot() {
+  if (_pdfActive < MAX_PDF_CONCURRENCY) {
+    _pdfActive++;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => _pdfWaiters.push(resolve));
+}
+function releasePdfSlot() {
+  if (_pdfWaiters.length > 0) _pdfWaiters.shift()(); // hand the slot to next waiter
+  else _pdfActive = Math.max(0, _pdfActive - 1);
+}
 // POST /api/bills/render — admin-authenticated. Body is a bill object built
 // client-side from rooms+config; server renders Thai-language PDF with QR
 // embedded. We don't persist bills server-side (they're computed on demand
@@ -525,11 +553,10 @@ app.post('/api/bills/render', sameOrigin, requireAuth, async (req, res) => {
   if (!bill || !bill.tenantName || !bill.total) {
     return res.status(400).json({ error: 'bill.tenantName and bill.total required' });
   }
-  // Fall back to PROMPTPAY_TARGET env var if the client didn't send one.
-  // Lets ops configure the QR target without touching the admin UI.
   if (!bill.promptpayTarget && process.env.PROMPTPAY_TARGET) {
     bill.promptpayTarget = process.env.PROMPTPAY_TARGET;
   }
+  await acquirePdfSlot();
   try {
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader(
@@ -538,8 +565,10 @@ app.post('/api/bills/render', sameOrigin, requireAuth, async (req, res) => {
     );
     await renderBillPdf(bill, res);
   } catch (err) {
-    console.error('bill render error:', err);
+    console.error(`[${req.id}] bill render error:`, sanitizeError(err));
     if (!res.headersSent) res.status(500).json({ error: 'pdf render failed' });
+  } finally {
+    releasePdfSlot();
   }
 });
 
@@ -986,6 +1015,16 @@ app.get('/health', async (_req, res) => {
 });
 
 // --- Static + routes ------------------------------------------------------
+// Cache hashable assets aggressively. Our HTML/JSX names don't change between
+// deploys (no build step), so we use a moderate 1h TTL — enough to cut repeat
+// downloads from a single user session, short enough that fixes propagate
+// within an hour without manual cache-bust.
+app.use((req, res, next) => {
+  if (/\.(js|jsx|css|png|jpg|jpeg|gif|svg|woff2?|ttf)$/i.test(req.path)) {
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+  }
+  next();
+});
 app.use(express.static(path.join(__dirname, 'project')));
 
 app.get('/', (_req, res) => {
@@ -1013,6 +1052,24 @@ app.get('/maintenance', (_req, res) => {
 });
 
 // --- Boot -----------------------------------------------------------------
+// Background job: prune audit_logs older than 180 days. Runs hourly so the
+// table stays bounded; deletion is a fast index range scan.
+function startAuditPruner() {
+  const prune = async () => {
+    try {
+      const r = await pool.query(
+        `DELETE FROM audit_logs WHERE created_at < NOW() - INTERVAL '180 days'`
+      );
+      if (r.rowCount) console.log(`[audit] pruned ${r.rowCount} old rows`);
+    } catch (err) {
+      console.error('[audit] prune failed:', sanitizeError(err));
+    }
+  };
+  // First run delayed 60s so DB is settled before a heavy DELETE on boot
+  setTimeout(prune, 60_000);
+  setInterval(prune, 60 * 60 * 1000).unref();
+}
+
 migrate()
   .then(() => {
     const server = app.listen(PORT, '0.0.0.0', () => {
@@ -1022,6 +1079,7 @@ migrate()
       console.log(`[server] login:   /login`);
       console.log(`[server] health:  /health`);
     });
+    startAuditPruner();
 
     // Graceful shutdown: drain in-flight requests before closing the DB pool
     // so Railway restarts don't kill mid-request work.
