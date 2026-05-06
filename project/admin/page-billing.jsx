@@ -285,34 +285,56 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         footer={previewBill && (
           <>
             <Btn variant="ghost" onClick={() => setPreviewBill(null)}>ปิด</Btn>
-            <Btn variant="secondary" icon="📥" onClick={() => {
+            <Btn variant="secondary" icon="📥" onClick={async () => {
               const b = previewBill;
-              const text = [
-                'ใบแจ้งหนี้ — บ้านกาญจน์ เรสซิเดนซ์',
-                '='.repeat(48),
-                `เลขที่บิล : ${b.id}`,
-                `ห้อง         : ${b.roomId}`,
-                `ผู้เช่า      : ${b.tenant}`,
-                `เบอร์โทร  : ${b.phone}`,
-                `งวด          : ${b.period}`,
-                `ครบกำหนด : ${b.dueDate}`,
-                '',
-                'รายการ',
-                `  ค่าเช่า                              ฿${b.rent.toLocaleString('th-TH')}`,
-                `  ค่าน้ำ (${b.waterUnits} หน่วย)   ฿${b.water.toLocaleString('th-TH')}`,
-                `  ค่าไฟ (${b.elecUnits} หน่วย)    ฿${b.elec.toLocaleString('th-TH')}`,
-                `  ค่า Wi-Fi                            ฿${b.wifi.toLocaleString('th-TH')}`,
-                b.penalty > 0 ? `  ค่าปรับ (${b.overdueDays} วัน)            ฿${b.penalty.toLocaleString('th-TH')}` : null,
-                '─'.repeat(48),
-                `  รวมที่ต้องชำระ                  ฿${b.total.toLocaleString('th-TH')}`,
-                '',
-                `สถานะ: ${b.status === 'paid' ? 'ชำระแล้ว' : 'ค้างชำระ'}`,
-              ].filter(Boolean).join('\n');
-              if (window.downloadFile(`bill_${b.id}.txt`, text)) {
-                setToast && setToast({ kind: 'success', message: `ดาวน์โหลดบิล ${b.id} เรียบร้อย` });
-                addActivity && addActivity({ icon: '📥', text: `ดาวน์โหลดบิล ${b.id}`, type: 'billing' });
+              // Build the bill payload matching services/pdf.js renderBillPdf shape.
+              const items = [
+                { label: 'ค่าเช่าห้อง', amount: b.rent || 0 },
+                { label: 'ค่าน้ำประปา', qty: `${b.waterUnits || 0} หน่วย`, amount: b.water || 0 },
+                { label: 'ค่าไฟฟ้า', qty: `${b.elecUnits || 0} หน่วย`, amount: b.elec || 0 },
+                { label: 'ค่า Wi-Fi', amount: b.wifi || 0 },
+              ];
+              if (b.penalty > 0) {
+                items.push({ label: `ค่าปรับล่าช้า (${b.overdueDays || 0} วัน)`, amount: b.penalty });
               }
-            }}>ดาวน์โหลด</Btn>
+              const billing = (config && config.billing) || {};
+              const promptpayTarget = billing.promptpayTarget || (config && config.payments && config.payments.promptpayTarget) || '';
+              const payload = {
+                billNo: b.id,
+                roomId: b.roomId,
+                tenantName: b.tenant,
+                tenantPhone: b.phone,
+                period: b.period,
+                dueDate: b.dueDate,
+                items,
+                total: b.total,
+                building: (config && config.building) || { name: 'บ้านกาญจน์ เรสซิเดนซ์' },
+                promptpayTarget,
+              };
+              try {
+                const res = await fetch('/api/bills/render', {
+                  method: 'POST',
+                  credentials: 'include',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ bill: payload }),
+                });
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const blob = await res.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `bill_${b.id}.pdf`;
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                URL.revokeObjectURL(url);
+                setToast && setToast({ kind: 'success', message: `ดาวน์โหลดบิล ${b.id} เรียบร้อย` });
+                addActivity && addActivity({ icon: '📥', text: `ดาวน์โหลดบิล ${b.id} (PDF)`, type: 'billing' });
+              } catch (err) {
+                console.error('PDF download failed:', err);
+                setToast && setToast({ kind: 'error', message: 'ดาวน์โหลดบิลไม่สำเร็จ' });
+              }
+            }}>ดาวน์โหลด PDF</Btn>
             <Btn variant="primary" icon="📨" onClick={() => {
               setToast && setToast({ kind: 'success', message: `ส่งบิล ${previewBill.id} ทาง LINE/Email แล้ว` });
               addActivity && addActivity({ icon: '📨', text: `ส่งบิล ${previewBill.id} ให้ ${previewBill.tenant}`, type: 'billing' });

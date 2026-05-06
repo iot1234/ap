@@ -10,6 +10,8 @@ const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
 const session = require('express-session');
 const PgSession = require('connect-pg-simple')(session);
+const { renderBillPdf } = require('./services/pdf');
+const { renderQrPng, renderQrDataUrl } = require('./services/promptpay');
 
 const PORT = process.env.PORT || 3000;
 const NODE_ENV = process.env.NODE_ENV || 'production';
@@ -281,6 +283,61 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBooking, async (req, res) 
   } catch (err) {
     console.error('public booking error:', err);
     res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// --- Bills: PDF rendering + PromptPay QR ----------------------------------
+// POST /api/bills/render — admin-authenticated. Body is a bill object built
+// client-side from rooms+config; server renders Thai-language PDF with QR
+// embedded. We don't persist bills server-side (they're computed on demand
+// from rooms+config in the admin UI), so the body carries everything needed.
+app.post('/api/bills/render', sameOrigin, requireAuth, async (req, res) => {
+  const bill = req.body && req.body.bill ? req.body.bill : req.body;
+  if (!bill || !bill.tenantName || !bill.total) {
+    return res.status(400).json({ error: 'bill.tenantName and bill.total required' });
+  }
+  // Fall back to PROMPTPAY_TARGET env var if the client didn't send one.
+  // Lets ops configure the QR target without touching the admin UI.
+  if (!bill.promptpayTarget && process.env.PROMPTPAY_TARGET) {
+    bill.promptpayTarget = process.env.PROMPTPAY_TARGET;
+  }
+  try {
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader(
+      'Content-Disposition',
+      `inline; filename="bill-${(bill.billNo || 'invoice').replace(/[^A-Za-z0-9_-]/g, '')}.pdf"`
+    );
+    await renderBillPdf(bill, res);
+  } catch (err) {
+    console.error('bill render error:', err);
+    if (!res.headersSent) res.status(500).json({ error: 'pdf render failed' });
+  }
+});
+
+// GET /api/promptpay/qr?target=<phone-or-citizen-id>&amount=<thb>&format=png|json
+// Public for now (rate-limited indirectly via session middleware overhead);
+// in practice the only callers are admin/tenant pages already inside the app.
+app.get('/api/promptpay/qr', async (req, res) => {
+  const target = String(req.query.target || '').trim();
+  const amountRaw = req.query.amount;
+  const amount = amountRaw != null && amountRaw !== '' ? Number(amountRaw) : undefined;
+  const format = req.query.format === 'json' ? 'json' : 'png';
+  if (!target) return res.status(400).json({ error: 'target required' });
+  if (amount != null && (!Number.isFinite(amount) || amount < 0)) {
+    return res.status(400).json({ error: 'invalid amount' });
+  }
+  try {
+    if (format === 'json') {
+      const dataUrl = await renderQrDataUrl(target, amount);
+      return res.json({ ok: true, dataUrl });
+    }
+    const png = await renderQrPng(target, amount);
+    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Cache-Control', 'no-store');
+    return res.end(png);
+  } catch (err) {
+    console.error('qr render error:', err);
+    return res.status(500).json({ error: 'qr render failed' });
   }
 });
 
