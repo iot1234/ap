@@ -10,6 +10,8 @@ const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
 const session = require('express-session');
 const PgSession = require('connect-pg-simple')(session);
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 const { renderBillPdf } = require('./services/pdf');
 const { renderQrPng, renderQrDataUrl } = require('./services/promptpay');
 const lineNotify = require('./services/line');
@@ -84,6 +86,22 @@ async function migrate() {
     CREATE INDEX IF NOT EXISTS idx_tickets_status ON maintenance_tickets(status);
     CREATE INDEX IF NOT EXISTS idx_tickets_room ON maintenance_tickets(room_id);
     CREATE INDEX IF NOT EXISTS idx_tickets_created ON maintenance_tickets(created_at DESC);
+
+    -- Audit log (Phase B1)
+    CREATE TABLE IF NOT EXISTS audit_logs (
+      id          BIGSERIAL PRIMARY KEY,
+      user_id     TEXT,
+      action      TEXT NOT NULL,
+      entity_type TEXT,
+      entity_id   TEXT,
+      detail      JSONB,
+      ip          TEXT,
+      ua          TEXT,
+      created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_logs(user_id);
+    CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_logs(entity_type, entity_id);
   `);
   console.log('[db] schema ready');
 
@@ -107,6 +125,34 @@ const app = express();
 app.set('trust proxy', 1);
 app.use(express.json({ limit: '5mb' }));
 
+// Security headers. CSP is permissive for the React-via-CDN + Babel-standalone
+// approach this app uses today; tighten when migrating to a build pipeline.
+app.use(helmet({
+  contentSecurityPolicy: {
+    useDefaults: true,
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'", 'https://unpkg.com'],
+      styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+      fontSrc: ["'self'", 'https://fonts.gstatic.com', 'data:'],
+      imgSrc: ["'self'", 'data:', 'blob:'],
+      connectSrc: ["'self'"],
+      frameAncestors: ["'self'"],
+    },
+  },
+  crossOriginEmbedderPolicy: false,  // unpkg / Google Fonts can't ship COEP headers
+}));
+
+// Rate-limit login attempts per IP — 10 per 15 minutes is plenty for humans
+// while frustrating brute-force scripts.
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'too many login attempts, try again later' },
+});
+
 app.use(
   session({
     store: new PgSession({ pool, tableName: 'user_sessions', createTableIfMissing: false }),
@@ -126,6 +172,25 @@ app.use(
 function requireAuth(req, res, next) {
   if (req.session && req.session.user) return next();
   return res.status(401).json({ error: 'unauthorized' });
+}
+
+// --- Audit log helper (Phase B1) ------------------------------------------
+// Fire-and-forget insert. Never throws back to caller — audit failures must
+// not break the user's request.
+async function audit(req, action, entityType, entityId, detail) {
+  try {
+    const userId = req.session && req.session.user ? req.session.user.username : null;
+    const ip = req.ip || req.headers['x-forwarded-for'] || null;
+    const ua = (req.headers['user-agent'] || '').slice(0, 400);
+    await pool.query(
+      `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, detail, ip, ua)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+      [userId, action, entityType || null, entityId || null,
+       detail ? JSON.stringify(detail) : null, ip, ua]
+    );
+  } catch (err) {
+    console.error('[audit] log failed:', err.message);
+  }
 }
 
 // --- Lightweight CSRF defense ---------------------------------------------
@@ -149,7 +214,7 @@ function sameOrigin(req, res, next) {
 }
 
 // --- Auth endpoints -------------------------------------------------------
-app.post('/api/auth/login', sameOrigin, async (req, res) => {
+app.post('/api/auth/login', sameOrigin, loginLimiter, async (req, res) => {
   const { username, password } = req.body || {};
   if (!username || !password) {
     return res.status(400).json({ error: 'username and password required' });
@@ -164,6 +229,7 @@ app.post('/api/auth/login', sameOrigin, async (req, res) => {
     const ok = await bcrypt.compare(password, user.password_hash);
     if (!ok) return res.status(401).json({ error: 'invalid credentials' });
     req.session.user = { id: user.id, username: user.username, role: user.role };
+    audit(req, 'auth.login', 'user', String(user.id));
     res.json({ user: req.session.user });
   } catch (err) {
     console.error('login error:', err);
@@ -172,6 +238,8 @@ app.post('/api/auth/login', sameOrigin, async (req, res) => {
 });
 
 app.post('/api/auth/logout', sameOrigin, (req, res) => {
+  const username = req.session && req.session.user ? req.session.user.username : null;
+  if (username) audit(req, 'auth.logout', 'user', username);
   req.session.destroy(() => res.json({ ok: true }));
 });
 
@@ -235,6 +303,7 @@ app.put('/api/data/:key', sameOrigin, requireAuth, async (req, res) => {
              updated_by = EXCLUDED.updated_by`,
       [key, value, req.session.user.username]
     );
+    audit(req, 'data.put', 'app_data', key);
     res.json({ ok: true, key });
   } catch (err) {
     console.error('data PUT error:', err);
@@ -247,6 +316,7 @@ app.delete('/api/data/:key', sameOrigin, requireAuth, async (req, res) => {
   if (!ALLOWED_KEYS.has(key)) return res.status(400).json({ error: 'invalid key' });
   try {
     await pool.query('DELETE FROM app_data WHERE key=$1', [key]);
+    audit(req, 'data.delete', 'app_data', key);
     res.json({ ok: true, key });
   } catch (err) {
     console.error('data DELETE error:', err);
@@ -571,6 +641,7 @@ app.put('/api/maintenance/:id', sameOrigin, requireAuth, async (req, res) => {
       params
     );
     if (rows.length === 0) return res.status(404).json({ error: 'not found' });
+    audit(req, 'maintenance.update', 'ticket', String(id), { fields: Object.keys(b) });
     res.json({ ok: true, ticket: rows[0] });
   } catch (err) {
     console.error('ticket update error:', err);
@@ -602,6 +673,86 @@ app.post('/api/maintenance/:id/rate', sameOrigin, async (req, res) => {
     res.json({ ok: true, ticket: rows[0] });
   } catch (err) {
     console.error('ticket rate error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// GET /api/audit?limit=&before=  — admin-auth, returns recent audit entries.
+// Cursor-paginated by created_at DESC.
+app.get('/api/audit', requireAuth, async (req, res) => {
+  const limit = Math.min(Number(req.query.limit) || 100, 500);
+  const before = req.query.before; // ISO timestamp or omit for newest
+  try {
+    const params = [];
+    let where = '';
+    if (before) { params.push(before); where = `WHERE created_at < $1`; }
+    params.push(limit);
+    const { rows } = await pool.query(
+      `SELECT id, user_id, action, entity_type, entity_id, detail, ip, created_at
+         FROM audit_logs ${where}
+         ORDER BY created_at DESC LIMIT $${params.length}`,
+      params
+    );
+    res.json({ ok: true, logs: rows });
+  } catch (err) {
+    console.error('audit list error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// --- Reports (Phase B2): real DB aggregates --------------------------------
+// Replaces the Math.sin-based mocks. We derive metrics from the existing
+// app_data JSONB store (rooms + bookings + audit) so no new schema needed.
+app.get('/api/reports/overview', requireAuth, async (_req, res) => {
+  try {
+    const [roomsRow, bookingsRow] = await Promise.all([
+      pool.query(`SELECT value FROM app_data WHERE key='baankarn_rooms_v1'`),
+      pool.query(`SELECT value FROM app_data WHERE key='baankarn_bookings_v1'`),
+    ]);
+    const roomsObj = roomsRow.rows.length ? roomsRow.rows[0].value : {};
+    const bookings = bookingsRow.rows.length && Array.isArray(bookingsRow.rows[0].value)
+      ? bookingsRow.rows[0].value : [];
+    const rooms = Object.values(roomsObj || {});
+    const occupied = rooms.filter((r) => r.status === 'occupied').length;
+    const overdue = rooms.filter((r) => r.status === 'overdue').length;
+    const reserved = rooms.filter((r) => r.status === 'reserved').length;
+    const vacant = rooms.filter((r) => r.status === 'vacant').length;
+    const maintenance = rooms.filter((r) => r.status === 'maintenance').length;
+    const totalRent = rooms.reduce((s, r) => s + (Number(r.rent) || 0), 0);
+    const occupiedRevenue = rooms
+      .filter((r) => r.status === 'occupied' || r.status === 'overdue')
+      .reduce((s, r) => s + (Number(r.rent) || 0), 0);
+    const pendingBookings = bookings.filter((b) => b.status === 'pending').length;
+    res.json({
+      ok: true,
+      counts: { occupied, overdue, reserved, vacant, maintenance, total: rooms.length },
+      revenue: { potential: totalRent, occupied: occupiedRevenue },
+      bookings: { pending: pendingBookings, total: bookings.length },
+    });
+  } catch (err) {
+    console.error('reports overview error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// GET /api/reports/maintenance — counts by status, average rating.
+app.get('/api/reports/maintenance', requireAuth, async (_req, res) => {
+  try {
+    const [byStatus, ratings] = await Promise.all([
+      pool.query(`SELECT status, COUNT(*) AS n FROM maintenance_tickets GROUP BY status`),
+      pool.query(`SELECT AVG(rating)::numeric(3,2) AS avg_rating, COUNT(rating) AS rated
+                    FROM maintenance_tickets WHERE rating IS NOT NULL`),
+    ]);
+    const counts = {};
+    byStatus.rows.forEach((r) => { counts[r.status] = Number(r.n); });
+    res.json({
+      ok: true,
+      counts,
+      avgRating: ratings.rows[0]?.avg_rating != null ? Number(ratings.rows[0].avg_rating) : null,
+      ratedCount: Number(ratings.rows[0]?.rated || 0),
+    });
+  } catch (err) {
+    console.error('reports maintenance error:', err);
     res.status(500).json({ error: 'internal error' });
   }
 });
