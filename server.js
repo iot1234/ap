@@ -100,8 +100,28 @@ function requireAuth(req, res, next) {
   return res.status(401).json({ error: 'unauthorized' });
 }
 
+// --- Lightweight CSRF defense ---------------------------------------------
+// Beyond cookie SameSite=lax, ensure state-changing requests originate from
+// our own domain by checking Origin/Referer against the request host.
+function sameOrigin(req, res, next) {
+  const origin = req.get('origin') || req.get('referer') || '';
+  // Empty Origin/Referer is OK only for same-origin (e.g. fetch w/o Origin).
+  // We'll only block requests with a mismatched Origin/Referer.
+  if (!origin) return next();
+  try {
+    const u = new URL(origin);
+    const host = req.get('host');
+    if (u.host !== host) {
+      return res.status(403).json({ error: 'cross-origin request blocked' });
+    }
+  } catch {
+    return res.status(400).json({ error: 'invalid origin' });
+  }
+  next();
+}
+
 // --- Auth endpoints -------------------------------------------------------
-app.post('/api/auth/login', async (req, res) => {
+app.post('/api/auth/login', sameOrigin, async (req, res) => {
   const { username, password } = req.body || {};
   if (!username || !password) {
     return res.status(400).json({ error: 'username and password required' });
@@ -123,7 +143,7 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
-app.post('/api/auth/logout', (req, res) => {
+app.post('/api/auth/logout', sameOrigin, (req, res) => {
   req.session.destroy(() => res.json({ ok: true }));
 });
 
@@ -168,10 +188,15 @@ app.get('/api/data', async (_req, res) => {
   }
 });
 
-app.put('/api/data/:key', requireAuth, async (req, res) => {
+app.put('/api/data/:key', sameOrigin, requireAuth, async (req, res) => {
   const key = req.params.key;
   if (!ALLOWED_KEYS.has(key)) return res.status(400).json({ error: 'invalid key' });
   const value = req.body && req.body.value !== undefined ? req.body.value : req.body;
+  // Reject null/undefined writes (use DELETE instead) — prevents the "row exists
+  // with value null" footgun where the next hydrate finds null and seeds again.
+  if (value === null || value === undefined) {
+    return res.status(400).json({ error: 'use DELETE to remove a key' });
+  }
   try {
     await pool.query(
       `INSERT INTO app_data (key, value, updated_by)
@@ -189,6 +214,18 @@ app.put('/api/data/:key', requireAuth, async (req, res) => {
   }
 });
 
+app.delete('/api/data/:key', sameOrigin, requireAuth, async (req, res) => {
+  const key = req.params.key;
+  if (!ALLOWED_KEYS.has(key)) return res.status(400).json({ error: 'invalid key' });
+  try {
+    await pool.query('DELETE FROM app_data WHERE key=$1', [key]);
+    res.json({ ok: true, key });
+  } catch (err) {
+    console.error('data DELETE error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
 // Public endpoint for tenant booking submissions (rate-limited via IP basic gate)
 const bookingHits = new Map();
 function rateLimitBooking(req, res, next) {
@@ -201,7 +238,7 @@ function rateLimitBooking(req, res, next) {
   next();
 }
 
-app.post('/api/bookings/public', rateLimitBooking, async (req, res) => {
+app.post('/api/bookings/public', sameOrigin, rateLimitBooking, async (req, res) => {
   const booking = req.body;
   if (!booking || !booking.roomId || !booking.tenantName) {
     return res.status(400).json({ error: 'roomId and tenantName required' });

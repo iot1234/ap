@@ -443,16 +443,16 @@ function App() {
   useEffect(() => { saveBookings(bookings); },     [bookings]);
   useEffect(() => { saveActivities(activities); }, [activities]);
 
-  // --- Auth: load current user on mount; redirect to /login if missing ---
+  // --- Auth: load current user info for the sidebar ---
+  // Auth is already enforced before this component mounts (see __bootAdmin
+  // at the bottom of this file), so this just fetches the user object for
+  // displaying name/role/avatar in the sidebar footer.
   const [currentUser, setCurrentUser] = useState(null);
   useEffect(() => {
     if (!window.AP || !window.AP.me) return;
     window.AP.me()
-      .then((d) => {
-        if (d && d.user) setCurrentUser(d.user);
-        else window.location.href = '/login';
-      })
-      .catch(() => { window.location.href = '/login'; });
+      .then((d) => { if (d && d.user) setCurrentUser(d.user); })
+      .catch(() => {});
   }, []);
 
   // --- Routing via hash ---
@@ -666,14 +666,32 @@ function App() {
 }
 
 // ---------- Render --------------------------------------------------------
-// Wait for API hydration (if api-client.js is loaded) so localStorage is
-// populated from the database before React reads it via loadRooms() etc.
+// Wait for hydration AND verify auth BEFORE mounting. Without this gate the
+// admin UI would render with sensitive tenant data and only redirect to /login
+// after the page already painted (visible flash + cached in browser history).
 const __mount = () => {
   const root = ReactDOM.createRoot(document.getElementById('root'));
   root.render(<App />);
 };
-if (window.AP && window.AP.ready && typeof window.AP.ready.then === 'function') {
-  window.AP.ready.then(__mount).catch(__mount);
-} else {
+const __redirectToLogin = () => { window.location.replace('/login'); };
+const __bootAdmin = async () => {
+  if (window.AP && window.AP.ready && typeof window.AP.ready.then === 'function') {
+    try { await window.AP.ready; } catch {}
+  }
+  // Hard auth gate: if not authenticated, replace location with /login and
+  // never mount React.
+  if (window.AP && window.AP.isAuthenticated && !window.AP.isAuthenticated()) {
+    __redirectToLogin();
+    return;
+  }
+  // Belt-and-braces: re-check via /api/auth/me directly
+  try {
+    const me = await (window.AP && window.AP.me ? window.AP.me() : Promise.resolve({}));
+    if (!me || !me.user) { __redirectToLogin(); return; }
+  } catch {
+    __redirectToLogin();
+    return;
+  }
   __mount();
-}
+};
+__bootAdmin();

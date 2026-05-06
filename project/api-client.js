@@ -19,10 +19,27 @@
   const DEBOUNCE_MS = 250;
   const pendingTimers = new Map();
   const inflight = new Set();
+  let isHydrating = false;        // suppress monkey-patch during hydration
+  let isAuthenticated = false;     // tenant pages skip PUTs entirely
+  let hydratedKeys = new Set();    // which keys came from the server (vs local seed)
+
+  // Save references to original methods BEFORE we wrap them
+  const origSetItem = window.localStorage.setItem.bind(window.localStorage);
+  const origRemoveItem = window.localStorage.removeItem.bind(window.localStorage);
 
   // --- Hydrate localStorage from API once on first load --------------------
   async function hydrate() {
+    isHydrating = true;
     try {
+      // First, find out if we're authenticated. If not, skip writes silently.
+      try {
+        const meRes = await fetch('/api/auth/me', { credentials: 'include' });
+        if (meRes.ok) {
+          const me = await meRes.json();
+          isAuthenticated = !!(me && me.user);
+        }
+      } catch {}
+
       const res = await fetch('/api/data', { credentials: 'include' });
       if (!res.ok) {
         console.warn('[api-client] hydrate failed', res.status);
@@ -32,13 +49,25 @@
       let count = 0;
       for (const key of SYNCED_KEYS) {
         if (data[key] !== undefined && data[key] !== null) {
-          window.localStorage.setItem(key, JSON.stringify(data[key]));
+          // Use the ORIGINAL setItem so we don't trigger a PUT back to server
+          origSetItem(key, JSON.stringify(data[key]));
+          hydratedKeys.add(key);
           count++;
+        } else {
+          // DB has nothing for this key. For tenants, clear stale localStorage
+          // so they don't push their local seed to the server (or worse, see
+          // diverged data). For admins, leave it — admin React will seed and
+          // upload on first save.
+          if (!isAuthenticated) {
+            origRemoveItem(key);
+          }
         }
       }
-      console.log(`[api-client] hydrated ${count}/${SYNCED_KEYS.length} keys from API`);
+      console.log(`[api-client] hydrated ${count}/${SYNCED_KEYS.length} keys (auth=${isAuthenticated})`);
     } catch (err) {
       console.warn('[api-client] hydrate error', err);
+    } finally {
+      isHydrating = false;
     }
   }
 
@@ -73,21 +102,33 @@
   }
 
   // --- Wrap localStorage.setItem ------------------------------------------
-  const origSetItem = window.localStorage.setItem.bind(window.localStorage);
+  // Behavior:
+  //   - During hydration: never trigger PUT (we're filling localStorage from server).
+  //   - When unauthenticated (tenant): never trigger PUT — they can't write anyway,
+  //     and trying would race with admin's data and pollute the DB on first run.
+  //     Tenants use dedicated endpoints (e.g. /api/bookings/public) for their writes.
+  //   - When authenticated (admin): debounce a PUT to /api/data/:key.
   window.localStorage.setItem = function (key, value) {
     origSetItem(key, value);
-    if (SYNCED_KEYS.includes(key)) {
+    if (!isHydrating && isAuthenticated && SYNCED_KEYS.includes(key)) {
       pushToApi(key, value);
     }
   };
 
-  // --- Wrap localStorage.removeItem to clear the key on the server too ----
-  const origRemoveItem = window.localStorage.removeItem.bind(window.localStorage);
+  // --- Wrap localStorage.removeItem ---------------------------------------
+  // For admins, send a real DELETE to remove the row. For others, no-op on API.
   window.localStorage.removeItem = function (key) {
     origRemoveItem(key);
-    // We don't expose DELETE; just push 'null' which our server treats as "store null"
-    if (SYNCED_KEYS.includes(key)) {
-      pushToApi(key, JSON.stringify(null));
+    if (!isHydrating && isAuthenticated && SYNCED_KEYS.includes(key)) {
+      // Clear pending PUT for this key first
+      if (pendingTimers.has(key)) {
+        clearTimeout(pendingTimers.get(key));
+        pendingTimers.delete(key);
+      }
+      fetch(`/api/data/${encodeURIComponent(key)}`, {
+        method: 'DELETE',
+        credentials: 'include',
+      }).catch((err) => console.warn(`[api-client] DELETE ${key} error`, err));
     }
   };
 
@@ -96,6 +137,8 @@
     hydrate,
     syncedKeys: SYNCED_KEYS,
     isInflight: () => inflight.size > 0,
+    isAuthenticated: () => isAuthenticated,
+    isHydrated: (key) => hydratedKeys.has(key),
     async login(username, password) {
       const res = await fetch('/api/auth/login', {
         method: 'POST',
@@ -103,15 +146,20 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password }),
       });
-      return res.json();
+      const data = await res.json();
+      if (res.ok && data.user) isAuthenticated = true;
+      return data;
     },
     async logout() {
       await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
+      isAuthenticated = false;
       window.location.href = '/login';
     },
     async me() {
       const res = await fetch('/api/auth/me', { credentials: 'include' });
-      return res.json();
+      const data = await res.json();
+      isAuthenticated = !!(data && data.user);
+      return data;
     },
     async submitPublicBooking(booking) {
       const res = await fetch('/api/bookings/public', {
