@@ -239,9 +239,25 @@ function rateLimitBooking(req, res, next) {
 }
 
 app.post('/api/bookings/public', sameOrigin, rateLimitBooking, async (req, res) => {
-  const booking = req.body;
-  if (!booking || !booking.roomId || !booking.tenantName) {
+  const b = req.body || {};
+  if (!b.roomId || !b.tenantName) {
     return res.status(400).json({ error: 'roomId and tenantName required' });
+  }
+  // Length / type sanity. Strings only, capped to reasonable lengths to keep
+  // the JSONB blob bounded and prevent payload-bomb attacks.
+  const str = (v, max) => (typeof v === 'string' ? v.slice(0, max) : '');
+  const cleaned = {
+    roomId:      str(b.roomId, 32),
+    tenantName:  str(b.tenantName, 120),
+    phone:       str(b.phone, 32),
+    email:       str(b.email, 120),
+    checkInDate: str(b.checkInDate, 16),
+    floor:       str(b.floor, 4),
+    roomType:    str(b.roomType, 32),
+    message:     str(b.message, 500),
+  };
+  if (!cleaned.tenantName.trim()) {
+    return res.status(400).json({ error: 'tenantName required' });
   }
   try {
     const { rows } = await pool.query(
@@ -251,7 +267,7 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBooking, async (req, res) 
     const list = (rows.length && Array.isArray(rows[0].value)) ? rows[0].value : [];
     const newBooking = {
       id: 'b' + Date.now(),
-      ...booking,
+      ...cleaned,
       status: 'pending',
       createdAt: new Date().toISOString(),
     };
@@ -295,6 +311,10 @@ app.get('/admin', (req, res) => {
 
 app.get('/login', (_req, res) => {
   res.sendFile(path.join(__dirname, 'project', 'login.html'));
+});
+
+app.get('/book', (_req, res) => {
+  res.sendFile(path.join(__dirname, 'project', 'booking.html'));
 });
 
 // --- Boot -----------------------------------------------------------------

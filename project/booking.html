@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>จองห้องพัก · บ้านกาญจน์ เรสซิเดนซ์</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700&family=IBM+Plex+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"/>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; min-height: 100%; }
+  body {
+    font-family: "IBM Plex Sans Thai", "Sora", system-ui, sans-serif;
+    background: #f5efe3;
+    color: #2c241b;
+    -webkit-font-smoothing: antialiased;
+    line-height: 1.55;
+  }
+  .wrap {
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 32px 20px 80px;
+  }
+  .topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 32px;
+  }
+  .brand {
+    display: flex; align-items: center; gap: 12px;
+    font-family: 'Sora', sans-serif;
+    font-weight: 600; font-size: 18px;
+  }
+  .brand-logo {
+    width: 40px; height: 40px; border-radius: 11px;
+    background: linear-gradient(135deg, #c46a3e, #a4542d);
+    color: #fff;
+    display: grid; place-items: center;
+    font-weight: 700; font-size: 20px;
+  }
+  .topbar a {
+    color: #5b4f40; text-decoration: none; font-size: 13.5px;
+    padding: 8px 14px; border-radius: 8px;
+    background: #ffffff; border: 1px solid #ece4d4;
+    transition: background .15s;
+  }
+  .topbar a:hover { background: #faf6ee; }
+  h1 {
+    font-family: 'Sora', sans-serif;
+    font-size: 28px; font-weight: 600;
+    margin: 0 0 8px; color: #2c241b;
+  }
+  .lead {
+    font-size: 14.5px; color: #5b4f40; margin-bottom: 32px;
+  }
+  .card {
+    background: #ffffff;
+    border: 1px solid #ece4d4;
+    border-radius: 14px;
+    padding: 28px;
+  }
+  .row { display: grid; gap: 16px; margin-bottom: 16px; }
+  .row.cols-2 { grid-template-columns: 1fr 1fr; }
+  @media (max-width: 600px) { .row.cols-2 { grid-template-columns: 1fr; } }
+  label {
+    display: block;
+    font-size: 12.5px; font-weight: 500; color: #5b4f40;
+    margin-bottom: 6px;
+  }
+  .req::after { content: " *"; color: #b54639; }
+  input, select, textarea {
+    width: 100%; height: 40px; padding: 0 12px;
+    background: #ffffff; color: #2c241b;
+    border: 1px solid #ece4d4; border-radius: 9px;
+    font-family: inherit; font-size: 13.5px;
+    transition: border-color .15s, box-shadow .15s;
+  }
+  textarea { height: auto; padding: 10px 12px; min-height: 80px; resize: vertical; }
+  input:focus, select:focus, textarea:focus {
+    outline: none;
+    border-color: #c46a3e;
+    box-shadow: 0 0 0 3px rgba(196,106,62,0.13);
+  }
+  .hint { font-size: 11.5px; color: #8a7d6b; margin-top: 4px; }
+  button[type=submit] {
+    width: 100%; height: 46px; margin-top: 12px;
+    background: #2c241b; color: #fff;
+    border: none; border-radius: 10px;
+    font-family: inherit; font-size: 14px; font-weight: 500;
+    cursor: pointer; transition: background .15s, transform .08s;
+  }
+  button[type=submit]:hover:not(:disabled) { background: #1f1813; }
+  button[type=submit]:active:not(:disabled) { transform: translateY(1px); }
+  button[type=submit]:disabled { opacity: 0.5; cursor: not-allowed; }
+  .alert {
+    padding: 12px 14px; border-radius: 9px;
+    font-size: 13.5px; margin-top: 16px;
+  }
+  .alert-error {
+    background: #f9e7e3; border: 1px solid #e6c8c2; color: #5a1a13;
+  }
+  .alert-success {
+    background: #e6f4ec; border: 1px solid #c1deca; color: #0e3a25;
+  }
+  .success-card {
+    background: #ffffff; border: 1px solid #ece4d4; border-radius: 14px;
+    padding: 40px 28px; text-align: center;
+  }
+  .success-icon {
+    width: 64px; height: 64px; border-radius: 50%;
+    background: #e6f4ec; color: #2e9b6a;
+    display: grid; place-items: center; font-size: 32px;
+    margin: 0 auto 18px;
+  }
+  .success-card h2 {
+    font-family: 'Sora', sans-serif;
+    font-size: 22px; font-weight: 600;
+    margin: 0 0 8px;
+  }
+  .success-card p { color: #5b4f40; font-size: 14px; margin: 0 0 8px; }
+  .ref { font-family: 'JetBrains Mono', monospace; color: #c46a3e; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="topbar">
+    <div class="brand">
+      <div class="brand-logo">บ</div>
+      <span>บ้านกาญจน์ เรสซิเดนซ์</span>
+    </div>
+    <a href="/">← กลับหน้าแรก</a>
+  </div>
+
+  <h1>จองห้องพัก</h1>
+  <p class="lead">กรอกข้อมูลเพื่อขอจองห้องพัก เจ้าหน้าที่จะติดต่อกลับภายใน 24 ชั่วโมง</p>
+
+  <div id="formContainer">
+    <form id="bookingForm" class="card" novalidate>
+      <div class="row cols-2">
+        <div>
+          <label for="name" class="req">ชื่อ-นามสกุล</label>
+          <input type="text" id="name" name="name" autocomplete="name" required maxlength="120"/>
+        </div>
+        <div>
+          <label for="phone" class="req">เบอร์โทรศัพท์</label>
+          <input type="tel" id="phone" name="phone" autocomplete="tel" required maxlength="20" placeholder="08X-XXX-XXXX"/>
+        </div>
+      </div>
+
+      <div class="row cols-2">
+        <div>
+          <label for="email">อีเมล (ถ้ามี)</label>
+          <input type="email" id="email" name="email" autocomplete="email" maxlength="120"/>
+        </div>
+        <div>
+          <label for="checkInDate" class="req">วันที่ต้องการเข้าพัก</label>
+          <input type="date" id="checkInDate" name="checkInDate" required/>
+        </div>
+      </div>
+
+      <div class="row cols-2">
+        <div>
+          <label for="floor">ชั้นที่สนใจ</label>
+          <select id="floor" name="floor">
+            <option value="">-- ไม่ระบุ --</option>
+            <option value="1">ชั้น 1</option>
+            <option value="2">ชั้น 2</option>
+            <option value="3">ชั้น 3</option>
+            <option value="4">ชั้น 4</option>
+            <option value="5">ชั้น 5</option>
+          </select>
+        </div>
+        <div>
+          <label for="roomType">ประเภทห้อง</label>
+          <select id="roomType" name="roomType">
+            <option value="">-- ไม่ระบุ --</option>
+            <option value="standard">ห้องมาตรฐาน</option>
+            <option value="deluxe">ห้องดีลักซ์</option>
+            <option value="suite">ห้องสวีท</option>
+            <option value="studio">สตูดิโอพรีเมียม</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="row">
+        <div>
+          <label for="message">ข้อความเพิ่มเติม</label>
+          <textarea id="message" name="message" maxlength="500" placeholder="เช่น ความต้องการพิเศษ ระยะเวลาเช่า ฯลฯ"></textarea>
+          <div class="hint">สูงสุด 500 ตัวอักษร</div>
+        </div>
+      </div>
+
+      <button type="submit" id="submitBtn">ส่งคำขอจอง</button>
+
+      <div id="alert" class="alert alert-error" style="display:none"></div>
+    </form>
+  </div>
+
+  <template id="successTpl">
+    <div class="success-card">
+      <div class="success-icon">✓</div>
+      <h2>ได้รับคำขอจองแล้ว</h2>
+      <p>ขอบคุณสำหรับการจอง — เจ้าหน้าที่จะติดต่อกลับภายใน 24 ชั่วโมง</p>
+      <p>หมายเลขอ้างอิง: <span class="ref" id="refNo"></span></p>
+      <p style="margin-top:24px"><a href="/" style="color:#c46a3e;text-decoration:none;font-weight:500">← กลับหน้าแรก</a></p>
+    </div>
+  </template>
+</div>
+
+<script>
+(function() {
+  const form = document.getElementById('bookingForm');
+  const btn = document.getElementById('submitBtn');
+  const alert = document.getElementById('alert');
+  const container = document.getElementById('formContainer');
+
+  // Default check-in date: 7 days from today
+  const dt = new Date();
+  dt.setDate(dt.getDate() + 7);
+  document.getElementById('checkInDate').value = dt.toISOString().slice(0, 10);
+  document.getElementById('checkInDate').min = new Date().toISOString().slice(0, 10);
+
+  function showError(msg) {
+    alert.textContent = msg;
+    alert.className = 'alert alert-error';
+    alert.style.display = 'block';
+  }
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    alert.style.display = 'none';
+
+    const data = {
+      tenantName: document.getElementById('name').value.trim(),
+      phone: document.getElementById('phone').value.trim(),
+      email: document.getElementById('email').value.trim(),
+      checkInDate: document.getElementById('checkInDate').value,
+      floor: document.getElementById('floor').value,
+      roomType: document.getElementById('roomType').value,
+      message: document.getElementById('message').value.trim(),
+      // server requires roomId; for unspecified preference, send a placeholder
+      roomId: document.getElementById('floor').value
+        ? `floor-${document.getElementById('floor').value}`
+        : 'unspecified',
+    };
+
+    if (!data.tenantName || !data.phone || !data.checkInDate) {
+      showError('กรุณากรอกข้อมูลที่จำเป็นให้ครบถ้วน');
+      return;
+    }
+
+    btn.disabled = true;
+    btn.textContent = 'กำลังส่ง...';
+
+    try {
+      const res = await fetch('/api/bookings/public', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      });
+      const result = await res.json();
+
+      if (res.status === 429) {
+        showError('คำขอมากเกินไป กรุณาลองใหม่อีกครั้งใน 1 นาที');
+        btn.disabled = false;
+        btn.textContent = 'ส่งคำขอจอง';
+        return;
+      }
+      if (!res.ok || !result.ok) {
+        showError(result.error || 'ส่งคำขอไม่สำเร็จ กรุณาลองใหม่');
+        btn.disabled = false;
+        btn.textContent = 'ส่งคำขอจอง';
+        return;
+      }
+
+      // Success: replace form with confirmation card
+      const tpl = document.getElementById('successTpl');
+      container.innerHTML = '';
+      container.appendChild(tpl.content.cloneNode(true));
+      document.getElementById('refNo').textContent = result.booking.id;
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    } catch (err) {
+      showError('เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ กรุณาลองใหม่');
+      btn.disabled = false;
+      btn.textContent = 'ส่งคำขอจอง';
+    }
+  });
+})();
+</script>
+</body>
+</html>
