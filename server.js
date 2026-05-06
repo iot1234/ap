@@ -123,7 +123,10 @@ async function migrate() {
 // --- App setup ------------------------------------------------------------
 const app = express();
 app.set('trust proxy', 1);
-app.use(express.json({ limit: '5mb' }));
+// 1MB is plenty for our largest JSON payload (config save). Lower limit
+// reduces memory pressure under attack — 100 concurrent 5MB POSTs vs 1MB
+// makes a 5x difference in worst-case memory.
+app.use(express.json({ limit: '1mb' }));
 
 // Security headers. CSP is permissive for the React-via-CDN + Babel-standalone
 // approach this app uses today; tighten when migrating to a build pipeline.
@@ -200,13 +203,19 @@ async function audit(req, action, entityType, entityId, detail) {
 }
 
 // --- Lightweight CSRF defense ---------------------------------------------
-// Beyond cookie SameSite=lax, ensure state-changing requests originate from
-// our own domain by checking Origin/Referer against the request host.
+// Beyond cookie SameSite=lax, require state-changing requests to carry a
+// same-origin Origin OR Referer header. We previously allowed both to be
+// empty (legitimate same-origin fetch w/o Origin) but that opened a hole:
+// a curl/raw-HTTP request without those headers could still hit endpoints.
+// Browsers always send Origin on POST/PUT/DELETE within the same site, so
+// requiring at least one is safe for legitimate clients.
 function sameOrigin(req, res, next) {
+  // GET/HEAD don't change state — skip.
+  if (req.method === 'GET' || req.method === 'HEAD') return next();
   const origin = req.get('origin') || req.get('referer') || '';
-  // Empty Origin/Referer is OK only for same-origin (e.g. fetch w/o Origin).
-  // We'll only block requests with a mismatched Origin/Referer.
-  if (!origin) return next();
+  if (!origin) {
+    return res.status(403).json({ error: 'missing origin/referer header' });
+  }
   try {
     const u = new URL(origin);
     const host = req.get('host');
@@ -234,9 +243,23 @@ app.post('/api/auth/login', sameOrigin, loginLimiter, async (req, res) => {
     const user = rows[0];
     const ok = await bcrypt.compare(password, user.password_hash);
     if (!ok) return res.status(401).json({ error: 'invalid credentials' });
-    req.session.user = { id: user.id, username: user.username, role: user.role };
-    audit(req, 'auth.login', 'user', String(user.id));
-    res.json({ user: req.session.user });
+    // Regenerate session ID after successful auth to defend against session
+    // fixation (an attacker can't pre-set a sid that survives login).
+    req.session.regenerate((regenErr) => {
+      if (regenErr) {
+        console.error('session.regenerate failed:', regenErr);
+        return res.status(500).json({ error: 'internal error' });
+      }
+      req.session.user = { id: user.id, username: user.username, role: user.role };
+      req.session.save((saveErr) => {
+        if (saveErr) {
+          console.error('session.save failed:', saveErr);
+          return res.status(500).json({ error: 'internal error' });
+        }
+        audit(req, 'auth.login', 'user', String(user.id));
+        res.json({ user: req.session.user });
+      });
+    });
   } catch (err) {
     console.error('login error:', err);
     res.status(500).json({ error: 'internal error' });
@@ -394,10 +417,16 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBooking, async (req, res) 
       roomId: cleaned.roomId,
     };
     list.unshift(newBooking);
+    // Cap at 500 newest entries to prevent unbounded JSONB growth.
+    // Older bookings are dropped silently — admins should archive or act on
+    // them within this window. With a 5/min/IP rate limit, 500 entries is
+    // ~100 minutes of single-IP attack; rotating-IP attacks are harder to
+    // stop here, so we add an upper bound on storage too.
+    const capped = list.slice(0, 500);
     await pool.query(
       `INSERT INTO app_data (key, value, updated_by) VALUES ($1, $2, 'public')
        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW(), updated_by = 'public'`,
-      ['baankarn_bookings_v1', JSON.stringify(list)]
+      ['baankarn_bookings_v1', JSON.stringify(capped)]
     );
 
     // Fire-and-forget LINE notification to owner. Don't await/block: response
@@ -424,7 +453,10 @@ app.post('/api/notify/bill', sameOrigin, requireAuth, async (req, res) => {
   if (!b.tenantName || !b.total) {
     return res.status(400).json({ error: 'tenantName and total required' });
   }
-  const recipient = b.recipientUserId || process.env.LINE_OWNER_USER_ID;
+  // Recipient is server-side only — we don't accept recipientUserId from the
+  // client to prevent an authenticated admin from spamming arbitrary LINE
+  // users (compromised admin scenario or insider abuse).
+  const recipient = process.env.LINE_OWNER_USER_ID;
   if (!recipient) return res.status(400).json({ error: 'no LINE recipient configured' });
   if (!lineNotify.isConfigured()) {
     return res.status(503).json({ error: 'LINE not configured on server' });
@@ -478,8 +510,14 @@ app.get('/api/promptpay/qr', async (req, res) => {
   const amount = amountRaw != null && amountRaw !== '' ? Number(amountRaw) : undefined;
   const format = req.query.format === 'json' ? 'json' : 'png';
   if (!target) return res.status(400).json({ error: 'target required' });
-  if (amount != null && (!Number.isFinite(amount) || amount < 0)) {
+  // Cap amount: realistic monthly bills are <100k THB. 999,999 is the upper
+  // sanity bound — bigger values are likely attempts to abuse the QR.
+  if (amount != null && (!Number.isFinite(amount) || amount < 0 || amount > 999999)) {
     return res.status(400).json({ error: 'invalid amount' });
+  }
+  // Validate target shape: 9-15 digits (covers Thai phone 10 + citizen ID 13)
+  if (!/^[\d-]{9,16}$/.test(target)) {
+    return res.status(400).json({ error: 'invalid target shape' });
   }
   try {
     if (format === 'json') {
@@ -704,8 +742,19 @@ app.post('/api/maintenance/:id/rate', sameOrigin, async (req, res) => {
 // GET /api/audit?limit=&before=  — admin-auth, returns recent audit entries.
 // Cursor-paginated by created_at DESC.
 app.get('/api/audit', requireAuth, async (req, res) => {
-  const limit = Math.min(Number(req.query.limit) || 100, 500);
-  const before = req.query.before; // ISO timestamp or omit for newest
+  const limit = Math.min(Math.max(Number(req.query.limit) || 100, 1), 500);
+  // Validate `before` as ISO date — pg accepts other formats but we want
+  // strict parsing so attackers can't push the cursor far enough to scan
+  // a huge window. Reject anything that doesn't parse as a valid Date.
+  const beforeRaw = req.query.before;
+  let before = null;
+  if (beforeRaw) {
+    const d = new Date(String(beforeRaw));
+    if (isNaN(d.getTime())) {
+      return res.status(400).json({ error: 'invalid before cursor (use ISO 8601)' });
+    }
+    before = d.toISOString();
+  }
   try {
     const params = [];
     let where = '';
