@@ -47,7 +47,11 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
           penalty,
           total: grandTotal,
           dueDate: `${config.notify?.dueOnDay ?? 7} ${fmtMonthTH(now)}`,
-          status: overdue ? 'unpaid' : 'paid',
+          // Bills default to 'unpaid'. Admin marks as paid via the row action,
+          // which sets r.billPaidAt on the room. Without that, status was
+          // mis-marked 'paid' for every non-overdue room — making the unpaid
+          // tab empty and creating false reassurance.
+          status: r.billPaidAt ? 'paid' : 'unpaid',
           overdueDays: r.overdueDays || 0,
         };
       });
@@ -84,9 +88,17 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
   const handleMarkPaid = (id) => {
     const bill = bills.find(b => b.id === id);
     if (!bill) return;
+    // billPaidAt is the source of truth for status: 'paid'. Without it, the
+    // useMemo recomputes status: 'unpaid' on next config change.
     setRooms(prev => ({
       ...prev,
-      [bill.roomId]: { ...prev[bill.roomId], status: 'occupied', overdueDays: 0, billStatus: 'paid' },
+      [bill.roomId]: {
+        ...prev[bill.roomId],
+        status: 'occupied',
+        overdueDays: 0,
+        billStatus: 'paid',
+        billPaidAt: new Date().toISOString(),
+      },
     }));
     addActivity && addActivity({ icon: '💳', text: `รับชำระบิล ${id} จำนวน ${fmtCurrency(bill.total)}`, type: 'payment' });
     setToast && setToast({ kind: 'success', message: `บันทึกชำระห้อง ${bill.roomId} แล้ว` });
@@ -271,7 +283,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
           padding: 12, background: C.surfaceAlt, borderRadius: 8,
           fontSize: 12.5, color: C.ink2,
         }}>
-          <div>📅 ครบกำหนดชำระ: <b>วันที่ {config.notify.dueOnDay} ของเดือน</b></div>
+          <div>📅 ครบกำหนดชำระ: <b>วันที่ {config.notify?.dueOnDay ?? 7} ของเดือน</b></div>
           <div>💰 ยอดรวมโดยประมาณ: <b>{fmtCurrency(bills.reduce((s,b) => s+b.total, 0))}</b></div>
           <div>📨 ส่งทาง: LINE, Email</div>
         </div>

@@ -141,10 +141,13 @@
     const btn = document.getElementById('submitBtn');
     const errBox = document.getElementById('error');
 
-    // If already logged in, skip login
-    fetch('/api/auth/me').then(r => r.json()).then(d => {
-      if (d.user) window.location.href = '/admin';
-    }).catch(() => {});
+    // If already logged in, skip login. Only redirect on a real 200 with a
+    // user payload — a 5xx error response containing {user:null} happens when
+    // the session store is down, and we shouldn't loop in that case.
+    fetch('/api/auth/me', { credentials: 'include' })
+      .then(async (r) => (r.ok ? r.json() : null))
+      .then((d) => { if (d && d.user) window.location.href = '/admin'; })
+      .catch(() => {});
 
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
@@ -153,14 +156,24 @@
       btn.textContent = 'กำลังเข้าสู่ระบบ...';
       const username = document.getElementById('username').value.trim();
       const password = document.getElementById('password').value;
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 8000);
       try {
         const res = await fetch('/api/auth/login', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'include',
           body: JSON.stringify({ username, password }),
+          signal: ctrl.signal,
         });
-        const data = await res.json();
+        const data = await res.json().catch(() => ({}));
+        if (res.status === 429) {
+          errBox.textContent = 'พยายามเข้าระบบบ่อยเกินไป กรุณารอสักครู่แล้วลองใหม่';
+          errBox.style.display = 'block';
+          btn.disabled = false;
+          btn.textContent = 'เข้าสู่ระบบ';
+          return;
+        }
         if (!res.ok) {
           errBox.textContent = data.error === 'invalid credentials'
             ? 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง'
@@ -172,10 +185,14 @@
         }
         window.location.href = '/admin';
       } catch (err) {
-        errBox.textContent = 'เชื่อมต่อเซิร์ฟเวอร์ไม่ได้';
+        errBox.textContent = err && err.name === 'AbortError'
+          ? 'เชื่อมต่อช้าเกินไป กรุณาลองใหม่'
+          : 'เชื่อมต่อเซิร์ฟเวอร์ไม่ได้';
         errBox.style.display = 'block';
         btn.disabled = false;
         btn.textContent = 'เข้าสู่ระบบ';
+      } finally {
+        clearTimeout(timer);
       }
     });
   </script>

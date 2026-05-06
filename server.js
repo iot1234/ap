@@ -28,6 +28,25 @@ if (!DATABASE_URL) {
   process.exit(1);
 }
 
+// --- Process-level safety nets --------------------------------------------
+// Without these, an unhandled async rejection or uncaught exception silently
+// crashes the process; Railway will restart but mid-flight requests die.
+// We log + exit so the orchestrator restarts cleanly with full context.
+process.on('uncaughtException', (err) => {
+  console.error('[fatal] uncaughtException:', err && err.stack || err);
+  process.exit(1);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[fatal] unhandledRejection:', reason);
+  process.exit(1);
+});
+
+// Sanitize URLs in errors to avoid leaking the DB password in logs.
+function sanitizeError(err) {
+  const msg = String(err && err.message || err);
+  return msg.replace(/(\b[a-z]+:\/\/)[^@\s]+@/gi, '$1***@');
+}
+
 // Railway-internal Postgres URLs are plain TCP; external ones use SSL.
 // Heuristic: enable SSL only when the host isn't .railway.internal.
 const useSSL = !/\.railway\.internal/i.test(DATABASE_URL);
@@ -35,9 +54,13 @@ const pool = new Pool({
   connectionString: DATABASE_URL,
   ssl: useSSL ? { rejectUnauthorized: false } : false,
   max: 10,
+  // Without these, a stalled DB causes requests to hang indefinitely instead
+  // of returning 503 quickly (so client retries can succeed).
+  connectionTimeoutMillis: 5000,
+  idleTimeoutMillis: 30_000,
 });
 
-pool.on('error', (err) => console.error('Postgres pool error:', err));
+pool.on('error', (err) => console.error('[pg] pool error:', sanitizeError(err)));
 
 // --- Schema migration -----------------------------------------------------
 async function migrate() {
@@ -128,6 +151,17 @@ app.set('trust proxy', 1);
 // makes a 5x difference in worst-case memory.
 app.use(express.json({ limit: '1mb' }));
 
+// Graceful JSON parse errors instead of stack traces.
+app.use((err, _req, res, next) => {
+  if (err && err.type === 'entity.parse.failed') {
+    return res.status(400).json({ error: 'invalid json body' });
+  }
+  if (err && err.type === 'entity.too.large') {
+    return res.status(413).json({ error: 'request too large (max 1mb)' });
+  }
+  next(err);
+});
+
 // Security headers. CSP is permissive for the React-via-CDN + Babel-standalone
 // approach this app uses today; tighten when migrating to a build pipeline.
 app.use(helmet({
@@ -164,7 +198,14 @@ const loginLimiter = rateLimit({
 
 app.use(
   session({
-    store: new PgSession({ pool, tableName: 'user_sessions', createTableIfMissing: false }),
+    // pruneSessionInterval: every hour, delete sessions with expire < NOW().
+    // Without this the user_sessions table grows forever in production.
+    store: new PgSession({
+      pool,
+      tableName: 'user_sessions',
+      createTableIfMissing: false,
+      pruneSessionInterval: 60 * 60, // seconds
+    }),
     secret: SESSION_SECRET,
     resave: false,
     saveUninitialized: false,
@@ -361,7 +402,8 @@ function rateLimitBooking(req, res, next) {
   const arr = (bookingHits.get(ip) || []).filter((t) => now - t < 60_000);
   if (arr.length >= 5) return res.status(429).json({ error: 'too many requests' });
   arr.push(now);
-  bookingHits.set(ip, arr);
+  if (arr.length === 0) bookingHits.delete(ip);
+  else bookingHits.set(ip, arr);
   next();
 }
 
@@ -554,7 +596,8 @@ function rateLimitTicket(req, res, next) {
   const arr = (ticketHits.get(ip) || []).filter((t) => now - t < 60_000);
   if (arr.length >= 5) return res.status(429).json({ error: 'too many requests' });
   arr.push(now);
-  ticketHits.set(ip, arr);
+  if (arr.length === 0) ticketHits.delete(ip);
+  else ticketHits.set(ip, arr);
   next();
 }
 
@@ -782,10 +825,14 @@ app.get('/api/reports/overview', requireAuth, async (_req, res) => {
       pool.query(`SELECT value FROM app_data WHERE key='baankarn_rooms_v1'`),
       pool.query(`SELECT value FROM app_data WHERE key='baankarn_bookings_v1'`),
     ]);
-    const roomsObj = roomsRow.rows.length ? roomsRow.rows[0].value : {};
+    // Defensive parse: if the JSONB blob is corrupted (e.g., a debug write
+    // stored a string instead of an object), Object.values would throw.
+    const rawRooms = roomsRow.rows.length ? roomsRow.rows[0].value : {};
+    const roomsObj = rawRooms && typeof rawRooms === 'object' && !Array.isArray(rawRooms)
+      ? rawRooms : {};
     const bookings = bookingsRow.rows.length && Array.isArray(bookingsRow.rows[0].value)
       ? bookingsRow.rows[0].value : [];
-    const rooms = Object.values(roomsObj || {});
+    const rooms = Object.values(roomsObj);
     const occupied = rooms.filter((r) => r.status === 'occupied').length;
     const overdue = rooms.filter((r) => r.status === 'overdue').length;
     const reserved = rooms.filter((r) => r.status === 'reserved').length;
@@ -968,15 +1015,34 @@ app.get('/maintenance', (_req, res) => {
 // --- Boot -----------------------------------------------------------------
 migrate()
   .then(() => {
-    app.listen(PORT, '0.0.0.0', () => {
+    const server = app.listen(PORT, '0.0.0.0', () => {
       console.log(`[server] listening on ${PORT} (NODE_ENV=${NODE_ENV})`);
       console.log(`[server] tenant:  /`);
       console.log(`[server] admin:   /admin`);
       console.log(`[server] login:   /login`);
       console.log(`[server] health:  /health`);
     });
+
+    // Graceful shutdown: drain in-flight requests before closing the DB pool
+    // so Railway restarts don't kill mid-request work.
+    const shutdown = (signal) => {
+      console.log(`[server] ${signal} received, shutting down gracefully`);
+      server.close(() => {
+        pool.end(() => {
+          console.log('[server] closed cleanly');
+          process.exit(0);
+        });
+      });
+      // Hard-exit safety net: if shutdown takes too long, kill anyway.
+      setTimeout(() => {
+        console.error('[server] graceful shutdown timeout, forcing exit');
+        process.exit(1);
+      }, 10_000).unref();
+    };
+    process.on('SIGTERM', () => shutdown('SIGTERM'));
+    process.on('SIGINT',  () => shutdown('SIGINT'));
   })
   .catch((err) => {
-    console.error('FATAL: migration failed:', err);
+    console.error('FATAL: migration failed:', sanitizeError(err));
     process.exit(1);
   });

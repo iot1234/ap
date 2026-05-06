@@ -904,6 +904,18 @@ function App() {
     catch (e) {}
   }, [rooms]);
 
+  // ESC key dismisses the mobile detail bottom-sheet — keyboard accessibility.
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === 'Escape') {
+        if (mobileDetailOpen) setMobileDetailOpen(false);
+        else if (mobileMenuOpen) setMobileMenuOpen(false);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [mobileDetailOpen, mobileMenuOpen]);
+
   const { isMobile } = useViewport();
 
   const totals = useMemo(() => {

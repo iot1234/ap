@@ -55,7 +55,15 @@ function PageMaintenance({ addActivity, setToast }) {
     }
   };
 
-  useEffect(() => { reload(); }, []);
+  useEffect(() => {
+    reload();
+    // Poll every 30s so admins see new tickets without manual refresh.
+    const t = setInterval(reload, 30_000);
+    return () => clearInterval(t);
+  }, []);
+
+  // Mobile: stack columns horizontally-scrollable rather than 5-col grid
+  const isMobile = typeof window !== 'undefined' && window.innerWidth <= 900;
 
   const filtered = useMemo(() => {
     return tickets.filter((t) => {
@@ -162,9 +170,10 @@ function PageMaintenance({ addActivity, setToast }) {
       {tickets.length > 0 && (
         <div style={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(5, 1fr)',
+          gridTemplateColumns: isMobile ? 'repeat(5, 280px)' : 'repeat(5, 1fr)',
           gap: 12,
           alignItems: 'flex-start',
+          ...(isMobile ? { overflowX: 'auto', paddingBottom: 8 } : {}),
         }}>
           {STATUS_COLUMNS.map((col) => (
             <div key={col.key} style={{
