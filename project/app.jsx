@@ -814,7 +814,7 @@ function TopBar({ search, setSearch, isMobile, onMenu }) {
       </div>
 
       <a
-        href="Admin Dashboard.html"
+        href="/admin"
         title="หลังบ้าน Admin"
         style={{
           display: 'inline-flex', alignItems: 'center', gap: 6,
@@ -1080,4 +1080,11 @@ function App() {
   );
 }
 
-ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+// Wait for API hydration (if api-client.js loaded) before mounting so the
+// tenant view reflects what's stored in the database.
+const __mountTenant = () => ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+if (window.AP && window.AP.ready && typeof window.AP.ready.then === 'function') {
+  window.AP.ready.then(__mountTenant).catch(__mountTenant);
+} else {
+  __mountTenant();
+}

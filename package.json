@@ -1,7 +1,7 @@
 {
   "name": "ap",
   "version": "1.0.0",
-  "description": "Dormitory management dashboard",
+  "description": "Dormitory management dashboard - production",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -10,6 +10,11 @@
     "node": ">=18"
   },
   "dependencies": {
-    "express": "^4.21.0"
+    "bcryptjs": "^2.4.3",
+    "connect-pg-simple": "^9.0.1",
+    "cookie-parser": "^1.4.7",
+    "express": "^4.21.0",
+    "express-session": "^1.18.1",
+    "pg": "^8.13.1"
   }
 }

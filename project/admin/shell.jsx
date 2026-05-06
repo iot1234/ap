@@ -49,7 +49,7 @@ const PAGE_TITLES = {
 };
 
 // ---------- Sidebar -------------------------------------------------------
-function Sidebar({ page, setPage, mobileOpen, setMobileOpen, isMobile, pendingBookings, overdueRooms, buildingName }) {
+function Sidebar({ page, setPage, mobileOpen, setMobileOpen, isMobile, pendingBookings, overdueRooms, buildingName, currentUser }) {
   const C = window.ADMIN_C;
   const shortName = (buildingName || 'บ้านกาญจน์').replace(/\s*(เรสซิเดนซ์|residence).*/i, '').trim();
 
@@ -175,7 +175,7 @@ function Sidebar({ page, setPage, mobileOpen, setMobileOpen, isMobile, pendingBo
           background: C.navBgAlt,
         }}>
           <a
-            href="Dorm Status Dashboard.html"
+            href="/"
             style={{
               display: 'flex', alignItems: 'center', gap: 10,
               padding: '8px 10px', borderRadius: 7,
@@ -198,11 +198,23 @@ function Sidebar({ page, setPage, mobileOpen, setMobileOpen, isMobile, pendingBo
               background: C.accent, color: '#fff',
               display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
               fontSize: 12, fontWeight: 600, flexShrink: 0,
-            }}>กญ</div>
+            }}>{(currentUser && currentUser.username ? currentUser.username[0] : 'A').toUpperCase()}</div>
             <div style={{ minWidth: 0, flex: 1 }}>
-              <div style={{ fontSize: 12.5, color: '#fff', fontWeight: 500 }}>กาญจนา ศรีสุข</div>
-              <div style={{ fontSize: 10.5, color: C.navMuted }}>เจ้าของหอพัก</div>
+              <div style={{ fontSize: 12.5, color: '#fff', fontWeight: 500 }}>{currentUser ? currentUser.username : 'admin'}</div>
+              <div style={{ fontSize: 10.5, color: C.navMuted }}>{currentUser ? currentUser.role : 'ผู้ดูแลระบบ'}</div>
             </div>
+            <button
+              onClick={() => { if (window.AP && window.AP.logout) window.AP.logout(); }}
+              title="ออกจากระบบ"
+              style={{
+                background: 'transparent', border: `1px solid ${C.navBorder}`,
+                color: C.navInkSoft, fontSize: 11, padding: '4px 8px',
+                borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit',
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255,255,255,0.08)'; e.currentTarget.style.color = '#fff'; }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = C.navInkSoft; }}>
+              ออก
+            </button>
           </div>
         </div>
       </aside>
@@ -431,6 +443,18 @@ function App() {
   useEffect(() => { saveBookings(bookings); },     [bookings]);
   useEffect(() => { saveActivities(activities); }, [activities]);
 
+  // --- Auth: load current user on mount; redirect to /login if missing ---
+  const [currentUser, setCurrentUser] = useState(null);
+  useEffect(() => {
+    if (!window.AP || !window.AP.me) return;
+    window.AP.me()
+      .then((d) => {
+        if (d && d.user) setCurrentUser(d.user);
+        else window.location.href = '/login';
+      })
+      .catch(() => { window.location.href = '/login'; });
+  }, []);
+
   // --- Routing via hash ---
   const [page, setPage] = useState(() => {
     const h = location.hash.replace('#', '');
@@ -589,6 +613,7 @@ function App() {
         pendingBookings={pendingBookings}
         overdueRooms={overdueRoomCount}
         buildingName={config.building?.name}
+        currentUser={currentUser}
       />
       <main style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
         <TopBar
@@ -641,5 +666,14 @@ function App() {
 }
 
 // ---------- Render --------------------------------------------------------
-const root = ReactDOM.createRoot(document.getElementById('root'));
-root.render(<App />);
+// Wait for API hydration (if api-client.js is loaded) so localStorage is
+// populated from the database before React reads it via loadRooms() etc.
+const __mount = () => {
+  const root = ReactDOM.createRoot(document.getElementById('root'));
+  root.render(<App />);
+};
+if (window.AP && window.AP.ready && typeof window.AP.ready.then === 'function') {
+  window.AP.ready.then(__mount).catch(__mount);
+} else {
+  __mount();
+}
