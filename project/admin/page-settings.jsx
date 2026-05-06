@@ -1,0 +1,542 @@
+// === admin/page-settings.jsx ==============================================
+// ตั้งค่าระบบ: ข้อมูลตึก, การชำระเงิน, การแจ้งเตือน, ระบบอัตโนมัติ, ผู้ใช้งาน
+// ===========================================================================
+
+const { useState } = React;
+
+function PageSettings({ rooms, setRooms, config, setConfig, bookings, setBookings, activities, setActivities, addActivity, setToast }) {
+  const C = window.ADMIN_C;
+  const { Card, Btn, Input, Select, Toggle, Textarea, Tabs, Pill, Avatar, Modal,
+          PageContainer, PageHeader, SectionHeading, DefList } = window;
+  const { resetAll, DEFAULT_CONFIG } = window;
+
+  const [tab, setTab] = useState('building');
+  const [draft, setDraft] = useState(config);
+  const [confirmReset, setConfirmReset] = useState(false);
+
+  const dirty = JSON.stringify(draft) !== JSON.stringify(config);
+
+  const updatePath = (path, value) => {
+    setDraft(prev => {
+      const next = JSON.parse(JSON.stringify(prev));
+      let cur = next;
+      const parts = path.split('.');
+      for (let i = 0; i < parts.length - 1; i++) cur = cur[parts[i]];
+      cur[parts[parts.length - 1]] = value;
+      return next;
+    });
+  };
+
+  const handleSave = () => {
+    setConfig(draft);
+    addActivity && addActivity({ icon: '⚙️', text: 'อัปเดตการตั้งค่าระบบ', type: 'system' });
+    setToast && setToast({ kind: 'success', message: 'บันทึกการตั้งค่าเรียบร้อย' });
+  };
+
+  const handleResetAll = () => {
+    resetAll();
+    setToast && setToast({ kind: 'info', message: 'รีเซ็ตข้อมูลทั้งหมดแล้ว — กำลังโหลดหน้าใหม่...' });
+    setTimeout(() => location.reload(), 1200);
+  };
+
+  return (
+    <PageContainer>
+      <PageHeader
+        title="ตั้งค่าระบบ"
+        subtitle="ข้อมูลตึก, การชำระเงิน, การแจ้งเตือน และอื่นๆ"
+        actions={
+          <>
+            <Btn variant="secondary" onClick={() => setDraft(config)} disabled={!dirty}>ยกเลิก</Btn>
+            <Btn variant="primary" icon="✓" onClick={handleSave} disabled={!dirty}>
+              {dirty ? 'บันทึก' : 'บันทึกแล้ว'}
+            </Btn>
+          </>
+        }
+      />
+
+      <Tabs
+        items={[
+          { value: 'building', label: 'ข้อมูลตึก',     icon: '🏢' },
+          { value: 'payment',  label: 'การชำระเงิน', icon: '💳' },
+          { value: 'notify',   label: 'การแจ้งเตือน', icon: '🔔' },
+          { value: 'auto',     label: 'อัตโนมัติ',     icon: '🤖' },
+          { value: 'users',    label: 'ผู้ใช้งาน',     icon: '👥' },
+          { value: 'system',   label: 'ระบบ',           icon: '⚙️' },
+        ]}
+        value={tab}
+        onChange={setTab}
+        variant="pills"
+        style={{ marginBottom: 20 }}
+      />
+
+      {tab === 'building' && <TabBuilding draft={draft} updatePath={updatePath} />}
+      {tab === 'payment'  && <TabPayment  draft={draft} updatePath={updatePath} />}
+      {tab === 'notify'   && <TabNotify   draft={draft} updatePath={updatePath} />}
+      {tab === 'auto'     && <TabAuto     draft={draft} updatePath={updatePath} />}
+      {tab === 'users'    && <TabUsers    setToast={setToast} addActivity={addActivity} />}
+      {tab === 'system'   && <TabSystem
+                                onResetAll={() => setConfirmReset(true)}
+                                rooms={rooms} setRooms={setRooms}
+                                config={config} setConfig={setConfig}
+                                bookings={bookings} setBookings={setBookings}
+                                activities={activities} setActivities={setActivities}
+                                setToast={setToast} addActivity={addActivity} />}
+
+      <Modal
+        open={confirmReset}
+        onClose={() => setConfirmReset(false)}
+        title="รีเซ็ตข้อมูลทั้งหมด"
+        footer={
+          <>
+            <Btn variant="ghost" onClick={() => setConfirmReset(false)}>ยกเลิก</Btn>
+            <Btn variant="danger" onClick={handleResetAll}>รีเซ็ตทั้งหมด</Btn>
+          </>
+        }
+      >
+        <div style={{ fontSize: 14, color: C.ink2, lineHeight: 1.6 }}>
+          <div style={{ marginBottom: 8 }}>การกระทำนี้จะ:</div>
+          <ul style={{ margin: 0, paddingLeft: 20, fontSize: 13 }}>
+            <li>ลบข้อมูลห้องทั้งหมดและสร้างใหม่</li>
+            <li>รีเซ็ตการตั้งราคากลับเป็นค่าเริ่มต้น</li>
+            <li>ลบประวัติการจองและบันทึกกิจกรรม</li>
+          </ul>
+          <div style={{ marginTop: 12, padding: 10, background: C.dangerSoft, borderRadius: 8, color: C.dangerInk, fontSize: 13 }}>
+            ⚠️ การกระทำนี้ไม่สามารถย้อนกลับได้
+          </div>
+        </div>
+      </Modal>
+    </PageContainer>
+  );
+}
+
+// ============================================================
+function TabBuilding({ draft, updatePath }) {
+  const { Card, Input, Textarea, SectionHeading } = window;
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 800 }}>
+      <Card>
+        <SectionHeading title="ข้อมูลตึก" level={3} />
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+          <Input label="ชื่อตึก"         value={draft.building.name}    onChange={(v) => updatePath('building.name', v)} />
+          <Input label="เบอร์โทรศัพท์" value={draft.building.phone}  onChange={(v) => updatePath('building.phone', v)} />
+          <Input label="อีเมล"             value={draft.building.email}  onChange={(v) => updatePath('building.email', v)} />
+          <Input label="LINE ID"           value={draft.building.line}    onChange={(v) => updatePath('building.line', v)} prefix="@" />
+        </div>
+        <div style={{ marginTop: 12 }}>
+          <Textarea
+            label="ที่อยู่"
+            rows={2}
+            value={draft.building.address}
+            onChange={(v) => updatePath('building.address', v)}
+          />
+        </div>
+      </Card>
+
+      <Card>
+        <SectionHeading title="โครงสร้างอาคาร" level={3} />
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+          <Input label="จำนวนชั้น"      type="number" suffix="ชั้น"  value={draft.building.floors}        onChange={(v) => updatePath('building.floors', Number(v))} />
+          <Input label="ห้อง/ชั้น"         type="number" suffix="ห้อง"  value={draft.building.roomsPerFloor} onChange={(v) => updatePath('building.roomsPerFloor', Number(v))} />
+          <Input label="เวลาเปิดทำการ" value={draft.building.open}                                onChange={(v) => updatePath('building.open', v)} />
+        </div>
+      </Card>
+
+      <Card>
+        <SectionHeading title="กฎระเบียบ" level={3} />
+        <Textarea
+          label="กฎระเบียบทั่วไป"
+          rows={3}
+          value={draft.building.rules}
+          onChange={(v) => updatePath('building.rules', v)}
+          placeholder="เช่น ห้ามสูบบุหรี่, ห้ามเลี้ยงสัตว์, เคอร์ฟิวเที่ยงคืน"
+        />
+      </Card>
+    </div>
+  );
+}
+
+// ============================================================
+function TabPayment({ draft, updatePath }) {
+  const C = window.ADMIN_C;
+  const { Card, Input, Toggle, Select, SectionHeading, Pill } = window;
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 800 }}>
+      <Card>
+        <SectionHeading title="พร้อมเพย์ (PromptPay)" subtitle="ช่องทางหลักสำหรับรับชำระบิล" level={3}
+          action={<Pill color="success" icon="✓">เปิดใช้งาน</Pill>} />
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+          <Input label="หมายเลขพร้อมเพย์" value={draft.payment.promptpay} onChange={(v) => updatePath('payment.promptpay', v)} hint="เบอร์โทรศัพท์หรือเลขประจำตัวประชาชน" />
+        </div>
+      </Card>
+
+      <Card>
+        <SectionHeading title="โอนผ่านธนาคาร" level={3} />
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+          <Select
+            label="ธนาคาร"
+            value={draft.payment.bank}
+            onChange={(v) => updatePath('payment.bank', v)}
+            options={['ไทยพาณิชย์','กสิกรไทย','กรุงเทพ','กรุงไทย','กรุงศรี','ทหารไทยธนชาต','ออมสิน','ธ.ก.ส.']}
+          />
+          <Input label="เลขที่บัญชี" value={draft.payment.bankAcc}  onChange={(v) => updatePath('payment.bankAcc', v)} />
+          <Input label="ชื่อบัญชี"     value={draft.payment.bankName} onChange={(v) => updatePath('payment.bankName', v)} style={{ gridColumn: 'span 2' }} />
+        </div>
+      </Card>
+
+      <Card>
+        <SectionHeading title="ช่องทางอื่นๆ" level={3} />
+        <Toggle label="LINE Pay"     hint="รับชำระผ่าน LINE Pay (ค่าธรรมเนียม 1.99%)" checked={draft.payment.linePay}    onChange={(v) => updatePath('payment.linePay', v)} />
+        <Toggle label="TrueMoney Wallet" hint="รับชำระผ่าน TrueMoney"                       checked={draft.payment.truemoney}  onChange={(v) => updatePath('payment.truemoney', v)} />
+        <Toggle label="บัตรเครดิต/เดบิต"  hint="ค่าธรรมเนียม 2.7-3.5%"                             checked={draft.payment.creditCard} onChange={(v) => updatePath('payment.creditCard', v)} />
+      </Card>
+    </div>
+  );
+}
+
+// ============================================================
+function TabNotify({ draft, updatePath }) {
+  const C = window.ADMIN_C;
+  const { Card, Input, Toggle, SectionHeading } = window;
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 800 }}>
+      <Card>
+        <SectionHeading title="กำหนดการบิล" subtitle="ออกบิลอัตโนมัติทุกเดือน" level={3} />
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+          <Input label="ออกบิลวันที่"    type="number" suffix="ของเดือน" value={draft.notify.billOnDay} onChange={(v) => updatePath('notify.billOnDay', Number(v))} />
+          <Input label="ครบกำหนดวันที่" type="number" suffix="ของเดือน" value={draft.notify.dueOnDay}  onChange={(v) => updatePath('notify.dueOnDay', Number(v))} />
+        </div>
+      </Card>
+
+      <Card>
+        <SectionHeading title="แจ้งเตือนและติดตาม" level={3} />
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+          <Input label="แจ้งเตือนครั้งที่ 1"  type="number" suffix="วันก่อนครบกำหนด" value={draft.notify.reminder1} onChange={(v) => updatePath('notify.reminder1', Number(v))} />
+          <Input label="แจ้งเตือนครั้งที่ 2"  type="number" suffix="วันหลังครบกำหนด" value={draft.notify.reminder2} onChange={(v) => updatePath('notify.reminder2', Number(v))} />
+          <Input label="แจ้งเตือนสัญญาใกล้หมด" type="number" suffix="วัน" value={draft.notify.contractEndDays} onChange={(v) => updatePath('notify.contractEndDays', Number(v))} />
+        </div>
+      </Card>
+
+      <Card>
+        <SectionHeading title="ช่องทางการแจ้งเตือน" level={3} />
+        <Toggle label="LINE Official Account" hint="ส่งข้อความผ่าน LINE OA (แนะนำ)"  checked={draft.notify.channels.line}  onChange={(v) => updatePath('notify.channels.line', v)} />
+        <Toggle label="อีเมล"                   hint="ส่งใบแจ้งหนี้ทางอีเมล"               checked={draft.notify.channels.email} onChange={(v) => updatePath('notify.channels.email', v)} />
+        <Toggle label="SMS"                       hint="ส่ง SMS (มีค่าใช้จ่ายเพิ่มเติม)" checked={draft.notify.channels.sms}   onChange={(v) => updatePath('notify.channels.sms', v)} />
+      </Card>
+    </div>
+  );
+}
+
+// ============================================================
+function TabAuto({ draft, updatePath }) {
+  const C = window.ADMIN_C;
+  const { Card, Toggle, Input, SectionHeading, Pill } = window;
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 800 }}>
+      <Card>
+        <SectionHeading title="ระบบอัตโนมัติ" subtitle="ลดงาน manual ที่ต้องทำซ้ำๆ" level={3} />
+        <Toggle label="ออกบิลอัตโนมัติ"      hint={`ออกบิลทุกวันที่ ${draft.notify.billOnDay} ของเดือน`}             checked={draft.automation.autoBill}        onChange={(v) => updatePath('automation.autoBill', v)} />
+        <Toggle label="แจ้งเตือนอัตโนมัติ" hint="ส่งเตือนก่อน/หลังครบกำหนดตามช่องทางที่ตั้งไว้"      checked={draft.automation.autoReminder}    onChange={(v) => updatePath('automation.autoReminder', v)} />
+        <Toggle label="ค่าปรับอัตโนมัติ"     hint="คำนวณค่าปรับชำระล่าช้าให้อัตโนมัติ"                    checked={draft.automation.autoLatePenalty} onChange={(v) => updatePath('automation.autoLatePenalty', v)} />
+      </Card>
+
+      <Card>
+        <SectionHeading title="สำรองข้อมูล" level={3}
+          action={<Pill color="success" icon="✓">ทำงานปกติ</Pill>} />
+        <Toggle label="สำรองข้อมูลรายวัน"  hint="สำรองอัตโนมัติทุกวันตามเวลาที่กำหนด" checked={draft.automation.autoBackup} onChange={(v) => updatePath('automation.autoBackup', v)} />
+        {draft.automation.autoBackup && (
+          <div style={{ marginTop: 12, maxWidth: 240 }}>
+            <Input
+              label="เวลาสำรองข้อมูล"
+              type="number"
+              suffix=":00 น."
+              value={draft.automation.backupHour}
+              onChange={(v) => updatePath('automation.backupHour', Number(v))}
+              hint="แนะนำเวลากลางคืนที่มีการใช้งานน้อย"
+            />
+          </div>
+        )}
+        <div style={{ marginTop: 12, padding: 10, background: C.surfaceAlt, borderRadius: 8, fontSize: 12.5, color: C.muted }}>
+          📂 สำรองข้อมูลล่าสุด: <b style={{ color: C.ink }}>เมื่อวาน 03:00 น.</b> · ขนาด 2.4 MB
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+// ============================================================
+function TabUsers({ setToast, addActivity }) {
+  const C = window.ADMIN_C;
+  const { Card, Btn, IconBtn, Avatar, Pill, DataTable, SectionHeading,
+          Modal, Input, Select, Toggle } = window;
+
+  const STORE_KEY = 'baankarn_users_v1';
+  const seed = [
+    { id: 1, name: 'กาญจนา ศรีสุข', email: 'kanjana@baankarn.com', role: 'เจ้าของ',           lastLogin: 'เมื่อกี้',     active: true },
+    { id: 2, name: 'สมชาย วงศ์ใหญ่', email: 'somchai@baankarn.com', role: 'ผู้จัดการ',       lastLogin: '2 ชม.ก่อน',  active: true },
+    { id: 3, name: 'นิตยา ทองดี',     email: 'nittaya@baankarn.com', role: 'เจ้าหน้าที่บัญชี', lastLogin: 'เมื่อวาน',  active: true },
+    { id: 4, name: 'วิภา จันทร์เพ็ญ', email: 'wipa@baankarn.com',    role: 'เจ้าหน้าที่ดูแล',  lastLogin: '3 วันก่อน', active: false },
+  ];
+
+  const [users, setUsers] = React.useState(() => {
+    try {
+      const raw = localStorage.getItem(STORE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) return parsed;
+      }
+    } catch (e) { console.warn('users load failed', e); }
+    return seed;
+  });
+  React.useEffect(() => {
+    try { localStorage.setItem(STORE_KEY, JSON.stringify(users)); } catch (e) {}
+  }, [users]);
+
+  const [editing, setEditing] = React.useState(null);
+  const [confirmDel, setConfirmDel] = React.useState(null);
+
+  const roleColor = (r) => r === 'เจ้าของ' ? 'accent' : (r === 'ผู้จัดการ' ? 'info' : 'neutral');
+
+  const openAdd = () => setEditing({ id: null, name: '', email: '', role: 'เจ้าหน้าที่ดูแล', active: true });
+  const openEdit = (u) => setEditing({ ...u });
+
+  const save = () => {
+    if (!editing.name?.trim() || !editing.email?.trim()) {
+      setToast && setToast({ kind: 'danger', message: 'กรุณากรอกชื่อและอีเมล' });
+      return;
+    }
+    if (editing.id) {
+      setUsers(prev => prev.map(u => u.id === editing.id ? { ...u, ...editing } : u));
+      addActivity && addActivity({ icon: '👤', text: `แก้ไขผู้ใช้ ${editing.name}`, type: 'system' });
+      setToast && setToast({ kind: 'success', message: 'บันทึกข้อมูลผู้ใช้เรียบร้อย' });
+    } else {
+      const id = Math.max(0, ...users.map(u => u.id)) + 1;
+      setUsers(prev => [...prev, { ...editing, id, lastLogin: 'ยังไม่เคย' }]);
+      addActivity && addActivity({ icon: '➕', text: `เพิ่มผู้ใช้ใหม่ ${editing.name}`, type: 'system' });
+      setToast && setToast({ kind: 'success', message: 'เพิ่มผู้ใช้เรียบร้อย' });
+    }
+    setEditing(null);
+  };
+
+  const del = () => {
+    const u = users.find(x => x.id === confirmDel);
+    setUsers(prev => prev.filter(x => x.id !== confirmDel));
+    addActivity && addActivity({ icon: '🗑️', text: `ลบผู้ใช้ ${u?.name}`, type: 'system' });
+    setToast && setToast({ kind: 'success', message: `ลบผู้ใช้ ${u?.name} แล้ว` });
+    setConfirmDel(null);
+  };
+
+  return (
+    <Card>
+      <SectionHeading
+        title="ผู้ใช้งานระบบ"
+        subtitle="กำหนดสิทธิ์และจัดการบัญชีผู้ใช้"
+        level={3}
+        action={<Btn variant="primary" size="sm" icon="+" onClick={openAdd}>เพิ่มผู้ใช้</Btn>}
+      />
+      <DataTable
+        columns={[
+          { key: 'user', label: 'ชื่อ', minWidth: 240,
+            render: u => (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <Avatar name={u.name} size={36} />
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: C.ink }}>{u.name}</div>
+                  <div style={{ fontSize: 11.5, color: C.muted }}>{u.email}</div>
+                </div>
+              </div>
+            ),
+          },
+          { key: 'role', label: 'บทบาท', minWidth: 120, render: u => <Pill color={roleColor(u.role)} size="sm">{u.role}</Pill> },
+          { key: 'lastLogin', label: 'เข้าใช้งานล่าสุด', minWidth: 140, render: u => <span style={{ fontSize: 12.5, color: C.ink2 }}>{u.lastLogin}</span> },
+          { key: 'status', label: 'สถานะ', minWidth: 90,
+            render: u => <Pill color={u.active ? 'success' : 'neutral'} size="sm">{u.active ? 'ใช้งาน' : 'ระงับ'}</Pill> },
+          { key: 'actions', label: '', align: 'right', minWidth: 80,
+            render: u => (
+              <div style={{ display: 'inline-flex', gap: 4 }} onClick={(e) => e.stopPropagation()}>
+                <IconBtn icon="✎" label="แก้ไข" onClick={() => openEdit(u)} />
+                {u.role !== 'เจ้าของ' && <IconBtn icon="🗑" label="ลบ" danger onClick={() => setConfirmDel(u.id)} />}
+              </div>
+            ),
+          },
+        ]}
+        rows={users}
+        onRowClick={openEdit}
+        stickyHeader={false}
+      />
+
+      <Modal
+        open={!!editing}
+        onClose={() => setEditing(null)}
+        title={editing?.id ? 'แก้ไขผู้ใช้' : 'เพิ่มผู้ใช้ใหม่'}
+        footer={
+          <>
+            <Btn variant="ghost" onClick={() => setEditing(null)}>ยกเลิก</Btn>
+            <Btn variant="primary" onClick={save}>บันทึก</Btn>
+          </>
+        }
+      >
+        {editing && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <Input label="ชื่อ-นามสกุล" value={editing.name}
+                   onChange={(v) => setEditing({ ...editing, name: v })} />
+            <Input label="อีเมล" type="email" value={editing.email}
+                   onChange={(v) => setEditing({ ...editing, email: v })} />
+            <Select label="บทบาท" value={editing.role}
+                    onChange={(v) => setEditing({ ...editing, role: v })}
+                    options={['เจ้าของ', 'ผู้จัดการ', 'เจ้าหน้าที่บัญชี', 'เจ้าหน้าที่ดูแล']} />
+            <Toggle label="เปิดใช้งาน" hint="ถ้าปิด ผู้ใช้นี้จะเข้าสู่ระบบไม่ได้"
+                    checked={editing.active}
+                    onChange={(v) => setEditing({ ...editing, active: v })} />
+          </div>
+        )}
+      </Modal>
+
+      <Modal
+        open={!!confirmDel}
+        onClose={() => setConfirmDel(null)}
+        title="ยืนยันการลบผู้ใช้"
+        footer={
+          <>
+            <Btn variant="ghost" onClick={() => setConfirmDel(null)}>ยกเลิก</Btn>
+            <Btn variant="danger" onClick={del}>ลบ</Btn>
+          </>
+        }
+      >
+        <div style={{ fontSize: 14, color: C.ink2 }}>
+          ต้องการลบผู้ใช้ <b style={{ color: C.ink }}>{users.find(u => u.id === confirmDel)?.name}</b> ใช่หรือไม่?
+        </div>
+      </Modal>
+    </Card>
+  );
+}
+
+// ============================================================
+function TabSystem({ onResetAll, rooms, setRooms, config, setConfig, bookings, setBookings, activities, setActivities, setToast, addActivity }) {
+  const C = window.ADMIN_C;
+  const { Card, Btn, SectionHeading, DefList, Modal } = window;
+  const { exportFullBackup, importJSON, exportRoomsCSV } = window;
+
+  const [confirmRestore, setConfirmRestore] = React.useState(null);
+
+  // Compute storage size
+  const storageSize = React.useMemo(() => {
+    try {
+      let total = 0;
+      for (const k in localStorage) {
+        if (Object.prototype.hasOwnProperty.call(localStorage, k)) {
+          total += (localStorage[k]?.length || 0) + k.length;
+        }
+      }
+      return (total / 1024).toFixed(1) + ' KB';
+    } catch (e) { return 'ไม่ทราบ'; }
+  }, [rooms, config, bookings, activities]);
+
+  const handleBackup = () => {
+    if (exportFullBackup(rooms, config, bookings, activities)) {
+      setToast && setToast({ kind: 'success', message: 'ส่งออกข้อมูลทั้งหมดเรียบร้อย' });
+      addActivity && addActivity({ icon: '💾', text: 'ส่งออก backup ข้อมูลทั้งหมด', type: 'system' });
+    }
+  };
+
+  const handleImport = () => {
+    importJSON(
+      (data) => {
+        if (!data || typeof data !== 'object') {
+          setToast && setToast({ kind: 'danger', message: 'ไฟล์ backup ไม่ถูกต้อง' });
+          return;
+        }
+        setConfirmRestore(data);
+      },
+      (err) => setToast && setToast({ kind: 'danger', message: 'นำเข้าไม่สำเร็จ: ' + err.message })
+    );
+  };
+
+  const applyRestore = () => {
+    const d = confirmRestore;
+    if (d.rooms      && setRooms)      setRooms(d.rooms);
+    if (d.config     && setConfig)     setConfig(d.config);
+    if (d.bookings   && setBookings)   setBookings(d.bookings);
+    if (d.activities && setActivities) setActivities(d.activities);
+    addActivity && addActivity({ icon: '📤', text: `นำเข้าข้อมูลจาก backup (${d.exportedAt?.slice(0,10) || 'unknown'})`, type: 'system' });
+    setToast && setToast({ kind: 'success', message: 'นำเข้าข้อมูลเรียบร้อย' });
+    setConfirmRestore(null);
+  };
+
+  const handleExportExcel = () => {
+    if (exportRoomsCSV(rooms)) {
+      setToast && setToast({ kind: 'info', message: 'ส่งออก CSV (เปิดได้ใน Excel)' });
+    }
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 800 }}>
+      <Card>
+        <SectionHeading title="ข้อมูลระบบ" level={3} />
+        <DefList
+          columns={2}
+          items={[
+            { label: 'เวอร์ชัน',           value: 'v1.0.0' },
+            { label: 'อัปเดตล่าสุด',     value: '2 พฤษภาคม 2569' },
+            { label: 'ฐานข้อมูล',          value: 'localStorage (prototype)' },
+            { label: 'พื้นที่ใช้งาน',      value: storageSize + ' / ~5 MB' },
+            { label: 'ห้องในระบบ',        value: Object.keys(rooms || {}).length + ' ห้อง' },
+            { label: 'การจองในระบบ',    value: (bookings || []).length + ' รายการ' },
+          ]}
+        />
+      </Card>
+
+      <Card>
+        <SectionHeading title="การส่งออก/นำเข้าข้อมูล" subtitle="สำรองข้อมูลทั้งหมดเป็นไฟล์ JSON หรือ CSV" level={3} />
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <Btn variant="secondary" icon="💾" onClick={handleBackup}>ส่งออกทั้งหมด (JSON)</Btn>
+          <Btn variant="secondary" icon="📤" onClick={handleImport}>นำเข้าจากไฟล์</Btn>
+          <Btn variant="secondary" icon="📊" onClick={handleExportExcel}>ส่งออก CSV (Excel)</Btn>
+        </div>
+        <div style={{ marginTop: 10, padding: 10, background: C.surfaceAlt, borderRadius: 8, fontSize: 12, color: C.muted }}>
+          💡 ไฟล์ JSON จะรวมข้อมูลห้อง, การตั้งค่า, การจอง และกิจกรรมทั้งหมด — สามารถนำกลับมาใช้ได้ในภายหลัง
+        </div>
+      </Card>
+
+      <Card style={{ borderColor: C.danger, background: '#fef9f8' }}>
+        <SectionHeading title="พื้นที่อันตราย" subtitle="การกระทำต่อไปนี้ไม่สามารถย้อนกลับได้" level={3} />
+        <div style={{ padding: 12, background: '#fff', border: `1px solid ${C.dangerSoft}`, borderRadius: 8, marginTop: 8 }}>
+          <div style={{ fontSize: 14, fontWeight: 600, color: C.dangerInk, marginBottom: 4 }}>รีเซ็ตข้อมูลทั้งหมด</div>
+          <div style={{ fontSize: 12.5, color: C.muted, marginBottom: 10 }}>
+            ลบข้อมูลห้อง, ผู้เช่า, การจอง, การตั้งค่าทั้งหมด — กลับสู่ค่าเริ่มต้น
+          </div>
+          <Btn variant="danger" size="sm" onClick={onResetAll}>รีเซ็ตทั้งหมด</Btn>
+        </div>
+      </Card>
+
+      <Modal
+        open={!!confirmRestore}
+        onClose={() => setConfirmRestore(null)}
+        title="ยืนยันการนำเข้าข้อมูล"
+        footer={
+          <>
+            <Btn variant="ghost" onClick={() => setConfirmRestore(null)}>ยกเลิก</Btn>
+            <Btn variant="danger" onClick={applyRestore}>นำเข้า (ทับข้อมูลปัจจุบัน)</Btn>
+          </>
+        }
+      >
+        {confirmRestore && (
+          <div style={{ fontSize: 14, color: C.ink2, lineHeight: 1.6 }}>
+            <div style={{ marginBottom: 10 }}>ไฟล์ที่จะนำเข้ามีข้อมูล:</div>
+            <ul style={{ margin: 0, paddingLeft: 20, fontSize: 13 }}>
+              <li>ห้องพัก: <b>{Object.keys(confirmRestore.rooms || {}).length}</b> ห้อง</li>
+              <li>การจอง: <b>{(confirmRestore.bookings || []).length}</b> รายการ</li>
+              <li>กิจกรรม: <b>{(confirmRestore.activities || []).length}</b> รายการ</li>
+              <li>การตั้งค่า: <b>{confirmRestore.config ? 'มี' : 'ไม่มี'}</b></li>
+              <li>ส่งออกเมื่อ: <b>{confirmRestore.exportedAt?.slice(0, 19).replace('T', ' ') || 'ไม่ระบุ'}</b></li>
+            </ul>
+            <div style={{ marginTop: 12, padding: 10, background: C.dangerSoft, borderRadius: 8, color: C.dangerInk, fontSize: 12.5 }}>
+              ⚠️ การนำเข้าจะทับข้อมูลปัจจุบันทั้งหมด — แนะนำให้ส่งออก backup ก่อน
+            </div>
+          </div>
+        )}
+      </Modal>
+    </div>
+  );
+}
+
+window.PageSettings = PageSettings;

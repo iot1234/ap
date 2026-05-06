@@ -71,6 +71,9 @@ function buildRooms() {
       else if (rnd2 < 0.90) status = 'reserved';
       else if (rnd2 < 0.96) status = 'overdue';
       else status = 'maintenance';
+      // Force specific rooms to ensure all statuses appear in demo
+      const forced = { '207':'overdue','305':'overdue','405':'overdue','102':'reserved','503':'reserved','408':'maintenance','502':'maintenance' };
+      if (forced[id]) status = forced[id];
       const t = ROOM_TYPES[type];
       const rent = t.baseRent + (f - 1) * 200;
       const tIdx = Math.floor(seedRand(seed + 13) * TENANTS.length);
@@ -809,12 +812,43 @@ function TopBar({ search, setSearch, isMobile, onMenu }) {
             fontFamily: 'inherit', fontSize: 13, color: C.ink, minWidth: 0,
           }}/>
       </div>
+
+      <a
+        href="Admin Dashboard.html"
+        title="หลังบ้าน Admin"
+        style={{
+          display: 'inline-flex', alignItems: 'center', gap: 6,
+          padding: isMobile ? '0 10px' : '0 14px', height: 36,
+          background: C.dark, color: '#fff',
+          border: 'none', borderRadius: 8,
+          fontFamily: 'inherit', fontSize: 12.5, fontWeight: 500,
+          textDecoration: 'none', cursor: 'pointer', flex: 'none',
+          transition: 'background .15s',
+        }}
+        onMouseEnter={(e) => e.currentTarget.style.background = '#1a140e'}
+        onMouseLeave={(e) => e.currentTarget.style.background = C.dark}>
+        <span style={{ fontSize: 13 }}>🛡</span>
+        {!isMobile && <span>Admin</span>}
+      </a>
     </div>
   );
 }
 
 function App() {
-  const [rooms, setRooms] = useState(() => buildRooms());
+  // ตอน mount ลองอ่านห้องจาก localStorage (ที่หลังบ้าน admin บันทึกไว้)
+  // ถ้าไม่มีให้สร้างใหม่จาก buildRooms()
+  const [rooms, setRooms] = useState(() => {
+    try {
+      const raw = localStorage.getItem('baankarn_rooms_v1');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object' && Object.keys(parsed).length > 0) {
+          return parsed;
+        }
+      }
+    } catch (e) {}
+    return buildRooms();
+  });
   const [floor, setFloor] = useState(3);
   const [selectedId, setSelectedId] = useState(null);
   const [search, setSearch] = useState('');
@@ -827,6 +861,12 @@ function App() {
     "showKpiBar": true
   }/*EDITMODE-END*/;
   const [tweaks, setTweak] = useTweaks(TWEAK_DEFAULTS);
+
+  // เซฟทุกการเปลี่ยนแปลงของห้องลง localStorage (sync ระหว่างหน้าบ้าน-หลังบ้าน)
+  useEffect(() => {
+    try { localStorage.setItem('baankarn_rooms_v1', JSON.stringify(rooms)); }
+    catch (e) {}
+  }, [rooms]);
 
   const { isMobile } = useViewport();
 

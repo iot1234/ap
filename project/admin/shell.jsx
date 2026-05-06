@@ -1,0 +1,645 @@
+// === admin/shell.jsx ======================================================
+// Sidebar (left rail) + TopBar (per-page header bar) + App (main shell)
+// ใช้ window globals จากไฟล์อื่นทั้งหมด
+// ===========================================================================
+
+const { useState, useEffect, useMemo } = React;
+
+// ---------- Navigation config ---------------------------------------------
+const NAV_GROUPS = [
+  {
+    title: 'ภาพรวม',
+    items: [
+      { id: 'overview', label: 'แดชบอร์ด',    icon: '◫' },
+    ],
+  },
+  {
+    title: 'จัดการ',
+    items: [
+      { id: 'rooms',    label: 'ห้องพัก',     icon: '🏠' },
+      { id: 'tenants',  label: 'ผู้เช่า',     icon: '👥' },
+      { id: 'bookings', label: 'การจอง',      icon: '📋' },
+    ],
+  },
+  {
+    title: 'การเงิน',
+    items: [
+      { id: 'billing',  label: 'บิล/ใบแจ้งหนี้', icon: '🧾' },
+      { id: 'reports',  label: 'รายงาน',      icon: '📊' },
+    ],
+  },
+  {
+    title: 'ตั้งค่า',
+    items: [
+      { id: 'pricing',  label: 'ตั้งราคา',    icon: '💰' },
+      { id: 'settings', label: 'ระบบ',         icon: '⚙️' },
+    ],
+  },
+];
+
+const PAGE_TITLES = {
+  overview: 'แดชบอร์ด',
+  rooms:    'ห้องพัก',
+  tenants:  'ผู้เช่า',
+  bookings: 'การจอง',
+  billing:  'บิล/ใบแจ้งหนี้',
+  reports:  'รายงาน',
+  pricing:  'ตั้งราคา',
+  settings: 'ตั้งค่าระบบ',
+};
+
+// ---------- Sidebar -------------------------------------------------------
+function Sidebar({ page, setPage, mobileOpen, setMobileOpen, isMobile, pendingBookings, overdueRooms, buildingName }) {
+  const C = window.ADMIN_C;
+  const shortName = (buildingName || 'บ้านกาญจน์').replace(/\s*(เรสซิเดนซ์|residence).*/i, '').trim();
+
+  const sidebarStyle = {
+    width: 260,
+    background: C.navBg,
+    color: C.navInk,
+    display: 'flex',
+    flexDirection: 'column',
+    flexShrink: 0,
+    height: '100vh',
+    position: isMobile ? 'fixed' : 'sticky',
+    top: 0,
+    left: 0,
+    zIndex: 100,
+    transform: isMobile ? `translateX(${mobileOpen ? 0 : -260}px)` : 'none',
+    transition: 'transform .25s ease',
+    boxShadow: isMobile ? '4px 0 24px -8px rgba(0,0,0,0.3)' : 'none',
+  };
+
+  const navItemStyle = (active) => ({
+    display: 'flex',
+    alignItems: 'center',
+    gap: 11,
+    padding: '9px 14px',
+    margin: '0 8px',
+    borderRadius: 8,
+    cursor: 'pointer',
+    background: active ? C.navActive : 'transparent',
+    color: active ? '#fff' : C.navInkSoft,
+    fontSize: 13.5,
+    fontWeight: active ? 600 : 500,
+    border: 'none',
+    width: 'calc(100% - 16px)',
+    textAlign: 'left',
+    fontFamily: 'inherit',
+    transition: 'background .15s, color .15s',
+    position: 'relative',
+  });
+
+  return (
+    <>
+      {isMobile && mobileOpen && (
+        <div
+          onClick={() => setMobileOpen(false)}
+          style={{
+            position: 'fixed', inset: 0, zIndex: 99,
+            background: 'rgba(0,0,0,0.4)', animation: 'fadeIn .2s ease',
+          }}
+        />
+      )}
+      <aside style={sidebarStyle}>
+        {/* Logo */}
+        <div style={{
+          padding: '20px 20px 18px',
+          borderBottom: `1px solid ${C.navBorder}`,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <div style={{
+              width: 38, height: 38, borderRadius: 9,
+              background: `linear-gradient(135deg, ${C.accent} 0%, ${C.accentDark} 100%)`,
+              display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+              color: '#fff', fontFamily: 'Sora, sans-serif', fontWeight: 700, fontSize: 18,
+              flexShrink: 0,
+            }}>{(shortName[0] || 'บ').toUpperCase()}</div>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontFamily: 'Sora, sans-serif', fontWeight: 700, fontSize: 14.5, color: '#fff', lineHeight: 1.2,
+                            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {shortName}
+              </div>
+              <div style={{ fontSize: 10, color: C.navMuted, textTransform: 'uppercase', letterSpacing: '0.08em', marginTop: 2 }}>
+                Admin Console
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Nav */}
+        <nav style={{ flex: 1, overflowY: 'auto', padding: '14px 0' }}>
+          {NAV_GROUPS.map(group => (
+            <div key={group.title} style={{ marginBottom: 18 }}>
+              <div style={{
+                padding: '4px 22px', fontSize: 10.5, color: C.navMuted,
+                textTransform: 'uppercase', letterSpacing: '0.1em', fontWeight: 600,
+                marginBottom: 6,
+              }}>{group.title}</div>
+              {group.items.map(it => {
+                const active = page === it.id;
+                let badge = null;
+                if (it.id === 'bookings' && pendingBookings > 0) badge = pendingBookings;
+                if (it.id === 'billing'  && overdueRooms > 0)    badge = overdueRooms;
+                return (
+                  <button
+                    key={it.id}
+                    onClick={() => { setPage(it.id); if (isMobile) setMobileOpen(false); }}
+                    style={navItemStyle(active)}>
+                    <span style={{ fontSize: 15, width: 18, textAlign: 'center', flexShrink: 0 }}>{it.icon}</span>
+                    <span style={{ flex: 1 }}>{it.label}</span>
+                    {badge != null && (
+                      <span style={{
+                        background: it.id === 'billing' ? C.danger : C.accent,
+                        color: '#fff', fontSize: 10, fontWeight: 700,
+                        padding: '1px 7px', borderRadius: 999, minWidth: 18, textAlign: 'center',
+                      }}>{badge}</span>
+                    )}
+                    {active && (
+                      <span style={{
+                        position: 'absolute', left: 0, top: '50%', transform: 'translateY(-50%)',
+                        width: 3, height: 18, background: C.navAccent, borderRadius: '0 2px 2px 0',
+                      }} />
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          ))}
+        </nav>
+
+        {/* Footer */}
+        <div style={{
+          padding: '14px 20px',
+          borderTop: `1px solid ${C.navBorder}`,
+          background: C.navBgAlt,
+        }}>
+          <a
+            href="Dorm Status Dashboard.html"
+            style={{
+              display: 'flex', alignItems: 'center', gap: 10,
+              padding: '8px 10px', borderRadius: 7,
+              background: 'rgba(255,255,255,0.05)',
+              color: C.navInkSoft, fontSize: 12.5, fontWeight: 500,
+              textDecoration: 'none', transition: 'background .15s',
+            }}
+            onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(255,255,255,0.1)'}
+            onMouseLeave={(e) => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}>
+            <span style={{ fontSize: 14 }}>👁</span>
+            <span style={{ flex: 1 }}>ดูในมุมผู้เช่า</span>
+            <span style={{ color: C.navMuted, fontSize: 11 }}>→</span>
+          </a>
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 10, marginTop: 10,
+            padding: '6px 4px',
+          }}>
+            <div style={{
+              width: 32, height: 32, borderRadius: '50%',
+              background: C.accent, color: '#fff',
+              display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+              fontSize: 12, fontWeight: 600, flexShrink: 0,
+            }}>กญ</div>
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div style={{ fontSize: 12.5, color: '#fff', fontWeight: 500 }}>กาญจนา ศรีสุข</div>
+              <div style={{ fontSize: 10.5, color: C.navMuted }}>เจ้าของหอพัก</div>
+            </div>
+          </div>
+        </div>
+      </aside>
+    </>
+  );
+}
+
+// ---------- TopBar --------------------------------------------------------
+function TopBar({ page, setPage, onMenuClick, isMobile, search, setSearch, notifCount,
+                  notifItems, onNotifClick, onResetData, searchResults, onSelectResult }) {
+  const C = window.ADMIN_C;
+  const [showNotif, setShowNotif] = useState(false);
+  const [showResults, setShowResults] = useState(false);
+
+  return (
+    <header style={{
+      height: 64,
+      background: C.surface,
+      borderBottom: `1px solid ${C.border}`,
+      display: 'flex',
+      alignItems: 'center',
+      padding: '0 20px',
+      gap: 12,
+      position: 'sticky',
+      top: 0,
+      zIndex: 50,
+      flexShrink: 0,
+    }}>
+      {isMobile && (
+        <button
+          onClick={onMenuClick}
+          style={{
+            width: 36, height: 36, border: 'none', background: 'transparent',
+            color: C.ink, cursor: 'pointer', fontSize: 22, padding: 0, lineHeight: 1,
+          }}>☰</button>
+      )}
+
+      <div style={{ minWidth: 0, flex: '0 1 auto' }}>
+        <div style={{ fontSize: 11, color: C.muted, fontWeight: 500 }}>Admin Console</div>
+        <div style={{ fontFamily: 'Sora, sans-serif', fontSize: 16, fontWeight: 600, color: C.ink, lineHeight: 1.2 }}>
+          {PAGE_TITLES[page] || ''}
+        </div>
+      </div>
+
+      {/* Search */}
+      <div style={{
+        flex: '1 1 auto', maxWidth: 380,
+        marginLeft: 'auto',
+        display: isMobile ? 'none' : 'flex',
+        position: 'relative',
+      }}>
+        <div style={{
+          width: '100%', display: 'flex', alignItems: 'center',
+          background: C.surfaceAlt, border: `1px solid ${showResults && searchResults?.length ? C.accent : C.border}`,
+          borderRadius: 9, padding: '0 12px', height: 38,
+        }}>
+          <span style={{ color: C.muted, marginRight: 8, fontSize: 14 }}>🔍</span>
+          <input
+            value={search}
+            onChange={(e) => { setSearch(e.target.value); setShowResults(true); }}
+            onFocus={() => setShowResults(true)}
+            placeholder="ค้นหาห้อง, ผู้เช่า, บิล..."
+            style={{
+              flex: 1, border: 'none', outline: 'none', background: 'transparent',
+              fontSize: 13.5, color: C.ink, fontFamily: 'inherit',
+            }}
+          />
+          {search && (
+            <button onClick={() => { setSearch(''); setShowResults(false); }}
+              style={{ border: 'none', background: 'transparent', color: C.muted, cursor: 'pointer', fontSize: 16, padding: 4 }}>×</button>
+          )}
+        </div>
+        {showResults && search && (
+          <>
+            <div onClick={() => setShowResults(false)} style={{ position: 'fixed', inset: 0, zIndex: 90 }} />
+            <div style={{
+              position: 'absolute', top: 'calc(100% + 6px)', left: 0, right: 0,
+              background: C.surface, border: `1px solid ${C.border}`,
+              borderRadius: 10, boxShadow: '0 12px 32px -8px rgba(30,20,10,0.18)',
+              zIndex: 100, maxHeight: 400, overflow: 'auto',
+            }}>
+              {(searchResults || []).length === 0 ? (
+                <div style={{ padding: 16, fontSize: 13, color: C.muted, textAlign: 'center' }}>
+                  ไม่พบผลการค้นหาสำหรับ "{search}"
+                </div>
+              ) : (
+                <>
+                  {(searchResults || []).map((r, i) => (
+                    <button
+                      key={i}
+                      onClick={() => { onSelectResult && onSelectResult(r); setShowResults(false); setSearch(''); }}
+                      style={{
+                        width: '100%', display: 'flex', gap: 10, alignItems: 'center',
+                        padding: '10px 14px', border: 'none', borderBottom: i < searchResults.length - 1 ? `1px solid ${C.borderSoft}` : 'none',
+                        background: 'transparent', cursor: 'pointer', textAlign: 'left',
+                        fontFamily: 'inherit',
+                      }}
+                      onMouseEnter={(e) => e.currentTarget.style.background = C.surfaceAlt}
+                      onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}>
+                      <span style={{ fontSize: 14 }}>{r.icon}</span>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 13, fontWeight: 500, color: C.ink }}>{r.title}</div>
+                        <div style={{ fontSize: 11.5, color: C.muted }}>{r.subtitle}</div>
+                      </div>
+                      <span style={{ fontSize: 10, color: C.muted, padding: '1px 6px', background: C.surfaceAlt, borderRadius: 999 }}>{r.kind}</span>
+                    </button>
+                  ))}
+                </>
+              )}
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* Notif */}
+      <div style={{ position: 'relative', flexShrink: 0, marginLeft: isMobile ? 'auto' : 0 }}>
+        <button
+          onClick={() => setShowNotif(s => !s)}
+          style={{
+            width: 38, height: 38, border: `1px solid ${C.border}`,
+            background: C.surface, color: C.ink, cursor: 'pointer',
+            borderRadius: 9, fontSize: 16, position: 'relative',
+          }}>
+          🔔
+          {notifCount > 0 && (
+            <span style={{
+              position: 'absolute', top: -4, right: -4,
+              background: C.danger, color: '#fff',
+              fontSize: 10, fontWeight: 700,
+              padding: '1px 5px', borderRadius: 999, minWidth: 16, textAlign: 'center',
+              border: `2px solid ${C.surface}`,
+            }}>{notifCount}</span>
+          )}
+        </button>
+        {showNotif && (
+          <>
+            <div onClick={() => setShowNotif(false)} style={{ position: 'fixed', inset: 0, zIndex: 90 }} />
+            <div style={{
+              position: 'absolute', top: 'calc(100% + 8px)', right: 0,
+              width: 360, maxWidth: 'calc(100vw - 32px)', background: C.surface,
+              border: `1px solid ${C.border}`, borderRadius: 12,
+              boxShadow: '0 12px 32px -8px rgba(30,20,10,0.18)',
+              zIndex: 100, overflow: 'hidden',
+            }}>
+              <div style={{ padding: '12px 14px', borderBottom: `1px solid ${C.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: C.ink }}>การแจ้งเตือน</div>
+                {notifCount > 0 && (
+                  <span style={{ fontSize: 11, color: C.muted }}>{notifCount} รายการใหม่</span>
+                )}
+              </div>
+              <div style={{ maxHeight: 380, overflow: 'auto' }}>
+                {(notifItems || []).length === 0 ? (
+                  <div style={{ padding: 32, fontSize: 13, color: C.muted, textAlign: 'center' }}>
+                    ✓ ไม่มีรายการเร่งด่วน
+                  </div>
+                ) : (
+                  notifItems.map((n, i) => (
+                    <button
+                      key={i}
+                      onClick={() => { onNotifClick && onNotifClick(n); setShowNotif(false); }}
+                      style={{
+                        width: '100%', display: 'flex', gap: 10, alignItems: 'flex-start',
+                        padding: '12px 14px', border: 'none',
+                        borderBottom: i < notifItems.length - 1 ? `1px solid ${C.borderSoft}` : 'none',
+                        background: 'transparent', cursor: 'pointer', textAlign: 'left',
+                        fontFamily: 'inherit',
+                      }}
+                      onMouseEnter={(e) => e.currentTarget.style.background = C.surfaceAlt}
+                      onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}>
+                      <div style={{
+                        width: 32, height: 32, borderRadius: 8,
+                        background: n.kind === 'overdue' ? C.dangerSoft : C.warningSoft,
+                        color: n.kind === 'overdue' ? C.danger : C.warning,
+                        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                        fontSize: 14, flexShrink: 0,
+                      }}>{n.icon}</div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 13, fontWeight: 500, color: C.ink, lineHeight: 1.4 }}>{n.title}</div>
+                        <div style={{ fontSize: 11.5, color: C.muted, marginTop: 2 }}>{n.subtitle}</div>
+                      </div>
+                      <span style={{ fontSize: 14, color: C.muted, alignSelf: 'center' }}>›</span>
+                    </button>
+                  ))
+                )}
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* Settings menu */}
+      <button
+        onClick={onResetData}
+        title="รีเฟรชข้อมูลตัวอย่าง"
+        style={{
+          width: 38, height: 38, border: `1px solid ${C.border}`,
+          background: C.surface, color: C.ink2, cursor: 'pointer',
+          borderRadius: 9, fontSize: 14, flexShrink: 0,
+        }}>↻</button>
+    </header>
+  );
+}
+
+// ---------- Main App ------------------------------------------------------
+function App() {
+  const C = window.ADMIN_C;
+  const {
+    loadRooms, saveRooms, loadConfig, saveConfig,
+    loadBookings, saveBookings, loadActivities, saveActivities, resetAll,
+  } = window;
+
+  const {
+    PageOverview, PageRooms, PagePricing, PageTenants,
+    PageBookings, PageBilling, PageReports, PageSettings,
+    Toast,
+  } = window;
+
+  // --- State (persisted to localStorage) ---
+  const [rooms,      setRooms]      = useState(loadRooms);
+  const [config,     setConfig]     = useState(loadConfig);
+  const [bookings,   setBookings]   = useState(loadBookings);
+  const [activities, setActivities] = useState(loadActivities);
+
+  useEffect(() => { saveRooms(rooms); },           [rooms]);
+  useEffect(() => { saveConfig(config); },         [config]);
+  useEffect(() => { saveBookings(bookings); },     [bookings]);
+  useEffect(() => { saveActivities(activities); }, [activities]);
+
+  // --- Routing via hash ---
+  const [page, setPage] = useState(() => {
+    const h = location.hash.replace('#', '');
+    return PAGE_TITLES[h] ? h : 'overview';
+  });
+  useEffect(() => { location.hash = page; }, [page]);
+  useEffect(() => {
+    const onHash = () => {
+      const h = location.hash.replace('#', '');
+      if (PAGE_TITLES[h]) setPage(h);
+    };
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, []);
+
+  // --- Viewport ---
+  const [isMobile, setIsMobile] = useState(() => typeof window !== 'undefined' && window.innerWidth <= 900);
+  useEffect(() => {
+    const onR = () => setIsMobile(window.innerWidth <= 900);
+    window.addEventListener('resize', onR);
+    return () => window.removeEventListener('resize', onR);
+  }, []);
+  const [mobileOpen, setMobileOpen] = useState(false);
+
+  // --- Toast ---
+  const [toast, setToast] = useState(null);
+
+  // --- Confirm refresh modal ---
+  const [confirmRefresh, setConfirmRefresh] = useState(false);
+
+  // --- Search (top bar) ---
+  const [search, setSearch] = useState('');
+
+  // --- Helpers passed to pages ---
+  const addActivity = (act) => {
+    setActivities(prev => [{ time: new Date().toISOString(), ...act }, ...prev].slice(0, 30));
+  };
+
+  const handleResetData = () => setConfirmRefresh(true);
+  const doResetData = () => {
+    resetAll();
+    location.reload();
+  };
+
+  const ADMIN_ROOM_TYPES = window.ADMIN_ROOM_TYPES;
+
+  const pendingBookings = bookings.filter(b => b.status === 'pending').length;
+  const overdueRooms = Object.values(rooms).filter(r => r.status === 'overdue');
+  const overdueRoomCount = overdueRooms.length;
+
+  // Build notification items
+  const notifItems = useMemo(() => {
+    const items = [];
+    overdueRooms.forEach(r => {
+      items.push({
+        kind: 'overdue', icon: '⚠️',
+        title: `ห้อง ${r.id} ค้างชำระ ${r.overdueDays} วัน`,
+        subtitle: `${r.tenant?.name || ''} · ฿${(r.rent + (r.water||0) + (r.elec||0) + (r.wifi||0)).toLocaleString('th-TH')}`,
+        target: { page: 'billing' },
+      });
+    });
+    bookings.filter(b => b.status === 'pending').forEach(b => {
+      items.push({
+        kind: 'booking', icon: '📋',
+        title: `การจองใหม่ ${b.id}`,
+        subtitle: `${b.name} · ${ADMIN_ROOM_TYPES[b.wantType]?.th || b.wantType}`,
+        target: { page: 'bookings' },
+      });
+    });
+    return items;
+  }, [rooms, bookings]);
+  const notifCount = notifItems.length;
+
+  // Build search results
+  const searchResults = useMemo(() => {
+    const q = (search || '').trim().toLowerCase();
+    if (!q) return [];
+    const results = [];
+    // Rooms
+    for (const r of Object.values(rooms)) {
+      const hay = `${r.id} ${r.tenant?.name || ''} ${ADMIN_ROOM_TYPES[r.type]?.th || ''}`.toLowerCase();
+      if (hay.includes(q)) {
+        results.push({
+          kind: 'ห้อง',
+          icon: '🏠',
+          title: `ห้อง ${r.id} · ${ADMIN_ROOM_TYPES[r.type]?.th}`,
+          subtitle: r.tenant ? r.tenant.name : 'ห้องว่าง',
+          target: { page: 'rooms' },
+        });
+        if (results.length >= 8) break;
+      }
+    }
+    // Tenants
+    for (const r of Object.values(rooms)) {
+      if (!r.tenant) continue;
+      const hay = `${r.tenant.name} ${r.tenant.phone || ''} ${r.tenant.email || ''}`.toLowerCase();
+      if (hay.includes(q)) {
+        results.push({
+          kind: 'ผู้เช่า',
+          icon: '👤',
+          title: r.tenant.name,
+          subtitle: `ห้อง ${r.id} · ${r.tenant.phone}`,
+          target: { page: 'tenants' },
+        });
+        if (results.length >= 12) break;
+      }
+    }
+    // Bookings
+    for (const b of bookings) {
+      const hay = `${b.id} ${b.name} ${b.phone}`.toLowerCase();
+      if (hay.includes(q)) {
+        results.push({
+          kind: 'การจอง',
+          icon: '📋',
+          title: b.name,
+          subtitle: `${b.id} · ${b.phone}`,
+          target: { page: 'bookings' },
+        });
+        if (results.length >= 14) break;
+      }
+    }
+    return results.slice(0, 14);
+  }, [search, rooms, bookings]);
+
+  const handleNotifClick = (n) => { if (n?.target?.page) setPage(n.target.page); };
+  const handleSelectResult = (r) => { if (r?.target?.page) setPage(r.target.page); };
+
+  const pageProps = {
+    rooms, setRooms,
+    config, setConfig,
+    bookings, setBookings,
+    activities, setActivities, addActivity,
+    setToast,
+  };
+
+  const PAGES = {
+    overview: PageOverview,
+    rooms:    PageRooms,
+    tenants:  PageTenants,
+    bookings: PageBookings,
+    billing:  PageBilling,
+    reports:  PageReports,
+    pricing:  PagePricing,
+    settings: PageSettings,
+  };
+  const Page = PAGES[page] || PageOverview;
+
+  return (
+    <div style={{ display: 'flex', minHeight: '100vh', background: C.bg }}>
+      <Sidebar
+        page={page}
+        setPage={setPage}
+        mobileOpen={mobileOpen}
+        setMobileOpen={setMobileOpen}
+        isMobile={isMobile}
+        pendingBookings={pendingBookings}
+        overdueRooms={overdueRoomCount}
+        buildingName={config.building?.name}
+      />
+      <main style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
+        <TopBar
+          page={page}
+          setPage={setPage}
+          onMenuClick={() => setMobileOpen(true)}
+          isMobile={isMobile}
+          search={search}
+          setSearch={setSearch}
+          notifCount={notifCount}
+          notifItems={notifItems}
+          onNotifClick={handleNotifClick}
+          searchResults={searchResults}
+          onSelectResult={handleSelectResult}
+          onResetData={handleResetData}
+        />
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <Page {...pageProps} />
+        </div>
+      </main>
+
+      <Toast
+        open={!!toast}
+        kind={toast?.kind || 'success'}
+        onClose={() => setToast(null)}
+      >{toast?.message}</Toast>
+
+      {window.Modal && (
+        <window.Modal
+          open={confirmRefresh}
+          onClose={() => setConfirmRefresh(false)}
+          title="รีเฟรชข้อมูล"
+          footer={
+            <>
+              <window.Btn variant="ghost" onClick={() => setConfirmRefresh(false)}>ยกเลิก</window.Btn>
+              <window.Btn variant="danger" onClick={doResetData}>รีเฟรชข้อมูล</window.Btn>
+            </>
+          }
+        >
+          <div style={{ fontSize: 14, color: C.ink2, lineHeight: 1.6 }}>
+            ลบการเปลี่ยนแปลงทั้งหมดและกลับสู่ข้อมูลตัวอย่าง — ใช้ดูผลของฟีเจอร์ใหม่ในข้อมูลเริ่มต้น
+            <div style={{ marginTop: 10, padding: 10, background: C.warningSoft, borderRadius: 8, color: C.warningInk, fontSize: 13 }}>
+              ⚠️ การกระทำนี้ไม่สามารถย้อนกลับได้ — แนะนำส่งออก JSON backup ก่อน (ตั้งค่า → ระบบ)
+            </div>
+          </div>
+        </window.Modal>
+      )}
+    </div>
+  );
+}
+
+// ---------- Render --------------------------------------------------------
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<App />);

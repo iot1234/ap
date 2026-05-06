@@ -1,0 +1,929 @@
+// === admin/ui.jsx =========================================================
+// UI primitives ใช้ร่วมกันทุกหน้า: Card, Btn, Input, Select, Toggle, Tabs,
+// Drawer, Modal, Table, KpiCard, Charts, EmptyState, Avatar, Badge, etc.
+// ===========================================================================
+
+const { useState, useEffect, useRef, useMemo } = React;
+const C = window.ADMIN_C;
+const ADMIN_STATUS = window.ADMIN_STATUS;
+const fmt = window.fmt;
+const fmtCurrency = window.fmtCurrency;
+
+// --- Card -----------------------------------------------------------------
+function Card({ children, padding = 24, style = {}, hover = false, onClick, className = '' }) {
+  const [hov, setHov] = useState(false);
+  return (
+    <div
+      onClick={onClick}
+      onMouseEnter={() => hover && setHov(true)}
+      onMouseLeave={() => hover && setHov(false)}
+      className={className}
+      style={{
+        background: C.surface,
+        border: `1px solid ${C.border}`,
+        borderRadius: 14,
+        padding,
+        cursor: onClick ? 'pointer' : 'default',
+        transition: 'box-shadow .18s, transform .18s, border-color .18s',
+        boxShadow: hov ? '0 8px 28px -16px rgba(60,40,20,0.18)' : '0 1px 0 rgba(60,40,20,0.02)',
+        borderColor: hov ? C.borderStrong : C.border,
+        ...style,
+      }}>
+      {children}
+    </div>
+  );
+}
+
+// --- SectionHeading -------------------------------------------------------
+function SectionHeading({ title, subtitle, action, level = 2, style = {} }) {
+  const Tag = `h${level}`;
+  return (
+    <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 16, marginBottom: 16, ...style }}>
+      <div>
+        <Tag style={{ margin: 0, fontFamily: 'Sora, sans-serif', fontWeight: 600, color: C.ink, fontSize: level === 2 ? 22 : (level === 3 ? 17 : 15), lineHeight: 1.2 }}>
+          {title}
+        </Tag>
+        {subtitle && <div style={{ fontSize: 13, color: C.muted, marginTop: 4 }}>{subtitle}</div>}
+      </div>
+      {action && <div>{action}</div>}
+    </div>
+  );
+}
+
+// --- Btn ------------------------------------------------------------------
+function Btn({ children, variant = 'primary', size = 'md', icon, iconRight, onClick, disabled, type = 'button', style = {}, fullWidth = false, danger = false }) {
+  const base = {
+    sm: { padding: '6px 12px',  fontSize: 12.5, height: 30, gap: 6  },
+    md: { padding: '9px 16px',  fontSize: 13.5, height: 38, gap: 8  },
+    lg: { padding: '12px 22px', fontSize: 15,   height: 46, gap: 10 },
+  }[size] || { padding: '9px 16px', fontSize: 13.5, height: 38, gap: 8 };
+
+  const variants = {
+    primary: { background: danger ? C.danger : C.dark, color: '#fff',   border: '1px solid transparent' },
+    accent:  { background: C.accent,                   color: '#fff',   border: '1px solid transparent' },
+    secondary: { background: C.surface,                color: C.ink,   border: `1px solid ${C.border}` },
+    ghost:   { background: 'transparent',              color: C.ink2,   border: '1px solid transparent' },
+    soft:    { background: C.surfaceAlt,                color: C.ink,   border: `1px solid ${C.borderSoft}` },
+    danger:  { background: C.danger,                    color: '#fff',  border: '1px solid transparent' },
+    success: { background: C.success,                   color: '#fff',  border: '1px solid transparent' },
+  };
+  const v = variants[variant] || variants.primary;
+
+  return (
+    <button
+      type={type}
+      disabled={disabled}
+      onClick={onClick}
+      style={{
+        ...v,
+        ...base,
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        borderRadius: 10,
+        cursor: disabled ? 'not-allowed' : 'pointer',
+        opacity: disabled ? 0.5 : 1,
+        fontWeight: 500,
+        fontFamily: 'inherit',
+        whiteSpace: 'nowrap',
+        width: fullWidth ? '100%' : 'auto',
+        transition: 'background .15s, transform .08s, border-color .15s',
+        ...style,
+      }}>
+      {icon && <span style={{ display: 'inline-flex', alignItems: 'center', fontSize: base.fontSize + 1 }}>{icon}</span>}
+      {children}
+      {iconRight && <span style={{ display: 'inline-flex', alignItems: 'center' }}>{iconRight}</span>}
+    </button>
+  );
+}
+
+// --- IconBtn (small square, icon-only) -----------------------------------
+function IconBtn({ icon, onClick, label, active, danger }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={label}
+      aria-label={label}
+      style={{
+        width: 36, height: 36,
+        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+        background: active ? C.accentSoft : 'transparent',
+        color: danger ? C.danger : (active ? C.accentInk : C.ink2),
+        border: `1px solid ${active ? C.accent : C.borderSoft}`,
+        borderRadius: 9,
+        cursor: 'pointer',
+        fontSize: 15,
+        transition: 'background .15s, border-color .15s, color .15s',
+      }}>
+      {icon}
+    </button>
+  );
+}
+
+// --- Input ----------------------------------------------------------------
+function Input({ label, value, onChange, placeholder, type = 'text', suffix, prefix, style = {}, disabled, hint, error, fullWidth = true }) {
+  const [focus, setFocus] = useState(false);
+  return (
+    <label style={{ display: 'block', width: fullWidth ? '100%' : 'auto' }}>
+      {label && <div style={{ fontSize: 12.5, fontWeight: 500, color: C.ink2, marginBottom: 6 }}>{label}</div>}
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        background: disabled ? C.surfaceMuted : C.surface,
+        border: `1px solid ${error ? C.danger : (focus ? C.accent : C.border)}`,
+        borderRadius: 9,
+        padding: '0 12px',
+        height: 40,
+        boxShadow: focus ? `0 0 0 3px ${C.accent}22` : 'none',
+        transition: 'box-shadow .15s, border-color .15s',
+        ...style,
+      }}>
+        {prefix && <span style={{ color: C.muted, marginRight: 8, fontSize: 13 }}>{prefix}</span>}
+        <input
+          type={type}
+          value={value ?? ''}
+          onChange={(e) => onChange && onChange(type === 'number' ? Number(e.target.value) : e.target.value)}
+          placeholder={placeholder}
+          disabled={disabled}
+          onFocus={() => setFocus(true)}
+          onBlur={() => setFocus(false)}
+          style={{
+            flex: 1,
+            border: 'none',
+            outline: 'none',
+            background: 'transparent',
+            fontSize: 14,
+            color: C.ink,
+            fontFamily: 'inherit',
+            padding: 0,
+            minWidth: 0,
+          }}
+        />
+        {suffix && <span style={{ color: C.muted, marginLeft: 8, fontSize: 13, whiteSpace: 'nowrap' }}>{suffix}</span>}
+      </div>
+      {hint && !error && <div style={{ fontSize: 11.5, color: C.muted, marginTop: 4 }}>{hint}</div>}
+      {error && <div style={{ fontSize: 11.5, color: C.danger, marginTop: 4 }}>{error}</div>}
+    </label>
+  );
+}
+
+// --- Select ---------------------------------------------------------------
+function Select({ label, value, onChange, options, placeholder, fullWidth = true, style = {} }) {
+  return (
+    <label style={{ display: 'block', width: fullWidth ? '100%' : 'auto' }}>
+      {label && <div style={{ fontSize: 12.5, fontWeight: 500, color: C.ink2, marginBottom: 6 }}>{label}</div>}
+      <select
+        value={value ?? ''}
+        onChange={(e) => onChange && onChange(e.target.value)}
+        style={{
+          width: '100%',
+          height: 40,
+          padding: '0 12px',
+          border: `1px solid ${C.border}`,
+          borderRadius: 9,
+          background: C.surface,
+          fontSize: 14,
+          color: C.ink,
+          fontFamily: 'inherit',
+          outline: 'none',
+          cursor: 'pointer',
+          ...style,
+        }}>
+        {placeholder && <option value="">{placeholder}</option>}
+        {options.map(o => (
+          typeof o === 'string'
+            ? <option key={o} value={o}>{o}</option>
+            : <option key={o.value} value={o.value}>{o.label}</option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+// --- Toggle ---------------------------------------------------------------
+function Toggle({ label, checked, onChange, hint, disabled }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '8px 0' }}>
+      <div style={{ flex: 1 }}>
+        {label && <div style={{ fontSize: 13.5, fontWeight: 500, color: C.ink }}>{label}</div>}
+        {hint && <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>{hint}</div>}
+      </div>
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={() => onChange && onChange(!checked)}
+        style={{
+          width: 42, height: 24,
+          background: checked ? C.success : C.borderStrong,
+          borderRadius: 12, border: 'none', cursor: disabled ? 'not-allowed' : 'pointer',
+          padding: 2, transition: 'background .18s', position: 'relative',
+          opacity: disabled ? 0.5 : 1,
+        }}>
+        <div style={{
+          width: 20, height: 20, background: '#fff', borderRadius: '50%',
+          transform: `translateX(${checked ? 18 : 0}px)`,
+          transition: 'transform .18s', boxShadow: '0 1px 2px rgba(0,0,0,0.2)'
+        }} />
+      </button>
+    </div>
+  );
+}
+
+// --- Textarea -------------------------------------------------------------
+function Textarea({ label, value, onChange, rows = 4, placeholder, hint }) {
+  const [focus, setFocus] = useState(false);
+  return (
+    <label style={{ display: 'block' }}>
+      {label && <div style={{ fontSize: 12.5, fontWeight: 500, color: C.ink2, marginBottom: 6 }}>{label}</div>}
+      <textarea
+        rows={rows}
+        value={value ?? ''}
+        onChange={(e) => onChange && onChange(e.target.value)}
+        placeholder={placeholder}
+        onFocus={() => setFocus(true)}
+        onBlur={() => setFocus(false)}
+        style={{
+          width: '100%',
+          padding: '10px 12px',
+          border: `1px solid ${focus ? C.accent : C.border}`,
+          borderRadius: 9,
+          background: C.surface,
+          fontSize: 13.5,
+          color: C.ink,
+          fontFamily: 'inherit',
+          outline: 'none',
+          resize: 'vertical',
+          boxShadow: focus ? `0 0 0 3px ${C.accent}22` : 'none',
+          transition: 'box-shadow .15s, border-color .15s',
+        }}
+      />
+      {hint && <div style={{ fontSize: 11.5, color: C.muted, marginTop: 4 }}>{hint}</div>}
+    </label>
+  );
+}
+
+// --- StatusDot ------------------------------------------------------------
+function StatusDot({ status, size = 8 }) {
+  const s = ADMIN_STATUS[status] || ADMIN_STATUS.vacant;
+  return (
+    <span style={{
+      display: 'inline-block', width: size, height: size, borderRadius: '50%',
+      background: s.dot, flexShrink: 0,
+      boxShadow: `0 0 0 2px ${s.soft}`,
+    }} />
+  );
+}
+
+// --- StatusBadge ----------------------------------------------------------
+function StatusBadge({ status, size = 'md' }) {
+  const s = ADMIN_STATUS[status] || ADMIN_STATUS.vacant;
+  const isSm = size === 'sm';
+  return (
+    <span style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 6,
+      padding: isSm ? '2px 8px' : '4px 10px',
+      borderRadius: 999,
+      background: s.soft,
+      color: s.ink,
+      fontSize: isSm ? 11 : 12,
+      fontWeight: 600,
+      whiteSpace: 'nowrap',
+    }}>
+      <StatusDot status={status} size={isSm ? 6 : 7} />
+      {s.th}
+    </span>
+  );
+}
+
+// --- Pill -----------------------------------------------------------------
+function Pill({ children, color = 'neutral', size = 'md', icon }) {
+  const map = {
+    neutral: { bg: C.surfaceAlt,    fg: C.ink2 },
+    accent:  { bg: C.accentSoft,    fg: C.accentInk },
+    success: { bg: C.successSoft,   fg: C.successInk },
+    warning: { bg: C.warningSoft,   fg: C.warningInk },
+    danger:  { bg: C.dangerSoft,    fg: C.dangerInk },
+    info:    { bg: C.infoSoft,      fg: C.infoInk },
+  };
+  const c = map[color] || map.neutral;
+  const isSm = size === 'sm';
+  return (
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', gap: 5,
+      padding: isSm ? '2px 8px' : '4px 10px',
+      background: c.bg, color: c.fg,
+      borderRadius: 999,
+      fontSize: isSm ? 11 : 12, fontWeight: 600, whiteSpace: 'nowrap',
+    }}>
+      {icon && <span>{icon}</span>}
+      {children}
+    </span>
+  );
+}
+
+// --- KpiCard --------------------------------------------------------------
+function KpiCard({ label, value, sub, change, color = 'neutral', icon }) {
+  const colors = {
+    neutral: { bg: C.surface,       border: C.border,       icon: C.ink2  },
+    accent:  { bg: '#fff8f1',       border: '#f3d8c2',      icon: C.accent },
+    success: { bg: '#f1faf5',       border: '#d4eddf',      icon: C.success },
+    warning: { bg: '#fdf6e9',       border: '#f0dfb8',      icon: C.warning },
+    danger:  { bg: '#fcefec',       border: '#f0cfc7',      icon: C.danger },
+    info:    { bg: '#eff5fa',       border: '#cfdfeb',      icon: C.info },
+    purple:  { bg: '#f6effa',       border: '#dbcce0',      icon: C.purple },
+  };
+  const cc = colors[color] || colors.neutral;
+  const positive = change && change > 0;
+  return (
+    <div style={{
+      background: cc.bg,
+      border: `1px solid ${cc.border}`,
+      borderRadius: 14,
+      padding: 18,
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 8,
+      minWidth: 0,
+    }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div style={{ fontSize: 12.5, color: C.muted, fontWeight: 500, lineHeight: 1.3 }}>{label}</div>
+        {icon && <div style={{
+          width: 32, height: 32, borderRadius: 8,
+          background: '#ffffffaa', display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+          color: cc.icon, fontSize: 16,
+        }}>{icon}</div>}
+      </div>
+      <div style={{ fontFamily: 'Sora, sans-serif', fontSize: 26, fontWeight: 700, color: C.ink, lineHeight: 1.1, letterSpacing: '-0.01em' }}>
+        {value}
+      </div>
+      {(sub || change != null) && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: C.muted }}>
+          {change != null && (
+            <span style={{
+              color: positive ? C.success : C.danger,
+              fontWeight: 600,
+              display: 'inline-flex', alignItems: 'center', gap: 2,
+            }}>
+              {positive ? '▲' : '▼'} {Math.abs(change)}%
+            </span>
+          )}
+          {sub && <span>{sub}</span>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// --- Tabs -----------------------------------------------------------------
+function Tabs({ items, value, onChange, variant = 'underline', style = {} }) {
+  if (variant === 'pills') {
+    return (
+      <div style={{ display: 'inline-flex', gap: 4, padding: 4, background: C.surfaceAlt, borderRadius: 10, ...style }}>
+        {items.map(it => {
+          const active = it.value === value;
+          return (
+            <button
+              key={it.value}
+              type="button"
+              onClick={() => onChange(it.value)}
+              style={{
+                padding: '7px 14px',
+                background: active ? C.surface : 'transparent',
+                color: active ? C.ink : C.muted,
+                border: 'none',
+                borderRadius: 7,
+                fontSize: 13,
+                fontWeight: active ? 600 : 500,
+                cursor: 'pointer',
+                fontFamily: 'inherit',
+                boxShadow: active ? '0 1px 3px rgba(60,40,20,0.08)' : 'none',
+                transition: 'all .15s',
+                whiteSpace: 'nowrap',
+              }}>
+              {it.icon && <span style={{ marginRight: 6 }}>{it.icon}</span>}
+              {it.label}
+              {it.count != null && (
+                <span style={{
+                  marginLeft: 6, padding: '1px 6px', borderRadius: 999,
+                  background: active ? C.accent : C.borderSoft,
+                  color: active ? '#fff' : C.muted,
+                  fontSize: 10.5, fontWeight: 700,
+                }}>{it.count}</span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+    );
+  }
+  // Underline variant
+  return (
+    <div style={{ display: 'flex', gap: 4, borderBottom: `1px solid ${C.border}`, ...style }}>
+      {items.map(it => {
+        const active = it.value === value;
+        return (
+          <button
+            key={it.value}
+            type="button"
+            onClick={() => onChange(it.value)}
+            style={{
+              padding: '10px 14px',
+              background: 'transparent',
+              color: active ? C.ink : C.muted,
+              border: 'none',
+              borderBottom: `2px solid ${active ? C.accent : 'transparent'}`,
+              fontSize: 13.5,
+              fontWeight: active ? 600 : 500,
+              cursor: 'pointer',
+              fontFamily: 'inherit',
+              marginBottom: -1,
+              transition: 'all .15s',
+              whiteSpace: 'nowrap',
+            }}>
+            {it.icon && <span style={{ marginRight: 6 }}>{it.icon}</span>}
+            {it.label}
+            {it.count != null && (
+              <span style={{ marginLeft: 6, color: C.muted, fontSize: 12 }}>({it.count})</span>
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// --- Drawer (right-side slide-in) -----------------------------------------
+function Drawer({ open, onClose, title, children, width = 540, footer }) {
+  useEffect(() => {
+    const onEsc = (e) => { if (e.key === 'Escape' && open) onClose && onClose(); };
+    window.addEventListener('keydown', onEsc);
+    return () => window.removeEventListener('keydown', onEsc);
+  }, [open, onClose]);
+  if (!open) return null;
+  return (
+    <div style={{ position: 'fixed', inset: 0, zIndex: 1000 }}>
+      <div onClick={onClose} style={{
+        position: 'absolute', inset: 0, background: 'rgba(30,20,10,0.36)',
+        animation: 'fadeIn .2s ease',
+      }} />
+      <div style={{
+        position: 'absolute', top: 0, right: 0, height: '100%',
+        width: '100%', maxWidth: width, background: C.bg,
+        boxShadow: '-12px 0 32px -8px rgba(30,20,10,0.18)',
+        display: 'flex', flexDirection: 'column',
+        animation: 'slideLeft .25s ease',
+      }}>
+        <div style={{
+          padding: '16px 24px', borderBottom: `1px solid ${C.border}`,
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          background: C.surface, flexShrink: 0,
+        }}>
+          <div style={{ fontSize: 16, fontWeight: 600, color: C.ink, fontFamily: 'Sora, sans-serif' }}>
+            {title}
+          </div>
+          <button onClick={onClose} style={{
+            width: 32, height: 32, border: 'none', background: 'transparent',
+            color: C.muted, cursor: 'pointer', fontSize: 20, borderRadius: 8,
+            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+          }}>×</button>
+        </div>
+        <div style={{ flex: 1, overflow: 'auto', padding: 24 }}>
+          {children}
+        </div>
+        {footer && (
+          <div style={{
+            padding: '14px 24px', borderTop: `1px solid ${C.border}`,
+            background: C.surface, flexShrink: 0,
+            display: 'flex', justifyContent: 'flex-end', gap: 8,
+          }}>
+            {footer}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// --- Modal ----------------------------------------------------------------
+function Modal({ open, onClose, title, children, footer, width = 480 }) {
+  useEffect(() => {
+    const onEsc = (e) => { if (e.key === 'Escape' && open) onClose && onClose(); };
+    window.addEventListener('keydown', onEsc);
+    return () => window.removeEventListener('keydown', onEsc);
+  }, [open, onClose]);
+  if (!open) return null;
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, zIndex: 1100,
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      padding: 16, background: 'rgba(30,20,10,0.42)',
+      animation: 'fadeIn .18s ease',
+    }} onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()} style={{
+        background: C.surface, borderRadius: 14, width: '100%', maxWidth: width,
+        boxShadow: '0 16px 48px -8px rgba(30,20,10,0.36)',
+        display: 'flex', flexDirection: 'column', maxHeight: '90vh',
+      }}>
+        {title && (
+          <div style={{
+            padding: '16px 22px', borderBottom: `1px solid ${C.border}`,
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          }}>
+            <div style={{ fontSize: 15.5, fontWeight: 600, color: C.ink, fontFamily: 'Sora, sans-serif' }}>{title}</div>
+            <button onClick={onClose} style={{
+              width: 28, height: 28, border: 'none', background: 'transparent',
+              color: C.muted, cursor: 'pointer', fontSize: 18, borderRadius: 6,
+            }}>×</button>
+          </div>
+        )}
+        <div style={{ padding: 22, overflow: 'auto' }}>{children}</div>
+        {footer && (
+          <div style={{
+            padding: '14px 22px', borderTop: `1px solid ${C.border}`,
+            display: 'flex', justifyContent: 'flex-end', gap: 8,
+          }}>{footer}</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// --- DataTable ------------------------------------------------------------
+function DataTable({ columns, rows, onRowClick, empty, density = 'normal', stickyHeader = true }) {
+  const padding = density === 'compact' ? '8px 12px' : '12px 14px';
+  return (
+    <div style={{
+      background: C.surface,
+      border: `1px solid ${C.border}`,
+      borderRadius: 12,
+      overflow: 'hidden',
+      width: '100%',
+    }}>
+      <div style={{ overflow: 'auto', maxWidth: '100%' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: columns.reduce((s,c) => s + (c.minWidth || 100), 0) }}>
+          <thead>
+            <tr style={{ background: C.surfaceAlt, position: stickyHeader ? 'sticky' : 'static', top: 0, zIndex: 1 }}>
+              {columns.map(col => (
+                <th key={col.key} style={{
+                  padding,
+                  textAlign: col.align || 'left',
+                  fontSize: 11.5,
+                  fontWeight: 600,
+                  color: C.muted,
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.04em',
+                  borderBottom: `1px solid ${C.border}`,
+                  whiteSpace: 'nowrap',
+                  minWidth: col.minWidth,
+                  width: col.width,
+                }}>{col.label}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 ? (
+              <tr>
+                <td colSpan={columns.length} style={{ padding: 40, textAlign: 'center', color: C.muted, fontSize: 13 }}>
+                  {empty || 'ไม่พบข้อมูล'}
+                </td>
+              </tr>
+            ) : rows.map((row, i) => (
+              <tr
+                key={row.id || row.key || i}
+                onClick={() => onRowClick && onRowClick(row, i)}
+                style={{
+                  cursor: onRowClick ? 'pointer' : 'default',
+                  borderBottom: i === rows.length - 1 ? 'none' : `1px solid ${C.borderSoft}`,
+                  transition: 'background .12s',
+                }}
+                onMouseEnter={(e) => onRowClick && (e.currentTarget.style.background = C.surfaceAlt)}
+                onMouseLeave={(e) => onRowClick && (e.currentTarget.style.background = 'transparent')}
+              >
+                {columns.map(col => (
+                  <td key={col.key} style={{
+                    padding,
+                    textAlign: col.align || 'left',
+                    fontSize: 13,
+                    color: C.ink,
+                    verticalAlign: 'middle',
+                  }}>
+                    {col.render ? col.render(row) : row[col.key]}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// --- EmptyState -----------------------------------------------------------
+function EmptyState({ icon = '📭', title, description, action }) {
+  return (
+    <div style={{
+      padding: '40px 24px', textAlign: 'center',
+      background: C.surfaceAlt, border: `1px dashed ${C.borderStrong}`,
+      borderRadius: 12,
+    }}>
+      <div style={{ fontSize: 40, marginBottom: 12 }}>{icon}</div>
+      <div style={{ fontSize: 15, fontWeight: 600, color: C.ink, marginBottom: 6 }}>{title}</div>
+      {description && <div style={{ fontSize: 13, color: C.muted, marginBottom: 16, maxWidth: 340, marginLeft: 'auto', marginRight: 'auto' }}>{description}</div>}
+      {action && <div>{action}</div>}
+    </div>
+  );
+}
+
+// --- Avatar (initials w/ deterministic color) ----------------------------
+function Avatar({ name, size = 36, color }) {
+  const initials = useMemo(() => {
+    if (!name) return '?';
+    const parts = name.replace(/^(คุณ|นาย|นาง|นางสาว|น\.ส\.)\s*/, '').trim().split(/\s+/);
+    return (parts[0]?.[0] || '') + (parts[1]?.[0] || '');
+  }, [name]);
+  const palette = ['#c46a3e','#3a6b8a','#7a4f8a','#2e9b6a','#c98a2b','#5b4f40','#8a4536','#456b2e'];
+  const hash = useMemo(() => {
+    let h = 0; for (const c of (name || '')) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+    return h;
+  }, [name]);
+  const bg = color || palette[hash % palette.length];
+  return (
+    <div style={{
+      width: size, height: size, borderRadius: '50%',
+      background: bg, color: '#fff',
+      display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+      fontSize: size * 0.36, fontWeight: 600, fontFamily: 'Sora, sans-serif',
+      flexShrink: 0,
+      letterSpacing: '-0.02em',
+    }}>{initials}</div>
+  );
+}
+
+// --- SearchInput ----------------------------------------------------------
+function SearchInput({ value, onChange, placeholder = 'ค้นหา...', width = 280 }) {
+  return (
+    <div style={{
+      display: 'inline-flex', alignItems: 'center', width,
+      background: C.surface, border: `1px solid ${C.border}`,
+      borderRadius: 9, padding: '0 12px', height: 38,
+    }}>
+      <span style={{ color: C.muted, marginRight: 8, fontSize: 14 }}>🔍</span>
+      <input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        style={{
+          flex: 1, border: 'none', outline: 'none', background: 'transparent',
+          fontSize: 13.5, color: C.ink, fontFamily: 'inherit', padding: 0,
+        }}
+      />
+      {value && (
+        <button onClick={() => onChange('')} style={{
+          border: 'none', background: 'transparent', color: C.muted,
+          cursor: 'pointer', fontSize: 14, padding: 4,
+        }}>×</button>
+      )}
+    </div>
+  );
+}
+
+// --- FilterChip -----------------------------------------------------------
+function FilterChip({ label, active, onClick, count, color }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        padding: '6px 12px',
+        background: active ? (color || C.dark) : C.surface,
+        color: active ? '#fff' : C.ink2,
+        border: `1px solid ${active ? (color || C.dark) : C.border}`,
+        borderRadius: 999,
+        fontSize: 12.5,
+        fontWeight: 500,
+        cursor: 'pointer',
+        fontFamily: 'inherit',
+        whiteSpace: 'nowrap',
+        display: 'inline-flex', alignItems: 'center', gap: 6,
+        transition: 'all .15s',
+      }}>
+      {label}
+      {count != null && (
+        <span style={{
+          padding: '0 6px', borderRadius: 999, fontSize: 11, fontWeight: 600,
+          background: active ? 'rgba(255,255,255,0.22)' : C.borderSoft,
+          color: active ? '#fff' : C.muted,
+        }}>{count}</span>
+      )}
+    </button>
+  );
+}
+
+// --- Toast (controlled) ---------------------------------------------------
+function Toast({ open, kind = 'success', children, onClose, duration = 2800 }) {
+  useEffect(() => {
+    if (!open || !duration) return;
+    const t = setTimeout(() => onClose && onClose(), duration);
+    return () => clearTimeout(t);
+  }, [open, duration, onClose]);
+  if (!open) return null;
+  const colors = {
+    success: { bg: C.successInk, fg: '#fff' },
+    danger:  { bg: C.dangerInk,  fg: '#fff' },
+    info:    { bg: C.dark,       fg: '#fff' },
+    warning: { bg: C.warning,    fg: '#fff' },
+  };
+  const cc = colors[kind] || colors.info;
+  return (
+    <div style={{
+      position: 'fixed', bottom: 24, left: '50%', transform: 'translateX(-50%)',
+      background: cc.bg, color: cc.fg,
+      padding: '11px 18px', borderRadius: 10,
+      fontSize: 13.5, fontWeight: 500,
+      boxShadow: '0 12px 32px -8px rgba(30,20,10,0.42)',
+      zIndex: 1200,
+      animation: 'slideUp .3s ease',
+      maxWidth: 'calc(100vw - 32px)',
+    }}>{children}</div>
+  );
+}
+
+// --- Charts: BarChart -----------------------------------------------------
+function BarChart({ data, height = 200, color, formatValue, showValues = false }) {
+  const max = Math.max(...data.map(d => d.value), 1);
+  const barColor = color || C.accent;
+  return (
+    <div style={{ display: 'flex', alignItems: 'flex-end', gap: 8, height, padding: '8px 0' }}>
+      {data.map((d, i) => {
+        const h = (d.value / max) * (height - 36);
+        return (
+          <div key={d.label || i} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', minWidth: 0, gap: 6 }}>
+            {showValues && <div style={{ fontSize: 10.5, fontWeight: 600, color: C.ink2, whiteSpace: 'nowrap' }}>
+              {formatValue ? formatValue(d.value) : fmt(d.value)}
+            </div>}
+            <div style={{
+              width: '100%', height: Math.max(h, 2), maxWidth: 40,
+              background: d.color || barColor,
+              borderRadius: '6px 6px 2px 2px',
+              transformOrigin: 'bottom',
+              animation: `growBar .6s ease ${i*0.04}s both`,
+              opacity: d.muted ? 0.45 : 1,
+            }} />
+            <div style={{ fontSize: 10.5, color: C.muted, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '100%' }}>
+              {d.label}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// --- Charts: DonutChart ---------------------------------------------------
+function DonutChart({ segments, size = 180, thickness = 22, centerLabel, centerValue }) {
+  const total = segments.reduce((s, x) => s + x.value, 0) || 1;
+  const r = size / 2 - thickness / 2;
+  const cx = size / 2, cy = size / 2;
+  let cum = 0;
+  const arcs = segments.map((seg, i) => {
+    const startA = (cum / total) * 2 * Math.PI - Math.PI / 2;
+    cum += seg.value;
+    const endA = (cum / total) * 2 * Math.PI - Math.PI / 2;
+    const x1 = cx + r * Math.cos(startA);
+    const y1 = cy + r * Math.sin(startA);
+    const x2 = cx + r * Math.cos(endA);
+    const y2 = cy + r * Math.sin(endA);
+    const large = endA - startA > Math.PI ? 1 : 0;
+    const d = `M ${x1} ${y1} A ${r} ${r} 0 ${large} 1 ${x2} ${y2}`;
+    return { d, color: seg.color, key: seg.label || i };
+  });
+  return (
+    <div style={{ position: 'relative', width: size, height: size }}>
+      <svg width={size} height={size} style={{ display: 'block' }}>
+        <circle cx={cx} cy={cy} r={r} fill="none" stroke={C.borderSoft} strokeWidth={thickness} />
+        {arcs.map(a => (
+          <path key={a.key} d={a.d} fill="none" stroke={a.color}
+                strokeWidth={thickness} strokeLinecap="butt" />
+        ))}
+      </svg>
+      {(centerLabel || centerValue) && (
+        <div style={{
+          position: 'absolute', inset: 0, display: 'flex',
+          flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+        }}>
+          {centerValue && <div style={{ fontFamily: 'Sora, sans-serif', fontSize: 28, fontWeight: 700, color: C.ink, lineHeight: 1 }}>{centerValue}</div>}
+          {centerLabel && <div style={{ fontSize: 11, color: C.muted, marginTop: 4 }}>{centerLabel}</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// --- Charts: Sparkline (line) --------------------------------------------
+function Sparkline({ data, width = 120, height = 36, color, fill = true }) {
+  if (!data || data.length === 0) return null;
+  const max = Math.max(...data), min = Math.min(...data);
+  const range = max - min || 1;
+  const stepX = data.length > 1 ? width / (data.length - 1) : 0;
+  const points = data.map((v, i) => [i * stepX, height - ((v - min) / range) * height]);
+  const pathD = points.map(([x,y], i) => `${i ? 'L' : 'M'} ${x.toFixed(1)} ${y.toFixed(1)}`).join(' ');
+  const fillD = `${pathD} L ${width} ${height} L 0 ${height} Z`;
+  const c = color || C.accent;
+  return (
+    <svg width={width} height={height} style={{ display: 'block' }}>
+      {fill && <path d={fillD} fill={c} opacity="0.12" />}
+      <path d={pathD} fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+// --- Charts: HorizontalBar (for top-N rankings) --------------------------
+function HBar({ value, max, color, label, suffix }) {
+  const pct = max > 0 ? (value / max) * 100 : 0;
+  return (
+    <div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginBottom: 4, color: C.ink2 }}>
+        <span>{label}</span>
+        <span style={{ fontWeight: 600, color: C.ink }}>{suffix || fmt(value)}</span>
+      </div>
+      <div style={{ height: 8, background: C.borderSoft, borderRadius: 4, overflow: 'hidden' }}>
+        <div style={{
+          height: '100%', width: `${pct}%`, background: color || C.accent,
+          borderRadius: 4, transition: 'width .6s ease',
+        }} />
+      </div>
+    </div>
+  );
+}
+
+// --- DefList (definition list, label-value rows) -------------------------
+function DefList({ items, columns = 1, dense = false }) {
+  return (
+    <div style={{
+      display: 'grid',
+      gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`,
+      gap: dense ? '8px 16px' : '12px 16px',
+    }}>
+      {items.map((it, i) => (
+        <div key={i} style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 2 }}>{it.label}</div>
+          <div style={{ fontSize: 13.5, color: C.ink, fontWeight: it.bold ? 600 : 400, wordBreak: 'break-word' }}>
+            {it.value || '—'}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// --- Page wrapper (consistent padding + max-width) ----------------------
+function PageContainer({ children, maxWidth = 1240, style = {} }) {
+  return (
+    <div style={{ maxWidth, margin: '0 auto', padding: '24px 28px 48px', ...style }}>
+      {children}
+    </div>
+  );
+}
+
+// --- PageHeader ---------------------------------------------------------
+function PageHeader({ title, subtitle, actions, breadcrumb }) {
+  return (
+    <div style={{ marginBottom: 24 }}>
+      {breadcrumb && (
+        <div style={{ fontSize: 12, color: C.muted, marginBottom: 8 }}>
+          {breadcrumb.map((b, i) => (
+            <span key={i}>
+              {i > 0 && <span style={{ margin: '0 6px' }}>/</span>}
+              {b}
+            </span>
+          ))}
+        </div>
+      )}
+      <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
+        <div>
+          <h1 style={{ margin: 0, fontFamily: 'Sora, sans-serif', fontSize: 26, fontWeight: 700, color: C.ink, letterSpacing: '-0.01em' }}>
+            {title}
+          </h1>
+          {subtitle && <div style={{ fontSize: 13.5, color: C.muted, marginTop: 6 }}>{subtitle}</div>}
+        </div>
+        {actions && <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>{actions}</div>}
+      </div>
+    </div>
+  );
+}
+
+// --- Expose to window ---------------------------------------------------
+Object.assign(window, {
+  Card, SectionHeading, Btn, IconBtn,
+  Input, Select, Toggle, Textarea,
+  StatusDot, StatusBadge, Pill,
+  KpiCard, Tabs, Drawer, Modal,
+  DataTable, EmptyState, Avatar,
+  SearchInput, FilterChip, Toast,
+  BarChart, DonutChart, Sparkline, HBar,
+  DefList, PageContainer, PageHeader,
+});
