@@ -448,33 +448,49 @@ function App() {
   // --- Live data polling -----------------------------------------------
   // Public bookings + maintenance tickets arrive without an admin reload,
   // so poll every 30s. Both endpoints are cheap (one row each).
+  // - Skip when the tab is hidden (saves bandwidth + battery).
+  // - Surface 401 via toast so admin can re-login instead of seeing stale data.
   const [tickets, setTickets] = useState([]);
   useEffect(() => {
     let cancel = false;
+    let warned401 = false;
     const refresh = async () => {
+      if (typeof document !== 'undefined' && document.hidden) return;
       try {
         const [bRes, tRes] = await Promise.all([
           fetch('/api/data/baankarn_bookings_v1', { credentials: 'include' }),
           fetch('/api/maintenance', { credentials: 'include' }),
         ]);
         if (cancel) return;
+        if (tRes.status === 401 && !warned401) {
+          warned401 = true;
+          setToast && setToast({ kind: 'error', message: 'หมดเวลาเข้าสู่ระบบ — โปรดล็อกอินใหม่' });
+        }
         if (bRes.ok) {
           const bd = await bRes.json();
           if (Array.isArray(bd?.value)) {
             setBookings((prev) => {
-              // Merge: keep admin's local edits but pick up new public-form
-              // submissions (those start with BK-PUB-).
+              // Only merge in genuinely-new public-form submissions; never
+              // resurrect a booking the admin removed locally. Filtering by
+              // source='public-form' stops admin-edited bookings (which the
+              // poll re-fetches) from being prepended as duplicates if their
+              // id were ever to mismatch.
               const known = new Set(prev.map((b) => b.id));
-              const additions = bd.value.filter((b) => !known.has(b.id));
+              const additions = bd.value.filter(
+                (b) => b && b.source === 'public-form' && !known.has(b.id)
+              );
               return additions.length ? [...additions, ...prev] : prev;
             });
           }
         }
         if (tRes.ok) {
+          warned401 = false;
           const td = await tRes.json();
           if (Array.isArray(td?.tickets)) setTickets(td.tickets);
         }
-      } catch {}
+      } catch (err) {
+        console.warn('[shell] live poll error:', err);
+      }
     };
     refresh();
     const t = setInterval(refresh, 30_000);

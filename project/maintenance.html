@@ -336,8 +336,9 @@
         `;
       }).join('');
 
-      // Wire up the per-card rating buttons after DOM update.
-      const phoneNow = document.getElementById('hPhone').value.trim();
+      // Tenant rating uses the phone we ALREADY validated for lookup. Capture
+      // it now so a later input edit doesn't break the rate POST.
+      const phoneAtLookup = phone;
       ticketList.querySelectorAll('.rate-star').forEach((btn) => {
         btn.addEventListener('click', async () => {
           const tid = Number(btn.dataset.tid);
@@ -347,7 +348,7 @@
             const res = await fetch(`/api/maintenance/${tid}/rate`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ phone: phoneNow, rating }),
+              body: JSON.stringify({ phone: phoneAtLookup, rating }),
             });
             const out = await res.json();
             if (!res.ok || !out.ok) {

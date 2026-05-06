@@ -1054,6 +1054,7 @@ app.get('/maintenance', (_req, res) => {
 // --- Boot -----------------------------------------------------------------
 // Background job: prune audit_logs older than 180 days. Runs hourly so the
 // table stays bounded; deletion is a fast index range scan.
+let _prunerInterval = null;
 function startAuditPruner() {
   const prune = async () => {
     try {
@@ -1065,9 +1066,14 @@ function startAuditPruner() {
       console.error('[audit] prune failed:', sanitizeError(err));
     }
   };
-  // First run delayed 60s so DB is settled before a heavy DELETE on boot
-  setTimeout(prune, 60_000);
-  setInterval(prune, 60 * 60 * 1000).unref();
+  // Run once immediately so a flapping deploy still gets cleanup, then hourly.
+  prune();
+  _prunerInterval = setInterval(prune, 60 * 60 * 1000);
+  _prunerInterval.unref();
+}
+function stopAuditPruner() {
+  if (_prunerInterval) clearInterval(_prunerInterval);
+  _prunerInterval = null;
 }
 
 migrate()
@@ -1085,6 +1091,8 @@ migrate()
     // so Railway restarts don't kill mid-request work.
     const shutdown = (signal) => {
       console.log(`[server] ${signal} received, shutting down gracefully`);
+      // Cancel the background pruner so its DELETE doesn't race with pool.end()
+      stopAuditPruner();
       server.close(() => {
         pool.end(() => {
           console.log('[server] closed cleanly');
