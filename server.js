@@ -59,6 +59,31 @@ async function migrate() {
       expire TIMESTAMP(6) NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_user_sessions_expire ON user_sessions(expire);
+
+    -- Maintenance tickets (Phase A4)
+    CREATE TABLE IF NOT EXISTS maintenance_tickets (
+      id              BIGSERIAL PRIMARY KEY,
+      ticket_no       TEXT UNIQUE NOT NULL,
+      room_id         TEXT NOT NULL,
+      tenant_name     TEXT,
+      tenant_phone    TEXT,
+      category        TEXT NOT NULL,
+      priority        TEXT NOT NULL DEFAULT 'medium',
+      status          TEXT NOT NULL DEFAULT 'open',
+      title           TEXT NOT NULL,
+      description     TEXT,
+      assigned_to     TEXT,
+      scheduled_at    TIMESTAMPTZ,
+      completed_at    TIMESTAMPTZ,
+      rating          SMALLINT,
+      rating_comment  TEXT,
+      cost            NUMERIC(10,2) DEFAULT 0,
+      created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_tickets_status ON maintenance_tickets(status);
+    CREATE INDEX IF NOT EXISTS idx_tickets_room ON maintenance_tickets(room_id);
+    CREATE INDEX IF NOT EXISTS idx_tickets_created ON maintenance_tickets(created_at DESC);
   `);
   console.log('[db] schema ready');
 
@@ -377,6 +402,210 @@ app.get('/api/promptpay/qr', async (req, res) => {
   }
 });
 
+// --- Maintenance tickets (Phase A4) ---------------------------------------
+// Lifecycle: open → assigned → in_progress → (awaiting_parts) → completed.
+// Tenants submit with room_id + their phone (no login). Admins manage all
+// tickets. Tenants can later look up their own by phone.
+
+const VALID_TICKET_STATUS = new Set([
+  'open','assigned','in_progress','awaiting_parts','completed','cancelled',
+]);
+const VALID_TICKET_PRIORITY = new Set(['critical','high','medium','low']);
+const VALID_TICKET_CATEGORY = new Set([
+  'electrical','plumbing','aircon','furniture','appliance','door_lock','wifi','other',
+]);
+
+const ticketHits = new Map();
+function rateLimitTicket(req, res, next) {
+  const ip = req.ip || req.headers['x-forwarded-for'] || 'unknown';
+  const now = Date.now();
+  const arr = (ticketHits.get(ip) || []).filter((t) => now - t < 60_000);
+  if (arr.length >= 5) return res.status(429).json({ error: 'too many requests' });
+  arr.push(now);
+  ticketHits.set(ip, arr);
+  next();
+}
+
+function makeTicketNo() {
+  const d = new Date();
+  const y = d.getFullYear().toString().slice(-2);
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const seq = String(d.getTime()).slice(-5);
+  return `MT${y}${m}-${seq}`;
+}
+
+// POST /api/maintenance — public (tenant submits). Rate-limited.
+app.post('/api/maintenance', sameOrigin, rateLimitTicket, async (req, res) => {
+  const b = req.body || {};
+  const str = (v, max) => (typeof v === 'string' ? v.slice(0, max) : '');
+  const cleaned = {
+    room_id:      str(b.roomId, 32),
+    tenant_name:  str(b.tenantName, 120),
+    tenant_phone: str(b.tenantPhone, 32),
+    category:     str(b.category, 32),
+    priority:     str(b.priority, 16) || 'medium',
+    title:        str(b.title, 200),
+    description:  str(b.description, 2000),
+  };
+  if (!cleaned.room_id || !cleaned.title || !cleaned.category) {
+    return res.status(400).json({ error: 'roomId, title and category required' });
+  }
+  if (!VALID_TICKET_CATEGORY.has(cleaned.category)) {
+    return res.status(400).json({ error: 'invalid category' });
+  }
+  if (!VALID_TICKET_PRIORITY.has(cleaned.priority)) {
+    return res.status(400).json({ error: 'invalid priority' });
+  }
+  const ticketNo = makeTicketNo();
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO maintenance_tickets
+        (ticket_no, room_id, tenant_name, tenant_phone, category, priority, title, description)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+        RETURNING *`,
+      [ticketNo, cleaned.room_id, cleaned.tenant_name, cleaned.tenant_phone,
+       cleaned.category, cleaned.priority, cleaned.title, cleaned.description]
+    );
+    const ticket = rows[0];
+    // Fire-and-forget LINE notify to owner
+    lineNotify
+      .notifyOwner(
+        `🛠 แจ้งซ่อมใหม่ (${ticket.priority})\n` +
+        `เลขที่: ${ticket.ticket_no}\n` +
+        `ห้อง: ${ticket.room_id} (${ticket.tenant_name || '-'})\n` +
+        `หมวด: ${ticket.category}\n` +
+        `เรื่อง: ${ticket.title}`
+      )
+      .catch(() => {});
+    res.json({ ok: true, ticket });
+  } catch (err) {
+    console.error('ticket create error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// GET /api/maintenance — admin list. Optional ?status= filter.
+app.get('/api/maintenance', requireAuth, async (req, res) => {
+  const status = req.query.status;
+  try {
+    const params = [];
+    let where = '';
+    if (status && VALID_TICKET_STATUS.has(String(status))) {
+      params.push(status);
+      where = `WHERE status = $1`;
+    }
+    const { rows } = await pool.query(
+      `SELECT * FROM maintenance_tickets ${where} ORDER BY created_at DESC LIMIT 500`,
+      params
+    );
+    res.json({ ok: true, tickets: rows });
+  } catch (err) {
+    console.error('ticket list error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// GET /api/maintenance/lookup?phone=... — public lookup of tenant's own tickets.
+// Requires both phone AND room_id to prevent enumeration.
+app.get('/api/maintenance/lookup', async (req, res) => {
+  const phone = String(req.query.phone || '').trim().slice(0, 32);
+  const roomId = String(req.query.roomId || '').trim().slice(0, 32);
+  if (!phone || !roomId) {
+    return res.status(400).json({ error: 'phone and roomId required' });
+  }
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, ticket_no, room_id, category, priority, status, title, created_at, completed_at, rating
+         FROM maintenance_tickets
+         WHERE tenant_phone = $1 AND room_id = $2
+         ORDER BY created_at DESC LIMIT 50`,
+      [phone, roomId]
+    );
+    res.json({ ok: true, tickets: rows });
+  } catch (err) {
+    console.error('ticket lookup error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// PUT /api/maintenance/:id — admin updates status / assigned / cost / scheduled.
+app.put('/api/maintenance/:id', sameOrigin, requireAuth, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id < 1) {
+    return res.status(400).json({ error: 'invalid id' });
+  }
+  const b = req.body || {};
+  const fields = [];
+  const params = [];
+  let idx = 1;
+  if (b.status !== undefined) {
+    if (!VALID_TICKET_STATUS.has(String(b.status))) {
+      return res.status(400).json({ error: 'invalid status' });
+    }
+    fields.push(`status = $${idx++}`); params.push(b.status);
+    if (b.status === 'completed') {
+      fields.push(`completed_at = NOW()`);
+    }
+  }
+  if (b.priority !== undefined) {
+    if (!VALID_TICKET_PRIORITY.has(String(b.priority))) {
+      return res.status(400).json({ error: 'invalid priority' });
+    }
+    fields.push(`priority = $${idx++}`); params.push(b.priority);
+  }
+  if (b.assignedTo !== undefined) { fields.push(`assigned_to = $${idx++}`); params.push(String(b.assignedTo).slice(0, 120)); }
+  if (b.scheduledAt !== undefined) { fields.push(`scheduled_at = $${idx++}`); params.push(b.scheduledAt || null); }
+  if (b.cost !== undefined) {
+    const cost = Number(b.cost);
+    if (!Number.isFinite(cost) || cost < 0) return res.status(400).json({ error: 'invalid cost' });
+    fields.push(`cost = $${idx++}`); params.push(cost);
+  }
+  if (fields.length === 0) {
+    return res.status(400).json({ error: 'nothing to update' });
+  }
+  fields.push(`updated_at = NOW()`);
+  params.push(id);
+  try {
+    const { rows } = await pool.query(
+      `UPDATE maintenance_tickets SET ${fields.join(', ')} WHERE id = $${idx} RETURNING *`,
+      params
+    );
+    if (rows.length === 0) return res.status(404).json({ error: 'not found' });
+    res.json({ ok: true, ticket: rows[0] });
+  } catch (err) {
+    console.error('ticket update error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// POST /api/maintenance/:id/rate — public, requires matching phone.
+app.post('/api/maintenance/:id/rate', sameOrigin, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+  const b = req.body || {};
+  const rating = Number(b.rating);
+  const phone = String(b.phone || '').trim();
+  if (!phone) return res.status(400).json({ error: 'phone required' });
+  if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
+    return res.status(400).json({ error: 'rating must be 1-5' });
+  }
+  const comment = typeof b.comment === 'string' ? b.comment.slice(0, 500) : null;
+  try {
+    const { rows } = await pool.query(
+      `UPDATE maintenance_tickets
+         SET rating = $1, rating_comment = $2, updated_at = NOW()
+         WHERE id = $3 AND tenant_phone = $4 AND status = 'completed'
+         RETURNING ticket_no, rating`,
+      [rating, comment, id, phone]
+    );
+    if (rows.length === 0) return res.status(404).json({ error: 'not found or not completed' });
+    res.json({ ok: true, ticket: rows[0] });
+  } catch (err) {
+    console.error('ticket rate error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
 // --- Health ---------------------------------------------------------------
 app.get('/health', async (_req, res) => {
   try {
@@ -408,6 +637,10 @@ app.get('/login', (_req, res) => {
 
 app.get('/book', (_req, res) => {
   res.sendFile(path.join(__dirname, 'project', 'booking.html'));
+});
+
+app.get('/maintenance', (_req, res) => {
+  res.sendFile(path.join(__dirname, 'project', 'maintenance.html'));
 });
 
 // --- Boot -----------------------------------------------------------------

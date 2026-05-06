@@ -16,9 +16,10 @@ const NAV_GROUPS = [
   {
     title: 'จัดการ',
     items: [
-      { id: 'rooms',    label: 'ห้องพัก',     icon: '🏠' },
-      { id: 'tenants',  label: 'ผู้เช่า',     icon: '👥' },
-      { id: 'bookings', label: 'การจอง',      icon: '📋' },
+      { id: 'rooms',       label: 'ห้องพัก',     icon: '🏠' },
+      { id: 'tenants',     label: 'ผู้เช่า',     icon: '👥' },
+      { id: 'bookings',    label: 'การจอง',      icon: '📋' },
+      { id: 'maintenance', label: 'แจ้งซ่อม',    icon: '🛠' },
     ],
   },
   {
@@ -38,14 +39,15 @@ const NAV_GROUPS = [
 ];
 
 const PAGE_TITLES = {
-  overview: 'แดชบอร์ด',
-  rooms:    'ห้องพัก',
-  tenants:  'ผู้เช่า',
-  bookings: 'การจอง',
-  billing:  'บิล/ใบแจ้งหนี้',
-  reports:  'รายงาน',
-  pricing:  'ตั้งราคา',
-  settings: 'ตั้งค่าระบบ',
+  overview:    'แดชบอร์ด',
+  rooms:       'ห้องพัก',
+  tenants:     'ผู้เช่า',
+  bookings:    'การจอง',
+  maintenance: 'แจ้งซ่อม',
+  billing:     'บิล/ใบแจ้งหนี้',
+  reports:     'รายงาน',
+  pricing:     'ตั้งราคา',
+  settings:    'ตั้งค่าระบบ',
 };
 
 // ---------- Sidebar -------------------------------------------------------
@@ -591,14 +593,15 @@ function App() {
   };
 
   const PAGES = {
-    overview: PageOverview,
-    rooms:    PageRooms,
-    tenants:  PageTenants,
-    bookings: PageBookings,
-    billing:  PageBilling,
-    reports:  PageReports,
-    pricing:  PagePricing,
-    settings: PageSettings,
+    overview:    PageOverview,
+    rooms:       PageRooms,
+    tenants:     PageTenants,
+    bookings:    PageBookings,
+    maintenance: window.PageMaintenance,
+    billing:     PageBilling,
+    reports:     PageReports,
+    pricing:     PagePricing,
+    settings:    PageSettings,
   };
   const Page = PAGES[page] || PageOverview;
 

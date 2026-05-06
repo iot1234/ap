@@ -814,6 +814,24 @@ function TopBar({ search, setSearch, isMobile, onMenu }) {
       </div>
 
       <a
+        href="/maintenance"
+        title="แจ้งซ่อม"
+        style={{
+          display: 'inline-flex', alignItems: 'center', gap: 6,
+          padding: isMobile ? '0 10px' : '0 14px', height: 36,
+          background: '#fff', color: '#5b4f40',
+          border: '1px solid #ece4d4', borderRadius: 8,
+          fontFamily: 'inherit', fontSize: 12.5, fontWeight: 500,
+          textDecoration: 'none', cursor: 'pointer', flex: 'none',
+          transition: 'background .15s',
+        }}
+        onMouseEnter={(e) => e.currentTarget.style.background = '#faf6ee'}
+        onMouseLeave={(e) => e.currentTarget.style.background = '#fff'}>
+        <span style={{ fontSize: 13 }}>🛠</span>
+        {!isMobile && <span>แจ้งซ่อม</span>}
+      </a>
+
+      <a
         href="/book"
         title="จองห้องพัก"
         style={{
