@@ -66,6 +66,14 @@ async function getCsrf() {
     return _csrf;
   } catch { return null; }
 }
+
+// Subscribers notified when a 401 / 403 lands — typically the App resets
+// to LoginView so the tenant doesn't stare at stale data after the session
+// expired mid-session.
+const _authListeners = new Set();
+function onAuthExpired(fn) { _authListeners.add(fn); return () => _authListeners.delete(fn); }
+function fireAuthExpired() { for (const fn of _authListeners) try { fn(); } catch {} }
+
 async function api(path, opts = {}) {
   const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
   const method = (opts.method || 'GET').toUpperCase();
@@ -74,6 +82,14 @@ async function api(path, opts = {}) {
     if (t) headers['X-CSRF-Token'] = t;
   }
   const r = await fetch(path, { credentials: 'same-origin', ...opts, headers });
+  // Session expiry: clear local CSRF token + tell the App to re-login.
+  // We exclude the login + me endpoints — 401 there is a normal "wrong
+  // credentials" response, not a session expiry.
+  if ((r.status === 401 || r.status === 403)
+      && !path.includes('/login') && !path.includes('/csrf-token') && !path.endsWith('/me')) {
+    _csrf = null;
+    fireAuthExpired();
+  }
   let data = null;
   try { data = await r.json(); } catch { /* ignore */ }
   if (!r.ok) {
@@ -657,12 +673,24 @@ function App() {
 
   useEffect(() => { document.body.dataset.theme = theme; }, [theme]);
 
+  // Watch for session expiry from any api() call → log out cleanly so the
+  // tenant doesn't stare at stale data with broken actions. Token cache
+  // already cleared inside api().
+  useEffect(() => {
+    return onAuthExpired(() => {
+      setTenant(null);
+      setBills([]);
+      setTickets([]);
+      setPage('home');
+    });
+  }, []);
+
   useEffect(() => {
     (async () => {
       try {
         const [me, f] = await Promise.all([
-          fetch('/api/tenant/me').then((r) => r.json()),
-          fetch('/api/features').then((r) => r.json()),
+          fetch('/api/tenant/me').then((r) => r.json()).catch(() => ({ tenant: null })),
+          fetch('/api/features').then((r) => r.json()).catch(() => ({ features: {} })),
         ]);
         setFeatures(f.features || {});
         if (me.tenant) {
@@ -726,4 +754,86 @@ function App() {
   );
 }
 
-ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+// === Error boundary + offline banner ======================================
+// Catches render-time exceptions in any view so a single bad bill/ticket
+// row doesn't blank the whole portal. Reports to /api/client-error so the
+// admin can see what blew up.
+class TenantErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { err: null }; }
+  static getDerivedStateFromError(err) { return { err }; }
+  componentDidCatch(err, info) {
+    try {
+      fetch('/api/client-error', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({
+          message: String(err?.message || err),
+          stack: String(err?.stack || '').slice(0, 4000),
+          componentStack: String(info?.componentStack || '').slice(0, 4000),
+          url: window.location.href,
+        }),
+      });
+    } catch { /* ignore */ }
+  }
+  render() {
+    if (!this.state.err) return this.props.children;
+    return (
+      <div style={{
+        padding: 32, margin: 16, borderRadius: 16,
+        background: 'var(--card)', color: 'var(--ink)', textAlign: 'center',
+      }}>
+        <div style={{ fontSize: 36, marginBottom: 12 }}>⚠️</div>
+        <h2 style={{ margin: 0, fontFamily: 'Sora', fontWeight: 600, fontSize: 18 }}>
+          เกิดข้อผิดพลาด
+        </h2>
+        <p style={{ color: 'var(--muted)', fontSize: 14, marginTop: 8, marginBottom: 16 }}>
+          {String(this.state.err?.message || 'unknown')}
+        </p>
+        <button
+          onClick={() => this.setState({ err: null })}
+          style={{
+            padding: '10px 24px', borderRadius: 10, border: 0,
+            background: 'var(--accent)', color: '#fff', fontWeight: 600,
+            cursor: 'pointer', fontFamily: 'inherit',
+          }}
+        >ลองใหม่</button>
+        <button
+          onClick={() => window.location.href = '/tenant'}
+          style={{
+            display: 'block', margin: '12px auto 0', background: 'transparent',
+            color: 'var(--muted)', border: 0, cursor: 'pointer', fontFamily: 'inherit', fontSize: 13,
+          }}
+        >โหลดหน้าใหม่</button>
+      </div>
+    );
+  }
+}
+
+function TenantOfflineBanner() {
+  const [online, setOnline] = useState(navigator.onLine);
+  useEffect(() => {
+    const up = () => setOnline(true);
+    const down = () => setOnline(false);
+    window.addEventListener('online', up);
+    window.addEventListener('offline', down);
+    return () => { window.removeEventListener('online', up); window.removeEventListener('offline', down); };
+  }, []);
+  if (online) return null;
+  return (
+    <div style={{
+      position: 'fixed', top: 0, left: 0, right: 0, zIndex: 1000,
+      background: '#b94a48', color: '#fff', padding: '8px 16px',
+      textAlign: 'center', fontSize: 13.5, fontWeight: 500,
+    }}>🔌 ไม่ได้เชื่อมต่ออินเทอร์เน็ต</div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(
+  <>
+    <TenantOfflineBanner />
+    <TenantErrorBoundary>
+      <App />
+    </TenantErrorBoundary>
+  </>
+);

@@ -78,6 +78,52 @@ check "GET /api/reports/overview"   200 -b "$COOKIE_JAR" "$BASE_URL/api/reports/
 check "GET /api/reports/maintenance" 200 -b "$COOKIE_JAR" "$BASE_URL/api/reports/maintenance"
 
 echo ""
+echo "v2 admin endpoints:"
+check "GET /api/admin/users"          200 -b "$COOKIE_JAR" "$BASE_URL/api/admin/users"
+check "GET /api/admin/security-events" 200 -b "$COOKIE_JAR" "$BASE_URL/api/admin/security-events"
+check "GET /api/admin/access-devices" 200 -b "$COOKIE_JAR" "$BASE_URL/api/admin/access-devices"
+check "GET /api/admin/notifications"  200 -b "$COOKIE_JAR" "$BASE_URL/api/admin/notifications"
+check "GET /api/admin/features"       200 -b "$COOKIE_JAR" "$BASE_URL/api/admin/features"
+check "GET /api/features"             200 "$BASE_URL/api/features"
+check "GET /api/tenants"              200 -b "$COOKIE_JAR" "$BASE_URL/api/tenants"
+check "GET /api/bills"                200 -b "$COOKIE_JAR" "$BASE_URL/api/bills"
+check "GET /api/payments"             200 -b "$COOKIE_JAR" "$BASE_URL/api/payments"
+
+echo ""
+echo "Public PII protection:"
+check "GET /api/data/baankarn_users_v1 (no auth) blocked"  401 "$BASE_URL/api/data/baankarn_users_v1"
+check "GET /api/data/baankarn_bookings_v1 (no auth) blocked" 401 "$BASE_URL/api/data/baankarn_bookings_v1"
+check "GET /api/data/baankarn_rooms_v1 (no auth) masked"   200 "$BASE_URL/api/data/baankarn_rooms_v1"
+
+echo ""
+echo "Validation (Zod):"
+check "POST /api/auth/login (empty)"   400 -X POST -H "Content-Type: application/json" \
+  -d '{}' -H "Origin: $BASE_URL" "$BASE_URL/api/auth/login"
+check "POST /api/bookings/public (no name)" 400 -X POST -H "Content-Type: application/json" \
+  -d '{"phone":"0812345678"}' -H "Origin: $BASE_URL" "$BASE_URL/api/bookings/public"
+check "GET /api/promptpay/qr (bad shape)" 400 "$BASE_URL/api/promptpay/qr?target=1234567890"
+
+echo ""
+echo "v2.1 routes/ modules:"
+check "GET /api/csrf-token"              200 "$BASE_URL/api/csrf-token"
+check "GET /api/rooms"                   200 -b "$COOKIE_JAR" "$BASE_URL/api/rooms"
+check "GET /api/settings"                200 -b "$COOKIE_JAR" "$BASE_URL/api/settings"
+check "GET /api/reports2/revenue"        200 -b "$COOKIE_JAR" "$BASE_URL/api/reports2/revenue?year=2026"
+check "GET /api/reports2/occupancy"      200 -b "$COOKIE_JAR" "$BASE_URL/api/reports2/occupancy?year=2026"
+check "GET /api/reports2/overdue"        200 -b "$COOKIE_JAR" "$BASE_URL/api/reports2/overdue"
+check "GET /api/reports2/maintenance/stats" 200 -b "$COOKIE_JAR" "$BASE_URL/api/reports2/maintenance/stats"
+check "GET /api/reports2/cashflow"       200 -b "$COOKIE_JAR" "$BASE_URL/api/reports2/cashflow"
+check "POST /webhook/line (bad sig)"     403 -X POST -H "Content-Type: application/json" \
+  -d '{"events":[]}' "$BASE_URL/webhook/line"
+
+echo ""
+echo "Auth hardening:"
+check "POST /api/auth/login (timing-attack)" 401 -X POST -H "Content-Type: application/json" \
+  -d "{\"username\":\"definitely-does-not-exist\",\"password\":\"wrong\"}" \
+  -H "Origin: $BASE_URL" "$BASE_URL/api/auth/login"
+check "GET /files/999999 (not found)"   404 "$BASE_URL/files/999999"
+
+echo ""
 echo "CSRF defense (cross-origin should be blocked):"
 check "PUT /api/data with foreign Origin → 403"  403 \
   -X PUT -H "Content-Type: application/json" -H "Origin: https://evil.example.com" \

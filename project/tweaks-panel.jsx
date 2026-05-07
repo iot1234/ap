@@ -145,7 +145,9 @@ function useTweaks(defaults) {
     const edits = typeof keyOrEdits === 'object' && keyOrEdits !== null
       ? keyOrEdits : { [keyOrEdits]: val };
     setValues((prev) => ({ ...prev, ...edits }));
-    window.parent.postMessage({ type: '__edit_mode_set_keys', edits }, '*');
+    // C1: target our own origin only. With '*' an attacker who managed to
+    // embed this page in their iframe could harvest edits.
+    window.parent.postMessage({ type: '__edit_mode_set_keys', edits }, window.location.origin);
   }, []);
   return [values, setTweak];
 }

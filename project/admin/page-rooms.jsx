@@ -66,7 +66,11 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
       reader.onload = () => {
         try {
           const text = reader.result.replace(/^﻿/, '');
+          // C8 — cap input so a malicious or accidental 100MB CSV can't
+          // freeze the browser. Real bulk-import is a few hundred rows.
+          if (text.length > 5_000_000) throw new Error('ไฟล์ใหญ่เกิน 5MB');
           const lines = text.split(/\r?\n/).filter(l => l.trim());
+          if (lines.length > 5000) throw new Error('แถวเกิน 5,000 — แบ่งไฟล์ก่อนนำเข้า');
           const parseRow = (line) => {
             const out = []; let cur = '', inQ = false;
             for (let i = 0; i < line.length; i++) {

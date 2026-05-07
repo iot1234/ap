@@ -6,47 +6,90 @@
 const { useState, useEffect, useMemo } = React;
 
 // ---------- Navigation config ---------------------------------------------
+// Groups are organised by user task, not by feature. Each item can declare
+// `minRole` — the sidebar hides it if the current user's role is below.
+// ROLE_RANK: owner > manager > staff > readonly.
+const ROLE_RANK = { owner: 4, manager: 3, staff: 2, readonly: 1 };
 const NAV_GROUPS = [
   {
     title: 'ภาพรวม',
     items: [
-      { id: 'overview', label: 'แดชบอร์ด',    icon: '◫' },
+      { id: 'overview', label: 'แดชบอร์ด', icon: '◫' },
     ],
   },
   {
-    title: 'จัดการ',
+    title: 'ห้องพัก & ผู้เช่า',
     items: [
-      { id: 'rooms',       label: 'ห้องพัก',     icon: '🏠' },
-      { id: 'tenants',     label: 'ผู้เช่า',     icon: '👥' },
-      { id: 'bookings',    label: 'การจอง',      icon: '📋' },
-      { id: 'maintenance', label: 'แจ้งซ่อม',    icon: '🛠' },
+      { id: 'rooms',         label: 'ห้องพัก',     icon: '🏠' },
+      { id: 'tenants',       label: 'ผู้เช่า',     icon: '👥' },
+      { id: 'bookings',      label: 'การจอง',      icon: '📋' },
+      { id: 'line-bindings', label: 'ผูก LINE OA', icon: '💬', minRole: 'manager' },
     ],
   },
   {
     title: 'การเงิน',
     items: [
-      { id: 'billing',  label: 'บิล/ใบแจ้งหนี้', icon: '🧾' },
-      { id: 'reports',  label: 'รายงาน',      icon: '📊' },
+      { id: 'billing',     label: 'บิล/ใบแจ้งหนี้',  icon: '🧾' },
+      { id: 'payments',    label: 'สลิป/การชำระ',    icon: '💳' },
+      { id: 'pricing',     label: 'ตั้งราคา',         icon: '💰', minRole: 'manager' },
+      { id: 'reports',     label: 'รายงาน (เก่า)',    icon: '📊' },
+      { id: 'reports-v2',  label: 'รายงานจริง',      icon: '📈', minRole: 'manager' },
     ],
   },
   {
-    title: 'ตั้งค่า',
+    title: 'บริการ',
     items: [
-      { id: 'pricing',  label: 'ตั้งราคา',    icon: '💰' },
-      { id: 'settings', label: 'ระบบ',         icon: '⚙️' },
+      { id: 'maintenance',     label: 'แจ้งซ่อม',          icon: '🛠' },
+      { id: 'meters',          label: 'มิเตอร์',           icon: '⚡' },
+      { id: 'access',          label: 'เข้า-ออก',          icon: '🔑', minRole: 'manager' },
+      { id: 'access-devices',  label: 'Hardware tokens', icon: '📡', minRole: 'owner' },
+    ],
+  },
+  {
+    title: 'ระบบ',
+    items: [
+      { id: 'notifications',       label: 'ประวัติแจ้งเตือน',     icon: '🔔', minRole: 'manager' },
+      { id: 'notifications-queue', label: 'คิวแจ้งเตือน',         icon: '📤', minRole: 'manager' },
+      { id: 'security-events',     label: 'เหตุการณ์ปลอดภัย',    icon: '🛡️', minRole: 'manager' },
+      { id: 'features',            label: 'ฟีเจอร์ระบบ',         icon: '🎛', minRole: 'owner' },
+      { id: 'secrets',             label: 'ตั้งค่า API/Keys',     icon: '🔐', minRole: 'owner' },
+      { id: 'settings',            label: 'ตั้งค่าระบบ',          icon: '⚙️' },
     ],
   },
 ];
+
+// Returns the same NAV_GROUPS but with items hidden when the user's role
+// rank is below the item's minRole.
+function filterNavByRole(groups, role) {
+  const have = ROLE_RANK[role] || 0;
+  return groups
+    .map((g) => ({
+      ...g,
+      items: g.items.filter((it) => !it.minRole || (ROLE_RANK[it.minRole] || 99) <= have),
+    }))
+    .filter((g) => g.items.length > 0);
+}
 
 const PAGE_TITLES = {
   overview:    'แดชบอร์ด',
   rooms:       'ห้องพัก',
   tenants:     'ผู้เช่า',
   bookings:    'การจอง',
+  'line-bindings': 'ผูก LINE OA',
   maintenance: 'แจ้งซ่อม',
   billing:     'บิล/ใบแจ้งหนี้',
+  payments:    'สลิปชำระเงิน',
+  meters:      'มิเตอร์',
+  access:      'เข้า-ออก',
+  notifications: 'บันทึกการแจ้งเตือน',
+  'notifications-queue': 'คิวการแจ้งเตือน',
+  'security-events':    'เหตุการณ์ปลอดภัย',
+  'access-devices':     'Hardware API Tokens',
   reports:     'รายงาน',
+  'reports-v2': 'รายงานจริง (DB)',
   pricing:     'ตั้งราคา',
+  features:    'ฟีเจอร์ระบบ',
+  secrets:     'ตั้งค่า API/Keys',
   settings:    'ตั้งค่าระบบ',
 };
 
@@ -129,9 +172,9 @@ function Sidebar({ page, setPage, mobileOpen, setMobileOpen, isMobile, pendingBo
           </div>
         </div>
 
-        {/* Nav */}
+        {/* Nav — role-aware */}
         <nav style={{ flex: 1, overflowY: 'auto', padding: '14px 0' }}>
-          {NAV_GROUPS.map(group => (
+          {filterNavByRole(NAV_GROUPS, currentUser?.role).map(group => (
             <div key={group.title} style={{ marginBottom: 18 }}>
               <div style={{
                 padding: '4px 22px', fontSize: 10.5, color: C.navMuted,
@@ -675,10 +718,21 @@ function App() {
     rooms:       PageRooms,
     tenants:     PageTenants,
     bookings:    PageBookings,
+    'line-bindings': window.PageLineBindings,
     maintenance: window.PageMaintenance,
     billing:     PageBilling,
+    payments:    window.PagePayments,
+    meters:      window.PageMeters,
+    access:      window.PageAccess,
+    notifications: window.PageNotifications,
+    'notifications-queue': window.PageNotificationsQueue,
+    'security-events':     window.PageSecurityEvents,
+    'access-devices':      window.PageAccessDevices,
     reports:     PageReports,
+    'reports-v2': window.PageReportsV2,
     pricing:     PagePricing,
+    features:    window.PageFeatures,
+    secrets:     window.PageSecrets,
     settings:    PageSettings,
   };
   const Page = PAGES[page] || PageOverview;
@@ -752,7 +806,18 @@ function App() {
 // after the page already painted (visible flash + cached in browser history).
 const __mount = () => {
   const root = ReactDOM.createRoot(document.getElementById('root'));
-  root.render(<App />);
+  // ErrorBoundary catches render-time exceptions in any page; OfflineBanner
+  // tells the admin when network goes down so they don't trust stale data.
+  const Boundary = window.ErrorBoundary || (({ children }) => children);
+  const Banner = window.OfflineBanner || (() => null);
+  root.render(
+    <>
+      <Banner />
+      <Boundary>
+        <App />
+      </Boundary>
+    </>
+  );
 };
 const __redirectToLogin = () => { window.location.replace('/login'); };
 const __bootAdmin = async () => {

@@ -266,146 +266,213 @@ function TabAuto({ draft, updatePath }) {
 }
 
 // ============================================================
+// TabUsers — wired to /api/admin/users (auth_users table). Replaces the
+// previous localStorage-only stub. All mutations require the caller to be
+// logged in with role=owner (server-side check), and the frontend uses
+// apiFetch so the CSRF token is attached.
 function TabUsers({ setToast, addActivity }) {
   const C = window.ADMIN_C;
   const { Card, Btn, IconBtn, Avatar, Pill, DataTable, SectionHeading,
-          Modal, Input, Select, Toggle } = window;
+          Modal, Input, Select } = window;
+  const fetchApi = window.apiFetch || ((u, o) => fetch(u, { credentials: 'same-origin', ...o }));
 
-  const STORE_KEY = 'baankarn_users_v1';
-  const seed = [
-    { id: 1, name: 'กาญจนา ศรีสุข', email: 'kanjana@baankarn.com', role: 'เจ้าของ',           lastLogin: 'เมื่อกี้',     active: true },
-    { id: 2, name: 'สมชาย วงศ์ใหญ่', email: 'somchai@baankarn.com', role: 'ผู้จัดการ',       lastLogin: '2 ชม.ก่อน',  active: true },
-    { id: 3, name: 'นิตยา ทองดี',     email: 'nittaya@baankarn.com', role: 'เจ้าหน้าที่บัญชี', lastLogin: 'เมื่อวาน',  active: true },
-    { id: 4, name: 'วิภา จันทร์เพ็ญ', email: 'wipa@baankarn.com',    role: 'เจ้าหน้าที่ดูแล',  lastLogin: '3 วันก่อน', active: false },
+  const ROLES = [
+    { value: 'owner',    label: 'เจ้าของ' },
+    { value: 'manager',  label: 'ผู้จัดการ' },
+    { value: 'staff',    label: 'เจ้าหน้าที่' },
+    { value: 'readonly', label: 'อ่านอย่างเดียว' },
   ];
+  const roleLabel = (r) => (ROLES.find((x) => x.value === r) || {}).label || r;
+  const roleColor = (r) => r === 'owner' ? 'accent' : (r === 'manager' ? 'info' : (r === 'staff' ? 'neutral' : 'muted'));
 
-  const [users, setUsers] = React.useState(() => {
-    try {
-      const raw = localStorage.getItem(STORE_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) return parsed;
-      }
-    } catch (e) { console.warn('users load failed', e); }
-    return seed;
-  });
-  React.useEffect(() => {
-    try { localStorage.setItem(STORE_KEY, JSON.stringify(users)); } catch (e) {}
-  }, [users]);
-
-  const [editing, setEditing] = React.useState(null);
+  const [users, setUsers]       = React.useState([]);
+  const [loading, setLoading]   = React.useState(true);
+  const [error, setError]       = React.useState(null);
+  const [editing, setEditing]   = React.useState(null);
   const [confirmDel, setConfirmDel] = React.useState(null);
+  const [busy, setBusy]         = React.useState(false);
 
-  const roleColor = (r) => r === 'เจ้าของ' ? 'accent' : (r === 'ผู้จัดการ' ? 'info' : 'neutral');
+  const reload = React.useCallback(async () => {
+    setLoading(true); setError(null);
+    try {
+      const r = await fetch('/api/admin/users', { credentials: 'same-origin' });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      setUsers(Array.isArray(d.users) ? d.users : []);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+  React.useEffect(() => { reload(); }, [reload]);
 
-  const openAdd = () => setEditing({ id: null, name: '', email: '', role: 'เจ้าหน้าที่ดูแล', active: true });
-  const openEdit = (u) => setEditing({ ...u });
+  const openAdd  = () => setEditing({ id: null, username: '', password: '', role: 'staff' });
+  const openEdit = (u) => setEditing({ id: u.id, username: u.username, password: '', role: u.role });
 
-  const save = () => {
-    if (!editing.name?.trim() || !editing.email?.trim()) {
-      setToast && setToast({ kind: 'danger', message: 'กรุณากรอกชื่อและอีเมล' });
+  const save = async () => {
+    if (!editing.username || editing.username.trim().length < 3) {
+      setToast && setToast({ kind: 'error', message: 'username ต้อง ≥ 3 ตัว' });
       return;
     }
-    if (editing.id) {
-      setUsers(prev => prev.map(u => u.id === editing.id ? { ...u, ...editing } : u));
-      addActivity && addActivity({ icon: '👤', text: `แก้ไขผู้ใช้ ${editing.name}`, type: 'system' });
-      setToast && setToast({ kind: 'success', message: 'บันทึกข้อมูลผู้ใช้เรียบร้อย' });
-    } else {
-      const id = Math.max(0, ...users.map(u => u.id)) + 1;
-      setUsers(prev => [...prev, { ...editing, id, lastLogin: 'ยังไม่เคย' }]);
-      addActivity && addActivity({ icon: '➕', text: `เพิ่มผู้ใช้ใหม่ ${editing.name}`, type: 'system' });
-      setToast && setToast({ kind: 'success', message: 'เพิ่มผู้ใช้เรียบร้อย' });
+    if (!editing.id && (!editing.password || editing.password.length < 12)) {
+      setToast && setToast({ kind: 'error', message: 'รหัสผ่านต้อง ≥ 12 ตัว' });
+      return;
     }
-    setEditing(null);
+    if (editing.id && editing.password && editing.password.length < 12) {
+      setToast && setToast({ kind: 'error', message: 'รหัสผ่านใหม่ต้อง ≥ 12 ตัว (เว้นว่าง = ไม่เปลี่ยน)' });
+      return;
+    }
+    setBusy(true);
+    try {
+      let r, d;
+      if (editing.id) {
+        const body = { role: editing.role };
+        if (editing.password) body.password = editing.password;
+        r = await fetchApi(`/api/admin/users/${editing.id}`, {
+          method: 'PUT', body: JSON.stringify(body),
+        });
+      } else {
+        r = await fetchApi('/api/admin/users', {
+          method: 'POST',
+          body: JSON.stringify({
+            username: editing.username.trim(),
+            password: editing.password,
+            role: editing.role,
+          }),
+        });
+      }
+      d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      addActivity && addActivity({
+        icon: editing.id ? '👤' : '➕',
+        text: editing.id ? `แก้ไขผู้ใช้ ${editing.username}` : `เพิ่มผู้ใช้ ${editing.username}`,
+        type: 'system',
+      });
+      setToast && setToast({ kind: 'success', message: editing.id ? 'บันทึกแล้ว' : 'เพิ่มผู้ใช้แล้ว' });
+      setEditing(null);
+      await reload();
+    } catch (err) {
+      setToast && setToast({ kind: 'error', message: err.message });
+    } finally {
+      setBusy(false);
+    }
   };
 
-  const del = () => {
-    const u = users.find(x => x.id === confirmDel);
-    setUsers(prev => prev.filter(x => x.id !== confirmDel));
-    addActivity && addActivity({ icon: '🗑️', text: `ลบผู้ใช้ ${u?.name}`, type: 'system' });
-    setToast && setToast({ kind: 'success', message: `ลบผู้ใช้ ${u?.name} แล้ว` });
-    setConfirmDel(null);
+  const del = async () => {
+    const u = users.find((x) => x.id === confirmDel);
+    if (!u) return;
+    setBusy(true);
+    try {
+      const r = await fetchApi(`/api/admin/users/${u.id}`, { method: 'DELETE' });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      addActivity && addActivity({ icon: '🗑️', text: `ลบผู้ใช้ ${u.username}`, type: 'system' });
+      setToast && setToast({ kind: 'success', message: `ลบผู้ใช้ ${u.username} แล้ว` });
+      setConfirmDel(null);
+      await reload();
+    } catch (err) {
+      setToast && setToast({ kind: 'error', message: err.message });
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
     <Card>
       <SectionHeading
         title="ผู้ใช้งานระบบ"
-        subtitle="กำหนดสิทธิ์และจัดการบัญชีผู้ใช้"
+        subtitle="กำหนดสิทธิ์และจัดการบัญชีผู้ใช้ — เฉพาะเจ้าของเข้าได้"
         level={3}
         action={<Btn variant="primary" size="sm" icon="+" onClick={openAdd}>เพิ่มผู้ใช้</Btn>}
       />
-      <DataTable
-        columns={[
-          { key: 'user', label: 'ชื่อ', minWidth: 240,
-            render: u => (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                <Avatar name={u.name} size={36} />
-                <div>
-                  <div style={{ fontSize: 13, fontWeight: 600, color: C.ink }}>{u.name}</div>
-                  <div style={{ fontSize: 11.5, color: C.muted }}>{u.email}</div>
+      {error && (
+        <div style={{ padding: 12, background: C.dangerSoft, color: C.dangerInk, borderRadius: 8, fontSize: 13, marginBottom: 12 }}>
+          ⚠️ {error} {error.includes('forbidden') && '— ต้องเข้าระบบในฐานะเจ้าของ'}
+        </div>
+      )}
+      {loading && users.length === 0 ? (
+        <div style={{ padding: 24, textAlign: 'center', color: C.muted }}>กำลังโหลด…</div>
+      ) : (
+        <DataTable
+          columns={[
+            { key: 'user', label: 'username', minWidth: 240,
+              render: u => (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <Avatar name={u.username} size={36} />
+                  <div>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: C.ink, fontFamily: 'JetBrains Mono, monospace' }}>{u.username}</div>
+                    <div style={{ fontSize: 11.5, color: C.muted }}>id #{u.id}</div>
+                  </div>
                 </div>
-              </div>
-            ),
-          },
-          { key: 'role', label: 'บทบาท', minWidth: 120, render: u => <Pill color={roleColor(u.role)} size="sm">{u.role}</Pill> },
-          { key: 'lastLogin', label: 'เข้าใช้งานล่าสุด', minWidth: 140, render: u => <span style={{ fontSize: 12.5, color: C.ink2 }}>{u.lastLogin}</span> },
-          { key: 'status', label: 'สถานะ', minWidth: 90,
-            render: u => <Pill color={u.active ? 'success' : 'neutral'} size="sm">{u.active ? 'ใช้งาน' : 'ระงับ'}</Pill> },
-          { key: 'actions', label: '', align: 'right', minWidth: 80,
-            render: u => (
-              <div style={{ display: 'inline-flex', gap: 4 }} onClick={(e) => e.stopPropagation()}>
-                <IconBtn icon="✎" label="แก้ไข" onClick={() => openEdit(u)} />
-                {u.role !== 'เจ้าของ' && <IconBtn icon="🗑" label="ลบ" danger onClick={() => setConfirmDel(u.id)} />}
-              </div>
-            ),
-          },
-        ]}
-        rows={users}
-        onRowClick={openEdit}
-        stickyHeader={false}
-      />
+              ),
+            },
+            { key: 'role', label: 'บทบาท', minWidth: 140,
+              render: u => <Pill color={roleColor(u.role)} size="sm">{roleLabel(u.role)}</Pill> },
+            { key: 'created_at', label: 'สร้างเมื่อ', minWidth: 160,
+              render: u => <span style={{ fontSize: 12.5, color: C.ink2 }}>
+                {u.created_at ? new Date(u.created_at).toLocaleString('th-TH') : '—'}
+              </span> },
+            { key: 'actions', label: '', align: 'right', minWidth: 80,
+              render: u => (
+                <div style={{ display: 'inline-flex', gap: 4 }} onClick={(e) => e.stopPropagation()}>
+                  <IconBtn icon="✎" label="แก้ไข" onClick={() => openEdit(u)} />
+                  <IconBtn icon="🗑" label="ลบ" danger onClick={() => setConfirmDel(u.id)} />
+                </div>
+              ),
+            },
+          ]}
+          rows={users}
+          onRowClick={openEdit}
+          stickyHeader={false}
+        />
+      )}
 
       <Modal
         open={!!editing}
-        onClose={() => setEditing(null)}
-        title={editing?.id ? 'แก้ไขผู้ใช้' : 'เพิ่มผู้ใช้ใหม่'}
+        onClose={() => !busy && setEditing(null)}
+        title={editing?.id ? `แก้ไข ${editing.username}` : 'เพิ่มผู้ใช้ใหม่'}
         footer={
           <>
-            <Btn variant="ghost" onClick={() => setEditing(null)}>ยกเลิก</Btn>
-            <Btn variant="primary" onClick={save}>บันทึก</Btn>
+            <Btn variant="ghost" onClick={() => setEditing(null)} disabled={busy}>ยกเลิก</Btn>
+            <Btn variant="primary" onClick={save} disabled={busy}>{busy ? '…' : 'บันทึก'}</Btn>
           </>
         }
       >
         {editing && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-            <Input label="ชื่อ-นามสกุล" value={editing.name}
-                   onChange={(v) => setEditing({ ...editing, name: v })} />
-            <Input label="อีเมล" type="email" value={editing.email}
-                   onChange={(v) => setEditing({ ...editing, email: v })} />
+            <Input label="username" value={editing.username}
+                   disabled={!!editing.id}
+                   onChange={(v) => setEditing({ ...editing, username: v })}
+                   hint={editing.id ? 'แก้ username ไม่ได้ — สร้างผู้ใช้ใหม่แทน' : 'a-z 0-9 _ . - (3-64 ตัว)'} />
+            <Input
+              label={editing.id ? 'รหัสผ่านใหม่ (เว้นว่าง = ไม่เปลี่ยน)' : 'รหัสผ่าน (≥ 12 ตัว)'}
+              type="password"
+              value={editing.password || ''}
+              onChange={(v) => setEditing({ ...editing, password: v })}
+            />
             <Select label="บทบาท" value={editing.role}
                     onChange={(v) => setEditing({ ...editing, role: v })}
-                    options={['เจ้าของ', 'ผู้จัดการ', 'เจ้าหน้าที่บัญชี', 'เจ้าหน้าที่ดูแล']} />
-            <Toggle label="เปิดใช้งาน" hint="ถ้าปิด ผู้ใช้นี้จะเข้าสู่ระบบไม่ได้"
-                    checked={editing.active}
-                    onChange={(v) => setEditing({ ...editing, active: v })} />
+                    options={ROLES.map((r) => ({ value: r.value, label: r.label }))} />
           </div>
         )}
       </Modal>
 
       <Modal
         open={!!confirmDel}
-        onClose={() => setConfirmDel(null)}
+        onClose={() => !busy && setConfirmDel(null)}
         title="ยืนยันการลบผู้ใช้"
         footer={
           <>
-            <Btn variant="ghost" onClick={() => setConfirmDel(null)}>ยกเลิก</Btn>
-            <Btn variant="danger" onClick={del}>ลบ</Btn>
+            <Btn variant="ghost" onClick={() => setConfirmDel(null)} disabled={busy}>ยกเลิก</Btn>
+            <Btn variant="danger" onClick={del} disabled={busy}>{busy ? '…' : 'ลบ'}</Btn>
           </>
         }
       >
         <div style={{ fontSize: 14, color: C.ink2 }}>
-          ต้องการลบผู้ใช้ <b style={{ color: C.ink }}>{users.find(u => u.id === confirmDel)?.name}</b> ใช่หรือไม่?
+          ต้องการลบผู้ใช้ <b style={{ color: C.ink, fontFamily: 'JetBrains Mono, monospace' }}>
+            {users.find((u) => u.id === confirmDel)?.username}
+          </b> ใช่หรือไม่? — การกระทำนี้ย้อนกลับไม่ได้
         </div>
       </Modal>
     </Card>
@@ -539,14 +606,63 @@ function TabSystem({ onResetAll, rooms, setRooms, config, setConfig, bookings, s
     }
   };
 
+  // A10 — Validate the imported backup before letting admin click "Restore".
+  // Without this, a crafted JSON file from an attacker could swap the
+  // PromptPay number, owner email, or user list, redirecting payments and
+  // notifications. We refuse anything that doesn't match the expected shape.
+  const validateBackupShape = (d) => {
+    if (!d || typeof d !== 'object') throw new Error('ไม่ใช่ object');
+    if (d.rooms !== undefined && (typeof d.rooms !== 'object' || Array.isArray(d.rooms))) {
+      throw new Error('rooms ต้องเป็น object');
+    }
+    if (d.config !== undefined && (typeof d.config !== 'object' || Array.isArray(d.config))) {
+      throw new Error('config ต้องเป็น object');
+    }
+    if (d.bookings !== undefined && !Array.isArray(d.bookings)) {
+      throw new Error('bookings ต้องเป็น array');
+    }
+    if (d.activities !== undefined && !Array.isArray(d.activities)) {
+      throw new Error('activities ต้องเป็น array');
+    }
+    // Critical-field sanitisation: refuse a backup that contains a malformed
+    // PromptPay target — a typical attacker payload.
+    const pp = d.config?.payment?.promptpayTarget;
+    if (pp !== undefined && pp !== null && pp !== '') {
+      const cleaned = String(pp).replace(/-/g, '');
+      if (!/^0\d{9}$/.test(cleaned) && !/^\d{13}$/.test(cleaned)) {
+        throw new Error('PromptPay ใน config ไม่ถูกต้อง');
+      }
+    }
+    return true;
+  };
+
+  // Compute a one-screen diff between the file and the current state so the
+  // admin sees exactly what's about to change before confirming.
+  const computeDiff = (incoming) => {
+    const cur = { rooms, config, bookings, activities };
+    const d = [];
+    for (const k of ['rooms', 'config', 'bookings', 'activities']) {
+      if (!(k in incoming)) continue;
+      const a = JSON.stringify(cur[k] || (Array.isArray(incoming[k]) ? [] : {}));
+      const b = JSON.stringify(incoming[k] || (Array.isArray(incoming[k]) ? [] : {}));
+      if (a === b) continue;
+      const sizeBefore = (Array.isArray(cur[k]) ? cur[k].length : Object.keys(cur[k] || {}).length);
+      const sizeAfter  = (Array.isArray(incoming[k]) ? incoming[k].length : Object.keys(incoming[k] || {}).length);
+      d.push(`${k}: ${sizeBefore} → ${sizeAfter}`);
+    }
+    return d;
+  };
+
   const handleImport = () => {
     importJSON(
       (data) => {
-        if (!data || typeof data !== 'object') {
-          setToast && setToast({ kind: 'danger', message: 'ไฟล์ backup ไม่ถูกต้อง' });
+        try {
+          validateBackupShape(data);
+        } catch (e) {
+          setToast && setToast({ kind: 'danger', message: 'ไฟล์ backup ไม่ผ่านการตรวจสอบ: ' + e.message });
           return;
         }
-        setConfirmRestore(data);
+        setConfirmRestore({ ...data, __diff: computeDiff(data) });
       },
       (err) => setToast && setToast({ kind: 'danger', message: 'นำเข้าไม่สำเร็จ: ' + err.message })
     );
@@ -630,6 +746,14 @@ function TabSystem({ onResetAll, rooms, setRooms, config, setConfig, bookings, s
               <li>การตั้งค่า: <b>{confirmRestore.config ? 'มี' : 'ไม่มี'}</b></li>
               <li>ส่งออกเมื่อ: <b>{confirmRestore.exportedAt?.slice(0, 19).replace('T', ' ') || 'ไม่ระบุ'}</b></li>
             </ul>
+            {Array.isArray(confirmRestore.__diff) && confirmRestore.__diff.length > 0 && (
+              <div style={{ marginTop: 12, padding: 10, background: C.warningSoft || '#fff7e0', borderRadius: 8, fontSize: 12.5 }}>
+                <div style={{ fontWeight: 600, marginBottom: 4 }}>การเปลี่ยนแปลงที่จะเกิดขึ้น:</div>
+                <ul style={{ margin: 0, paddingLeft: 18 }}>
+                  {confirmRestore.__diff.map((line, i) => <li key={i}>{line}</li>)}
+                </ul>
+              </div>
+            )}
             <div style={{ marginTop: 12, padding: 10, background: C.dangerSoft, borderRadius: 8, color: C.dangerInk, fontSize: 12.5 }}>
               ⚠️ การนำเข้าจะทับข้อมูลปัจจุบันทั้งหมด — แนะนำให้ส่งออก backup ก่อน
             </div>

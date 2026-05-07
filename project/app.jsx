@@ -493,16 +493,16 @@ function DetailPanel({ room, onUpdate, onClose }) {
                     width: 38, height: 38, borderRadius: '50%', background: s.dot, color: '#fff',
                     display: 'flex', alignItems: 'center', justifyContent: 'center',
                     fontFamily: 'Sora', fontWeight: 600, fontSize: 14, flex: 'none',
-                  }}>{room.tenant.name.charAt(2) || '?'}</div>
+                  }}>{(room.tenant.name || '?').charAt(2) || '?'}</div>
                   <div style={{ minWidth: 0, flex: 1 }}>
                     <div style={{
                       fontSize: 14, color: C.ink, fontWeight: 600,
                       overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                    }}>{room.tenant.name}</div>
+                    }}>{room.tenant.name || 'มีผู้เช่า'}</div>
                     <div style={{
                       fontSize: 11, color: C.ink2, marginTop: 1,
                       overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                    }}>{room.tenant.occupation}</div>
+                    }}>{room.tenant.occupation || ''}</div>
                   </div>
                 </div>
                 <div style={{
@@ -936,7 +936,7 @@ function App() {
       const q = search.toLowerCase();
       list = list.filter(r =>
         r.id.includes(q) ||
-        (r.tenant?.name.toLowerCase().includes(q)) ||
+        (r.tenant?.name?.toLowerCase?.().includes(q)) ||
         ROOM_TYPES[r.type].th.includes(q)
       );
     }

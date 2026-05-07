@@ -1,0 +1,118 @@
+// db/pool.js
+// Postgres connection pool with:
+//   - automatic SSL detection (Railway-internal vs external)
+//   - per-query 10s timeout (prevents slow-query DoS)
+//   - circuit breaker: after 5 failures within 60s, all queries return 503
+//     until the next successful test query (probed every 30s)
+//   - sanitised error logging so DB password never leaks via stack traces
+
+const { Pool } = require('pg');
+
+const DATABASE_URL = process.env.DATABASE_URL;
+if (!DATABASE_URL) {
+  console.error('FATAL: DATABASE_URL is not set');
+  process.exit(1);
+}
+
+function sanitizeError(err) {
+  const msg = String((err && err.message) || err);
+  return msg.replace(/(\b[a-z]+:\/\/)[^@\s]+@/gi, '$1***@');
+}
+
+const useSSL = !/\.railway\.internal/i.test(DATABASE_URL);
+const pool = new Pool({
+  connectionString: DATABASE_URL,
+  ssl: useSSL ? { rejectUnauthorized: false } : false,
+  max: 10,
+  // Prevent stalled-DB requests from hanging indefinitely.
+  connectionTimeoutMillis: 5000,
+  idleTimeoutMillis: 30_000,
+  // statement_timeout = abort any query > 10s. Keeps a buggy slow query from
+  // tying up a connection slot.
+  statement_timeout: 10_000,
+  // Same idea for transactions waiting on a lock.
+  lock_timeout: 5_000,
+});
+
+pool.on('error', (err) => console.error('[pg] pool error:', sanitizeError(err)));
+
+// === Circuit breaker ======================================================
+// Track recent failures. If we exceed `THRESHOLD` failures within
+// `WINDOW_MS`, open the circuit — incoming queries return a 503-style error
+// without hitting the DB. A periodic probe re-tests the connection; if it
+// succeeds we close the circuit again.
+const CB = {
+  state: 'closed',          // closed | open | half-open
+  failures: [],
+  THRESHOLD: 5,
+  WINDOW_MS: 60_000,
+  PROBE_MS: 30_000,
+  openedAt: 0,
+};
+
+function recordFailure() {
+  const now = Date.now();
+  CB.failures = CB.failures.filter((t) => now - t < CB.WINDOW_MS);
+  CB.failures.push(now);
+  if (CB.state === 'closed' && CB.failures.length >= CB.THRESHOLD) {
+    CB.state = 'open';
+    CB.openedAt = now;
+    console.error(`[pg] circuit OPEN (${CB.failures.length} failures in window)`);
+    schedulePrope();
+  }
+}
+function recordSuccess() {
+  if (CB.state === 'half-open' || CB.state === 'open') {
+    CB.state = 'closed';
+    CB.failures = [];
+    console.log('[pg] circuit CLOSED');
+  }
+}
+let _probeTimer = null;
+function schedulePrope() {
+  if (_probeTimer) return;
+  _probeTimer = setTimeout(async () => {
+    _probeTimer = null;
+    CB.state = 'half-open';
+    try {
+      await pool.query('SELECT 1');
+      recordSuccess();
+    } catch (err) {
+      console.error('[pg] probe failed:', sanitizeError(err));
+      CB.state = 'open';
+      schedulePrope();
+    }
+  }, CB.PROBE_MS).unref();
+}
+
+class CircuitOpenError extends Error {
+  constructor() { super('database unavailable'); this.code = 'DB_CIRCUIT_OPEN'; }
+}
+
+/**
+ * Wrap pool.query so the circuit breaker can intercept and so we count
+ * failures. Use `safeQuery` for any code path where you want graceful
+ * degradation; existing callers can keep using `pool.query` directly and
+ * skip the breaker for read-only paths that are OK to fail loud.
+ */
+async function safeQuery(text, params) {
+  if (CB.state === 'open') throw new CircuitOpenError();
+  try {
+    const r = await pool.query(text, params);
+    if (CB.state === 'half-open') recordSuccess();
+    return r;
+  } catch (err) {
+    recordFailure();
+    throw err;
+  }
+}
+
+function status() {
+  return {
+    state: CB.state,
+    recentFailures: CB.failures.length,
+    openedAt: CB.openedAt ? new Date(CB.openedAt).toISOString() : null,
+  };
+}
+
+module.exports = { pool, safeQuery, sanitizeError, status, CircuitOpenError };

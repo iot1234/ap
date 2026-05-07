@@ -51,13 +51,15 @@
 <!-- API client: hydrates localStorage from server before React mounts -->
 <script src="/api-client.js"></script>
 
-<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
-<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<!-- B6: production build is ~6 KB vs ~120 KB development build, no dev panels exposed. -->
+<script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" integrity="sha384-DGyLxAyjq0f9SPpVevD6IgztCFlnMF6oW/XQGmfe+IsZ8TqEiDrcHkMLKI6fiB/Z" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" integrity="sha384-gTGxhz21lVGYNMcdJOyq01Edg0jhn/c22nsx0kyqP0TxaV5WVdsSH1fSDUf5YJj1" crossorigin="anonymous"></script>
 <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
 
 <!-- Foundation: must load first -->
 <script type="text/babel" src="/admin/shared.jsx"></script>
 <script type="text/babel" src="/admin/ui.jsx"></script>
+<script type="text/babel" src="/admin/hooks.jsx"></script>
 
 <!-- Pages: each independent, attach to window.Page* -->
 <script type="text/babel" src="/admin/page-overview.jsx"></script>
@@ -69,6 +71,19 @@
 <script type="text/babel" src="/admin/page-billing.jsx"></script>
 <script type="text/babel" src="/admin/page-reports.jsx"></script>
 <script type="text/babel" src="/admin/page-settings.jsx"></script>
+
+<!-- v2 pages (feature-flag gated on the server side) -->
+<script type="text/babel" src="/admin/page-features.jsx"></script>
+<script type="text/babel" src="/admin/page-payments.jsx"></script>
+<script type="text/babel" src="/admin/page-meters.jsx"></script>
+<script type="text/babel" src="/admin/page-access.jsx"></script>
+<script type="text/babel" src="/admin/page-notifications.jsx"></script>
+<script type="text/babel" src="/admin/page-secrets.jsx"></script>
+<script type="text/babel" src="/admin/page-line-bindings.jsx"></script>
+<script type="text/babel" src="/admin/page-notifications-queue.jsx"></script>
+<script type="text/babel" src="/admin/page-security-events.jsx"></script>
+<script type="text/babel" src="/admin/page-access-devices.jsx"></script>
+<script type="text/babel" src="/admin/page-reports-v2.jsx"></script>
 
 <!-- Shell: must load last (uses everything above + renders) -->
 <script type="text/babel" src="/admin/shell.jsx"></script>

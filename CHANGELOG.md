@@ -9,6 +9,80 @@ Versions track GitHub commits.
 
 ## [Unreleased]
 
+### Added — v2 feature expansion
+**One unifying primitive: `services/features.js`.** Every new capability is gated by a flag stored in `app_data['baankarn_features_v1']` (JSONB). Admin toggles flags from the new `Features` admin page; routes that depend on a flag are blocked at the server (`503`) when the flag is off.
+
+#### New schema (idempotent CREATE TABLE IF NOT EXISTS)
+- `tenants` — full tenant record with phone, encrypted citizen ID, PIN hash for portal login, locale, line_user_id
+- `contracts` — contracts linked to tenants
+- `bills` — persistent bills (replaces on-demand calc); supports VAT, late fee, recurring charges, void
+- `payments` — slip-based payments with admin verification queue, dedup via slip_hash
+- `meter_readings` — water/elec history with anomaly detection (n-σ)
+- `access_logs` + `access_cards` — RFID/QR/BLE event log + card management
+- `notifications_log` — every LINE/email/SMS attempt
+- `file_uploads` — tracked photo/slip/signature uploads (local fs + optional S3)
+- `tenant_sessions` — separate session table for the tenant portal
+
+#### New services
+- `services/features.js` — flag loader, save, `requireFeature(name)` middleware, `attach` middleware
+- `services/crypto.js` — AES-256-GCM encrypt/decrypt for citizen ID at rest (HKDF-derived key fallback)
+- `services/storage.js` — base64 → local file with size/mime caps, optional S3 hook
+- `services/billing.js` — pure bill calculation (rent + utilities + recurring + late fee + VAT)
+- `services/notifier.js` — multi-channel dispatch (LINE → Email → log) with `notifications_log` recording
+- `services/email.js` — lazy SMTP via nodemailer (optional dep)
+- `services/sentry.js` — lazy Sentry init when errorTracking flag + `SENTRY_DSN`
+- `services/meter.js` — record / latest / consumption / 3σ anomaly detection
+- `services/scheduler.js` — in-process hourly cron: auto-backup, late-fee marking, bill auto-generation
+
+#### New REST endpoints (all behind feature flags where applicable)
+- `GET /api/features` (public, enabled-only) — clients use this to hide UI for off features
+- `GET /api/admin/features`, `PUT /api/admin/features` — admin read/write of full flag config
+- `GET/POST/PUT/DELETE /api/tenants[/:id]` — tenant CRUD with soft delete
+- `POST /api/tenant/login`, `POST /api/tenant/logout`, `GET /api/tenant/me` — tenant portal auth (phone + bcrypt PIN, separate session table)
+- `GET /api/tenant/bills`, `GET /api/tenant/maintenance` — tenant's own data
+- `POST /api/tenant/payments` — tenant uploads slip; gated by `slipUpload`
+- `GET /api/payments`, `PUT /api/payments/:id/verify` — admin slip queue
+- `GET /api/bills`, `POST /api/bills`, `PUT /api/bills/:id/void` — admin bill management with optional `compute=true` to auto-build
+- `POST /api/uploads` — admin photo/signature/citizen-id upload
+- `POST /api/meters/:roomId/readings`, `GET /api/meters/:roomId/readings` — meter history
+- `POST /api/access/log`, `GET /api/access/logs` — access events
+- `GET /api/notifications/log` — admin viewer
+
+#### New UI pages
+- `/tenant` — full SPA tenant portal: login, home, bills, slip upload, maintenance form, profile (i18n th/en + dark mode toggle)
+- `admin/page-features.jsx` — toggle every feature flag with inline config editing
+- `admin/page-payments.jsx` — slip verification queue with image preview and accept/reject
+- `admin/page-meters.jsx` — meter history with inline SVG chart + manual entry
+- `admin/page-access.jsx` — access log viewer + manual entry form
+- `admin/page-notifications.jsx` — read-only notification dispatch log
+
+#### Tests
+- `tests/billing.test.js` (6 tests) — bill computation, VAT, late fee, recurring, status logic
+- `tests/crypto.test.js` (6 tests) — round-trip, IV randomness, tamper detection, masking, HMAC
+- `tests/features.test.js` (4 tests) — `withDefaults` shallow + deep merge, regression guard on flag list
+- `tests/storage.test.js` (3 tests) — `parseBase64` data URL + raw + error
+- `tests/meter.test.js` (4 tests) — consumption math + type whitelist
+- `npm test` runs all 23. All pass on Node 24.
+
+#### Operations
+- `services/scheduler.js` — hourly tick: marks overdue bills, runs daily backup at `autoBackup.hourUtc`, generates monthly bills on `billAutoGenerate.dayOfMonth`
+- `scripts/backup.js` now exports `run()` for in-process invocation (CLI mode preserved via `require.main` guard)
+- `.scheduler-state.json` records last-fired keys to prevent duplicate runs across restarts
+- `services/sentry.js` registered as final error middleware in `server.js`
+
+#### Security additions
+- AES-256-GCM encryption of citizen IDs (admin must `?includeCitizen=1` to decrypt)
+- bcrypt-hashed tenant PIN (4–8 digits)
+- Separate `tenant_sessions` table — admin and tenant cookies don't collide
+- Slip dedup via HMAC-SHA256 on URL+size — same slip can't be uploaded twice
+- Soft-delete switch — admin can choose hard vs. soft delete per deployment
+
+#### Disabled-by-default flags (opt-in)
+`tenantPortal`, `slipUpload`, `meterIot`, `accessControl`, `recurringCharges`, `vat`, `email`, `sms`, `errorTracking`, `autoBackup`, `billAutoGenerate`
+
+#### Enabled-by-default flags
+`photoUpload`, `lateFee`, `i18n`, `darkMode`, `softDelete`, `citizenIdEncryption`
+
 ### Added — Phase E essentials
 - `scripts/smoke-test.sh` — bash + curl end-to-end smoke test of all endpoints (auth, public, admin, CSRF defense, rate limit). Usable in CI.
 - `docs/api.yaml` — OpenAPI 3.0 spec covering all 19 REST endpoints.

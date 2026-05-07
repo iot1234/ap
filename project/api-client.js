@@ -8,12 +8,15 @@
 // ===========================================================================
 
 (function () {
+  // Keys that are mirrored to /api/data/:key. baankarn_users_v1 was removed
+  // because the Users page now talks to /api/admin/users (auth_users table)
+  // directly — keeping it here would PUT a localStorage stub blob to the
+  // server every time the page rendered.
   const SYNCED_KEYS = [
     'baankarn_rooms_v1',
     'baankarn_config_v1',
     'baankarn_bookings_v1',
     'baankarn_activities_v1',
-    'baankarn_users_v1',
   ];
 
   const DEBOUNCE_MS = 250;
@@ -129,16 +132,42 @@
     pendingTimers.set(key, timer);
   }
 
+  // --- Defense-in-depth: shape guard on synced values --------------------
+  // Each whitelisted key has an expected JSON shape. The wrapper used to
+  // PUT *anything* set on localStorage to the API, which meant a single
+  // XSS in admin context could persist garbage server-side. We now reject
+  // values that don't parse as JSON or whose top-level type doesn't match
+  // the expected shape. Real admin code only ever writes valid shapes.
+  const EXPECTED_TYPE = {
+    baankarn_rooms_v1:      'object',
+    baankarn_config_v1:     'object',
+    baankarn_bookings_v1:   'array',
+    baankarn_activities_v1: 'array',
+  };
+  function shapeIsValid(key, raw) {
+    const want = EXPECTED_TYPE[key];
+    if (!want) return false;
+    if (typeof raw !== 'string') return false;
+    let parsed;
+    try { parsed = JSON.parse(raw); } catch { return false; }
+    if (parsed === null) return false;
+    if (want === 'array') return Array.isArray(parsed);
+    return typeof parsed === 'object' && !Array.isArray(parsed);
+  }
+
   // --- Wrap localStorage.setItem ------------------------------------------
   // Behavior:
   //   - During hydration: never trigger PUT (we're filling localStorage from server).
-  //   - When unauthenticated (tenant): never trigger PUT — they can't write anyway,
-  //     and trying would race with admin's data and pollute the DB on first run.
-  //     Tenants use dedicated endpoints (e.g. /api/bookings/public) for their writes.
-  //   - When authenticated (admin): debounce a PUT to /api/data/:key.
+  //   - When unauthenticated (tenant): never trigger PUT.
+  //   - When authenticated (admin): debounce a PUT to /api/data/:key —
+  //     but only if the value passes the shape guard above.
   window.localStorage.setItem = function (key, value) {
     origSetItem(key, value);
     if (!isHydrating && isAuthenticated && SYNCED_KEYS.includes(key)) {
+      if (!shapeIsValid(key, value)) {
+        console.warn('[api-client] dropped invalid value for', key);
+        return;
+      }
       pushToApi(key, value);
     }
   };

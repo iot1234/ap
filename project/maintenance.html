@@ -297,14 +297,24 @@
     try {
       const res = await fetch(`/api/maintenance/lookup?roomId=${encodeURIComponent(roomId)}&phone=${encodeURIComponent(phone)}`);
       const data = await res.json();
-      if (!data.ok) {
-        ticketList.innerHTML = `<div style="text-align:center;color:#5a1a13;padding:24px">${data.error || 'ค้นหาไม่สำเร็จ'}</div>`;
+      // C2: data.error originates from the server, but defense-in-depth —
+      // never interpolate untrusted text into innerHTML. Use textContent.
+      const setMessage = (color, text) => {
+        ticketList.textContent = '';
+        const div = document.createElement('div');
+        div.style.cssText = 'text-align:center;padding:24px;color:' + color;
+        div.textContent = text;
+        ticketList.appendChild(div);
+      };
+      if (res.status === 429) {
+        setMessage('#c08a2a', '⏱ ค้นหาบ่อยเกินไป — รอสักครู่แล้วลองใหม่');
         return;
       }
-      if (!data.tickets.length) {
-        ticketList.innerHTML = '<div style="text-align:center;color:#8a7d6b;padding:24px">ไม่พบรายการแจ้งซ่อมของคุณ</div>';
+      if (!data || !data.ok) {
+        setMessage('#5a1a13', (data && data.error) ? data.error : 'ค้นหาไม่สำเร็จ');
         return;
       }
+      if (!data.tickets.length) { setMessage('#8a7d6b', 'ไม่พบรายการแจ้งซ่อมของคุณ'); return; }
       const STATUS_LABEL = {
         open: 'เปิดใหม่', assigned: 'มอบหมายแล้ว', in_progress: 'กำลังดำเนินการ',
         awaiting_parts: 'รออะไหล่', completed: 'เสร็จสิ้น', cancelled: 'ยกเลิก',

@@ -1,10 +1,12 @@
 {
   "name": "ap",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Dormitory management dashboard - production",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test tests/*.test.js",
+    "backup": "node scripts/backup.js"
   },
   "engines": {
     "node": ">=18"
@@ -13,6 +15,7 @@
     "bcryptjs": "^2.4.3",
     "connect-pg-simple": "^9.0.1",
     "cookie-parser": "^1.4.7",
+    "csrf-csrf": "^3.0.6",
     "exceljs": "^4.4.0",
     "express": "^4.21.0",
     "express-rate-limit": "^8.5.0",
@@ -21,6 +24,12 @@
     "pdfkit": "^0.18.0",
     "pg": "^8.13.1",
     "promptpay-qr": "^0.5.0",
-    "qrcode": "^1.5.4"
+    "qrcode": "^1.5.4",
+    "zod": "^3.23.8"
+  },
+  "optionalDependencies": {
+    "@aws-sdk/client-s3": "^3.1044.0",
+    "@sentry/node": "^8.40.0",
+    "nodemailer": "^6.9.16"
   }
 }

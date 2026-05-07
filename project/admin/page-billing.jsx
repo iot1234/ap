@@ -37,12 +37,23 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         const penalty = overdue ? (r.overdueDays || 0) * (config.fees?.latePenaltyPerDay || 0) : 0;
         const grandTotal = total + penalty;
         const now = new Date();
+        // Period in ISO YYYY-MM (server schema requires this) — was Thai
+        // text which made bill_no unicode and didn't match scheduler's ISO
+        // period, so the same room/month produced two different bill rows.
+        const periodIso = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+        // Display period in Thai for the UI; ISO is for the API + bill_no.
+        const periodDisplay = fmtMonthTH(now);
+        // Due date in ISO YYYY-MM-DD (also schema-required). Uses
+        // config.notify.dueOnDay if set, else 7th.
+        const dueDay = Math.max(1, Math.min(28, Number(config.notify?.dueOnDay) || 7));
+        const dueIso = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(dueDay).padStart(2, '0')}`;
         return {
-          id: `INV-${r.id}-${(now.getFullYear()+543).toString().slice(-2)}${(now.getMonth()+1).toString().padStart(2,'0')}`,
+          id: `INV-${periodIso}-${r.id}`,
           roomId: r.id,
           tenant: r.tenant.name,
           phone: r.tenant.phone,
-          period: fmtMonthTH(now),
+          period: periodIso,            // for API
+          periodDisplay,                 // for UI
           rent: r.rent,
           water, elec, wifi,
           waterUnits: r.waterUnits,
@@ -52,7 +63,8 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
           subtotal: total,
           penalty,
           total: grandTotal,
-          dueDate: `${config.notify?.dueOnDay ?? 7} ${fmtMonthTH(now)}`,
+          dueDate: dueIso,               // for API
+          dueDateDisplay: `${dueDay} ${periodDisplay}`,
           // Bills default to 'unpaid'. Admin marks as paid via the row action,
           // which sets r.billPaidAt on the room. Without that, status was
           // mis-marked 'paid' for every non-overdue room — making the unpaid
@@ -126,15 +138,77 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
     setToast && setToast({ kind: 'info', message: `ยกเลิกการบันทึกชำระห้อง ${bill.roomId}` });
   };
 
-  const handleSendReminder = (id) => {
-    setToast && setToast({ kind: 'info', message: `ส่งเตือนบิล ${id} ทาง LINE แล้ว` });
-    addActivity && addActivity({ icon: '🔔', text: `ส่งเตือนชำระบิล ${id}`, type: 'system' });
+  const handleSendReminder = async (id) => {
+    const b = bills.find((x) => x.id === id);
+    if (!b) return;
+    try {
+      const r = await fetch('/api/notify/bill', {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tenantName: b.tenant, roomId: b.roomId,
+          period: b.period, total: b.total, billNo: b.id,
+        }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || d.ok === false) {
+        const err = (d && d.error) || `HTTP ${r.status}`;
+        setToast && setToast({ kind: 'error', message: `ส่งเตือนไม่สำเร็จ: ${err}` });
+        return;
+      }
+      setToast && setToast({ kind: 'success', message: `ส่งเตือนบิล ${id} ทาง LINE แล้ว` });
+      addActivity && addActivity({ icon: '🔔', text: `ส่งเตือนชำระบิล ${id}`, type: 'system' });
+    } catch (e) {
+      setToast && setToast({ kind: 'error', message: `ส่งเตือนไม่สำเร็จ: ${e.message}` });
+    }
   };
 
-  const handleGenerate = () => {
-    addActivity && addActivity({ icon: '📋', text: `ออกบิลประจำเดือน ${fmtMonthTH(new Date())} (${bills.length} ใบ)`, type: 'billing' });
-    setToast && setToast({ kind: 'success', message: `ออกบิลแล้ว ${bills.length} ใบ` });
+  const handleGenerate = async () => {
+    // Use the server-side /api/bills/bulk-generate which writes every
+    // occupied room's bill in one transaction. Faster + atomic + uses
+    // services/billing.js (single source of truth for VAT, late fee, etc).
     setConfirmGenerate(false);
+    const apiFetch = window.apiFetch || fetch;
+    try {
+      const now = new Date();
+      const period = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+      const dueDay = Number(config.notify?.dueOnDay) || 7;
+      const r = await apiFetch('/api/bills/bulk-generate', {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ period, dueDay }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'failed');
+      addActivity && addActivity({ icon: '📋', text: `ออกบิลรอบ ${period}: ${d.made} ใบ (ข้าม ${d.skipped})`, type: 'billing' });
+      setToast && setToast({
+        kind: d.made > 0 ? 'success' : 'info',
+        message: `ออกบิล ${d.made} ใบ${d.skipped ? ` (ข้าม ${d.skipped})` : ''}`,
+      });
+    } catch (e) {
+      setToast && setToast({ kind: 'error', message: 'ออกบิลไม่สำเร็จ: ' + (e.message || 'unknown') });
+    }
+  };
+
+  // Bulk-send all pending/overdue bills via LINE+email.
+  const handleBulkSend = async () => {
+    if (!window.confirm('ส่งแจ้งเตือนทุกบิลที่ยังไม่ชำระ/ค้างชำระทาง LINE+อีเมล?')) return;
+    const apiFetch = window.apiFetch || fetch;
+    try {
+      const r = await apiFetch('/api/bills/bulk-send', {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'failed');
+      setToast && setToast({
+        kind: d.enqueued > 0 ? 'success' : 'info',
+        message: `จัดคิวแล้ว ${d.enqueued}/${d.attempted} ใบ${d.failed ? ` (พลาด ${d.failed})` : ''}`,
+      });
+      addActivity && addActivity({ icon: '🔔', text: `ส่งเตือนทุกบิลค้าง: ${d.enqueued} ใบ`, type: 'system' });
+    } catch (e) {
+      setToast && setToast({ kind: 'error', message: 'ส่งไม่สำเร็จ: ' + e.message });
+    }
   };
 
   const columns = [
@@ -170,7 +244,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         </div>
       ),
     },
-    { key: 'period', label: 'งวด', minWidth: 100, render: b => <span style={{ fontSize: 12.5 }}>{b.period}</span> },
+    { key: 'period', label: 'งวด', minWidth: 100, render: b => <span style={{ fontSize: 12.5 }}>{b.periodDisplay || b.period}</span> },
     {
       key: 'total', label: 'รวม', align: 'right', minWidth: 120,
       render: b => (
@@ -224,6 +298,9 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
             }}>ส่งออก CSV</Btn>
             <Btn variant="primary" icon="📋" onClick={() => setConfirmGenerate(true)}>
               ออกบิลรายเดือน
+            </Btn>
+            <Btn icon="🔔" onClick={handleBulkSend}>
+              ส่งเตือนทั้งหมด
             </Btn>
           </>
         }
@@ -495,7 +572,7 @@ function BillPreview({ b }) {
       }}>
         <div>
           <div style={{ fontSize: 12, color: '#bcaf95' }}>ยอดรวมที่ต้องชำระ</div>
-          <div style={{ fontSize: 11, color: '#8a7d6b', marginTop: 2 }}>ครบกำหนด {b.dueDate}</div>
+          <div style={{ fontSize: 11, color: '#8a7d6b', marginTop: 2 }}>ครบกำหนด {b.dueDateDisplay || b.dueDate}</div>
         </div>
         <div style={{ fontFamily: 'Sora, sans-serif', fontSize: 24, fontWeight: 700 }}>
           {fmtCurrency(b.total)}

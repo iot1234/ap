@@ -1,0 +1,175 @@
+// === admin/page-access-devices.jsx =========================================
+// Issue + revoke API tokens for hardware (RFID readers, ESP32, etc.) so
+// they can POST /api/access/log without an admin session. Tokens are
+// shown ONCE on creation — never stored in plaintext.
+//
+// Backed by:
+//   GET    /api/admin/access-devices
+//   POST   /api/admin/access-devices         { deviceId, description }
+//   DELETE /api/admin/access-devices/:id
+// ===========================================================================
+
+const { useState, useEffect } = React;
+
+function PageAccessDevices({ setToast }) {
+  const C = window.ADMIN_C;
+  const { Card, Pill, PageContainer, PageHeader, EmptyState, Btn, Modal } = window;
+  const apiFetch = window.apiFetch;
+  const [devices, setDevices] = useState([]);
+  const [showNew, setShowNew] = useState(false);
+  const [form, setForm] = useState({ deviceId: '', description: '' });
+  const [busy, setBusy] = useState(false);
+  const [revealed, setRevealed] = useState(null);   // { token, deviceId }
+
+  async function load() {
+    try {
+      const r = await fetch('/api/admin/access-devices', { credentials: 'same-origin' });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'load failed');
+      setDevices(d.devices || []);
+    } catch (e) {
+      setToast && setToast({ kind: 'error', message: e.message });
+    }
+  }
+  useEffect(() => { load(); }, []);
+
+  async function create(e) {
+    e.preventDefault();
+    if (!/^[A-Za-z0-9_.-]{2,64}$/.test(form.deviceId)) {
+      setToast && setToast({ kind: 'error', message: 'device id ต้องเป็น a-z 0-9 _.- (2-64 ตัว)' });
+      return;
+    }
+    setBusy(true);
+    try {
+      const r = await apiFetch('/api/admin/access-devices', {
+        method: 'POST', body: JSON.stringify(form),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'create failed');
+      setRevealed({ token: d.token, deviceId: d.device.device_id });
+      setShowNew(false);
+      setForm({ deviceId: '', description: '' });
+      load();
+    } catch (e) {
+      setToast && setToast({ kind: 'error', message: e.message });
+    } finally { setBusy(false); }
+  }
+
+  async function remove(id) {
+    if (!window.confirm('ลบ device นี้? hardware ที่ใช้ token เก่าจะไม่สามารถ POST log ได้อีก')) return;
+    try {
+      const r = await apiFetch(`/api/admin/access-devices/${id}`, { method: 'DELETE' });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'delete failed');
+      setToast && setToast({ kind: 'success', message: 'ลบแล้ว' });
+      load();
+    } catch (e) {
+      setToast && setToast({ kind: 'error', message: e.message });
+    }
+  }
+
+  function copyToken() {
+    if (!revealed || !navigator.clipboard) return;
+    navigator.clipboard.writeText(revealed.token);
+    setToast && setToast({ kind: 'success', message: 'คัดลอกแล้ว' });
+  }
+
+  return (
+    <PageContainer>
+      <PageHeader title="API Tokens สำหรับ Hardware"
+        subtitle="ออก Bearer token ให้ RFID reader / ESP32 ใช้ POST /api/access/log โดยไม่ต้องมี session"
+        actions={
+          <Btn variant="primary" onClick={() => setShowNew(true)}>+ ออก token ใหม่</Btn>
+        } />
+
+      <Card style={{ background: C.warningSoft || '#fff7e0', borderLeft: `4px solid ${C.warning || '#c08a2a'}` }}>
+        <div style={{ fontSize: 13, lineHeight: 1.6, color: C.ink2 || C.ink }}>
+          🔐 <b>ความปลอดภัย:</b> token ใหม่จะแสดงเพียงครั้งเดียวเท่านั้น — ระบบเก็บแค่ SHA-256 hash<br/>
+          📡 <b>Hardware ใช้:</b> ส่ง <code>Authorization: Bearer &lt;token&gt;</code> ทุก request<br/>
+          🔄 <b>หมุน token:</b> ลบอันเก่า → สร้างใหม่ → อัปเดตใน firmware
+        </div>
+      </Card>
+
+      <Card>
+        {devices.length === 0 ? <EmptyState title="ยังไม่มี device — กดปุ่ม '+' ด้านบนเพื่อออก token แรก" /> : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 1, background: C.border, borderRadius: 8, overflow: 'hidden' }}>
+            {devices.map((d) => (
+              <div key={d.id} style={{
+                background: C.bg, padding: '12px 16px', display: 'grid',
+                gridTemplateColumns: '2fr 2fr auto auto', gap: 12, alignItems: 'center',
+              }}>
+                <div style={{ minWidth: 0 }}>
+                  <code style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 13, fontWeight: 600 }}>{d.device_id}</code>
+                  {d.description && <div style={{ color: C.muted, fontSize: 12, marginTop: 2 }}>{d.description}</div>}
+                </div>
+                <div style={{ color: C.muted, fontSize: 12 }}>
+                  สร้างเมื่อ {new Date(d.created_at).toLocaleDateString('th-TH')}
+                  {d.last_seen && <><br/>ใช้งานล่าสุด {new Date(d.last_seen).toLocaleString('th-TH')}</>}
+                </div>
+                <Pill color={d.enabled ? '#2f8f5b' : '#8a7d6b'}>{d.enabled ? 'ใช้งาน' : 'ปิด'}</Pill>
+                <Btn size="sm" variant="danger" onClick={() => remove(d.id)}>ลบ</Btn>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+
+      <Modal open={showNew} onClose={() => setShowNew(false)} title="ออก token ใหม่">
+        <form onSubmit={create} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <label style={{ fontSize: 12, color: C.muted }}>
+            Device ID
+            <input value={form.deviceId} onChange={(e) => setForm({ ...form, deviceId: e.target.value })}
+              placeholder="rfid-floor-3" required maxLength={64}
+              style={{
+                width: '100%', marginTop: 4, padding: '8px 12px', borderRadius: 6,
+                border: '1px solid ' + C.border, background: C.bg, color: C.ink,
+                fontSize: 13.5, fontFamily: 'inherit',
+              }} />
+          </label>
+          <label style={{ fontSize: 12, color: C.muted }}>
+            คำอธิบาย (optional)
+            <input value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })}
+              placeholder="เครื่องอ่านบัตรชั้น 3 ใกล้บันได" maxLength={200}
+              style={{
+                width: '100%', marginTop: 4, padding: '8px 12px', borderRadius: 6,
+                border: '1px solid ' + C.border, background: C.bg, color: C.ink,
+                fontSize: 13.5, fontFamily: 'inherit',
+              }} />
+          </label>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <Btn type="submit" variant="primary" disabled={busy} style={{ flex: 1 }}>
+              {busy ? '…' : 'สร้าง'}
+            </Btn>
+            <Btn type="button" variant="ghost" onClick={() => setShowNew(false)}>ยกเลิก</Btn>
+          </div>
+        </form>
+      </Modal>
+
+      <Modal open={!!revealed} onClose={() => setRevealed(null)} title="🔑 Token ใหม่ — แสดงเพียงครั้งเดียว">
+        {revealed && (
+          <div>
+            <div style={{ color: C.muted, fontSize: 13, marginBottom: 8 }}>
+              Device: <code>{revealed.deviceId}</code>
+            </div>
+            <code style={{
+              display: 'block', wordBreak: 'break-all',
+              fontFamily: 'JetBrains Mono, monospace', fontSize: 12.5,
+              padding: 12, background: C.bgSoft || '#fff7e0',
+              borderRadius: 8, border: '1px solid ' + C.border,
+              userSelect: 'all',
+            }}>{revealed.token}</code>
+            <div style={{ marginTop: 8, padding: 10, background: '#fff5f4', border: '1px solid #f3c2bf', borderRadius: 8, color: '#5a1a13', fontSize: 12.5 }}>
+              ⚠️ บันทึก token นี้ไว้ที่ปลอดภัยทันที — ระบบจะไม่แสดงอีกหลังปิดหน้านี้
+            </div>
+            <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+              <Btn variant="primary" onClick={copyToken} style={{ flex: 1 }}>📋 คัดลอก</Btn>
+              <Btn variant="ghost" onClick={() => setRevealed(null)}>ปิด</Btn>
+            </div>
+          </div>
+        )}
+      </Modal>
+    </PageContainer>
+  );
+}
+
+window.PageAccessDevices = PageAccessDevices;
