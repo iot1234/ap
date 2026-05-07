@@ -132,4 +132,10 @@ function SlipModal({ payment, busy, onClose, onDecide }) {
   );
 }
 
-window.PagePayments = PagePayments;
+window.PagePayments = window.FeatureGate
+  ? function PagePaymentsGated(props) {
+      return React.createElement(window.FeatureGate,
+        { flag: 'slipUpload', label: 'สลิปชำระเงิน' },
+        React.createElement(PagePayments, props));
+    }
+  : PagePayments;

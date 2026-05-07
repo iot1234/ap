@@ -284,4 +284,10 @@ function RecurringForm({ initial, tenants, onCancel, onSave, busy }) {
   );
 }
 
-window.PageRecurringCharges = PageRecurringCharges;
+window.PageRecurringCharges = window.FeatureGate
+  ? function PageRecurringChargesGated(props) {
+      return React.createElement(window.FeatureGate,
+        { flag: 'recurringCharges', label: 'ค่าใช้จ่ายประจำ' },
+        React.createElement(PageRecurringCharges, props));
+    }
+  : PageRecurringCharges;

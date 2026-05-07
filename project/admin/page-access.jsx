@@ -110,4 +110,10 @@ function inp(C) {
   };
 }
 
-window.PageAccess = PageAccess;
+window.PageAccess = window.FeatureGate
+  ? function PageAccessGated(props) {
+      return React.createElement(window.FeatureGate,
+        { flag: 'accessControl', label: 'เข้า-ออก' },
+        React.createElement(PageAccess, props));
+    }
+  : PageAccess;

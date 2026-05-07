@@ -84,17 +84,18 @@
     constructor(props) { super(props); this.state = { err: null }; }
     static getDerivedStateFromError(err) { return { err }; }
     componentDidCatch(err, info) {
-      // Best-effort report to server for grouping. Stays inside try so a
-      // failing report can't double-fault.
+      // Best-effort report to server. Only stringify primitive fields —
+      // err.cause / err.target may contain DOM/fiber refs that re-throw
+      // "Converting circular structure to JSON" inside this handler.
       try {
         fetch('/api/client-error', {
           method: 'POST',
           credentials: 'same-origin',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            message: String(err?.message || err),
-            stack: String(err?.stack || '').slice(0, 4000),
-            componentStack: String(info?.componentStack || '').slice(0, 4000),
+            message: String((err && err.message) || err).slice(0, 1000),
+            stack: String((err && err.stack) || '').slice(0, 4000),
+            componentStack: String((info && info.componentStack) || '').slice(0, 4000),
             url: window.location.href,
           }),
         });
@@ -268,6 +269,27 @@
   // sync errors thrown anywhere; unhandledrejection catches async rejects.
   // Both fire-and-forget POST to /api/client-error so admin sees them in
   // audit logs even when the user closes the tab right after.
+  //
+  // safeStringify: drops circular refs + DOM nodes + React fibers so a
+  // payload containing them doesn't itself throw "Converting circular
+  // structure to JSON" (the original error we're trying to report becomes
+  // unreportable). We replace problematic values with "[Circular]" /
+  // "[DOM]" / "[ReactFiber]" placeholders so the actionable parts survive.
+  function safeStringify(obj) {
+    const seen = new WeakSet();
+    return JSON.stringify(obj, function (key, value) {
+      if (typeof key === 'string' && key.startsWith('__react')) return '[ReactFiber]';
+      if (value === window) return '[Window]';
+      if (typeof Element !== 'undefined' && value instanceof Element) return '[DOM:' + value.tagName + ']';
+      if (typeof Event !== 'undefined' && value instanceof Event) return '[Event:' + value.type + ']';
+      if (typeof Node !== 'undefined' && value instanceof Node) return '[Node]';
+      if (value && typeof value === 'object') {
+        if (seen.has(value)) return '[Circular]';
+        seen.add(value);
+      }
+      return value;
+    });
+  }
   if (typeof window !== 'undefined' && !window.__admin_err_bound) {
     window.__admin_err_bound = true;
     let _lastReport = 0;   // throttle: 1 report per second to dodge loops
@@ -275,15 +297,18 @@
       const now = Date.now();
       if (now - _lastReport < 1000) return;
       _lastReport = now;
+      let body;
+      try { body = safeStringify(payload); }
+      catch { body = safeStringify({ message: 'unstringifiable payload' }); }
       try {
         navigator.sendBeacon
           ? navigator.sendBeacon('/api/client-error', new Blob(
-              [JSON.stringify(payload)], { type: 'application/json' }))
+              [body], { type: 'application/json' }))
           : fetch('/api/client-error', {
               method: 'POST',
               credentials: 'same-origin',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(payload),
+              body,
               keepalive: true,
             });
       } catch { /* ignore */ }
@@ -306,7 +331,44 @@
     });
   }
 
+  // === FeatureGate ====================================================
+  // Wraps a page so it shows a friendly "feature is off" placeholder when
+  // the corresponding feature flag is disabled — instead of letting the page
+  // render and stack 503-error toasts as every API call fails.
+  function FeatureGate({ flag, children, label }) {
+    const f = useFeatureFlag(flag);
+    if (!f.ready) {
+      return React.createElement(window.AdminSkeleton || 'div', { rows: 4 });
+    }
+    if (f.enabled) return children;
+    const C = window.ADMIN_C || {};
+    return React.createElement('div', {
+      style: {
+        padding: 40, margin: 24, borderRadius: 12,
+        background: C.bgSoft || '#fff7e0',
+        color: C.ink2 || '#5b4f40',
+        textAlign: 'center', fontFamily: 'inherit',
+      },
+    }, [
+      React.createElement('div', { key: 'i', style: { fontSize: 36, marginBottom: 12 } }, '🎛'),
+      React.createElement('div', { key: 'h', style: { fontFamily: 'Sora', fontSize: 16, fontWeight: 600, marginBottom: 4 } },
+        `ฟีเจอร์ "${label || flag}" ปิดอยู่`),
+      React.createElement('div', { key: 'd', style: { fontSize: 13.5, marginBottom: 16 } },
+        'เปิดได้ที่ ระบบ → ฟีเจอร์ระบบ'),
+      React.createElement('button', {
+        key: 'b',
+        onClick: () => { window.location.hash = '#features'; window.location.reload(); },
+        style: {
+          padding: '8px 18px', borderRadius: 8, border: 0,
+          background: C.accent || '#c46a3e', color: '#fff',
+          fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit',
+        },
+      }, 'ไปหน้าฟีเจอร์'),
+    ]);
+  }
+
   window.useFeatureFlag = useFeatureFlag;
+  window.FeatureGate = FeatureGate;
   window.useApi = useApi;
   window.loadFeatures = loadFeatures;
   window.ErrorBoundary = ErrorBoundary;

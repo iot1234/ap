@@ -837,21 +837,81 @@ app.get('/api/data', async (req, res) => {
 app.put('/api/data/:key', sameOrigin, requireAuth, async (req, res) => {
   const key = req.params.key;
   if (!ALLOWED_KEYS.has(key)) return res.status(400).json({ error: 'invalid key' });
-  const value = req.body && req.body.value !== undefined ? req.body.value : req.body;
+  let value = req.body && req.body.value !== undefined ? req.body.value : req.body;
   // Reject null/undefined writes (use DELETE instead) — prevents the "row exists
   // with value null" footgun where the next hydrate finds null and seeds again.
   if (value === null || value === undefined) {
     return res.status(400).json({ error: 'use DELETE to remove a key' });
   }
+  // Defensive normalisation: if the client sent a JSON string instead of an
+  // object/array (older code path or buggy state), parse it. This avoids
+  // the Postgres error 22P02 "invalid input syntax for type json" we hit
+  // when an array element was a malformed JSON-string-of-an-object.
+  if (typeof value === 'string') {
+    try { value = JSON.parse(value); }
+    catch (e) {
+      return res.status(400).json({
+        error: 'value is a string but not valid JSON',
+        code: 'INVALID_JSON',
+        hint: e.message,
+      });
+    }
+  }
+  // Re-stringify ourselves so pg-node sends a clean JSON literal — this
+  // sidesteps any double-escape edge case where an array element was
+  // previously serialized as a JSON-string-of-an-object.
+  let serialised;
+  try { serialised = JSON.stringify(value); }
+  catch (e) {
+    return res.status(400).json({
+      error: 'value is not JSON-serialisable (circular ref?)',
+      code: 'NOT_SERIALISABLE',
+      hint: e.message,
+    });
+  }
+  // Sanity check: enforce expected top-level shape per key. Some legacy
+  // clients sent malformed structures (e.g. activities became an array of
+  // mixed objects + JSON-strings) which then choked Postgres on read.
+  const EXPECTED_SHAPE = {
+    baankarn_rooms_v1:      'object',
+    baankarn_config_v1:     'object',
+    baankarn_bookings_v1:   'array',
+    baankarn_activities_v1: 'array',
+    baankarn_users_v1:      'array',
+  };
+  const want = EXPECTED_SHAPE[key];
+  if (want === 'array' && !Array.isArray(value)) {
+    return res.status(400).json({ error: `${key} must be a JSON array`, code: 'BAD_SHAPE' });
+  }
+  if (want === 'object' && (typeof value !== 'object' || Array.isArray(value))) {
+    return res.status(400).json({ error: `${key} must be a JSON object`, code: 'BAD_SHAPE' });
+  }
+  // For arrays, repair common corruption: any element that's a STRING which
+  // looks like JSON gets parsed back to its object form. This is exactly
+  // the situation that produced the 22P02 error in production logs —
+  // someone's `addActivity` accidentally JSON.stringify'd the activity
+  // before pushing into the array.
+  if (Array.isArray(value)) {
+    value = value.map((item) => {
+      if (typeof item !== 'string') return item;
+      const trimmed = item.trim();
+      if ((trimmed.startsWith('{') && trimmed.endsWith('}'))
+          || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
+        try { return JSON.parse(trimmed); } catch { /* leave as string */ }
+      }
+      return item;
+    });
+    serialised = JSON.stringify(value);
+  }
   try {
     await pool.query(
       `INSERT INTO app_data (key, value, updated_by)
-       VALUES ($1, $2, $3)
+       VALUES ($1, $2::jsonb, $3)
        ON CONFLICT (key) DO UPDATE
          SET value = EXCLUDED.value,
              updated_at = NOW(),
              updated_by = EXCLUDED.updated_by`,
-      [key, value, req.session.user.username]
+      [key, serialised, req.session.user.username]
     );
     audit(req, 'data.put', 'app_data', key);
     // Bridge: when admin saves the rooms blob, mirror tenant info into

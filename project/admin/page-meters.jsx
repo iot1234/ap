@@ -122,4 +122,13 @@ function selStyle(C) {
   };
 }
 
-window.PageMeters = PageMeters;
+// Wrap with FeatureGate so the page renders a friendly "feature is off"
+// placeholder when admin disables `meterIot`, instead of letting every
+// /api/meters/... call return 503 and stack error toasts.
+window.PageMeters = window.FeatureGate
+  ? function PageMetersGated(props) {
+      return React.createElement(window.FeatureGate,
+        { flag: 'meterIot', label: 'มิเตอร์' },
+        React.createElement(PageMeters, props));
+    }
+  : PageMeters;

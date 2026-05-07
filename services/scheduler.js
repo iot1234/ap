@@ -21,15 +21,57 @@ const notifier = require('./notifier');
 const meter = require('./meter');
 
 const TICK_MS = 60 * 60 * 1000;          // hourly
-const STATE_FILE = path.join(__dirname, '..', '.scheduler-state.json');
+
+// Pick a writable location for the state file. Containers commonly run as
+// non-root with /app owned-but-not-writable for new files; SCHEDULER_STATE_FILE
+// env (or a Railway volume) wins, then the app dir, then /tmp as a last
+// resort. State is just last-fired-keys — losing it means today's tasks may
+// fire twice; not worth crashing the container.
+const _candidateStatePaths = [
+  process.env.SCHEDULER_STATE_FILE,
+  process.env.UPLOAD_DIR && path.join(process.env.UPLOAD_DIR, 'scheduler-state.json'),
+  path.join(__dirname, '..', '.scheduler-state.json'),
+  path.join(require('os').tmpdir(), 'baankarn-scheduler-state.json'),
+].filter(Boolean);
+
+function _pickStateFile() {
+  for (const p of _candidateStatePaths) {
+    try {
+      // Test writability by opening for append (creates if missing)
+      const fd = fs.openSync(p, 'a');
+      fs.closeSync(fd);
+      return p;
+    } catch { /* not writable, try next */ }
+  }
+  return null;
+}
+let STATE_FILE = _pickStateFile();
+if (STATE_FILE && STATE_FILE !== _candidateStatePaths[0]) {
+  console.log('[scheduler] state file:', STATE_FILE);
+}
 
 function readState() {
+  if (!STATE_FILE) return {};
   try { return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); }
   catch { return {}; }
 }
 function writeState(s) {
+  if (!STATE_FILE) return;
   try { fs.writeFileSync(STATE_FILE, JSON.stringify(s)); }
-  catch (err) { console.error('[scheduler] state write failed:', err.message); }
+  catch (err) {
+    // First write that lands here means our pick became unwritable
+    // (e.g. permissions changed). Try to relocate ONCE so we don't spam logs.
+    if (err.code === 'EACCES' || err.code === 'EROFS') {
+      const fallback = path.join(require('os').tmpdir(), 'baankarn-scheduler-state.json');
+      if (STATE_FILE !== fallback) {
+        console.warn('[scheduler] relocating state file to', fallback, '(reason:', err.code + ')');
+        STATE_FILE = fallback;
+        try { fs.writeFileSync(STATE_FILE, JSON.stringify(s)); return; }
+        catch (e2) { console.error('[scheduler] tmp fallback also failed:', e2.message); }
+      }
+    }
+    console.error('[scheduler] state write failed:', err.message);
+  }
 }
 
 async function tickAutoBackup(pool, flags, now, state) {

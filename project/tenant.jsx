@@ -785,15 +785,20 @@ class TenantErrorBoundary extends React.Component {
   constructor(props) { super(props); this.state = { err: null }; }
   static getDerivedStateFromError(err) { return { err }; }
   componentDidCatch(err, info) {
+    // Stringify only primitive fields. We never serialize the full err
+    // object — React errors often contain DOM nodes / fibers / event refs
+    // that JSON.stringify can't handle (the original "Converting circular
+    // structure to JSON" we're trying to report would otherwise re-throw
+    // and the report itself fails silently).
     try {
       fetch('/api/client-error', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'same-origin',
         body: JSON.stringify({
-          message: String(err?.message || err),
-          stack: String(err?.stack || '').slice(0, 4000),
-          componentStack: String(info?.componentStack || '').slice(0, 4000),
+          message: String(err && err.message ? err.message : err).slice(0, 1000),
+          stack: String((err && err.stack) || '').slice(0, 4000),
+          componentStack: String((info && info.componentStack) || '').slice(0, 4000),
           url: window.location.href,
         }),
       });
@@ -854,6 +859,24 @@ function TenantOfflineBanner() {
 
 // Global error sink — same pattern as admin/hooks.jsx. ErrorBoundary covers
 // render errors; these listeners cover sync exceptions + unhandled async.
+//
+// safeStringify drops circular refs + DOM nodes + React fibers so reporting
+// an error doesn't itself throw "Converting circular structure to JSON" —
+// which was producing a confusing fallback page on tenant portal.
+function _tenantSafeStringify(obj) {
+  const seen = new WeakSet();
+  return JSON.stringify(obj, function (key, value) {
+    if (typeof key === 'string' && key.startsWith('__react')) return '[ReactFiber]';
+    if (value === window) return '[Window]';
+    if (typeof Element !== 'undefined' && value instanceof Element) return '[DOM:' + value.tagName + ']';
+    if (typeof Event !== 'undefined' && value instanceof Event) return '[Event:' + value.type + ']';
+    if (value && typeof value === 'object') {
+      if (seen.has(value)) return '[Circular]';
+      seen.add(value);
+    }
+    return value;
+  });
+}
 if (typeof window !== 'undefined' && !window.__tenant_err_bound) {
   window.__tenant_err_bound = true;
   let _lastReport = 0;
@@ -861,14 +884,17 @@ if (typeof window !== 'undefined' && !window.__tenant_err_bound) {
     const now = Date.now();
     if (now - _lastReport < 1000) return;
     _lastReport = now;
+    let body;
+    try { body = _tenantSafeStringify(payload); }
+    catch { body = JSON.stringify({ message: 'unstringifiable payload' }); }
     try {
-      const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
+      const blob = new Blob([body], { type: 'application/json' });
       navigator.sendBeacon
         ? navigator.sendBeacon('/api/client-error', blob)
         : fetch('/api/client-error', {
             method: 'POST', credentials: 'same-origin',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload), keepalive: true,
+            body, keepalive: true,
           });
     } catch { /* ignore */ }
   }
