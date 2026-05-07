@@ -785,8 +785,8 @@ function maskConfigPublic(cfg) {
   const c = { ...cfg };
   if (c.payment) {
     c.payment = {
-      promptpayDisplayName: c.payment.promptpayDisplayName,
-      promptpayTarget: c.payment.promptpayTarget,
+      promptpayDisplayName: c.payment.promptpayDisplayName || c.payment.bankName,
+      promptpayTarget: c.payment.promptpay || c.payment.promptpayTarget,
     };
   }
   delete c.users; delete c.notification; delete c.automation;
@@ -1445,8 +1445,10 @@ app.post('/api/maintenance/:id/rate', sameOrigin, validateBody(schemas.rateTicke
 });
 
 // GET /api/audit?limit=&before=  — admin-auth, returns recent audit entries.
-// Cursor-paginated by created_at DESC.
-app.get('/api/audit', requireAuth, async (req, res) => {
+// Cursor-paginated by created_at DESC. Restricted to owner/manager
+// because auth.login_failed details (reason='unknown_user' vs
+// 'wrong_password') can be used to enumerate which usernames exist.
+app.get('/api/audit', requireAuth, requireRole('owner', 'manager'), async (req, res) => {
   const limit = Math.min(Math.max(Number(req.query.limit) || 100, 1), 500);
   // Validate `before` as ISO date — pg accepts other formats but we want
   // strict parsing so attackers can't push the cursor far enough to scan
@@ -1938,7 +1940,23 @@ app.delete('/api/tenants/:id', sameOrigin, requireAuth, async (req, res) => {
     if (flags.softDelete && flags.softDelete.enabled) {
       await pool.query(`UPDATE tenants SET deleted_at=NOW() WHERE id=$1`, [id]);
     } else {
-      await pool.query(`DELETE FROM tenants WHERE id=$1`, [id]);
+      // Hard delete is dangerous: tenants(id) has FK references from bills,
+      // contracts, payments, access_cards, line_bindings (CASCADE),
+      // recurring_charges (CASCADE), tenant_sessions (NOT NULL).
+      // Most FKs are ON DELETE NO ACTION → the DELETE fails with 23503 and
+      // the tenant stays orphaned. Surface that as a clear 409 instead of
+      // a generic 500 so admin knows to use soft-delete (or clean refs first).
+      try {
+        await pool.query(`DELETE FROM tenants WHERE id=$1`, [id]);
+      } catch (err) {
+        if (err.code === '23503') {
+          return res.status(409).json({
+            error: 'ลบไม่ได้ — ผู้เช่ายังมีบิล/สัญญา/บัตรเข้า-ออกเชื่อมโยง โปรดเปิด softDelete หรือลบข้อมูลที่เชื่อมโยงก่อน',
+            code: 'TENANT_HAS_REFS',
+          });
+        }
+        throw err;
+      }
     }
     audit(req, 'tenant.delete', 'tenant', String(id));
     res.json({ ok: true });
@@ -2097,6 +2115,37 @@ app.get('/api/tenant/me', async (req, res) => {
     });
   } catch (err) {
     res.json({ tenant: null });
+  }
+});
+
+// Tenant updates their own profile (locale + email only). Locale was
+// previously persisted to localStorage only, so it reset every time the
+// tenant cleared cookies or used another device.
+app.put('/api/tenant/me', sameOrigin, requireTenant, async (req, res) => {
+  const b = req.body || {};
+  const fields = [], params = [];
+  let i = 1;
+  if (b.locale !== undefined && ['th', 'en'].includes(String(b.locale))) {
+    fields.push(`locale=$${i++}`); params.push(String(b.locale));
+  }
+  if (b.email !== undefined) {
+    const e = b.email ? String(b.email).slice(0, 200).trim() : null;
+    fields.push(`email=$${i++}`); params.push(e);
+  }
+  if (!fields.length) return res.status(400).json({ error: 'nothing to update' });
+  fields.push('updated_at = NOW()');
+  params.push(req.tenant.tenant_id);
+  try {
+    await pool.query(
+      `UPDATE tenants SET ${fields.join(', ')} WHERE id=$${i} AND deleted_at IS NULL`,
+      params
+    );
+    audit(req, 'tenant.profile_update', 'tenant', String(req.tenant.tenant_id),
+      { fields: Object.keys(b) }, `tenant:${req.tenant.tenant_id}`);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('tenant me PUT error:', err);
+    res.status(500).json({ error: 'internal error' });
   }
 });
 
@@ -2444,22 +2493,36 @@ app.post('/api/tenant/payments', sameOrigin, requireTenant, ensureSlipUpload, as
       maxBytes: req.features.slipUpload.maxBytes || 1_500_000,
       allowedMimes: req.features.slipUpload.allowedMimes || ['image/jpeg', 'image/png', 'image/webp'],
     });
+    // Atomic: payment INSERT + (optional) bill mark-paid run in one tx so
+    // we never end up with a verified payment row pointing at a bill still
+    // marked 'pending', or vice-versa, if either statement crashes mid-way.
     let row;
+    const client = await pool.connect();
     try {
-      const ins = await pool.query(
-        `INSERT INTO payments (bill_id, tenant_id, amount, method, slip_url, slip_hash, status)
-         VALUES ($1,$2,$3,'promptpay',$4,$5,$6)
-         RETURNING *`,
-        [billId, req.tenant.tenant_id, amount, slip.url, slipHash,
-         req.features.slipUpload.requireVerification ? 'pending' : 'verified']
-      );
-      row = ins.rows[0];
+      await client.query('BEGIN');
+      try {
+        const ins = await client.query(
+          `INSERT INTO payments (bill_id, tenant_id, amount, method, slip_url, slip_hash, status)
+           VALUES ($1,$2,$3,'promptpay',$4,$5,$6)
+           RETURNING *`,
+          [billId, req.tenant.tenant_id, amount, slip.url, slipHash,
+           req.features.slipUpload.requireVerification ? 'pending' : 'verified']
+        );
+        row = ins.rows[0];
+      } catch (err) {
+        await client.query('ROLLBACK').catch(() => {});
+        if (err.code === '23505') return res.status(409).json({ error: 'duplicate slip' });
+        throw err;
+      }
+      if (!req.features.slipUpload.requireVerification) {
+        await client.query(`UPDATE bills SET status='paid', paid_at=NOW() WHERE id=$1 AND status<>'paid'`, [billId]);
+      }
+      await client.query('COMMIT');
     } catch (err) {
-      if (err.code === '23505') return res.status(409).json({ error: 'duplicate slip' });
+      await client.query('ROLLBACK').catch(() => {});
       throw err;
-    }
-    if (!req.features.slipUpload.requireVerification) {
-      await pool.query(`UPDATE bills SET status='paid', paid_at=NOW() WHERE id=$1 AND status<>'paid'`, [billId]);
+    } finally {
+      client.release();
     }
     audit(req, 'tenant.slip_upload', 'payment', String(row.id),
       { billId, amount, autoVerified: !req.features.slipUpload.requireVerification },

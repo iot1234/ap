@@ -687,7 +687,18 @@ function App() {
   const [bills, setBills] = useState([]);
   const [tickets, setTickets] = useState([]);
 
-  const setLocale = (v) => { setLocaleRaw(v); localStorage.setItem('tenant_locale', v); };
+  const setLocale = (v) => {
+    setLocaleRaw(v);
+    localStorage.setItem('tenant_locale', v);
+    // Persist to server so the preference follows the tenant across
+    // devices / cookie clears. Fail-soft: the localStorage copy still
+    // works locally if the server call fails.
+    if (tenant) {
+      api('/api/tenant/me', {
+        method: 'PUT', body: JSON.stringify({ locale: v }),
+      }).catch(() => {});
+    }
+  };
   const setTheme = (v) => {
     setThemeRaw(v);
     document.body.dataset.theme = v;

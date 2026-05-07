@@ -37,14 +37,31 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
   // reflecting the action — local state still updates and the api-client's
   // /api/data sync persists eventually.
   const updateStatus = async (id, status, extra = {}) => {
+    // Snapshot the prior state so we can revert if the server rejects the
+    // transition (e.g. trying to approve→reviewing — server returns 400 with
+    // an `allowed` list). Admin sees a toast instead of a phantom approval.
+    const before = bookings.find((b) => b.id === id);
     setBookings(prev => prev.map(b => b.id === id ? { ...b, status, ...extra } : b));
     try {
       const f = window.apiFetch || fetch;
-      await f(`/api/bookings/${encodeURIComponent(id)}`, {
+      const r = await f(`/api/bookings/${encodeURIComponent(id)}`, {
         method: 'PUT',
         body: JSON.stringify({ status, ...extra }),
       });
-    } catch (e) { /* server-side audit/notify failure is non-fatal */ }
+      if (r && r.ok === false || (r && r.status >= 400)) {
+        const j = await r.json().catch(() => ({}));
+        if (before) {
+          setBookings(prev => prev.map(b => b.id === id ? before : b));
+        }
+        setToast && setToast({
+          kind: 'error',
+          message: j.error || `เปลี่ยนสถานะไม่สำเร็จ (HTTP ${r.status})`,
+        });
+      }
+    } catch (e) {
+      // Network failure → keep optimistic update; api-client.js will sync
+      // the bookings blob via /api/data once the connection is back.
+    }
   };
 
   const handleApprove = (id) => {

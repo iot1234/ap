@@ -55,16 +55,31 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             dueDate: prevQ.rows[0].due_date,
             status: prevQ.rows[0].status,
           } : null;
-          // Pull active recurring charges for this room — services/billing.js
-          // adds them as line items when the recurringCharges feature is on.
+          // Pull active recurring charges for this room AND its current
+          // tenant — without the tenant_id branch, parking/cleaning charges
+          // billed to the person (not the unit) would be silently dropped.
           let recurring = [];
+          let tenantIdForRoom = null;
           try {
+            const tq = await pool.query(
+              `SELECT id FROM tenants
+                 WHERE current_room_id=$1 AND status='active' AND deleted_at IS NULL
+                 ORDER BY updated_at DESC LIMIT 1`,
+              [room.id]
+            );
+            if (tq.rows.length) tenantIdForRoom = tq.rows[0].id;
+          } catch { /* ignore */ }
+          try {
+            const params = [];
+            const ors = [];
+            if (tenantIdForRoom) { params.push(tenantIdForRoom); ors.push(`tenant_id = $${params.length}`); }
+            params.push(room.id); ors.push(`room_id = $${params.length}`);
             const rc = await pool.query(
               `SELECT label, amount FROM recurring_charges
-                 WHERE room_id=$1 AND active = TRUE
+                 WHERE active = TRUE AND (${ors.join(' OR ')})
                    AND (start_at IS NULL OR start_at <= CURRENT_DATE)
                    AND (end_at IS NULL OR end_at >= CURRENT_DATE)`,
-              [room.id]
+              params
             );
             recurring = rc.rows.map((x) => ({ label: x.label, amount: Number(x.amount) }));
           } catch { /* table may not exist on older deployments */ }
@@ -72,12 +87,13 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           try {
             const { rowCount } = await queryWithRetry(
               `INSERT INTO bills
-                 (bill_no, room_id, period, rent, water_units, water_rate, water_amount,
+                 (bill_no, tenant_id, room_id, period, rent,
+                  water_units, water_rate, water_amount,
                   elec_units, elec_rate, elec_amount, wifi, subtotal, vat, late_fee, total, due_date, status)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,'pending')
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'pending')
                ON CONFLICT (bill_no) DO NOTHING`,
               [
-                bill.billNo, bill.roomId, bill.period,
+                bill.billNo, tenantIdForRoom, bill.roomId, bill.period,
                 bill.rent, bill.waterUnits, bill.waterRate, bill.waterAmount,
                 bill.elecUnits, bill.elecRate, bill.elecAmount,
                 bill.wifi, bill.subtotal, bill.vat, bill.lateFee, bill.total,
@@ -107,10 +123,12 @@ module.exports = function buildBillsExtrasRouter(ctx) {
   async function enqueueBillNotifications(billId) {
     const billQ = await pool.query(
       `SELECT b.*, t.full_name AS tenant_name, t.phone AS tenant_phone, t.line_user_id, t.email
-         FROM bills b LEFT JOIN tenants t ON t.id = b.tenant_id WHERE b.id=$1`,
+         FROM bills b LEFT JOIN tenants t ON t.id = b.tenant_id
+         WHERE b.id=$1 AND b.deleted_at IS NULL`,
       [billId]
     );
     if (!billQ.rows.length) return { ok: false, error: 'not found' };
+    if (billQ.rows[0].status === 'void') return { ok: false, error: 'bill is void' };
     const b = billQ.rows[0];
     const subject = `บิลรอบ ${b.period} — ห้อง ${b.room_id}`;
     const body = `บิลใหม่\nผู้เช่า: ${b.tenant_name || '-'}\nห้อง: ${b.room_id}\nรอบ: ${b.period}\nยอด: ฿${Number(b.total).toLocaleString('th-TH', { minimumFractionDigits: 2 })}\nกำหนดชำระ: ${b.due_date}`;

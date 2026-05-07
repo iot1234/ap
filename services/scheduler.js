@@ -133,15 +133,71 @@ async function tickBillGen(pool, flags, now, state) {
     let made = 0;
     for (const room of rooms) {
       if (!room.tenant || (room.status !== 'occupied' && room.status !== 'overdue')) continue;
-      const bill = billing.buildBill({ room, config, features: flags, period, dueDate });
+      // Resolve the active tenant for this room so generated bills appear
+      // in the tenant portal (without tenant_id, /api/tenant/bills can't
+      // see them and the LINE bill push has no recipient).
+      let tenantId = null;
+      try {
+        const tq = await pool.query(
+          `SELECT id FROM tenants
+              WHERE current_room_id=$1 AND status='active' AND deleted_at IS NULL
+              ORDER BY updated_at DESC LIMIT 1`,
+          [room.id]
+        );
+        if (tq.rows.length) tenantId = tq.rows[0].id;
+      } catch { /* fail-soft */ }
+
+      // Pull active recurring charges (parking/internet/etc.) so the
+      // scheduler-generated bill matches what the manual /api/bills POST
+      // would produce. Without this, scheduler bills silently miss line
+      // items that the admin UI shows when generating manually.
+      let recurring = [];
+      if (flags.recurringCharges?.enabled) {
+        try {
+          const params = [];
+          const ors = [];
+          if (tenantId) { params.push(tenantId); ors.push(`tenant_id = $${params.length}`); }
+          params.push(room.id); ors.push(`room_id = $${params.length}`);
+          const rc = await pool.query(
+            `SELECT label, amount FROM recurring_charges
+               WHERE active = TRUE AND (${ors.join(' OR ')})
+                 AND (start_at IS NULL OR start_at <= CURRENT_DATE)
+                 AND (end_at IS NULL OR end_at >= CURRENT_DATE)`,
+            params
+          );
+          recurring = rc.rows.map((r) => ({ label: r.label, amount: Number(r.amount) }));
+        } catch { /* table may not exist on older deployments */ }
+      }
+
+      // Pull previous overdue bill for late-fee carry-over (matches the
+      // manual generate path so totals are identical between both routes).
+      let previous = null;
+      try {
+        const prev = await pool.query(
+          `SELECT total, due_date, paid_at, status FROM bills
+             WHERE room_id=$1 AND status IN ('pending','overdue') AND deleted_at IS NULL
+             ORDER BY created_at DESC LIMIT 1`,
+          [room.id]
+        );
+        if (prev.rows[0]) {
+          previous = {
+            total: Number(prev.rows[0].total),
+            dueDate: prev.rows[0].due_date,
+            status: prev.rows[0].status,
+          };
+        }
+      } catch { /* ignore */ }
+
+      const bill = billing.buildBill({ room, config, features: flags, previous, recurring, period, dueDate });
       try {
         await pool.query(
-          `INSERT INTO bills (bill_no, room_id, period, rent, water_units, water_rate, water_amount,
+          `INSERT INTO bills (bill_no, tenant_id, room_id, period, rent,
+              water_units, water_rate, water_amount,
               elec_units, elec_rate, elec_amount, wifi, subtotal, vat, late_fee, total, due_date, status)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,'pending')
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'pending')
            ON CONFLICT (bill_no) DO NOTHING`,
           [
-            bill.billNo, bill.roomId, bill.period,
+            bill.billNo, tenantId, bill.roomId, bill.period,
             bill.rent, bill.waterUnits, bill.waterRate, bill.waterAmount,
             bill.elecUnits, bill.elecRate, bill.elecAmount,
             bill.wifi, bill.subtotal, bill.vat, bill.lateFee, bill.total,
@@ -149,7 +205,11 @@ async function tickBillGen(pool, flags, now, state) {
           ]
         );
         made++;
-      } catch (e) { console.error('[scheduler] bill insert failed:', e.message); }
+      } catch (e) {
+        // Partial-unique on (room_id, period) blocks duplicates even when
+        // bill_no differs across paths; treat as silent skip.
+        if (e.code !== '23505') console.error('[scheduler] bill insert failed:', e.message);
+      }
     }
     state.lastBillPeriod = period;
     writeState(state);
