@@ -91,7 +91,36 @@ function buildBill({ room, config, features, previous = null, recurring = [], pe
     lateFee,
     total,
     building: (config && config.building) || {},
-    promptpayTarget: (config && config.payment && config.payment.promptpayTarget) || undefined,
+    ...buildPaymentBlock(config),
+  };
+}
+
+/**
+ * Extract a unified payment block from config.payment so PDFs and tenant
+ * portal both see the same shape. Includes PromptPay (primary), bank transfer
+ * details, and the toggles for LINE Pay / TrueMoney / credit card so they can
+ * be advertised on the invoice even though we don't process them in-app.
+ */
+function buildPaymentBlock(config) {
+  const p = (config && config.payment) || {};
+  const promptpayTarget = p.promptpay || p.promptpayTarget || undefined;
+  const promptpayName = p.promptpayDisplayName || p.bankName || undefined;
+  const bank = p.bank ? {
+    bank: p.bank,
+    account: p.bankAcc || '',
+    name: p.bankName || '',
+  } : null;
+  const methods = [];
+  if (promptpayTarget) methods.push({ key: 'promptpay', label: 'PromptPay', enabled: true });
+  if (bank && bank.account) methods.push({ key: 'bank', label: `${bank.bank} • ${bank.account}`, enabled: true });
+  if (p.linePay)    methods.push({ key: 'linePay',    label: 'LINE Pay',          enabled: true });
+  if (p.truemoney)  methods.push({ key: 'truemoney',  label: 'TrueMoney Wallet',  enabled: true });
+  if (p.creditCard) methods.push({ key: 'creditCard', label: 'บัตรเครดิต/เดบิต', enabled: true });
+  return {
+    promptpayTarget,
+    promptpayName,
+    bankInfo: bank,
+    paymentMethods: methods,
   };
 }
 
@@ -125,4 +154,4 @@ function statusOf(bill, now = new Date()) {
   return 'pending';
 }
 
-module.exports = { buildBill, statusOf, makeBillNo, formatPeriodNow, formatDueDate, round2 };
+module.exports = { buildBill, buildPaymentBlock, statusOf, makeBillNo, formatPeriodNow, formatDueDate, round2 };

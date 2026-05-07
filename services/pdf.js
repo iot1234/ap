@@ -48,6 +48,9 @@ function fmtCurrency(n) {
  * @param {number} bill.total - Total amount in THB.
  * @param {object} [bill.building] - { name, address, phone }.
  * @param {string} [bill.promptpayTarget] - phone/citizen-id for QR. If omitted, no QR.
+ * @param {string} [bill.promptpayName] - display name shown above the QR.
+ * @param {object} [bill.bankInfo] - { bank, account, name } for bank-transfer card.
+ * @param {Array<{key:string,label:string,enabled:boolean}>} [bill.paymentMethods]
  * @param {WritableStream} stream - Where to pipe the PDF.
  * @returns {Promise<void>} resolves when stream finishes.
  */
@@ -158,22 +161,65 @@ async function renderBillPdf(bill, stream) {
     y += 18;
   }
 
-  // --- PromptPay QR (right column) ---
+  // --- Payment options block (right column) ---
+  // Renders: PromptPay QR card → bank transfer card → other channels list.
+  // The block is anchored at y (after the totals) so it scales with item count.
+  const payX = 330;
+  const payW = 220;
+  let payY = y + 24;
+
   if (bill.promptpayTarget) {
     try {
       const qrPng = await renderQrPng(bill.promptpayTarget, bill.total, { width: 360 });
       const qrSize = 130;
-      const qrY = y + 24;
-      // Card background for QR
-      doc.roundedRect(330, qrY - 12, 220, qrSize + 64, 10).fill(C.bg);
+      doc.roundedRect(payX, payY - 12, payW, qrSize + 70, 10).fill(C.bg);
       doc.fillColor(C.ink2).font('th-bold').fontSize(10)
-        .text('สแกนเพื่อชำระเงิน (PromptPay)', 340, qrY - 4, { width: 200, align: 'center' });
-      doc.image(qrPng, 330 + (220 - qrSize) / 2, qrY + 14, { width: qrSize, height: qrSize });
+        .text('สแกนเพื่อชำระ (PromptPay)', payX + 10, payY - 4, { width: payW - 20, align: 'center' });
+      doc.image(qrPng, payX + (payW - qrSize) / 2, payY + 14, { width: qrSize, height: qrSize });
       doc.font('th').fontSize(9).fillColor(C.muted)
-        .text(`อ้างอิง: ${bill.billNo || '—'}`, 340, qrY + qrSize + 18, { width: 200, align: 'center' });
+        .text(
+          bill.promptpayName ? `${bill.promptpayName} · อ้างอิง ${bill.billNo || '—'}` : `อ้างอิง: ${bill.billNo || '—'}`,
+          payX + 10, payY + qrSize + 18,
+          { width: payW - 20, align: 'center' }
+        );
+      payY += qrSize + 80;
     } catch (err) {
       console.error('[pdf] QR render failed:', err.message);
     }
+  }
+
+  // Bank transfer card
+  if (bill.bankInfo && bill.bankInfo.account) {
+    const cardH = 76;
+    doc.roundedRect(payX, payY, payW, cardH, 10).fill(C.bg);
+    doc.fillColor(C.ink2).font('th-bold').fontSize(10)
+      .text('โอนผ่านธนาคาร', payX + 12, payY + 8, { width: payW - 24 });
+    doc.font('th').fontSize(10).fillColor(C.ink)
+      .text(bill.bankInfo.bank || '—', payX + 12, payY + 24, { width: payW - 24 });
+    doc.font('th-bold').fontSize(11).fillColor(C.ink)
+      .text(bill.bankInfo.account, payX + 12, payY + 40, { width: payW - 24 });
+    if (bill.bankInfo.name) {
+      doc.font('th').fontSize(9).fillColor(C.muted)
+        .text(bill.bankInfo.name, payX + 12, payY + 58, { width: payW - 24 });
+    }
+    payY += cardH + 8;
+  }
+
+  // Additional accepted channels (LINE Pay, TrueMoney, credit card, etc.)
+  const extraMethods = (bill.paymentMethods || [])
+    .filter((m) => m && m.enabled && m.key !== 'promptpay' && m.key !== 'bank');
+  if (extraMethods.length > 0) {
+    const cardH = 18 + extraMethods.length * 13;
+    doc.roundedRect(payX, payY, payW, cardH, 10).fill(C.bg);
+    doc.fillColor(C.ink2).font('th-bold').fontSize(10)
+      .text('ช่องทางที่รับชำระอื่น', payX + 12, payY + 6, { width: payW - 24 });
+    let lineY = payY + 22;
+    doc.font('th').fontSize(9).fillColor(C.ink2);
+    for (const m of extraMethods) {
+      doc.text(`• ${m.label}`, payX + 12, lineY, { width: payW - 24 });
+      lineY += 13;
+    }
+    payY += cardH + 8;
   }
 
   // --- Footer ---
