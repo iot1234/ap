@@ -439,10 +439,15 @@ function exportFullBackup(rooms, config, bookings, activities) {
 function printPage() { try { window.print(); return true; } catch (e) { return false; } }
 
 // --- Expose to window -----------------------------------------------------
+// ADMIN_TENANTS used to live here but was removed when tenants moved into
+// the relational `tenants` table. The reference left in this exposure list
+// kept throwing "ADMIN_TENANTS is not defined" at module load — which then
+// stopped every page-*.jsx file below from registering window.PageX, so
+// every admin route showed skeleton-forever instead of its component.
 Object.assign(window, {
   ADMIN_C, ADMIN_STATUS, ADMIN_STATUS_KEYS,
   ADMIN_ROOM_TYPES, ADMIN_ROOM_TYPE_KEYS,
-  ADMIN_TENANTS, ADMIN_VIEWS,
+  ADMIN_VIEWS,
   DEFAULT_CONFIG, STORAGE_KEYS,
   fmt, fmtCurrency, fmtPercent, fmtDateTH, fmtMonthTH, relTime, seedRand,
   buildAdminRooms, buildBookings, buildActivities,
