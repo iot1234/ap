@@ -206,29 +206,44 @@ function maskValue(v, kind) {
 async function testGroup(group) {
   if (group === 'line') {
     const tok = get('LINE_CHANNEL_ACCESS_TOKEN');
-    const owner = get('LINE_OWNER_USER_ID');
     if (!tok) return { ok: false, error: 'LINE_CHANNEL_ACCESS_TOKEN ไม่ได้ตั้ง' };
+    // Defence-in-depth: secrets.get() already strips ASCII control chars,
+    // but a non-ASCII char or unicode whitespace would still trip Node's
+    // http header validator with a synchronous throw. Pre-flight here
+    // returns a clean Thai-language error instead of a 500.
+    if (/[^\x20-\x7E]/.test(tok)) {
+      return { ok: false, error: 'access token มีอักขระที่ไม่ใช่ ASCII printable — โปรดวางใหม่' };
+    }
     // Lightweight: hit /v2/bot/info which validates the token without
     // sending a message.
     return new Promise((resolve) => {
       const https = require('https');
-      const req = https.request({
-        hostname: 'api.line.me', path: '/v2/bot/info', method: 'GET',
-        headers: { Authorization: `Bearer ${tok}` }, timeout: 5000,
-      }, (res) => {
-        let buf = '';
-        res.on('data', (c) => { buf += c; });
-        res.on('end', () => {
-          if (res.statusCode === 200) {
-            try {
-              const j = JSON.parse(buf);
-              resolve({ ok: true, info: { displayName: j.displayName, basicId: j.basicId } });
-            } catch { resolve({ ok: true }); }
-          } else {
-            resolve({ ok: false, error: `HTTP ${res.statusCode}: ${buf.slice(0, 200)}` });
-          }
+      let req;
+      try {
+        req = https.request({
+          hostname: 'api.line.me', path: '/v2/bot/info', method: 'GET',
+          headers: { Authorization: `Bearer ${tok}` }, timeout: 5000,
+        }, (res) => {
+          let buf = '';
+          res.on('data', (c) => { buf += c; });
+          res.on('end', () => {
+            if (res.statusCode === 200) {
+              try {
+                const j = JSON.parse(buf);
+                resolve({ ok: true, info: { displayName: j.displayName, basicId: j.basicId } });
+              } catch { resolve({ ok: true }); }
+            } else {
+              resolve({ ok: false, error: `HTTP ${res.statusCode}: ${buf.slice(0, 200)}` });
+            }
+          });
         });
-      });
+      } catch (err) {
+        // https.request throws synchronously on illegal header content.
+        // Without this catch the error escapes the Promise and lands as a
+        // 500 with no Thai context for the operator.
+        resolve({ ok: false, error: 'header invalid: ' + err.message });
+        return;
+      }
       req.on('error', (e) => resolve({ ok: false, error: e.message }));
       req.on('timeout', () => { req.destroy(); resolve({ ok: false, error: 'timeout' }); });
       req.end();
