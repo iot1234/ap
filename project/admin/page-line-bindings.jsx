@@ -185,7 +185,16 @@ function PageLineBindings({ setToast }) {
                         <span style={{ color: C.muted, marginLeft: 8, fontWeight: 400 }}>· ห้อง {row.current_room_id}</span>
                       )}
                     </div>
-                    <div style={{ color: C.muted, fontSize: 12, marginTop: 2 }}>{row.phone}</div>
+                    <div style={{ color: C.muted, fontSize: 12, marginTop: 2 }}>
+                      {row.phone}
+                      {(row.oa_name || row.target_oa_name) && (
+                        <span style={{ marginLeft: 8 }}>
+                          · {row.oa_name
+                              ? `ผ่าน ${row.oa_name}`
+                              : `→ ${row.target_oa_name}`}
+                        </span>
+                      )}
+                    </div>
                   </div>
                   <div>
                     <Pill color={state.color}>{state.label}</Pill>
@@ -280,11 +289,12 @@ function StatCard({ label, value, color }) {
   );
 }
 
-function DetailModal({ C, Modal, Btn, Pill, detail, tenantId, busy, onClose, onIssue, onRevoke, onBlock, onUnblock }) {
+function DetailModal({ C, Modal, Btn, Pill, detail, tenantId, oas, busy, onClose, onIssue, onRevoke, onBlock, onUnblock }) {
   const t = detail.tenant;
   const pending = detail.pending;
   const bound = detail.bound;
   const blocked = !!t.line_binding_blocked;
+  const hasMultiOas = oas && oas.length > 0;
 
   function copyCode(code) {
     if (!navigator.clipboard) return;
@@ -315,7 +325,17 @@ function DetailModal({ C, Modal, Btn, Pill, detail, tenantId, busy, onClose, onI
 
         {pending && !blocked && (
           <div style={{ padding: 14, background: C.bgSoft || '#fff7e0', border: '1px solid ' + C.border, borderRadius: 8 }}>
-            <div style={{ fontSize: 12, color: C.muted }}>รหัสที่ออกล่าสุด · หมดอายุ {new Date(pending.expires_at).toLocaleString('th-TH')}</div>
+            <div style={{ fontSize: 12, color: C.muted }}>
+              รหัสที่ออกล่าสุด · หมดอายุ {new Date(pending.expires_at).toLocaleString('th-TH')}
+              {pending.target_oa_name && (
+                <span style={{ marginLeft: 8, color: C.accent }}>
+                  · ส่งไปที่ <b>{pending.target_oa_name}</b> เท่านั้น
+                </span>
+              )}
+              {!pending.target_oa_name && hasMultiOas && (
+                <span style={{ marginLeft: 8 }}>· รับได้ทุก OA</span>
+              )}
+            </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 8 }}>
               <code style={{
                 fontFamily: 'JetBrains Mono, monospace', fontSize: 18, fontWeight: 600,
