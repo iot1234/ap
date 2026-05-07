@@ -13,14 +13,22 @@ const secrets = require('./secrets');
 
 // In-memory cache of decrypted OAs. Keyed by oa_id; invalidated on writes via
 // invalidateCache(). Avoids re-decrypting on every notification push.
-const _cache = new Map();   // id -> { oa, expires }
+const _cache = new Map();        // id -> { oa, expires }
+const _cacheBySlug = new Map();  // slug -> { oa, expires }
 const CACHE_TTL_MS = 60_000;
 
 function _now() { return Date.now(); }
 
 function invalidateCache(oaId) {
-  if (oaId == null) _cache.clear();
-  else _cache.delete(oaId);
+  if (oaId == null) {
+    _cache.clear();
+    _cacheBySlug.clear();
+  } else {
+    _cache.delete(oaId);
+    // Slug cache is keyed by string — drop the whole map on a per-id
+    // invalidation; the OA may have changed slug too.
+    _cacheBySlug.clear();
+  }
 }
 
 // --- Slug helpers ---------------------------------------------------------
@@ -142,11 +150,24 @@ async function getBySlug(pool, slug, { withSecrets = false } = {}) {
   const s = normalizeSlug(slug);
   if (!s) return null;
   if (s === 'env') return _envOa();
+  // Cache-aware lookup. The webhook /webhook/line/:slug calls this on
+  // every event; without caching we'd re-decrypt the channel secret per
+  // request, which is ~10x the CPU of the legacy single-OA path.
+  const cached = _cacheBySlug.get(s);
+  if (cached && cached.expires > _now() && withSecrets) return cached.oa;
+
   const { rows } = await pool.query(
     `SELECT * FROM line_oas WHERE slug=$1 AND deleted_at IS NULL`,
     [s]
   );
-  return rowToPublic(rows[0], withSecrets);
+  const oa = rowToPublic(rows[0], withSecrets);
+  if (oa && withSecrets) {
+    _cacheBySlug.set(s, { oa, expires: _now() + CACHE_TTL_MS });
+    // Mirror into the id cache too so a subsequent getById hits the same
+    // decrypted bytes without another DB roundtrip.
+    if (oa.id) _cache.set(oa.id, { oa, expires: _now() + CACHE_TTL_MS });
+  }
+  return oa;
 }
 
 // The "default" OA is what we use when issuing a binding code without a

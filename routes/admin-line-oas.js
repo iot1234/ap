@@ -42,7 +42,10 @@ module.exports = function buildAdminLineOasRouter(ctx) {
 
   r.get('/:id', requireAuth, requireRole('owner', 'manager'), async (req, res) => {
     const id = Number(req.params.id);
-    if (!Number.isFinite(id)) return res.status(400).json({ error: 'invalid id' });
+    // Reject id <= 0 to match PUT/DELETE — env-OA (id=0) is exposed via
+    // the list endpoint as `isEnvOa: true` and edited only via env vars,
+    // never via the per-id REST surface.
+    if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: 'invalid id' });
     try {
       const oa = await lineOa.getById(pool, id);
       if (!oa) return res.status(404).json({ error: 'not found' });

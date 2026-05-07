@@ -330,14 +330,19 @@ async function tryBind(pool, { code, lineUserId, oaId } = {}) {
       [lineUserId, oaIdNum, row.tenant_id]
     );
     await client.query('COMMIT');
-    // Update OA bound_count outside the transaction (best-effort).
+    // Update OA bound_count outside the transaction (best-effort, eventual-
+    // consistency UI counter only). Recomputed via SELECT COUNT so even if a
+    // previous update failed silently, the next bind self-heals the count.
+    // Concurrent binds may race here but the SUBQUERY recounts the truth, so
+    // the final state always converges to the actual bound row count rather
+    // than incrementing a stale field. Safe to fire-and-forget.
     if (oaIdNum != null) {
       pool.query(
         `UPDATE line_oas SET bound_count = (
             SELECT COUNT(*) FROM line_bindings WHERE oa_id=$1 AND status='bound'
           ), last_seen_at=NOW(), updated_at=NOW() WHERE id=$1`,
         [oaIdNum]
-      ).catch(() => {});
+      ).catch((err) => console.warn('[line] bound_count update failed:', err.message));
     }
     return {
       ok: true,
