@@ -365,8 +365,19 @@ function TabUsers({ setToast, addActivity }) {
   }, []);
   React.useEffect(() => { reload(); }, [reload]);
 
-  const openAdd  = () => setEditing({ id: null, username: '', password: '', role: 'staff' });
-  const openEdit = (u) => setEditing({ id: u.id, username: u.username, password: '', role: u.role });
+  // Track which row is the current admin so we can prompt for currentPassword
+  // when they edit their own row (server enforces step-up auth on self
+  // password changes — without this, the save just 400s with STEP_UP_REQUIRED).
+  const [meId, setMeId] = React.useState(null);
+  React.useEffect(() => {
+    fetch('/api/auth/me', { credentials: 'same-origin' })
+      .then((r) => r.json())
+      .then((d) => { if (d && d.user && d.user.id) setMeId(Number(d.user.id)); })
+      .catch(() => {});
+  }, []);
+
+  const openAdd  = () => setEditing({ id: null, username: '', password: '', role: 'staff', currentPassword: '' });
+  const openEdit = (u) => setEditing({ id: u.id, username: u.username, password: '', role: u.role, currentPassword: '' });
 
   const save = async () => {
     if (!editing.username || editing.username.trim().length < 3) {
@@ -381,12 +392,19 @@ function TabUsers({ setToast, addActivity }) {
       setToast && setToast({ kind: 'error', message: 'รหัสผ่านใหม่ต้อง ≥ 12 ตัว (เว้นว่าง = ไม่เปลี่ยน)' });
       return;
     }
+    // Step-up: server requires currentPassword when self-rotating password
+    const isSelfPwChange = editing.id && editing.id === meId && !!editing.password;
+    if (isSelfPwChange && !editing.currentPassword) {
+      setToast && setToast({ kind: 'error', message: 'ใส่รหัสผ่านปัจจุบันเพื่อยืนยัน (กำลังเปลี่ยนของตัวเอง)' });
+      return;
+    }
     setBusy(true);
     try {
       let r, d;
       if (editing.id) {
         const body = { role: editing.role };
         if (editing.password) body.password = editing.password;
+        if (isSelfPwChange) body.currentPassword = editing.currentPassword;
         r = await fetchApi(`/api/admin/users/${editing.id}`, {
           method: 'PUT', body: JSON.stringify(body),
         });
@@ -401,7 +419,13 @@ function TabUsers({ setToast, addActivity }) {
         });
       }
       d = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      if (!r.ok) {
+        // Surface server-specific error codes with friendlier messages
+        if (d.code === 'STEP_UP_REQUIRED') throw new Error('ใส่รหัสผ่านปัจจุบันก่อนเปลี่ยน');
+        if (d.code === 'SELF_ROLE_CHANGE') throw new Error('เปลี่ยนบทบาทของตัวเองไม่ได้ — ขอเจ้าของอื่นช่วย');
+        if (d.code === 'LAST_OWNER')      throw new Error('ไม่สามารถลด/ลบเจ้าของคนสุดท้ายได้');
+        throw new Error(d.error || `HTTP ${r.status}`);
+      }
       addActivity && addActivity({
         icon: editing.id ? '👤' : '➕',
         text: editing.id ? `แก้ไขผู้ใช้ ${editing.username}` : `เพิ่มผู้ใช้ ${editing.username}`,
@@ -475,7 +499,10 @@ function TabUsers({ setToast, addActivity }) {
               render: u => (
                 <div style={{ display: 'inline-flex', gap: 4 }} onClick={(e) => e.stopPropagation()}>
                   <IconBtn icon="✎" label="แก้ไข" onClick={() => openEdit(u)} />
-                  <IconBtn icon="🗑" label="ลบ" danger onClick={() => setConfirmDel(u.id)} />
+                  <IconBtn icon="🗑" label={u.id === meId ? 'ลบตัวเองไม่ได้' : 'ลบ'}
+                           danger
+                           disabled={u.id === meId}
+                           onClick={() => u.id !== meId && setConfirmDel(u.id)} />
                 </div>
               ),
             },
@@ -509,9 +536,20 @@ function TabUsers({ setToast, addActivity }) {
               value={editing.password || ''}
               onChange={(v) => setEditing({ ...editing, password: v })}
             />
+            {editing.id && editing.id === meId && editing.password && (
+              <Input
+                label="รหัสผ่านปัจจุบัน (ยืนยันการเปลี่ยนของตัวเอง)"
+                type="password"
+                value={editing.currentPassword || ''}
+                onChange={(v) => setEditing({ ...editing, currentPassword: v })}
+                hint="ระบบบังคับให้กรอกเพื่อกัน session ที่ถูก hijack เปลี่ยนรหัสผ่าน"
+              />
+            )}
             <Select label="บทบาท" value={editing.role}
                     onChange={(v) => setEditing({ ...editing, role: v })}
-                    options={ROLES.map((r) => ({ value: r.value, label: r.label }))} />
+                    options={ROLES.map((r) => ({ value: r.value, label: r.label }))}
+                    disabled={editing.id && editing.id === meId}
+                    hint={editing.id && editing.id === meId ? 'เปลี่ยนบทบาทของตัวเองไม่ได้ — ขอ owner คนอื่น' : ''} />
           </div>
         )}
       </Modal>

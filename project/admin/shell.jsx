@@ -295,10 +295,13 @@ function TopBar({ page, setPage, onMenuClick, isMobile, search, setSearch, notif
       {isMobile && (
         <button
           onClick={onMenuClick}
+          aria-label="เปิดเมนูนำทาง"
+          aria-expanded={false}
+          aria-controls="admin-sidebar"
           style={{
             width: 36, height: 36, border: 'none', background: 'transparent',
             color: C.ink, cursor: 'pointer', fontSize: 22, padding: 0, lineHeight: 1,
-          }}>☰</button>
+          }}><span aria-hidden="true">☰</span></button>
       )}
 
       <div style={{ minWidth: 0, flex: '0 1 auto' }}>
@@ -320,20 +323,25 @@ function TopBar({ page, setPage, onMenuClick, isMobile, search, setSearch, notif
           background: C.surfaceAlt, border: `1px solid ${showResults && searchResults?.length ? C.accent : C.border}`,
           borderRadius: 9, padding: '0 12px', height: 38,
         }}>
-          <span style={{ color: C.muted, marginRight: 8, fontSize: 14 }}>🔍</span>
+          <span aria-hidden="true" style={{ color: C.muted, marginRight: 8, fontSize: 14 }}>🔍</span>
           <input
             value={search}
             onChange={(e) => { setSearch(e.target.value); setShowResults(true); }}
             onFocus={() => setShowResults(true)}
             placeholder="ค้นหาห้อง, ผู้เช่า, บิล..."
+            aria-label="ค้นหาห้อง ผู้เช่า หรือบิล"
+            aria-controls="admin-search-results"
+            aria-expanded={!!(showResults && search)}
             style={{
               flex: 1, border: 'none', outline: 'none', background: 'transparent',
               fontSize: 13.5, color: C.ink, fontFamily: 'inherit',
             }}
           />
           {search && (
-            <button onClick={() => { setSearch(''); setShowResults(false); }}
-              style={{ border: 'none', background: 'transparent', color: C.muted, cursor: 'pointer', fontSize: 16, padding: 4 }}>×</button>
+            <button
+              onClick={() => { setSearch(''); setShowResults(false); }}
+              aria-label="ล้างคำค้น"
+              style={{ border: 'none', background: 'transparent', color: C.muted, cursor: 'pointer', fontSize: 16, padding: 4 }}><span aria-hidden="true">×</span></button>
           )}
         </div>
         {showResults && search && (
@@ -382,14 +390,17 @@ function TopBar({ page, setPage, onMenuClick, isMobile, search, setSearch, notif
       <div style={{ position: 'relative', flexShrink: 0, marginLeft: isMobile ? 'auto' : 0 }}>
         <button
           onClick={() => setShowNotif(s => !s)}
+          aria-label={notifCount > 0 ? `การแจ้งเตือน — ${notifCount} รายการใหม่` : 'การแจ้งเตือน'}
+          aria-haspopup="true"
+          aria-expanded={showNotif}
           style={{
             width: 38, height: 38, border: `1px solid ${C.border}`,
             background: C.surface, color: C.ink, cursor: 'pointer',
             borderRadius: 9, fontSize: 16, position: 'relative',
           }}>
-          🔔
+          <span aria-hidden="true">🔔</span>
           {notifCount > 0 && (
-            <span style={{
+            <span aria-hidden="true" style={{
               position: 'absolute', top: -4, right: -4,
               background: C.danger, color: '#fff',
               fontSize: 10, fontWeight: 700,

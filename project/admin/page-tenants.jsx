@@ -1,5 +1,8 @@
 // === admin/page-tenants.jsx ===============================================
-// จัดการผู้เช่า: รายชื่อ + drawer profile (สัญญา, บิล, บันทึก)
+// จัดการผู้เช่า: รายชื่อ + drawer profile (สัญญา, บิล, บันทึก) + "เพิ่มผู้เช่า"
+// modal that POSTs to /api/tenants. Older versions only let admin add a
+// tenant by editing a vacant room — this brought tenant creation into a
+// dedicated form so admin can pre-create a tenant before assigning a room.
 // ===========================================================================
 
 const { useState, useMemo } = React;
@@ -10,12 +13,15 @@ function PageTenants({ rooms, setRooms, addActivity, setToast }) {
   const { fmt, fmtCurrency } = window;
   const { Card, Btn, IconBtn, Avatar, Pill, StatusBadge, DataTable, Drawer,
           SearchInput, FilterChip, PageContainer, PageHeader, SectionHeading,
-          DefList, Tabs } = window;
+          DefList, Tabs, Modal, Input, Select, Textarea } = window;
+  const apiFetch = window.apiFetch || ((u, o) => fetch(u, { credentials: 'same-origin', ...o }));
 
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState('all');
   const [activeId, setActiveId] = useState(null);
   const [drawerTab, setDrawerTab] = useState('profile');
+  const [addOpen, setAddOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
 
   // Build tenants list from rooms
   const tenants = useMemo(() => {
@@ -122,9 +128,7 @@ function PageTenants({ rooms, setRooms, addActivity, setToast }) {
                 setToast && setToast({ kind: 'success', message: `ดาวน์โหลด CSV ${tenants.length} ผู้เช่าเรียบร้อย` });
               }
             }}>ส่งออก</Btn>
-            <Btn variant="primary" icon="+" onClick={() => setToast && setToast({
-              kind: 'info', message: 'เพิ่มผู้เช่าได้จากหน้า "ห้องพัก" → เลือกห้องที่ว่าง → เปลี่ยนสถานะเป็นมีผู้เช่า',
-            })}>เพิ่มผู้เช่า</Btn>
+            <Btn variant="primary" icon="+" onClick={() => setAddOpen(true)}>เพิ่มผู้เช่า</Btn>
           </>
         }
       />
@@ -144,6 +148,18 @@ function PageTenants({ rooms, setRooms, addActivity, setToast }) {
         rows={filtered}
         onRowClick={(t) => { setActiveId(t.roomId); setDrawerTab('profile'); }}
         empty="ไม่พบผู้เช่าที่ตรงกับเงื่อนไข"
+      />
+
+      <AddTenantModal
+        open={addOpen}
+        onClose={() => !busy && setAddOpen(false)}
+        rooms={rooms}
+        setRooms={setRooms}
+        busy={busy}
+        setBusy={setBusy}
+        addActivity={addActivity}
+        setToast={setToast}
+        apiFetch={apiFetch}
       />
 
       <Drawer
@@ -184,6 +200,168 @@ function PageTenants({ rooms, setRooms, addActivity, setToast }) {
         )}
       </Drawer>
     </PageContainer>
+  );
+}
+
+// Standalone "Add Tenant" modal. Posts to /api/tenants (relational `tenants`
+// table, used by tenant portal + LINE binding) AND optionally writes the
+// tenant into the legacy rooms blob if a room was picked, so the table on
+// this page (which reads from rooms) shows the new tenant immediately.
+function AddTenantModal({ open, onClose, rooms, setRooms, busy, setBusy, addActivity, setToast, apiFetch }) {
+  const C = window.ADMIN_C;
+  const { Btn, Input, Select, Textarea, Modal } = window;
+  const [form, setForm] = React.useState({
+    fullName: '', phone: '', citizenId: '', email: '',
+    occupation: '', roomId: '', pin: '', notes: '',
+  });
+
+  // Reset whenever modal opens (don't leak stale input from a cancelled session)
+  React.useEffect(() => {
+    if (open) setForm({
+      fullName: '', phone: '', citizenId: '', email: '',
+      occupation: '', roomId: '', pin: '', notes: '',
+    });
+  }, [open]);
+
+  const vacantRooms = React.useMemo(() => {
+    return Object.values(rooms || {})
+      .filter((r) => r.status === 'vacant' || !r.tenant)
+      .sort((a, b) => String(a.id).localeCompare(String(b.id)))
+      .map((r) => ({ value: r.id, label: `${r.id} · ชั้น ${r.floor} · ${(window.ADMIN_ROOM_TYPES[r.type] || {}).th || r.type}` }));
+  }, [rooms]);
+
+  function set(k, v) { setForm((p) => ({ ...p, [k]: v })); }
+
+  async function submit() {
+    const fullName = form.fullName.trim();
+    const phone = form.phone.replace(/[\s-]/g, '');
+    if (fullName.length < 2) {
+      setToast && setToast({ kind: 'error', message: 'ชื่อ-นามสกุลอย่างน้อย 2 ตัว' });
+      return;
+    }
+    if (!/^0\d{8,9}$/.test(phone)) {
+      setToast && setToast({ kind: 'error', message: 'เบอร์โทรไม่ถูกต้อง (ขึ้นต้น 0 ตามด้วย 9-10 หลัก)' });
+      return;
+    }
+    if (form.citizenId && !/^\d{13}$/.test(form.citizenId.replace(/[\s-]/g, ''))) {
+      setToast && setToast({ kind: 'error', message: 'เลขบัตรประชาชนต้อง 13 หลัก' });
+      return;
+    }
+    if (form.pin && !/^\d{4,8}$/.test(form.pin)) {
+      setToast && setToast({ kind: 'error', message: 'PIN ต้องเป็นตัวเลข 4-8 หลัก' });
+      return;
+    }
+    setBusy(true);
+    try {
+      const body = {
+        fullName, phone,
+        citizenId: form.citizenId.replace(/[\s-]/g, '') || undefined,
+        email: form.email.trim() || undefined,
+        roomId: form.roomId || undefined,
+        pin: form.pin || undefined,
+        notes: form.notes.trim() || undefined,
+      };
+      const r = await apiFetch('/api/tenants', {
+        method: 'POST', body: JSON.stringify(body),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+
+      // If admin assigned a room, mirror the tenant into the rooms blob so
+      // this page's table (which reads rooms[].tenant) shows them immediately
+      // without a page reload. The relational tenants table is the source of
+      // truth; the rooms blob is just the cached display copy.
+      if (form.roomId && rooms[form.roomId]) {
+        setRooms((prev) => {
+          const next = { ...prev };
+          const r0 = next[form.roomId];
+          if (r0) {
+            next[form.roomId] = {
+              ...r0,
+              status: r0.status === 'vacant' ? 'occupied' : r0.status,
+              tenant: {
+                name: fullName,
+                phone,
+                email: form.email.trim() || '',
+                occupation: form.occupation.trim() || '',
+                score: 'A',
+                tenantId: d.tenant && d.tenant.id ? d.tenant.id : null,
+              },
+              since: window.fmtDateTH ? window.fmtDateTH(new Date()) : new Date().toISOString().slice(0, 10),
+            };
+          }
+          return next;
+        });
+      }
+
+      addActivity && addActivity({
+        icon: '👤',
+        text: `เพิ่มผู้เช่า ${fullName}${form.roomId ? ` (ห้อง ${form.roomId})` : ''}`,
+        type: 'tenant',
+      });
+      setToast && setToast({ kind: 'success', message: `เพิ่มผู้เช่า ${fullName} เรียบร้อย` });
+      onClose && onClose();
+    } catch (err) {
+      setToast && setToast({ kind: 'error', message: err.message });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title="เพิ่มผู้เช่าใหม่"
+      width={560}
+      footer={
+        <>
+          <Btn variant="ghost" onClick={onClose} disabled={busy}>ยกเลิก</Btn>
+          <Btn variant="primary" onClick={submit} disabled={busy}>
+            {busy ? 'กำลังบันทึก…' : 'เพิ่มผู้เช่า'}
+          </Btn>
+        </>
+      }
+    >
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+          <Input label="ชื่อ-นามสกุล *"
+                 value={form.fullName} onChange={(v) => set('fullName', v)}
+                 placeholder="เช่น คุณสมศรี ใจดี" />
+          <Input label="เบอร์โทรศัพท์ *"
+                 value={form.phone} onChange={(v) => set('phone', v)}
+                 placeholder="0812345678" />
+          <Input label="เลขบัตรประชาชน (ไม่บังคับ)"
+                 value={form.citizenId} onChange={(v) => set('citizenId', v)}
+                 placeholder="13 หลัก"
+                 hint="เก็บแบบเข้ารหัสในฐานข้อมูล" />
+          <Input label="อีเมล (ไม่บังคับ)"
+                 value={form.email} onChange={(v) => set('email', v)}
+                 placeholder="user@example.com" />
+          <Input label="อาชีพ (ไม่บังคับ)"
+                 value={form.occupation} onChange={(v) => set('occupation', v)} />
+          <Input label="PIN เข้าพอร์ทัล (ไม่บังคับ)"
+                 type="password"
+                 value={form.pin} onChange={(v) => set('pin', v)}
+                 placeholder="4-8 หลัก"
+                 hint="ผู้เช่าใช้ login ที่ /tenant" />
+        </div>
+        <Select label="ห้องที่จะเข้าพัก (เลือกภายหลังก็ได้)"
+                value={form.roomId}
+                onChange={(v) => set('roomId', v)}
+                options={[{ value: '', label: '— ไม่เลือก —' }, ...vacantRooms]}
+                hint={vacantRooms.length === 0 ? 'ไม่มีห้องว่างในขณะนี้' : `${vacantRooms.length} ห้องว่าง`} />
+        <Textarea label="บันทึก (ไม่บังคับ)"
+                  rows={2}
+                  value={form.notes}
+                  onChange={(v) => set('notes', v)}
+                  placeholder="ข้อมูลเพิ่มเติม เช่น ผู้ติดต่อฉุกเฉิน" />
+        <div style={{ padding: 10, background: C.surfaceAlt, borderRadius: 8, fontSize: 12, color: C.muted, lineHeight: 1.6 }}>
+          💡 ผู้เช่ามีตัวตนในระบบ tenants พร้อมใช้งาน LINE binding + tenant portal ได้ทันที ·
+          ถ้ายังไม่ได้เลือกห้อง สามารถมาผูกที่หน้า "ห้องพัก" ภายหลัง
+        </div>
+      </div>
+    </Modal>
   );
 }
 

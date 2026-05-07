@@ -887,8 +887,21 @@ function releasePdfSlot() {
 // from rooms+config in the admin UI), so the body carries everything needed.
 app.post('/api/bills/render', sameOrigin, csrfGuard, requireAuth, async (req, res) => {
   const bill = req.body && req.body.bill ? req.body.bill : req.body;
+  const config = req.body && req.body.config;
   if (!bill || !bill.tenantName || !bill.total) {
     return res.status(400).json({ error: 'bill.tenantName and bill.total required' });
+  }
+  // Single source of truth for payment block: services/billing.buildPaymentBlock
+  // derives promptpayTarget, bankInfo, paymentMethods from config.payment.
+  // If client sent { bill, config } we enrich here so the client doesn't need
+  // to duplicate the field-extraction logic. Pre-computed fields on `bill`
+  // win — old clients that don't send config still work.
+  if (config) {
+    const pb = billing.buildPaymentBlock(config);
+    if (!bill.promptpayTarget && pb.promptpayTarget) bill.promptpayTarget = pb.promptpayTarget;
+    if (!bill.promptpayName && pb.promptpayName) bill.promptpayName = pb.promptpayName;
+    if (!bill.bankInfo && pb.bankInfo) bill.bankInfo = pb.bankInfo;
+    if (!bill.paymentMethods && pb.paymentMethods) bill.paymentMethods = pb.paymentMethods;
   }
   if (!bill.promptpayTarget) {
     const pp = require('./services/secrets').get('PROMPTPAY_TARGET');

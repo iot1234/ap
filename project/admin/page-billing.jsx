@@ -440,29 +440,10 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
               if (b.penalty > 0) {
                 items.push({ label: `ค่าปรับล่าช้า (${b.overdueDays || 0} วัน)`, amount: b.penalty });
               }
-              // Single source of truth: config.payment (set in Settings →
-              // การชำระเงิน). Older field names kept as fallbacks for any
-              // pre-existing config blobs.
-              const billing = (config && config.billing) || {};
-              const payment = (config && config.payment) || {};
-              const promptpayTarget =
-                payment.promptpay ||
-                payment.promptpayTarget ||
-                billing.promptpayTarget ||
-                (config && config.payments && config.payments.promptpayTarget) ||
-                '';
-              const promptpayName = payment.promptpayDisplayName || payment.bankName || '';
-              const bankInfo = (payment.bank && payment.bankAcc) ? {
-                bank: payment.bank,
-                account: payment.bankAcc,
-                name: payment.bankName || '',
-              } : null;
-              const paymentMethods = [];
-              if (promptpayTarget) paymentMethods.push({ key: 'promptpay', label: 'PromptPay', enabled: true });
-              if (bankInfo) paymentMethods.push({ key: 'bank', label: `${bankInfo.bank} • ${bankInfo.account}`, enabled: true });
-              if (payment.linePay)    paymentMethods.push({ key: 'linePay',    label: 'LINE Pay',          enabled: true });
-              if (payment.truemoney)  paymentMethods.push({ key: 'truemoney',  label: 'TrueMoney Wallet',  enabled: true });
-              if (payment.creditCard) paymentMethods.push({ key: 'creditCard', label: 'บัตรเครดิต/เดบิต', enabled: true });
+              // Server enriches with payment fields from config.payment via
+              // services/billing.buildPaymentBlock. Client only sends the
+              // bill basics + config blob; the field-extraction logic lives
+              // in one place so client and PDF renderer can't drift.
               const payload = {
                 billNo: b.id,
                 roomId: b.roomId,
@@ -473,17 +454,13 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
                 items,
                 total: b.total,
                 building: (config && config.building) || { name: 'บ้านกาญจน์ เรสซิเดนซ์' },
-                promptpayTarget,
-                promptpayName,
-                bankInfo,
-                paymentMethods,
               };
               try {
                 const res = await fetch('/api/bills/render', {
                   method: 'POST',
                   credentials: 'include',
                   headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ bill: payload }),
+                  body: JSON.stringify({ bill: payload, config }),
                 });
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
                 const blob = await res.blob();

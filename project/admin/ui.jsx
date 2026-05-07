@@ -3,7 +3,7 @@
 // Drawer, Modal, Table, KpiCard, Charts, EmptyState, Avatar, Badge, etc.
 // ===========================================================================
 
-const { useState, useEffect, useRef, useMemo } = React;
+const { useState, useEffect, useRef, useMemo, useId } = React;
 const C = window.ADMIN_C;
 const ADMIN_STATUS = window.ADMIN_STATUS;
 const fmt = window.fmt;
@@ -509,11 +509,26 @@ function Drawer({ open, onClose, title, children, width = 540, footer }) {
 
 // --- Modal ----------------------------------------------------------------
 function Modal({ open, onClose, title, children, footer, width = 480 }) {
+  const dialogRef = useRef(null);
+  const titleId = useId();
   useEffect(() => {
     const onEsc = (e) => { if (e.key === 'Escape' && open) onClose && onClose(); };
     window.addEventListener('keydown', onEsc);
     return () => window.removeEventListener('keydown', onEsc);
   }, [open, onClose]);
+  // Focus trap: send focus into the dialog when it opens; restore to the
+  // previously-focused element on close. Without this, screen-reader and
+  // keyboard users get dropped back to the top of the page.
+  useEffect(() => {
+    if (!open) return;
+    const previouslyFocused = document.activeElement;
+    const node = dialogRef.current;
+    if (node) {
+      const focusable = node.querySelector('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
+      (focusable || node).focus();
+    }
+    return () => { try { previouslyFocused && previouslyFocused.focus && previouslyFocused.focus(); } catch {} };
+  }, [open]);
   if (!open) return null;
   return (
     <div style={{
@@ -522,21 +537,32 @@ function Modal({ open, onClose, title, children, footer, width = 480 }) {
       padding: 16, background: 'rgba(30,20,10,0.42)',
       animation: 'fadeIn .18s ease',
     }} onClick={onClose}>
-      <div onClick={(e) => e.stopPropagation()} style={{
-        background: C.surface, borderRadius: 14, width: '100%', maxWidth: width,
-        boxShadow: '0 16px 48px -8px rgba(30,20,10,0.36)',
-        display: 'flex', flexDirection: 'column', maxHeight: '90vh',
-      }}>
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={title ? titleId : undefined}
+        tabIndex={-1}
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: C.surface, borderRadius: 14, width: '100%', maxWidth: width,
+          boxShadow: '0 16px 48px -8px rgba(30,20,10,0.36)',
+          display: 'flex', flexDirection: 'column', maxHeight: '90vh',
+          outline: 'none',
+        }}>
         {title && (
           <div style={{
             padding: '16px 22px', borderBottom: `1px solid ${C.border}`,
             display: 'flex', alignItems: 'center', justifyContent: 'space-between',
           }}>
-            <div style={{ fontSize: 15.5, fontWeight: 600, color: C.ink, fontFamily: 'Sora, sans-serif' }}>{title}</div>
-            <button onClick={onClose} style={{
-              width: 28, height: 28, border: 'none', background: 'transparent',
-              color: C.muted, cursor: 'pointer', fontSize: 18, borderRadius: 6,
-            }}>×</button>
+            <div id={titleId} style={{ fontSize: 15.5, fontWeight: 600, color: C.ink, fontFamily: 'Sora, sans-serif' }}>{title}</div>
+            <button
+              onClick={onClose}
+              aria-label="ปิด"
+              style={{
+                width: 28, height: 28, border: 'none', background: 'transparent',
+                color: C.muted, cursor: 'pointer', fontSize: 18, borderRadius: 6,
+              }}><span aria-hidden="true">×</span></button>
           </div>
         )}
         <div style={{ padding: 22, overflow: 'auto' }}>{children}</div>
@@ -738,17 +764,24 @@ function Toast({ open, kind = 'success', children, onClose, duration = 2800 }) {
     warning: { bg: C.warning,    fg: '#fff' },
   };
   const cc = colors[kind] || colors.info;
+  // role=status (polite) for success/info; role=alert (assertive) for danger
+  // / warning so the urgency matches what screen readers announce.
+  const isUrgent = kind === 'danger' || kind === 'warning';
   return (
-    <div style={{
-      position: 'fixed', bottom: 24, left: '50%', transform: 'translateX(-50%)',
-      background: cc.bg, color: cc.fg,
-      padding: '11px 18px', borderRadius: 10,
-      fontSize: 13.5, fontWeight: 500,
-      boxShadow: '0 12px 32px -8px rgba(30,20,10,0.42)',
-      zIndex: 1200,
-      animation: 'slideUp .3s ease',
-      maxWidth: 'calc(100vw - 32px)',
-    }}>{children}</div>
+    <div
+      role={isUrgent ? 'alert' : 'status'}
+      aria-live={isUrgent ? 'assertive' : 'polite'}
+      aria-atomic="true"
+      style={{
+        position: 'fixed', bottom: 24, left: '50%', transform: 'translateX(-50%)',
+        background: cc.bg, color: cc.fg,
+        padding: '11px 18px', borderRadius: 10,
+        fontSize: 13.5, fontWeight: 500,
+        boxShadow: '0 12px 32px -8px rgba(30,20,10,0.42)',
+        zIndex: 1200,
+        animation: 'slideUp .3s ease',
+        maxWidth: 'calc(100vw - 32px)',
+      }}>{children}</div>
   );
 }
 
