@@ -71,3 +71,46 @@ test('statusOf: paid > overdue > pending', () => {
 test('makeBillNo is deterministic for room+period', () => {
   assert.equal(billing.makeBillNo('201', '2026-05'), 'INV-2026-05-201');
 });
+
+test('buildPaymentBlock: payment.promptpay (form key) wins over legacy promptpayTarget', () => {
+  const block = billing.buildPaymentBlock({ payment: { promptpay: '0801234567', promptpayTarget: '0900000000' } });
+  assert.equal(block.promptpayTarget, '0801234567');
+});
+
+test('buildPaymentBlock: legacy promptpayTarget still works when payment.promptpay missing', () => {
+  const block = billing.buildPaymentBlock({ payment: { promptpayTarget: '0812345678' } });
+  assert.equal(block.promptpayTarget, '0812345678');
+});
+
+test('buildPaymentBlock: bank info + extra channels surface in paymentMethods', () => {
+  const block = billing.buildPaymentBlock({
+    payment: {
+      promptpay: '0801234567',
+      bank: 'ไทยพาณิชย์', bankAcc: '123-456789-0', bankName: 'นางกาญจนา ศรีสุข',
+      linePay: true, truemoney: false, creditCard: true,
+    },
+  });
+  assert.deepEqual(block.bankInfo, { bank: 'ไทยพาณิชย์', account: '123-456789-0', name: 'นางกาญจนา ศรีสุข' });
+  const keys = block.paymentMethods.map((m) => m.key);
+  assert.deepEqual(keys, ['promptpay', 'bank', 'linePay', 'creditCard']);
+  assert.equal(block.promptpayName, 'นางกาญจนา ศรีสุข');
+});
+
+test('buildPaymentBlock: empty config returns empty block (no nulls in spread)', () => {
+  const block = billing.buildPaymentBlock({});
+  assert.equal(block.promptpayTarget, undefined);
+  assert.equal(block.bankInfo, null);
+  assert.deepEqual(block.paymentMethods, []);
+});
+
+test('buildBill: includes paymentMethods + bankInfo from config.payment', () => {
+  const flags = { lateFee: { enabled: false }, vat: { enabled: false } };
+  const cfg = {
+    ...baseConfig,
+    payment: { promptpay: '0801234567', bank: 'KBank', bankAcc: '111-2-22222-2', bankName: 'A B', linePay: true },
+  };
+  const bill = billing.buildBill({ room: baseRoom, config: cfg, features: flags });
+  assert.equal(bill.promptpayTarget, '0801234567');
+  assert.equal(bill.bankInfo.account, '111-2-22222-2');
+  assert.ok(bill.paymentMethods.find((m) => m.key === 'linePay'));
+});
