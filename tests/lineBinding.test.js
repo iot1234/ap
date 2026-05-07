@@ -187,3 +187,92 @@ test('tryBind: success — updates binding + tenant', async () => {
 test('CODE_PREFIX is BIND-', () => {
   assert.equal(lb.CODE_PREFIX, 'BIND-');
 });
+
+// ===== Multi-OA tests ======================================================
+
+test('issue: rejects targetOaId pointing to non-existent OA', async () => {
+  const pool = buildFakePool({
+    'SELECT id, full_name': () => ({ rows: [{ id: 1, full_name: 'X', line_binding_blocked: false }] }),
+    'SELECT id, enabled FROM line_oas': () => ({ rows: [] }),
+  });
+  await assert.rejects(
+    () => lb.issue(pool, { tenantId: 1, ttlDays: 7, targetOaId: 999 }),
+    /OA ที่เลือกไม่มี/
+  );
+});
+
+test('issue: targetOaId=0 is treated as "any OA" (legacy env)', async () => {
+  const pool = buildFakePool({
+    'SELECT id, full_name': () => ({ rows: [{ id: 1, full_name: 'X', line_binding_blocked: false }] }),
+    'INSERT INTO line_bindings': () => ({ rows: [{ id: 1, code: 'BIND-AAAA0000', expires_at: new Date(), target_oa_id: null }] }),
+  });
+  // Should not call SELECT line_oas because 0 = any-OA
+  const out = await lb.issue(pool, { tenantId: 1, ttlDays: 7, targetOaId: 0 });
+  assert.equal(out.targetOaId, null);
+  const calledOaCheck = pool._calls.some((c) => c.sql.includes('SELECT id, enabled FROM line_oas'));
+  assert.equal(calledOaCheck, false, 'should skip OA validation when targetOaId=0');
+});
+
+test('tryBind: enforces target_oa_id when set on the binding', async () => {
+  const pool = buildFakePool({
+    'FROM line_bindings b JOIN tenants': () => ({
+      rows: [{
+        id: 1, tenant_id: 5, status: 'pending',
+        target_oa_id: 7,    // code was issued for OA #7
+        expires_at: new Date(Date.now() + 86400000),
+        full_name: 'X', current_room_id: '101',
+        line_binding_blocked: false,
+      }],
+    }),
+  });
+  // Tenant sent the code to OA #3 (wrong target)
+  const r = await lb.tryBind(pool, { code: 'BIND-DEADBEEF', lineUserId: 'U1', oaId: 3 });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'wrong_oa');
+  assert.equal(r.expectedOaId, 7);
+});
+
+test('tryBind: dedup is per-OA (same userId on different OAs is OK)', async () => {
+  // Scenario: tenant 5 has pending code; SAME LINE userId already bound to
+  // tenant 99 — but that bind is on a different OA (oa_id=2 vs current oa=5).
+  // Should NOT collide because LINE userIds are scoped per-OA.
+  const pool = buildFakePool({
+    'FROM line_bindings b JOIN tenants': () => ({
+      rows: [{
+        id: 1, tenant_id: 5, status: 'pending',
+        target_oa_id: null,
+        expires_at: new Date(Date.now() + 86400000),
+        full_name: 'X', current_room_id: '101',
+        line_binding_blocked: false,
+      }],
+    }),
+    // The dedup query is scoped to oa_id matching, so no other bound row found
+    "WHERE line_user_id=$1": () => ({ rows: [] }),
+  });
+  const r = await lb.tryBind(pool, { code: 'BIND-DEADBEEF', lineUserId: 'Uabc', oaId: 5 });
+  assert.equal(r.ok, true);
+  assert.equal(r.oaId, 5);
+});
+
+test('tryBind: records oa_id on success', async () => {
+  const pool = buildFakePool({
+    'FROM line_bindings b JOIN tenants': () => ({
+      rows: [{
+        id: 1, tenant_id: 5, status: 'pending', target_oa_id: null,
+        expires_at: new Date(Date.now() + 86400000),
+        full_name: 'A', current_room_id: '201', line_binding_blocked: false,
+      }],
+    }),
+    "WHERE line_user_id=$1": () => ({ rows: [] }),
+  });
+  await lb.tryBind(pool, { code: 'BIND-DEADBEEF', lineUserId: 'U1', oaId: 42 });
+  // Find the UPDATE line_bindings ... SET ... oa_id=$2 call
+  const updateBinding = pool._calls.find((c) =>
+    c.sql.includes('UPDATE line_bindings') && c.sql.includes('oa_id'));
+  assert.ok(updateBinding, 'should UPDATE line_bindings with oa_id');
+  // Find the UPDATE tenants ... line_oa_id=$2
+  const updateTenant = pool._calls.find((c) =>
+    c.sql.replace(/\s+/g, ' ').includes('UPDATE tenants') &&
+    c.sql.includes('line_oa_id'));
+  assert.ok(updateTenant, 'should UPDATE tenants with line_oa_id');
+});

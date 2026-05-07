@@ -12,19 +12,8 @@ const billing = require('../services/billing');
 const features = require('../services/features');
 const cryptoSvc = require('../services/crypto');
 
-// PIN trivial-reject — kept identical to server.js
-const TRIVIAL_PINS_4 = new Set([
-  '0000','1111','2222','3333','4444','5555','6666','7777','8888','9999',
-  '1234','4321','2580','1010','1212','1313',
-]);
-function isTrivialPin(s) {
-  const str = String(s || '');
-  if (!/^\d{4,8}$/.test(str)) return false;
-  if (str.length === 4 && TRIVIAL_PINS_4.has(str)) return true;
-  if (/^(\d)\1+$/.test(str)) return true;
-  if (/^(0123|1234|2345|3456|4567|5678|6789|9876|8765|7654)/.test(str)) return true;
-  return false;
-}
+// PIN trivial-reject — single source of truth.
+const { TRIVIAL_PINS_4, isTrivialPin } = require('../services/pinPolicy');
 
 module.exports = function buildTenantOpsRouter(ctx) {
   const { pool, requireAuth, requireRole, sameOrigin, csrfGuard, audit, requireTenant,

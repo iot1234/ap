@@ -58,7 +58,7 @@ function recordFailure() {
     CB.state = 'open';
     CB.openedAt = now;
     console.error(`[pg] circuit OPEN (${CB.failures.length} failures in window)`);
-    schedulePrope();
+    scheduleProbe();
   }
 }
 function recordSuccess() {
@@ -69,7 +69,7 @@ function recordSuccess() {
   }
 }
 let _probeTimer = null;
-function schedulePrope() {
+function scheduleProbe() {
   if (_probeTimer) return;
   _probeTimer = setTimeout(async () => {
     _probeTimer = null;
@@ -80,7 +80,7 @@ function schedulePrope() {
     } catch (err) {
       console.error('[pg] probe failed:', sanitizeError(err));
       CB.state = 'open';
-      schedulePrope();
+      scheduleProbe();
     }
   }, CB.PROBE_MS).unref();
 }

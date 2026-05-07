@@ -55,6 +55,12 @@ async function migrate(pool, opts = {}) {
     CREATE INDEX IF NOT EXISTS idx_tickets_status ON maintenance_tickets(status);
     CREATE INDEX IF NOT EXISTS idx_tickets_room ON maintenance_tickets(room_id);
     CREATE INDEX IF NOT EXISTS idx_tickets_created ON maintenance_tickets(created_at DESC);
+    -- tenant_id added so /api/tenant/maintenance can keep showing a tenant's
+    -- past tickets even after they change phone numbers. Public ticket
+    -- submissions still come in anonymously (no session) — server.js stamps
+    -- tenant_id when phone matches an existing tenants row at create time.
+    ALTER TABLE maintenance_tickets ADD COLUMN IF NOT EXISTS tenant_id BIGINT;
+    CREATE INDEX IF NOT EXISTS idx_tickets_tenant_id ON maintenance_tickets(tenant_id);
 
     CREATE TABLE IF NOT EXISTS audit_logs (
       id          BIGSERIAL PRIMARY KEY,

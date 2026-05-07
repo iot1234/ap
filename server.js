@@ -119,263 +119,20 @@ const pool = new Pool({
   // of returning 503 quickly (so client retries can succeed).
   connectionTimeoutMillis: 5000,
   idleTimeoutMillis: 30_000,
+  // statement_timeout: aborts any query running > 10s on the server side, so
+  // a buggy slow query can't pin a connection slot. lock_timeout caps how
+  // long a transaction will wait for a row/table lock before bailing.
+  statement_timeout: 10_000,
+  lock_timeout: 5_000,
 });
 
 pool.on('error', (err) => console.error('[pg] pool error:', sanitizeError(err)));
 
 // --- Schema migration -----------------------------------------------------
 // Delegates to db/migrate.js so the SQL is reusable from tests + scripts.
-// The inline definition below (kept for now) is the legacy path; new tables
-// are only added in db/migrate.js so this block doesn't drift.
 const dbMigrate = require('./db/migrate');
 async function migrate() {
   await dbMigrate.migrate(pool);
-  return;
-
-  /* eslint-disable no-unreachable */
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS app_data (
-      key         TEXT PRIMARY KEY,
-      value       JSONB NOT NULL,
-      updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      updated_by  TEXT
-    );
-    CREATE TABLE IF NOT EXISTS auth_users (
-      id            SERIAL PRIMARY KEY,
-      username      TEXT UNIQUE NOT NULL,
-      password_hash TEXT NOT NULL,
-      role          TEXT NOT NULL DEFAULT 'admin',
-      created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-    CREATE TABLE IF NOT EXISTS user_sessions (
-      sid    VARCHAR NOT NULL PRIMARY KEY,
-      sess   JSON NOT NULL,
-      expire TIMESTAMP(6) NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS idx_user_sessions_expire ON user_sessions(expire);
-
-    -- Maintenance tickets (Phase A4)
-    CREATE TABLE IF NOT EXISTS maintenance_tickets (
-      id              BIGSERIAL PRIMARY KEY,
-      ticket_no       TEXT UNIQUE NOT NULL,
-      room_id         TEXT NOT NULL,
-      tenant_name     TEXT,
-      tenant_phone    TEXT,
-      category        TEXT NOT NULL,
-      priority        TEXT NOT NULL DEFAULT 'medium',
-      status          TEXT NOT NULL DEFAULT 'open',
-      title           TEXT NOT NULL,
-      description     TEXT,
-      assigned_to     TEXT,
-      scheduled_at    TIMESTAMPTZ,
-      completed_at    TIMESTAMPTZ,
-      rating          SMALLINT,
-      rating_comment  TEXT,
-      cost            NUMERIC(10,2) DEFAULT 0,
-      created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-    CREATE INDEX IF NOT EXISTS idx_tickets_status ON maintenance_tickets(status);
-    CREATE INDEX IF NOT EXISTS idx_tickets_room ON maintenance_tickets(room_id);
-    CREATE INDEX IF NOT EXISTS idx_tickets_created ON maintenance_tickets(created_at DESC);
-
-    -- Audit log (Phase B1)
-    CREATE TABLE IF NOT EXISTS audit_logs (
-      id          BIGSERIAL PRIMARY KEY,
-      user_id     TEXT,
-      action      TEXT NOT NULL,
-      entity_type TEXT,
-      entity_id   TEXT,
-      detail      JSONB,
-      ip          TEXT,
-      ua          TEXT,
-      created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-    CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_logs(user_id);
-    CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_logs(entity_type, entity_id);
-
-    -- === v2 schema (feature-flagged additions) ===========================
-    -- Tenants table — replaces room.tenant blob for new flows. Existing rooms
-    -- keep their inline tenant blob; the tenants table is opt-in via the
-    -- tenantPortal feature flag.
-    CREATE TABLE IF NOT EXISTS tenants (
-      id                    BIGSERIAL PRIMARY KEY,
-      full_name             TEXT NOT NULL,
-      phone                 TEXT NOT NULL,
-      citizen_id_encrypted  TEXT,
-      citizen_id_tail       TEXT,
-      email                 TEXT,
-      line_user_id          TEXT,
-      pin_hash              TEXT,
-      current_room_id       TEXT,
-      status                TEXT NOT NULL DEFAULT 'active',
-      blacklist_reason      TEXT,
-      notes                 TEXT,
-      locale                TEXT DEFAULT 'th',
-      created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      deleted_at            TIMESTAMPTZ
-    );
-    CREATE INDEX IF NOT EXISTS idx_tenants_phone ON tenants(phone) WHERE deleted_at IS NULL;
-    CREATE INDEX IF NOT EXISTS idx_tenants_room ON tenants(current_room_id) WHERE deleted_at IS NULL;
-
-    CREATE TABLE IF NOT EXISTS contracts (
-      id              BIGSERIAL PRIMARY KEY,
-      contract_no     TEXT UNIQUE NOT NULL,
-      tenant_id       BIGINT REFERENCES tenants(id),
-      room_id         TEXT NOT NULL,
-      start_date      DATE NOT NULL,
-      end_date        DATE,
-      monthly_rent    NUMERIC(10,2) NOT NULL,
-      deposit         NUMERIC(10,2) DEFAULT 0,
-      status          TEXT NOT NULL DEFAULT 'active',
-      signature_url   TEXT,
-      signed_at       TIMESTAMPTZ,
-      created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      deleted_at      TIMESTAMPTZ
-    );
-    CREATE INDEX IF NOT EXISTS idx_contracts_tenant ON contracts(tenant_id);
-    CREATE INDEX IF NOT EXISTS idx_contracts_room ON contracts(room_id);
-
-    CREATE TABLE IF NOT EXISTS bills (
-      id            BIGSERIAL PRIMARY KEY,
-      bill_no       TEXT UNIQUE NOT NULL,
-      tenant_id     BIGINT REFERENCES tenants(id),
-      room_id       TEXT NOT NULL,
-      period        TEXT NOT NULL,
-      rent          NUMERIC(10,2) NOT NULL DEFAULT 0,
-      water_units   NUMERIC(10,2) DEFAULT 0,
-      water_rate    NUMERIC(10,2) DEFAULT 0,
-      water_amount  NUMERIC(10,2) DEFAULT 0,
-      elec_units    NUMERIC(10,2) DEFAULT 0,
-      elec_rate     NUMERIC(10,2) DEFAULT 0,
-      elec_amount   NUMERIC(10,2) DEFAULT 0,
-      wifi          NUMERIC(10,2) DEFAULT 0,
-      other         JSONB DEFAULT '[]'::jsonb,
-      subtotal      NUMERIC(10,2) NOT NULL,
-      vat           NUMERIC(10,2) DEFAULT 0,
-      late_fee      NUMERIC(10,2) DEFAULT 0,
-      total         NUMERIC(10,2) NOT NULL,
-      due_date      DATE NOT NULL,
-      paid_at       TIMESTAMPTZ,
-      status        TEXT NOT NULL DEFAULT 'pending',
-      void_reason   TEXT,
-      created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      deleted_at    TIMESTAMPTZ
-    );
-    CREATE INDEX IF NOT EXISTS idx_bills_tenant ON bills(tenant_id);
-    CREATE INDEX IF NOT EXISTS idx_bills_room_period ON bills(room_id, period);
-    CREATE INDEX IF NOT EXISTS idx_bills_status ON bills(status);
-
-    CREATE TABLE IF NOT EXISTS payments (
-      id             BIGSERIAL PRIMARY KEY,
-      bill_id        BIGINT REFERENCES bills(id),
-      tenant_id      BIGINT REFERENCES tenants(id),
-      amount         NUMERIC(10,2) NOT NULL,
-      method         TEXT NOT NULL,
-      ref            TEXT,
-      slip_url       TEXT,
-      slip_hash      TEXT,
-      status         TEXT NOT NULL DEFAULT 'pending',
-      verified_by    TEXT,
-      verified_at    TIMESTAMPTZ,
-      rejected_reason TEXT,
-      created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-    CREATE INDEX IF NOT EXISTS idx_payments_bill ON payments(bill_id);
-    CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status);
-    CREATE UNIQUE INDEX IF NOT EXISTS uq_payments_slip_hash ON payments(slip_hash) WHERE slip_hash IS NOT NULL;
-
-    CREATE TABLE IF NOT EXISTS meter_readings (
-      id          BIGSERIAL PRIMARY KEY,
-      room_id     TEXT NOT NULL,
-      meter_type  TEXT NOT NULL,
-      reading     NUMERIC(10,2) NOT NULL,
-      source      TEXT DEFAULT 'manual',
-      created_by  TEXT,
-      reading_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-    CREATE INDEX IF NOT EXISTS idx_meter_room_at ON meter_readings(room_id, meter_type, reading_at DESC);
-
-    CREATE TABLE IF NOT EXISTS access_logs (
-      id           BIGSERIAL PRIMARY KEY,
-      room_id      TEXT,
-      tenant_id    BIGINT,
-      device       TEXT NOT NULL,
-      method       TEXT NOT NULL,
-      card_id      TEXT,
-      result       TEXT NOT NULL,
-      reason       TEXT,
-      occurred_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-    CREATE INDEX IF NOT EXISTS idx_access_at ON access_logs(occurred_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_access_room ON access_logs(room_id);
-
-    CREATE TABLE IF NOT EXISTS access_cards (
-      id           BIGSERIAL PRIMARY KEY,
-      card_id      TEXT UNIQUE NOT NULL,
-      tenant_id    BIGINT REFERENCES tenants(id),
-      room_id      TEXT,
-      status       TEXT NOT NULL DEFAULT 'active',
-      issued_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      revoked_at   TIMESTAMPTZ,
-      revoke_reason TEXT
-    );
-
-    CREATE TABLE IF NOT EXISTS notifications_log (
-      id          BIGSERIAL PRIMARY KEY,
-      channel     TEXT NOT NULL,
-      recipient   TEXT NOT NULL,
-      subject     TEXT,
-      body        TEXT,
-      status      TEXT NOT NULL,
-      error       TEXT,
-      created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-    CREATE INDEX IF NOT EXISTS idx_notif_at ON notifications_log(created_at DESC);
-
-    CREATE TABLE IF NOT EXISTS file_uploads (
-      id            BIGSERIAL PRIMARY KEY,
-      category      TEXT NOT NULL,
-      ref_id        TEXT,
-      filename      TEXT NOT NULL,
-      mime_type     TEXT,
-      size_bytes    BIGINT,
-      storage       TEXT NOT NULL DEFAULT 'local',
-      url           TEXT,
-      uploaded_by   TEXT,
-      uploaded_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-    CREATE INDEX IF NOT EXISTS idx_files_ref ON file_uploads(category, ref_id);
-
-    CREATE TABLE IF NOT EXISTS tenant_sessions (
-      sid     TEXT PRIMARY KEY,
-      tenant_id BIGINT NOT NULL REFERENCES tenants(id),
-      expire  TIMESTAMPTZ NOT NULL,
-      ip      TEXT,
-      ua      TEXT,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-    CREATE INDEX IF NOT EXISTS idx_tsess_expire ON tenant_sessions(expire);
-    CREATE INDEX IF NOT EXISTS idx_tsess_tenant ON tenant_sessions(tenant_id);
-  `);
-  console.log('[db] schema ready');
-
-  // Bootstrap admin user (idempotent — only inserts if missing)
-  const { rows } = await pool.query(
-    'SELECT id FROM auth_users WHERE username=$1',
-    [ADMIN_USERNAME]
-  );
-  if (rows.length === 0) {
-    const hash = await bcrypt.hash(ADMIN_PASSWORD, 10);
-    await pool.query(
-      'INSERT INTO auth_users (username, password_hash, role) VALUES ($1,$2,$3)',
-      [ADMIN_USERNAME, hash, 'admin']
-    );
-    console.log(`[db] bootstrapped admin user: ${ADMIN_USERNAME}`);
-  }
-  /* eslint-enable no-unreachable */
 }
 
 // --- App setup ------------------------------------------------------------
@@ -657,23 +414,9 @@ const lockout = makeLockout(pool);
 const DUMMY_HASH = '$2a$10$' + 'X'.repeat(53);
 
 // === Trivial-PIN reject (A6) =============================================
-// Block obvious sequences/repeats/dates so an attacker can't crack a
-// real-world PIN with the top-100 most common values.
-const TRIVIAL_PINS_4 = new Set([
-  '0000','1111','2222','3333','4444','5555','6666','7777','8888','9999',
-  '1234','4321','2580','1010','1212','1313','2024','2025','2026','2027',
-  '0123','0852','0000','1004','1122','1313','1342','1414','1515','1616',
-  '1717','1818','1919','2002','2007','2008','2010','2011','2020','2021',
-  '2022','2023','7777','8888','9876','9999',
-]);
-function isTrivialPin(s) {
-  const str = String(s || '');
-  if (!/^\d{4,8}$/.test(str)) return false;
-  if (str.length === 4 && TRIVIAL_PINS_4.has(str)) return true;
-  if (/^(\d)\1+$/.test(str)) return true;                 // all same
-  if (/^(0123|1234|2345|3456|4567|5678|6789|9876|8765|7654|6543|5432|4321)/.test(str)) return true;
-  return false;
-}
+// Single source of truth in services/pinPolicy.js — also used by
+// routes/tenant-ops.js so the two paths can't drift.
+const { TRIVIAL_PINS_4, isTrivialPin } = require('./services/pinPolicy');
 
 // --- Auth endpoints -------------------------------------------------------
 app.post('/api/auth/login', sameOrigin, loginLimiter, validateBody(schemas.login), async (req, res) => {
@@ -885,7 +628,6 @@ app.put('/api/data/:key', sameOrigin, csrfGuard, requireAuth, requireRole('owner
     baankarn_config_v1:     'object',
     baankarn_bookings_v1:   'array',
     baankarn_activities_v1: 'array',
-    baankarn_users_v1:      'array',
   };
   const want = EXPECTED_SHAPE[key];
   if (want === 'array' && !Array.isArray(value)) {
@@ -1299,13 +1041,24 @@ app.post('/api/maintenance', sameOrigin, rateLimitTicket, validateBody(schemas.c
   };
   const ticketNo = makeTicketNo();
   try {
+    // Best-effort tenant linkage: if phone matches an existing tenant row,
+    // stamp tenant_id so the ticket survives a future phone change. Anonymous
+    // submissions (no matching tenant) just leave tenant_id NULL.
+    let tenantId = null;
+    if (cleaned.tenant_phone) {
+      const tr = await pool.query(
+        'SELECT id FROM tenants WHERE phone=$1 AND deleted_at IS NULL ORDER BY id DESC LIMIT 1',
+        [cleaned.tenant_phone]
+      );
+      if (tr.rows.length) tenantId = tr.rows[0].id;
+    }
     const { rows } = await pool.query(
       `INSERT INTO maintenance_tickets
-        (ticket_no, room_id, tenant_name, tenant_phone, category, priority, title, description)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+        (ticket_no, room_id, tenant_name, tenant_phone, category, priority, title, description, tenant_id)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
         RETURNING *`,
       [ticketNo, cleaned.room_id, cleaned.tenant_name, cleaned.tenant_phone,
-       cleaned.category, cleaned.priority, cleaned.title, cleaned.description]
+       cleaned.category, cleaned.priority, cleaned.title, cleaned.description, tenantId]
     );
     const ticket = rows[0];
     // A4 — audit even public ticket creation; user_id captured as the
@@ -2228,17 +1981,19 @@ app.get('/api/tenant/bills', requireTenant, async (req, res) => {
 });
 
 app.get('/api/tenant/maintenance', requireTenant, async (req, res) => {
-  // B4 — pagination support, capped at 100/page; default 50.
+  // Pagination support, capped at 100/page; default 50.
   const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 100);
   const offset = Math.max(Number(req.query.offset) || 0, 0);
   try {
+    // Match by tenant_id (durable across phone changes) OR phone (covers
+    // legacy tickets created before tenant_id was stamped at insert time).
     const { rows } = await pool.query(
       `SELECT id, ticket_no, room_id, category, priority, status, title, description,
               created_at, completed_at, rating, rating_comment
          FROM maintenance_tickets
-         WHERE room_id=$1 AND tenant_phone=$2
+         WHERE tenant_id = $1 OR (tenant_phone = $2 AND $2 <> '')
          ORDER BY created_at DESC LIMIT $3 OFFSET $4`,
-      [req.tenant.current_room_id || '', req.tenant.phone, limit, offset]
+      [req.tenant.tenant_id, req.tenant.phone || '', limit, offset]
     );
     res.json({ ok: true, tickets: rows, limit, offset });
   } catch (err) {
@@ -2288,11 +2043,11 @@ app.post('/api/tenant/maintenance/:id/rate', sameOrigin, csrfGuard, requireTenan
       `UPDATE maintenance_tickets
          SET rating=$1, rating_comment=$2, updated_at=NOW()
          WHERE id=$3
-           AND tenant_phone=$4
+           AND (tenant_id = $4 OR (tenant_phone = $5 AND $5 <> ''))
            AND status='completed'
            AND rating IS NULL
          RETURNING ticket_no, rating, rating_comment, completed_at`,
-      [rating, comment, id, req.tenant.phone]
+      [rating, comment, id, req.tenant.tenant_id, req.tenant.phone || '']
     );
     if (!rows.length) {
       return res.status(404).json({ error: 'ticket not found, not yours, not completed, or already rated' });

@@ -6,21 +6,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-// isTrivialPin lives inside server.js; reproduce the canonical impl here so
-// we don't have to spin up the server. If you change the rules in server.js,
-// mirror the change here.
-const TRIVIAL_PINS_4 = new Set([
-  '0000','1111','2222','3333','4444','5555','6666','7777','8888','9999',
-  '1234','4321','2580','1010','1212','1313','2024','2025','2026','2027',
-]);
-function isTrivialPin(s) {
-  const str = String(s || '');
-  if (!/^\d{4,8}$/.test(str)) return false;
-  if (str.length === 4 && TRIVIAL_PINS_4.has(str)) return true;
-  if (/^(\d)\1+$/.test(str)) return true;
-  if (/^(0123|1234|2345|3456|4567|5678|6789|9876|8765|7654|6543|5432|4321)/.test(str)) return true;
-  return false;
-}
+// Test the actual implementation — services/pinPolicy.js is the single
+// source of truth, also imported by server.js and routes/tenant-ops.js.
+const { isTrivialPin } = require('../services/pinPolicy');
 
 test('rejects 0000 / 1111 / 1234 / 9999', () => {
   for (const p of ['0000', '1111', '1234', '9999', '4321']) {
