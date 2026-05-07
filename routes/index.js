@@ -12,6 +12,7 @@ module.exports = function mountRoutes(app, ctx) {
   const webhooks = require('./webhooks')(ctx);
   const adminSecrets = require('./admin-secrets')(ctx);
   const adminLineBindings = require('./admin-line-bindings')(ctx);
+  const recurring = require('./recurring-charges')(ctx);
 
   // Run any per-router bootstrap (e.g. table creation for rooms_v2)
   const bootstraps = [rooms.bootstrap].filter(Boolean);
@@ -21,6 +22,7 @@ module.exports = function mountRoutes(app, ctx) {
   app.use('/api/reports2', reports);  // /api/reports2 to avoid clobbering legacy
   app.use('/api/tenants', tenantOps);
   app.use('/api/bills', billsExtras);
+  app.use('/api/recurring-charges', recurring);
   app.use('/api/admin/secrets', adminSecrets);
   app.use('/api/admin/line-bindings', adminLineBindings);
   app.use('/webhook', webhooks);

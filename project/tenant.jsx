@@ -81,7 +81,30 @@ async function api(path, opts = {}) {
     const t = await getCsrf();
     if (t) headers['X-CSRF-Token'] = t;
   }
-  const r = await fetch(path, { credentials: 'same-origin', ...opts, headers });
+  // 30s timeout protects mobile users on flaky networks — they get a clear
+  // error instead of a forever-spinning UI. Override via opts.timeoutMs.
+  const timeoutMs = opts.timeoutMs == null ? 30_000 : opts.timeoutMs;
+  let controller, timer;
+  let signal = opts.signal;
+  if (!signal && Number.isFinite(timeoutMs)) {
+    controller = new AbortController();
+    signal = controller.signal;
+    timer = setTimeout(() => controller.abort(), timeoutMs);
+  }
+  let r;
+  try {
+    r = await fetch(path, { credentials: 'same-origin', ...opts, signal, headers });
+  } catch (err) {
+    if (timer) clearTimeout(timer);
+    if (err.name === 'AbortError') {
+      const e = new Error('คำขอใช้เวลานานเกินกำหนด');
+      e.code = 'TIMEOUT';
+      throw e;
+    }
+    throw err;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
   // Session expiry: clear local CSRF token + tell the App to re-login.
   // We exclude the login + me endpoints — 401 there is a normal "wrong
   // credentials" response, not a session expiry.
@@ -827,6 +850,43 @@ function TenantOfflineBanner() {
       textAlign: 'center', fontSize: 13.5, fontWeight: 500,
     }}>🔌 ไม่ได้เชื่อมต่ออินเทอร์เน็ต</div>
   );
+}
+
+// Global error sink — same pattern as admin/hooks.jsx. ErrorBoundary covers
+// render errors; these listeners cover sync exceptions + unhandled async.
+if (typeof window !== 'undefined' && !window.__tenant_err_bound) {
+  window.__tenant_err_bound = true;
+  let _lastReport = 0;
+  function reportTenantError(payload) {
+    const now = Date.now();
+    if (now - _lastReport < 1000) return;
+    _lastReport = now;
+    try {
+      const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
+      navigator.sendBeacon
+        ? navigator.sendBeacon('/api/client-error', blob)
+        : fetch('/api/client-error', {
+            method: 'POST', credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload), keepalive: true,
+          });
+    } catch { /* ignore */ }
+  }
+  window.addEventListener('error', (ev) => {
+    reportTenantError({
+      message: String(ev.message || 'window.onerror'),
+      stack: String((ev.error && ev.error.stack) || '').slice(0, 4000),
+      url: window.location.href, source: ev.filename, line: ev.lineno,
+    });
+  });
+  window.addEventListener('unhandledrejection', (ev) => {
+    const r = ev.reason;
+    reportTenantError({
+      message: 'unhandledrejection: ' + String((r && r.message) || r),
+      stack: String((r && r.stack) || '').slice(0, 4000),
+      url: window.location.href,
+    });
+  });
 }
 
 ReactDOM.createRoot(document.getElementById('root')).render(

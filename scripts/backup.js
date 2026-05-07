@@ -148,14 +148,32 @@ async function main() {
 async function run({ pool: externalPool, retainDays }) {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const backup = { schemaVersion: 1, createdAt: new Date().toISOString(), tables: {} };
+  const counts = {};
   for (const t of TABLES) {
     try {
       const { rows } = await externalPool.query(`SELECT * FROM ${t}`);
       backup.tables[t] = rows;
+      counts[t] = rows.length;
     } catch (err) {
-      backup.tables[t] = { __error: err.message };
+      if (err.code === '42P01') {
+        backup.tables[t] = { __skipped: 'table does not exist' };
+      } else {
+        backup.tables[t] = { __error: err.message };
+      }
     }
   }
+  // Integrity hash — admin can verify a backup file hasn't been tampered
+  // with (or corrupted in transit) before restoring. SHA-256 of the
+  // serialized payload BEFORE the hash field is added, so the hash is
+  // stable across multiple restores.
+  const crypto = require('crypto');
+  const payload = JSON.stringify(backup);
+  backup.integrity = {
+    algorithm: 'sha256',
+    digest: crypto.createHash('sha256').update(payload).digest('hex'),
+    rowCounts: counts,
+  };
+
   const outDir = path.join(__dirname, '..', 'backups');
   fs.mkdirSync(outDir, { recursive: true });
   const file = path.join(outDir, `backup-${stamp}.json`);
@@ -168,9 +186,40 @@ async function run({ pool: externalPool, retainDays }) {
     const old = files.shift();
     try { fs.unlinkSync(path.join(outDir, old)); } catch {}
   }
-  return { file, size: fs.statSync(file).size };
+  return {
+    file,
+    size: fs.statSync(file).size,
+    digest: backup.integrity.digest,
+    rowCounts: counts,
+  };
 }
-module.exports = { run };
+
+/**
+ * Verify a backup file's integrity hash without restoring anything.
+ * Returns { ok: true, counts } when valid, { ok: false, error } otherwise.
+ */
+function verify(filePath) {
+  try {
+    const raw = fs.readFileSync(filePath, 'utf8');
+    const obj = JSON.parse(raw);
+    if (!obj || !obj.integrity || obj.integrity.algorithm !== 'sha256') {
+      return { ok: false, error: 'no integrity block (older backup format)' };
+    }
+    const expected = obj.integrity.digest;
+    const stored = { ...obj };
+    delete stored.integrity;
+    const actual = require('crypto').createHash('sha256')
+      .update(JSON.stringify(stored)).digest('hex');
+    if (actual !== expected) {
+      return { ok: false, error: 'hash mismatch — file may be tampered or truncated' };
+    }
+    return { ok: true, counts: obj.integrity.rowCounts || {}, createdAt: obj.createdAt };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
+module.exports = { run, verify };
 
 // CLI mode: only execute when invoked directly (node scripts/backup.js)
 if (require.main === module) {

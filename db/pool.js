@@ -107,6 +107,44 @@ async function safeQuery(text, params) {
   }
 }
 
+// Postgres SQLSTATE codes that are safe to retry. They indicate the request
+// itself was fine but a concurrent transaction interfered — running again
+// usually wins.
+//   40001 = serialization_failure
+//   40P01 = deadlock_detected
+//   57P03 = cannot_connect_now
+//   53300 = too_many_connections (transient under burst)
+const RETRY_CODES = new Set(['40001', '40P01', '57P03', '53300']);
+
+/**
+ * Retry-aware query. Use for non-idempotent INSERTs/UPDATEs that could lose
+ * a deadlock against a parallel admin action. Read paths don't need this —
+ * they'll surface as 500 and the user retries from the UI.
+ *
+ * @param {string} text
+ * @param {Array} params
+ * @param {object} [opts] - { attempts: 3, baseDelayMs: 50 }
+ */
+async function queryWithRetry(text, params, opts = {}) {
+  const attempts = Math.max(1, opts.attempts || 3);
+  const baseDelayMs = opts.baseDelayMs || 50;
+  let lastErr;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await pool.query(text, params);
+    } catch (err) {
+      lastErr = err;
+      if (!RETRY_CODES.has(err.code)) throw err;       // non-transient → bail
+      if (i === attempts - 1) throw err;                // last attempt → bail
+      // Exponential backoff with jitter so two clients fighting the same
+      // deadlock don't retry in lockstep.
+      const wait = baseDelayMs * Math.pow(2, i) + Math.floor(Math.random() * 50);
+      await new Promise((r) => setTimeout(r, wait));
+    }
+  }
+  throw lastErr;
+}
+
 function status() {
   return {
     state: CB.state,
@@ -115,4 +153,4 @@ function status() {
   };
 }
 
-module.exports = { pool, safeQuery, sanitizeError, status, CircuitOpenError };
+module.exports = { pool, safeQuery, queryWithRetry, sanitizeError, status, CircuitOpenError, RETRY_CODES };

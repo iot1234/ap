@@ -12,6 +12,10 @@ const billing = require('../services/billing');
 const features = require('../services/features');
 const notifier = require('../services/notifier');
 const notifQueue = require('../services/notificationQueue');
+// queryWithRetry retries serialization/deadlock errors (40001, 40P01, 57P03,
+// 53300). bulk-generate inserts ~30+ bills in a tight loop — most likely
+// path to hit a deadlock against the scheduler's auto-gen running parallel.
+const { queryWithRetry } = require('../db/pool');
 
 module.exports = function buildBillsExtrasRouter(ctx) {
   const { pool, requireAuth, requireRole, sameOrigin, csrfGuard, audit } = ctx;
@@ -51,9 +55,22 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             dueDate: prevQ.rows[0].due_date,
             status: prevQ.rows[0].status,
           } : null;
-          const bill = billing.buildBill({ room, config, features: flags, previous, period, dueDate });
+          // Pull active recurring charges for this room — services/billing.js
+          // adds them as line items when the recurringCharges feature is on.
+          let recurring = [];
           try {
-            const { rowCount } = await pool.query(
+            const rc = await pool.query(
+              `SELECT label, amount FROM recurring_charges
+                 WHERE room_id=$1 AND active = TRUE
+                   AND (start_at IS NULL OR start_at <= CURRENT_DATE)
+                   AND (end_at IS NULL OR end_at >= CURRENT_DATE)`,
+              [room.id]
+            );
+            recurring = rc.rows.map((x) => ({ label: x.label, amount: Number(x.amount) }));
+          } catch { /* table may not exist on older deployments */ }
+          const bill = billing.buildBill({ room, config, features: flags, previous, recurring, period, dueDate });
+          try {
+            const { rowCount } = await queryWithRetry(
               `INSERT INTO bills
                  (bill_no, room_id, period, rent, water_units, water_rate, water_amount,
                   elec_units, elec_rate, elec_amount, wifi, subtotal, vat, late_fee, total, due_date, status)

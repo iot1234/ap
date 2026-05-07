@@ -329,6 +329,30 @@ async function migrate(pool, opts = {}) {
     ALTER TABLE tenants ADD COLUMN IF NOT EXISTS line_binding_blocked_at TIMESTAMPTZ;
     ALTER TABLE tenants ADD COLUMN IF NOT EXISTS line_binding_blocked_reason TEXT;
 
+    -- Recurring monthly charges per room (parking, internet, locker, etc.).
+    -- Bulk-generate auto-pulls active rows for a room → adds them as line
+    -- items on the next bill. start_at/end_at let admin pre-schedule
+    -- promotional discounts or stop-dates.
+    CREATE TABLE IF NOT EXISTS recurring_charges (
+      id          BIGSERIAL PRIMARY KEY,
+      room_id     TEXT,
+      tenant_id   BIGINT REFERENCES tenants(id),
+      label       TEXT NOT NULL,
+      amount      NUMERIC(10,2) NOT NULL,
+      frequency   TEXT NOT NULL DEFAULT 'monthly',  -- monthly | quarterly | one_off
+      active      BOOLEAN NOT NULL DEFAULT TRUE,
+      start_at    DATE,
+      end_at      DATE,
+      notes       TEXT,
+      created_by  TEXT,
+      created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      -- a charge must point at a tenant OR a room (not neither)
+      CONSTRAINT recurring_target CHECK (room_id IS NOT NULL OR tenant_id IS NOT NULL)
+    );
+    CREATE INDEX IF NOT EXISTS idx_recurring_room ON recurring_charges(room_id) WHERE active = TRUE;
+    CREATE INDEX IF NOT EXISTS idx_recurring_tenant ON recurring_charges(tenant_id) WHERE active = TRUE;
+
     -- Encrypted secret store. Holds API keys (LINE, SMTP, Sentry, R2) so
     -- admins can configure them from the UI instead of needing to redeploy
     -- with new env vars. Values are AES-256-GCM encrypted (services/encryption.js)
@@ -340,29 +364,6 @@ async function migrate(pool, opts = {}) {
       updated_by      TEXT,
       updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
-
-    -- Recurring charges (parking, internet add-on, cleaning fee, etc.) that
-    -- attach to either a tenant or a room and are added to every monthly
-    -- bill while active. amount=0 with frequency='one_off' means a one-time
-    -- charge; otherwise the row stays active until end_date or until admin
-    -- sets active=FALSE.
-    CREATE TABLE IF NOT EXISTS recurring_charges (
-      id            BIGSERIAL PRIMARY KEY,
-      tenant_id     BIGINT REFERENCES tenants(id) ON DELETE CASCADE,
-      room_id       TEXT,
-      label         TEXT NOT NULL,
-      amount        NUMERIC(10,2) NOT NULL DEFAULT 0,
-      frequency     TEXT NOT NULL DEFAULT 'monthly',
-      active        BOOLEAN NOT NULL DEFAULT TRUE,
-      start_date    DATE,
-      end_date      DATE,
-      notes         TEXT,
-      created_by    TEXT,
-      created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-    CREATE INDEX IF NOT EXISTS idx_recurring_tenant ON recurring_charges(tenant_id) WHERE active;
-    CREATE INDEX IF NOT EXISTS idx_recurring_room ON recurring_charges(room_id) WHERE active;
 
     -- Bookings table: lets us migrate off the JSONB blob over time. The
     -- public booking endpoint still writes to the blob for backwards-compat

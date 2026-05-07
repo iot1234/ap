@@ -174,7 +174,7 @@ function RecurringForm({ initial, tenants, onCancel, onSave, busy }) {
     tenant_id: initial.tenant_id || '',
     room_id:   initial.room_id || '',
     active:    initial.active !== false,
-    end_date:  initial.end_date || '',
+    end_at:  initial.end_at || '',
     notes:     initial.notes || '',
   });
   const [scope, setScope] = useState(
@@ -194,7 +194,7 @@ function RecurringForm({ initial, tenants, onCancel, onSave, busy }) {
       active: form.active,
       tenantId: scope === 'tenant' ? Number(form.tenant_id) || null : null,
       roomId:   scope === 'room' ? form.room_id.trim() || null : null,
-      endDate:  form.end_date || null,
+      endAt:    form.end_at || null,
       notes:    form.notes.trim() || null,
     };
     if (!payload.tenantId && !payload.roomId) {
@@ -260,8 +260,8 @@ function RecurringForm({ initial, tenants, onCancel, onSave, busy }) {
         )}
 
         <label style={lbl}>หมดอายุ (optional)</label>
-        <input type="date" value={form.end_date}
-          onChange={(e) => setForm({ ...form, end_date: e.target.value })} style={inp} />
+        <input type="date" value={form.end_at}
+          onChange={(e) => setForm({ ...form, end_at: e.target.value })} style={inp} />
 
         <label style={lbl}>หมายเหตุ</label>
         <textarea value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })}

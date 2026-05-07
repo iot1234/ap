@@ -1883,7 +1883,24 @@ async function tenantSessionLookup(req) {
        WHERE s.sid = $1 AND s.expire > NOW() AND t.deleted_at IS NULL`,
     [sid]
   );
-  return rows[0] || null;
+  if (!rows.length) return null;
+  const session = rows[0];
+  // Sliding session: when the cookie is past 50% of its lifetime, extend
+  // expire to a fresh full window. Avoids logging tenants out mid-session
+  // while they're actively using the portal. Best-effort: failures are
+  // silent so a slow DB doesn't block the auth check.
+  try {
+    const days = Number((flags.tenantPortal && flags.tenantPortal.sessionDays) || 30);
+    const now = Date.now();
+    const expire = new Date(session.expire).getTime();
+    const halfLife = (days / 2) * 86_400_000;
+    if (expire - now < halfLife) {
+      const newExpire = new Date(now + days * 86_400_000);
+      pool.query(`UPDATE tenant_sessions SET expire=$1 WHERE sid=$2`, [newExpire, sid])
+        .catch(() => {});
+    }
+  } catch { /* ignore */ }
+  return session;
 }
 
 async function requireTenant(req, res, next) {
@@ -2560,116 +2577,11 @@ app.put('/api/bookings/:id', sameOrigin, requireAuth, requireRole('owner', 'mana
   }
 });
 
-// === v2: Recurring charges (B1) ===========================================
-// Per-tenant or per-room recurring line items (parking, internet add-on,
-// cleaning, etc.) auto-merged into monthly bills when the recurringCharges
-// feature flag is enabled. Either tenant_id or room_id (or both) must be
-// set. Bill generation calls loadRecurringFor() to pick up active rows.
-
-const RECURRING_FREQ = new Set(['monthly', 'quarterly', 'one_off']);
-
-app.get('/api/recurring-charges', requireAuth, async (req, res) => {
-  const tenantId = req.query.tenantId ? Number(req.query.tenantId) : null;
-  const roomId = req.query.roomId ? String(req.query.roomId).slice(0, 32) : null;
-  const params = [];
-  const where = [];
-  if (tenantId) { params.push(tenantId); where.push(`tenant_id=$${params.length}`); }
-  if (roomId) { params.push(roomId); where.push(`room_id=$${params.length}`); }
-  if (req.query.active === 'true') where.push('active = TRUE');
-  if (req.query.active === 'false') where.push('active = FALSE');
-  try {
-    const { rows } = await pool.query(
-      `SELECT * FROM recurring_charges
-         ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
-         ORDER BY active DESC, created_at DESC LIMIT 500`,
-      params
-    );
-    res.json({ ok: true, charges: rows });
-  } catch (err) {
-    console.error('recurring list error:', err);
-    res.status(500).json({ error: 'internal error' });
-  }
-});
-
-app.post('/api/recurring-charges', sameOrigin, requireAuth, requireRole('owner', 'manager'), async (req, res) => {
-  const b = req.body || {};
-  const tenantId = b.tenantId ? Number(b.tenantId) : null;
-  const roomId = b.roomId ? String(b.roomId).slice(0, 32) : null;
-  const label = String(b.label || '').trim().slice(0, 80);
-  const amount = Number(b.amount);
-  const frequency = RECURRING_FREQ.has(String(b.frequency)) ? String(b.frequency) : 'monthly';
-  if (!label) return res.status(400).json({ error: 'label required' });
-  if (!Number.isFinite(amount) || amount < 0 || amount > 1_000_000) return res.status(400).json({ error: 'invalid amount' });
-  if (!tenantId && !roomId) return res.status(400).json({ error: 'tenantId or roomId required' });
-  try {
-    const { rows } = await pool.query(
-      `INSERT INTO recurring_charges
-         (tenant_id, room_id, label, amount, frequency, active, start_date, end_date, notes, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
-      [
-        tenantId, roomId, label, amount, frequency,
-        b.active !== false,
-        b.startDate || null, b.endDate || null,
-        b.notes ? String(b.notes).slice(0, 500) : null,
-        req.session.user.username,
-      ]
-    );
-    audit(req, 'recurring.create', 'recurring_charge', String(rows[0].id), { tenantId, roomId, label, amount });
-    res.json({ ok: true, charge: rows[0] });
-  } catch (err) {
-    console.error('recurring create error:', err);
-    res.status(500).json({ error: 'internal error' });
-  }
-});
-
-app.put('/api/recurring-charges/:id', sameOrigin, requireAuth, requireRole('owner', 'manager'), async (req, res) => {
-  const id = Number(req.params.id);
-  if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
-  const b = req.body || {};
-  const fields = [], params = [];
-  let idx = 1;
-  if (b.label !== undefined) { fields.push(`label=$${idx++}`); params.push(String(b.label).slice(0, 80)); }
-  if (b.amount !== undefined) {
-    const a = Number(b.amount);
-    if (!Number.isFinite(a) || a < 0) return res.status(400).json({ error: 'invalid amount' });
-    fields.push(`amount=$${idx++}`); params.push(a);
-  }
-  if (b.frequency !== undefined) {
-    if (!RECURRING_FREQ.has(String(b.frequency))) return res.status(400).json({ error: 'invalid frequency' });
-    fields.push(`frequency=$${idx++}`); params.push(String(b.frequency));
-  }
-  if (b.active !== undefined) { fields.push(`active=$${idx++}`); params.push(!!b.active); }
-  if (b.endDate !== undefined) { fields.push(`end_date=$${idx++}`); params.push(b.endDate || null); }
-  if (b.notes !== undefined) { fields.push(`notes=$${idx++}`); params.push(b.notes ? String(b.notes).slice(0, 500) : null); }
-  if (!fields.length) return res.status(400).json({ error: 'nothing to update' });
-  fields.push(`updated_at=NOW()`);
-  params.push(id);
-  try {
-    const { rows } = await pool.query(
-      `UPDATE recurring_charges SET ${fields.join(', ')} WHERE id=$${idx} RETURNING *`,
-      params
-    );
-    if (!rows.length) return res.status(404).json({ error: 'not found' });
-    audit(req, 'recurring.update', 'recurring_charge', String(id), { fields: Object.keys(b) });
-    res.json({ ok: true, charge: rows[0] });
-  } catch (err) {
-    console.error('recurring update error:', err);
-    res.status(500).json({ error: 'internal error' });
-  }
-});
-
-app.delete('/api/recurring-charges/:id', sameOrigin, requireAuth, requireRole('owner', 'manager'), async (req, res) => {
-  const id = Number(req.params.id);
-  if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
-  try {
-    const { rowCount } = await pool.query(`DELETE FROM recurring_charges WHERE id=$1`, [id]);
-    if (!rowCount) return res.status(404).json({ error: 'not found' });
-    audit(req, 'recurring.delete', 'recurring_charge', String(id));
-    res.json({ ok: true });
-  } catch (err) {
-    res.status(500).json({ error: 'internal error' });
-  }
-});
+// === v2: Recurring charges helper (B1) ====================================
+// CRUD lives in routes/recurring-charges.js (dedicated router with Zod
+// validation + a /:id/toggle action). We keep loadRecurringFor here
+// because /api/bills POST below calls it directly to merge active rows
+// into the line-item list at bill-generate time.
 
 // Helper used by bill generation (manual + scheduler) to load active
 // charges that apply to a given (tenantId, roomId) combo. one_off charges
@@ -2683,8 +2595,8 @@ async function loadRecurringFor(pool, { tenantId, roomId }) {
   if (roomId)   { params.push(roomId);   ors.push(`room_id = $${params.length}`); }
   if (!ors.length) return [];
   where.push(`(${ors.join(' OR ')})`);
-  where.push(`(start_date IS NULL OR start_date <= CURRENT_DATE)`);
-  where.push(`(end_date IS NULL OR end_date >= CURRENT_DATE)`);
+  where.push(`(start_at IS NULL OR start_at <= CURRENT_DATE)`);
+  where.push(`(end_at IS NULL OR end_at >= CURRENT_DATE)`);
   const { rows } = await pool.query(
     `SELECT id, label, amount, frequency FROM recurring_charges
        WHERE ${where.join(' AND ')} ORDER BY created_at ASC`,
@@ -3079,13 +2991,61 @@ app.post('/api/admin/notifications/:id/retry', sameOrigin, requireAuth, requireR
 });
 
 // --- Health ---------------------------------------------------------------
+// /health → liveness + dependency probe.
+//   db          : SELECT 1 latency in ms (or 'down')
+//   scheduler   : last fired key from .scheduler-state.json (sanity check)
+//   queue       : count of pending notifications (visibility on backlog)
+//   secrets     : 'configured' / 'partial' / 'none' (no values, just shape)
+//   uptime      : process uptime in seconds
+//   memory_mb   : RSS in MB
+// Returns 200 when db is reachable, 503 when degraded so Railway/upstream
+// LBs can route around bad replicas.
 app.get('/health', async (_req, res) => {
+  const out = {
+    status: 'ok',
+    time: new Date().toISOString(),
+    uptime: Math.floor(process.uptime()),
+    memory_mb: Math.round(process.memoryUsage().rss / 1024 / 1024),
+  };
+  // DB probe with timing
+  const t0 = Date.now();
   try {
     await pool.query('SELECT 1');
-    res.json({ status: 'ok', db: 'ok', time: new Date().toISOString() });
+    out.db = { status: 'ok', latency_ms: Date.now() - t0 };
   } catch (err) {
-    res.status(503).json({ status: 'degraded', db: 'down', error: err.message });
+    out.status = 'degraded';
+    out.db = { status: 'down', error: sanitizeError(err) };
   }
+  // Notification queue depth — large pending = something stuck
+  try {
+    const q = await pool.query(`SELECT
+      COUNT(*) FILTER (WHERE status='pending')::int AS pending,
+      COUNT(*) FILTER (WHERE status='failed')::int AS failed
+      FROM notifications_queue WHERE created_at > NOW() - INTERVAL '24 hours'`);
+    out.queue = q.rows[0];
+  } catch { out.queue = null; }
+  // Scheduler heartbeat — last-fired keys from state file
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    const sf = path.join(__dirname, '.scheduler-state.json');
+    if (fs.existsSync(sf)) {
+      out.scheduler = JSON.parse(fs.readFileSync(sf, 'utf8'));
+    }
+  } catch { /* ignore */ }
+  // Secrets status — count, no values
+  try {
+    const c = await pool.query('SELECT COUNT(*)::int AS n FROM secrets');
+    out.secrets = { in_db: c.rows[0].n };
+  } catch { out.secrets = null; }
+
+  res.status(out.status === 'ok' ? 200 : 503).json(out);
+});
+
+// /health/live → minimal probe for Kubernetes-style liveness checks.
+// No DB call — server is "alive" if Node is responsive.
+app.get('/health/live', (_req, res) => {
+  res.json({ status: 'ok', time: new Date().toISOString() });
 });
 
 // --- Static + routes ------------------------------------------------------
@@ -3175,11 +3135,38 @@ app.get('/tenant', (_req, res) => {
 
 // Final Express error handler — captures unhandled route errors so they
 // reach Sentry (when enabled) instead of disappearing into the server log.
+// Error response always includes:
+//   - error: human-readable message
+//   - code: machine code (UNAUTHORIZED, RATE_LIMIT, DB_ERROR, ...)
+//   - requestId: req.id — admin can paste this when reporting bugs
+//   - timestamp: ISO so logs + UI report stay correlated
 app.use((err, req, res, _next) => {
-  console.error(`[${req.id || '-'}] unhandled:`, sanitizeError(err));
-  sentry.captureException(err, { reqId: req.id, path: req.path });
+  const reqId = req.id || '-';
+  console.error(`[${reqId}] unhandled:`, sanitizeError(err));
+  sentry.captureException(err, { reqId, path: req.path, method: req.method });
   if (res.headersSent) return;
-  res.status(500).json({ error: 'internal error' });
+  // Don't leak stack/internals to the client. Surface a stable error code
+  // for the frontend to branch on; the real detail goes to logs + Sentry.
+  res.status(err.status || 500).json({
+    error: NODE_ENV === 'production' ? 'internal error' : sanitizeError(err),
+    code: err.code || 'INTERNAL_ERROR',
+    requestId: reqId,
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// Catch-all 404 for /api/* — without this, Express falls through to the
+// SPA static handler and returns HTML for unknown API paths, which the
+// frontend then tries to JSON.parse and shows a confusing "Unexpected token <"
+// error. JSON 404 makes debugging instant.
+app.use('/api', (req, res) => {
+  res.status(404).json({
+    error: 'route not found',
+    code: 'NOT_FOUND',
+    requestId: req.id,
+    path: req.path,
+    method: req.method,
+  });
 });
 
 // --- Boot -----------------------------------------------------------------

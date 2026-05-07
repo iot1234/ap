@@ -732,6 +732,7 @@ function App() {
     'access-devices':      window.PageAccessDevices,
     reports:     PageReports,
     'reports-v2': window.PageReportsV2,
+    recurring:   window.PageRecurringCharges,
     pricing:     PagePricing,
     recurring:   window.PageRecurringCharges,
     features:    window.PageFeatures,
