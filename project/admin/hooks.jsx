@@ -390,20 +390,12 @@
   // render and stack 503-error toasts as every API call fails.
   function FeatureGate({ flag, children, label }) {
     const f = useFeatureFlag(flag);
-    // Watchdog: if the feature-flag fetch is still running after 6s, fall
-    // through to the "off" placeholder rather than spinning the skeleton
-    // forever. Skeletons + heavy CSS animations + an unfulfilled fetch is
-    // the documented recipe for Chrome's RESULT_CODE_HUNG renderer crash
-    // on slower devices.
-    const [timedOut, setTimedOut] = React.useState(false);
-    React.useEffect(() => {
-      if (f.ready) return;
-      const t = setTimeout(() => setTimedOut(true), 6000);
-      return () => clearTimeout(t);
-    }, [f.ready]);
-    if (!f.ready && !timedOut) {
-      return React.createElement(window.AdminSkeleton || 'div', { rows: 4 });
-    }
+    // Fail-open: render the page immediately while the flag fetch is in
+    // flight. The page's own load() effect will see 503 if the feature is
+    // truly off and surface that as an empty list — much better UX than
+    // staring at a skeleton bar that may never resolve. Once the flag
+    // resolves, if it's actually disabled we swap to the "off" placeholder.
+    if (!f.ready) return children;
     if (f.enabled) return children;
     const C = window.ADMIN_C || {};
     return React.createElement('div', {
