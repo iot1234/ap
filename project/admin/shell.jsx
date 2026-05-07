@@ -3,7 +3,7 @@
 // ใช้ window globals จากไฟล์อื่นทั้งหมด
 // ===========================================================================
 
-const { useState, useEffect, useMemo } = React;
+const { useState, useEffect, useMemo, useRef } = React;
 
 // ---------- Navigation config ---------------------------------------------
 // Groups are organised by user task, not by feature. Each item can declare
@@ -498,10 +498,15 @@ function App() {
   const [bookings,   setBookings]   = useState(loadBookings);
   const [activities, setActivities] = useState(loadActivities);
 
-  useEffect(() => { saveRooms(rooms); },           [rooms]);
-  useEffect(() => { saveConfig(config); },         [config]);
-  useEffect(() => { saveBookings(bookings); },     [bookings]);
-  useEffect(() => { saveActivities(activities); }, [activities]);
+  // Skip the first render's save: useEffect fires once on mount with the
+  // value we JUST loaded from localStorage (which the api-client already
+  // hydrated from /api/data). Without this guard, every page load triggers
+  // four immediate PUTs to mirror the freshly-fetched data right back.
+  const _firstSave = useRef({ rooms: true, config: true, bookings: true, activities: true });
+  useEffect(() => { if (_firstSave.current.rooms)      { _firstSave.current.rooms      = false; return; } saveRooms(rooms); },           [rooms]);
+  useEffect(() => { if (_firstSave.current.config)     { _firstSave.current.config     = false; return; } saveConfig(config); },         [config]);
+  useEffect(() => { if (_firstSave.current.bookings)   { _firstSave.current.bookings   = false; return; } saveBookings(bookings); },     [bookings]);
+  useEffect(() => { if (_firstSave.current.activities) { _firstSave.current.activities = false; return; } saveActivities(activities); }, [activities]);
 
   // --- Live data polling -----------------------------------------------
   // Public bookings + maintenance tickets arrive without an admin reload,
