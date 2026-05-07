@@ -249,82 +249,11 @@ app.use(
 );
 
 // --- Auth middleware ------------------------------------------------------
-// Refreshes `req.session.user.role` from the DB on every authenticated
-// request so a downgraded admin doesn't keep using cached privileges until
-// their session expires (7 days). Single-row PK lookup; cheap.
-async function requireAuth(req, res, next) {
-  if (!req.session || !req.session.user) {
-    return res.status(401).json({ error: 'unauthorized', code: 'UNAUTHORIZED' });
-  }
-  try {
-    const { rows } = await pool.query(
-      'SELECT role FROM auth_users WHERE id=$1', [req.session.user.id]
-    );
-    if (!rows.length) {
-      // User was deleted — destroy the session
-      req.session.destroy(() => {});
-      return res.status(401).json({ error: 'account no longer exists', code: 'UNAUTHORIZED' });
-    }
-    req.session.user.role = rows[0].role;
-    next();
-  } catch (err) {
-    console.error('requireAuth refresh error:', err);
-    res.status(500).json({ error: 'internal error' });
-  }
-}
-
-// === RBAC (C7) =============================================================
-const ROLE_RANK = { owner: 4, manager: 3, staff: 2, readonly: 1 };
-function requireRole(...allowed) {
-  const minRank = Math.min(...allowed.map((r) => ROLE_RANK[r] || 99));
-  return function (req, res, next) {
-    if (!req.session || !req.session.user) {
-      return res.status(401).json({ error: 'unauthorized', code: 'UNAUTHORIZED' });
-    }
-    const role = req.session.user.role;
-    if (allowed.includes(role)) return next();
-    const rank = ROLE_RANK[role] || 0;
-    if (rank >= minRank) return next();
-    return res.status(403).json({
-      error: 'forbidden — insufficient role', code: 'FORBIDDEN',
-      required: allowed, actual: role,
-    });
-  };
-}
-
-// === Device-or-admin auth (B2) ============================================
-// Hardware (RFID readers, ESP32) authenticates with a Bearer token stored
-// hashed in `access_devices`. Falls back to admin session if no Authorization
-// header is present.
-const _crypto = require('crypto');
-async function requireDeviceOrAdmin(req, res, next) {
-  const auth = req.headers.authorization;
-  if (auth && auth.startsWith('Bearer ')) {
-    const token = auth.slice(7).trim();
-    if (!token || token.length > 200) {
-      return res.status(401).json({ error: 'invalid token', code: 'UNAUTHORIZED' });
-    }
-    const hash = _crypto.createHash('sha256').update(token).digest('hex');
-    try {
-      const { rows } = await pool.query(
-        `SELECT id, device_id FROM access_devices
-           WHERE api_token_hash=$1 AND enabled=TRUE LIMIT 1`,
-        [hash]
-      );
-      if (rows.length) {
-        req.device = rows[0];
-        pool.query('UPDATE access_devices SET last_seen=NOW() WHERE id=$1', [rows[0].id])
-          .catch(() => {});
-        return next();
-      }
-      return res.status(401).json({ error: 'invalid device token', code: 'UNAUTHORIZED' });
-    } catch (err) {
-      console.error('device auth error:', err.message);
-      return res.status(500).json({ error: 'internal error' });
-    }
-  }
-  return requireAuth(req, res, next);
-}
+// Canonical implementation lives in middleware/auth.js (also used by routes/*
+// modules). Wired here so every consumer shares the same constants and DB
+// lookups — previously this file had a copy-pasted duplicate that drifted.
+const { makeAuth } = require('./middleware/auth');
+const { requireAuth, requireRole, requireDeviceOrAdmin } = makeAuth(pool);
 
 // --- Audit log helper (Phase B1) ------------------------------------------
 // Fire-and-forget insert. Never throws back to caller — audit failures must

@@ -66,6 +66,12 @@ function recordSuccess() {
     CB.state = 'closed';
     CB.failures = [];
     console.log('[pg] circuit CLOSED');
+  } else if (CB.failures.length) {
+    // Closed-state success drains the rolling window so an old transient
+    // failure doesn't combine with a new one to trip the breaker on
+    // otherwise-healthy traffic.
+    const now = Date.now();
+    CB.failures = CB.failures.filter((t) => now - t < CB.WINDOW_MS / 2);
   }
 }
 let _probeTimer = null;
@@ -99,7 +105,12 @@ async function safeQuery(text, params) {
   if (CB.state === 'open') throw new CircuitOpenError();
   try {
     const r = await pool.query(text, params);
-    if (CB.state === 'half-open') recordSuccess();
+    // Successful query: drain the failure window. Without this, a slow drip
+    // of failures keeps `failures.length` near THRESHOLD even when most
+    // queries succeed — one bad query at the wrong moment then trips the
+    // breaker on otherwise-healthy traffic. recordSuccess() handles the
+    // closed-state cleanup too (no-op if there's nothing to clear).
+    recordSuccess();
     return r;
   } catch (err) {
     recordFailure();
