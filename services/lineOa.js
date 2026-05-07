@@ -288,7 +288,12 @@ async function update(pool, id, patch, updatedBy) {
     const sql = `UPDATE line_oas SET ${sets.join(', ')} WHERE id=$${i} AND deleted_at IS NULL RETURNING *`;
     const { rows } = await client.query(sql, params);
     await client.query('COMMIT');
-    invalidateCache(numId);
+    // When the caller flipped is_default, the previously-default OA's
+    // cached entry still has isDefault=TRUE for up to 60s. Wipe the entire
+    // cache (every OA + slug) so the next request reloads fresh state for
+    // any OA — not just the one we just touched.
+    if (patch.isDefault !== undefined) invalidateCache(null);
+    else invalidateCache(numId);
     if (!rows[0]) throw new Error('not found');
     return rowToPublic(rows[0], false);
   } catch (err) {
@@ -308,9 +313,14 @@ async function remove(pool, id, by) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    // Clear last_seen_at + last_error too so the admin UI doesn't keep
+    // showing "last seen 2h ago" on a row that's already deleted (was
+    // confusing operators who weren't sure if delete actually happened).
     await client.query(
-      `UPDATE line_oas SET deleted_at=NOW(), enabled=FALSE, updated_at=NOW()
-         WHERE id=$1 AND deleted_at IS NULL`,
+      `UPDATE line_oas
+          SET deleted_at=NOW(), enabled=FALSE, is_default=FALSE,
+              last_seen_at=NULL, last_error=NULL, updated_at=NOW()
+        WHERE id=$1 AND deleted_at IS NULL`,
       [numId]
     );
     // Revoke active bindings via this OA so we don't try to push to a dead token

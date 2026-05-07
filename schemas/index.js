@@ -154,7 +154,10 @@ schemas.publicBooking = z.object({
 schemas.createTicket = z.object({
   roomId: z.string().min(1).max(32),
   tenantName: z.string().max(120).optional(),
-  tenantPhone: z.string().max(32).optional(),
+  // Use the same phone validator as the rest of the system so a malformed
+  // phone (e.g. "abc123") can't be saved on a ticket and break later
+  // lookup / notification flows. Empty string is normalised to undefined.
+  tenantPhone: phoneStr.optional().or(z.literal('').transform(() => undefined)),
   category: z.enum(['electrical', 'plumbing', 'aircon', 'furniture', 'appliance', 'door_lock', 'wifi', 'other']),
   priority: z.enum(['critical', 'high', 'medium', 'low']).optional(),
   title: z.string().trim().min(1).max(200),

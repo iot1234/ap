@@ -1073,9 +1073,17 @@ app.get('/api/maintenance', requireAuth, async (req, res) => {
 // GET /api/maintenance/lookup?phone=... — public lookup of tenant's own tickets.
 // Requires both phone AND room_id to prevent enumeration.
 app.get('/api/maintenance/lookup', rateLimitLookup, lookupJitter, async (req, res) => {
-  const phone = String(req.query.phone || '').trim().slice(0, 32);
+  // Validate phone shape before hitting the DB so an attacker can't probe
+  // the ticket table with garbage values + the rate limiter only protects
+  // intentional traffic, not lookups with malformed input.
+  const rawPhone = String(req.query.phone || '').trim();
+  const phoneCheck = require('./schemas').phoneStr.safeParse(rawPhone);
+  if (!phoneCheck.success) {
+    return res.status(400).json({ error: 'invalid phone' });
+  }
+  const phone = phoneCheck.data;
   const roomId = String(req.query.roomId || '').trim().slice(0, 32);
-  if (!phone || !roomId) {
+  if (!roomId) {
     return res.status(400).json({ error: 'phone and roomId required' });
   }
   try {
@@ -1137,6 +1145,34 @@ app.put('/api/maintenance/:id', sameOrigin, csrfGuard, requireAuth, requireRole(
     );
     if (rows.length === 0) return res.status(404).json({ error: 'not found' });
     audit(req, 'maintenance.update', 'ticket', String(id), { fields: Object.keys(b) });
+
+    // Notify the tenant when the ticket transitions to `completed` so they
+    // get a prompt to rate the service. Fire-and-forget; routes through
+    // notifier (LINE → email) so multi-OA tenants get the right channel.
+    if (b.status === 'completed') {
+      try {
+        const t = rows[0];
+        // Look up the bound tenant (so we have line_user_id + line_oa_id).
+        const tq = await pool.query(
+          `SELECT id, full_name, phone, email, line_user_id, line_oa_id
+             FROM tenants
+             WHERE phone=$1 AND deleted_at IS NULL
+             ORDER BY updated_at DESC LIMIT 1`,
+          [t.tenant_phone || '']
+        );
+        if (tq.rows.length) {
+          const flags = await features.load(pool);
+          notifier.notifyTenant({ pool, features: flags }, tq.rows[0], {
+            subject: '🛠 แจ้งซ่อมเสร็จสิ้น',
+            text: `งาน ${t.ticket_no} เสร็จเรียบร้อย\n` +
+                  `เรื่อง: ${t.title}\n\n` +
+                  `กรุณาให้คะแนนการบริการในแอป`,
+          }).catch(() => {});
+        }
+      } catch (err) {
+        console.warn('[ticket] tenant notify on completed failed:', err.message);
+      }
+    }
     res.json({ ok: true, ticket: rows[0] });
   } catch (err) {
     console.error('ticket update error:', err);
@@ -1153,14 +1189,22 @@ app.post('/api/maintenance/:id/rate', sameOrigin, validateBody(schemas.rateTicke
   const phone = b.phone;
   const comment = b.comment || null;
   try {
+    // Add `AND rating IS NULL` so a tenant can't keep updating their score
+    // (e.g. start at 5★ then quietly downgrade to 1★ after a billing dispute).
+    // Tenant portal endpoint /api/tenant/maintenance/:id/rate already had
+    // this guard; the legacy public endpoint was missing it.
     const { rows } = await pool.query(
       `UPDATE maintenance_tickets
          SET rating = $1, rating_comment = $2, updated_at = NOW()
-         WHERE id = $3 AND tenant_phone = $4 AND status = 'completed'
+         WHERE id = $3 AND tenant_phone = $4
+           AND status = 'completed'
+           AND rating IS NULL
          RETURNING ticket_no, rating`,
       [rating, comment, id, phone]
     );
-    if (rows.length === 0) return res.status(404).json({ error: 'not found or not completed' });
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'not found, not completed, or already rated' });
+    }
     audit(req, 'ticket.rate', 'ticket', String(id), { rating, hasComment: !!comment }, `public:${phone}`)
       .catch(() => {});
     res.json({ ok: true, ticket: rows[0] });
@@ -1346,25 +1390,32 @@ app.get('/api/reports/bills.xlsx', requireAuth, async (_req, res) => {
 // GET /api/reports/maintenance — counts by status, average rating, cost
 // aggregates. Optional ?period=YYYY-MM filter. C5.
 app.get('/api/reports/maintenance', requireAuth, async (req, res) => {
+  // The regex below already constrains period to YYYY-MM (no SQL metacharacters
+  // can pass through), but we still parameterise to keep the codebase free of
+  // string-concatenated SQL — any future relaxation of the regex would silently
+  // open an injection vector if we kept interpolating.
   const period = String(req.query.period || '').match(/^\d{4}-\d{2}$/) ? req.query.period : null;
-  const periodFilter = period
-    ? `WHERE to_char(created_at, 'YYYY-MM') = '${period}'`
-    : '';
+  const where = period ? `WHERE to_char(created_at, 'YYYY-MM') = $1` : '';
+  const params = period ? [period] : [];
   try {
     const [byStatus, ratings, costs, byCategory] = await Promise.all([
-      pool.query(`SELECT status, COUNT(*) AS n FROM maintenance_tickets ${periodFilter} GROUP BY status`),
-      pool.query(`SELECT AVG(rating)::numeric(3,2) AS avg_rating, COUNT(rating) AS rated
-                    FROM maintenance_tickets ${periodFilter ? periodFilter + ' AND ' : 'WHERE '} rating IS NOT NULL`),
+      pool.query(`SELECT status, COUNT(*) AS n FROM maintenance_tickets ${where} GROUP BY status`, params),
+      pool.query(
+        `SELECT AVG(rating)::numeric(3,2) AS avg_rating, COUNT(rating) AS rated
+           FROM maintenance_tickets ${period ? where + ' AND ' : 'WHERE '} rating IS NOT NULL`,
+        params
+      ),
       pool.query(`SELECT
                     SUM(cost)::numeric(12,2) AS total_cost,
                     AVG(cost)::numeric(10,2) FILTER (WHERE cost > 0) AS avg_cost,
                     COUNT(*) FILTER (WHERE cost > 0) AS billed_count,
                     SUM(cost) FILTER (WHERE status='completed')::numeric(12,2) AS completed_cost
-                  FROM maintenance_tickets ${periodFilter}`),
-      pool.query(`SELECT category, COUNT(*) AS n,
-                         SUM(cost)::numeric(12,2) AS cost_total
-                  FROM maintenance_tickets ${periodFilter}
-                  GROUP BY category ORDER BY n DESC`),
+                  FROM maintenance_tickets ${where}`, params),
+      pool.query(
+        `SELECT category, COUNT(*) AS n, SUM(cost)::numeric(12,2) AS cost_total
+           FROM maintenance_tickets ${where} GROUP BY category ORDER BY n DESC`,
+        params
+      ),
     ]);
     const counts = {};
     byStatus.rows.forEach((r) => { counts[r.status] = Number(r.n); });

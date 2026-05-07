@@ -53,11 +53,17 @@ module.exports = function buildAdminLineBindingsRouter(ctx) {
       const id = Number(req.params.id);
       if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
       const ttlDays = Number(req.body?.ttlDays || 7);
+      // Optional targetOaId — when admin picks a specific OA in the UI,
+      // the tenant must send the code to THAT OA's webhook for tryBind to
+      // accept it. Without this passthrough the constraint silently
+      // dropped and any OA could accept any code.
+      const targetOaId = req.body?.targetOaId;
       try {
         const result = await lineBinding.issue(pool, {
-          tenantId: id, ttlDays, createdBy: req.session.user.username,
+          tenantId: id, ttlDays, targetOaId,
+          createdBy: req.session.user.username,
         });
-        audit(req, 'line_binding.issue', 'tenant', String(id), { ttlDays });
+        audit(req, 'line_binding.issue', 'tenant', String(id), { ttlDays, targetOaId: result.targetOaId || null });
         res.json({ ok: true, ...result });
       } catch (err) {
         console.error('admin line-binding issue error:', err.message);
