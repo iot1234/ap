@@ -15,18 +15,61 @@ const rateLimit = require('express-rate-limit');
 const { renderBillPdf } = require('./services/pdf');
 const { renderQrPng, renderQrDataUrl } = require('./services/promptpay');
 const lineNotify = require('./services/line');
+const features = require('./services/features');
+const cryptoSvc = require('./services/crypto');
+const storage = require('./services/storage');
+const billing = require('./services/billing');
+const notifier = require('./services/notifier');
+const meter = require('./services/meter');
+const sentry = require('./services/sentry');
+const scheduler = require('./services/scheduler');
+const { schemas } = require('./schemas');
+const { validateBody } = require('./middleware/validate');
 
 const PORT = process.env.PORT || 3000;
 const NODE_ENV = process.env.NODE_ENV || 'production';
 const DATABASE_URL = process.env.DATABASE_URL;
-const SESSION_SECRET = process.env.SESSION_SECRET || 'dev-only-change-me';
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin1234';
+// No fallback for SESSION_SECRET / ADMIN_PASSWORD — refusing to boot is
+// safer than running with a known-weak default that anyone reading the
+// repo can use to sign forged cookies.
+const SESSION_SECRET = process.env.SESSION_SECRET;
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 
-if (!DATABASE_URL) {
-  console.error('FATAL: DATABASE_URL is not set');
+// === Production env enforcement (A1) =====================================
+// Refuse to start when critical env is missing or weak. The previous
+// fallbacks (`dev-only-change-me`, `admin1234`) were both visible in source
+// and smoke-test scripts — anyone deploying without setting them got an
+// instantly-pwnable instance. We now hard-fail in production and warn in
+// dev so the operator sees the problem at boot time.
+const _fatalConfig = [];
+if (!DATABASE_URL) _fatalConfig.push('DATABASE_URL is not set');
+if (NODE_ENV === 'production') {
+  if (!SESSION_SECRET) _fatalConfig.push('SESSION_SECRET is required in production (≥ 32 random bytes)');
+  else if (SESSION_SECRET.length < 32) _fatalConfig.push('SESSION_SECRET must be ≥ 32 chars');
+  else if (SESSION_SECRET === 'dev-only-change-me') _fatalConfig.push('SESSION_SECRET is the example value — generate a fresh one');
+  if (!ADMIN_PASSWORD && !process.env.SKIP_ADMIN_BOOTSTRAP) {
+    // We allow SKIP_ADMIN_BOOTSTRAP=1 for ops who manage users via the API
+    // themselves. Otherwise the boot path expects a password to seed the
+    // first admin row.
+    _fatalConfig.push('ADMIN_PASSWORD is required in production (or set SKIP_ADMIN_BOOTSTRAP=1)');
+  } else if (ADMIN_PASSWORD && ADMIN_PASSWORD.length < 12) {
+    _fatalConfig.push('ADMIN_PASSWORD must be ≥ 12 chars');
+  } else if (ADMIN_PASSWORD === 'admin1234') {
+    _fatalConfig.push('ADMIN_PASSWORD is the example value — choose a fresh password');
+  }
+}
+if (_fatalConfig.length) {
+  console.error('FATAL: configuration errors:');
+  for (const m of _fatalConfig) console.error('  - ' + m);
   process.exit(1);
 }
+// In dev, warn loudly but allow boot.
+if (NODE_ENV !== 'production' && !SESSION_SECRET) {
+  console.warn('[boot] SESSION_SECRET is not set — using a random ephemeral secret (sessions reset on restart)');
+}
+const _runtimeSessionSecret = SESSION_SECRET
+  || require('crypto').randomBytes(48).toString('base64');
 
 // --- Process-level safety nets --------------------------------------------
 // Without these, an unhandled async rejection or uncaught exception silently
@@ -63,7 +106,15 @@ const pool = new Pool({
 pool.on('error', (err) => console.error('[pg] pool error:', sanitizeError(err)));
 
 // --- Schema migration -----------------------------------------------------
+// Delegates to db/migrate.js so the SQL is reusable from tests + scripts.
+// The inline definition below (kept for now) is the legacy path; new tables
+// are only added in db/migrate.js so this block doesn't drift.
+const dbMigrate = require('./db/migrate');
 async function migrate() {
+  await dbMigrate.migrate(pool);
+  return;
+
+  /* eslint-disable no-unreachable */
   await pool.query(`
     CREATE TABLE IF NOT EXISTS app_data (
       key         TEXT PRIMARY KEY,
@@ -125,6 +176,171 @@ async function migrate() {
     CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_logs(user_id);
     CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_logs(entity_type, entity_id);
+
+    -- === v2 schema (feature-flagged additions) ===========================
+    -- Tenants table — replaces room.tenant blob for new flows. Existing rooms
+    -- keep their inline tenant blob; the tenants table is opt-in via the
+    -- tenantPortal feature flag.
+    CREATE TABLE IF NOT EXISTS tenants (
+      id                    BIGSERIAL PRIMARY KEY,
+      full_name             TEXT NOT NULL,
+      phone                 TEXT NOT NULL,
+      citizen_id_encrypted  TEXT,
+      citizen_id_tail       TEXT,
+      email                 TEXT,
+      line_user_id          TEXT,
+      pin_hash              TEXT,
+      current_room_id       TEXT,
+      status                TEXT NOT NULL DEFAULT 'active',
+      blacklist_reason      TEXT,
+      notes                 TEXT,
+      locale                TEXT DEFAULT 'th',
+      created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      deleted_at            TIMESTAMPTZ
+    );
+    CREATE INDEX IF NOT EXISTS idx_tenants_phone ON tenants(phone) WHERE deleted_at IS NULL;
+    CREATE INDEX IF NOT EXISTS idx_tenants_room ON tenants(current_room_id) WHERE deleted_at IS NULL;
+
+    CREATE TABLE IF NOT EXISTS contracts (
+      id              BIGSERIAL PRIMARY KEY,
+      contract_no     TEXT UNIQUE NOT NULL,
+      tenant_id       BIGINT REFERENCES tenants(id),
+      room_id         TEXT NOT NULL,
+      start_date      DATE NOT NULL,
+      end_date        DATE,
+      monthly_rent    NUMERIC(10,2) NOT NULL,
+      deposit         NUMERIC(10,2) DEFAULT 0,
+      status          TEXT NOT NULL DEFAULT 'active',
+      signature_url   TEXT,
+      signed_at       TIMESTAMPTZ,
+      created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      deleted_at      TIMESTAMPTZ
+    );
+    CREATE INDEX IF NOT EXISTS idx_contracts_tenant ON contracts(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_contracts_room ON contracts(room_id);
+
+    CREATE TABLE IF NOT EXISTS bills (
+      id            BIGSERIAL PRIMARY KEY,
+      bill_no       TEXT UNIQUE NOT NULL,
+      tenant_id     BIGINT REFERENCES tenants(id),
+      room_id       TEXT NOT NULL,
+      period        TEXT NOT NULL,
+      rent          NUMERIC(10,2) NOT NULL DEFAULT 0,
+      water_units   NUMERIC(10,2) DEFAULT 0,
+      water_rate    NUMERIC(10,2) DEFAULT 0,
+      water_amount  NUMERIC(10,2) DEFAULT 0,
+      elec_units    NUMERIC(10,2) DEFAULT 0,
+      elec_rate     NUMERIC(10,2) DEFAULT 0,
+      elec_amount   NUMERIC(10,2) DEFAULT 0,
+      wifi          NUMERIC(10,2) DEFAULT 0,
+      other         JSONB DEFAULT '[]'::jsonb,
+      subtotal      NUMERIC(10,2) NOT NULL,
+      vat           NUMERIC(10,2) DEFAULT 0,
+      late_fee      NUMERIC(10,2) DEFAULT 0,
+      total         NUMERIC(10,2) NOT NULL,
+      due_date      DATE NOT NULL,
+      paid_at       TIMESTAMPTZ,
+      status        TEXT NOT NULL DEFAULT 'pending',
+      void_reason   TEXT,
+      created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      deleted_at    TIMESTAMPTZ
+    );
+    CREATE INDEX IF NOT EXISTS idx_bills_tenant ON bills(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_bills_room_period ON bills(room_id, period);
+    CREATE INDEX IF NOT EXISTS idx_bills_status ON bills(status);
+
+    CREATE TABLE IF NOT EXISTS payments (
+      id             BIGSERIAL PRIMARY KEY,
+      bill_id        BIGINT REFERENCES bills(id),
+      tenant_id      BIGINT REFERENCES tenants(id),
+      amount         NUMERIC(10,2) NOT NULL,
+      method         TEXT NOT NULL,
+      ref            TEXT,
+      slip_url       TEXT,
+      slip_hash      TEXT,
+      status         TEXT NOT NULL DEFAULT 'pending',
+      verified_by    TEXT,
+      verified_at    TIMESTAMPTZ,
+      rejected_reason TEXT,
+      created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_payments_bill ON payments(bill_id);
+    CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status);
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_payments_slip_hash ON payments(slip_hash) WHERE slip_hash IS NOT NULL;
+
+    CREATE TABLE IF NOT EXISTS meter_readings (
+      id          BIGSERIAL PRIMARY KEY,
+      room_id     TEXT NOT NULL,
+      meter_type  TEXT NOT NULL,
+      reading     NUMERIC(10,2) NOT NULL,
+      source      TEXT DEFAULT 'manual',
+      created_by  TEXT,
+      reading_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_meter_room_at ON meter_readings(room_id, meter_type, reading_at DESC);
+
+    CREATE TABLE IF NOT EXISTS access_logs (
+      id           BIGSERIAL PRIMARY KEY,
+      room_id      TEXT,
+      tenant_id    BIGINT,
+      device       TEXT NOT NULL,
+      method       TEXT NOT NULL,
+      card_id      TEXT,
+      result       TEXT NOT NULL,
+      reason       TEXT,
+      occurred_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_access_at ON access_logs(occurred_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_access_room ON access_logs(room_id);
+
+    CREATE TABLE IF NOT EXISTS access_cards (
+      id           BIGSERIAL PRIMARY KEY,
+      card_id      TEXT UNIQUE NOT NULL,
+      tenant_id    BIGINT REFERENCES tenants(id),
+      room_id      TEXT,
+      status       TEXT NOT NULL DEFAULT 'active',
+      issued_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      revoked_at   TIMESTAMPTZ,
+      revoke_reason TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS notifications_log (
+      id          BIGSERIAL PRIMARY KEY,
+      channel     TEXT NOT NULL,
+      recipient   TEXT NOT NULL,
+      subject     TEXT,
+      body        TEXT,
+      status      TEXT NOT NULL,
+      error       TEXT,
+      created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_notif_at ON notifications_log(created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS file_uploads (
+      id            BIGSERIAL PRIMARY KEY,
+      category      TEXT NOT NULL,
+      ref_id        TEXT,
+      filename      TEXT NOT NULL,
+      mime_type     TEXT,
+      size_bytes    BIGINT,
+      storage       TEXT NOT NULL DEFAULT 'local',
+      url           TEXT,
+      uploaded_by   TEXT,
+      uploaded_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_files_ref ON file_uploads(category, ref_id);
+
+    CREATE TABLE IF NOT EXISTS tenant_sessions (
+      sid     TEXT PRIMARY KEY,
+      tenant_id BIGINT NOT NULL REFERENCES tenants(id),
+      expire  TIMESTAMPTZ NOT NULL,
+      ip      TEXT,
+      ua      TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_tsess_expire ON tenant_sessions(expire);
+    CREATE INDEX IF NOT EXISTS idx_tsess_tenant ON tenant_sessions(tenant_id);
   `);
   console.log('[db] schema ready');
 
@@ -141,11 +357,13 @@ async function migrate() {
     );
     console.log(`[db] bootstrapped admin user: ${ADMIN_USERNAME}`);
   }
+  /* eslint-enable no-unreachable */
 }
 
 // --- App setup ------------------------------------------------------------
 const app = express();
 app.set('trust proxy', 1);
+app.set('pgPool', pool);  // exposed for feature middlewares (services/features.js)
 
 // Lightweight correlation ID — every request gets a short id echoed in the
 // X-Request-ID response header and prefixed onto any error logs we emit.
@@ -157,10 +375,25 @@ app.use((req, res, next) => {
   res.setHeader('X-Request-ID', id);
   next();
 });
-// 1MB is plenty for our largest JSON payload (config save). Lower limit
-// reduces memory pressure under attack — 100 concurrent 5MB POSTs vs 1MB
-// makes a 5x difference in worst-case memory.
-app.use(express.json({ limit: '1mb' }));
+// 3MB covers a single base64-encoded image (slip / room photo / signature).
+// Lower limit reduces memory pressure under attack — 100 concurrent 30MB
+// POSTs vs 3MB makes a 10x difference in worst-case memory. Per-feature
+// caps (e.g. slipUpload.maxBytes) further constrain individual fields.
+//
+// `verify` callback captures the raw body for /webhook/* routes that need
+// to compute HMAC over the exact bytes the upstream service sent.
+// Re-stringifying req.body would change whitespace + key order and break
+// signature verification.
+app.use(express.json({
+  limit: '3mb',
+  verify: (req, _res, buf) => {
+    if (req.path && req.path.startsWith('/webhook/')) {
+      req.rawBody = buf.toString('utf8');
+    }
+  },
+}));
+// cookie-parser must run before csrf-csrf so req.cookies is populated.
+app.use(require('cookie-parser')(_runtimeSessionSecret));
 
 // Graceful JSON parse errors instead of stack traces.
 app.use((err, _req, res, next) => {
@@ -168,7 +401,7 @@ app.use((err, _req, res, next) => {
     return res.status(400).json({ error: 'invalid json body' });
   }
   if (err && err.type === 'entity.too.large') {
-    return res.status(413).json({ error: 'request too large (max 1mb)' });
+    return res.status(413).json({ error: 'request too large (max 3mb)' });
   }
   next(err);
 });
@@ -180,7 +413,12 @@ app.use(helmet({
     useDefaults: true,
     directives: {
       defaultSrc: ["'self'"],
+      // unsafe-eval is required by Babel-standalone runtime (in-browser JSX
+      // transpile). Migrate to a build pipeline + script nonces to remove it.
       scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'", 'https://unpkg.com'],
+      // Block inline event handlers (onclick=…) — modern XSS payloads still
+      // try them since 'unsafe-inline' on script-src doesn't allow attrs.
+      scriptSrcAttr: ["'none'"],
       styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
       fontSrc: ["'self'", 'https://fonts.gstatic.com', 'data:'],
       imgSrc: ["'self'", 'data:', 'blob:'],
@@ -193,15 +431,21 @@ app.use(helmet({
     },
   },
   crossOriginEmbedderPolicy: false,
-  // Allow same-origin blob/data URLs to open in popups (PDF preview).
-  crossOriginOpenerPolicy: { policy: 'same-origin-allow-popups' },
+  // C14 — strict same-origin (was 'same-origin-allow-popups'). Tightens
+  // tabnabbing window: a popup we open can't navigate us back to a phish.
+  // PDF preview now opens via download/blob URL not window.open, so the
+  // looser policy is no longer needed.
+  crossOriginOpenerPolicy: { policy: 'same-origin' },
+  hidePoweredBy: true,
 }));
+app.disable('x-powered-by');
 
-// Rate-limit login attempts per IP — 10 per 15 minutes is plenty for humans
-// while frustrating brute-force scripts.
+// Rate-limit login attempts per IP — 5 per 15 minutes is plenty for humans
+// while frustrating brute-force scripts. Per-account lockout (middleware/
+// lockout.js) adds a second layer that survives IP rotation.
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 10,
+  max: 5,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'too many login attempts, try again later' },
@@ -217,7 +461,7 @@ app.use(
       createTableIfMissing: false,
       pruneSessionInterval: 60 * 60, // seconds
     }),
-    secret: SESSION_SECRET,
+    secret: _runtimeSessionSecret,
     resave: false,
     saveUninitialized: false,
     cookie: {
@@ -230,18 +474,99 @@ app.use(
 );
 
 // --- Auth middleware ------------------------------------------------------
-function requireAuth(req, res, next) {
-  if (req.session && req.session.user) return next();
-  return res.status(401).json({ error: 'unauthorized' });
+// Refreshes `req.session.user.role` from the DB on every authenticated
+// request so a downgraded admin doesn't keep using cached privileges until
+// their session expires (7 days). Single-row PK lookup; cheap.
+async function requireAuth(req, res, next) {
+  if (!req.session || !req.session.user) {
+    return res.status(401).json({ error: 'unauthorized', code: 'UNAUTHORIZED' });
+  }
+  try {
+    const { rows } = await pool.query(
+      'SELECT role FROM auth_users WHERE id=$1', [req.session.user.id]
+    );
+    if (!rows.length) {
+      // User was deleted — destroy the session
+      req.session.destroy(() => {});
+      return res.status(401).json({ error: 'account no longer exists', code: 'UNAUTHORIZED' });
+    }
+    req.session.user.role = rows[0].role;
+    next();
+  } catch (err) {
+    console.error('requireAuth refresh error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+}
+
+// === RBAC (C7) =============================================================
+const ROLE_RANK = { owner: 4, manager: 3, staff: 2, readonly: 1 };
+function requireRole(...allowed) {
+  const minRank = Math.min(...allowed.map((r) => ROLE_RANK[r] || 99));
+  return function (req, res, next) {
+    if (!req.session || !req.session.user) {
+      return res.status(401).json({ error: 'unauthorized', code: 'UNAUTHORIZED' });
+    }
+    const role = req.session.user.role;
+    if (allowed.includes(role)) return next();
+    const rank = ROLE_RANK[role] || 0;
+    if (rank >= minRank) return next();
+    return res.status(403).json({
+      error: 'forbidden — insufficient role', code: 'FORBIDDEN',
+      required: allowed, actual: role,
+    });
+  };
+}
+
+// === Device-or-admin auth (B2) ============================================
+// Hardware (RFID readers, ESP32) authenticates with a Bearer token stored
+// hashed in `access_devices`. Falls back to admin session if no Authorization
+// header is present.
+const _crypto = require('crypto');
+async function requireDeviceOrAdmin(req, res, next) {
+  const auth = req.headers.authorization;
+  if (auth && auth.startsWith('Bearer ')) {
+    const token = auth.slice(7).trim();
+    if (!token || token.length > 200) {
+      return res.status(401).json({ error: 'invalid token', code: 'UNAUTHORIZED' });
+    }
+    const hash = _crypto.createHash('sha256').update(token).digest('hex');
+    try {
+      const { rows } = await pool.query(
+        `SELECT id, device_id FROM access_devices
+           WHERE api_token_hash=$1 AND enabled=TRUE LIMIT 1`,
+        [hash]
+      );
+      if (rows.length) {
+        req.device = rows[0];
+        pool.query('UPDATE access_devices SET last_seen=NOW() WHERE id=$1', [rows[0].id])
+          .catch(() => {});
+        return next();
+      }
+      return res.status(401).json({ error: 'invalid device token', code: 'UNAUTHORIZED' });
+    } catch (err) {
+      console.error('device auth error:', err.message);
+      return res.status(500).json({ error: 'internal error' });
+    }
+  }
+  return requireAuth(req, res, next);
 }
 
 // --- Audit log helper (Phase B1) ------------------------------------------
 // Fire-and-forget insert. Never throws back to caller — audit failures must
-// not break the user's request.
-async function audit(req, action, entityType, entityId, detail) {
+// not break the user's request. `userIdOverride` is used by paths that
+// don't have a session yet (e.g. failed login: we want to record the
+// attempted username).
+function clientIp(req) {
+  if (req.ip) return req.ip;
+  const xff = req.headers['x-forwarded-for'];
+  if (typeof xff === 'string') return xff.split(',')[0].trim();
+  return null;
+}
+async function audit(req, action, entityType, entityId, detail, userIdOverride) {
   try {
-    const userId = req.session && req.session.user ? req.session.user.username : null;
-    const ip = req.ip || req.headers['x-forwarded-for'] || null;
+    const userId = userIdOverride !== undefined ? userIdOverride
+      : (req.session && req.session.user ? req.session.user.username : null);
+    const ip = clientIp(req);
     const ua = (req.headers['user-agent'] || '').slice(0, 400);
     await pool.query(
       `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, detail, ip, ua)
@@ -280,21 +605,96 @@ function sameOrigin(req, res, next) {
   next();
 }
 
+// === CSRF token endpoint (defense-in-depth on top of sameOrigin) =========
+// Frontend reads /api/csrf-token, then attaches X-CSRF-Token to every
+// state-changing request. The header value must match the cookie set here
+// — an off-origin attacker can't read the cookie, so they can't forge.
+const { makeCsrf } = require('./middleware/csrf');
+const csrf = makeCsrf({
+  secret: process.env.CSRF_SECRET || _runtimeSessionSecret,
+  secure: NODE_ENV === 'production',
+});
+app.get('/api/csrf-token', (req, res) => {
+  const token = csrf.generateCsrfToken(req, res);
+  res.json({ csrfToken: token });
+});
+// Wrap doubleCsrfProtection with our existing sameOrigin so the order is:
+// sameOrigin (cheap origin check) → CSRF token check (cookie+header).
+function csrfGuard(req, res, next) {
+  // Bearer-auth device requests skip CSRF (they have no cookie jar).
+  const auth = req.headers.authorization;
+  if (auth && auth.startsWith('Bearer ')) return next();
+  csrf.doubleCsrfProtection(req, res, (err) => {
+    if (err) return csrf.csrfErrorHandler(err, req, res, next);
+    next();
+  });
+}
+
+// === Lockout (per-account brute-force defense) ============================
+const { makeLockout, LockedOutError } = require('./middleware/lockout');
+const lockout = makeLockout(pool);
+// Bcrypt-shaped placeholder used so every login attempt does the same work
+// regardless of whether the user exists. A2 — gates timing-attack
+// enumeration of valid usernames.
+const DUMMY_HASH = '$2a$10$' + 'X'.repeat(53);
+
+// === Trivial-PIN reject (A6) =============================================
+// Block obvious sequences/repeats/dates so an attacker can't crack a
+// real-world PIN with the top-100 most common values.
+const TRIVIAL_PINS_4 = new Set([
+  '0000','1111','2222','3333','4444','5555','6666','7777','8888','9999',
+  '1234','4321','2580','1010','1212','1313','2024','2025','2026','2027',
+  '0123','0852','0000','1004','1122','1313','1342','1414','1515','1616',
+  '1717','1818','1919','2002','2007','2008','2010','2011','2020','2021',
+  '2022','2023','7777','8888','9876','9999',
+]);
+function isTrivialPin(s) {
+  const str = String(s || '');
+  if (!/^\d{4,8}$/.test(str)) return false;
+  if (str.length === 4 && TRIVIAL_PINS_4.has(str)) return true;
+  if (/^(\d)\1+$/.test(str)) return true;                 // all same
+  if (/^(0123|1234|2345|3456|4567|5678|6789|9876|8765|7654|6543|5432|4321)/.test(str)) return true;
+  return false;
+}
+
 // --- Auth endpoints -------------------------------------------------------
-app.post('/api/auth/login', sameOrigin, loginLimiter, async (req, res) => {
-  const { username, password } = req.body || {};
-  if (!username || !password) {
-    return res.status(400).json({ error: 'username and password required' });
-  }
+app.post('/api/auth/login', sameOrigin, loginLimiter, validateBody(schemas.login), async (req, res) => {
+  const { username, password } = req.body;
+  const principal = `admin:${username.toLowerCase()}`;
   try {
+    // Reject early if locked, but still consume some time so the response
+    // shape mirrors a normal failed login.
+    try {
+      await lockout.check(principal);
+    } catch (err) {
+      if (err.code === 'LOCKED_OUT') {
+        await audit(req, 'auth.login_locked', 'user', username, null, username);
+        const minutes = Math.ceil((err.retryAfterMs || 0) / 60_000);
+        return res.status(429).json({
+          error: `บัญชีถูกล็อกชั่วคราว — ลองใหม่ใน ${minutes} นาที`,
+          code: 'LOCKED_OUT',
+        });
+      }
+      throw err;
+    }
+
     const { rows } = await pool.query(
       'SELECT id, username, password_hash, role FROM auth_users WHERE username=$1',
       [username]
     );
-    if (rows.length === 0) return res.status(401).json({ error: 'invalid credentials' });
-    const user = rows[0];
-    const ok = await bcrypt.compare(password, user.password_hash);
-    if (!ok) return res.status(401).json({ error: 'invalid credentials' });
+    const user = rows[0] || null;
+    const hash = user ? user.password_hash : DUMMY_HASH;
+    // Always run bcrypt.compare so timing is roughly constant.
+    const ok = await bcrypt.compare(password, hash);
+    if (!user || !ok) {
+      // Fire and forget: lockout counter + audit failed attempt.
+      lockout.recordFailure(principal, 'admin').catch(() => {});
+      audit(req, 'auth.login_failed', 'user', username,
+        { reason: !user ? 'unknown_user' : 'wrong_password' }, username).catch(() => {});
+      return res.status(401).json({ error: 'invalid credentials' });
+    }
+    // Successful login → clear lockout counter for this principal.
+    lockout.reset(principal).catch(() => {});
     // Regenerate session ID after successful auth to defend against session
     // fixation (an attacker can't pre-set a sid that survives login).
     req.session.regenerate((regenErr) => {
@@ -329,35 +729,94 @@ app.get('/api/auth/me', (req, res) => {
 });
 
 // --- Data endpoints (JSONB key-value store) -------------------------------
-// Whitelist of allowed keys to prevent abuse
+// Whitelist of allowed keys to prevent abuse. Public reads only see masked
+// rooms (no tenant PII); the rest are admin-only.
+// baankarn_users_v1 was removed: admin user management now goes through
+// /api/admin/users (auth_users table), so this key would only mirror a
+// legacy localStorage stub from older builds.
 const ALLOWED_KEYS = new Set([
   'baankarn_rooms_v1',
   'baankarn_config_v1',
   'baankarn_bookings_v1',
   'baankarn_activities_v1',
-  'baankarn_users_v1',
 ]);
+// Keys that are safe to read while unauthenticated. Everything else returns
+// 401. `baankarn_rooms_v1` is allowed but the value is run through
+// `maskRoomsPublic` first.
+const PUBLIC_KEYS = new Set(['baankarn_rooms_v1', 'baankarn_config_v1']);
+
+// Strip every tenant-PII field from a rooms object. The home page only needs
+// status/floor/type/rent to render the building grid, so we drop name, phone,
+// email, citizen ID, occupation, photos, contract end, etc.
+function maskRoomsPublic(roomsObj) {
+  if (!roomsObj || typeof roomsObj !== 'object') return roomsObj;
+  const out = {};
+  for (const [id, r] of Object.entries(roomsObj)) {
+    if (!r || typeof r !== 'object') continue;
+    out[id] = {
+      id: r.id,
+      floor: r.floor,
+      no: r.no,
+      type: r.type,
+      view: r.view,
+      status: r.status,
+      rent: r.rent,
+      // Keep tenant truthy so existing UI conditions still work, but every
+      // PII field is replaced with a masked placeholder.
+      tenant: r.tenant ? { name: 'มีผู้เช่า', occupation: '', masked: true } : null,
+    };
+  }
+  return out;
+}
+
+// Fields in baankarn_config_v1 that are operator-internal — strip when public.
+function maskConfigPublic(cfg) {
+  if (!cfg || typeof cfg !== 'object') return cfg;
+  const c = { ...cfg };
+  if (c.payment) {
+    c.payment = {
+      promptpayDisplayName: c.payment.promptpayDisplayName,
+      promptpayTarget: c.payment.promptpayTarget,
+    };
+  }
+  delete c.users; delete c.notification; delete c.automation;
+  return c;
+}
 
 app.get('/api/data/:key', async (req, res) => {
   const key = req.params.key;
   if (!ALLOWED_KEYS.has(key)) return res.status(400).json({ error: 'invalid key' });
+  const isAuth = !!(req.session && req.session.user);
+  if (!isAuth && !PUBLIC_KEYS.has(key)) {
+    return res.status(401).json({ error: 'unauthorized' });
+  }
   try {
     const { rows } = await pool.query('SELECT value FROM app_data WHERE key=$1', [key]);
-    res.json({ key, value: rows.length ? rows[0].value : null });
+    let value = rows.length ? rows[0].value : null;
+    if (!isAuth && key === 'baankarn_rooms_v1')  value = maskRoomsPublic(value);
+    if (!isAuth && key === 'baankarn_config_v1') value = maskConfigPublic(value);
+    res.json({ key, value });
   } catch (err) {
     console.error('data GET error:', err);
     res.status(500).json({ error: 'internal error' });
   }
 });
 
-app.get('/api/data', async (_req, res) => {
+app.get('/api/data', async (req, res) => {
+  const isAuth = !!(req.session && req.session.user);
   try {
+    const keys = isAuth ? Array.from(ALLOWED_KEYS) : Array.from(PUBLIC_KEYS);
     const { rows } = await pool.query(
       'SELECT key, value FROM app_data WHERE key = ANY($1)',
-      [Array.from(ALLOWED_KEYS)]
+      [keys]
     );
     const out = {};
-    rows.forEach((r) => { out[r.key] = r.value; });
+    for (const r of rows) {
+      let v = r.value;
+      if (!isAuth && r.key === 'baankarn_rooms_v1')  v = maskRoomsPublic(v);
+      if (!isAuth && r.key === 'baankarn_config_v1') v = maskConfigPublic(v);
+      out[r.key] = v;
+    }
     res.json(out);
   } catch (err) {
     console.error('data GET-all error:', err);
@@ -385,12 +844,76 @@ app.put('/api/data/:key', sameOrigin, requireAuth, async (req, res) => {
       [key, value, req.session.user.username]
     );
     audit(req, 'data.put', 'app_data', key);
+    // Bridge: when admin saves the rooms blob, mirror tenant info into
+    // the tenants table so the tenant portal + bills + LINE binding all
+    // see the same identities. Best-effort: silent on failure so admin
+    // saves never error out.
+    if (key === 'baankarn_rooms_v1' && value && typeof value === 'object') {
+      mirrorRoomsToTenants(value, req.session.user.username).catch((err) => {
+        console.error('[bridge] rooms→tenants mirror failed:', err.message);
+      });
+    }
     res.json({ ok: true, key });
   } catch (err) {
     console.error('data PUT error:', err);
     res.status(500).json({ error: 'internal error' });
   }
 });
+
+// === JSONB rooms → tenants table bridge ===================================
+// Admin's existing rooms UI keeps writing to baankarn_rooms_v1 JSONB. The
+// tenants table needs to stay in sync so:
+//   - Tenant portal can recognise the user (login by phone)
+//   - Bills can be auto-linked to tenant_id
+//   - LINE binding can target a real tenant row
+//
+// Algorithm: for every room with a tenant.name, upsert by (phone, name).
+// Phone is the natural key — we never delete tenants here (admin removes
+// via tenants UI explicitly), only update current_room_id and contact info.
+async function mirrorRoomsToTenants(roomsObj, updatedBy) {
+  if (!roomsObj || typeof roomsObj !== 'object') return;
+  const seenPhones = new Set();
+  for (const [roomId, room] of Object.entries(roomsObj)) {
+    if (!room || typeof room !== 'object') continue;
+    const t = room.tenant;
+    if (!t || !t.name || t.masked) continue;
+    const phone = String(t.phone || '').replace(/[\s-]/g, '').slice(0, 32);
+    const fullName = String(t.name).slice(0, 200).trim();
+    if (!fullName) continue;
+    // If no phone, we can't safely upsert; skip silently to avoid duplicates
+    if (!phone) continue;
+    if (seenPhones.has(phone)) continue;   // dedup within this write
+    seenPhones.add(phone);
+    // Manual upsert by phone — avoids depending on a partial unique index.
+    // We never touch pin_hash or citizen_id_encrypted — those come from
+    // /api/tenants endpoints with explicit input.
+    try {
+      const existing = await pool.query(
+        'SELECT id FROM tenants WHERE phone=$1 AND deleted_at IS NULL LIMIT 1',
+        [phone]
+      );
+      if (existing.rows.length) {
+        await pool.query(
+          `UPDATE tenants
+              SET full_name=$1,
+                  email=COALESCE($2, email),
+                  current_room_id=$3,
+                  updated_at=NOW()
+            WHERE id=$4`,
+          [fullName, t.email || null, String(roomId).slice(0, 32), existing.rows[0].id]
+        );
+      } else {
+        await pool.query(
+          `INSERT INTO tenants (full_name, phone, email, current_room_id, status, locale)
+           VALUES ($1,$2,$3,$4,'active','th')`,
+          [fullName, phone, t.email || null, String(roomId).slice(0, 32)]
+        );
+      }
+    } catch (err) {
+      console.error('[bridge] upsert failed for phone', phone.slice(-4), ':', err.message);
+    }
+  }
+}
 
 app.delete('/api/data/:key', sameOrigin, requireAuth, async (req, res) => {
   const key = req.params.key;
@@ -405,24 +928,51 @@ app.delete('/api/data/:key', sameOrigin, requireAuth, async (req, res) => {
   }
 });
 
-// Public endpoint for tenant booking submissions (rate-limited via IP basic gate)
-const bookingHits = new Map();
-function rateLimitBooking(req, res, next) {
-  const ip = req.ip || req.headers['x-forwarded-for'] || 'unknown';
-  const now = Date.now();
-  const arr = (bookingHits.get(ip) || []).filter((t) => now - t < 60_000);
-  if (arr.length >= 5) return res.status(429).json({ error: 'too many requests' });
-  arr.push(now);
-  if (arr.length === 0) bookingHits.delete(ip);
-  else bookingHits.set(ip, arr);
-  next();
+// Generic IP-based rate limiter factory. Replaces three near-identical inline
+// limiters; centralizes the cleanup logic that was buggy before (the `if
+// (arr.length === 0) delete` branch was unreachable since arr.length is at
+// least 1 right after the `arr.push(now)` line, so the Map grew unbounded).
+//
+// We do periodic sweep cleanup roughly once every ~5 minutes (probabilistic)
+// so a flood of unique IPs can't pile up between sweeps.
+function makeIpLimiter({ windowMs, max, message = 'too many requests' }) {
+  const hits = new Map();
+  let lastSweep = Date.now();
+  return function limiter(req, res, next) {
+    const ip = req.ip || req.headers['x-forwarded-for'] || 'unknown';
+    const now = Date.now();
+    const arr = (hits.get(ip) || []).filter((t) => now - t < windowMs);
+    if (arr.length >= max) return res.status(429).json({ error: message });
+    arr.push(now);
+    hits.set(ip, arr);
+    if (now - lastSweep > 5 * 60_000) {
+      lastSweep = now;
+      for (const [k, v] of hits) {
+        if (!v.length || now - v[v.length - 1] > windowMs) hits.delete(k);
+      }
+    }
+    next();
+  };
 }
 
-app.post('/api/bookings/public', sameOrigin, rateLimitBooking, async (req, res) => {
-  const b = req.body || {};
-  if (!b.roomId || !b.tenantName) {
-    return res.status(400).json({ error: 'roomId and tenantName required' });
-  }
+// All IP-based rate limiters. Declared together up here so any later route
+// registration can reference them without TDZ errors (we hit one of those
+// when /api/promptpay/qr was wired before the limiter const had been
+// initialised — moving every limiter to a single block makes the order
+// obvious and prevents recurrence).
+const rateLimitBooking = makeIpLimiter({ windowMs: 60_000, max: 3 });
+const rateLimitTicket  = makeIpLimiter({ windowMs: 60_000, max: 3 });
+const rateLimitQr      = makeIpLimiter({ windowMs: 60_000, max: 30 });
+// A7 — lookup endpoint can leak phone↔room mapping by enumeration. Tight
+// per-IP cap + small random jitter on the response to neutralise timing.
+const rateLimitLookup  = makeIpLimiter({ windowMs: 60_000, max: 10 });
+function lookupJitter(_req, _res, next) {
+  const ms = 200 + Math.floor(Math.random() * 300);
+  setTimeout(next, ms);
+}
+
+app.post('/api/bookings/public', sameOrigin, rateLimitBooking, validateBody(schemas.publicBooking), async (req, res) => {
+  const b = req.body;
   // Length / type sanity. Strings only, capped to reasonable lengths to keep
   // the JSONB blob bounded and prevent payload-bomb attacks.
   const str = (v, max) => (typeof v === 'string' ? v.slice(0, max) : '');
@@ -452,8 +1002,10 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBooking, async (req, res) 
     const wantType = VALID_TYPES.includes(cleaned.roomType) ? cleaned.roomType : 'standard';
     const wantFloor = Number(cleaned.floor) || null;
     const newBooking = {
-      // admin schema
-      id: 'BK-PUB-' + Date.now(),
+      // admin schema. Use a random suffix instead of Date.now() so two
+      // simultaneous requests can't end up with the same id (which the admin
+      // UI would then dedupe via Set, dropping the second booking).
+      id: 'BK-PUB-' + require('crypto').randomBytes(6).toString('hex'),
       name: cleaned.tenantName,
       phone: cleaned.phone,
       wantType,
@@ -470,6 +1022,9 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBooking, async (req, res) 
       roomId: cleaned.roomId,
     };
     list.unshift(newBooking);
+    audit(req, 'booking.public_create', 'booking', newBooking.id,
+      { phone: cleaned.phone, roomId: cleaned.roomId, wantType, wantFloor },
+      `public:${cleaned.phone || 'anon'}`).catch(() => {});
     // Cap at 500 newest entries to prevent unbounded JSONB growth.
     // Older bookings are dropped silently — admins should archive or act on
     // them within this window. With a 5/min/IP rate limit, 500 entries is
@@ -482,14 +1037,15 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBooking, async (req, res) 
       ['baankarn_bookings_v1', JSON.stringify(capped)]
     );
 
-    // Fire-and-forget LINE notification to owner. Don't await/block: response
-    // ships immediately, the push runs on the event loop. Failures are caught
-    // and logged inside the service.
-    lineNotify
-      .notifyOwner(
-        `📋 ผู้เช่าใหม่ขอจอง\nชื่อ: ${cleaned.tenantName}\nโทร: ${cleaned.phone || '-'}\nห้อง: ${cleaned.roomId}\nวันเข้าพัก: ${cleaned.checkInDate || '-'}\nรหัสการจอง: ${newBooking.id}`
-      )
-      .catch(() => {});
+    // Multi-channel owner notify (LINE → email fallback) + log to
+    // notifications_log so admin sees it even when LINE is offline. B6.
+    try {
+      const flags = await features.load(pool);
+      notifier.notifyOwner({ pool, features: flags }, {
+        subject: '📋 ผู้เช่าใหม่ขอจอง',
+        text: `ชื่อ: ${cleaned.tenantName}\nโทร: ${cleaned.phone || '-'}\nห้อง: ${cleaned.roomId || '-'}\nวันเข้าพัก: ${cleaned.checkInDate || '-'}\nรหัสการจอง: ${newBooking.id}`,
+      }).catch(() => {});
+    } catch { /* ignore */ }
 
     res.json({ ok: true, booking: newBooking });
   } catch (err) {
@@ -509,7 +1065,7 @@ app.post('/api/notify/bill', sameOrigin, requireAuth, async (req, res) => {
   // Recipient is server-side only — we don't accept recipientUserId from the
   // client to prevent an authenticated admin from spamming arbitrary LINE
   // users (compromised admin scenario or insider abuse).
-  const recipient = process.env.LINE_OWNER_USER_ID;
+  const recipient = require('./services/secrets').get('LINE_OWNER_USER_ID');
   if (!recipient) return res.status(400).json({ error: 'no LINE recipient configured' });
   if (!lineNotify.isConfigured()) {
     return res.status(503).json({ error: 'LINE not configured on server' });
@@ -538,11 +1094,25 @@ function acquirePdfSlot() {
     _pdfActive++;
     return Promise.resolve();
   }
-  return new Promise((resolve) => _pdfWaiters.push(resolve));
+  // C9 — bound the queue wait at 30s so a long-running render can't make
+  // every queued caller hang past the HTTP read timeout.
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      const i = _pdfWaiters.indexOf(slot);
+      if (i >= 0) _pdfWaiters.splice(i, 1);
+      reject(new Error('PDF queue timeout'));
+    }, 30_000);
+    timer.unref();
+    const slot = () => { clearTimeout(timer); _pdfActive++; resolve(); };
+    _pdfWaiters.push(slot);
+  });
 }
 function releasePdfSlot() {
-  if (_pdfWaiters.length > 0) _pdfWaiters.shift()(); // hand the slot to next waiter
-  else _pdfActive = Math.max(0, _pdfActive - 1);
+  _pdfActive = Math.max(0, _pdfActive - 1);
+  if (_pdfWaiters.length > 0) {
+    const next = _pdfWaiters.shift();
+    next();   // increments _pdfActive itself
+  }
 }
 // POST /api/bills/render — admin-authenticated. Body is a bill object built
 // client-side from rooms+config; server renders Thai-language PDF with QR
@@ -553,11 +1123,14 @@ app.post('/api/bills/render', sameOrigin, requireAuth, async (req, res) => {
   if (!bill || !bill.tenantName || !bill.total) {
     return res.status(400).json({ error: 'bill.tenantName and bill.total required' });
   }
-  if (!bill.promptpayTarget && process.env.PROMPTPAY_TARGET) {
-    bill.promptpayTarget = process.env.PROMPTPAY_TARGET;
+  if (!bill.promptpayTarget) {
+    const pp = require('./services/secrets').get('PROMPTPAY_TARGET');
+    if (pp) bill.promptpayTarget = pp;
   }
-  await acquirePdfSlot();
+  let acquired = false;
   try {
+    await acquirePdfSlot();
+    acquired = true;
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader(
       'Content-Disposition',
@@ -566,16 +1139,19 @@ app.post('/api/bills/render', sameOrigin, requireAuth, async (req, res) => {
     await renderBillPdf(bill, res);
   } catch (err) {
     console.error(`[${req.id}] bill render error:`, sanitizeError(err));
-    if (!res.headersSent) res.status(500).json({ error: 'pdf render failed' });
+    if (!res.headersSent) {
+      const code = String(err.message || '').includes('PDF queue timeout') ? 503 : 500;
+      res.status(code).json({ error: 'pdf render failed', code: code === 503 ? 'BUSY' : 'PDF_ERROR' });
+    }
   } finally {
-    releasePdfSlot();
+    if (acquired) releasePdfSlot();
   }
 });
 
 // GET /api/promptpay/qr?target=<phone-or-citizen-id>&amount=<thb>&format=png|json
 // Public for now (rate-limited indirectly via session middleware overhead);
 // in practice the only callers are admin/tenant pages already inside the app.
-app.get('/api/promptpay/qr', async (req, res) => {
+app.get('/api/promptpay/qr', rateLimitQr, async (req, res) => {
   const target = String(req.query.target || '').trim();
   const amountRaw = req.query.amount;
   const amount = amountRaw != null && amountRaw !== '' ? Number(amountRaw) : undefined;
@@ -586,9 +1162,14 @@ app.get('/api/promptpay/qr', async (req, res) => {
   if (amount != null && (!Number.isFinite(amount) || amount < 0 || amount > 999999)) {
     return res.status(400).json({ error: 'invalid amount' });
   }
-  // Validate target shape: 9-15 digits (covers Thai phone 10 + citizen ID 13)
-  if (!/^[\d-]{9,16}$/.test(target)) {
-    return res.status(400).json({ error: 'invalid target shape' });
+  // C13 — strict shape: Thai phone (10 digits, leading 0) OR citizen ID (13).
+  // Previously a regex allowed `1234567890` (no leading 0) through, which
+  // generates a payload that no Thai bank app can parse.
+  const cleaned = target.replace(/-/g, '');
+  const isPhone = /^0\d{9}$/.test(cleaned);
+  const isCitizen = /^\d{13}$/.test(cleaned);
+  if (!isPhone && !isCitizen) {
+    return res.status(400).json({ error: 'PromptPay target must be a 10-digit Thai phone (0XXXXXXXXX) or 13-digit citizen ID' });
   }
   try {
     if (format === 'json') {
@@ -618,18 +1199,6 @@ const VALID_TICKET_CATEGORY = new Set([
   'electrical','plumbing','aircon','furniture','appliance','door_lock','wifi','other',
 ]);
 
-const ticketHits = new Map();
-function rateLimitTicket(req, res, next) {
-  const ip = req.ip || req.headers['x-forwarded-for'] || 'unknown';
-  const now = Date.now();
-  const arr = (ticketHits.get(ip) || []).filter((t) => now - t < 60_000);
-  if (arr.length >= 5) return res.status(429).json({ error: 'too many requests' });
-  arr.push(now);
-  if (arr.length === 0) ticketHits.delete(ip);
-  else ticketHits.set(ip, arr);
-  next();
-}
-
 function makeTicketNo() {
   const d = new Date();
   const y = d.getFullYear().toString().slice(-2);
@@ -639,27 +1208,17 @@ function makeTicketNo() {
 }
 
 // POST /api/maintenance — public (tenant submits). Rate-limited.
-app.post('/api/maintenance', sameOrigin, rateLimitTicket, async (req, res) => {
-  const b = req.body || {};
-  const str = (v, max) => (typeof v === 'string' ? v.slice(0, max) : '');
+app.post('/api/maintenance', sameOrigin, rateLimitTicket, validateBody(schemas.createTicket), async (req, res) => {
+  const b = req.body;
   const cleaned = {
-    room_id:      str(b.roomId, 32),
-    tenant_name:  str(b.tenantName, 120),
-    tenant_phone: str(b.tenantPhone, 32),
-    category:     str(b.category, 32),
-    priority:     str(b.priority, 16) || 'medium',
-    title:        str(b.title, 200),
-    description:  str(b.description, 2000),
+    room_id:      b.roomId,
+    tenant_name:  b.tenantName || '',
+    tenant_phone: b.tenantPhone || '',
+    category:     b.category,
+    priority:     b.priority || 'medium',
+    title:        b.title,
+    description:  b.description || '',
   };
-  if (!cleaned.room_id || !cleaned.title || !cleaned.category) {
-    return res.status(400).json({ error: 'roomId, title and category required' });
-  }
-  if (!VALID_TICKET_CATEGORY.has(cleaned.category)) {
-    return res.status(400).json({ error: 'invalid category' });
-  }
-  if (!VALID_TICKET_PRIORITY.has(cleaned.priority)) {
-    return res.status(400).json({ error: 'invalid priority' });
-  }
   const ticketNo = makeTicketNo();
   try {
     const { rows } = await pool.query(
@@ -671,16 +1230,22 @@ app.post('/api/maintenance', sameOrigin, rateLimitTicket, async (req, res) => {
        cleaned.category, cleaned.priority, cleaned.title, cleaned.description]
     );
     const ticket = rows[0];
-    // Fire-and-forget LINE notify to owner
-    lineNotify
-      .notifyOwner(
-        `🛠 แจ้งซ่อมใหม่ (${ticket.priority})\n` +
-        `เลขที่: ${ticket.ticket_no}\n` +
-        `ห้อง: ${ticket.room_id} (${ticket.tenant_name || '-'})\n` +
-        `หมวด: ${ticket.category}\n` +
-        `เรื่อง: ${ticket.title}`
-      )
-      .catch(() => {});
+    // A4 — audit even public ticket creation; user_id captured as the
+    // submitter's phone so admin can correlate abuse.
+    audit(req, 'ticket.create', 'ticket', String(ticket.id),
+      { priority: ticket.priority, category: ticket.category, room: ticket.room_id },
+      `public:${cleaned.tenant_phone || 'anon'}`).catch(() => {});
+    // Fire-and-forget multi-channel notify (LINE→email fallback)
+    try {
+      const flags = await features.load(pool);
+      notifier.notifyOwner({ pool, features: flags }, {
+        subject: `🛠 แจ้งซ่อมใหม่ (${ticket.priority})`,
+        text: `เลขที่: ${ticket.ticket_no}\n` +
+              `ห้อง: ${ticket.room_id} (${ticket.tenant_name || '-'})\n` +
+              `หมวด: ${ticket.category}\n` +
+              `เรื่อง: ${ticket.title}`,
+      }).catch(() => {});
+    } catch { /* ignore */ }
     res.json({ ok: true, ticket });
   } catch (err) {
     console.error('ticket create error:', err);
@@ -711,7 +1276,7 @@ app.get('/api/maintenance', requireAuth, async (req, res) => {
 
 // GET /api/maintenance/lookup?phone=... — public lookup of tenant's own tickets.
 // Requires both phone AND room_id to prevent enumeration.
-app.get('/api/maintenance/lookup', async (req, res) => {
+app.get('/api/maintenance/lookup', rateLimitLookup, lookupJitter, async (req, res) => {
   const phone = String(req.query.phone || '').trim().slice(0, 32);
   const roomId = String(req.query.roomId || '').trim().slice(0, 32);
   if (!phone || !roomId) {
@@ -784,17 +1349,13 @@ app.put('/api/maintenance/:id', sameOrigin, requireAuth, async (req, res) => {
 });
 
 // POST /api/maintenance/:id/rate — public, requires matching phone.
-app.post('/api/maintenance/:id/rate', sameOrigin, async (req, res) => {
+app.post('/api/maintenance/:id/rate', sameOrigin, validateBody(schemas.rateTicket), async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
-  const b = req.body || {};
-  const rating = Number(b.rating);
-  const phone = String(b.phone || '').trim();
-  if (!phone) return res.status(400).json({ error: 'phone required' });
-  if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
-    return res.status(400).json({ error: 'rating must be 1-5' });
-  }
-  const comment = typeof b.comment === 'string' ? b.comment.slice(0, 500) : null;
+  const b = req.body;
+  const rating = b.rating;
+  const phone = b.phone;
+  const comment = b.comment || null;
   try {
     const { rows } = await pool.query(
       `UPDATE maintenance_tickets
@@ -804,6 +1365,8 @@ app.post('/api/maintenance/:id/rate', sameOrigin, async (req, res) => {
       [rating, comment, id, phone]
     );
     if (rows.length === 0) return res.status(404).json({ error: 'not found or not completed' });
+    audit(req, 'ticket.rate', 'ticket', String(id), { rating, hasComment: !!comment }, `public:${phone}`)
+      .catch(() => {});
     res.json({ ok: true, ticket: rows[0] });
   } catch (err) {
     console.error('ticket rate error:', err);
@@ -982,24 +1545,1520 @@ app.get('/api/reports/bills.xlsx', requireAuth, async (_req, res) => {
   }
 });
 
-// GET /api/reports/maintenance — counts by status, average rating.
-app.get('/api/reports/maintenance', requireAuth, async (_req, res) => {
+// GET /api/reports/maintenance — counts by status, average rating, cost
+// aggregates. Optional ?period=YYYY-MM filter. C5.
+app.get('/api/reports/maintenance', requireAuth, async (req, res) => {
+  const period = String(req.query.period || '').match(/^\d{4}-\d{2}$/) ? req.query.period : null;
+  const periodFilter = period
+    ? `WHERE to_char(created_at, 'YYYY-MM') = '${period}'`
+    : '';
   try {
-    const [byStatus, ratings] = await Promise.all([
-      pool.query(`SELECT status, COUNT(*) AS n FROM maintenance_tickets GROUP BY status`),
+    const [byStatus, ratings, costs, byCategory] = await Promise.all([
+      pool.query(`SELECT status, COUNT(*) AS n FROM maintenance_tickets ${periodFilter} GROUP BY status`),
       pool.query(`SELECT AVG(rating)::numeric(3,2) AS avg_rating, COUNT(rating) AS rated
-                    FROM maintenance_tickets WHERE rating IS NOT NULL`),
+                    FROM maintenance_tickets ${periodFilter ? periodFilter + ' AND ' : 'WHERE '} rating IS NOT NULL`),
+      pool.query(`SELECT
+                    SUM(cost)::numeric(12,2) AS total_cost,
+                    AVG(cost)::numeric(10,2) FILTER (WHERE cost > 0) AS avg_cost,
+                    COUNT(*) FILTER (WHERE cost > 0) AS billed_count,
+                    SUM(cost) FILTER (WHERE status='completed')::numeric(12,2) AS completed_cost
+                  FROM maintenance_tickets ${periodFilter}`),
+      pool.query(`SELECT category, COUNT(*) AS n,
+                         SUM(cost)::numeric(12,2) AS cost_total
+                  FROM maintenance_tickets ${periodFilter}
+                  GROUP BY category ORDER BY n DESC`),
     ]);
     const counts = {};
     byStatus.rows.forEach((r) => { counts[r.status] = Number(r.n); });
+    const c = costs.rows[0] || {};
     res.json({
       ok: true,
+      period: period || 'all',
       counts,
       avgRating: ratings.rows[0]?.avg_rating != null ? Number(ratings.rows[0].avg_rating) : null,
       ratedCount: Number(ratings.rows[0]?.rated || 0),
+      cost: {
+        total: Number(c.total_cost || 0),
+        avg: Number(c.avg_cost || 0),
+        billedCount: Number(c.billed_count || 0),
+        completedTotal: Number(c.completed_cost || 0),
+      },
+      byCategory: byCategory.rows.map((r) => ({
+        category: r.category, count: Number(r.n), cost: Number(r.cost_total || 0),
+      })),
     });
   } catch (err) {
     console.error('reports maintenance error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// === v2: Feature management API ===========================================
+// Public read of enabled flags only — clients use this to hide UI for
+// disabled features. The full config (with secrets-adjacent fields like
+// SMTP host) is admin-only via /api/admin/features.
+app.get('/api/features', async (_req, res) => {
+  try {
+    const f = await features.load(pool);
+    const out = {};
+    for (const [k, v] of Object.entries(f)) {
+      out[k] = { enabled: !!v.enabled };
+      // Expose a few non-secret display fields so the client can render
+      // (e.g. i18n.defaultLocale, lateFee.ratePctPerMonth)
+      const safe = ['defaultLocale', 'available', 'ratePctPerMonth', 'ratePct',
+        'gracePeriodDays', 'requirePin', 'mode', 'autoIncludeOnBillGen',
+        'overdueDaysThreshold', 'requirePaymentForCard'];
+      for (const s of safe) if (v[s] !== undefined) out[k][s] = v[s];
+    }
+    res.json({ ok: true, features: out });
+  } catch (err) {
+    console.error('features public error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+app.get('/api/admin/features', requireAuth, async (_req, res) => {
+  try {
+    const f = await features.load(pool);
+    // Never echo a secret. SMTP_PASS is env-only and not in DB anyway.
+    res.json({ ok: true, features: f, defaults: features.DEFAULTS });
+  } catch (err) {
+    console.error('features admin GET error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+app.put('/api/admin/features', sameOrigin, requireAuth, async (req, res) => {
+  const partial = req.body && req.body.features ? req.body.features : req.body;
+  if (!partial || typeof partial !== 'object') {
+    return res.status(400).json({ error: 'features object required' });
+  }
+  try {
+    const next = await features.save(pool, partial, req.session.user.username);
+    audit(req, 'features.update', 'config', 'features', { keys: Object.keys(partial) });
+    res.json({ ok: true, features: next });
+  } catch (err) {
+    console.error('features admin PUT error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// === v2: Tenants (table-backed) ===========================================
+// Coexists with rooms[].tenant blob. Use this when the tenantPortal flag is
+// enabled — gives us a stable id for contracts/bills/payments and a real
+// PIN-based login.
+
+const VALID_TENANT_STATUS = new Set(['active', 'moved_out', 'blacklist']);
+
+function maskTenantOut(t) {
+  if (!t) return t;
+  const out = { ...t };
+  if (out.citizen_id_encrypted) {
+    delete out.citizen_id_encrypted;
+    out.citizen_id_masked = out.citizen_id_tail ? `***-${out.citizen_id_tail}` : '***';
+  }
+  delete out.pin_hash;
+  return out;
+}
+
+app.get('/api/tenants', requireAuth, async (req, res) => {
+  try {
+    const q = String(req.query.q || '').trim().toLowerCase();
+    const status = req.query.status;
+    const params = [];
+    const where = ['deleted_at IS NULL'];
+    if (status && VALID_TENANT_STATUS.has(String(status))) {
+      params.push(status); where.push(`status = $${params.length}`);
+    }
+    if (q) {
+      params.push(`%${q}%`);
+      where.push(`(LOWER(full_name) LIKE $${params.length} OR phone LIKE $${params.length} OR LOWER(COALESCE(email,'')) LIKE $${params.length})`);
+    }
+    const { rows } = await pool.query(
+      `SELECT id, full_name, phone, email, line_user_id, current_room_id, status,
+              citizen_id_tail, locale, created_at
+         FROM tenants
+         WHERE ${where.join(' AND ')}
+         ORDER BY created_at DESC LIMIT 500`,
+      params
+    );
+    res.json({ ok: true, tenants: rows });
+  } catch (err) {
+    console.error('tenants list error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+app.get('/api/tenants/:id', requireAuth, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, full_name, phone, email, line_user_id, current_room_id, status,
+              citizen_id_encrypted, citizen_id_tail, notes, locale, blacklist_reason,
+              created_at, updated_at
+         FROM tenants WHERE id=$1 AND deleted_at IS NULL`,
+      [id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'not found' });
+    const flags = await features.load(pool);
+    const out = maskTenantOut(rows[0]);
+    // Decrypt for admin if encryption is on AND the request asks
+    if (flags.citizenIdEncryption && flags.citizenIdEncryption.enabled
+        && req.query.includeCitizen === '1' && rows[0].citizen_id_encrypted) {
+      try { out.citizen_id = cryptoSvc.decryptString(rows[0].citizen_id_encrypted); }
+      catch (_e) { out.citizen_id = null; }
+    }
+    res.json({ ok: true, tenant: out });
+  } catch (err) {
+    console.error('tenant get error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+app.post('/api/tenants', sameOrigin, requireAuth, async (req, res) => {
+  const b = req.body || {};
+  const str = (v, max) => (typeof v === 'string' ? v.slice(0, max) : '');
+  const fullName = str(b.fullName, 200).trim();
+  const phone = str(b.phone, 32).trim();
+  if (!fullName || !phone) {
+    return res.status(400).json({ error: 'fullName and phone required' });
+  }
+  const flags = await features.load(pool);
+  const citizenId = str(b.citizenId, 32).replace(/[^0-9]/g, '');
+  let citizenEnc = null, citizenTail = null;
+  if (citizenId) {
+    citizenTail = citizenId.slice(-4);
+    if (flags.citizenIdEncryption && flags.citizenIdEncryption.enabled) {
+      try { citizenEnc = cryptoSvc.encryptString(citizenId); }
+      catch (e) {
+        return res.status(500).json({ error: 'crypto unavailable: ' + e.message });
+      }
+    } else {
+      citizenEnc = citizenId; // plaintext — not recommended
+    }
+  }
+  let pinHash = null;
+  if (b.pin) {
+    if (!/^\d{4,8}$/.test(String(b.pin))) {
+      return res.status(400).json({ error: 'PIN ต้องเป็นตัวเลข 4-8 หลัก' });
+    }
+    if (isTrivialPin(b.pin)) {
+      return res.status(400).json({ error: 'PIN ไม่ปลอดภัย — เลี่ยงรูปแบบที่คาดเดาง่าย เช่น 1234, 0000, 1111' });
+    }
+    pinHash = await bcrypt.hash(String(b.pin), 10);
+  }
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO tenants
+        (full_name, phone, citizen_id_encrypted, citizen_id_tail, email, line_user_id,
+         pin_hash, current_room_id, status, notes, locale)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+       RETURNING id, full_name, phone, email, current_room_id, status, created_at`,
+      [
+        fullName, phone, citizenEnc, citizenTail,
+        str(b.email, 200) || null,
+        str(b.lineUserId, 64) || null,
+        pinHash,
+        str(b.roomId, 32) || null,
+        VALID_TENANT_STATUS.has(b.status) ? b.status : 'active',
+        str(b.notes, 1000) || null,
+        ['th', 'en'].includes(b.locale) ? b.locale : 'th',
+      ]
+    );
+    audit(req, 'tenant.create', 'tenant', String(rows[0].id));
+    res.json({ ok: true, tenant: rows[0] });
+  } catch (err) {
+    console.error('tenant create error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+app.put('/api/tenants/:id', sameOrigin, requireAuth, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+  const b = req.body || {};
+  const fields = [];
+  const params = [];
+  let i = 1;
+  const set = (col, val) => { fields.push(`${col} = $${i++}`); params.push(val); };
+  if (b.fullName !== undefined) set('full_name', String(b.fullName).slice(0, 200));
+  if (b.phone !== undefined) set('phone', String(b.phone).slice(0, 32));
+  if (b.email !== undefined) set('email', b.email ? String(b.email).slice(0, 200) : null);
+  if (b.lineUserId !== undefined) set('line_user_id', b.lineUserId ? String(b.lineUserId).slice(0, 64) : null);
+  if (b.roomId !== undefined) set('current_room_id', b.roomId ? String(b.roomId).slice(0, 32) : null);
+  if (b.status !== undefined) {
+    if (!VALID_TENANT_STATUS.has(String(b.status))) return res.status(400).json({ error: 'invalid status' });
+    set('status', b.status);
+    if (b.status === 'blacklist' && b.blacklistReason) set('blacklist_reason', String(b.blacklistReason).slice(0, 500));
+  }
+  if (b.notes !== undefined) set('notes', b.notes ? String(b.notes).slice(0, 1000) : null);
+  if (b.locale !== undefined && ['th', 'en'].includes(b.locale)) set('locale', b.locale);
+  if (b.pin !== undefined && b.pin) {
+    if (!/^\d{4,8}$/.test(String(b.pin))) return res.status(400).json({ error: 'PIN ต้องเป็นตัวเลข 4-8 หลัก' });
+    if (isTrivialPin(b.pin)) return res.status(400).json({ error: 'PIN ไม่ปลอดภัย — เลี่ยงรูปแบบที่คาดเดาง่าย' });
+    const hash = await bcrypt.hash(String(b.pin), 10);
+    set('pin_hash', hash);
+  }
+  if (b.citizenId !== undefined) {
+    const cid = String(b.citizenId || '').replace(/[^0-9]/g, '');
+    if (cid) {
+      const flags = await features.load(pool);
+      try {
+        const enc = (flags.citizenIdEncryption && flags.citizenIdEncryption.enabled)
+          ? cryptoSvc.encryptString(cid) : cid;
+        set('citizen_id_encrypted', enc);
+        set('citizen_id_tail', cid.slice(-4));
+      } catch (e) { return res.status(500).json({ error: 'crypto: ' + e.message }); }
+    } else {
+      set('citizen_id_encrypted', null); set('citizen_id_tail', null);
+    }
+  }
+  if (!fields.length) return res.status(400).json({ error: 'nothing to update' });
+  fields.push('updated_at = NOW()');
+  params.push(id);
+  try {
+    const { rows } = await pool.query(
+      `UPDATE tenants SET ${fields.join(', ')} WHERE id=$${i} AND deleted_at IS NULL RETURNING id`,
+      params
+    );
+    if (!rows.length) return res.status(404).json({ error: 'not found' });
+    audit(req, 'tenant.update', 'tenant', String(id), { fields: Object.keys(b) });
+    res.json({ ok: true, id });
+  } catch (err) {
+    console.error('tenant update error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+app.delete('/api/tenants/:id', sameOrigin, requireAuth, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+  try {
+    const flags = await features.load(pool);
+    if (flags.softDelete && flags.softDelete.enabled) {
+      await pool.query(`UPDATE tenants SET deleted_at=NOW() WHERE id=$1`, [id]);
+    } else {
+      await pool.query(`DELETE FROM tenants WHERE id=$1`, [id]);
+    }
+    audit(req, 'tenant.delete', 'tenant', String(id));
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('tenant delete error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// === v2: Tenant portal auth ================================================
+// Simple hand-rolled session table (tenant_sessions). We don't want to share
+// express-session with admins (different cookie, different secret would help
+// but separating sessions by table is cleaner).
+
+const TENANT_COOKIE = 'tenant_sid';
+
+function makeSid() {
+  const c = require('crypto');
+  return c.randomBytes(24).toString('base64url');
+}
+
+async function tenantSessionLookup(req) {
+  const flags = await features.load(pool);
+  if (!flags.tenantPortal || !flags.tenantPortal.enabled) return null;
+  const sid = req.headers.cookie ? (req.headers.cookie.match(/(?:^|;\s*)tenant_sid=([^;]+)/) || [])[1] : null;
+  if (!sid) return null;
+  const { rows } = await pool.query(
+    `SELECT s.tenant_id, s.expire, t.full_name, t.phone, t.email, t.line_user_id,
+            t.current_room_id, t.status, t.locale
+       FROM tenant_sessions s JOIN tenants t ON t.id = s.tenant_id
+       WHERE s.sid = $1 AND s.expire > NOW() AND t.deleted_at IS NULL`,
+    [sid]
+  );
+  return rows[0] || null;
+}
+
+async function requireTenant(req, res, next) {
+  try {
+    const t = await tenantSessionLookup(req);
+    if (!t) return res.status(401).json({ error: 'unauthorized' });
+    if (t.status === 'blacklist') return res.status(403).json({ error: 'account suspended' });
+    req.tenant = t;
+    next();
+  } catch (err) {
+    console.error('requireTenant error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+}
+
+const rateLimitTenantLogin = makeIpLimiter({
+  windowMs: 15 * 60_000, max: 8, message: 'too many login attempts',
+});
+
+app.post('/api/tenant/login', sameOrigin, rateLimitTenantLogin, features.requireFeature('tenantPortal'), async (req, res) => {
+  const phone = String(req.body?.phone || '').trim().slice(0, 32);
+  const pin = String(req.body?.pin || '').trim().slice(0, 16);
+  if (!phone || !pin) return res.status(400).json({ error: 'phone and pin required' });
+  const principal = `tenant:${phone}`;
+  try {
+    try {
+      await lockout.check(principal);
+    } catch (err) {
+      if (err.code === 'LOCKED_OUT') {
+        const minutes = Math.ceil((err.retryAfterMs || 0) / 60_000);
+        return res.status(429).json({
+          error: `บัญชีถูกล็อกชั่วคราว — ลองใหม่ใน ${minutes} นาที`,
+          code: 'LOCKED_OUT',
+        });
+      }
+      throw err;
+    }
+    const { rows } = await pool.query(
+      `SELECT id, full_name, pin_hash, status FROM tenants
+         WHERE phone=$1 AND deleted_at IS NULL LIMIT 1`,
+      [phone]
+    );
+    const t = rows[0] || null;
+    const hash = (t && t.pin_hash) ? t.pin_hash : DUMMY_HASH;
+    // Always run bcrypt so timing is constant — A3 fix: don't reveal account
+    // existence/status through response speed or status code.
+    const ok = await bcrypt.compare(pin, hash);
+    if (!t || !t.pin_hash || !ok) {
+      lockout.recordFailure(principal, 'tenant').catch(() => {});
+      audit(req, 'tenant.login_failed', 'tenant', phone, null, phone).catch(() => {});
+      return res.status(401).json({ error: 'invalid credentials' });
+    }
+    // Only AFTER credentials check do we surface blacklist as a different
+    // status — so attackers can't enumerate suspended accounts without
+    // already knowing the PIN.
+    if (t.status === 'blacklist') {
+      return res.status(403).json({ error: 'account suspended' });
+    }
+    lockout.reset(principal).catch(() => {});
+    const sid = makeSid();
+    const days = (req.features?.tenantPortal?.sessionDays) || 30;
+    const expire = new Date(Date.now() + days * 86_400_000);
+    await pool.query(
+      `INSERT INTO tenant_sessions (sid, tenant_id, expire, ip, ua)
+       VALUES ($1,$2,$3,$4,$5)`,
+      [sid, t.id, expire, clientIp(req), (req.headers['user-agent'] || '').slice(0, 400)]
+    );
+    res.cookie(TENANT_COOKIE, sid, {
+      httpOnly: true,
+      secure: NODE_ENV === 'production',
+      sameSite: 'lax',
+      path: '/',
+      expires: expire,
+    });
+    audit(req, 'tenant.login', 'tenant', String(t.id));
+    res.json({ ok: true, tenant: { id: t.id, fullName: t.full_name } });
+  } catch (err) {
+    console.error('tenant login error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+app.post('/api/tenant/logout', sameOrigin, async (req, res) => {
+  try {
+    const sid = req.headers.cookie ? (req.headers.cookie.match(/(?:^|;\s*)tenant_sid=([^;]+)/) || [])[1] : null;
+    if (sid) await pool.query(`DELETE FROM tenant_sessions WHERE sid=$1`, [sid]);
+    res.clearCookie(TENANT_COOKIE);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('tenant logout error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+app.get('/api/tenant/me', async (req, res) => {
+  try {
+    const t = await tenantSessionLookup(req);
+    if (!t) return res.json({ tenant: null });
+    res.json({
+      tenant: {
+        id: t.tenant_id, fullName: t.full_name, phone: t.phone,
+        email: t.email, roomId: t.current_room_id, locale: t.locale,
+        status: t.status,
+      },
+    });
+  } catch (err) {
+    res.json({ tenant: null });
+  }
+});
+
+app.get('/api/tenant/bills', requireTenant, async (req, res) => {
+  // B4 — pagination. Bills typically arrive once a month, so 24 default
+  // covers 2 years; max 100 per page.
+  const limit = Math.min(Math.max(Number(req.query.limit) || 24, 1), 100);
+  const offset = Math.max(Number(req.query.offset) || 0, 0);
+  const status = req.query.status;
+  const where = ['tenant_id=$1', 'deleted_at IS NULL'];
+  const params = [req.tenant.tenant_id];
+  if (status && ['pending', 'paid', 'overdue', 'void'].includes(String(status))) {
+    params.push(status);
+    where.push(`status=$${params.length}`);
+  }
+  params.push(limit, offset);
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, bill_no, period, rent, water_units, water_rate, water_amount,
+              elec_units, elec_rate, elec_amount, wifi, other,
+              subtotal, vat, late_fee, total,
+              due_date, status, paid_at, created_at
+         FROM bills
+         WHERE ${where.join(' AND ')}
+         ORDER BY created_at DESC LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params
+    );
+    res.json({ ok: true, bills: rows, limit, offset });
+  } catch (err) {
+    console.error('tenant bills error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+app.get('/api/tenant/maintenance', requireTenant, async (req, res) => {
+  // B4 — pagination support, capped at 100/page; default 50.
+  const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 100);
+  const offset = Math.max(Number(req.query.offset) || 0, 0);
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, ticket_no, room_id, category, priority, status, title, description,
+              created_at, completed_at, rating, rating_comment
+         FROM maintenance_tickets
+         WHERE room_id=$1 AND tenant_phone=$2
+         ORDER BY created_at DESC LIMIT $3 OFFSET $4`,
+      [req.tenant.current_room_id || '', req.tenant.phone, limit, offset]
+    );
+    res.json({ ok: true, tickets: rows, limit, offset });
+  } catch (err) {
+    console.error('tenant tickets error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// B5 — tenant view of their own payment history. Lists every slip they
+// uploaded with current verification status, optional bill ref, and reject
+// reason if applicable. Pagination by limit/offset, default 50.
+app.get('/api/tenant/payments', requireTenant, async (req, res) => {
+  const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 100);
+  const offset = Math.max(Number(req.query.offset) || 0, 0);
+  try {
+    const { rows } = await pool.query(
+      `SELECT p.id, p.bill_id, p.amount, p.method, p.slip_url,
+              p.status, p.verified_at, p.rejected_reason, p.created_at,
+              b.bill_no, b.period
+         FROM payments p
+         LEFT JOIN bills b ON b.id = p.bill_id
+         WHERE p.tenant_id=$1
+         ORDER BY p.created_at DESC LIMIT $2 OFFSET $3`,
+      [req.tenant.tenant_id, limit, offset]
+    );
+    res.json({ ok: true, payments: rows, limit, offset });
+  } catch (err) {
+    console.error('tenant payments list error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// A1 — tenant rates a completed ticket. Authenticated via tenant_session
+// (no need to re-pass phone — we know who the tenant is). The ticket must
+// be both for this tenant's current room AND in 'completed' status, AND
+// not already rated. We also stamp `updated_at` for activity tracking.
+app.post('/api/tenant/maintenance/:id/rate', sameOrigin, requireTenant, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+  const rating = Number(req.body?.rating);
+  if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
+    return res.status(400).json({ error: 'rating must be integer 1-5' });
+  }
+  const comment = req.body?.comment ? String(req.body.comment).slice(0, 500) : null;
+  try {
+    const { rows } = await pool.query(
+      `UPDATE maintenance_tickets
+         SET rating=$1, rating_comment=$2, updated_at=NOW()
+         WHERE id=$3
+           AND tenant_phone=$4
+           AND status='completed'
+           AND rating IS NULL
+         RETURNING ticket_no, rating, rating_comment, completed_at`,
+      [rating, comment, id, req.tenant.phone]
+    );
+    if (!rows.length) {
+      return res.status(404).json({ error: 'ticket not found, not yours, not completed, or already rated' });
+    }
+    audit(req, 'maintenance.rate', 'ticket', String(id),
+      { rating, hasComment: !!comment }, `tenant:${req.tenant.tenant_id}`);
+    // Notify owner so they see the feedback in real-time
+    try {
+      const flags = await features.load(pool);
+      notifier.notifyOwner({ pool, features: flags }, {
+        subject: `⭐ ผู้เช่าให้คะแนน ${rating}/5`,
+        text: `Ticket ${rows[0].ticket_no} — ${rating}/5${comment ? `\n"${comment}"` : ''}`,
+      }).catch(() => {});
+    } catch { /* ignore */ }
+    res.json({ ok: true, ticket: rows[0] });
+  } catch (err) {
+    console.error('tenant ticket rate error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// === v2: Bills (persistent) ===============================================
+// Replaces the on-demand bill computation. Admin generates a bill once per
+// room+period; tenant + admin can later attach payments.
+
+app.get('/api/bills', requireAuth, async (req, res) => {
+  const status = req.query.status;
+  const params = [];
+  const where = ['deleted_at IS NULL'];
+  if (status && ['pending', 'paid', 'overdue', 'void'].includes(String(status))) {
+    params.push(status); where.push(`status=$${params.length}`);
+  }
+  if (req.query.roomId) {
+    params.push(String(req.query.roomId).slice(0, 32));
+    where.push(`room_id=$${params.length}`);
+  }
+  if (req.query.period) {
+    params.push(String(req.query.period).slice(0, 16));
+    where.push(`period=$${params.length}`);
+  }
+  try {
+    const { rows } = await pool.query(
+      `SELECT * FROM bills WHERE ${where.join(' AND ')}
+        ORDER BY created_at DESC LIMIT 500`, params
+    );
+    res.json({ ok: true, bills: rows });
+  } catch (err) {
+    console.error('bills list error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+app.post('/api/bills', sameOrigin, requireAuth, async (req, res) => {
+  const b = req.body || {};
+  const flags = await features.load(pool);
+  // Admin sends either a fully-formed bill, or roomId+period and we compute it.
+  let computed = b;
+  // Track which one_off recurring rows we used so we can deactivate them
+  // after a successful insert (so they don't appear on next month's bill).
+  let usedOneOffIds = [];
+  if (b.compute && b.roomId) {
+    const [roomsRow, configRow] = await Promise.all([
+      pool.query(`SELECT value FROM app_data WHERE key='baankarn_rooms_v1'`),
+      pool.query(`SELECT value FROM app_data WHERE key='baankarn_config_v1'`),
+    ]);
+    const roomsObj = roomsRow.rows.length ? roomsRow.rows[0].value : {};
+    const config = configRow.rows.length ? configRow.rows[0].value : {};
+    const room = roomsObj[b.roomId] || (Object.values(roomsObj || {}).find((r) => r.id === b.roomId));
+    if (!room) return res.status(404).json({ error: 'room not found' });
+    let previous = null;
+    try {
+      const prev = await pool.query(
+        `SELECT total, due_date, paid_at, status FROM bills
+           WHERE room_id=$1 AND status IN ('pending','overdue') ORDER BY created_at DESC LIMIT 1`,
+        [b.roomId]
+      );
+      previous = prev.rows[0] ? { total: Number(prev.rows[0].total), dueDate: prev.rows[0].due_date, status: prev.rows[0].status } : null;
+    } catch {}
+    // B1 — auto-load recurring charges if recurringCharges flag on and the
+    // caller didn't explicitly pass `recurring`. Resolve the active tenant
+    // first so per-tenant charges (parking, cleaning) match the right person.
+    let recurringList = Array.isArray(b.recurring) ? b.recurring : [];
+    if (flags.recurringCharges?.enabled && !b.recurring) {
+      let tid = b.tenantId || null;
+      if (!tid) {
+        try {
+          const tq = await pool.query(
+            `SELECT id FROM tenants WHERE current_room_id=$1 AND status='active' AND deleted_at IS NULL
+               ORDER BY updated_at DESC LIMIT 1`,
+            [b.roomId]
+          );
+          if (tq.rows.length) tid = tq.rows[0].id;
+        } catch { /* ignore */ }
+      }
+      const dbRecurring = await loadRecurringFor(pool, { tenantId: tid, roomId: b.roomId });
+      recurringList = dbRecurring.map((r) => ({ label: r.label, amount: Number(r.amount) }));
+      usedOneOffIds = dbRecurring.filter((r) => r.frequency === 'one_off').map((r) => r.id);
+    }
+    computed = billing.buildBill({
+      room, config, features: flags,
+      previous,
+      recurring: recurringList,
+      period: b.period, dueDate: b.dueDate,
+    });
+  }
+  if (!computed.billNo || !computed.total || !computed.roomId) {
+    return res.status(400).json({ error: 'billNo, roomId and total required' });
+  }
+  // Auto-link to tenant: if caller didn't pass tenantId explicitly, look up
+  // the active tenant currently in this room. This is what makes bills
+  // visible in the tenant portal — without it tenant_id stays NULL.
+  let tenantId = b.tenantId || null;
+  if (!tenantId && computed.roomId) {
+    try {
+      const t = await pool.query(
+        `SELECT id FROM tenants
+            WHERE current_room_id=$1 AND status='active' AND deleted_at IS NULL
+            ORDER BY updated_at DESC LIMIT 1`,
+        [computed.roomId]
+      );
+      if (t.rows.length) tenantId = t.rows[0].id;
+    } catch (err) {
+      console.warn('[bill] tenant lookup failed:', err.message);
+    }
+  }
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO bills
+       (bill_no, tenant_id, room_id, period, rent,
+        water_units, water_rate, water_amount,
+        elec_units, elec_rate, elec_amount,
+        wifi, other, subtotal, vat, late_fee, total, due_date, status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14,$15,$16,$17,$18,'pending')
+       ON CONFLICT (bill_no) DO UPDATE SET
+         tenant_id=COALESCE(EXCLUDED.tenant_id, bills.tenant_id),
+         rent=EXCLUDED.rent, water_units=EXCLUDED.water_units, water_rate=EXCLUDED.water_rate,
+         water_amount=EXCLUDED.water_amount, elec_units=EXCLUDED.elec_units,
+         elec_rate=EXCLUDED.elec_rate, elec_amount=EXCLUDED.elec_amount,
+         wifi=EXCLUDED.wifi, other=EXCLUDED.other,
+         subtotal=EXCLUDED.subtotal, vat=EXCLUDED.vat, late_fee=EXCLUDED.late_fee,
+         total=EXCLUDED.total, due_date=EXCLUDED.due_date
+       RETURNING *`,
+      [
+        computed.billNo, tenantId, computed.roomId, computed.period,
+        computed.rent || 0,
+        computed.waterUnits || 0, computed.waterRate || 0, computed.waterAmount || 0,
+        computed.elecUnits || 0, computed.elecRate || 0, computed.elecAmount || 0,
+        computed.wifi || 0,
+        JSON.stringify(Array.isArray(b.other) ? b.other : []),
+        computed.subtotal || computed.total, computed.vat || 0, computed.lateFee || 0,
+        computed.total, computed.dueDate,
+      ]
+    );
+    audit(req, 'bill.create', 'bill', String(rows[0].id), { tenantId, autoLinked: !b.tenantId && tenantId });
+    // B1 — mark consumed one_off recurring charges inactive so they don't
+    // appear on next month's bill. Best-effort; failure here doesn't unwind
+    // the bill insert (the charges line items are already in `other`).
+    if (usedOneOffIds.length) {
+      try {
+        await pool.query(
+          `UPDATE recurring_charges SET active=FALSE, updated_at=NOW() WHERE id = ANY($1::bigint[])`,
+          [usedOneOffIds]
+        );
+      } catch (err) {
+        console.warn('[bill] one_off deactivate failed:', err.message);
+      }
+    }
+    res.json({ ok: true, bill: rows[0], computed });
+  } catch (err) {
+    // A7 — translate the partial-unique constraint into a clear 409 so
+    // the admin UI can show "already generated" instead of a generic 500.
+    if (err.code === '23505' && /uq_bills_room_period_active/.test(err.constraint || '')) {
+      return res.status(409).json({
+        error: 'มีบิลของรอบนี้อยู่แล้ว — ทำการ void ก่อนถ้าต้องการสร้างใหม่',
+        code: 'BILL_DUPLICATE',
+      });
+    }
+    console.error('bill create error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+app.put('/api/bills/:id/void', sameOrigin, requireAuth, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+  const reason = String(req.body?.reason || '').slice(0, 500);
+  try {
+    const { rows } = await pool.query(
+      `UPDATE bills SET status='void', void_reason=$1 WHERE id=$2 AND status<>'paid' RETURNING *`,
+      [reason, id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'not found or already paid' });
+    audit(req, 'bill.void', 'bill', String(id), { reason });
+    res.json({ ok: true, bill: rows[0] });
+  } catch (err) {
+    console.error('bill void error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// === v2: Payments + slip upload ===========================================
+// Tenant uploads a slip via /api/tenant/payments (gated by slipUpload).
+// Admin verifies via /api/payments/:id/verify.
+
+async function ensureSlipUpload(req, res, next) {
+  const flags = await features.load(pool);
+  if (!flags.slipUpload || !flags.slipUpload.enabled) {
+    return res.status(503).json({ error: 'slipUpload disabled' });
+  }
+  req.features = flags;
+  next();
+}
+
+app.post('/api/tenant/payments', sameOrigin, requireTenant, ensureSlipUpload, async (req, res) => {
+  const b = req.body || {};
+  const billId = Number(b.billId);
+  if (!Number.isInteger(billId) || billId < 1) return res.status(400).json({ error: 'billId required' });
+  const amount = Number(b.amount);
+  if (!Number.isFinite(amount) || amount <= 0) return res.status(400).json({ error: 'invalid amount' });
+  if (!b.slip) return res.status(400).json({ error: 'slip image required' });
+  try {
+    const billRes = await pool.query(
+      `SELECT id, total, status, tenant_id FROM bills WHERE id=$1 AND deleted_at IS NULL`,
+      [billId]
+    );
+    if (!billRes.rows.length) return res.status(404).json({ error: 'bill not found' });
+    if (billRes.rows[0].tenant_id && Number(billRes.rows[0].tenant_id) !== Number(req.tenant.tenant_id)) {
+      return res.status(403).json({ error: 'not your bill' });
+    }
+    // Hash the actual slip bytes BEFORE saving so dedup works (prior version
+    // hashed the URL+size which were always unique → unique index never
+    // triggered).
+    const rawBuf = Buffer.from(String(b.slip || '').replace(/^data:[^;]+;base64,/, ''), 'base64');
+    const slipHash = cryptoSvc.hmac(rawBuf);
+    const dup = await pool.query('SELECT id FROM payments WHERE slip_hash=$1 LIMIT 1', [slipHash]);
+    if (dup.rows.length) return res.status(409).json({ error: 'duplicate slip' });
+
+    const slip = await storage.saveBase64({
+      pool,
+      category: 'slip',
+      dataUrl: b.slip,
+      refId: String(billId),
+      uploadedBy: `tenant:${req.tenant.tenant_id}`,
+      maxBytes: req.features.slipUpload.maxBytes || 1_500_000,
+      allowedMimes: req.features.slipUpload.allowedMimes || ['image/jpeg', 'image/png', 'image/webp'],
+    });
+    let row;
+    try {
+      const ins = await pool.query(
+        `INSERT INTO payments (bill_id, tenant_id, amount, method, slip_url, slip_hash, status)
+         VALUES ($1,$2,$3,'promptpay',$4,$5,$6)
+         RETURNING *`,
+        [billId, req.tenant.tenant_id, amount, slip.url, slipHash,
+         req.features.slipUpload.requireVerification ? 'pending' : 'verified']
+      );
+      row = ins.rows[0];
+    } catch (err) {
+      if (err.code === '23505') return res.status(409).json({ error: 'duplicate slip' });
+      throw err;
+    }
+    if (!req.features.slipUpload.requireVerification) {
+      await pool.query(`UPDATE bills SET status='paid', paid_at=NOW() WHERE id=$1 AND status<>'paid'`, [billId]);
+    }
+    audit(req, 'tenant.slip_upload', 'payment', String(row.id),
+      { billId, amount, autoVerified: !req.features.slipUpload.requireVerification },
+      `tenant:${req.tenant.tenant_id}`).catch(() => {});
+    notifier.notifyOwner(
+      { pool, features: req.features },
+      { subject: 'มีผู้ส่งสลิปชำระเงินใหม่',
+        text: `บิล #${billId} จำนวน ${amount.toLocaleString('th-TH')} บาท จาก ${req.tenant.full_name} (${req.tenant.phone})` }
+    ).catch(() => {});
+    res.json({ ok: true, payment: row });
+  } catch (err) {
+    console.error('tenant payment error:', err);
+    res.status(400).json({ error: err.message || 'upload failed' });
+  }
+});
+
+app.get('/api/payments', requireAuth, async (req, res) => {
+  const status = req.query.status;
+  const params = [];
+  const where = [];
+  if (status && ['pending', 'verified', 'rejected'].includes(String(status))) {
+    params.push(status); where.push(`p.status=$${params.length}`);
+  }
+  try {
+    const { rows } = await pool.query(
+      `SELECT p.*, b.bill_no, b.period, t.full_name AS tenant_name, t.phone AS tenant_phone
+         FROM payments p
+         LEFT JOIN bills b ON b.id = p.bill_id
+         LEFT JOIN tenants t ON t.id = p.tenant_id
+         ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+         ORDER BY p.created_at DESC LIMIT 500`, params
+    );
+    res.json({ ok: true, payments: rows });
+  } catch (err) {
+    console.error('payments list error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// CANONICAL slip verify endpoint — takes a payment id. Use this from the
+// admin payments page. routes/bills-extras.js exposes a sibling
+// POST /api/bills/:id/verify-slip that takes a bill id (looks up the latest
+// pending payment for that bill, then delegates to the same SQL). Both
+// paths converge on `bills.status='paid' + payments.status='verified'`.
+// Also notifies the tenant on outcome so they see the verdict in their
+// portal / LINE without polling.
+app.put('/api/payments/:id/verify', sameOrigin, requireAuth, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+  const accept = req.body?.accept !== false;
+  const reason = String(req.body?.reason || '').slice(0, 500);
+  try {
+    if (accept) {
+      const { rows } = await pool.query(
+        `UPDATE payments SET status='verified', verified_by=$1, verified_at=NOW()
+           WHERE id=$2 AND status='pending' RETURNING *`,
+        [req.session.user.username, id]
+      );
+      if (!rows.length) return res.status(404).json({ error: 'not found or already decided' });
+      if (rows[0].bill_id) {
+        await pool.query(`UPDATE bills SET status='paid', paid_at=NOW() WHERE id=$1 AND status<>'paid'`, [rows[0].bill_id]);
+      }
+      audit(req, 'payment.verify', 'payment', String(id), { billId: rows[0].bill_id, amount: rows[0].amount });
+      // Notify the tenant fire-and-forget
+      notifyTenantOnPayment(rows[0], 'verified').catch(() => {});
+      res.json({ ok: true, payment: rows[0] });
+    } else {
+      const { rows } = await pool.query(
+        `UPDATE payments SET status='rejected', verified_by=$1, verified_at=NOW(), rejected_reason=$2
+           WHERE id=$3 AND status='pending' RETURNING *`,
+        [req.session.user.username, reason, id]
+      );
+      if (!rows.length) return res.status(404).json({ error: 'not found' });
+      audit(req, 'payment.reject', 'payment', String(id), { reason, billId: rows[0].bill_id });
+      notifyTenantOnPayment(rows[0], 'rejected', reason).catch(() => {});
+      res.json({ ok: true, payment: rows[0] });
+    }
+  } catch (err) {
+    console.error('payment verify error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// Helper for both verify endpoints — pushes a notification to the tenant
+// when their slip is verified or rejected. Fire-and-forget; logs to
+// notifications_log via notifier.
+async function notifyTenantOnPayment(payment, outcome, reason) {
+  if (!payment || !payment.tenant_id) return;
+  try {
+    const flags = await features.load(pool);
+    const { rows } = await pool.query(
+      `SELECT id, full_name, phone, email, line_user_id FROM tenants
+         WHERE id=$1 AND deleted_at IS NULL`,
+      [payment.tenant_id]
+    );
+    if (!rows.length) return;
+    const t = rows[0];
+    const subject = outcome === 'verified' ? '✅ ตรวจสอบการชำระเงินแล้ว' : '❌ สลิปไม่ผ่านการตรวจสอบ';
+    const lines = [
+      outcome === 'verified'
+        ? `ชำระเงินบิล #${payment.bill_id || '-'} จำนวน ${Number(payment.amount).toLocaleString('th-TH')} บาท ได้รับการยืนยันแล้ว`
+        : `สลิปสำหรับบิล #${payment.bill_id || '-'} ไม่ผ่านการตรวจสอบ`,
+      reason ? `เหตุผล: ${reason}` : null,
+      'ติดต่อเจ้าหน้าที่หากมีข้อสงสัย',
+    ].filter(Boolean);
+    await notifier.notifyTenant({ pool, features: flags }, t, {
+      subject, text: lines.join('\n'),
+    });
+  } catch (err) {
+    console.error('[notifyTenantOnPayment]', err.message);
+  }
+}
+
+// === v2: Booking state machine (B6) =======================================
+// Bookings are stored in app_data['baankarn_bookings_v1'] (legacy JSONB).
+// Admin advances state via PUT /api/bookings/:id (status / notes / roomId).
+// Valid transitions: pending → reviewing → approved | rejected | cancelled.
+// Each transition fires a notify (owner sees the change; tenant via SMS/LINE
+// if we have a phone — currently only LINE since SMS is provider-dependent).
+
+const BOOKING_STATUSES = new Set(['pending', 'reviewing', 'approved', 'rejected', 'cancelled']);
+const BOOKING_TRANSITIONS = {
+  pending:   ['reviewing', 'approved', 'rejected', 'cancelled'],
+  reviewing: ['approved', 'rejected', 'cancelled'],
+  approved:  ['cancelled'],          // can revoke an approval if tenant backs out
+  rejected:  ['reviewing'],          // re-open if admin reconsidered
+  cancelled: [],                     // terminal
+};
+
+app.put('/api/bookings/:id', sameOrigin, requireAuth, requireRole('owner', 'manager'), async (req, res) => {
+  const id = String(req.params.id).slice(0, 64);
+  const b = req.body || {};
+  if (b.status && !BOOKING_STATUSES.has(String(b.status))) {
+    return res.status(400).json({ error: 'invalid status' });
+  }
+  try {
+    const { rows: cur } = await pool.query(`SELECT value FROM app_data WHERE key='baankarn_bookings_v1'`);
+    const list = cur.length && Array.isArray(cur[0].value) ? cur[0].value : [];
+    const idx = list.findIndex((x) => x && x.id === id);
+    if (idx < 0) return res.status(404).json({ error: 'booking not found' });
+    const before = list[idx];
+    if (b.status && b.status !== before.status) {
+      const allowed = BOOKING_TRANSITIONS[before.status || 'pending'] || [];
+      if (!allowed.includes(b.status)) {
+        return res.status(400).json({
+          error: `cannot transition ${before.status} → ${b.status}`,
+          allowed,
+        });
+      }
+    }
+    const updated = {
+      ...before,
+      status: b.status || before.status,
+      adminNotes: b.adminNotes !== undefined ? String(b.adminNotes).slice(0, 1000) : before.adminNotes,
+      roomId: b.roomId !== undefined ? String(b.roomId).slice(0, 32) : before.roomId,
+      updatedAt: new Date().toISOString(),
+      updatedBy: req.session.user.username,
+    };
+    list[idx] = updated;
+    await pool.query(
+      `INSERT INTO app_data (key, value, updated_by) VALUES ($1, $2, $3)
+       ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW(), updated_by=EXCLUDED.updated_by`,
+      ['baankarn_bookings_v1', JSON.stringify(list), req.session.user.username]
+    );
+    audit(req, 'booking.update', 'booking', id, {
+      from: before.status, to: updated.status, fields: Object.keys(b),
+    });
+
+    // Fire-and-forget notify on status change (so the tenant + owner know
+    // their booking was acted on).
+    if (b.status && b.status !== before.status) {
+      try {
+        const flags = await features.load(pool);
+        // Owner notification — concise audit-style line.
+        const subj = `📋 Booking ${id}: ${before.status} → ${updated.status}`;
+        notifier.notifyOwner({ pool, features: flags }, {
+          subject: subj,
+          text: `${updated.name || '-'} (${updated.phone || '-'})\n` +
+                `ห้องที่ต้องการ: ${updated.roomId || updated.wantType || '-'}\n` +
+                (updated.adminNotes ? `หมายเหตุ: ${updated.adminNotes}` : ''),
+        }).catch(() => {});
+
+        // Tenant notification — only if we have a contact channel.
+        const tenantText = ({
+          approved: `✅ การจองห้องได้รับการอนุมัติแล้ว\nกรุณาติดต่อสำนักงานเพื่อเซ็นสัญญา`,
+          rejected: `❌ ขออภัย — การจองห้องไม่ได้รับการอนุมัติ\n${updated.adminNotes ? 'หมายเหตุ: ' + updated.adminNotes : ''}`,
+          reviewing: `🔍 การจองของคุณกำลังถูกตรวจสอบ`,
+          cancelled: `🚫 การจองถูกยกเลิก`,
+        })[updated.status];
+        if (tenantText && updated.email) {
+          notifier.notifyTenant({ pool, features: flags },
+            { full_name: updated.name, email: updated.email, phone: updated.phone },
+            { subject: `อัปเดตสถานะการจองห้อง — ${updated.status}`, text: tenantText }
+          ).catch(() => {});
+        }
+      } catch { /* ignore */ }
+    }
+    res.json({ ok: true, booking: updated });
+  } catch (err) {
+    console.error('booking update error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// === v2: Recurring charges (B1) ===========================================
+// Per-tenant or per-room recurring line items (parking, internet add-on,
+// cleaning, etc.) auto-merged into monthly bills when the recurringCharges
+// feature flag is enabled. Either tenant_id or room_id (or both) must be
+// set. Bill generation calls loadRecurringFor() to pick up active rows.
+
+const RECURRING_FREQ = new Set(['monthly', 'quarterly', 'one_off']);
+
+app.get('/api/recurring-charges', requireAuth, async (req, res) => {
+  const tenantId = req.query.tenantId ? Number(req.query.tenantId) : null;
+  const roomId = req.query.roomId ? String(req.query.roomId).slice(0, 32) : null;
+  const params = [];
+  const where = [];
+  if (tenantId) { params.push(tenantId); where.push(`tenant_id=$${params.length}`); }
+  if (roomId) { params.push(roomId); where.push(`room_id=$${params.length}`); }
+  if (req.query.active === 'true') where.push('active = TRUE');
+  if (req.query.active === 'false') where.push('active = FALSE');
+  try {
+    const { rows } = await pool.query(
+      `SELECT * FROM recurring_charges
+         ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+         ORDER BY active DESC, created_at DESC LIMIT 500`,
+      params
+    );
+    res.json({ ok: true, charges: rows });
+  } catch (err) {
+    console.error('recurring list error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+app.post('/api/recurring-charges', sameOrigin, requireAuth, requireRole('owner', 'manager'), async (req, res) => {
+  const b = req.body || {};
+  const tenantId = b.tenantId ? Number(b.tenantId) : null;
+  const roomId = b.roomId ? String(b.roomId).slice(0, 32) : null;
+  const label = String(b.label || '').trim().slice(0, 80);
+  const amount = Number(b.amount);
+  const frequency = RECURRING_FREQ.has(String(b.frequency)) ? String(b.frequency) : 'monthly';
+  if (!label) return res.status(400).json({ error: 'label required' });
+  if (!Number.isFinite(amount) || amount < 0 || amount > 1_000_000) return res.status(400).json({ error: 'invalid amount' });
+  if (!tenantId && !roomId) return res.status(400).json({ error: 'tenantId or roomId required' });
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO recurring_charges
+         (tenant_id, room_id, label, amount, frequency, active, start_date, end_date, notes, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+      [
+        tenantId, roomId, label, amount, frequency,
+        b.active !== false,
+        b.startDate || null, b.endDate || null,
+        b.notes ? String(b.notes).slice(0, 500) : null,
+        req.session.user.username,
+      ]
+    );
+    audit(req, 'recurring.create', 'recurring_charge', String(rows[0].id), { tenantId, roomId, label, amount });
+    res.json({ ok: true, charge: rows[0] });
+  } catch (err) {
+    console.error('recurring create error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+app.put('/api/recurring-charges/:id', sameOrigin, requireAuth, requireRole('owner', 'manager'), async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+  const b = req.body || {};
+  const fields = [], params = [];
+  let idx = 1;
+  if (b.label !== undefined) { fields.push(`label=$${idx++}`); params.push(String(b.label).slice(0, 80)); }
+  if (b.amount !== undefined) {
+    const a = Number(b.amount);
+    if (!Number.isFinite(a) || a < 0) return res.status(400).json({ error: 'invalid amount' });
+    fields.push(`amount=$${idx++}`); params.push(a);
+  }
+  if (b.frequency !== undefined) {
+    if (!RECURRING_FREQ.has(String(b.frequency))) return res.status(400).json({ error: 'invalid frequency' });
+    fields.push(`frequency=$${idx++}`); params.push(String(b.frequency));
+  }
+  if (b.active !== undefined) { fields.push(`active=$${idx++}`); params.push(!!b.active); }
+  if (b.endDate !== undefined) { fields.push(`end_date=$${idx++}`); params.push(b.endDate || null); }
+  if (b.notes !== undefined) { fields.push(`notes=$${idx++}`); params.push(b.notes ? String(b.notes).slice(0, 500) : null); }
+  if (!fields.length) return res.status(400).json({ error: 'nothing to update' });
+  fields.push(`updated_at=NOW()`);
+  params.push(id);
+  try {
+    const { rows } = await pool.query(
+      `UPDATE recurring_charges SET ${fields.join(', ')} WHERE id=$${idx} RETURNING *`,
+      params
+    );
+    if (!rows.length) return res.status(404).json({ error: 'not found' });
+    audit(req, 'recurring.update', 'recurring_charge', String(id), { fields: Object.keys(b) });
+    res.json({ ok: true, charge: rows[0] });
+  } catch (err) {
+    console.error('recurring update error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+app.delete('/api/recurring-charges/:id', sameOrigin, requireAuth, requireRole('owner', 'manager'), async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+  try {
+    const { rowCount } = await pool.query(`DELETE FROM recurring_charges WHERE id=$1`, [id]);
+    if (!rowCount) return res.status(404).json({ error: 'not found' });
+    audit(req, 'recurring.delete', 'recurring_charge', String(id));
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// Helper used by bill generation (manual + scheduler) to load active
+// charges that apply to a given (tenantId, roomId) combo. one_off charges
+// are returned only if they haven't been billed yet (we mark them
+// inactive after their first inclusion — see /api/bills POST).
+async function loadRecurringFor(pool, { tenantId, roomId }) {
+  const params = [];
+  const where = ['active = TRUE'];
+  const ors = [];
+  if (tenantId) { params.push(tenantId); ors.push(`tenant_id = $${params.length}`); }
+  if (roomId)   { params.push(roomId);   ors.push(`room_id = $${params.length}`); }
+  if (!ors.length) return [];
+  where.push(`(${ors.join(' OR ')})`);
+  where.push(`(start_date IS NULL OR start_date <= CURRENT_DATE)`);
+  where.push(`(end_date IS NULL OR end_date >= CURRENT_DATE)`);
+  const { rows } = await pool.query(
+    `SELECT id, label, amount, frequency FROM recurring_charges
+       WHERE ${where.join(' AND ')} ORDER BY created_at ASC`,
+    params
+  );
+  return rows;
+}
+
+// === v2: Photo upload (rooms / signatures / citizen-id images) ============
+app.post('/api/uploads', sameOrigin, requireAuth, features.requireFeature('photoUpload'), async (req, res) => {
+  const b = req.body || {};
+  const category = String(b.category || 'misc');
+  if (!['room_photo', 'contract_signature', 'citizen_id_image', 'misc'].includes(category)) {
+    return res.status(400).json({ error: 'invalid category' });
+  }
+  if (!b.dataUrl) return res.status(400).json({ error: 'dataUrl required' });
+  try {
+    const out = await storage.saveBase64({
+      pool,
+      category,
+      dataUrl: b.dataUrl,
+      refId: b.refId ? String(b.refId).slice(0, 64) : null,
+      uploadedBy: req.session.user.username,
+      maxBytes: req.features.photoUpload.maxBytes || 1_500_000,
+    });
+    audit(req, 'upload.create', 'file', String(out.id), { category });
+    res.json({ ok: true, file: out });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'upload failed' });
+  }
+});
+
+// === v2: Meter readings ===================================================
+app.post('/api/meters/:roomId/readings', sameOrigin, requireAuth, features.requireFeature('meterIot'), async (req, res) => {
+  const roomId = String(req.params.roomId).slice(0, 32);
+  const { meterType, reading, source } = req.body || {};
+  try {
+    const row = await meter.record(pool, {
+      roomId, meterType, reading,
+      // A2 — only 'manual' is appropriate for admin-entered readings; an
+      // admin shouldn't be able to claim a reading came from MQTT/simulator
+      // (those come from scheduler / device endpoints with bearer auth).
+      source: 'manual',
+      createdBy: req.session.user.username,
+    });
+    // A2 — anomaly detection is fail-soft: if features not loaded for any
+    // reason, default sigmas=3 and still notify. The notifier is already
+    // non-throwing, but we additionally swallow any awaits so the admin's
+    // request never fails because the LINE owner endpoint is down.
+    const flags = req.features || (await features.load(pool).catch(() => ({})));
+    const sigmas = (flags.meterIot && flags.meterIot.anomalySigmas) || 3;
+    let anomaly = null;
+    try {
+      anomaly = await meter.detectAnomaly(pool, roomId, row.meter_type, sigmas);
+    } catch (e) { console.warn('[meter] anomaly detect failed:', e.message); }
+    if (anomaly) {
+      notifier.notifyOwner(
+        { pool, features: flags },
+        { subject: '⚠️ มิเตอร์ผิดปกติ',
+          text: `ห้อง ${roomId} (${row.meter_type}) z=${Number(anomaly.z).toFixed(2)} เกิน ${sigmas}σ\nค่าล่าสุด: ${anomaly.last}, ค่าเฉลี่ย: ${Number(anomaly.mean).toFixed(2)}` }
+      ).catch(() => {});
+      audit(req, 'meter.anomaly', 'meter', String(row.id),
+        { z: anomaly.z, sigmas, mean: anomaly.mean });
+    }
+    audit(req, 'meter.record', 'meter', String(row.id), { meterType: row.meter_type, reading: row.reading });
+    res.json({ ok: true, reading: row, anomaly });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.get('/api/meters/:roomId/readings', requireAuth, async (req, res) => {
+  const roomId = String(req.params.roomId).slice(0, 32);
+  const type = String(req.query.type || 'elec');
+  if (!meter.ALLOWED_TYPES.has(type)) return res.status(400).json({ error: 'invalid type' });
+  try {
+    const { rows } = await pool.query(
+      `SELECT * FROM meter_readings WHERE room_id=$1 AND meter_type=$2
+         ORDER BY reading_at DESC LIMIT 200`,
+      [roomId, type]
+    );
+    res.json({ ok: true, readings: rows });
+  } catch (err) {
+    console.error('meter list error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// === v2: Access control logs (manual entry; integrates with future RFID) ==
+// Hardware (Bearer token) skips sameOrigin since it never has a browser
+// Origin header. Admin users still get the CSRF-style same-origin check.
+function deviceOrSameOrigin(req, res, next) {
+  const auth = req.headers.authorization;
+  if (auth && auth.startsWith('Bearer ')) return next();
+  return sameOrigin(req, res, next);
+}
+app.post('/api/access/log', deviceOrSameOrigin, requireDeviceOrAdmin, features.requireFeature('accessControl'), async (req, res) => {
+  const b = req.body || {};
+  const device = String(b.device || '').slice(0, 64);
+  const method = String(b.method || 'manual').slice(0, 16);
+  const result = String(b.result || 'granted').slice(0, 16);
+  if (!device) return res.status(400).json({ error: 'device required' });
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO access_logs (room_id, tenant_id, device, method, card_id, result, reason)
+       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+      [
+        b.roomId ? String(b.roomId).slice(0, 32) : null,
+        Number.isInteger(Number(b.tenantId)) ? Number(b.tenantId) : null,
+        device, method,
+        b.cardId ? String(b.cardId).slice(0, 64) : null,
+        ['granted', 'denied'].includes(result) ? result : 'granted',
+        b.reason ? String(b.reason).slice(0, 200) : null,
+      ]
+    );
+    audit(req, 'access.log', 'access', String(rows[0].id));
+    res.json({ ok: true, log: rows[0] });
+  } catch (err) {
+    console.error('access log error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+app.get('/api/access/logs', requireAuth, async (req, res) => {
+  const limit = Math.min(Number(req.query.limit) || 100, 500);
+  try {
+    const { rows } = await pool.query(
+      `SELECT * FROM access_logs ORDER BY occurred_at DESC LIMIT $1`,
+      [limit]
+    );
+    res.json({ ok: true, logs: rows });
+  } catch (err) {
+    console.error('access logs list error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// === v2: Admin user management (B1, C7) ===================================
+// Real CRUD against auth_users, replacing the localStorage-only stub in
+// page-settings.jsx. Owner-only — no other role can change or remove
+// privileged accounts.
+app.get('/api/admin/users', requireAuth, requireRole('owner'), async (_req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT id, username, role, created_at FROM auth_users ORDER BY id ASC'
+    );
+    res.json({ ok: true, users: rows });
+  } catch (err) {
+    console.error('admin users list error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+app.post('/api/admin/users', sameOrigin, requireAuth, requireRole('owner'), async (req, res) => {
+  const r = require('./schemas').schemas.adminCreateUser.safeParse(req.body || {});
+  if (!r.success) return res.status(400).json(require('./middleware/validate').formatZodError(r.error));
+  const { username, password, role } = r.data;
+  try {
+    const exists = await pool.query('SELECT 1 FROM auth_users WHERE username=$1', [username]);
+    if (exists.rows.length) return res.status(409).json({ error: 'username already exists' });
+    const hash = await bcrypt.hash(password, 10);
+    const ins = await pool.query(
+      `INSERT INTO auth_users (username, password_hash, role) VALUES ($1,$2,$3)
+       RETURNING id, username, role, created_at`,
+      [username, hash, role || 'staff']
+    );
+    audit(req, 'user.create', 'user', String(ins.rows[0].id), { role });
+    res.json({ ok: true, user: ins.rows[0] });
+  } catch (err) {
+    console.error('admin users create error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+app.put('/api/admin/users/:id', sameOrigin, requireAuth, requireRole('owner'), async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+  const r = require('./schemas').schemas.adminUpdateUser.safeParse(req.body || {});
+  if (!r.success) return res.status(400).json(require('./middleware/validate').formatZodError(r.error));
+  const { password, role } = r.data;
+  try {
+    const fields = [], params = [];
+    let i = 1;
+    if (password) {
+      const hash = await bcrypt.hash(password, 10);
+      fields.push(`password_hash=$${i++}`); params.push(hash);
+    }
+    if (role) { fields.push(`role=$${i++}`); params.push(role); }
+    if (!fields.length) return res.status(400).json({ error: 'nothing to update' });
+    params.push(id);
+    const upd = await pool.query(
+      `UPDATE auth_users SET ${fields.join(', ')} WHERE id=$${i} RETURNING id, username, role`,
+      params
+    );
+    if (!upd.rows.length) return res.status(404).json({ error: 'not found' });
+    audit(req, 'user.update', 'user', String(id), { fields: Object.keys(r.data) });
+    res.json({ ok: true, user: upd.rows[0] });
+  } catch (err) {
+    console.error('admin users update error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+app.delete('/api/admin/users/:id', sameOrigin, requireAuth, requireRole('owner'), async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+  if (req.session.user.id === id) {
+    return res.status(400).json({ error: 'cannot delete your own account' });
+  }
+  try {
+    // Prevent deleting the last owner — DB would still have you locked out.
+    const owners = await pool.query(`SELECT COUNT(*)::int n FROM auth_users WHERE role='owner'`);
+    const target = await pool.query(`SELECT role FROM auth_users WHERE id=$1`, [id]);
+    if (target.rows.length && target.rows[0].role === 'owner' && owners.rows[0].n <= 1) {
+      return res.status(400).json({ error: 'cannot delete the last owner' });
+    }
+    await pool.query('DELETE FROM auth_users WHERE id=$1', [id]);
+    audit(req, 'user.delete', 'user', String(id));
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('admin users delete error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// === v2: Security events (failed logins / lockouts) =======================
+// Read-only viewer of recent auth_failures. Helps owner spot brute-force
+// before it succeeds.
+app.get('/api/admin/security-events', requireAuth, requireRole('owner', 'manager'), async (req, res) => {
+  const limit = Math.min(Number(req.query.limit) || 100, 500);
+  try {
+    const [failed, locked] = await Promise.all([
+      pool.query(
+        `SELECT id, user_id, action, ip, ua, detail, created_at
+           FROM audit_logs
+          WHERE action IN ('auth.login_failed','tenant.login_failed','auth.login_locked')
+          ORDER BY created_at DESC LIMIT $1`,
+        [limit]
+      ),
+      pool.query(
+        `SELECT principal, kind, fail_count, locked_until, last_fail_at
+           FROM login_lockouts
+          WHERE locked_until IS NOT NULL AND locked_until > NOW()
+          ORDER BY locked_until DESC LIMIT 50`
+      ),
+    ]);
+    res.json({ ok: true, failed: failed.rows, lockouts: locked.rows });
+  } catch (err) {
+    console.error('security events error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// === v2: Access devices (B2) — manage hardware Bearer tokens ===============
+app.get('/api/admin/access-devices', requireAuth, requireRole('owner', 'manager'), async (_req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, device_id, enabled, description, last_seen, created_at
+         FROM access_devices ORDER BY created_at DESC`
+    );
+    res.json({ ok: true, devices: rows });
+  } catch (err) {
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+app.post('/api/admin/access-devices', sameOrigin, requireAuth, requireRole('owner'), async (req, res) => {
+  const deviceId = String(req.body?.deviceId || '').trim().slice(0, 64);
+  const description = String(req.body?.description || '').slice(0, 200);
+  if (!deviceId || !/^[A-Za-z0-9_.-]{2,64}$/.test(deviceId)) {
+    return res.status(400).json({ error: 'invalid device id' });
+  }
+  // Generate a 32-byte random token; return it ONCE in the response. We
+  // store only the SHA-256 hash, so a leaked DB row can't be replayed.
+  const token = _crypto.randomBytes(32).toString('hex');
+  const hash = _crypto.createHash('sha256').update(token).digest('hex');
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO access_devices (device_id, api_token_hash, description)
+       VALUES ($1,$2,$3) RETURNING id, device_id, enabled, created_at`,
+      [deviceId, hash, description || null]
+    );
+    audit(req, 'access_device.create', 'device', deviceId);
+    res.json({ ok: true, device: rows[0], token, hint: 'Save this token now — it will never be shown again.' });
+  } catch (err) {
+    if (err.code === '23505') return res.status(409).json({ error: 'device id already exists' });
+    console.error('access device create error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+app.delete('/api/admin/access-devices/:id', sameOrigin, requireAuth, requireRole('owner'), async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+  try {
+    await pool.query('DELETE FROM access_devices WHERE id=$1', [id]);
+    audit(req, 'access_device.delete', 'device', String(id));
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// === v2: Notifications log (read-only admin viewer) ========================
+app.get('/api/notifications/log', requireAuth, async (req, res) => {
+  const limit = Math.min(Number(req.query.limit) || 100, 500);
+  try {
+    const { rows } = await pool.query(
+      `SELECT * FROM notifications_log ORDER BY created_at DESC LIMIT $1`,
+      [limit]
+    );
+    res.json({ ok: true, logs: rows });
+  } catch (err) {
+    console.error('notif log error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// POST /api/client-error — best-effort sink for ErrorBoundary reports.
+// Public + lightly rate-limited so bots can't flood it.
+const _clientErrLimit = makeIpLimiter({ windowMs: 60_000, max: 30 });
+app.post('/api/client-error', _clientErrLimit, async (req, res) => {
+  const b = req.body || {};
+  const userId = req.session?.user ? req.session.user.username : null;
+  try {
+    await pool.query(
+      `INSERT INTO audit_logs (user_id, action, entity_type, detail, ip, ua)
+       VALUES ($1,'client_error','frontend',$2::jsonb,$3,$4)`,
+      [
+        userId,
+        JSON.stringify({
+          message: String(b.message || '').slice(0, 1000),
+          stack: String(b.stack || '').slice(0, 4000),
+          componentStack: String(b.componentStack || '').slice(0, 4000),
+          url: String(b.url || '').slice(0, 500),
+        }),
+        clientIp(req),
+        (req.headers['user-agent'] || '').slice(0, 400),
+      ]
+    );
+  } catch { /* ignore */ }
+  // Always 204 — never tell the client about server errors.
+  res.status(204).end();
+});
+
+// === Mount routes/ modules =================================================
+// Each module gets a context object with shared dependencies. Done here
+// (not earlier) so all helpers are defined.
+const _routesIndex = require('./routes');
+const _routesCtx = {
+  pool,
+  audit,
+  requireAuth,
+  requireRole,
+  requireDeviceOrAdmin,
+  requireTenant: (req, res, next) => requireTenant(req, res, next),
+  sameOrigin,
+  csrfGuard,
+};
+const _routesMounted = _routesIndex(app, _routesCtx);
+
+// === v2: Notification queue admin endpoints ===============================
+const notifQueue = require('./services/notificationQueue');
+
+app.get('/api/admin/notifications', requireAuth, requireRole('owner', 'manager'), async (req, res) => {
+  const status = String(req.query.status || '').slice(0, 16);
+  const params = [];
+  let where = '';
+  if (['pending', 'sent', 'failed'].includes(status)) {
+    params.push(status); where = `WHERE status = $1`;
+  }
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, channel, recipient, subject, status, retry_count,
+              next_attempt_at, sent_at, last_error, created_at
+         FROM notifications_queue ${where}
+         ORDER BY created_at DESC LIMIT 200`,
+      params
+    );
+    res.json({ ok: true, items: rows });
+  } catch (err) {
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+app.post('/api/admin/notifications/:id/retry', sameOrigin, requireAuth, requireRole('owner', 'manager'), async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+  try {
+    await notifQueue.retryById(pool, id);
+    audit(req, 'notification.retry', 'notification', String(id));
+    res.json({ ok: true });
+  } catch (err) {
     res.status(500).json({ error: 'internal error' });
   }
 });
@@ -1027,6 +3086,50 @@ app.use((req, res, next) => {
 });
 app.use(express.static(path.join(__dirname, 'project')));
 
+// Files (slips, room photos, signatures, citizen-ID images) are sensitive
+// PII. Instead of mounting uploads/ as a public static path, we proxy through
+// /files/:id with auth gating: admins see everything; tenants see only their
+// own uploads. URLs that leaked to logs/chats are still useless without auth.
+storage.ensureDir(storage.rootPath());
+app.get('/files/:id', async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id < 1) return res.status(400).end();
+  try {
+    const { rows } = await pool.query(
+      'SELECT category, filename, mime_type, uploaded_by, storage FROM file_uploads WHERE id=$1',
+      [id]
+    );
+    if (!rows.length) return res.status(404).end();
+    const f = rows[0];
+    const isAdmin = !!(req.session && req.session.user);
+    let allowed = isAdmin;
+    if (!allowed) {
+      // Tenant: allow only own uploads (uploaded_by === 'tenant:<id>')
+      const tSession = await tenantSessionLookup(req);
+      if (tSession && f.uploaded_by === `tenant:${tSession.tenant_id}`) allowed = true;
+    }
+    if (!allowed) return res.status(403).end();
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Cache-Control', 'private, max-age=300');
+    if (f.mime_type) res.setHeader('Content-Type', f.mime_type);
+    // Stream-of-bytes path supports both local disk and R2 transparently
+    // (storage.readFile picks the backend). Local: still an in-memory read,
+    // but slip/photo limits cap at ~1.5MB so this is fine.
+    if (f.storage === 's3') {
+      const buf = await storage.readFile(f);
+      if (!buf) return res.status(404).end();
+      return res.end(buf);
+    }
+    const fp = path.join(storage.rootPath(), f.category, f.filename);
+    res.sendFile(fp, (err) => {
+      if (err && !res.headersSent) res.status(404).end();
+    });
+  } catch (err) {
+    console.error('files proxy error:', err);
+    if (!res.headersSent) res.status(500).end();
+  }
+});
+
 app.get('/', (_req, res) => {
   res.sendFile(path.join(__dirname, 'project', 'Dorm Status Dashboard.html'));
 });
@@ -1051,22 +3154,45 @@ app.get('/maintenance', (_req, res) => {
   res.sendFile(path.join(__dirname, 'project', 'maintenance.html'));
 });
 
+app.get('/tenant', (_req, res) => {
+  res.sendFile(path.join(__dirname, 'project', 'tenant.html'));
+});
+
+// Final Express error handler — captures unhandled route errors so they
+// reach Sentry (when enabled) instead of disappearing into the server log.
+app.use((err, req, res, _next) => {
+  console.error(`[${req.id || '-'}] unhandled:`, sanitizeError(err));
+  sentry.captureException(err, { reqId: req.id, path: req.path });
+  if (res.headersSent) return;
+  res.status(500).json({ error: 'internal error' });
+});
+
 // --- Boot -----------------------------------------------------------------
-// Background job: prune audit_logs older than 180 days. Runs hourly so the
-// table stays bounded; deletion is a fast index range scan.
+// Background job: prune time-bounded tables hourly. Each retention window
+// is independent so we can age out audit aggressively while keeping
+// notifications shorter.
 let _prunerInterval = null;
 function startAuditPruner() {
   const prune = async () => {
-    try {
-      const r = await pool.query(
-        `DELETE FROM audit_logs WHERE created_at < NOW() - INTERVAL '180 days'`
-      );
-      if (r.rowCount) console.log(`[audit] pruned ${r.rowCount} old rows`);
-    } catch (err) {
-      console.error('[audit] prune failed:', sanitizeError(err));
+    const stats = {};
+    const tasks = [
+      ['audit_logs',         `DELETE FROM audit_logs WHERE created_at < NOW() - INTERVAL '180 days'`],
+      ['tenant_sessions',    `DELETE FROM tenant_sessions WHERE expire < NOW()`],
+      ['notifications_log',  `DELETE FROM notifications_log WHERE created_at < NOW() - INTERVAL '90 days'`],
+      ['notifications_queue',`DELETE FROM notifications_queue WHERE status='sent' AND sent_at < NOW() - INTERVAL '14 days'`],
+      ['access_logs',        `DELETE FROM access_logs WHERE occurred_at < NOW() - INTERVAL '180 days'`],
+      ['login_lockouts',     `DELETE FROM login_lockouts WHERE last_fail_at < NOW() - INTERVAL '30 days' AND (locked_until IS NULL OR locked_until < NOW())`],
+    ];
+    for (const [name, sql] of tasks) {
+      try {
+        const r = await pool.query(sql);
+        if (r.rowCount) stats[name] = r.rowCount;
+      } catch (err) {
+        console.error(`[prune] ${name} failed:`, sanitizeError(err));
+      }
     }
+    if (Object.keys(stats).length) console.log('[prune]', stats);
   };
-  // Run once immediately so a flapping deploy still gets cleanup, then hourly.
   prune();
   _prunerInterval = setInterval(prune, 60 * 60 * 1000);
   _prunerInterval.unref();
@@ -1077,15 +3203,55 @@ function stopAuditPruner() {
 }
 
 migrate()
-  .then(() => {
+  .then(async () => {
+    // Run per-router bootstrap blocks (rooms_v2 table, etc).
+    if (_routesMounted && Array.isArray(_routesMounted.bootstraps)) {
+      for (const fn of _routesMounted.bootstraps) {
+        try { await fn(); }
+        catch (err) { console.error('[boot] router bootstrap failed:', err.message); }
+      }
+    }
+    // Load secrets BEFORE Sentry init / scheduler start so any consumer
+    // that reads via secrets.get() sees DB-backed values from boot 0.
+    try { await require('./services/secrets').preload(pool); }
+    catch (err) { console.warn('[boot] secrets preload skipped:', err.message); }
+
+    // A6 — sanity check critical security secrets at boot. These never
+    // crash startup; they just print a loud warning so operators see the
+    // gap in Railway logs before the first real request needs them.
+    {
+      const sec = require('./services/secrets');
+      if (sec.get('LINE_CHANNEL_ACCESS_TOKEN') && !sec.get('LINE_CHANNEL_SECRET')) {
+        console.warn(
+          '[boot] WARNING: LINE_CHANNEL_ACCESS_TOKEN is set but LINE_CHANNEL_SECRET is not. ' +
+          'Webhook signature verification will reject every request — set the secret in /admin#secrets.'
+        );
+      }
+      if (NODE_ENV === 'production' && !process.env.CITIZEN_ID_KEY && !process.env.ENCRYPTION_KEY_V1) {
+        console.warn(
+          '[boot] WARNING: no CITIZEN_ID_KEY / ENCRYPTION_KEY_V1 set — citizen-id encryption ' +
+          'falls back to HKDF(SESSION_SECRET). Rotate to a dedicated key in production.'
+        );
+      }
+    }
+    // Optional Sentry init — no-op if errorTracking flag is off.
+    try {
+      const flags = await features.load(pool);
+      sentry.init(flags);
+    } catch (err) {
+      console.warn('[boot] features load failed:', err.message);
+    }
     const server = app.listen(PORT, '0.0.0.0', () => {
       console.log(`[server] listening on ${PORT} (NODE_ENV=${NODE_ENV})`);
-      console.log(`[server] tenant:  /`);
+      console.log(`[server] tenant public: /, /book, /maintenance`);
+      console.log(`[server] tenant portal: /tenant`);
       console.log(`[server] admin:   /admin`);
       console.log(`[server] login:   /login`);
       console.log(`[server] health:  /health`);
     });
     startAuditPruner();
+    scheduler.start(pool);
+    notifQueue.start(pool, () => features.load(pool));
 
     // Graceful shutdown: drain in-flight requests before closing the DB pool
     // so Railway restarts don't kill mid-request work.
@@ -1093,6 +3259,8 @@ migrate()
       console.log(`[server] ${signal} received, shutting down gracefully`);
       // Cancel the background pruner so its DELETE doesn't race with pool.end()
       stopAuditPruner();
+      scheduler.stop();
+      notifQueue.stop();
       server.close(() => {
         pool.end(() => {
           console.log('[server] closed cleanly');

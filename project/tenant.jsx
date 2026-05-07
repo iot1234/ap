@@ -1,0 +1,729 @@
+// === project/tenant.jsx ====================================================
+// Tenant portal SPA. Logs in with phone + 6-digit PIN, then shows:
+//   - Dashboard (current room, latest bill, ticket count)
+//   - Bills (list + detail + slip upload)
+//   - Maintenance (submit + own ticket history)
+//   - Profile (locale, dark mode toggle)
+//
+// Gated by features.tenantPortal — when off, the login API returns 503.
+// ===========================================================================
+
+const { useState, useEffect, useMemo, useRef } = React;
+
+// ------------------------------------------------------------------ i18n ---
+const TR = {
+  th: {
+    portal: 'พอร์ทัลผู้เช่า', login: 'เข้าสู่ระบบ', phone: 'เบอร์โทรศัพท์',
+    pin: 'รหัส PIN', signIn: 'เข้าสู่ระบบ', logOut: 'ออกจากระบบ',
+    bills: 'บิล', maintenance: 'แจ้งซ่อม', profile: 'โปรไฟล์',
+    home: 'หน้าหลัก', welcome: 'สวัสดี', noBills: 'ยังไม่มีบิล',
+    bill: 'บิล', period: 'รอบบิล', total: 'ยอดรวม', dueDate: 'กำหนดชำระ',
+    status: 'สถานะ', uploadSlip: 'อัปโหลดสลิป', viewBill: 'ดูบิล',
+    submitTicket: 'แจ้งซ่อม', myTickets: 'ประวัติแจ้งซ่อม',
+    title: 'หัวข้อ', description: 'รายละเอียด', category: 'หมวดหมู่',
+    priority: 'ระดับความเร่งด่วน', submit: 'ส่ง',
+    pending: 'รอดำเนินการ', paid: 'ชำระแล้ว', overdue: 'ค้างชำระ',
+    void: 'ยกเลิก', open: 'เปิด', completed: 'เสร็จสิ้น', in_progress: 'กำลังดำเนินการ',
+    assigned: 'มอบหมายแล้ว', awaiting_parts: 'รออะไหล่', cancelled: 'ยกเลิก',
+    darkMode: 'โหมดมืด', language: 'ภาษา',
+    portalDisabled: 'พอร์ทัลผู้เช่ายังปิดอยู่ — กรุณาติดต่อเจ้าหน้าที่',
+    invalidLogin: 'เบอร์หรือ PIN ไม่ถูกต้อง',
+    chooseFile: 'เลือกไฟล์สลิป', amount: 'จำนวนเงิน', uploadOk: 'อัปโหลดสลิปสำเร็จ',
+    nothingHere: 'ไม่มีรายการ', loading: 'กำลังโหลด…', save: 'บันทึก',
+  },
+  en: {
+    portal: 'Tenant Portal', login: 'Sign in', phone: 'Phone number',
+    pin: 'PIN', signIn: 'Sign in', logOut: 'Log out',
+    bills: 'Bills', maintenance: 'Maintenance', profile: 'Profile',
+    home: 'Home', welcome: 'Hello', noBills: 'No bills yet',
+    bill: 'Bill', period: 'Period', total: 'Total', dueDate: 'Due date',
+    status: 'Status', uploadSlip: 'Upload slip', viewBill: 'View bill',
+    submitTicket: 'Submit ticket', myTickets: 'My tickets',
+    title: 'Title', description: 'Description', category: 'Category',
+    priority: 'Priority', submit: 'Submit',
+    pending: 'pending', paid: 'paid', overdue: 'overdue',
+    void: 'void', open: 'open', completed: 'completed', in_progress: 'in progress',
+    assigned: 'assigned', awaiting_parts: 'awaiting parts', cancelled: 'cancelled',
+    darkMode: 'Dark mode', language: 'Language',
+    portalDisabled: 'Tenant portal is currently disabled — please contact admin',
+    invalidLogin: 'Invalid phone or PIN',
+    chooseFile: 'Choose slip image', amount: 'Amount', uploadOk: 'Slip uploaded',
+    nothingHere: 'Nothing here', loading: 'Loading…', save: 'Save',
+  },
+};
+function tr(locale, k) { return (TR[locale] || TR.th)[k] || k; }
+
+// --------------------------------------------------------- helpers / api ---
+// CSRF: tenant routes that go through csrfGuard need X-CSRF-Token. We
+// fetch it once and reuse — the cookie+token pair is bound to the session.
+let _csrf = null;
+async function getCsrf() {
+  if (_csrf) return _csrf;
+  try {
+    const r = await fetch('/api/csrf-token', { credentials: 'same-origin' });
+    const j = await r.json();
+    _csrf = j.csrfToken;
+    return _csrf;
+  } catch { return null; }
+}
+async function api(path, opts = {}) {
+  const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
+  const method = (opts.method || 'GET').toUpperCase();
+  if (method !== 'GET' && method !== 'HEAD') {
+    const t = await getCsrf();
+    if (t) headers['X-CSRF-Token'] = t;
+  }
+  const r = await fetch(path, { credentials: 'same-origin', ...opts, headers });
+  let data = null;
+  try { data = await r.json(); } catch { /* ignore */ }
+  if (!r.ok) {
+    const err = new Error((data && data.error) || `HTTP ${r.status}`);
+    err.status = r.status; err.data = data;
+    throw err;
+  }
+  return data;
+}
+
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = reject;
+    r.readAsDataURL(file);
+  });
+}
+
+function fmtCurrency(n) {
+  return Number(n || 0).toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+const STATUS_COLOR = {
+  pending: '#c08a2a', overdue: '#b94a48', paid: '#2f8f5b', void: '#8a7d6b',
+  open: '#c08a2a', assigned: '#3a7bba', in_progress: '#3a7bba',
+  awaiting_parts: '#c08a2a', completed: '#2f8f5b', cancelled: '#8a7d6b',
+};
+
+// ------------------------------------------------------------- views ------
+
+function FirstTimePinSetup({ locale, onCancel, onDone }) {
+  const t = (k) => tr(locale, k);
+  const [phone, setPhone] = useState('');
+  const [tail, setTail] = useState('');
+  const [newPin, setNewPin] = useState('');
+  const [confirm, setConfirm] = useState('');
+  const [msg, setMsg] = useState('');
+  const [busy, setBusy] = useState(false);
+  async function submit(e) {
+    e.preventDefault();
+    setMsg('');
+    if (newPin !== confirm) { setMsg('PIN ใหม่ไม่ตรงกัน'); return; }
+    if (!/^\d{4,8}$/.test(newPin)) { setMsg('PIN ต้องเป็นตัวเลข 4-8 หลัก'); return; }
+    if (!/^\d{4}$/.test(tail)) { setMsg('ใส่เลขบัตรประชาชน 4 ตัวท้าย'); return; }
+    setBusy(true);
+    try {
+      await api('/api/tenants/_tenant/pin/init', {
+        method: 'POST',
+        body: JSON.stringify({ phone, citizenIdTail: tail, newPin }),
+      });
+      setMsg('✅ ตั้ง PIN สำเร็จ — กรุณา login');
+      setTimeout(onDone, 1200);
+    } catch (e2) {
+      setMsg('❌ ' + (e2.message || 'ข้อมูลไม่ตรงกัน'));
+    } finally { setBusy(false); }
+  }
+  return (
+    <form onSubmit={submit}>
+      <h1 style={{ margin: 0, fontFamily: 'Sora', fontWeight: 600, fontSize: 20 }}>ตั้ง PIN ครั้งแรก</h1>
+      <p style={{ color: 'var(--muted)', fontSize: 13, marginBottom: 18 }}>
+        ใช้เบอร์โทร + 4 ตัวท้ายของเลขบัตรประชาชน (จากที่ลงทะเบียนไว้)
+      </p>
+      <label style={lbl}>{t('phone')}</label>
+      <input type="tel" maxLength={32} value={phone}
+        onChange={(e) => setPhone(e.target.value)} required style={inp} />
+      <label style={lbl}>4 ตัวท้ายเลขบัตรประชาชน</label>
+      <input inputMode="numeric" pattern="[0-9]*" maxLength={4} value={tail}
+        onChange={(e) => setTail(e.target.value)} required style={inp} />
+      <label style={lbl}>PIN ใหม่</label>
+      <input type="password" inputMode="numeric" pattern="[0-9]*" maxLength={8}
+        value={newPin} onChange={(e) => setNewPin(e.target.value)} required style={inp} />
+      <label style={lbl}>ยืนยัน PIN</label>
+      <input type="password" inputMode="numeric" pattern="[0-9]*" maxLength={8}
+        value={confirm} onChange={(e) => setConfirm(e.target.value)} required style={inp} />
+      {msg ? <div style={{ marginTop: 8, fontSize: 13, color: msg.startsWith('✅') ? 'var(--green)' : 'var(--red)' }}>{msg}</div> : null}
+      <button type="submit" disabled={busy} style={btnPrimary}>{busy ? '…' : 'ตั้ง PIN'}</button>
+      <button type="button" onClick={onCancel} style={btnLink}>ย้อนกลับ</button>
+    </form>
+  );
+}
+
+function LoginView({ locale, setLocale, onLoggedIn, portalEnabled }) {
+  const [phone, setPhone] = useState('');
+  const [pin, setPin] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const [showInit, setShowInit] = useState(false);
+  const t = (k) => tr(locale, k);
+
+  async function submit(e) {
+    e.preventDefault();
+    setErr(''); setBusy(true);
+    try {
+      const out = await api('/api/tenant/login', {
+        method: 'POST', body: JSON.stringify({ phone, pin }),
+      });
+      onLoggedIn(out.tenant);
+    } catch (e2) {
+      setErr(e2.status === 503 ? t('portalDisabled') : t('invalidLogin'));
+    } finally { setBusy(false); }
+  }
+
+  if (showInit) {
+    return (
+      <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', padding: 16 }}>
+        <div style={{
+          background: 'var(--card)', color: 'var(--ink)', borderRadius: 16,
+          padding: '36px 28px', width: '100%', maxWidth: 380,
+          boxShadow: '0 20px 60px -20px rgba(0,0,0,0.25)',
+        }}>
+          <FirstTimePinSetup locale={locale}
+            onCancel={() => setShowInit(false)}
+            onDone={() => setShowInit(false)} />
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', padding: 16 }}>
+      <form onSubmit={submit} style={{
+        background: 'var(--card)', color: 'var(--ink)', borderRadius: 16,
+        padding: '36px 28px', width: '100%', maxWidth: 380,
+        boxShadow: '0 20px 60px -20px rgba(0,0,0,0.25)',
+      }}>
+        <div style={{
+          width: 56, height: 56, borderRadius: 14, marginBottom: 16,
+          background: 'linear-gradient(135deg,#c46a3e,#a4542d)', color: '#fff',
+          display: 'grid', placeItems: 'center', fontWeight: 700, fontSize: 24,
+        }}>บก</div>
+        <h1 style={{ margin: 0, fontFamily: 'Sora', fontWeight: 600, fontSize: 22 }}>{t('portal')}</h1>
+        <p style={{ color: 'var(--muted)', fontSize: 13, marginBottom: 22 }}>
+          {portalEnabled === false ? t('portalDisabled') : 'บ้านกาญจน์ เรสซิเดนซ์'}
+        </p>
+        <fieldset disabled={portalEnabled === false || busy} style={{ border: 0, padding: 0, margin: 0 }}>
+          <label style={lbl}>{t('phone')}</label>
+          <input value={phone} onChange={(e) => setPhone(e.target.value)} required
+            type="tel" maxLength={32} style={inp} placeholder="081-234-5678" />
+          <label style={lbl}>{t('pin')}</label>
+          <input value={pin} onChange={(e) => setPin(e.target.value)} required
+            type="password" inputMode="numeric" pattern="[0-9]*" maxLength={8} style={inp}
+            placeholder="•••••" />
+          {err ? <div style={{ color: 'var(--red)', fontSize: 13, marginTop: 8 }}>{err}</div> : null}
+          <button type="submit" style={btnPrimary}>{busy ? '…' : t('signIn')}</button>
+          <button type="button" onClick={() => setShowInit(true)}
+            style={{ ...btnLink, marginTop: 12 }}>
+            ครั้งแรก? ตั้ง PIN ใหม่
+          </button>
+        </fieldset>
+        <div style={{ marginTop: 18, display: 'flex', justifyContent: 'space-between', fontSize: 12.5 }}>
+          <a href="/" style={{ color: 'var(--muted)' }}>← กลับหน้าหลัก</a>
+          <select value={locale} onChange={(e) => setLocale(e.target.value)}
+            style={{ background: 'transparent', color: 'var(--muted)', border: 0 }}>
+            <option value="th">ไทย</option>
+            <option value="en">English</option>
+          </select>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function Tab({ id, page, setPage, children }) {
+  const active = page === id;
+  return (
+    <button onClick={() => setPage(id)} style={{
+      flex: 1, padding: '14px 8px', border: 0, background: 'transparent',
+      color: active ? 'var(--accent)' : 'var(--muted)',
+      borderTop: active ? '2px solid var(--accent)' : '2px solid transparent',
+      fontSize: 13, fontWeight: 500, cursor: 'pointer',
+      fontFamily: 'inherit',
+    }}>{children}</button>
+  );
+}
+
+function HomeView({ tenant, locale, bills, tickets }) {
+  const t = (k) => tr(locale, k);
+  const latestBill = bills.find((b) => b.status === 'pending' || b.status === 'overdue');
+  const openTickets = tickets.filter((x) => !['completed', 'cancelled'].includes(x.status)).length;
+  return (
+    <div style={{ padding: 20 }}>
+      <h2 style={h2}>{t('welcome')}, {tenant.fullName}</h2>
+      {tenant.roomId ? <p style={{ color: 'var(--muted)', margin: '4px 0 16px' }}>ห้อง {tenant.roomId}</p> : null}
+      <div style={cardGrid}>
+        <Stat label={t('bills')} value={bills.filter((b) => b.status !== 'paid' && b.status !== 'void').length} />
+        <Stat label={t('maintenance')} value={openTickets} />
+        <Stat label="รวมที่ค้าง"
+          value={`฿${fmtCurrency(bills.filter((b) => ['pending', 'overdue'].includes(b.status)).reduce((s, x) => s + Number(x.total || 0), 0))}`} />
+      </div>
+      {latestBill ? (
+        <div style={{ ...card, marginTop: 16 }}>
+          <div style={{ color: 'var(--muted)', fontSize: 12 }}>{t('bill')} {latestBill.bill_no}</div>
+          <div style={{ fontFamily: 'Sora', fontSize: 22, fontWeight: 600, marginTop: 4 }}>฿{fmtCurrency(latestBill.total)}</div>
+          <div style={{ color: 'var(--muted)', fontSize: 13, marginTop: 6 }}>
+            {t('dueDate')}: {latestBill.due_date} · <Pill color={STATUS_COLOR[latestBill.status]}>{t(latestBill.status)}</Pill>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function Stat({ label, value }) {
+  return (
+    <div style={card}>
+      <div style={{ color: 'var(--muted)', fontSize: 12 }}>{label}</div>
+      <div style={{ fontFamily: 'Sora', fontWeight: 600, fontSize: 22, marginTop: 4 }}>{value}</div>
+    </div>
+  );
+}
+
+function Pill({ children, color }) {
+  return (
+    <span style={{
+      display: 'inline-block', padding: '2px 8px', borderRadius: 999,
+      fontSize: 11.5, fontWeight: 500, background: (color || '#888') + '22',
+      color: color || 'var(--muted)',
+    }}>{children}</span>
+  );
+}
+
+function BillsView({ locale, bills, refresh, slipFeature }) {
+  const t = (k) => tr(locale, k);
+  const [openId, setOpenId] = useState(null);
+  const open = bills.find((b) => b.id === openId);
+  return (
+    <div style={{ padding: 20 }}>
+      <h2 style={h2}>{t('bills')}</h2>
+      {bills.length === 0 ? <p style={{ color: 'var(--muted)' }}>{t('noBills')}</p> : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {bills.map((b) => (
+            <div key={b.id} style={{ ...card, cursor: 'pointer' }} onClick={() => setOpenId(b.id)}>
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <div>
+                  <div style={{ fontFamily: 'Sora', fontWeight: 600 }}>{b.bill_no}</div>
+                  <div style={{ color: 'var(--muted)', fontSize: 12.5 }}>{t('period')} {b.period} · {t('dueDate')} {b.due_date}</div>
+                </div>
+                <div style={{ textAlign: 'right' }}>
+                  <div style={{ fontFamily: 'Sora', fontWeight: 600 }}>฿{fmtCurrency(b.total)}</div>
+                  <Pill color={STATUS_COLOR[b.status]}>{t(b.status)}</Pill>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      {open ? <BillDetail bill={open} locale={locale} onClose={() => setOpenId(null)}
+        slipFeature={slipFeature} refresh={refresh} /> : null}
+    </div>
+  );
+}
+
+function BillDetail({ bill, locale, onClose, slipFeature, refresh }) {
+  const t = (k) => tr(locale, k);
+  const [amount, setAmount] = useState(String(bill.total));
+  const [file, setFile] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState('');
+  async function upload() {
+    if (!file) { setMsg(t('chooseFile')); return; }
+    setBusy(true); setMsg('');
+    try {
+      const dataUrl = await fileToDataUrl(file);
+      await api('/api/tenant/payments', {
+        method: 'POST',
+        body: JSON.stringify({ billId: bill.id, amount: Number(amount), slip: dataUrl }),
+      });
+      setMsg(t('uploadOk'));
+      setTimeout(() => { onClose(); refresh(); }, 800);
+    } catch (e) {
+      setMsg(e.message || 'error');
+    } finally { setBusy(false); }
+  }
+  return (
+    <div style={modalBg} onClick={onClose}>
+      <div style={modal} onClick={(e) => e.stopPropagation()}>
+        <h3 style={{ margin: 0, fontFamily: 'Sora', fontWeight: 600 }}>{bill.bill_no}</h3>
+        <p style={{ color: 'var(--muted)', fontSize: 13 }}>{t('period')} {bill.period}</p>
+        <div style={{ ...card, marginTop: 12 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 14, padding: '4px 0' }}>
+            <span>{t('total')}</span><strong>฿{fmtCurrency(bill.total)}</strong>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 14, padding: '4px 0' }}>
+            <span>{t('dueDate')}</span><span>{bill.due_date}</span>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 14, padding: '4px 0' }}>
+            <span>{t('status')}</span><Pill color={STATUS_COLOR[bill.status]}>{t(bill.status)}</Pill>
+          </div>
+        </div>
+        {bill.status !== 'paid' && bill.status !== 'void' && slipFeature?.enabled ? (
+          <div style={{ marginTop: 16 }}>
+            <label style={lbl}>{t('amount')}</label>
+            <input value={amount} onChange={(e) => setAmount(e.target.value)}
+              type="number" step="0.01" style={inp} />
+            {Number(amount) !== Number(bill.total) ? (
+              <div style={{ marginTop: 4, color: 'var(--red)', fontSize: 12.5 }}>
+                ⚠ จำนวนไม่ตรงยอดบิล (฿{fmtCurrency(bill.total)})
+              </div>
+            ) : null}
+            <label style={lbl}>{t('chooseFile')}</label>
+            <input type="file" accept="image/jpeg,image/png,image/webp" onChange={(e) => setFile(e.target.files[0])} style={{ marginBottom: 12 }} />
+            <button onClick={upload} disabled={busy} style={btnPrimary}>{busy ? '…' : t('uploadSlip')}</button>
+            {msg ? <div style={{ marginTop: 8, color: 'var(--muted)', fontSize: 13 }}>{msg}</div> : null}
+          </div>
+        ) : null}
+        <button onClick={onClose} style={btnLink}>ปิด</button>
+      </div>
+    </div>
+  );
+}
+
+function MaintenanceView({ locale, tenant, tickets, refresh }) {
+  const t = (k) => tr(locale, k);
+  const [showForm, setShowForm] = useState(false);
+  const [form, setForm] = useState({ category: 'electrical', priority: 'medium', title: '', description: '' });
+  const [busy, setBusy] = useState(false);
+  async function submit(e) {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      await api('/api/maintenance', {
+        method: 'POST',
+        body: JSON.stringify({
+          roomId: tenant.roomId, tenantName: tenant.fullName, tenantPhone: tenant.phone,
+          category: form.category, priority: form.priority, title: form.title, description: form.description,
+        }),
+      });
+      setShowForm(false);
+      setForm({ category: 'electrical', priority: 'medium', title: '', description: '' });
+      refresh();
+    } catch (e2) { alert(e2.message); }
+    finally { setBusy(false); }
+  }
+  return (
+    <div style={{ padding: 20 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <h2 style={{ ...h2, marginBottom: 0 }}>{t('maintenance')}</h2>
+        <button onClick={() => setShowForm(true)} style={btnPrimarySmall}>+ {t('submitTicket')}</button>
+      </div>
+      <p style={{ color: 'var(--muted)', fontSize: 13, marginTop: 4 }}>{t('myTickets')} ({tickets.length})</p>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {tickets.map((x) => (
+          <div key={x.id} style={card}>
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <div>
+                <div style={{ fontWeight: 600 }}>{x.title}</div>
+                <div style={{ color: 'var(--muted)', fontSize: 12 }}>{x.ticket_no} · {x.category}</div>
+              </div>
+              <Pill color={STATUS_COLOR[x.status]}>{t(x.status)}</Pill>
+            </div>
+            {x.status === 'completed' && x.rating == null ? (
+              <RateTicket ticketId={x.id} onDone={refresh} />
+            ) : null}
+            {x.rating != null ? (
+              <div style={{ marginTop: 8, fontSize: 13, color: 'var(--muted)' }}>
+                ⭐ {x.rating}/5{x.rating_comment ? ` · "${x.rating_comment}"` : ''}
+              </div>
+            ) : null}
+          </div>
+        ))}
+        {tickets.length === 0 ? <p style={{ color: 'var(--muted)' }}>{t('nothingHere')}</p> : null}
+      </div>
+      {showForm ? (
+        <div style={modalBg} onClick={() => setShowForm(false)}>
+          <form style={modal} onClick={(e) => e.stopPropagation()} onSubmit={submit}>
+            <h3 style={{ margin: 0, fontFamily: 'Sora' }}>{t('submitTicket')}</h3>
+            <label style={lbl}>{t('category')}</label>
+            <select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} style={inp}>
+              {['electrical', 'plumbing', 'aircon', 'furniture', 'appliance', 'door_lock', 'wifi', 'other']
+                .map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
+            <label style={lbl}>{t('priority')}</label>
+            <select value={form.priority} onChange={(e) => setForm({ ...form, priority: e.target.value })} style={inp}>
+              {['critical', 'high', 'medium', 'low'].map((p) => <option key={p} value={p}>{p}</option>)}
+            </select>
+            <label style={lbl}>{t('title')}</label>
+            <input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} required style={inp} />
+            <label style={lbl}>{t('description')}</label>
+            <textarea value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })}
+              rows={4} style={{ ...inp, resize: 'vertical' }} />
+            <button type="submit" disabled={busy} style={btnPrimary}>{busy ? '…' : t('submit')}</button>
+            <button type="button" onClick={() => setShowForm(false)} style={btnLink}>ยกเลิก</button>
+          </form>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function RateTicket({ ticketId, onDone }) {
+  const [stars, setStars] = useState(0);
+  const [comment, setComment] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  async function submit() {
+    if (!stars) { setErr('โปรดเลือกดาว 1-5'); return; }
+    setBusy(true); setErr('');
+    try {
+      await api(`/api/tenant/maintenance/${ticketId}/rate`, {
+        method: 'POST',
+        body: JSON.stringify({ rating: stars, comment: comment.trim() || undefined }),
+      });
+      onDone && onDone();
+    } catch (e) {
+      setErr(e.message || 'failed');
+    } finally { setBusy(false); }
+  }
+  return (
+    <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--border)' }}>
+      <div style={{ fontSize: 13, color: 'var(--ink2)', marginBottom: 4 }}>ให้คะแนนการซ่อม</div>
+      <div style={{ display: 'flex', gap: 4, marginBottom: 6 }}>
+        {[1, 2, 3, 4, 5].map((n) => (
+          <button key={n} type="button" onClick={() => setStars(n)}
+            style={{ background: 'transparent', border: 0, fontSize: 22, cursor: 'pointer',
+              color: n <= stars ? '#f1b32d' : 'var(--border)', padding: 0 }}>
+            ★
+          </button>
+        ))}
+      </div>
+      <input value={comment} onChange={(e) => setComment(e.target.value)}
+        placeholder="ความคิดเห็น (ไม่บังคับ)" maxLength={500} style={inp} />
+      {err ? <div style={{ color: 'var(--red)', fontSize: 12 }}>{err}</div> : null}
+      <button onClick={submit} disabled={busy} style={{ ...btnPrimarySmall, marginTop: 6 }}>
+        {busy ? '…' : 'ส่งคะแนน'}
+      </button>
+    </div>
+  );
+}
+
+function ChangePinForm({ locale }) {
+  const t = (k) => tr(locale, k);
+  const [oldPin, setOldPin] = useState('');
+  const [newPin, setNewPin] = useState('');
+  const [confirm, setConfirm] = useState('');
+  const [msg, setMsg] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [open, setOpen] = useState(false);
+
+  async function submit(e) {
+    e.preventDefault();
+    setMsg('');
+    if (newPin !== confirm) { setMsg('PIN ใหม่ไม่ตรงกัน'); return; }
+    if (!/^\d{4,8}$/.test(newPin)) { setMsg('PIN ต้องเป็นตัวเลข 4-8 หลัก'); return; }
+    setBusy(true);
+    try {
+      await api('/api/tenants/_tenant/pin/change', {
+        method: 'POST',
+        body: JSON.stringify({ oldPin, newPin }),
+      });
+      setMsg('✅ เปลี่ยน PIN สำเร็จ');
+      setOldPin(''); setNewPin(''); setConfirm('');
+      setTimeout(() => { setOpen(false); setMsg(''); }, 1500);
+    } catch (e2) {
+      setMsg('❌ ' + (e2.message || 'failed'));
+    } finally { setBusy(false); }
+  }
+
+  if (!open) {
+    return (
+      <button onClick={() => setOpen(true)} style={btnLink}>เปลี่ยน PIN</button>
+    );
+  }
+  return (
+    <form onSubmit={submit} style={{ marginTop: 8 }}>
+      <input type="password" inputMode="numeric" pattern="[0-9]*"
+        placeholder="PIN เดิม" maxLength={8} value={oldPin}
+        onChange={(e) => setOldPin(e.target.value)} required style={inp} />
+      <input type="password" inputMode="numeric" pattern="[0-9]*"
+        placeholder="PIN ใหม่ (4-8 หลัก)" maxLength={8} value={newPin}
+        onChange={(e) => setNewPin(e.target.value)} required style={inp} />
+      <input type="password" inputMode="numeric" pattern="[0-9]*"
+        placeholder="ยืนยัน PIN ใหม่" maxLength={8} value={confirm}
+        onChange={(e) => setConfirm(e.target.value)} required style={inp} />
+      {msg ? <div style={{ marginTop: 6, fontSize: 13, color: msg.startsWith('✅') ? 'var(--green)' : 'var(--red)' }}>{msg}</div> : null}
+      <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+        <button type="submit" disabled={busy} style={{ ...btnPrimary, marginTop: 0, flex: 1 }}>{busy ? '…' : 'บันทึก'}</button>
+        <button type="button" onClick={() => { setOpen(false); setMsg(''); }} style={btnLink}>ยกเลิก</button>
+      </div>
+    </form>
+  );
+}
+
+function ProfileView({ tenant, locale, setLocale, theme, setTheme, onLogout, features }) {
+  const t = (k) => tr(locale, k);
+  return (
+    <div style={{ padding: 20 }}>
+      <h2 style={h2}>{t('profile')}</h2>
+      <div style={card}>
+        <div style={{ fontFamily: 'Sora', fontWeight: 600, fontSize: 18 }}>{tenant.fullName}</div>
+        <div style={{ color: 'var(--muted)', fontSize: 13 }}>{tenant.phone}</div>
+        {tenant.email ? <div style={{ color: 'var(--muted)', fontSize: 13 }}>{tenant.email}</div> : null}
+        {tenant.roomId ? <div style={{ marginTop: 6 }}>ห้อง {tenant.roomId}</div> : null}
+        <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--border)' }}>
+          <div style={{ fontSize: 13, color: 'var(--ink2)', marginBottom: 4 }}>🔐 PIN</div>
+          <ChangePinForm locale={locale} />
+        </div>
+      </div>
+      <div style={{ ...card, marginTop: 12 }}>
+        {features?.i18n?.enabled ? (
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+            <span>{t('language')}</span>
+            <select value={locale} onChange={(e) => setLocale(e.target.value)} style={{ ...inp, width: 'auto', margin: 0 }}>
+              <option value="th">ไทย</option>
+              <option value="en">English</option>
+            </select>
+          </div>
+        ) : null}
+        {features?.darkMode?.enabled ? (
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span>{t('darkMode')}</span>
+            <button onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} style={btnLink}>
+              {theme === 'dark' ? '🌙 ON' : '☀️ OFF'}
+            </button>
+          </div>
+        ) : null}
+      </div>
+      <button onClick={onLogout} style={{ ...btnPrimary, background: 'transparent', color: 'var(--accent)', border: '1px solid var(--accent)', marginTop: 12 }}>
+        {t('logOut')}
+      </button>
+    </div>
+  );
+}
+
+// --------------------------------------------------------- styles --------
+const lbl = { display: 'block', fontSize: 12.5, fontWeight: 500, color: 'var(--ink2)', margin: '12px 0 6px' };
+const inp = {
+  width: '100%', padding: '11px 14px', borderRadius: 10, border: '1px solid var(--border)',
+  background: 'var(--bg)', color: 'var(--ink)', fontSize: 14.5, fontFamily: 'inherit',
+  marginBottom: 4,
+};
+const btnPrimary = {
+  width: '100%', padding: '12px 14px', marginTop: 16, borderRadius: 10,
+  border: 0, background: 'var(--accent)', color: '#fff', fontWeight: 600, fontSize: 14,
+  cursor: 'pointer', fontFamily: 'inherit',
+};
+const btnPrimarySmall = { ...btnPrimary, width: 'auto', marginTop: 0, padding: '8px 14px', fontSize: 13 };
+const btnLink = {
+  display: 'block', width: '100%', marginTop: 8, background: 'transparent',
+  border: 0, color: 'var(--muted)', cursor: 'pointer', padding: 6, fontFamily: 'inherit', fontSize: 13,
+};
+const card = {
+  background: 'var(--card)', border: '1px solid var(--border)',
+  borderRadius: 12, padding: 16,
+};
+const cardGrid = { display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(110px,1fr))', gap: 10 };
+const h2 = { fontFamily: 'Sora', fontSize: 22, fontWeight: 600, margin: '0 0 12px' };
+const modalBg = {
+  position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)',
+  display: 'grid', placeItems: 'center', zIndex: 100, padding: 16,
+};
+const modal = {
+  background: 'var(--card)', color: 'var(--ink)', borderRadius: 16,
+  padding: 24, width: '100%', maxWidth: 420,
+};
+
+// --------------------------------------------------------- App ----------
+function App() {
+  const [tenant, setTenant] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [features, setFeatures] = useState(null);
+  // B7 — whitelist values read from localStorage. Without this an attacker
+  // who controls localStorage (XSS or shared device) could inject arbitrary
+  // strings — most paths sanitise downstream but defense in depth is cheap.
+  const ALLOWED_LOCALES = ['th', 'en'];
+  const ALLOWED_THEMES = ['light', 'dark'];
+  const _initLocale = localStorage.getItem('tenant_locale');
+  const _initTheme = localStorage.getItem('tenant_theme');
+  const [locale, setLocaleRaw] = useState(ALLOWED_LOCALES.includes(_initLocale) ? _initLocale : 'th');
+  const [theme, setThemeRaw] = useState(ALLOWED_THEMES.includes(_initTheme) ? _initTheme : 'light');
+  const [page, setPage] = useState('home');
+  const [bills, setBills] = useState([]);
+  const [tickets, setTickets] = useState([]);
+
+  const setLocale = (v) => { setLocaleRaw(v); localStorage.setItem('tenant_locale', v); };
+  const setTheme = (v) => {
+    setThemeRaw(v);
+    document.body.dataset.theme = v;
+    localStorage.setItem('tenant_theme', v);
+  };
+
+  useEffect(() => { document.body.dataset.theme = theme; }, [theme]);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const [me, f] = await Promise.all([
+          fetch('/api/tenant/me').then((r) => r.json()),
+          fetch('/api/features').then((r) => r.json()),
+        ]);
+        setFeatures(f.features || {});
+        if (me.tenant) {
+          setTenant(me.tenant);
+          if (me.tenant.locale) setLocale(me.tenant.locale);
+          await refresh(me.tenant);
+        }
+      } finally { setLoading(false); }
+    })();
+  }, []);
+
+  async function refresh(currentTenant) {
+    const t = currentTenant || tenant;
+    if (!t) return;
+    try {
+      const [billsR, ticketsR] = await Promise.all([
+        api('/api/tenant/bills').catch(() => ({ bills: [] })),
+        api('/api/tenant/maintenance').catch(() => ({ tickets: [] })),
+      ]);
+      setBills(billsR.bills || []);
+      setTickets(ticketsR.tickets || []);
+    } catch (e) { /* ignore */ }
+  }
+
+  async function onLoggedIn(t) {
+    const me = await fetch('/api/tenant/me').then((r) => r.json());
+    setTenant(me.tenant);
+    await refresh(me.tenant);
+    setPage('home');
+  }
+  async function onLogout() {
+    await fetch('/api/tenant/logout', { method: 'POST' });
+    setTenant(null); setBills([]); setTickets([]); setPage('home');
+  }
+
+  if (loading) return <div style={{ padding: 40, textAlign: 'center' }}>{tr(locale, 'loading')}</div>;
+  if (!tenant) return <LoginView locale={locale} setLocale={setLocale}
+    onLoggedIn={onLoggedIn} portalEnabled={features?.tenantPortal?.enabled !== false} />;
+
+  return (
+    <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
+      <main style={{ flex: 1, paddingBottom: 64, maxWidth: 720, margin: '0 auto', width: '100%' }}>
+        {page === 'home' && <HomeView tenant={tenant} locale={locale} bills={bills} tickets={tickets} />}
+        {page === 'bills' && <BillsView locale={locale} bills={bills}
+          refresh={() => refresh(tenant)} slipFeature={features?.slipUpload} />}
+        {page === 'maintenance' && <MaintenanceView locale={locale} tenant={tenant}
+          tickets={tickets} refresh={() => refresh(tenant)} />}
+        {page === 'profile' && <ProfileView tenant={tenant} locale={locale} setLocale={setLocale}
+          theme={theme} setTheme={setTheme} onLogout={onLogout} features={features} />}
+      </main>
+      <nav style={{
+        position: 'sticky', bottom: 0, background: 'var(--card)',
+        borderTop: '1px solid var(--border)', display: 'flex',
+      }}>
+        <Tab id="home" page={page} setPage={setPage}>{tr(locale, 'home')}</Tab>
+        <Tab id="bills" page={page} setPage={setPage}>{tr(locale, 'bills')}</Tab>
+        <Tab id="maintenance" page={page} setPage={setPage}>{tr(locale, 'maintenance')}</Tab>
+        <Tab id="profile" page={page} setPage={setPage}>{tr(locale, 'profile')}</Tab>
+      </nav>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
