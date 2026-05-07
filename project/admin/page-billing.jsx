@@ -141,10 +141,10 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
   const handleSendReminder = async (id) => {
     const b = bills.find((x) => x.id === id);
     if (!b) return;
+    const apiFetch = window.apiFetch || ((u, o) => fetch(u, { credentials: 'same-origin', ...o }));
     try {
-      const r = await fetch('/api/notify/bill', {
-        method: 'POST', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
+      const r = await apiFetch('/api/notify/bill', {
+        method: 'POST',
         body: JSON.stringify({
           tenantName: b.tenant, roomId: b.roomId,
           period: b.period, total: b.total, billNo: b.id,
@@ -338,13 +338,12 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
             <Btn variant="soft" size="sm" icon="🔔" onClick={async () => {
               const ids = [...selected];
               const targets = bills.filter((b) => ids.includes(b.id));
+              const apiFetch = window.apiFetch || ((u, o) => fetch(u, { credentials: 'same-origin', ...o }));
               let okCount = 0, failCount = 0, skip = false;
               for (const b of targets) {
                 try {
-                  const r = await fetch('/api/notify/bill', {
+                  const r = await apiFetch('/api/notify/bill', {
                     method: 'POST',
-                    credentials: 'include',
-                    headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                       billNo: b.id, roomId: b.roomId, tenantName: b.tenant,
                       period: b.period, total: b.total,
@@ -455,11 +454,10 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
                 total: b.total,
                 building: (config && config.building) || { name: 'บ้านกาญจน์ เรสซิเดนซ์' },
               };
+              const apiFetch = window.apiFetch || ((u, o) => fetch(u, { credentials: 'same-origin', ...o }));
               try {
-                const res = await fetch('/api/bills/render', {
+                const res = await apiFetch('/api/bills/render', {
                   method: 'POST',
-                  credentials: 'include',
-                  headers: { 'Content-Type': 'application/json' },
                   body: JSON.stringify({ bill: payload, config }),
                 });
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -481,11 +479,10 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
             }}>ดาวน์โหลด PDF</Btn>
             <Btn variant="primary" icon="📨" onClick={async () => {
               const b = previewBill;
+              const apiFetch = window.apiFetch || ((u, o) => fetch(u, { credentials: 'same-origin', ...o }));
               try {
-                const res = await fetch('/api/notify/bill', {
+                const res = await apiFetch('/api/notify/bill', {
                   method: 'POST',
-                  credentials: 'include',
-                  headers: { 'Content-Type': 'application/json' },
                   body: JSON.stringify({
                     billNo: b.id,
                     roomId: b.roomId,

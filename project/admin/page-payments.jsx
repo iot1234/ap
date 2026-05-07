@@ -25,10 +25,10 @@ function PagePayments({ setToast }) {
 
   async function decide(id, accept, reason) {
     setBusy(true);
+    const apiFetch = window.apiFetch || ((u, o) => fetch(u, { credentials: 'same-origin', ...o }));
     try {
-      const r = await fetch(`/api/payments/${id}/verify`, {
-        method: 'PUT', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
+      const r = await apiFetch(`/api/payments/${id}/verify`, {
+        method: 'PUT',
         body: JSON.stringify({ accept, reason }),
       });
       const d = await r.json();

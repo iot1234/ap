@@ -23,10 +23,10 @@ function PageAccess({ setToast }) {
 
   async function submit(e) {
     e.preventDefault();
+    const apiFetch = window.apiFetch || ((u, o) => fetch(u, { credentials: 'same-origin', ...o }));
     try {
-      const r = await fetch('/api/access/log', {
-        method: 'POST', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
+      const r = await apiFetch('/api/access/log', {
+        method: 'POST',
         body: JSON.stringify(form),
       });
       const d = await r.json();

@@ -82,7 +82,19 @@
   // ErrorBoundary class component
   class ErrorBoundary extends React.Component {
     constructor(props) { super(props); this.state = { err: null }; }
-    static getDerivedStateFromError(err) { return { err }; }
+    static getDerivedStateFromError(err) {
+      // Coerce err.message to a string immediately. The fallback UI renders
+      // err.message via String(...) below; if err.message is itself a
+      // circular object (e.g. some libraries store the problematic value as
+      // the message), that String() call can re-throw inside render and
+      // freeze the ErrorBoundary. Keeping a primitive snapshot avoids that.
+      const safe = {
+        message: typeof err?.message === 'string' ? err.message :
+                 (err == null ? 'unknown' : Object.prototype.toString.call(err)),
+        stack: typeof err?.stack === 'string' ? err.stack : '',
+      };
+      return { err: safe };
+    }
     componentDidCatch(err, info) {
       // Best-effort report to server. Only stringify primitive fields —
       // err.cause / err.target may contain DOM/fiber refs that re-throw
@@ -99,7 +111,7 @@
             url: window.location.href,
           }),
         });
-      } catch { /* ignore */ }
+      } catch { /* ignore — client-error reporter must never re-throw */ }
     }
     render() {
       if (!this.state.err) return this.props.children;
