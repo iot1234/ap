@@ -657,15 +657,15 @@ function ChangePinForm({ locale }) {
   async function submit(e) {
     e.preventDefault();
     setMsg('');
-    if (newPin !== confirm) { setMsg('PIN ใหม่ไม่ตรงกัน'); return; }
-    if (!/^\d{4,8}$/.test(newPin)) { setMsg('PIN ต้องเป็นตัวเลข 4-8 หลัก'); return; }
+    if (newPin !== confirm) { setMsg(t('pinMismatch')); return; }
+    if (!/^\d{4,8}$/.test(newPin)) { setMsg(t('pinDigitsOnly')); return; }
     setBusy(true);
     try {
       await api('/api/tenants/_tenant/pin/change', {
         method: 'POST',
         body: JSON.stringify({ oldPin, newPin }),
       });
-      setMsg('✅ เปลี่ยน PIN สำเร็จ');
+      setMsg(t('pinChangeOk'));
       setOldPin(''); setNewPin(''); setConfirm('');
       setTimeout(() => { setOpen(false); setMsg(''); }, 1500);
     } catch (e2) {
@@ -675,24 +675,27 @@ function ChangePinForm({ locale }) {
 
   if (!open) {
     return (
-      <button onClick={() => setOpen(true)} style={btnLink}>เปลี่ยน PIN</button>
+      <button onClick={() => setOpen(true)} style={btnLink}>{t('pinChange')}</button>
     );
   }
   return (
     <form onSubmit={submit} style={{ marginTop: 8 }}>
       <input type="password" inputMode="numeric" pattern="[0-9]*"
-        placeholder="PIN เดิม" maxLength={8} value={oldPin}
-        onChange={(e) => setOldPin(e.target.value)} required style={inp} />
+        placeholder={t('pinOldLabel')} maxLength={8} value={oldPin}
+        onChange={(e) => setOldPin(e.target.value)} required style={inp}
+        aria-label={t('pinOldLabel')} />
       <input type="password" inputMode="numeric" pattern="[0-9]*"
-        placeholder="PIN ใหม่ (4-8 หลัก)" maxLength={8} value={newPin}
-        onChange={(e) => setNewPin(e.target.value)} required style={inp} />
+        placeholder={t('pinNewLabel')} maxLength={8} value={newPin}
+        onChange={(e) => setNewPin(e.target.value)} required style={inp}
+        aria-label={t('pinNewLabel')} />
       <input type="password" inputMode="numeric" pattern="[0-9]*"
-        placeholder="ยืนยัน PIN ใหม่" maxLength={8} value={confirm}
-        onChange={(e) => setConfirm(e.target.value)} required style={inp} />
+        placeholder={t('pinConfirmLabel')} maxLength={8} value={confirm}
+        onChange={(e) => setConfirm(e.target.value)} required style={inp}
+        aria-label={t('pinConfirmLabel')} />
       {msg ? <div style={{ marginTop: 6, fontSize: 13, color: msg.startsWith('✅') ? 'var(--green)' : 'var(--red)' }}>{msg}</div> : null}
       <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-        <button type="submit" disabled={busy} style={{ ...btnPrimary, marginTop: 0, flex: 1 }}>{busy ? '…' : 'บันทึก'}</button>
-        <button type="button" onClick={() => { setOpen(false); setMsg(''); }} style={btnLink}>ยกเลิก</button>
+        <button type="submit" disabled={busy} style={{ ...btnPrimary, marginTop: 0, flex: 1 }}>{busy ? '…' : t('save')}</button>
+        <button type="button" onClick={() => { setOpen(false); setMsg(''); }} style={btnLink}>{t('cancel')}</button>
       </div>
     </form>
   );
