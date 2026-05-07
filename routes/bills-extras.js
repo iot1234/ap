@@ -245,9 +245,16 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         audit(req, accept ? 'slip.verify' : 'slip.reject', 'bill', String(id), { paymentId: pid, reason });
         // Fire-and-forget tenant notification with the verdict
         try {
+          // Filter t.deleted_at IS NULL so we don't push "slip verified"
+          // notifications to ex-tenants who've been soft-deleted between
+          // upload and verify. Pull line_oa_id so the notifier routes the
+          // push through the OA the tenant actually bound to (multi-OA
+          // tenants see different userIds per OA — wrong OA = silent drop).
           const pq = await pool.query(
-            `SELECT p.*, t.id AS t_id, t.full_name, t.phone, t.email, t.line_user_id
-               FROM payments p LEFT JOIN tenants t ON t.id=p.tenant_id
+            `SELECT p.*, t.id AS t_id, t.full_name, t.phone, t.email,
+                    t.line_user_id, t.line_oa_id
+               FROM payments p
+               LEFT JOIN tenants t ON t.id = p.tenant_id AND t.deleted_at IS NULL
                WHERE p.id=$1`, [pid]
           );
           if (pq.rows.length && pq.rows[0].t_id) {
@@ -257,8 +264,12 @@ module.exports = function buildBillsExtrasRouter(ctx) {
               ? `ชำระเงินบิล #${id} ได้รับการยืนยันแล้ว`
               : `สลิปสำหรับบิล #${id} ไม่ผ่านการตรวจสอบ${reason ? `\nเหตุผล: ${reason}` : ''}`;
             notifier.notifyTenant({ pool, features: flags },
-              { id: pq.rows[0].t_id, line_user_id: pq.rows[0].line_user_id,
-                phone: pq.rows[0].phone, email: pq.rows[0].email, full_name: pq.rows[0].full_name },
+              { id: pq.rows[0].t_id,
+                line_user_id: pq.rows[0].line_user_id,
+                line_oa_id: pq.rows[0].line_oa_id,
+                phone: pq.rows[0].phone,
+                email: pq.rows[0].email,
+                full_name: pq.rows[0].full_name },
               { subject, text }
             ).catch(() => {});
           }

@@ -2381,7 +2381,8 @@ async function notifyTenantOnPayment(payment, outcome, reason) {
   try {
     const flags = await features.load(pool);
     const { rows } = await pool.query(
-      `SELECT id, full_name, phone, email, line_user_id FROM tenants
+      `SELECT id, full_name, phone, email, line_user_id, line_oa_id
+         FROM tenants
          WHERE id=$1 AND deleted_at IS NULL`,
       [payment.tenant_id]
     );
