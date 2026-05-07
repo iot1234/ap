@@ -3119,12 +3119,19 @@ app.get('/health/live', (_req, res) => {
 });
 
 // --- Static + routes ------------------------------------------------------
-// Cache hashable assets aggressively. Our HTML/JSX names don't change between
-// deploys (no build step), so we use a moderate 1h TTL — enough to cut repeat
-// downloads from a single user session, short enough that fixes propagate
-// within an hour without manual cache-bust.
+// Asset caching policy:
+//   - .jsx (transpiled in browser, changes every deploy) → no-cache so a fix
+//     deployed to Railway is visible the moment the user reloads. Without
+//     this, operators who hit a bug then deploy a fix still see the bug for
+//     up to an hour because Cache-Control: max-age=3600 holds the old file.
+//   - Other static assets (fonts, images) → 1h TTL since they rarely change.
 app.use((req, res, next) => {
-  if (/\.(js|jsx|css|png|jpg|jpeg|gif|svg|woff2?|ttf)$/i.test(req.path)) {
+  if (/\.jsx$/i.test(req.path)) {
+    // Force-revalidate on every reload — JSX files are the SPA's source of truth.
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+  } else if (/\.(js|css|png|jpg|jpeg|gif|svg|woff2?|ttf)$/i.test(req.path)) {
     res.setHeader('Cache-Control', 'public, max-age=3600');
   }
   next();
