@@ -360,6 +360,11 @@ function DetailModal({ C, Modal, Btn, Pill, detail, tenantId, oas, busy, onClose
         {bound && !pending && !blocked && (
           <div style={{ padding: 12, background: '#f1faf3', border: '1px solid #c8e6cd', borderRadius: 8, color: '#1f6b3a', fontSize: 13 }}>
             ✅ ผูกบัญชีแล้วเมื่อ {new Date(bound.bound_at).toLocaleString('th-TH')}
+            {bound.oa_name && (
+              <div style={{ marginTop: 4, fontSize: 12, color: '#1f6b3a' }}>
+                ผ่าน LINE OA: <b>{bound.oa_name}</b> — บิล/แจ้งเตือนจะส่งกลับผ่าน OA นี้
+              </div>
+            )}
           </div>
         )}
 
