@@ -419,7 +419,7 @@ async function migrate(pool, opts = {}) {
         `[db] ADMIN_PASSWORD is the example value 'admin1234' — bootstrap skipped.`
       );
     } else {
-      const hash = await bcrypt.hash(ADMIN_PASSWORD, 10);
+      const hash = await bcrypt.hash(ADMIN_PASSWORD, 12);
       await pool.query(
         'INSERT INTO auth_users (username, password_hash, role) VALUES ($1,$2,$3)',
         [ADMIN_USERNAME, hash, 'owner']  // first user gets the highest role

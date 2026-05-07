@@ -234,6 +234,10 @@ schemas.adminCreateUser = z.object({
 
 schemas.adminUpdateUser = z.object({
   password: z.string().min(12).max(128).optional(),
+  // Required ONLY when caller is changing their OWN password — server
+  // enforces this so a hijacked session can't lock out the legit owner
+  // without also knowing the current password.
+  currentPassword: z.string().min(1).max(128).optional(),
   role: z.enum(['owner', 'manager', 'staff', 'readonly']).optional(),
 });
 

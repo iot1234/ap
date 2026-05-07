@@ -2935,17 +2935,35 @@ app.get('/api/admin/users', requireAuth, requireRole('owner'), async (_req, res)
 app.post('/api/admin/users', sameOrigin, requireAuth, requireRole('owner'), async (req, res) => {
   const r = require('./schemas').schemas.adminCreateUser.safeParse(req.body || {});
   if (!r.success) return res.status(400).json(require('./middleware/validate').formatZodError(r.error));
-  const { username, password, role } = r.data;
+  // Force lowercase username so "admin"/"Admin"/"ADMIN" can't all coexist as
+  // separate rows. Lockout principal already lowercases (server.js:663) so
+  // case-different siblings would otherwise share the same lockout counter
+  // — locking each other out unintentionally on bad-password attempts.
+  const username = String(r.data.username).toLowerCase();
+  const password = r.data.password;
+  const finalRole = r.data.role || 'staff';
   try {
-    const exists = await pool.query('SELECT 1 FROM auth_users WHERE username=$1', [username]);
+    const exists = await pool.query('SELECT 1 FROM auth_users WHERE LOWER(username)=$1', [username]);
     if (exists.rows.length) return res.status(409).json({ error: 'username already exists' });
-    const hash = await bcrypt.hash(password, 10);
+    // bcrypt cost 12 on new accounts (login compare works against any cost,
+    // so existing rows with cost 10 keep working without re-hash).
+    const hash = await bcrypt.hash(password, 12);
     const ins = await pool.query(
       `INSERT INTO auth_users (username, password_hash, role) VALUES ($1,$2,$3)
        RETURNING id, username, role, created_at`,
-      [username, hash, role || 'staff']
+      [username, hash, finalRole]
     );
-    audit(req, 'user.create', 'user', String(ins.rows[0].id), { role });
+    // Log the ACTUAL assigned role (not the request body's optional field
+    // which can be undefined and shows up as `{ role: undefined }`).
+    audit(req, 'user.create', 'user', String(ins.rows[0].id),
+      { username, role: finalRole, by: req.session.user.username });
+    // Notify all OTHER owners — adds visibility if a hijacked session is
+    // creating a backdoor user. Fail-soft so the create still succeeds even
+    // if the notifier path is broken.
+    notifyOtherOwners(req, {
+      subject: '👤 มีการสร้างผู้ใช้ใหม่',
+      text: `${req.session.user.username} สร้างผู้ใช้ "${username}" (role: ${finalRole})`,
+    }).catch(() => {});
     res.json({ ok: true, user: ins.rows[0] });
   } catch (err) {
     console.error('admin users create error:', err);
@@ -2957,12 +2975,65 @@ app.put('/api/admin/users/:id', sameOrigin, requireAuth, requireRole('owner'), a
   if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
   const r = require('./schemas').schemas.adminUpdateUser.safeParse(req.body || {});
   if (!r.success) return res.status(400).json(require('./middleware/validate').formatZodError(r.error));
-  const { password, role } = r.data;
+  const { password, currentPassword, role } = r.data;
+  const isSelf = Number(req.session.user.id) === id;
+
   try {
+    // Look up the target row first — we need to know its current state to
+    // enforce the "last owner" + "no self-demote" + "step-up" rules.
+    const beforeQ = await pool.query(
+      'SELECT id, username, role, password_hash FROM auth_users WHERE id=$1',
+      [id]
+    );
+    if (!beforeQ.rows.length) return res.status(404).json({ error: 'not found' });
+    const before = beforeQ.rows[0];
+
+    // Step-up auth: changing your OWN password requires the current
+    // password. Without this, a hijacked session can rotate the password
+    // and lock out the legit owner who wouldn't know to invalidate
+    // sessions. Other owners changing each other's passwords is fine
+    // because that's the recovery path.
+    if (password && isSelf) {
+      if (!currentPassword) {
+        return res.status(400).json({
+          error: 'currentPassword required when changing your own password',
+          code: 'STEP_UP_REQUIRED',
+        });
+      }
+      const ok = await bcrypt.compare(currentPassword, before.password_hash);
+      if (!ok) {
+        audit(req, 'user.password_self_change_failed', 'user', String(id), null);
+        return res.status(401).json({ error: 'current password is incorrect' });
+      }
+    }
+
+    // Block self role-change. Owners must use a different owner account to
+    // demote themselves (defense vs hijacked session writing themselves
+    // out of admin), and we never want an owner to accidentally drop their
+    // own privileges and lose access until another owner restores them.
+    if (role && isSelf && role !== before.role) {
+      return res.status(400).json({
+        error: 'cannot change your own role — ask another owner',
+        code: 'SELF_ROLE_CHANGE',
+      });
+    }
+
+    // Block last-owner demotion. Without this, the system can end up with
+    // zero owners and /api/admin/users becomes inaccessible to everyone.
+    if (role && before.role === 'owner' && role !== 'owner') {
+      const owners = await pool.query(`SELECT COUNT(*)::int n FROM auth_users WHERE role='owner'`);
+      if (owners.rows[0].n <= 1) {
+        return res.status(400).json({
+          error: 'cannot demote the last owner',
+          code: 'LAST_OWNER',
+        });
+      }
+    }
+
     const fields = [], params = [];
     let i = 1;
     if (password) {
-      const hash = await bcrypt.hash(password, 10);
+      const hash = await bcrypt.hash(password, 12);
       fields.push(`password_hash=$${i++}`); params.push(hash);
     }
     if (role) { fields.push(`role=$${i++}`); params.push(role); }
@@ -2973,7 +3044,31 @@ app.put('/api/admin/users/:id', sameOrigin, requireAuth, requireRole('owner'), a
       params
     );
     if (!upd.rows.length) return res.status(404).json({ error: 'not found' });
-    audit(req, 'user.update', 'user', String(id), { fields: Object.keys(r.data) });
+
+    // Detailed audit so forensics can reconstruct exactly what changed.
+    // For role changes we explicitly capture old → new because field-list
+    // alone makes "owner→staff" indistinguishable from "manager→staff".
+    const detail = {
+      target: before.username,
+      passwordChanged: !!password,
+      isSelf,
+    };
+    if (role && role !== before.role) {
+      detail.role = { from: before.role, to: role };
+    }
+    audit(req, 'user.update', 'user', String(id), detail);
+
+    // Notify other owners on role changes or password reset for non-self
+    // (resetting your own password is normal; resetting someone else's is
+    // a recovery action that should be visible).
+    if ((role && role !== before.role) || (password && !isSelf)) {
+      notifyOtherOwners(req, {
+        subject: '⚙️ การเปลี่ยนสิทธิ์ผู้ใช้',
+        text: role && role !== before.role
+          ? `${req.session.user.username} เปลี่ยน role ของ "${before.username}": ${before.role} → ${role}`
+          : `${req.session.user.username} รีเซ็ตรหัสผ่านของ "${before.username}"`,
+      }).catch(() => {});
+    }
     res.json({ ok: true, user: upd.rows[0] });
   } catch (err) {
     console.error('admin users update error:', err);
@@ -2989,18 +3084,64 @@ app.delete('/api/admin/users/:id', sameOrigin, requireAuth, requireRole('owner')
   try {
     // Prevent deleting the last owner — DB would still have you locked out.
     const owners = await pool.query(`SELECT COUNT(*)::int n FROM auth_users WHERE role='owner'`);
-    const target = await pool.query(`SELECT role FROM auth_users WHERE id=$1`, [id]);
-    if (target.rows.length && target.rows[0].role === 'owner' && owners.rows[0].n <= 1) {
+    const target = await pool.query(`SELECT id, username, role FROM auth_users WHERE id=$1`, [id]);
+    if (!target.rows.length) return res.status(404).json({ error: 'not found' });
+    if (target.rows[0].role === 'owner' && owners.rows[0].n <= 1) {
       return res.status(400).json({ error: 'cannot delete the last owner' });
     }
+    const t = target.rows[0];
     await pool.query('DELETE FROM auth_users WHERE id=$1', [id]);
-    audit(req, 'user.delete', 'user', String(id));
+    audit(req, 'user.delete', 'user', String(id),
+      { username: t.username, role: t.role, by: req.session.user.username });
+    notifyOtherOwners(req, {
+      subject: '🗑️ ผู้ใช้ถูกลบ',
+      text: `${req.session.user.username} ลบบัญชี "${t.username}" (role: ${t.role})`,
+    }).catch(() => {});
     res.json({ ok: true });
   } catch (err) {
     console.error('admin users delete error:', err);
     res.status(500).json({ error: 'internal error' });
   }
 });
+
+// Helper for user-mgmt endpoints: push a one-line alert to every owner
+// EXCEPT the actor. Lets the team see when someone creates/promotes/deletes
+// privileged accounts so a hijacked owner session leaves a visible trail.
+// Best-effort — never blocks the originating request.
+async function notifyOtherOwners(req, msg) {
+  try {
+    const flags = await features.load(pool);
+    const actorId = req.session?.user?.id;
+    // We notify owners by LINE userId only when they have one bound. Email
+    // fallback runs through notifier.notifyOwner which targets the
+    // configured LINE_OWNER_USER_ID / OWNER_EMAIL, so we always at least
+    // hit the system owner channel.
+    await notifier.notifyOwner({ pool, features: flags }, msg);
+    // Plus per-owner LINE push for any other owner with line_user_id set.
+    const { rows } = await pool.query(
+      `SELECT u.id, u.username FROM auth_users u
+         WHERE u.role='owner' AND u.id <> $1`,
+      [actorId || 0]
+    );
+    if (!rows.length) return;
+    // Map owner usernames → line_user_ids via tenants table (admins are
+    // sometimes also tenants who bound LINE). If no match, skip silently.
+    for (const o of rows) {
+      try {
+        const t = await pool.query(
+          `SELECT line_user_id FROM tenants
+             WHERE phone=$1 OR full_name=$2
+             LIMIT 1`,
+          [o.username, o.username]
+        );
+        const lineId = t.rows[0]?.line_user_id;
+        if (lineId) await lineNotify.pushText(lineId, `${msg.subject}\n${msg.text}`);
+      } catch { /* per-owner failure is fine */ }
+    }
+  } catch (err) {
+    console.warn('[user-mgmt] notify other owners failed:', err.message);
+  }
+}
 
 // === v2: Security events (failed logins / lockouts) =======================
 // Read-only viewer of recent auth_failures. Helps owner spot brute-force

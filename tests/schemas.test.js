@@ -72,6 +72,33 @@ test('adminCreateUser: valid', () => {
   const r = schemas.adminCreateUser.safeParse({ username: 'foo', password: 'longenoughpw1', role: 'staff' });
   assert.equal(r.success, true);
 });
+test('adminCreateUser: username regex rejects spaces', () => {
+  const r = schemas.adminCreateUser.safeParse({ username: 'foo bar', password: 'longenoughpw1' });
+  assert.equal(r.success, false);
+});
+test('adminCreateUser: username regex rejects unicode/non-ascii', () => {
+  const r = schemas.adminCreateUser.safeParse({ username: 'แอดมิน', password: 'longenoughpw1' });
+  assert.equal(r.success, false);
+});
+test('adminUpdateUser: currentPassword optional (other-owner reset path)', () => {
+  const r = schemas.adminUpdateUser.safeParse({ password: 'newlongenoughpw1' });
+  assert.equal(r.success, true);
+});
+test('adminUpdateUser: rejects extra fields like username via zod strict-ish parse', () => {
+  // Schema doesn't include username — extra fields are silently dropped by
+  // default. Confirm role/password are the only writable surface.
+  const r = schemas.adminUpdateUser.safeParse({
+    role: 'staff', password: 'newlongenoughpw1', username: 'evil',
+  });
+  assert.equal(r.success, true);
+  assert.equal(r.data.username, undefined);
+});
+test('adminUpdateUser: role enum tight (no admin/root)', () => {
+  for (const bad of ['admin', 'root', 'superuser', 'OWNER']) {
+    const r = schemas.adminUpdateUser.safeParse({ role: bad });
+    assert.equal(r.success, false, `should reject role=${bad}`);
+  }
+});
 
 test('backupImport: bad PromptPay rejected', () => {
   const r = schemas.backupImport.safeParse({
