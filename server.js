@@ -2922,6 +2922,7 @@ app.post('/api/admin/access-devices', sameOrigin, csrfGuard, requireAuth, requir
   }
   // Generate a 32-byte random token; return it ONCE in the response. We
   // store only the SHA-256 hash, so a leaked DB row can't be replayed.
+  const _crypto = require('crypto');
   const token = _crypto.randomBytes(32).toString('hex');
   const hash = _crypto.createHash('sha256').update(token).digest('hex');
   try {

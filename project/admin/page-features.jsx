@@ -12,6 +12,10 @@ const { useState, useEffect, useMemo } = React;
 function PageFeatures({ setToast }) {
   const C = window.ADMIN_C;
   const { Card, SectionHeading, Btn, Pill, PageContainer, PageHeader } = window;
+  // apiFetch attaches the CSRF token + handles 401 redirects. Without it the
+  // PUT to /api/admin/features 403s with "invalid CSRF token", and every
+  // toggle on this page silently fails.
+  const apiFetch = window.apiFetch || ((u, o) => fetch(u, { credentials: 'same-origin', ...o }));
   const [features, setFeatures] = useState(null);
   const [defaults, setDefaults] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -31,9 +35,8 @@ function PageFeatures({ setToast }) {
   async function save(partial) {
     setBusy(true); setErr('');
     try {
-      const r = await fetch('/api/admin/features', {
-        method: 'PUT', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
+      const r = await apiFetch('/api/admin/features', {
+        method: 'PUT',
         body: JSON.stringify({ features: partial }),
       });
       const d = await r.json();
