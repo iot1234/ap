@@ -174,18 +174,26 @@ async function tickAccessControlSync(pool, flags, now, state) {
   const todayKey = now.toISOString().slice(0, 10);
   if (state.lastAccessSync === todayKey) return;
   // Revoke active cards belonging to tenants whose oldest unpaid bill is
-  // > 30 days past due. Reason field tags it so admin can reverse easily.
+  // older than `accessControl.overdueDaysThreshold` days past due. Bound
+  // the threshold to a sane range (1-365) so a misconfigured value can't
+  // either revoke same-day or never trigger.
   const REVOKE_REASON = 'auto:overdue_bill';
+  const rawThreshold = Number(flags.accessControl?.overdueDaysThreshold);
+  const threshold = Number.isFinite(rawThreshold)
+    ? Math.max(1, Math.min(365, Math.trunc(rawThreshold)))
+    : 30;
   try {
-    // Find tenants with overdue bills > 30 days
+    // Find tenants with overdue bills > threshold days. We pass threshold
+    // as a parameter so it can't smuggle SQL even if the feature flag was
+    // tampered with.
     const overdue = await pool.query(`
       SELECT DISTINCT tenant_id FROM bills
         WHERE status='overdue'
           AND tenant_id IS NOT NULL
           AND deleted_at IS NULL
-          AND due_date < CURRENT_DATE - INTERVAL '30 days'
+          AND due_date < CURRENT_DATE - ($1::int * INTERVAL '1 day')
           AND paid_at IS NULL
-    `);
+    `, [threshold]);
     const overdueIds = overdue.rows.map((r) => Number(r.tenant_id));
     let revoked = 0, restored = 0;
     if (overdueIds.length) {
@@ -198,8 +206,8 @@ async function tickAccessControlSync(pool, flags, now, state) {
       revoked = r.rowCount || 0;
     }
     // Restore previously auto-revoked cards whose tenant no longer has any
-    // overdue bill > 30d. Only undo our own auto-revokes (manual revokes
-    // stay revoked — admin made that call deliberately).
+    // overdue bill > threshold. Only undo our own auto-revokes (manual
+    // revokes stay revoked — admin made that call deliberately).
     const restore = await pool.query(`
       UPDATE access_cards SET status='active', revoked_at=NULL, revoke_reason=NULL
         WHERE status='revoked' AND revoke_reason=$1
@@ -208,11 +216,11 @@ async function tickAccessControlSync(pool, flags, now, state) {
             SELECT 1 FROM bills b
               WHERE b.tenant_id = access_cards.tenant_id
                 AND b.status='overdue'
-                AND b.due_date < CURRENT_DATE - INTERVAL '30 days'
+                AND b.due_date < CURRENT_DATE - ($2::int * INTERVAL '1 day')
                 AND b.paid_at IS NULL
                 AND b.deleted_at IS NULL
           )
-    `, [REVOKE_REASON]);
+    `, [REVOKE_REASON, threshold]);
     restored = restore.rowCount || 0;
     state.lastAccessSync = todayKey;
     writeState(state);

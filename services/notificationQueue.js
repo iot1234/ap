@@ -103,10 +103,14 @@ async function processOne(pool, features, row) {
       await logResult(pool, row, 'failed', errMsg);
     } else {
       const wait = BACKOFF_MIN[Math.min(nextRetry, BACKOFF_MIN.length - 1)];
+      // Multiply integer parameter by a fixed-unit interval — avoids the
+      // implicit text-cast that the `int || 'milliseconds'` form depends
+      // on (works in PG 9.5+ but reads ambiguous; this version is plain
+      // SQL standard arithmetic).
       await pool.query(
         `UPDATE notifications_queue
            SET retry_count=$2, last_error=$3,
-               next_attempt_at=NOW() + ($4::int || ' milliseconds')::interval
+               next_attempt_at=NOW() + ($4::int * INTERVAL '1 millisecond')
            WHERE id=$1`,
         [row.id, nextRetry, errMsg, wait]
       );

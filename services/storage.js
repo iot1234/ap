@@ -145,8 +145,8 @@ async function saveBase64({
   let s3Key = null;
   if (s3Configured()) {
     const client = getS3Client();
-    if (client) {
-      const bucket = secrets.get('R2_BUCKET');
+    const bucket = secrets.get('R2_BUCKET');
+    if (client && bucket) {
       s3Key = `${safeCategory}/${filename}`;
       try {
         await client.send(new client._lib.PutObjectCommand({
@@ -194,6 +194,10 @@ async function readFile(rec) {
     const client = getS3Client();
     if (!client) throw new Error('R2 credentials missing — cannot read s3-stored file');
     const bucket = secrets.get('R2_BUCKET');
+    // Bucket can be cleared independently of access keys (admin removes
+    // R2_BUCKET from secrets but leaves the keys in place). Without this
+    // check the AWS SDK throws a less-helpful "Bucket is required" error.
+    if (!bucket) throw new Error('R2_BUCKET not configured — cannot read s3-stored file');
     const key = `${rec.category}/${rec.filename}`;
     const out = await client.send(new client._lib.GetObjectCommand({ Bucket: bucket, Key: key }));
     const chunks = [];
@@ -216,8 +220,8 @@ async function remove(pool, id) {
   if (r.storage === 's3' && s3Configured()) {
     try {
       const client = getS3Client();
-      if (client) {
-        const bucket = secrets.get('R2_BUCKET');
+      const bucket = secrets.get('R2_BUCKET');
+      if (client && bucket) {
         await client.send(new client._lib.DeleteObjectCommand({
           Bucket: bucket, Key: `${r.category}/${r.filename}`,
         }));

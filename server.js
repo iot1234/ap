@@ -2441,9 +2441,11 @@ async function notifyTenantOnPayment(payment, outcome, reason) {
     if (!rows.length) return;
     const t = rows[0];
     const subject = outcome === 'verified' ? '✅ ตรวจสอบการชำระเงินแล้ว' : '❌ สลิปไม่ผ่านการตรวจสอบ';
+    const amt = Number(payment.amount);
+    const amtStr = Number.isFinite(amt) ? amt.toLocaleString('th-TH', { minimumFractionDigits: 2 }) : '-';
     const lines = [
       outcome === 'verified'
-        ? `ชำระเงินบิล #${payment.bill_id || '-'} จำนวน ${Number(payment.amount).toLocaleString('th-TH')} บาท ได้รับการยืนยันแล้ว`
+        ? `ชำระเงินบิล #${payment.bill_id || '-'} จำนวน ${amtStr} บาท ได้รับการยืนยันแล้ว`
         : `สลิปสำหรับบิล #${payment.bill_id || '-'} ไม่ผ่านการตรวจสอบ`,
       reason ? `เหตุผล: ${reason}` : null,
       'ติดต่อเจ้าหน้าที่หากมีข้อสงสัย',

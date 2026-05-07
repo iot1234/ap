@@ -175,7 +175,11 @@ module.exports = function buildWebhooksRouter(ctx) {
       await lineSvc.replyText(replyToken, '📑 ยังไม่มีบิลในระบบ');
       return;
     }
-    const fmt = (n) => Number(n).toLocaleString('th-TH', { minimumFractionDigits: 2 });
+    const fmt = (n) => {
+      const v = Number(n);
+      if (!Number.isFinite(v)) return '0.00';
+      return v.toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    };
     const STATUS_TH = { pending: 'รอชำระ', paid: 'ชำระแล้ว', overdue: 'ค้างชำระ', void: 'ยกเลิก' };
     const lines = rows.map((b, i) =>
       `${i + 1}) ${b.bill_no} (${b.period})\n   ฿${fmt(b.total)} · ${STATUS_TH[b.status] || b.status}\n   ครบกำหนด ${b.due_date}`
