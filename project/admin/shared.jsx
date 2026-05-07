@@ -60,21 +60,10 @@ const ADMIN_ROOM_TYPES = {
 };
 const ADMIN_ROOM_TYPE_KEYS = ['standard', 'deluxe', 'suite', 'studio'];
 
-// --- Sample tenants -------------------------------------------------------
-const ADMIN_TENANTS = [
-  { name: 'คุณสมศรี ใจดี',       occupation: 'นักศึกษา ม.เชียงใหม่ ปี 3', phone: '081-234-5678', email: 'somsri.j@gmail.com',  score: 'A' },
-  { name: 'คุณวีรพล อนันต์',     occupation: 'พนักงานออฟฟิศ บ.NTT',         phone: '082-345-6789', email: 'verapon.a@ntt.co.th', score: 'A' },
-  { name: 'คุณอารยา สุวรรณ',     occupation: 'นศ.ปริญญาโท วิศวกรรมฯ',       phone: '083-456-7890', email: 'araya.s@cmu.ac.th',   score: 'A' },
-  { name: 'คุณธนภัทร เจริญสุข',  occupation: 'ฟรีแลนซ์ดีไซเนอร์',           phone: '084-567-8901', email: 'thanapat.c@gmail.com',score: 'B' },
-  { name: 'คุณพิมพ์ชนก ทวีสุข',  occupation: 'แพทย์ใช้ทุน รพ.มหาราช',     phone: '085-678-9012', email: 'pimchanok.t@hotmail.com', score: 'A' },
-  { name: 'คุณกิตติ ศรีสุข',       occupation: 'วิศวกรซอฟต์แวร์',              phone: '086-789-0123', email: 'kitti.s@dev.com',     score: 'A' },
-  { name: 'คุณนิภาพร วงษา',     occupation: 'อาจารย์มหาวิทยาลัย',         phone: '087-890-1234', email: 'nipaporn.w@cmu.ac.th',score: 'A' },
-  { name: 'คุณภูมิ สถาพร',         occupation: 'นักศึกษา ปี 2',                  phone: '088-901-2345', email: 'phum.s@student.cmu.ac.th', score: 'B' },
-  { name: 'คุณชลธิชา รุ่งเรือง',  occupation: 'พยาบาลวิชาชีพ',                phone: '089-012-3456', email: 'chonticha.r@gmail.com', score: 'A' },
-  { name: 'คุณอนุชา ชัยวัฒน์',   occupation: 'เจ้าหน้าที่ราชการ',             phone: '090-123-4567', email: 'anucha.c@cmu.go.th',  score: 'A' },
-  { name: 'คุณสุพิชชา เกษมสุข',  occupation: 'นศ.ปริญญาเอก',                  phone: '091-234-5678', email: 'supitcha.k@cmu.ac.th',score: 'A' },
-  { name: 'คุณรณกร ภักดี',         occupation: 'พนักงานธนาคาร',                phone: '092-345-6789', email: 'ronakorn.p@scb.co.th',score: 'B' },
-];
+// Sample-tenant list removed — the app now reads real tenant data from the
+// DB-backed app_data['baankarn_rooms_v1'] blob (and the relational tenants
+// table). Demo seeding has been retired; admins enter real tenants through
+// the rooms UI on first run.
 
 // --- View premium options -------------------------------------------------
 const ADMIN_VIEWS = ['วิวภูเขา', 'วิวเมือง', 'วิวสวน', 'วิวถนน'];
@@ -105,20 +94,23 @@ const DEFAULT_CONFIG = {
   },
   building: {
     name:    'บ้านกาญจน์ เรสซิเดนซ์',
-    address: '123/45 ถ.นิมมานเหมินทร์ ต.สุเทพ อ.เมือง จ.เชียงใหม่ 50200',
-    phone:   '053-123-4567',
-    email:   'baankarn.cnx@gmail.com',
-    line:    '@baankarn',
+    address: '',
+    phone:   '',
+    email:   '',
+    line:    '',
     floors:  5,
     roomsPerFloor: 8,
     open:    '24 ชั่วโมง',
-    rules:   'ห้ามสูบบุหรี่และเลี้ยงสัตว์ในห้องพัก',
+    rules:   '',
   },
   payment: {
-    promptpay:  '0801234567',
-    bank:       'ไทยพาณิชย์',
-    bankAcc:    '123-456789-0',
-    bankName:   'นางกาญจนา ศรีสุข',
+    // Empty defaults — admin fills these in via Settings → การชำระเงิน on
+    // first run. Bills + tenant portal won't show payment instructions until
+    // these are populated, which is intentional (pushes setup to operator).
+    promptpay:  '',
+    bank:       '',
+    bankAcc:    '',
+    bankName:   '',
     linePay:    false,
     truemoney:  false,
     creditCard: false,
@@ -170,114 +162,45 @@ function relTime(iso) {
   if (d < 30)   return `${Math.floor(d/7)} สัปดาห์ก่อน`;
   return fmtDateTH(dt);
 }
+// seedRand was used by the demo data builder; kept exported (no-op now) so
+// any external caller still resolves the symbol. The demo room/tenant
+// generator has been removed — admins seed real rooms via the rooms UI.
 function seedRand(seed) { const x = Math.sin(seed) * 10000; return x - Math.floor(x); }
 
-// --- Data builder ---------------------------------------------------------
-// บางห้องถูก force ให้สถานะเฉพาะ เพื่อ demo ให้เห็นทุกสถานะอย่างน้อย 1 ห้อง
-const FORCED_STATUS = {
-  '207': 'overdue',
-  '305': 'overdue',
-  '405': 'overdue',
-  '102': 'reserved',
-  '503': 'reserved',
-  '408': 'maintenance',
-  '502': 'maintenance',
-};
-
+// --- Empty room scaffold (5 floors × 8 rooms) -----------------------------
+// Replaces the demo `buildAdminRooms()` that used to ship 40 rooms with
+// random tenants/statuses. The app now starts with 40 vacant rooms, no
+// tenants, no occupancy data — admin enters reality from there.
 function buildAdminRooms() {
   const rooms = {};
-  [1,2,3,4,5].forEach(f => {
+  [1,2,3,4,5].forEach((f) => {
     for (let r = 1; r <= 8; r++) {
       const id = `${f}${r.toString().padStart(2,'0')}`;
-      const seed = f * 17 + r * 31;
-      const rnd  = seedRand(seed);
-      const rnd2 = seedRand(seed + 7);
-
-      let type = 'standard';
-      if (f === 5 && rnd > 0.3)         type = 'studio';
-      else if (f >= 4 && rnd > 0.5)     type = 'suite';
-      else if (f >= 3 && rnd > 0.55)    type = 'deluxe';
-      else if (rnd > 0.78)              type = 'deluxe';
-
-      let status;
-      if (rnd2 < 0.32)      status = 'vacant';
-      else if (rnd2 < 0.82) status = 'occupied';
-      else if (rnd2 < 0.90) status = 'reserved';
-      else if (rnd2 < 0.96) status = 'overdue';
-      else                  status = 'maintenance';
-
-      // Force specific rooms to ensure all statuses are represented in demo
-      if (FORCED_STATUS[id]) status = FORCED_STATUS[id];
-
-      const t = ADMIN_ROOM_TYPES[type];
-      const rent = t.baseRent + (f - 1) * 200;
-      const tIdx = Math.floor(seedRand(seed + 13) * ADMIN_TENANTS.length);
-      const tenant = (status === 'occupied' || status === 'overdue' || status === 'reserved')
-        ? { ...ADMIN_TENANTS[tIdx] } : null;
-
-      const monthsTH = ['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.','ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'];
-      const sinceDay = 1 + Math.floor(seedRand(seed+19)*28);
-      const sinceMo  = Math.floor(seedRand(seed+23)*12);
-      const sinceYr  = 2565 + Math.floor(seedRand(seed+29)*4);
-      const since    = tenant ? `${sinceDay} ${monthsTH[sinceMo]} ${sinceYr}` : null;
-
-      const waterUnits = Math.round(8 + seedRand(seed+37)*22);
-      const elecUnits  = Math.round(40 + seedRand(seed+41)*120);
-
+      const t = ADMIN_ROOM_TYPES.standard;
       rooms[id] = {
-        id, floor: f, no: r, type, status, rent,
-        tenant, since,
-        deposit: rent * 2,
-        water:    waterUnits * 18,
-        elec:     elecUnits  * 8,
-        waterUnits, elecUnits,
-        wifi:     250,
-        contractEnd: tenant
-          ? `${15 + Math.floor(seedRand(seed+43)*15)}/${1+Math.floor(seedRand(seed+47)*12)}/${2567 + Math.floor(seedRand(seed+53)*3)}`
-          : null,
-        photos:  [],
-        notes:   '',
-        view:    f >= 3 ? (r <= 4 ? 'วิวภูเขา' : 'วิวเมือง') : (r <= 4 ? 'วิวสวน' : 'วิวถนน'),
-        balcony: type !== 'standard',
-        parking: type === 'suite' || type === 'studio',
-        kitchen: type === 'suite',
-        lastCleaned: `${1 + Math.floor(seedRand(seed+59)*28)} เม.ย. 2569`,
-        lastBillDate: status === 'occupied' || status === 'overdue'
-          ? `1 พ.ค. 2569` : null,
-        billStatus: status === 'overdue' ? 'unpaid' : (status === 'occupied' ? 'paid' : 'none'),
-        overdueDays: status === 'overdue' ? Math.ceil(seedRand(seed+61)*14) + 3 : 0,
+        id, floor: f, no: r, type: 'standard', status: 'vacant',
+        rent: t.baseRent + (f - 1) * 200,
+        tenant: null, since: null,
+        deposit: (t.baseRent + (f - 1) * 200) * 2,
+        water: 0, elec: 0, waterUnits: 0, elecUnits: 0,
+        wifi: 250,
+        contractEnd: null,
+        photos: [], notes: '',
+        view: f >= 3 ? 'วิวเมือง' : 'วิวสวน',
+        balcony: false, parking: false, kitchen: false,
+        lastCleaned: null, lastBillDate: null,
+        billStatus: 'none', overdueDays: 0,
       };
     }
   });
   return rooms;
 }
 
-// --- Sample bookings (pending approvals) ---------------------------------
-function buildBookings() {
-  return [
-    { id: 'BK-2569-0123', name: 'คุณนภัสสร พันธ์ทอง',  phone: '094-321-0987', wantType: 'deluxe',   wantFloor: 3, moveIn: '2569-05-15', months: 12, deposit: 11600, status: 'pending',  createdAt: '2026-05-01T09:32:00' },
-    { id: 'BK-2569-0124', name: 'คุณภัทรพล อิ่มสุข',    phone: '095-222-1188', wantType: 'standard', wantFloor: 2, moveIn: '2569-05-20', months: 6,  deposit: 9000,  status: 'pending',  createdAt: '2026-05-01T14:08:00' },
-    { id: 'BK-2569-0125', name: 'คุณกานต์ธิดา ดวงใจ',  phone: '096-543-7766', wantType: 'studio',   wantFloor: 5, moveIn: '2569-06-01', months: 12, deposit: 13600, status: 'reviewing', createdAt: '2026-05-02T10:12:00' },
-    { id: 'BK-2569-0126', name: 'คุณชนาธิป สถิตย์',    phone: '097-808-4422', wantType: 'suite',    wantFloor: 4, moveIn: '2569-05-25', months: 24, deposit: 15000, status: 'pending',  createdAt: '2026-05-02T15:45:00' },
-    { id: 'BK-2569-0127', name: 'คุณวรางคณา รักดี',    phone: '098-111-2233', wantType: 'standard', wantFloor: 1, moveIn: '2569-05-10', months: 12, deposit: 9000,  status: 'approved', createdAt: '2026-04-29T08:12:00' },
-  ];
-}
-
-// --- Sample activities (audit log / activity feed) ------------------------
-function buildActivities() {
-  const now = Date.now();
-  const ago = (m) => new Date(now - m*60000).toISOString();
-  return [
-    { time: ago(8),    type: 'payment', text: 'รับชำระบิลห้อง 305 จำนวน ฿7,420', icon: '💳' },
-    { time: ago(45),   type: 'booking', text: 'การจองใหม่ #BK-2569-0126 จากคุณชนาธิป', icon: '📋' },
-    { time: ago(120),  type: 'maint',   text: 'แจ้งซ่อมแอร์ห้อง 408 จากผู้เช่า', icon: '🔧' },
-    { time: ago(240),  type: 'payment', text: 'รับชำระบิลห้อง 201 จำนวน ฿5,920', icon: '💳' },
-    { time: ago(720),  type: 'contract',text: 'สัญญาห้อง 502 ใกล้หมดอายุ (อีก 30 วัน)', icon: '📄' },
-    { time: ago(1440), type: 'tenant',  text: 'อนุมัติผู้เช่าใหม่ห้อง 103 — คุณวรางคณา', icon: '👤' },
-    { time: ago(2880), type: 'system',  text: 'ระบบสำรองข้อมูลรายวันสำเร็จ', icon: '💾' },
-    { time: ago(4320), type: 'overdue', text: 'แจ้งเตือนค้างชำระห้อง 207 (ครั้งที่ 2)', icon: '⚠️' },
-  ];
-}
+// Demo bookings + activities removed. Real entries arrive via:
+//   - Public POST /api/bookings/public (pending row appears)
+//   - Audit log → activities derivation in the admin overview
+function buildBookings() { return []; }
+function buildActivities() { return []; }
 
 // --- localStorage layer ---------------------------------------------------
 const STORAGE_KEYS = {

@@ -29,20 +29,10 @@ const STATUS = {
   maintenance:{th: 'ปรับปรุง',  dot: '#7a6c54', soft: '#efeae0', ink: '#3a3326' },
 };
 
-const TENANTS = [
-  ['คุณสมศรี ใจดี', 'นักศึกษา ม.เชียงใหม่ ปี 3'],
-  ['คุณวีรพล อนันต์', 'พนักงานออฟฟิศ บ.NTT'],
-  ['คุณอารยา สุวรรณ', 'นศ.ปริญญาโท วิศวกรรมฯ'],
-  ['คุณธนภัทร เจริญสุข', 'ฟรีแลนซ์ดีไซเนอร์'],
-  ['คุณพิมพ์ชนก ทวีสุข', 'แพทย์ใช้ทุน รพ.มหาราช'],
-  ['คุณกิตติ ศรีสุข', 'วิศวกรซอฟต์แวร์'],
-  ['คุณนิภาพร วงษา', 'อาจารย์มหาวิทยาลัย'],
-  ['คุณภูมิ สถาพร', 'นักศึกษา ปี 2'],
-  ['คุณชลธิชา รุ่งเรือง', 'พยาบาลวิชาชีพ'],
-  ['คุณอนุชา ชัยวัฒน์', 'เจ้าหน้าที่ราชการ'],
-  ['คุณสุพิชชา เกษมสุข', 'นศ.ปริญญาเอก'],
-  ['คุณรณกร ภักดี', 'พนักงานธนาคาร'],
-];
+// Sample-tenant list removed — public dashboard only renders tenant name +
+// "occupied" presence pulled (masked) from the server. Real tenants come
+// from the DB via /api/data/baankarn_rooms_v1 (server applies maskRoomsPublic
+// to strip PII for unauthenticated viewers).
 
 const ROOM_TYPES = {
   standard: { th: 'ห้องมาตรฐาน', size: 24, baseRent: 4500, beds: 1, ac: false },
@@ -51,48 +41,29 @@ const ROOM_TYPES = {
   studio:   { th: 'สตูดิโอพรีเมียม', size: 32, baseRent: 6800, beds: 1, ac: true },
 };
 
+// seedRand kept as a no-op-grade helper (caller still resolves the symbol)
+// even though the demo room generator that used it has been retired.
 function seedRand(seed) { let x = Math.sin(seed) * 10000; return x - Math.floor(x); }
 
+// Empty 5×8 scaffold. Replaces the previous deterministic-random demo that
+// generated 40 rooms with seeded tenants/statuses on first paint. The public
+// dashboard now starts blank and fills in from /api/data/baankarn_rooms_v1
+// once the server has been seeded by an admin.
 function buildRooms() {
   const rooms = {};
-  [1,2,3,4,5].forEach(f => {
+  [1,2,3,4,5].forEach((f) => {
     for (let r = 1; r <= 8; r++) {
       const id = `${f}${r.toString().padStart(2,'0')}`;
-      const seed = f * 17 + r * 31;
-      const rnd = seedRand(seed), rnd2 = seedRand(seed + 7);
-      let type = 'standard';
-      if (f === 5 && rnd > 0.3) type = 'studio';
-      else if (f >= 4 && rnd > 0.5) type = 'suite';
-      else if (f >= 3 && rnd > 0.55) type = 'deluxe';
-      else if (rnd > 0.78) type = 'deluxe';
-      let status;
-      if (rnd2 < 0.32) status = 'vacant';
-      else if (rnd2 < 0.82) status = 'occupied';
-      else if (rnd2 < 0.90) status = 'reserved';
-      else if (rnd2 < 0.96) status = 'overdue';
-      else status = 'maintenance';
-      // Force specific rooms to ensure all statuses appear in demo
-      const forced = { '207':'overdue','305':'overdue','405':'overdue','102':'reserved','503':'reserved','408':'maintenance','502':'maintenance' };
-      if (forced[id]) status = forced[id];
-      const t = ROOM_TYPES[type];
-      const rent = t.baseRent + (f - 1) * 200;
-      const tIdx = Math.floor(seedRand(seed + 13) * TENANTS.length);
-      const tenant = (status === 'occupied' || status === 'overdue' || status === 'reserved')
-        ? { name: TENANTS[tIdx][0], occupation: TENANTS[tIdx][1] } : null;
-      const months = ['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.','ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'];
-      const since = tenant ? `${1 + Math.floor(seedRand(seed+19)*28)} ${months[Math.floor(seedRand(seed+23)*12)]} 256${5 + Math.floor(seedRand(seed+29)*4)}` : null;
-      const waterUnits = Math.round(8 + seedRand(seed+37)*22);
-      const elecUnits = Math.round(40 + seedRand(seed+41)*120);
+      const t = ROOM_TYPES.standard;
       rooms[id] = {
-        id, floor: f, no: r, type, status, rent, tenant, since,
-        deposit: rent * 2,
-        water: waterUnits * 18, elec: elecUnits * 8,
-        waterUnits, elecUnits, wifi: 250,
-        contractEnd: tenant ? `${15 + Math.floor(seedRand(seed+43)*15)}/${1+Math.floor(seedRand(seed+47)*12)}/256${7 + Math.floor(seedRand(seed+53)*3)}` : null,
-        photos: [], notes: '',
-        view: f >= 3 ? (r <= 4 ? 'วิวภูเขา' : 'วิวเมือง') : (r <= 4 ? 'วิวสวน' : 'วิวถนน'),
-        balcony: type !== 'standard',
-        lastCleaned: `${1 + Math.floor(seedRand(seed+59)*28)} เม.ย. 2569`,
+        id, floor: f, no: r, type: 'standard', status: 'vacant',
+        rent: t.baseRent + (f - 1) * 200,
+        tenant: null, since: null,
+        deposit: (t.baseRent + (f - 1) * 200) * 2,
+        water: 0, elec: 0, waterUnits: 0, elecUnits: 0, wifi: 250,
+        contractEnd: null, photos: [], notes: '',
+        view: f >= 3 ? 'วิวเมือง' : 'วิวสวน',
+        balcony: false, lastCleaned: null,
       };
     }
   });
