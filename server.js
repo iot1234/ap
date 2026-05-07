@@ -2114,12 +2114,18 @@ app.get('/api/bills', requireAuth, async (req, res) => {
     params.push(String(req.query.period).slice(0, 16));
     where.push(`period=$${params.length}`);
   }
+  // Pagination so admins working with > 500 historical bills can page
+  // through them. Default 200/page; max 500 (preserves the previous cap).
+  const limit = Math.min(Math.max(Number(req.query.limit) || 200, 1), 500);
+  const offset = Math.max(Number(req.query.offset) || 0, 0);
+  params.push(limit, offset);
   try {
     const { rows } = await pool.query(
       `SELECT * FROM bills WHERE ${where.join(' AND ')}
-        ORDER BY created_at DESC LIMIT 500`, params
+        ORDER BY created_at DESC LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params
     );
-    res.json({ ok: true, bills: rows });
+    res.json({ ok: true, bills: rows, limit, offset });
   } catch (err) {
     console.error('bills list error:', err);
     res.status(500).json({ error: 'internal error' });
@@ -2374,6 +2380,11 @@ app.get('/api/payments', requireAuth, async (req, res) => {
   if (status && ['pending', 'verified', 'rejected'].includes(String(status))) {
     params.push(status); where.push(`p.status=$${params.length}`);
   }
+  // Pagination — slip queue can grow large in busy buildings, admin
+  // shouldn't be capped at the first 500 forever.
+  const limit = Math.min(Math.max(Number(req.query.limit) || 200, 1), 500);
+  const offset = Math.max(Number(req.query.offset) || 0, 0);
+  params.push(limit, offset);
   try {
     const { rows } = await pool.query(
       `SELECT p.*, b.bill_no, b.period, t.full_name AS tenant_name, t.phone AS tenant_phone
@@ -2381,9 +2392,10 @@ app.get('/api/payments', requireAuth, async (req, res) => {
          LEFT JOIN bills b ON b.id = p.bill_id
          LEFT JOIN tenants t ON t.id = p.tenant_id
          ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
-         ORDER BY p.created_at DESC LIMIT 500`, params
+         ORDER BY p.created_at DESC LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params
     );
-    res.json({ ok: true, payments: rows });
+    res.json({ ok: true, payments: rows, limit, offset });
   } catch (err) {
     console.error('payments list error:', err);
     res.status(500).json({ error: 'internal error' });
@@ -2476,7 +2488,11 @@ async function notifyTenantOnPayment(payment, outcome, reason) {
 
 const BOOKING_STATUSES = new Set(['pending', 'reviewing', 'approved', 'rejected', 'cancelled']);
 const BOOKING_TRANSITIONS = {
-  pending:   ['reviewing', 'approved', 'rejected', 'cancelled'],
+  // Approve must go through `reviewing` first — direct pending → approved
+  // bypassed the verification checklist (call-back, ID check, credit
+  // history, room match) and made it easy for a distracted admin to
+  // greenlight an unverified applicant.
+  pending:   ['reviewing', 'rejected', 'cancelled'],
   reviewing: ['approved', 'rejected', 'cancelled'],
   approved:  ['cancelled'],          // can revoke an approval if tenant backs out
   rejected:  ['reviewing'],          // re-open if admin reconsidered
@@ -2536,18 +2552,48 @@ app.put('/api/bookings/:id', sameOrigin, csrfGuard, requireAuth, requireRole('ow
                 (updated.adminNotes ? `หมายเหตุ: ${updated.adminNotes}` : ''),
         }).catch(() => {});
 
-        // Tenant notification — only if we have a contact channel.
+        // Tenant notification — try to enrich the booking blob with the
+        // applicant's bound LINE info so multi-OA tenants get the message
+        // via the right OA. If the applicant is also a registered tenant
+        // (matched by phone) we pull line_user_id + line_oa_id from there.
         const tenantText = ({
           approved: `✅ การจองห้องได้รับการอนุมัติแล้ว\nกรุณาติดต่อสำนักงานเพื่อเซ็นสัญญา`,
           rejected: `❌ ขออภัย — การจองห้องไม่ได้รับการอนุมัติ\n${updated.adminNotes ? 'หมายเหตุ: ' + updated.adminNotes : ''}`,
           reviewing: `🔍 การจองของคุณกำลังถูกตรวจสอบ`,
           cancelled: `🚫 การจองถูกยกเลิก`,
         })[updated.status];
-        if (tenantText && updated.email) {
-          notifier.notifyTenant({ pool, features: flags },
-            { full_name: updated.name, email: updated.email, phone: updated.phone },
-            { subject: `อัปเดตสถานะการจองห้อง — ${updated.status}`, text: tenantText }
-          ).catch(() => {});
+        if (tenantText) {
+          let tenantInfo = {
+            full_name: updated.name,
+            email: updated.email || null,
+            phone: updated.phone || null,
+            line_user_id: null,
+            line_oa_id: null,
+          };
+          if (updated.phone) {
+            try {
+              const tq = await pool.query(
+                `SELECT line_user_id, line_oa_id, email
+                   FROM tenants WHERE phone=$1 AND deleted_at IS NULL
+                   ORDER BY updated_at DESC LIMIT 1`,
+                [updated.phone]
+              );
+              if (tq.rows.length) {
+                tenantInfo.line_user_id = tq.rows[0].line_user_id;
+                tenantInfo.line_oa_id = tq.rows[0].line_oa_id;
+                if (!tenantInfo.email && tq.rows[0].email) tenantInfo.email = tq.rows[0].email;
+              }
+            } catch { /* ignore enrichment failure */ }
+          }
+          // Only fire notify if we have at least one channel — LINE binding
+          // OR an email. Without either, the queued message would just log
+          // "no channel" and waste a row.
+          if (tenantInfo.line_user_id || tenantInfo.email) {
+            notifier.notifyTenant({ pool, features: flags },
+              tenantInfo,
+              { subject: `อัปเดตสถานะการจองห้อง — ${updated.status}`, text: tenantText }
+            ).catch(() => {});
+          }
         }
       } catch { /* ignore */ }
     }

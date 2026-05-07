@@ -21,15 +21,38 @@ const TR = {
     status: 'สถานะ', uploadSlip: 'อัปโหลดสลิป', viewBill: 'ดูบิล',
     submitTicket: 'แจ้งซ่อม', myTickets: 'ประวัติแจ้งซ่อม',
     title: 'หัวข้อ', description: 'รายละเอียด', category: 'หมวดหมู่',
-    priority: 'ระดับความเร่งด่วน', submit: 'ส่ง',
+    priority: 'ระดับความเร่งด่วน', submit: 'ส่ง', cancel: 'ยกเลิก',
     pending: 'รอดำเนินการ', paid: 'ชำระแล้ว', overdue: 'ค้างชำระ',
     void: 'ยกเลิก', open: 'เปิด', completed: 'เสร็จสิ้น', in_progress: 'กำลังดำเนินการ',
     assigned: 'มอบหมายแล้ว', awaiting_parts: 'รออะไหล่', cancelled: 'ยกเลิก',
-    darkMode: 'โหมดมืด', language: 'ภาษา',
+    darkMode: 'โหมดมืด', language: 'ภาษา', close: 'ปิด',
     portalDisabled: 'พอร์ทัลผู้เช่ายังปิดอยู่ — กรุณาติดต่อเจ้าหน้าที่',
     invalidLogin: 'เบอร์หรือ PIN ไม่ถูกต้อง',
     chooseFile: 'เลือกไฟล์สลิป', amount: 'จำนวนเงิน', uploadOk: 'อัปโหลดสลิปสำเร็จ',
     nothingHere: 'ไม่มีรายการ', loading: 'กำลังโหลด…', save: 'บันทึก',
+    // Maintenance categories
+    cat_electrical: 'ไฟฟ้า', cat_plumbing: 'ประปา', cat_aircon: 'แอร์',
+    cat_furniture: 'เฟอร์นิเจอร์', cat_appliance: 'เครื่องใช้ไฟฟ้า',
+    cat_door_lock: 'ประตู / กลอน', cat_wifi: 'อินเทอร์เน็ต', cat_other: 'อื่นๆ',
+    // Priority labels
+    prio_critical: 'ฉุกเฉิน', prio_high: 'สูง', prio_medium: 'ปานกลาง', prio_low: 'ต่ำ',
+    // Rate ticket
+    ratePrompt: 'ให้คะแนนการซ่อม', ratePicked: 'เลือกดาว 1-5',
+    ratePlaceholder: 'ความคิดเห็น (ไม่บังคับ)', submitRating: 'ส่งคะแนน',
+    // PIN flows
+    pinMismatch: 'PIN ใหม่ไม่ตรงกัน', pinDigitsOnly: 'PIN ต้องเป็นตัวเลข 4-8 หลัก',
+    pinIdTailFormat: 'ใส่เลขบัตรประชาชน 4 ตัวท้าย',
+    pinInitTitle: 'ตั้ง PIN ครั้งแรก',
+    pinInitHint: 'ใช้เบอร์โทร + 4 ตัวท้ายของเลขบัตรประชาชน (จากที่ลงทะเบียนไว้)',
+    pinInitOk: '✅ ตั้ง PIN สำเร็จ — กรุณา login',
+    pinInitFail: 'ข้อมูลไม่ตรงกัน',
+    idTailLabel: '4 ตัวท้ายเลขบัตรประชาชน',
+    pinNew: 'PIN ใหม่', pinConfirm: 'ยืนยัน PIN', pinSet: 'ตั้ง PIN',
+    pinChangeOk: '✅ เปลี่ยน PIN สำเร็จ', pinChange: 'เปลี่ยน PIN',
+    pinOldLabel: 'PIN เดิม', pinNewLabel: 'PIN ใหม่ (4-8 หลัก)',
+    pinConfirmLabel: 'ยืนยัน PIN ใหม่',
+    backLink: 'ย้อนกลับ',
+    amountMismatchWarn: '⚠ จำนวนไม่ตรงยอดบิล',
   },
   en: {
     portal: 'Tenant Portal', login: 'Sign in', phone: 'Phone number',
@@ -40,15 +63,34 @@ const TR = {
     status: 'Status', uploadSlip: 'Upload slip', viewBill: 'View bill',
     submitTicket: 'Submit ticket', myTickets: 'My tickets',
     title: 'Title', description: 'Description', category: 'Category',
-    priority: 'Priority', submit: 'Submit',
+    priority: 'Priority', submit: 'Submit', cancel: 'Cancel',
     pending: 'pending', paid: 'paid', overdue: 'overdue',
     void: 'void', open: 'open', completed: 'completed', in_progress: 'in progress',
     assigned: 'assigned', awaiting_parts: 'awaiting parts', cancelled: 'cancelled',
-    darkMode: 'Dark mode', language: 'Language',
+    darkMode: 'Dark mode', language: 'Language', close: 'Close',
     portalDisabled: 'Tenant portal is currently disabled — please contact admin',
     invalidLogin: 'Invalid phone or PIN',
     chooseFile: 'Choose slip image', amount: 'Amount', uploadOk: 'Slip uploaded',
     nothingHere: 'Nothing here', loading: 'Loading…', save: 'Save',
+    cat_electrical: 'Electrical', cat_plumbing: 'Plumbing', cat_aircon: 'A/C',
+    cat_furniture: 'Furniture', cat_appliance: 'Appliance',
+    cat_door_lock: 'Door / Lock', cat_wifi: 'Wi-Fi', cat_other: 'Other',
+    prio_critical: 'Critical', prio_high: 'High', prio_medium: 'Medium', prio_low: 'Low',
+    ratePrompt: 'Rate the service', ratePicked: 'Pick 1-5 stars',
+    ratePlaceholder: 'Optional comment', submitRating: 'Submit rating',
+    pinMismatch: 'New PINs do not match', pinDigitsOnly: 'PIN must be 4-8 digits',
+    pinIdTailFormat: 'Enter the last 4 digits of your citizen ID',
+    pinInitTitle: 'Set up your PIN',
+    pinInitHint: 'Use your phone number + last 4 digits of your citizen ID (from registration)',
+    pinInitOk: '✅ PIN set — please log in',
+    pinInitFail: 'Information did not match',
+    idTailLabel: 'Last 4 digits of citizen ID',
+    pinNew: 'New PIN', pinConfirm: 'Confirm PIN', pinSet: 'Set PIN',
+    pinChangeOk: '✅ PIN changed', pinChange: 'Change PIN',
+    pinOldLabel: 'Old PIN', pinNewLabel: 'New PIN (4-8 digits)',
+    pinConfirmLabel: 'Confirm new PIN',
+    backLink: 'Back',
+    amountMismatchWarn: '⚠ Amount does not match the bill',
   },
 };
 function tr(locale, k) { return (TR[locale] || TR.th)[k] || k; }
@@ -155,42 +197,42 @@ function FirstTimePinSetup({ locale, onCancel, onDone }) {
   async function submit(e) {
     e.preventDefault();
     setMsg('');
-    if (newPin !== confirm) { setMsg('PIN ใหม่ไม่ตรงกัน'); return; }
-    if (!/^\d{4,8}$/.test(newPin)) { setMsg('PIN ต้องเป็นตัวเลข 4-8 หลัก'); return; }
-    if (!/^\d{4}$/.test(tail)) { setMsg('ใส่เลขบัตรประชาชน 4 ตัวท้าย'); return; }
+    if (newPin !== confirm) { setMsg(t('pinMismatch')); return; }
+    if (!/^\d{4,8}$/.test(newPin)) { setMsg(t('pinDigitsOnly')); return; }
+    if (!/^\d{4}$/.test(tail)) { setMsg(t('pinIdTailFormat')); return; }
     setBusy(true);
     try {
       await api('/api/tenants/_tenant/pin/init', {
         method: 'POST',
         body: JSON.stringify({ phone, citizenIdTail: tail, newPin }),
       });
-      setMsg('✅ ตั้ง PIN สำเร็จ — กรุณา login');
+      setMsg(t('pinInitOk'));
       setTimeout(onDone, 1200);
     } catch (e2) {
-      setMsg('❌ ' + (e2.message || 'ข้อมูลไม่ตรงกัน'));
+      setMsg('❌ ' + (e2.message || t('pinInitFail')));
     } finally { setBusy(false); }
   }
   return (
     <form onSubmit={submit}>
-      <h1 style={{ margin: 0, fontFamily: 'Sora', fontWeight: 600, fontSize: 20 }}>ตั้ง PIN ครั้งแรก</h1>
+      <h1 style={{ margin: 0, fontFamily: 'Sora', fontWeight: 600, fontSize: 20 }}>{t('pinInitTitle')}</h1>
       <p style={{ color: 'var(--muted)', fontSize: 13, marginBottom: 18 }}>
-        ใช้เบอร์โทร + 4 ตัวท้ายของเลขบัตรประชาชน (จากที่ลงทะเบียนไว้)
+        {t('pinInitHint')}
       </p>
       <label style={lbl}>{t('phone')}</label>
       <input type="tel" maxLength={32} value={phone}
         onChange={(e) => setPhone(e.target.value)} required style={inp} />
-      <label style={lbl}>4 ตัวท้ายเลขบัตรประชาชน</label>
+      <label style={lbl}>{t('idTailLabel')}</label>
       <input inputMode="numeric" pattern="[0-9]*" maxLength={4} value={tail}
         onChange={(e) => setTail(e.target.value)} required style={inp} />
-      <label style={lbl}>PIN ใหม่</label>
+      <label style={lbl}>{t('pinNew')}</label>
       <input type="password" inputMode="numeric" pattern="[0-9]*" maxLength={8}
         value={newPin} onChange={(e) => setNewPin(e.target.value)} required style={inp} />
-      <label style={lbl}>ยืนยัน PIN</label>
+      <label style={lbl}>{t('pinConfirm')}</label>
       <input type="password" inputMode="numeric" pattern="[0-9]*" maxLength={8}
         value={confirm} onChange={(e) => setConfirm(e.target.value)} required style={inp} />
       {msg ? <div style={{ marginTop: 8, fontSize: 13, color: msg.startsWith('✅') ? 'var(--green)' : 'var(--red)' }}>{msg}</div> : null}
-      <button type="submit" disabled={busy} style={btnPrimary}>{busy ? '…' : 'ตั้ง PIN'}</button>
-      <button type="button" onClick={onCancel} style={btnLink}>ย้อนกลับ</button>
+      <button type="submit" disabled={busy} style={btnPrimary}>{busy ? '…' : t('pinSet')}</button>
+      <button type="button" onClick={onCancel} style={btnLink}>{t('backLink')}</button>
     </form>
   );
 }
@@ -516,7 +558,7 @@ function MaintenanceView({ locale, tenant, tickets, refresh }) {
               <Pill color={STATUS_COLOR[x.status]}>{t(x.status)}</Pill>
             </div>
             {x.status === 'completed' && x.rating == null ? (
-              <RateTicket ticketId={x.id} onDone={refresh} />
+              <RateTicket ticketId={x.id} locale={locale} onDone={refresh} />
             ) : null}
             {x.rating != null ? (
               <div style={{ marginTop: 8, fontSize: 13, color: 'var(--muted)' }}>
@@ -534,11 +576,13 @@ function MaintenanceView({ locale, tenant, tickets, refresh }) {
             <label style={lbl}>{t('category')}</label>
             <select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} style={inp}>
               {['electrical', 'plumbing', 'aircon', 'furniture', 'appliance', 'door_lock', 'wifi', 'other']
-                .map((c) => <option key={c} value={c}>{c}</option>)}
+                .map((c) => <option key={c} value={c}>{t('cat_' + c)}</option>)}
             </select>
             <label style={lbl}>{t('priority')}</label>
             <select value={form.priority} onChange={(e) => setForm({ ...form, priority: e.target.value })} style={inp}>
-              {['critical', 'high', 'medium', 'low'].map((p) => <option key={p} value={p}>{p}</option>)}
+              {['critical', 'high', 'medium', 'low'].map((p) => (
+                <option key={p} value={p}>{t('prio_' + p)}</option>
+              ))}
             </select>
             <label style={lbl}>{t('title')}</label>
             <input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} required style={inp} />
@@ -546,7 +590,7 @@ function MaintenanceView({ locale, tenant, tickets, refresh }) {
             <textarea value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })}
               rows={4} style={{ ...inp, resize: 'vertical' }} />
             <button type="submit" disabled={busy} style={btnPrimary}>{busy ? '…' : t('submit')}</button>
-            <button type="button" onClick={() => setShowForm(false)} style={btnLink}>ยกเลิก</button>
+            <button type="button" onClick={() => setShowForm(false)} style={btnLink}>{t('cancel')}</button>
           </form>
         </div>
       ) : null}
@@ -554,13 +598,14 @@ function MaintenanceView({ locale, tenant, tickets, refresh }) {
   );
 }
 
-function RateTicket({ ticketId, onDone }) {
+function RateTicket({ ticketId, locale, onDone }) {
+  const t = (k) => tr(locale || 'th', k);
   const [stars, setStars] = useState(0);
   const [comment, setComment] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   async function submit() {
-    if (!stars) { setErr('โปรดเลือกดาว 1-5'); return; }
+    if (!stars) { setErr(t('ratePicked')); return; }
     setBusy(true); setErr('');
     try {
       await api(`/api/tenant/maintenance/${ticketId}/rate`, {
@@ -574,21 +619,27 @@ function RateTicket({ ticketId, onDone }) {
   }
   return (
     <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--border)' }}>
-      <div style={{ fontSize: 13, color: 'var(--ink2)', marginBottom: 4 }}>ให้คะแนนการซ่อม</div>
-      <div style={{ display: 'flex', gap: 4, marginBottom: 6 }}>
+      <div style={{ fontSize: 13, color: 'var(--ink2)', marginBottom: 4 }}>{t('ratePrompt')}</div>
+      <div style={{ display: 'flex', gap: 4, marginBottom: 6 }} role="radiogroup" aria-label={t('ratePrompt')}>
         {[1, 2, 3, 4, 5].map((n) => (
           <button key={n} type="button" onClick={() => setStars(n)}
-            style={{ background: 'transparent', border: 0, fontSize: 22, cursor: 'pointer',
-              color: n <= stars ? '#f1b32d' : 'var(--border)', padding: 0 }}>
+            role="radio" aria-checked={n === stars} aria-label={`${n} ★`}
+            style={{
+              background: 'transparent', border: 0, fontSize: 26, cursor: 'pointer',
+              color: n <= stars ? '#f1b32d' : 'var(--border)',
+              minWidth: 44, minHeight: 44,
+              display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+              padding: 0,
+            }}>
             ★
           </button>
         ))}
       </div>
       <input value={comment} onChange={(e) => setComment(e.target.value)}
-        placeholder="ความคิดเห็น (ไม่บังคับ)" maxLength={500} style={inp} />
+        placeholder={t('ratePlaceholder')} maxLength={500} style={inp} />
       {err ? <div style={{ color: 'var(--red)', fontSize: 12 }}>{err}</div> : null}
-      <button onClick={submit} disabled={busy} style={{ ...btnPrimarySmall, marginTop: 6 }}>
-        {busy ? '…' : 'ส่งคะแนน'}
+      <button onClick={submit} disabled={busy} style={{ ...btnPrimarySmall, marginTop: 6, minHeight: 44 }}>
+        {busy ? '…' : t('submitRating')}
       </button>
     </div>
   );
@@ -718,6 +769,10 @@ const modalBg = {
 const modal = {
   background: 'var(--card)', color: 'var(--ink)', borderRadius: 16,
   padding: 24, width: '100%', maxWidth: 420,
+  // On small screens a tall maintenance form (4+ fields) used to clip
+  // below the viewport without a way to scroll. Cap height + scroll the
+  // body inside the dialog.
+  maxHeight: 'calc(100vh - 32px)', overflowY: 'auto',
 };
 
 // --------------------------------------------------------- App ----------

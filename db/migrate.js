@@ -391,6 +391,43 @@ async function migrate(pool, opts = {}) {
     -- Cache the binding's OA on the tenant row too, so notifier doesn't have
     -- to JOIN every push. Updated by lineBinding.tryBind / revoke / block.
     ALTER TABLE tenants ADD COLUMN IF NOT EXISTS line_oa_id BIGINT;
+  `);
+
+  // === FK cascade hardening (idempotent) ===================================
+  // access_cards + tenant_sessions previously referenced tenants(id) without
+  // an ON DELETE action. Hard-deleting a tenant (rare per soft-delete
+  // policy, but possible via DELETE /api/tenants/:id when softDelete flag
+  // is off) would either fail with FK violation or orphan the rows.
+  // Switch both to ON DELETE CASCADE. Wrapped in DO blocks so the migration
+  // is safe to re-run on databases where the constraint already has the
+  // right action — the "duplicate_object" / "no such constraint" branches
+  // are caught silently.
+  for (const stmt of [
+    `DO $$ BEGIN
+       BEGIN
+         ALTER TABLE access_cards DROP CONSTRAINT IF EXISTS access_cards_tenant_id_fkey;
+         ALTER TABLE access_cards
+           ADD CONSTRAINT access_cards_tenant_id_fkey
+           FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE;
+       EXCEPTION WHEN others THEN NULL;
+       END;
+     END $$;`,
+    `DO $$ BEGIN
+       BEGIN
+         ALTER TABLE tenant_sessions DROP CONSTRAINT IF EXISTS tenant_sessions_tenant_id_fkey;
+         ALTER TABLE tenant_sessions
+           ADD CONSTRAINT tenant_sessions_tenant_id_fkey
+           FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE;
+       EXCEPTION WHEN others THEN NULL;
+       END;
+     END $$;`,
+  ]) {
+    try { await pool.query(stmt); } catch (err) {
+      console.warn('[db] FK cascade migration warn:', err.message);
+    }
+  }
+
+  await pool.query(`
 
     -- Recurring monthly charges per room (parking, internet, locker, etc.).
     -- Bulk-generate auto-pulls active rows for a room → adds them as line

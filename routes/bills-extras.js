@@ -85,18 +85,26 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           } catch { /* table may not exist on older deployments */ }
           const bill = billing.buildBill({ room, config, features: flags, previous, recurring, period, dueDate });
           try {
+            // Persist the recurring line items in bills.other so the PDF
+            // render + tenant-portal bill detail can reproduce them later.
+            // Without this the line items only existed in bill.subtotal —
+            // the breakdown was lost on read.
+            const otherJson = JSON.stringify(recurring || []);
             const { rowCount } = await queryWithRetry(
               `INSERT INTO bills
                  (bill_no, tenant_id, room_id, period, rent,
                   water_units, water_rate, water_amount,
-                  elec_units, elec_rate, elec_amount, wifi, subtotal, vat, late_fee, total, due_date, status)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'pending')
+                  elec_units, elec_rate, elec_amount, wifi, other,
+                  subtotal, vat, late_fee, total, due_date, status)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,
+                       $14,$15,$16,$17,$18,'pending')
                ON CONFLICT (bill_no) DO NOTHING`,
               [
                 bill.billNo, tenantIdForRoom, bill.roomId, bill.period,
                 bill.rent, bill.waterUnits, bill.waterRate, bill.waterAmount,
                 bill.elecUnits, bill.elecRate, bill.elecAmount,
-                bill.wifi, bill.subtotal, bill.vat, bill.lateFee, bill.total,
+                bill.wifi, otherJson,
+                bill.subtotal, bill.vat, bill.lateFee, bill.total,
                 bill.dueDate,
               ],
               { pool, attempts: 3 }

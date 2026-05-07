@@ -15,22 +15,34 @@
   let _cacheAt = 0;
   let _inflight = null;
   const TTL_MS = 60_000;
+  const FETCH_TIMEOUT_MS = 8_000;
 
   async function loadFeatures(force) {
     if (!force && _cache && Date.now() - _cacheAt < TTL_MS) return _cache;
     if (_inflight) return _inflight;
-    _inflight = fetch('/api/features', { credentials: 'same-origin' })
-      .then((r) => r.json())
+    // Hard timeout via AbortController so a hung /api/features request can't
+    // leave FeatureGate stuck on the loading skeleton forever (which on
+    // mobile/Chrome can escalate to RESULT_CODE_HUNG when combined with
+    // skeleton CSS animations + repeated re-renders).
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
+    _inflight = fetch('/api/features', { credentials: 'same-origin', signal: ctrl.signal })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status))))
       .then((d) => {
         _cache = d.features || {};
         _cacheAt = Date.now();
         return _cache;
       })
-      .catch(() => {
-        // Hard-fail: assume nothing is enabled rather than leaving stale.
-        return _cache || {};
+      .catch((err) => {
+        // Hard-fail: cache an EMPTY map (every flag effectively disabled) so
+        // FeatureGate renders the friendly "feature off" placeholder instead
+        // of looping. The cache TTL means we'll retry in 60s automatically.
+        console.warn('[features] load failed:', err && err.message);
+        _cache = _cache || {};
+        _cacheAt = Date.now();
+        return _cache;
       })
-      .finally(() => { _inflight = null; });
+      .finally(() => { clearTimeout(timer); _inflight = null; });
     return _inflight;
   }
 
@@ -287,10 +299,13 @@
         style: {
           height: lineHeight,
           width: i % 3 === 2 ? '60%' : '100%',
-          background: `linear-gradient(90deg, ${bg} 0%, ${fg} 50%, ${bg} 100%)`,
-          backgroundSize: '200% 100%',
+          background: fg,
+          opacity: 0.6,
           borderRadius: 4,
-          animation: 'shimmer 1.4s infinite',
+          // Static skeleton — the previous CSS shimmer animation looped
+          // forever on the GPU and, combined with multiple FeatureGate
+          // children mounting/unmounting in rapid succession, was implicated
+          // in Chrome RESULT_CODE_HUNG renderer crashes on the access page.
         },
       })
     ));
@@ -375,7 +390,18 @@
   // render and stack 503-error toasts as every API call fails.
   function FeatureGate({ flag, children, label }) {
     const f = useFeatureFlag(flag);
-    if (!f.ready) {
+    // Watchdog: if the feature-flag fetch is still running after 6s, fall
+    // through to the "off" placeholder rather than spinning the skeleton
+    // forever. Skeletons + heavy CSS animations + an unfulfilled fetch is
+    // the documented recipe for Chrome's RESULT_CODE_HUNG renderer crash
+    // on slower devices.
+    const [timedOut, setTimedOut] = React.useState(false);
+    React.useEffect(() => {
+      if (f.ready) return;
+      const t = setTimeout(() => setTimedOut(true), 6000);
+      return () => clearTimeout(t);
+    }, [f.ready]);
+    if (!f.ready && !timedOut) {
       return React.createElement(window.AdminSkeleton || 'div', { rows: 4 });
     }
     if (f.enabled) return children;

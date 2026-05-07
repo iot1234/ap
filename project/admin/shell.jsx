@@ -788,7 +788,13 @@ function App() {
           onResetData={handleResetData}
         />
         <div style={{ flex: 1, minWidth: 0 }}>
-          <Page {...pageProps} />
+          {/* Per-page ErrorBoundary so a render error in one page doesn't
+              kill the whole shell — admin can still navigate to a working
+              page or click "Retry" to remount the failing one. */}
+          {(() => {
+            const Boundary = window.ErrorBoundary || (({ children }) => children);
+            return <Boundary key={page}><Page {...pageProps} /></Boundary>;
+          })()}
         </div>
       </main>
 
