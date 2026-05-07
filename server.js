@@ -1826,15 +1826,44 @@ app.put('/api/tenants/:id', sameOrigin, requireAuth, async (req, res) => {
   }
   if (!fields.length) return res.status(400).json({ error: 'nothing to update' });
   fields.push('updated_at = NOW()');
+  // Optimistic locking: if the client sent a `version` (= server's last
+  // updated_at), we add it to the WHERE clause. Two concurrent edits → the
+  // second UPDATE returns 0 rows → 409 with the current state so the UI
+  // can prompt the user to reload before retrying. Without `version` we
+  // fall back to last-write-wins (preserves backwards compat).
+  let lockClause = '';
+  if (b.version) {
+    params.push(b.version);
+    lockClause = ` AND updated_at = $${params.length}`;
+  }
   params.push(id);
   try {
     const { rows } = await pool.query(
-      `UPDATE tenants SET ${fields.join(', ')} WHERE id=$${i} AND deleted_at IS NULL RETURNING id`,
+      `UPDATE tenants SET ${fields.join(', ')}
+         WHERE id=$${params.length} AND deleted_at IS NULL${lockClause}
+         RETURNING id, updated_at`,
       params
     );
-    if (!rows.length) return res.status(404).json({ error: 'not found' });
+    if (!rows.length) {
+      if (b.version) {
+        // Either the row is gone or the version is stale. Look up to tell apart.
+        const cur = await pool.query(
+          `SELECT id, full_name, phone, email, current_room_id, status, updated_at
+             FROM tenants WHERE id=$1 AND deleted_at IS NULL`,
+          [id]
+        );
+        if (cur.rows.length) {
+          return res.status(409).json({
+            error: 'ผู้ใช้อื่นแก้ไขข้อมูลนี้ไปแล้ว — โปรดโหลดข้อมูลใหม่ก่อนแก้ไข',
+            code: 'VERSION_CONFLICT',
+            current: cur.rows[0],
+          });
+        }
+      }
+      return res.status(404).json({ error: 'not found', code: 'NOT_FOUND' });
+    }
     audit(req, 'tenant.update', 'tenant', String(id), { fields: Object.keys(b) });
-    res.json({ ok: true, id });
+    res.json({ ok: true, id, updated_at: rows[0].updated_at });
   } catch (err) {
     console.error('tenant update error:', err);
     res.status(500).json({ error: 'internal error' });
