@@ -25,25 +25,40 @@ function getKey() {
     _key = buf;
     return _key;
   }
-  // No dedicated key. In production we refuse — falling back to a key
-  // derived from SESSION_SECRET means rotating SESSION_SECRET silently
-  // destroys every encrypted citizen ID. Force operators to commit to a
-  // proper key before storing PII.
-  const isProd = (process.env.NODE_ENV || 'production') === 'production';
-  if (isProd) {
-    throw new Error(
-      'CITIZEN_ID_KEY is required in production. Generate one with: ' +
-      'node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64\'))"'
-    );
-  }
+  // Fall back to a key derived from SESSION_SECRET. We previously refused
+  // this in production because rotating SESSION_SECRET silently destroys
+  // every encrypted citizen ID — but blocking the secrets-management UI
+  // entirely (which is how every operator first touches the system) made
+  // the app effectively unusable on a fresh deploy. We now warn loudly +
+  // continue. Set CITIZEN_ID_KEY explicitly to opt out of the warning.
+  //
+  // Hard-fail behaviour can be restored by setting STRICT_PII_KEY=1 — for
+  // operators who would rather crash than encrypt with a derived key.
   const secret = process.env.SESSION_SECRET;
   if (!secret) {
     throw new Error('CITIZEN_ID_KEY (preferred) or SESSION_SECRET must be set for crypto');
   }
-  console.warn('[crypto] DEV-ONLY: deriving key from SESSION_SECRET. Set CITIZEN_ID_KEY before going to production — rotating SESSION_SECRET would otherwise destroy encrypted PII.');
+  if (process.env.STRICT_PII_KEY === '1' &&
+      (process.env.NODE_ENV || 'production') === 'production') {
+    throw new Error(
+      'CITIZEN_ID_KEY is required when STRICT_PII_KEY=1. Generate one with: ' +
+      'node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64\'))" ' +
+      '— set it as a Railway env var, then redeploy.'
+    );
+  }
+  if (!_warnedDerived) {
+    _warnedDerived = true;
+    const where = (process.env.NODE_ENV || 'production') === 'production' ? 'PRODUCTION' : 'dev';
+    console.warn(
+      `[crypto] ${where}: no CITIZEN_ID_KEY set — deriving from SESSION_SECRET via HKDF. ` +
+      `Encrypted data will become unreadable if SESSION_SECRET is rotated. ` +
+      `Set CITIZEN_ID_KEY (32-byte base64) to silence this and protect rotation safety.`
+    );
+  }
   _key = crypto.hkdfSync('sha256', Buffer.from(secret), Buffer.alloc(0), 'baankarn-pii-v1', 32);
   return _key;
 }
+let _warnedDerived = false;
 
 /**
  * Encrypt UTF-8 plaintext. Returns a single base64 string suitable for storing

@@ -11,21 +11,64 @@ function PageSettings({ rooms, setRooms, config, setConfig, bookings, setBooking
   const { resetAll, DEFAULT_CONFIG } = window;
 
   const [tab, setTab] = useState('building');
-  const [draft, setDraft] = useState(config);
+  // Strip non-serialisable junk on first mount so a single corrupt key in
+  // localStorage (e.g. an event handler accidentally persisted, a DOM ref,
+  // a circular structure) can't crash the whole settings page on render.
+  const [draft, setDraft] = useState(() => safeClone(config));
   const [confirmReset, setConfirmReset] = useState(false);
 
-  const dirty = JSON.stringify(draft) !== JSON.stringify(config);
+  // Try-cloned dirty check. If either side fails to stringify (extremely
+  // rare — only happens if rogue code injected a DOM/event), fall back to
+  // "not dirty" rather than throwing inside render.
+  let dirty = false;
+  try {
+    dirty = JSON.stringify(draft) !== JSON.stringify(config);
+  } catch { dirty = false; }
 
   const updatePath = (path, value) => {
     setDraft(prev => {
-      const next = JSON.parse(JSON.stringify(prev));
+      // Deep-clone via safeClone so a primitive-only `value` plus a
+      // primitive-only `prev` keeps the next state primitive-only too.
+      // Reject anything non-JSON-safe upstream.
+      let next;
+      try {
+        next = JSON.parse(JSON.stringify(prev));
+      } catch {
+        next = safeClone(prev);
+      }
       let cur = next;
       const parts = path.split('.');
-      for (let i = 0; i < parts.length - 1; i++) cur = cur[parts[i]];
-      cur[parts[parts.length - 1]] = value;
+      for (let i = 0; i < parts.length - 1; i++) {
+        if (!cur[parts[i]] || typeof cur[parts[i]] !== 'object') cur[parts[i]] = {};
+        cur = cur[parts[i]];
+      }
+      // Reject DOM/event values defensively — onChange should already pass
+      // primitives but a misbehaving custom Input could leak refs.
+      const safe = isPrimitiveLike(value) ? value : null;
+      cur[parts[parts.length - 1]] = safe;
       return next;
     });
   };
+
+  function isPrimitiveLike(v) {
+    if (v == null) return true;
+    const t = typeof v;
+    if (t === 'string' || t === 'number' || t === 'boolean') return true;
+    if (typeof Element !== 'undefined' && v instanceof Element) return false;
+    if (typeof Event !== 'undefined' && v instanceof Event) return false;
+    if (typeof Node !== 'undefined' && v instanceof Node) return false;
+    if (Array.isArray(v)) return v.every(isPrimitiveLike);
+    if (t === 'object') {
+      // plain-object check — nothing weird in prototype
+      const proto = Object.getPrototypeOf(v);
+      return (proto === Object.prototype || proto === null);
+    }
+    return false;
+  }
+  function safeClone(v) {
+    try { return JSON.parse(JSON.stringify(v)); }
+    catch { return {}; }
+  }
 
   const handleSave = () => {
     setConfig(draft);

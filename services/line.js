@@ -105,28 +105,6 @@ async function pushText(...args) {
 }
 
 /**
- * Push a Flex message.
- *   pushFlex(oa, userId, altText, flex)
- *   pushFlex(userId, altText, flex)   — legacy
- */
-async function pushFlex(...args) {
-  const { oa, rest } = _splitArgs(args, 4);
-  const [userId, altText, flex] = rest;
-  const resolved = _resolveOa(oa);
-  if (!resolved || !userId || !flex) return false;
-  try {
-    await postJson(resolved, '/v2/bot/message/push', {
-      to: userId,
-      messages: [{ type: 'flex', altText: String(altText).slice(0, 400), contents: flex }],
-    });
-    return true;
-  } catch (err) {
-    console.error(`[line:${resolved.slug || resolved.id}] flex push failed:`, err.message);
-    return false;
-  }
-}
-
-/**
  * Reply to a webhook event using the one-shot replyToken.
  *   replyText(oa, replyToken, text)
  *   replyText(replyToken, text)   — legacy
@@ -146,38 +124,6 @@ async function replyText(...args) {
     console.error(`[line:${resolved.slug || resolved.id}] reply failed:`, err.message);
     return false;
   }
-}
-
-async function replyFlex(...args) {
-  const { oa, rest } = _splitArgs(args, 4);
-  const [replyToken, altText, flex] = rest;
-  const resolved = _resolveOa(oa);
-  if (!resolved || !replyToken || !flex) return false;
-  try {
-    await postJson(resolved, '/v2/bot/message/reply', {
-      replyToken,
-      messages: [{ type: 'flex', altText: String(altText).slice(0, 400), contents: flex }],
-    });
-    return true;
-  } catch (err) {
-    console.error(`[line:${resolved.slug || resolved.id}] reply flex failed:`, err.message);
-    return false;
-  }
-}
-
-/**
- * Notify the OA's owner (or the env owner if no OA passed) about a system
- * event. Uses the OA's `ownerUserId` field if present, falling back to the
- * env-level LINE_OWNER_USER_ID.
- */
-async function notifyOwner(...args) {
-  const { oa, rest } = _splitArgs(args, 2);
-  const [text] = rest;
-  const resolved = _resolveOa(oa);
-  if (!resolved) return false;
-  const owner = resolved.ownerUserId || secrets.get('LINE_OWNER_USER_ID');
-  if (!owner) return false;
-  return pushText(resolved, owner, text);
 }
 
 /**
@@ -203,56 +149,7 @@ function verifyWebhookSignature(...args) {
   } catch { return false; }
 }
 
-// --- Flex template (unchanged) -------------------------------------------
-function buildBillFlex({ tenantName, roomId, period, total, dueDate, billNo, portalUrl }) {
-  const fmt = (n) => Number(n).toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  return {
-    type: 'bubble',
-    size: 'kilo',
-    header: {
-      type: 'box', layout: 'vertical', backgroundColor: '#c46a3e', paddingAll: '20px',
-      contents: [
-        { type: 'text', text: 'ใบแจ้งหนี้', color: '#ffffff', weight: 'bold', size: 'sm' },
-        { type: 'text', text: `ห้อง ${roomId || '-'}`, color: '#ffffff', weight: 'bold', size: 'xl', margin: 'sm' },
-        { type: 'text', text: `รอบ ${period || '-'}`, color: '#ffffffdd', size: 'xs' },
-      ],
-    },
-    body: {
-      type: 'box', layout: 'vertical', spacing: 'md',
-      contents: [
-        { type: 'text', text: `ผู้เช่า: ${tenantName || '-'}`, size: 'sm', color: '#5b4f40' },
-        { type: 'box', layout: 'baseline', spacing: 'sm', margin: 'md',
-          contents: [
-            { type: 'text', text: 'ยอดรวม', size: 'sm', color: '#8a7d6b', flex: 0 },
-            { type: 'text', text: `฿${fmt(total)}`, size: 'xl', weight: 'bold', color: '#2c241b', align: 'end' },
-          ],
-        },
-        { type: 'box', layout: 'baseline', spacing: 'sm',
-          contents: [
-            { type: 'text', text: 'กำหนดชำระ', size: 'sm', color: '#8a7d6b', flex: 0 },
-            { type: 'text', text: String(dueDate || '-'), size: 'sm', align: 'end', color: '#2c241b' },
-          ],
-        },
-        billNo ? { type: 'box', layout: 'baseline', spacing: 'sm',
-          contents: [
-            { type: 'text', text: 'เลขที่บิล', size: 'xs', color: '#8a7d6b', flex: 0 },
-            { type: 'text', text: String(billNo), size: 'xs', align: 'end', color: '#5b4f40' },
-          ],
-        } : null,
-      ].filter(Boolean),
-    },
-    footer: portalUrl ? {
-      type: 'box', layout: 'vertical',
-      contents: [{
-        type: 'button', style: 'primary', color: '#c46a3e', height: 'sm',
-        action: { type: 'uri', label: 'ดูบิล + ชำระ', uri: portalUrl },
-      }],
-    } : undefined,
-  };
-}
-
 module.exports = {
-  isConfigured, pushText, pushFlex, replyText, replyFlex,
-  notifyOwner, verifyWebhookSignature, buildBillFlex,
+  isConfigured, pushText, replyText, verifyWebhookSignature,
   _resolveOa, // exported for tests
 };

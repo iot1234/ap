@@ -822,20 +822,13 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBooking, validateBody(sche
 });
 
 // POST /api/notify/bill — admin-auth. Trigger a LINE notification for a bill
-// the admin just sent. Body: { tenantName, roomId, period, total, billNo,
-// recipientUserId? } — if recipientUserId omitted, falls back to LINE_OWNER_USER_ID.
+// the admin just sent. Body: { tenantName, roomId, period, total, billNo }.
+// Routes through notifier.notifyOwner so multi-OA tenants get the message
+// via the correct OA + email fallback fires when LINE isn't configured.
 app.post('/api/notify/bill', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager', 'staff'), async (req, res) => {
   const b = req.body || {};
   if (!b.tenantName || !b.total) {
     return res.status(400).json({ error: 'tenantName and total required' });
-  }
-  // Recipient is server-side only — we don't accept recipientUserId from the
-  // client to prevent an authenticated admin from spamming arbitrary LINE
-  // users (compromised admin scenario or insider abuse).
-  const recipient = require('./services/secrets').get('LINE_OWNER_USER_ID');
-  if (!recipient) return res.status(400).json({ error: 'no LINE recipient configured' });
-  if (!lineNotify.isConfigured()) {
-    return res.status(503).json({ error: 'LINE not configured on server' });
   }
   const text = [
     `💰 ออกบิลใหม่`,
@@ -845,8 +838,20 @@ app.post('/api/notify/bill', sameOrigin, csrfGuard, requireAuth, requireRole('ow
     `จำนวน: ฿${Number(b.total).toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
     b.billNo ? `เลขที่: ${b.billNo}` : null,
   ].filter(Boolean).join('\n');
-  const ok = await lineNotify.pushText(recipient, text);
-  res.json({ ok });
+  try {
+    const flags = await features.load(pool);
+    const out = await notifier.notifyOwner({ pool, features: flags }, {
+      subject: '💰 ออกบิลใหม่',
+      text,
+    });
+    if (!out.ok) {
+      return res.status(503).json({ error: 'no notification channel reached the owner', channel: out.channel });
+    }
+    res.json({ ok: true, channel: out.channel });
+  } catch (err) {
+    console.error('notify/bill error:', err.message);
+    res.status(500).json({ error: 'internal error' });
+  }
 });
 
 // --- Bills: PDF rendering + PromptPay QR ----------------------------------
@@ -2855,18 +2860,27 @@ async function notifyOtherOwners(req, msg) {
       [actorId || 0]
     );
     if (!rows.length) return;
-    // Map owner usernames → line_user_ids via tenants table (admins are
-    // sometimes also tenants who bound LINE). If no match, skip silently.
+    // Map owner usernames → tenant rows (line_user_id + line_oa_id) via
+    // tenants table (admins are sometimes also tenants who bound LINE).
+    // Then route through notifier.notifyTenant so the multi-OA dispatcher
+    // resolves which OA to push through. Falls back to email when the
+    // owner has no LINE binding.
     for (const o of rows) {
       try {
         const t = await pool.query(
-          `SELECT line_user_id FROM tenants
+          `SELECT id, full_name, phone, email, line_user_id, line_oa_id
+             FROM tenants
              WHERE phone=$1 OR full_name=$2
              LIMIT 1`,
           [o.username, o.username]
         );
-        const lineId = t.rows[0]?.line_user_id;
-        if (lineId) await lineNotify.pushText(lineId, `${msg.subject}\n${msg.text}`);
+        if (!t.rows.length) continue;
+        await notifier.notifyTenant(
+          { pool, features: flags },
+          t.rows[0],
+          { subject: msg.subject, text: msg.text }
+        );
+        continue;
       } catch { /* per-owner failure is fine */ }
     }
   } catch (err) {
