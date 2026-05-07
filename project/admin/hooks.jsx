@@ -192,6 +192,10 @@
   window.loadFeatures = loadFeatures;
   window.ErrorBoundary = ErrorBoundary;
   window.OfflineBanner = OfflineBanner;
+  // Pages that call state-changing endpoints directly (page-bookings,
+  // page-recurring-charges, etc.) need the same CSRF-aware fetch the hook
+  // uses internally. Expose it as a global so non-hook callers can reuse it.
+  window.apiFetch = apiFetch;
   window.apiFetch = apiFetch;
   window.getCsrfToken = getCsrfToken;
 })();

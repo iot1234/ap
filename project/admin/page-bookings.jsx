@@ -29,8 +29,22 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
 
   const active = activeId ? bookings.find(b => b.id === activeId) : null;
 
-  const updateStatus = (id, status) => {
-    setBookings(prev => prev.map(b => b.id === id ? { ...b, status } : b));
+  // updateStatus is the canonical state-change hook. It still writes to the
+  // local bookings list (api-client mirrors this into baankarn_bookings_v1),
+  // and ALSO fires PUT /api/bookings/:id which on the server side enforces
+  // the transition guard, audits the change, and pushes notifications to
+  // owner + tenant. Fail-soft: a server outage doesn't block the UI from
+  // reflecting the action — local state still updates and the api-client's
+  // /api/data sync persists eventually.
+  const updateStatus = async (id, status, extra = {}) => {
+    setBookings(prev => prev.map(b => b.id === id ? { ...b, status, ...extra } : b));
+    try {
+      const f = window.apiFetch || fetch;
+      await f(`/api/bookings/${encodeURIComponent(id)}`, {
+        method: 'PUT',
+        body: JSON.stringify({ status, ...extra }),
+      });
+    } catch (e) { /* server-side audit/notify failure is non-fatal */ }
   };
 
   const handleApprove = (id) => {

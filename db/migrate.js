@@ -405,11 +405,18 @@ async function migrate(pool, opts = {}) {
         `Set ADMIN_PASSWORD then redeploy, or create the user manually.`
       );
     } else if (ADMIN_PASSWORD.length < 12 && (process.env.NODE_ENV || 'production') === 'production') {
-      console.error(
-        `[db] FATAL: ADMIN_PASSWORD is shorter than 12 chars in production. ` +
-        `Refusing to bootstrap a weak admin account.`
+      // Don't throw — that crash-loops the container when ops just want to
+      // start the server with a placeholder password. Skip the bootstrap
+      // and tell the operator how to recover.
+      console.warn(
+        `[db] ADMIN_PASSWORD is shorter than 12 chars in production. ` +
+        `Refusing to seed a weak admin row — set a strong password and redeploy, ` +
+        `or POST /api/admin/users from an existing session to add the first user.`
       );
-      throw new Error('ADMIN_PASSWORD too short for production');
+    } else if (ADMIN_PASSWORD === 'admin1234') {
+      console.warn(
+        `[db] ADMIN_PASSWORD is the example value 'admin1234' — bootstrap skipped.`
+      );
     } else {
       const hash = await bcrypt.hash(ADMIN_PASSWORD, 10);
       await pool.query(

@@ -37,32 +37,42 @@ const SESSION_SECRET = process.env.SESSION_SECRET;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 
 // === Production env enforcement (A1) =====================================
-// Refuse to start when critical env is missing or weak. The previous
-// fallbacks (`dev-only-change-me`, `admin1234`) were both visible in source
-// and smoke-test scripts — anyone deploying without setting them got an
-// instantly-pwnable instance. We now hard-fail in production and warn in
-// dev so the operator sees the problem at boot time.
+// We split into FATAL (refuse to boot) and WARN (log + continue):
+//   FATAL: missing/example session secret — actively used to sign every
+//     cookie, so weak = forged-cookie attack vector right now.
+//   WARN:  weak ADMIN_PASSWORD — only used for the FIRST-RUN bootstrap of
+//     the admin row. db/migrate.js refuses to bootstrap with a weak value,
+//     so an existing deployment with a real admin row is unaffected.
+//     Crash-looping the server here would lock operators out of an
+//     otherwise-healthy deployment when they need to fix env vars; better
+//     to start, log, and let the operator log in to fix.
 const _fatalConfig = [];
+const _warnConfig = [];
 if (!DATABASE_URL) _fatalConfig.push('DATABASE_URL is not set');
 if (NODE_ENV === 'production') {
-  if (!SESSION_SECRET) _fatalConfig.push('SESSION_SECRET is required in production (≥ 32 random bytes)');
+  // SESSION_SECRET — fatal because it's used live for every cookie.
+  if (!SESSION_SECRET) _fatalConfig.push('SESSION_SECRET is required in production (≥ 32 random bytes). Generate: node -e "console.log(require(\'crypto\').randomBytes(48).toString(\'base64\'))"');
   else if (SESSION_SECRET.length < 32) _fatalConfig.push('SESSION_SECRET must be ≥ 32 chars');
   else if (SESSION_SECRET === 'dev-only-change-me') _fatalConfig.push('SESSION_SECRET is the example value — generate a fresh one');
+
+  // ADMIN_PASSWORD — warn-only because it's only consumed by the first-run
+  // bootstrap. After the admin user exists in DB, the env var is no-op.
   if (!ADMIN_PASSWORD && !process.env.SKIP_ADMIN_BOOTSTRAP) {
-    // We allow SKIP_ADMIN_BOOTSTRAP=1 for ops who manage users via the API
-    // themselves. Otherwise the boot path expects a password to seed the
-    // first admin row.
-    _fatalConfig.push('ADMIN_PASSWORD is required in production (or set SKIP_ADMIN_BOOTSTRAP=1)');
+    _warnConfig.push('ADMIN_PASSWORD is not set — first-run bootstrap will be skipped. Set SKIP_ADMIN_BOOTSTRAP=1 to silence this, or supply a ≥12-char password to seed the first admin.');
   } else if (ADMIN_PASSWORD && ADMIN_PASSWORD.length < 12) {
-    _fatalConfig.push('ADMIN_PASSWORD must be ≥ 12 chars');
+    _warnConfig.push('ADMIN_PASSWORD is shorter than 12 chars — bootstrap will REFUSE to seed a weak admin. Existing admin users still work normally.');
   } else if (ADMIN_PASSWORD === 'admin1234') {
-    _fatalConfig.push('ADMIN_PASSWORD is the example value — choose a fresh password');
+    _warnConfig.push('ADMIN_PASSWORD is the example value `admin1234` — bootstrap will refuse it. Existing admin users still work.');
   }
 }
 if (_fatalConfig.length) {
   console.error('FATAL: configuration errors:');
   for (const m of _fatalConfig) console.error('  - ' + m);
   process.exit(1);
+}
+if (_warnConfig.length) {
+  console.warn('[boot] configuration warnings (non-fatal):');
+  for (const m of _warnConfig) console.warn('  ⚠ ' + m);
 }
 // In dev, warn loudly but allow boot.
 if (NODE_ENV !== 'production' && !SESSION_SECRET) {
@@ -2154,7 +2164,8 @@ app.post('/api/bills', sameOrigin, requireAuth, async (req, res) => {
     try {
       const prev = await pool.query(
         `SELECT total, due_date, paid_at, status FROM bills
-           WHERE room_id=$1 AND status IN ('pending','overdue') ORDER BY created_at DESC LIMIT 1`,
+           WHERE room_id=$1 AND status IN ('pending','overdue') AND deleted_at IS NULL
+           ORDER BY created_at DESC LIMIT 1`,
         [b.roomId]
       );
       previous = prev.rows[0] ? { total: Number(prev.rows[0].total), dueDate: prev.rows[0].due_date, status: prev.rows[0].status } : null;
@@ -3027,6 +3038,8 @@ const _routesCtx = {
   requireTenant: (req, res, next) => requireTenant(req, res, next),
   sameOrigin,
   csrfGuard,
+  lockout,                                 // for per-principal brute-force defense
+  makeIpLimiter,                           // shared IP-based rate-limit factory
 };
 const _routesMounted = _routesIndex(app, _routesCtx);
 

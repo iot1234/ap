@@ -27,7 +27,15 @@ function isTrivialPin(s) {
 }
 
 module.exports = function buildTenantOpsRouter(ctx) {
-  const { pool, requireAuth, requireRole, sameOrigin, csrfGuard, audit, requireTenant } = ctx;
+  const { pool, requireAuth, requireRole, sameOrigin, csrfGuard, audit, requireTenant,
+          lockout, makeIpLimiter } = ctx;
+  // Brute-force defenses for the unauthenticated PIN init endpoint. Without
+  // these an attacker who knows a phone number can try all 10,000 possible
+  // 4-digit citizen-id tails freely. IP-level limiter caps scripted attempts;
+  // per-phone lockout makes rotating IPs ineffective too.
+  const pinInitIpLimiter = makeIpLimiter
+    ? makeIpLimiter({ windowMs: 15 * 60_000, max: 8, message: 'too many PIN init attempts' })
+    : (_req, _res, next) => next();
   const r = express.Router();
 
   // === checkIn ============================================================
@@ -206,14 +214,33 @@ module.exports = function buildTenantOpsRouter(ctx) {
   // === Tenant portal — first-time set PIN with phone + last4(id_card) =====
   // Used when tenant has never logged in (pin_hash is NULL). The id_card
   // tail is used as a one-time secret — admin entered it during checkin.
-  r.post('/_tenant/pin/init', sameOrigin, csrfGuard,
+  // Hardened: IP rate limiter (~8/15min) + per-phone lockout (5 wrong
+  // tails → 30min lockout) so brute-forcing 10,000 tails isn't feasible.
+  r.post('/_tenant/pin/init', sameOrigin, csrfGuard, pinInitIpLimiter,
     validateBody(schemas.tenantSetPin),
     async (req, res) => {
       const { phone, citizenIdTail, newPin } = req.body;
       if (isTrivialPin(newPin)) {
         return res.status(400).json({ error: 'PIN ไม่ปลอดภัย — เลี่ยงรูปแบบที่คาดเดาง่าย', code: 'WEAK_PIN' });
       }
+      const principal = `pin_init:${String(phone).slice(0, 32)}`;
       try {
+        // Per-phone lockout check first so a locked attacker can't even
+        // see DB lookup timing.
+        if (lockout) {
+          try { await lockout.check(principal); }
+          catch (err) {
+            if (err.code === 'LOCKED_OUT') {
+              const minutes = Math.ceil((err.retryAfterMs || 0) / 60_000);
+              audit(req, 'tenant.pin_init_locked', 'tenant', phone, null, phone).catch(() => {});
+              return res.status(429).json({
+                error: `ลองใหม่ใน ${minutes} นาที`, code: 'LOCKED_OUT',
+              });
+            }
+            throw err;
+          }
+        }
+
         const { rows } = await pool.query(
           `SELECT id, pin_hash, citizen_id_encrypted, citizen_id_tail
              FROM tenants WHERE phone=$1 AND deleted_at IS NULL AND status<>'blacklist' LIMIT 1`,
@@ -225,6 +252,9 @@ module.exports = function buildTenantOpsRouter(ctx) {
 
         if (!rows.length || rows[0].pin_hash) {
           // No tenant OR PIN already set — refuse without leaking which case.
+          if (lockout) lockout.recordFailure(principal, 'tenant').catch(() => {});
+          audit(req, 'tenant.pin_init_failed', 'tenant', phone,
+            { reason: !rows.length ? 'no_tenant' : 'already_set' }, phone).catch(() => {});
           return res.status(401).json({ error: 'ข้อมูลไม่ตรงกัน' });
         }
         const t = rows[0];
@@ -237,11 +267,16 @@ module.exports = function buildTenantOpsRouter(ctx) {
           } catch { /* ignore */ }
         }
         if (!storedTail || storedTail !== citizenIdTail) {
+          if (lockout) lockout.recordFailure(principal, 'tenant').catch(() => {});
+          audit(req, 'tenant.pin_init_failed', 'tenant', String(t.id),
+            { reason: 'bad_tail' }, phone).catch(() => {});
           return res.status(401).json({ error: 'ข้อมูลไม่ตรงกัน' });
         }
         const hash = await bcrypt.hash(newPin, 10);
         await pool.query(`UPDATE tenants SET pin_hash=$1, updated_at=NOW() WHERE id=$2`,
           [hash, t.id]);
+        // Successful init → clear failure counter for this phone.
+        if (lockout) lockout.reset(principal).catch(() => {});
         audit(req, 'tenant.pin_init', 'tenant', String(t.id));
         res.json({ ok: true });
       } catch (err) {

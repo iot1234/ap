@@ -38,10 +38,12 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         for (const room of rooms) {
           if (!room || !room.tenant) { skipped++; continue; }
           if (room.status !== 'occupied' && room.status !== 'overdue') { skipped++; continue; }
-          // pull previous overdue bill for late-fee
+          // pull previous overdue bill for late-fee. Filter soft-deleted
+          // so a void+restored bill can't pile up phantom late fees.
           const prevQ = await pool.query(
             `SELECT total, due_date, paid_at, status FROM bills
-              WHERE room_id=$1 AND status IN ('pending','overdue') ORDER BY created_at DESC LIMIT 1`,
+              WHERE room_id=$1 AND status IN ('pending','overdue') AND deleted_at IS NULL
+              ORDER BY created_at DESC LIMIT 1`,
             [room.id]
           );
           const previous = prevQ.rows[0] ? {
