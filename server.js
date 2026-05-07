@@ -617,11 +617,15 @@ app.put('/api/data/:key', sameOrigin, csrfGuard, requireAuth, requireRole('owner
 //   - LINE binding can target a real tenant row
 //
 // Algorithm: for every room with a tenant.name, upsert by (phone, name).
-// Phone is the natural key — we never delete tenants here (admin removes
-// via tenants UI explicitly), only update current_room_id and contact info.
+// Composite key: previously this used phone alone, which silently merged
+// two distinct people who happened to share a phone (parents + kids in
+// same household, shared lobby phone, etc.). The lookup now matches phone
+// AND a normalised full_name so different humans on the same phone become
+// separate tenant rows. Same-name retypes still update one row in place.
 async function mirrorRoomsToTenants(roomsObj, updatedBy) {
   if (!roomsObj || typeof roomsObj !== 'object') return;
-  const seenPhones = new Set();
+  const seen = new Set();
+  const norm = (s) => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
   for (const [roomId, room] of Object.entries(roomsObj)) {
     if (!room || typeof room !== 'object') continue;
     const t = room.tenant;
@@ -631,15 +635,20 @@ async function mirrorRoomsToTenants(roomsObj, updatedBy) {
     if (!fullName) continue;
     // If no phone, we can't safely upsert; skip silently to avoid duplicates
     if (!phone) continue;
-    if (seenPhones.has(phone)) continue;   // dedup within this write
-    seenPhones.add(phone);
-    // Manual upsert by phone — avoids depending on a partial unique index.
+    const dedupKey = `${phone}|${norm(fullName)}`;
+    if (seen.has(dedupKey)) continue;
+    seen.add(dedupKey);
+    // Match on phone + case-insensitive full_name. lower(full_name) avoids
+    // the trivial-typo "John Smith" vs "john smith" creating duplicates.
     // We never touch pin_hash or citizen_id_encrypted — those come from
     // /api/tenants endpoints with explicit input.
     try {
       const existing = await pool.query(
-        'SELECT id FROM tenants WHERE phone=$1 AND deleted_at IS NULL LIMIT 1',
-        [phone]
+        `SELECT id FROM tenants
+           WHERE phone=$1 AND lower(full_name)=lower($2)
+                 AND deleted_at IS NULL
+           LIMIT 1`,
+        [phone, fullName]
       );
       if (existing.rows.length) {
         await pool.query(
@@ -652,6 +661,15 @@ async function mirrorRoomsToTenants(roomsObj, updatedBy) {
           [fullName, t.email || null, String(roomId).slice(0, 32), existing.rows[0].id]
         );
       } else {
+        // Soft-warn when this phone is already on a different tenant so
+        // operators can audit shared-phone households intentionally.
+        const collide = await pool.query(
+          'SELECT COUNT(*)::int AS n FROM tenants WHERE phone=$1 AND deleted_at IS NULL',
+          [phone]
+        );
+        if (collide.rows[0].n > 0) {
+          console.warn(`[bridge] phone ${phone.slice(-4)} now on ${collide.rows[0].n + 1} distinct tenant rows (room ${roomId})`);
+        }
         await pool.query(
           `INSERT INTO tenants (full_name, phone, email, current_room_id, status, locale)
            VALUES ($1,$2,$3,$4,'active','th')`,
@@ -738,53 +756,50 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBooking, validateBody(sche
   if (!cleaned.tenantName.trim()) {
     return res.status(400).json({ error: 'tenantName required' });
   }
+  // Build the new booking object outside the transaction.
+  const VALID_TYPES = ['standard', 'deluxe', 'suite', 'studio'];
+  const wantType = VALID_TYPES.includes(cleaned.roomType) ? cleaned.roomType : 'standard';
+  const wantFloor = Number(cleaned.floor) || null;
+  const newBooking = {
+    id: 'BK-PUB-' + require('crypto').randomBytes(6).toString('hex'),
+    name: cleaned.tenantName,
+    phone: cleaned.phone,
+    wantType,
+    wantFloor,
+    moveIn: cleaned.checkInDate || null,
+    months: 12,
+    deposit: 0,
+    status: 'pending',
+    createdAt: new Date().toISOString(),
+    email: cleaned.email,
+    message: cleaned.message,
+    source: 'public-form',
+    roomId: cleaned.roomId,
+  };
+  const client = await pool.connect();
   try {
-    const { rows } = await pool.query(
-      'SELECT value FROM app_data WHERE key=$1',
+    // Read-modify-write inside a transaction with SELECT FOR UPDATE so two
+    // simultaneous public submissions can't both see the same list and
+    // overwrite each other on save. The row-level lock serialises writers;
+    // the request rate limit (3/min/IP) keeps queue depth shallow.
+    await client.query('BEGIN');
+    const { rows } = await client.query(
+      'SELECT value FROM app_data WHERE key=$1 FOR UPDATE',
       ['baankarn_bookings_v1']
     );
     const list = (rows.length && Array.isArray(rows[0].value)) ? rows[0].value : [];
-    // Normalize to the shape that admin/page-bookings.jsx expects (it iterates
-    // over bookings rendering b.wantType/b.wantFloor/b.moveIn/b.months).
-    // Public booking form uses tenantName/roomType/floor/checkInDate, so map.
-    const VALID_TYPES = ['standard', 'deluxe', 'suite', 'studio'];
-    const wantType = VALID_TYPES.includes(cleaned.roomType) ? cleaned.roomType : 'standard';
-    const wantFloor = Number(cleaned.floor) || null;
-    const newBooking = {
-      // admin schema. Use a random suffix instead of Date.now() so two
-      // simultaneous requests can't end up with the same id (which the admin
-      // UI would then dedupe via Set, dropping the second booking).
-      id: 'BK-PUB-' + require('crypto').randomBytes(6).toString('hex'),
-      name: cleaned.tenantName,
-      phone: cleaned.phone,
-      wantType,
-      wantFloor,
-      moveIn: cleaned.checkInDate || null,
-      months: 12,
-      deposit: 0,
-      status: 'pending',
-      createdAt: new Date().toISOString(),
-      // keep the public-only fields too so admin can see them in detail drawer
-      email: cleaned.email,
-      message: cleaned.message,
-      source: 'public-form',
-      roomId: cleaned.roomId,
-    };
     list.unshift(newBooking);
-    audit(req, 'booking.public_create', 'booking', newBooking.id,
-      { phone: cleaned.phone, roomId: cleaned.roomId, wantType, wantFloor },
-      `public:${cleaned.phone || 'anon'}`).catch(() => {});
     // Cap at 500 newest entries to prevent unbounded JSONB growth.
-    // Older bookings are dropped silently — admins should archive or act on
-    // them within this window. With a 5/min/IP rate limit, 500 entries is
-    // ~100 minutes of single-IP attack; rotating-IP attacks are harder to
-    // stop here, so we add an upper bound on storage too.
     const capped = list.slice(0, 500);
-    await pool.query(
+    await client.query(
       `INSERT INTO app_data (key, value, updated_by) VALUES ($1, $2, 'public')
        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW(), updated_by = 'public'`,
       ['baankarn_bookings_v1', JSON.stringify(capped)]
     );
+    await client.query('COMMIT');
+    audit(req, 'booking.public_create', 'booking', newBooking.id,
+      { phone: cleaned.phone, roomId: cleaned.roomId, wantType, wantFloor },
+      `public:${cleaned.phone || 'anon'}`).catch(() => {});
 
     // Multi-channel owner notify (LINE → email fallback) + log to
     // notifications_log so admin sees it even when LINE is offline. B6.
@@ -798,8 +813,11 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBooking, validateBody(sche
 
     res.json({ ok: true, booking: newBooking });
   } catch (err) {
+    try { await client.query('ROLLBACK'); } catch { /* already rolled back */ }
     console.error('public booking error:', err);
     res.status(500).json({ error: 'internal error' });
+  } finally {
+    client.release();
   }
 });
 
