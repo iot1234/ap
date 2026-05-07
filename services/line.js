@@ -1,37 +1,58 @@
 // services/line.js
-// LINE Messaging API push notifications. Lightweight wrapper using the
-// built-in `https` module (no extra dependency). Fire-and-forget — caller
-// awaits if it cares, but errors are caught and logged so a failed push
-// never blocks the request that triggered it.
+// LINE Messaging API push notifications. Now multi-OA aware:
+//   - pushText(oa, userId, text)        — push via specific OA
+//   - pushText(userId, text)            — backward-compat: uses env-OA
+// Pass an `oa` object as the first arg to route through that channel.
 //
-// Configure via env:
-//   LINE_CHANNEL_ACCESS_TOKEN - long-lived channel access token
-//   LINE_OWNER_USER_ID        - default recipient (admin/owner) for system events
-//
-// If LINE_CHANNEL_ACCESS_TOKEN is missing, all push functions become no-ops
-// (return false) so the rest of the app keeps working in dev/staging without
-// LINE configured.
+// Backward compatibility: if the first arg looks like a userId string (starts
+// with 'U' for LINE user, or just a long string), we treat the call as legacy
+// "single OA via env vars" and resolve credentials from secrets.js.
 
 const https = require('https');
 const secrets = require('./secrets');
 
-function isConfigured() {
-  return !!secrets.get('LINE_CHANNEL_ACCESS_TOKEN');
+// --- OA resolution --------------------------------------------------------
+// Anything we accept as an "OA-shaped" object must expose channelAccessToken
+// (string) for outbound calls. We synthesize an env-OA from secrets.js if no
+// OA was passed in — preserves the previous single-OA call signature.
+function _resolveOa(maybeOa) {
+  if (maybeOa && typeof maybeOa === 'object' && maybeOa.channelAccessToken) {
+    return maybeOa;
+  }
+  const token = secrets.get('LINE_CHANNEL_ACCESS_TOKEN');
+  if (!token) return null;
+  return {
+    id: 0, slug: 'env', isEnvOa: true,
+    channelAccessToken: token,
+    channelSecret: secrets.get('LINE_CHANNEL_SECRET') || null,
+    ownerUserId: secrets.get('LINE_OWNER_USER_ID') || null,
+  };
 }
 
-function postJson(pathname, body) {
+// Heuristic: the legacy call was pushText(userId, text); the new call is
+// pushText(oa, userId, text). We disambiguate by the shape of the first arg.
+function _splitArgs(args, fnLen /* expected: oa-form arg count */) {
+  if (args.length === fnLen && args[0] && typeof args[0] === 'object') {
+    return { oa: args[0], rest: args.slice(1) };
+  }
+  // Legacy form: no oa supplied
+  return { oa: null, rest: args };
+}
+
+// --- HTTP helpers ---------------------------------------------------------
+function postJson(oa, pathname, body) {
   return new Promise((resolve, reject) => {
+    if (!oa || !oa.channelAccessToken) {
+      return reject(new Error('LINE OA not configured'));
+    }
     const data = Buffer.from(JSON.stringify(body), 'utf8');
     const req = https.request(
       {
-        hostname: 'api.line.me',
-        port: 443,
-        path: pathname,
-        method: 'POST',
+        hostname: 'api.line.me', port: 443, path: pathname, method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Content-Length': data.length,
-          Authorization: `Bearer ${secrets.get('LINE_CHANNEL_ACCESS_TOKEN')}`,
+          Authorization: `Bearer ${oa.channelAccessToken}`,
         },
         timeout: 5000,
       },
@@ -48,101 +69,132 @@ function postJson(pathname, body) {
       }
     );
     req.on('error', reject);
-    req.on('timeout', () => {
-      req.destroy(new Error('LINE API timeout'));
-    });
+    req.on('timeout', () => req.destroy(new Error('LINE API timeout')));
     req.write(data);
     req.end();
   });
 }
 
+// --- Public API -----------------------------------------------------------
+
+function isConfigured(oa) {
+  const resolved = _resolveOa(oa);
+  return !!(resolved && resolved.channelAccessToken);
+}
+
 /**
- * Push a plain text message to a single user.
- * @returns {Promise<boolean>} true if pushed, false if not configured / failed.
+ * Push a plain text message.
+ *   pushText(oa, userId, text)  — preferred, multi-OA aware
+ *   pushText(userId, text)      — legacy, uses env OA
  */
-async function pushText(userId, text) {
-  if (!isConfigured() || !userId || !text) return false;
+async function pushText(...args) {
+  const { oa, rest } = _splitArgs(args, 3);
+  const [userId, text] = rest;
+  const resolved = _resolveOa(oa);
+  if (!resolved || !userId || !text) return false;
   try {
-    await postJson('/v2/bot/message/push', {
+    await postJson(resolved, '/v2/bot/message/push', {
       to: userId,
       messages: [{ type: 'text', text: String(text).slice(0, 5000) }],
     });
     return true;
   } catch (err) {
-    console.error('[line] push failed:', err.message);
+    console.error(`[line:${resolved.slug || resolved.id}] push failed:`, err.message);
     return false;
   }
 }
 
 /**
- * Push a Flex Message (rich layout) to a user.
- * @param {string} userId
- * @param {string} altText - shown in chat list / push notification body
- * @param {object} flex - Flex Message bubble JSON per LINE spec
+ * Push a Flex message.
+ *   pushFlex(oa, userId, altText, flex)
+ *   pushFlex(userId, altText, flex)   — legacy
  */
-async function pushFlex(userId, altText, flex) {
-  if (!isConfigured() || !userId || !flex) return false;
+async function pushFlex(...args) {
+  const { oa, rest } = _splitArgs(args, 4);
+  const [userId, altText, flex] = rest;
+  const resolved = _resolveOa(oa);
+  if (!resolved || !userId || !flex) return false;
   try {
-    await postJson('/v2/bot/message/push', {
+    await postJson(resolved, '/v2/bot/message/push', {
       to: userId,
-      messages: [
-        { type: 'flex', altText: String(altText).slice(0, 400), contents: flex },
-      ],
+      messages: [{ type: 'flex', altText: String(altText).slice(0, 400), contents: flex }],
     });
     return true;
   } catch (err) {
-    console.error('[line] flex push failed:', err.message);
+    console.error(`[line:${resolved.slug || resolved.id}] flex push failed:`, err.message);
     return false;
   }
 }
 
 /**
- * Convenience: notify the configured owner about an event with a plain text
- * message. Use for low-stakes notifications (new booking, bill issued, etc.).
+ * Reply to a webhook event using the one-shot replyToken.
+ *   replyText(oa, replyToken, text)
+ *   replyText(replyToken, text)   — legacy
  */
-async function notifyOwner(text) {
-  const owner = secrets.get('LINE_OWNER_USER_ID');
-  if (!owner) return false;
-  return pushText(owner, text);
-}
-
-/**
- * Reply to a LINE webhook event. Uses the one-shot replyToken from the
- * incoming event — must be called within ~30s of receiving the webhook.
- */
-async function replyText(replyToken, text) {
-  if (!isConfigured() || !replyToken || !text) return false;
+async function replyText(...args) {
+  const { oa, rest } = _splitArgs(args, 3);
+  const [replyToken, text] = rest;
+  const resolved = _resolveOa(oa);
+  if (!resolved || !replyToken || !text) return false;
   try {
-    await postJson('/v2/bot/message/reply', {
+    await postJson(resolved, '/v2/bot/message/reply', {
       replyToken,
       messages: [{ type: 'text', text: String(text).slice(0, 5000) }],
     });
     return true;
   } catch (err) {
-    console.error('[line] reply failed:', err.message);
+    console.error(`[line:${resolved.slug || resolved.id}] reply failed:`, err.message);
     return false;
   }
 }
 
-async function replyFlex(replyToken, altText, flex) {
-  if (!isConfigured() || !replyToken || !flex) return false;
+async function replyFlex(...args) {
+  const { oa, rest } = _splitArgs(args, 4);
+  const [replyToken, altText, flex] = rest;
+  const resolved = _resolveOa(oa);
+  if (!resolved || !replyToken || !flex) return false;
   try {
-    await postJson('/v2/bot/message/reply', {
+    await postJson(resolved, '/v2/bot/message/reply', {
       replyToken,
       messages: [{ type: 'flex', altText: String(altText).slice(0, 400), contents: flex }],
     });
     return true;
   } catch (err) {
-    console.error('[line] reply flex failed:', err.message);
+    console.error(`[line:${resolved.slug || resolved.id}] reply flex failed:`, err.message);
     return false;
   }
 }
 
-// === LINE webhook signature verification =================================
-// Validates the X-Line-Signature header against LINE_CHANNEL_SECRET. Use
-// this on the /webhook/line route before consuming the body.
-function verifyWebhookSignature(rawBody, signature) {
-  const secret = secrets.get('LINE_CHANNEL_SECRET');
+/**
+ * Notify the OA's owner (or the env owner if no OA passed) about a system
+ * event. Uses the OA's `ownerUserId` field if present, falling back to the
+ * env-level LINE_OWNER_USER_ID.
+ */
+async function notifyOwner(...args) {
+  const { oa, rest } = _splitArgs(args, 2);
+  const [text] = rest;
+  const resolved = _resolveOa(oa);
+  if (!resolved) return false;
+  const owner = resolved.ownerUserId || secrets.get('LINE_OWNER_USER_ID');
+  if (!owner) return false;
+  return pushText(resolved, owner, text);
+}
+
+/**
+ * Verify the X-Line-Signature header. Per-OA: each OA has its own channel
+ * secret, so the slug-based webhook MUST pass its own OA in.
+ *   verifyWebhookSignature(oa, rawBody, sig)
+ *   verifyWebhookSignature(rawBody, sig)   — legacy: uses env secret
+ */
+function verifyWebhookSignature(...args) {
+  let oa, rawBody, signature;
+  if (args.length === 3 && args[0] && typeof args[0] === 'object') {
+    [oa, rawBody, signature] = args;
+  } else {
+    [rawBody, signature] = args;
+    oa = _resolveOa(null);
+  }
+  const secret = (oa && oa.channelSecret) || secrets.get('LINE_CHANNEL_SECRET');
   if (!secret || !signature) return false;
   const crypto = require('crypto');
   const expected = crypto.createHmac('sha256', secret).update(rawBody).digest('base64');
@@ -151,10 +203,7 @@ function verifyWebhookSignature(rawBody, signature) {
   } catch { return false; }
 }
 
-// === Flex message template — bill =========================================
-// Returns a LINE Flex bubble for a bill. Renders a clean card with
-// header (room + period), itemised total, and a CTA button that links to
-// the tenant portal.
+// --- Flex template (unchanged) -------------------------------------------
 function buildBillFlex({ tenantName, roomId, period, total, dueDate, billNo, portalUrl }) {
   const fmt = (n) => Number(n).toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   return {
@@ -205,4 +254,5 @@ function buildBillFlex({ tenantName, roomId, period, total, dueDate, billNo, por
 module.exports = {
   isConfigured, pushText, pushFlex, replyText, replyFlex,
   notifyOwner, verifyWebhookSignature, buildBillFlex,
+  _resolveOa, // exported for tests
 };
