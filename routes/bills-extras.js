@@ -122,7 +122,8 @@ module.exports = function buildBillsExtrasRouter(ctx) {
   // without admin session/CSRF, so it always enqueued 0.
   async function enqueueBillNotifications(billId) {
     const billQ = await pool.query(
-      `SELECT b.*, t.full_name AS tenant_name, t.phone AS tenant_phone, t.line_user_id, t.email
+      `SELECT b.*, t.full_name AS tenant_name, t.phone AS tenant_phone,
+              t.line_user_id, t.line_oa_id, t.email
          FROM bills b LEFT JOIN tenants t ON t.id = b.tenant_id
          WHERE b.id=$1 AND b.deleted_at IS NULL`,
       [billId]
@@ -134,19 +135,30 @@ module.exports = function buildBillsExtrasRouter(ctx) {
     const body = `บิลใหม่\nผู้เช่า: ${b.tenant_name || '-'}\nห้อง: ${b.room_id}\nรอบ: ${b.period}\nยอด: ฿${Number(b.total).toLocaleString('th-TH', { minimumFractionDigits: 2 })}\nกำหนดชำระ: ${b.due_date}`;
     const enqueued = [];
     if (b.line_user_id) {
-      const qid = await notifQueue.enqueue(pool, { channel: 'line', recipient: b.line_user_id, subject, body });
+      // Carry the tenant's bound OA in the payload so the queue worker
+      // pushes through the right channel (multi-OA tenants see different
+      // userIds per OA).
+      const qid = await notifQueue.enqueue(pool, {
+        channel: 'line', recipient: b.line_user_id, subject, body,
+        payload: { oaId: b.line_oa_id || null, billId },
+      });
       enqueued.push({ channel: 'line', id: qid });
     } else {
       const lineOwner = require('../services/secrets').get('LINE_OWNER_USER_ID');
       if (lineOwner) {
+        // Owner channel — falls back to default OA via getDefault().
         const qid = await notifQueue.enqueue(pool, {
           channel: 'line', recipient: lineOwner, subject, body,
+          payload: { oaId: null, billId, target: 'owner' },
         });
         enqueued.push({ channel: 'line', id: qid });
       }
     }
     if (b.email) {
-      const qid = await notifQueue.enqueue(pool, { channel: 'email', recipient: b.email, subject, body });
+      const qid = await notifQueue.enqueue(pool, {
+        channel: 'email', recipient: b.email, subject, body,
+        payload: { billId },
+      });
       enqueued.push({ channel: 'email', id: qid });
     }
     return { ok: true, enqueued };

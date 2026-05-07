@@ -6,6 +6,7 @@
 // backoff. After 3 failed attempts the row is parked at status='failed'.
 
 const lineNotify = require('./line');
+const lineOa = require('./lineOa');
 const email = require('./email');
 const sms = require('./sms');
 
@@ -55,9 +56,23 @@ async function enqueue(pool, msg) {
 async function dispatch(pool, features, row) {
   const channel = row.channel;
   if (channel === 'line') {
-    if (!lineNotify.isConfigured()) throw new Error('LINE not configured');
     if (!row.recipient) throw new Error('LINE recipient missing');
-    const ok = await lineNotify.pushText(row.recipient, row.body || row.subject || '');
+    // Multi-OA aware: payload.oaId picks which OA to push through.
+    // Falls back to the default OA when payload doesn't carry one (e.g.
+    // owner-channel notifications) or when no DB OA is registered yet
+    // (legacy env-OA deploys).
+    const payload = row.payload && typeof row.payload === 'object' ? row.payload : {};
+    const oaIdHint = payload.oaId != null ? Number(payload.oaId) : null;
+    let oa = null;
+    try {
+      oa = oaIdHint
+        ? await lineOa.resolveForTenant(pool, oaIdHint, { withSecrets: true })
+        : await lineOa.getDefault(pool, { withSecrets: true });
+    } catch (err) {
+      throw new Error(`LINE OA resolve failed: ${err.message}`);
+    }
+    if (!oa || !oa.channelAccessToken) throw new Error('LINE not configured');
+    const ok = await lineNotify.pushText(oa, row.recipient, row.body || row.subject || '');
     if (!ok) throw new Error('LINE push returned false');
     return;
   }
