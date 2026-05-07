@@ -372,6 +372,21 @@ function BillDetail({ bill, locale, onClose, slipFeature, refresh }) {
   const [file, setFile] = useState(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState('');
+  const [pay, setPay] = useState(null);
+  // Fetch operator's accepted payment channels (PromptPay/bank/etc.) so the
+  // tenant can scan the QR or copy bank details right from the bill modal.
+  // Falls back to no-op on error — the slip-upload section still works.
+  React.useEffect(() => {
+    let cancelled = false;
+    fetch('/api/tenant/payment-info', { credentials: 'same-origin' })
+      .then((r) => r.json())
+      .then((d) => { if (!cancelled && d && d.payment) setPay(d.payment); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+  const qrUrl = pay && pay.promptpayTarget
+    ? `/api/promptpay/qr?target=${encodeURIComponent(pay.promptpayTarget)}&amount=${encodeURIComponent(bill.total)}&format=png`
+    : null;
   async function upload() {
     if (!file) { setMsg(t('chooseFile')); return; }
     setBusy(true); setMsg('');
@@ -403,6 +418,42 @@ function BillDetail({ bill, locale, onClose, slipFeature, refresh }) {
             <span>{t('status')}</span><Pill color={STATUS_COLOR[bill.status]}>{t(bill.status)}</Pill>
           </div>
         </div>
+        {bill.status !== 'paid' && bill.status !== 'void' && pay ? (
+          <div style={{ ...card, marginTop: 12 }}>
+            <div style={{ fontFamily: 'Sora', fontWeight: 600, fontSize: 14, marginBottom: 8 }}>
+              ช่องทางชำระเงิน
+            </div>
+            {qrUrl ? (
+              <div style={{ textAlign: 'center', marginBottom: 12 }}>
+                <img
+                  src={qrUrl} alt="PromptPay QR" width="180" height="180"
+                  style={{ border: '1px solid var(--border)', borderRadius: 10, padding: 6, background: '#fff' }}
+                  onError={(e) => { e.currentTarget.style.display = 'none'; }}
+                />
+                <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 4 }}>
+                  สแกน PromptPay {pay.promptpayName ? `· ${pay.promptpayName}` : ''}
+                </div>
+              </div>
+            ) : null}
+            {pay.bankInfo && pay.bankInfo.account ? (
+              <div style={{ padding: 10, background: 'var(--card-alt, #f5efe3)', borderRadius: 8, marginBottom: 8 }}>
+                <div style={{ fontSize: 12, color: 'var(--muted)' }}>โอนผ่านธนาคาร</div>
+                <div style={{ fontSize: 14, fontWeight: 600 }}>{pay.bankInfo.bank}</div>
+                <div style={{ fontSize: 14, fontFamily: 'JetBrains Mono, monospace' }}>{pay.bankInfo.account}</div>
+                {pay.bankInfo.name ? <div style={{ fontSize: 12, color: 'var(--muted)' }}>{pay.bankInfo.name}</div> : null}
+              </div>
+            ) : null}
+            {(pay.paymentMethods || [])
+              .filter((m) => m.key !== 'promptpay' && m.key !== 'bank')
+              .length > 0 ? (
+              <div style={{ fontSize: 12.5, color: 'var(--muted)' }}>
+                ช่องทางอื่น: {(pay.paymentMethods || [])
+                  .filter((m) => m.key !== 'promptpay' && m.key !== 'bank')
+                  .map((m) => m.label).join(', ')}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
         {bill.status !== 'paid' && bill.status !== 'void' && slipFeature?.enabled ? (
           <div style={{ marginTop: 16 }}>
             <label style={lbl}>{t('amount')}</label>

@@ -2149,6 +2149,37 @@ app.put('/api/tenant/me', sameOrigin, requireTenant, async (req, res) => {
   }
 });
 
+// GET /api/tenant/payment-info — exposes the operator's accepted payment
+// channels (PromptPay number, bank account, LINE Pay/TrueMoney/credit-card
+// toggles) to the tenant portal so the BillDetail screen can render them.
+// Reads from baankarn_config_v1.payment + the buildPaymentBlock helper so the
+// shape matches what PDFs render. No authentication beyond the tenant cookie
+// — these are details we already print on every invoice.
+app.get('/api/tenant/payment-info', requireTenant, async (_req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT value FROM app_data WHERE key='baankarn_config_v1'`
+    );
+    const cfg = rows.length ? rows[0].value : {};
+    const block = require('./services/billing').buildPaymentBlock(cfg);
+    // Last-resort fallback to env var if the operator never filled in the
+    // form: matches the bill-render endpoint's behaviour at server.js:1196.
+    if (!block.promptpayTarget) {
+      const envPp = require('./services/secrets').get('PROMPTPAY_TARGET');
+      if (envPp) {
+        block.promptpayTarget = envPp;
+        if (!block.paymentMethods.find((m) => m.key === 'promptpay')) {
+          block.paymentMethods.unshift({ key: 'promptpay', label: 'PromptPay', enabled: true });
+        }
+      }
+    }
+    res.json({ ok: true, payment: block, building: cfg.building || null });
+  } catch (err) {
+    console.error('tenant payment-info error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
 app.get('/api/tenant/bills', requireTenant, async (req, res) => {
   // B4 — pagination. Bills typically arrive once a month, so 24 default
   // covers 2 years; max 100 per page.
