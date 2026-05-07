@@ -126,12 +126,16 @@ const RETRY_CODES = new Set(['40001', '40P01', '57P03', '53300']);
  * @param {object} [opts] - { attempts: 3, baseDelayMs: 50 }
  */
 async function queryWithRetry(text, params, opts = {}) {
+  // Allow caller to pass their own pool (server.js owns the singleton in
+  // this codebase; db/pool.js's `pool` is a fallback for callers that
+  // don't have direct access).
+  const p = opts.pool || pool;
   const attempts = Math.max(1, opts.attempts || 3);
   const baseDelayMs = opts.baseDelayMs || 50;
   let lastErr;
   for (let i = 0; i < attempts; i++) {
     try {
-      return await pool.query(text, params);
+      return await p.query(text, params);
     } catch (err) {
       lastErr = err;
       if (!RETRY_CODES.has(err.code)) throw err;       // non-transient → bail

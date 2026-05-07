@@ -82,7 +82,8 @@ module.exports = function buildBillsExtrasRouter(ctx) {
                 bill.elecUnits, bill.elecRate, bill.elecAmount,
                 bill.wifi, bill.subtotal, bill.vat, bill.lateFee, bill.total,
                 bill.dueDate,
-              ]
+              ],
+              { pool, attempts: 3 }
             );
             if (rowCount) made++; else skipped++;
           } catch (e) {
