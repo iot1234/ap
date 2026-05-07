@@ -329,11 +329,15 @@
                </div>
              </div>`
           : '';
+        // Defense-in-depth: ticket_no/status come from the server, but this
+        // template path also assembled raw via innerHTML — escape them too in
+        // case server validation ever loosens.
+        const safeStatus = String(t.status || '').replace(/[^a-z_]/g, '');
         return `
           <div class="ticket">
             <div class="ticket-header">
-              <span class="ticket-no">${t.ticket_no}</span>
-              <span class="pill pill-${t.status}">${STATUS_LABEL[t.status] || t.status}</span>
+              <span class="ticket-no">${escapeHtml(t.ticket_no)}</span>
+              <span class="pill pill-${safeStatus}">${escapeHtml(STATUS_LABEL[t.status] || t.status)}</span>
             </div>
             <div class="ticket-title">${escapeHtml(t.title)}</div>
             <div class="ticket-meta">

@@ -339,11 +339,22 @@ async function tick(pool) {
   try { flags = await features.load(pool); } catch { return; }
   const state = readState();
   const now = new Date();
-  await tickLateFee(pool, flags, now, state);
-  await tickAutoBackup(pool, flags, now, state);
-  await tickBillGen(pool, flags, now, state);
-  await tickMeterSimulator(pool, flags, now, state);
-  await tickAccessControlSync(pool, flags, now, state);
+  // Run jobs in parallel with allSettled so a hung job (e.g. backup waiting
+  // on R2) doesn't block the others (late-fee, bill-gen). Each job catches
+  // its own errors internally; allSettled here is a safety net for ones we
+  // missed. Errors are logged, never propagated to the parent tick caller.
+  const results = await Promise.allSettled([
+    tickLateFee(pool, flags, now, state),
+    tickAutoBackup(pool, flags, now, state),
+    tickBillGen(pool, flags, now, state),
+    tickMeterSimulator(pool, flags, now, state),
+    tickAccessControlSync(pool, flags, now, state),
+  ]);
+  for (const r of results) {
+    if (r.status === 'rejected') {
+      console.error('[scheduler] sub-tick failed:', r.reason && r.reason.message || r.reason);
+    }
+  }
 }
 
 let _interval = null;
