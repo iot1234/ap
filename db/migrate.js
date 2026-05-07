@@ -454,6 +454,55 @@ async function migrate(pool, opts = {}) {
     CREATE INDEX IF NOT EXISTS idx_bookings_created ON bookings(created_at DESC);
   `);
 
+  // === One-time role backfill =============================================
+  // The auth_users.role column was originally `TEXT DEFAULT 'admin'`. The
+  // RBAC system later switched to a 4-tier ladder (owner/manager/staff/
+  // readonly) and ROLE_RANK no longer recognises the literal string 'admin'.
+  // Any user with role='admin' silently ranks 0 and gets stripped of every
+  // menu item that has minRole, including Settings → Users — meaning they
+  // can't even fix their own role through the UI.
+  //
+  // Recovery is in three layers:
+  //   1) Promote any 'admin' rows to 'owner'.
+  //   2) Coerce any unrecognised role string to 'staff' (safer than rank 0).
+  //   3) If after (1)+(2) there's still no owner at all, promote the oldest
+  //      user — without an owner the system is unusable since /api/admin/users
+  //      is owner-only. Idempotent on re-runs.
+  try {
+    const upd1 = await pool.query(
+      `UPDATE auth_users SET role='owner' WHERE role='admin'`
+    );
+    if (upd1.rowCount > 0) {
+      console.log(`[db] migrated ${upd1.rowCount} legacy 'admin' user(s) to role='owner'`);
+    }
+    const upd2 = await pool.query(
+      `UPDATE auth_users SET role='staff'
+        WHERE role NOT IN ('owner','manager','staff','readonly')`
+    );
+    if (upd2.rowCount > 0) {
+      console.log(`[db] coerced ${upd2.rowCount} user(s) with unknown role to 'staff'`);
+    }
+    // Ensure at least one owner exists so the operator isn't locked out.
+    const ownersQ = await pool.query(`SELECT COUNT(*)::int n FROM auth_users WHERE role='owner'`);
+    if (ownersQ.rows[0].n === 0) {
+      const promoted = await pool.query(
+        `UPDATE auth_users SET role='owner'
+           WHERE id = (SELECT id FROM auth_users ORDER BY id ASC LIMIT 1)
+         RETURNING id, username`
+      );
+      if (promoted.rows[0]) {
+        console.log(
+          `[db] no 'owner' found — promoted oldest user '${promoted.rows[0].username}' (id=${promoted.rows[0].id}) to owner`
+        );
+      }
+    }
+    // Drop the bad default so future inserts that forget to specify a role
+    // don't repeat the bug.
+    await pool.query(`ALTER TABLE auth_users ALTER COLUMN role SET DEFAULT 'staff'`);
+  } catch (err) {
+    console.warn('[db] role backfill skipped:', err.message);
+  }
+
   // === Bootstrap admin =====================================================
   // Only auto-bootstraps when ADMIN_PASSWORD is provided. A previous version
   // fell back to "admin1234" — production deploys that forgot to set the

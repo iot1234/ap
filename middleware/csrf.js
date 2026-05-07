@@ -19,7 +19,10 @@
 const { doubleCsrf } = require('csrf-csrf');
 
 function makeCsrf({ secret, secure }) {
-  const { generateCsrfToken, doubleCsrfProtection, invalidCsrfTokenError } = doubleCsrf({
+  // csrf-csrf v3.2+ renamed `generateToken` (no-op alias kept for migration).
+  // Older code in this repo called it `generateCsrfToken` — we accept both
+  // names from the lib so a minor-version bump can't break the boot path.
+  const result = doubleCsrf({
     getSecret: () => secret,
     getSessionIdentifier: (req) => {
       // Prefer admin session id, fall back to tenant session id, fall back
@@ -43,6 +46,14 @@ function makeCsrf({ secret, secure }) {
       || (req.body && req.body._csrf)
       || (req.query && req.query._csrf),
   });
+  const { doubleCsrfProtection, invalidCsrfTokenError } = result;
+  const generateCsrfToken = result.generateCsrfToken || result.generateToken;
+  if (typeof generateCsrfToken !== 'function') {
+    throw new Error(
+      'csrf-csrf: neither generateCsrfToken nor generateToken exposed — ' +
+      'package API changed; update middleware/csrf.js'
+    );
+  }
 
   function csrfErrorHandler(err, req, res, next) {
     if (err === invalidCsrfTokenError) {
