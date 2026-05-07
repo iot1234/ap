@@ -16,14 +16,24 @@ function PageLineBindings({ setToast }) {
   const [openId, setOpenId] = useState(null);
   const [openDetail, setOpenDetail] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [oas, setOas] = useState([]);                 // list of registered OAs
+  const [issueOaId, setIssueOaId] = useState('');     // selected target OA for issue
+  const [showIssueModal, setShowIssueModal] = useState(null); // { tenantId } when picking OA
 
   async function load() {
     try {
-      const r = await fetch('/api/admin/line-bindings', { credentials: 'same-origin' });
-      const d = await r.json();
-      if (!r.ok) throw new Error(d.error || 'load failed');
+      const [r1, r2] = await Promise.all([
+        fetch('/api/admin/line-bindings', { credentials: 'same-origin' }),
+        fetch('/api/admin/line-oas', { credentials: 'same-origin' }).catch(() => null),
+      ]);
+      const d = await r1.json();
+      if (!r1.ok) throw new Error(d.error || 'load failed');
       setItems(d.items || []);
       setCounts(d.counts || {});
+      if (r2 && r2.ok) {
+        const d2 = await r2.json();
+        setOas((d2.items || []).filter((o) => o.enabled));
+      }
     } catch (e) {
       setToast && setToast({ kind: 'error', message: e.message });
     }
@@ -39,18 +49,33 @@ function PageLineBindings({ setToast }) {
     } catch (e) { setToast && setToast({ kind: 'error', message: e.message }); }
   }
 
-  async function issue(id) {
+  // Issue a code, optionally targeting a specific OA. If admin has ≥2 OAs we
+  // open a small modal to let them pick; with ≤1 OA we issue directly.
+  function startIssue(tenantId) {
+    if (oas.length <= 1) {
+      issue(tenantId, oas[0]?.id || null);
+      return;
+    }
+    setIssueOaId('');  // any-OA by default
+    setShowIssueModal({ tenantId });
+  }
+
+  async function issue(id, targetOaId) {
     setBusy(true);
     try {
+      const body = { ttlDays: 7 };
+      if (targetOaId != null && targetOaId !== '' && Number(targetOaId) > 0) {
+        body.targetOaId = Number(targetOaId);
+      }
       const r = await apiFetch(`/api/admin/line-bindings/tenants/${id}`, {
-        method: 'POST',
-        body: JSON.stringify({ ttlDays: 7 }),
+        method: 'POST', body: JSON.stringify(body),
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || 'failed');
       setToast && setToast({ kind: 'success', message: `ออกรหัสแล้ว: ${d.code}` });
+      setShowIssueModal(null);
       await load();
-      await loadDetail(id);
+      if (openId === id || id === showIssueModal?.tenantId) await loadDetail(id);
     } catch (e) { setToast && setToast({ kind: 'error', message: e.message }); }
     finally { setBusy(false); }
   }
@@ -190,13 +215,55 @@ function PageLineBindings({ setToast }) {
           C={C} Modal={Modal} Btn={Btn} Pill={Pill}
           detail={openDetail}
           tenantId={openId}
+          oas={oas}
           busy={busy}
           onClose={() => { setOpenId(null); setOpenDetail(null); }}
-          onIssue={() => issue(openId)}
+          onIssue={() => startIssue(openId)}
           onRevoke={() => revoke(openId)}
           onBlock={() => block(openId)}
           onUnblock={() => unblock(openId)} />
       )}
+
+      {/* Issue-with-target-OA picker (only shown when admin has ≥2 OAs) */}
+      <Modal
+        open={!!showIssueModal}
+        onClose={() => setShowIssueModal(null)}
+        title="เลือก LINE OA สำหรับรหัสนี้"
+        footer={
+          <>
+            <Btn variant="ghost" onClick={() => setShowIssueModal(null)}>ยกเลิก</Btn>
+            <Btn variant="primary" disabled={busy}
+                 onClick={() => issue(showIssueModal.tenantId, issueOaId)}>
+              {busy ? '…' : 'ออกรหัส'}
+            </Btn>
+          </>
+        }
+      >
+        {showIssueModal && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, fontSize: 14 }}>
+            <div style={{ color: C.muted, fontSize: 13, lineHeight: 1.6 }}>
+              ผู้เช่าต้องส่งรหัสไปที่ LINE OA ที่เลือกนี้เท่านั้น (ระบบจะปฏิเสธถ้าส่งผิดที่)
+              เลือก "ใช้ OA ใดก็ได้" ถ้าไม่อยากบังคับ
+            </div>
+            <select value={issueOaId} onChange={(e) => setIssueOaId(e.target.value)}
+                    style={{ padding: '8px 12px', borderRadius: 6, border: '1px solid ' + C.border,
+                             background: C.bg, color: C.ink, fontSize: 14 }}>
+              <option value="">— ใช้ OA ใดก็ได้ —</option>
+              {oas.filter((o) => !o.isEnvOa || o.id > 0).map((o) => (
+                <option key={o.id} value={o.id}>
+                  {o.name} {o.isDefault ? '(default)' : ''}
+                </option>
+              ))}
+            </select>
+            {oas.length === 0 && (
+              <div style={{ padding: 10, background: C.warningSoft || '#fff7e0',
+                            color: C.warningInk || '#7a5a00', borderRadius: 8, fontSize: 12 }}>
+                ⚠ ยังไม่มี LINE OA ลงทะเบียนเลย — ไปเพิ่มได้ที่หน้า "จัดการ LINE OA"
+              </div>
+            )}
+          </div>
+        )}
+      </Modal>
     </PageContainer>
   );
 }

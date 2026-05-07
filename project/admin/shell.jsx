@@ -723,6 +723,7 @@ function App() {
     tenants:     PageTenants,
     bookings:    PageBookings,
     'line-bindings': window.PageLineBindings,
+    'line-oas':      window.PageLineOas,
     maintenance: window.PageMaintenance,
     billing:     PageBilling,
     payments:    window.PagePayments,
