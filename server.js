@@ -368,8 +368,11 @@ app.post('/api/auth/login', sameOrigin, loginLimiter, validateBody(schemas.login
       throw err;
     }
 
+    // Case-insensitive lookup to match the case-folding done at create time
+    // (POST /api/admin/users lowercases before insert + LOWER() uniqueness).
+    // Without this, a user created as "admin" couldn't sign in as "Admin".
     const { rows } = await pool.query(
-      'SELECT id, username, password_hash, role FROM auth_users WHERE username=$1',
+      'SELECT id, username, password_hash, role FROM auth_users WHERE LOWER(username)=LOWER($1)',
       [username]
     );
     const user = rows[0] || null;
@@ -706,7 +709,11 @@ function makeIpLimiter({ windowMs, max, message = 'too many requests' }) {
   const hits = new Map();
   let lastSweep = Date.now();
   return function limiter(req, res, next) {
-    const ip = req.ip || req.headers['x-forwarded-for'] || 'unknown';
+    // Use clientIp() so the X-Forwarded-For fallback parses the FIRST
+    // address — using the raw header string lets a misconfigured proxy
+    // expose multiple keys per attacker (each unique XFF combo bypasses
+    // the per-IP cap).
+    const ip = clientIp(req) || 'unknown';
     const now = Date.now();
     const arr = (hits.get(ip) || []).filter((t) => now - t < windowMs);
     if (arr.length >= max) return res.status(429).json({ error: message });
@@ -2025,12 +2032,15 @@ app.get('/api/tenant/payments', requireTenant, async (req, res) => {
   const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 100);
   const offset = Math.max(Number(req.query.offset) || 0, 0);
   try {
+    // Filter b.deleted_at IS NULL on the JOIN so payments tied to a
+    // soft-deleted bill don't surface in the tenant's history with
+    // dangling bill metadata.
     const { rows } = await pool.query(
       `SELECT p.id, p.bill_id, p.amount, p.method, p.slip_url,
               p.status, p.verified_at, p.rejected_reason, p.created_at,
               b.bill_no, b.period
          FROM payments p
-         LEFT JOIN bills b ON b.id = p.bill_id
+         LEFT JOIN bills b ON b.id = p.bill_id AND b.deleted_at IS NULL
          WHERE p.tenant_id=$1
          ORDER BY p.created_at DESC LIMIT $2 OFFSET $3`,
       [req.tenant.tenant_id, limit, offset]
@@ -2333,7 +2343,7 @@ app.post('/api/tenant/payments', sameOrigin, csrfGuard, requireTenant, ensureSli
         throw err;
       }
       if (!req.features.slipUpload.requireVerification) {
-        await client.query(`UPDATE bills SET status='paid', paid_at=NOW() WHERE id=$1 AND status<>'paid'`, [billId]);
+        await client.query(`UPDATE bills SET status='paid', paid_at=NOW() WHERE id=$1 AND status IN ('pending','overdue')`, [billId]);
       }
       await client.query('COMMIT');
     } catch (err) {
@@ -2401,7 +2411,7 @@ app.put('/api/payments/:id/verify', sameOrigin, csrfGuard, requireAuth, requireR
       );
       if (!rows.length) return res.status(404).json({ error: 'not found or already decided' });
       if (rows[0].bill_id) {
-        await pool.query(`UPDATE bills SET status='paid', paid_at=NOW() WHERE id=$1 AND status<>'paid'`, [rows[0].bill_id]);
+        await pool.query(`UPDATE bills SET status='paid', paid_at=NOW() WHERE id=$1 AND status IN ('pending','overdue')`, [rows[0].bill_id]);
       }
       audit(req, 'payment.verify', 'payment', String(id), { billId: rows[0].bill_id, amount: rows[0].amount });
       // Notify the tenant fire-and-forget
@@ -2911,30 +2921,17 @@ async function notifyOtherOwners(req, msg) {
          WHERE u.role='owner' AND u.id <> $1`,
       [actorId || 0]
     );
-    if (!rows.length) return;
-    // Map owner usernames → tenant rows (line_user_id + line_oa_id) via
-    // tenants table (admins are sometimes also tenants who bound LINE).
-    // Then route through notifier.notifyTenant so the multi-OA dispatcher
-    // resolves which OA to push through. Falls back to email when the
-    // owner has no LINE binding.
-    for (const o of rows) {
-      try {
-        const t = await pool.query(
-          `SELECT id, full_name, phone, email, line_user_id, line_oa_id
-             FROM tenants
-             WHERE phone=$1 OR full_name=$2
-             LIMIT 1`,
-          [o.username, o.username]
-        );
-        if (!t.rows.length) continue;
-        await notifier.notifyTenant(
-          { pool, features: flags },
-          t.rows[0],
-          { subject: msg.subject, text: msg.text }
-        );
-        continue;
-      } catch { /* per-owner failure is fine */ }
-    }
+    // We previously matched owner accounts against the tenants table by
+    // full_name OR phone to find their bound LINE id. That was exploitable:
+    // an attacker who can register a tenant with full_name='alice'
+    // (matching an owner username) could intercept owner-management
+    // notifications meant for the real Alice.
+    //
+    // Per-owner LINE delivery would need a deliberate auth_users.line_user_id
+    // column + binding flow, which we don't have yet. For now the system
+    // owner channel above (LINE_OWNER_USER_ID / OWNER_EMAIL via notifier.
+    // notifyOwner) is the only outbound path. Audit log still captures
+    // every user-mgmt action so other owners see them on next login.
   } catch (err) {
     console.warn('[user-mgmt] notify other owners failed:', err.message);
   }
@@ -3325,6 +3322,9 @@ function startAuditPruner() {
       ['tenant_sessions',    `DELETE FROM tenant_sessions WHERE expire < NOW()`],
       ['notifications_log',  `DELETE FROM notifications_log WHERE created_at < NOW() - INTERVAL '90 days'`],
       ['notifications_queue',`DELETE FROM notifications_queue WHERE status='sent' AND sent_at < NOW() - INTERVAL '14 days'`],
+      // Failed rows accumulate too — manual retry resets them, but rows
+      // nobody touches stay forever. Keep 30 days of forensics then drop.
+      ['notifications_queue_failed', `DELETE FROM notifications_queue WHERE status='failed' AND created_at < NOW() - INTERVAL '30 days'`],
       ['access_logs',        `DELETE FROM access_logs WHERE occurred_at < NOW() - INTERVAL '180 days'`],
       ['login_lockouts',     `DELETE FROM login_lockouts WHERE last_fail_at < NOW() - INTERVAL '30 days' AND (locked_until IS NULL OR locked_until < NOW())`],
     ];

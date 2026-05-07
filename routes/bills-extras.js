@@ -231,7 +231,9 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             [req.session.user.username, pid]
           );
           await client.query(
-            `UPDATE bills SET status='paid', paid_at=NOW() WHERE id=$1 AND status<>'paid'`,
+            // Only flip pending/overdue → paid. status<>'paid' would also
+            // match 'void', re-animating a bill the admin already cancelled.
+            `UPDATE bills SET status='paid', paid_at=NOW() WHERE id=$1 AND status IN ('pending','overdue')`,
             [id]
           );
         } else {

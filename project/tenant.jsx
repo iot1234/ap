@@ -773,9 +773,15 @@ function App() {
   useEffect(() => {
     (async () => {
       try {
+        // credentials: 'same-origin' is required so the tenant_sid cookie
+        // travels on the GET — without it /api/tenant/me always returns
+        // null and the portal lands on the login screen even after a
+        // valid login persisted by the previous session.
         const [me, f] = await Promise.all([
-          fetch('/api/tenant/me').then((r) => r.json()).catch(() => ({ tenant: null })),
-          fetch('/api/features').then((r) => r.json()).catch(() => ({ features: {} })),
+          fetch('/api/tenant/me', { credentials: 'same-origin' })
+            .then((r) => r.json()).catch(() => ({ tenant: null })),
+          fetch('/api/features', { credentials: 'same-origin' })
+            .then((r) => r.json()).catch(() => ({ features: {} })),
         ]);
         setFeatures(f.features || {});
         if (me.tenant) {
@@ -801,13 +807,18 @@ function App() {
   }
 
   async function onLoggedIn(t) {
-    const me = await fetch('/api/tenant/me').then((r) => r.json());
+    const me = await fetch('/api/tenant/me', { credentials: 'same-origin' })
+      .then((r) => r.json());
     setTenant(me.tenant);
     await refresh(me.tenant);
     setPage('home');
   }
   async function onLogout() {
-    await fetch('/api/tenant/logout', { method: 'POST' });
+    // /api/tenant/logout went under csrfGuard — must use the api() wrapper
+    // so X-CSRF-Token + cookie are attached. Raw fetch was 403'ing and
+    // the session never actually closed.
+    try { await api('/api/tenant/logout', { method: 'POST' }); }
+    catch { /* clear local state regardless of server response */ }
     setTenant(null); setBills([]); setTickets([]); setPage('home');
   }
 

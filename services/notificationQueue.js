@@ -117,7 +117,11 @@ async function processOne(pool, features, row) {
       );
       await logResult(pool, row, 'failed', errMsg);
     } else {
-      const wait = BACKOFF_MIN[Math.min(nextRetry, BACKOFF_MIN.length - 1)];
+      // Index by `nextRetry - 1` so the FIRST retry uses BACKOFF_MIN[0]
+      // (1m). Previously this read BACKOFF_MIN[1] (5m) on the first retry,
+      // skipping the 1-minute step entirely → effective backoffs were
+      // 5m, 30m instead of the intended 1m, 5m, 30m.
+      const wait = BACKOFF_MIN[Math.min(nextRetry - 1, BACKOFF_MIN.length - 1)];
       // Multiply integer parameter by a fixed-unit interval — avoids the
       // implicit text-cast that the `int || 'milliseconds'` form depends
       // on (works in PG 9.5+ but reads ambiguous; this version is plain

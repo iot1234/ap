@@ -28,9 +28,12 @@ function PageMeters({ rooms, setToast }) {
     e.preventDefault();
     if (!reading) return;
     try {
-      const r = await fetch(`/api/meters/${encodeURIComponent(roomId)}/readings`, {
-        method: 'POST', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
+      // Must use apiFetch — POST goes through csrfGuard server-side, raw
+      // fetch was 403'ing silently and the meter reading never landed.
+      const apiFetch = window.apiFetch
+        || ((u, o) => fetch(u, { credentials: 'same-origin', ...o }));
+      const r = await apiFetch(`/api/meters/${encodeURIComponent(roomId)}/readings`, {
+        method: 'POST',
         body: JSON.stringify({ meterType: type, reading: Number(reading), source: 'manual' }),
       });
       const d = await r.json();
