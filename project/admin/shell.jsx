@@ -50,6 +50,7 @@ const NAV_GROUPS = [
   {
     title: 'ระบบ',
     items: [
+      { id: 'health',              label: 'สถานะระบบ',           icon: '🩺', minRole: 'manager' },
       { id: 'notifications',       label: 'ประวัติแจ้งเตือน',     icon: '🔔', minRole: 'manager' },
       { id: 'notifications-queue', label: 'คิวแจ้งเตือน',         icon: '📤', minRole: 'manager' },
       { id: 'security-events',     label: 'เหตุการณ์ปลอดภัย',    icon: '🛡️', minRole: 'manager' },
@@ -95,6 +96,7 @@ const PAGE_TITLES = {
   features:    'ฟีเจอร์ระบบ',
   secrets:     'ตั้งค่า API/Keys',
   settings:    'ตั้งค่าระบบ',
+  health:      'สถานะระบบ',
 };
 
 // ---------- Sidebar -------------------------------------------------------
@@ -756,6 +758,7 @@ function App() {
     features:    window.PageFeatures,
     secrets:     window.PageSecrets,
     settings:    PageSettings,
+    health:      window.PageHealth,
   };
   const Page = PAGES[page] || PageOverview;
 

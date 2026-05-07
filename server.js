@@ -3163,6 +3163,21 @@ app.post('/api/admin/notifications/:id/retry', sameOrigin, csrfGuard, requireAut
 //   secrets     : 'configured' / 'partial' / 'none' (no values, just shape)
 //   uptime      : process uptime in seconds
 //   memory_mb   : RSS in MB
+// Detailed admin-only health dashboard. Aggregates every subsystem probe
+// (DB, schema sanity, LINE OA, SMTP, R2, queue, lockouts, scheduler) into
+// one report with status+detail per check. Owner|manager only — exposes
+// failure messages that could reveal config to a less-privileged role.
+app.get('/api/admin/health', requireAuth, requireRole('owner', 'manager'), async (_req, res) => {
+  try {
+    const healthCheck = require('./services/healthCheck');
+    const report = await healthCheck.runChecks(pool);
+    res.json({ ok: true, ...report });
+  } catch (err) {
+    console.error('admin health error:', err.message);
+    res.status(500).json({ ok: false, error: 'health probe failed', message: err.message });
+  }
+});
+
 // Returns 200 when db is reachable, 503 when degraded so Railway/upstream
 // LBs can route around bad replicas.
 app.get('/health', async (_req, res) => {

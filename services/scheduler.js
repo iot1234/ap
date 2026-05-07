@@ -355,6 +355,17 @@ async function tick(pool) {
       console.error('[scheduler] sub-tick failed:', r.reason && r.reason.message || r.reason);
     }
   }
+  // Health probe + auto-alert. Runs every tick (hourly) regardless of
+  // feature flags — operators always want to know when something's wrong.
+  // Internally guarded against notification spam (only alerts on
+  // status transitions or after 60min in error state).
+  try {
+    const anomalyDetector = require('./anomalyDetector');
+    await anomalyDetector.tick(pool, state);
+    writeState(state);
+  } catch (err) {
+    console.error('[scheduler] anomaly tick failed:', err.message);
+  }
 }
 
 let _interval = null;
