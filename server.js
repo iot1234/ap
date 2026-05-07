@@ -53,7 +53,15 @@ if (NODE_ENV === 'production') {
   // SESSION_SECRET — fatal because it's used live for every cookie.
   if (!SESSION_SECRET) _fatalConfig.push('SESSION_SECRET is required in production (≥ 32 random bytes). Generate: node -e "console.log(require(\'crypto\').randomBytes(48).toString(\'base64\'))"');
   else if (SESSION_SECRET.length < 32) _fatalConfig.push('SESSION_SECRET must be ≥ 32 chars');
-  else if (SESSION_SECRET === 'dev-only-change-me') _fatalConfig.push('SESSION_SECRET is the example value — generate a fresh one');
+  else if ([
+    'dev-only-change-me',
+    'change-me-to-a-long-random-string',
+    'change-me',
+    'changeme',
+    'your-secret-here',
+  ].includes(SESSION_SECRET)) {
+    _fatalConfig.push('SESSION_SECRET looks like an .env.example placeholder — generate a fresh one');
+  }
 
   // ADMIN_PASSWORD — warn-only because it's only consumed by the first-run
   // bootstrap. After the admin user exists in DB, the env var is no-op.
@@ -1978,17 +1986,22 @@ function makeSid() {
   return c.randomBytes(24).toString('base64url');
 }
 
+function hashSid(sid) {
+  return require('crypto').createHash('sha256').update(String(sid)).digest('hex');
+}
+
 async function tenantSessionLookup(req) {
   const flags = await features.load(pool);
   if (!flags.tenantPortal || !flags.tenantPortal.enabled) return null;
   const sid = req.headers.cookie ? (req.headers.cookie.match(/(?:^|;\s*)tenant_sid=([^;]+)/) || [])[1] : null;
   if (!sid) return null;
+  const sidHash = hashSid(sid);
   const { rows } = await pool.query(
-    `SELECT s.tenant_id, s.expire, t.full_name, t.phone, t.email, t.line_user_id,
+    `SELECT s.tenant_id, s.expire, s.sid_hash, t.full_name, t.phone, t.email, t.line_user_id,
             t.current_room_id, t.status, t.locale
        FROM tenant_sessions s JOIN tenants t ON t.id = s.tenant_id
-       WHERE s.sid = $1 AND s.expire > NOW() AND t.deleted_at IS NULL`,
-    [sid]
+       WHERE s.sid_hash = $1 AND s.expire > NOW() AND t.deleted_at IS NULL`,
+    [sidHash]
   );
   if (!rows.length) return null;
   const session = rows[0];
@@ -2003,7 +2016,7 @@ async function tenantSessionLookup(req) {
     const halfLife = (days / 2) * 86_400_000;
     if (expire - now < halfLife) {
       const newExpire = new Date(now + days * 86_400_000);
-      pool.query(`UPDATE tenant_sessions SET expire=$1 WHERE sid=$2`, [newExpire, sid])
+      pool.query(`UPDATE tenant_sessions SET expire=$1 WHERE sid_hash=$2`, [newExpire, sidHash])
         .catch(() => {});
     }
   } catch { /* ignore */ }
@@ -2068,12 +2081,15 @@ app.post('/api/tenant/login', sameOrigin, rateLimitTenantLogin, features.require
     }
     lockout.reset(principal).catch(() => {});
     const sid = makeSid();
+    const sidHash = hashSid(sid);
     const days = (req.features?.tenantPortal?.sessionDays) || 30;
     const expire = new Date(Date.now() + days * 86_400_000);
+    // sid column kept (PRIMARY KEY) but populated with hash too — only the
+    // hash is queryable; the raw cookie never round-trips through the DB.
     await pool.query(
-      `INSERT INTO tenant_sessions (sid, tenant_id, expire, ip, ua)
-       VALUES ($1,$2,$3,$4,$5)`,
-      [sid, t.id, expire, clientIp(req), (req.headers['user-agent'] || '').slice(0, 400)]
+      `INSERT INTO tenant_sessions (sid, sid_hash, tenant_id, expire, ip, ua)
+       VALUES ($1,$2,$3,$4,$5,$6)`,
+      [sidHash, sidHash, t.id, expire, clientIp(req), (req.headers['user-agent'] || '').slice(0, 400)]
     );
     res.cookie(TENANT_COOKIE, sid, {
       httpOnly: true,
@@ -2093,7 +2109,7 @@ app.post('/api/tenant/login', sameOrigin, rateLimitTenantLogin, features.require
 app.post('/api/tenant/logout', sameOrigin, csrfGuard, async (req, res) => {
   try {
     const sid = req.headers.cookie ? (req.headers.cookie.match(/(?:^|;\s*)tenant_sid=([^;]+)/) || [])[1] : null;
-    if (sid) await pool.query(`DELETE FROM tenant_sessions WHERE sid=$1`, [sid]);
+    if (sid) await pool.query(`DELETE FROM tenant_sessions WHERE sid_hash=$1`, [hashSid(sid)]);
     res.clearCookie(TENANT_COOKIE);
     res.json({ ok: true });
   } catch (err) {
@@ -3409,7 +3425,21 @@ app.get('/files/:id', async (req, res) => {
     }
     if (!allowed) return res.status(403).end();
     res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Cache-Control', 'private, max-age=300');
+    // Sensitive PII categories must not be cached on disk — Cache-Control:
+    // no-store keeps slips and citizen-ID images out of the browser cache so
+    // they're not recoverable after logout. room_photo is non-sensitive and
+    // can keep a short private cache for SPA performance.
+    const SENSITIVE_CATEGORIES = new Set(['slip', 'citizen_id_image', 'contract_signature']);
+    if (SENSITIVE_CATEGORIES.has(f.category)) {
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+      res.setHeader('Pragma', 'no-cache');
+      // Force download for sensitive files so a forged mime-type can't be
+      // rendered inline (defense-in-depth on top of nosniff).
+      const safeName = String(f.filename || `file-${id}`).replace(/[^\w.\-]/g, '_').slice(0, 80);
+      res.setHeader('Content-Disposition', `attachment; filename="${safeName}"`);
+    } else {
+      res.setHeader('Cache-Control', 'private, max-age=300');
+    }
     if (f.mime_type) res.setHeader('Content-Type', f.mime_type);
     // Stream-of-bytes path supports both local disk and R2 transparently
     // (storage.readFile picks the backend). Local: still an in-memory read,

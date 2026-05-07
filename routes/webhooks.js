@@ -1,106 +1,149 @@
 // routes/webhooks.js
 // External-service webhooks. We verify HMAC signatures inline because these
 // requests don't have a session cookie or origin header to use sameOrigin.
+//
+// Multi-OA routing:
+//   POST /webhook/line          — legacy single-OA webhook (env vars or default DB OA)
+//   POST /webhook/line/:slug    — per-OA webhook; the slug picks which channel
+// Each OA verifies the signature with its OWN channel secret, so a leaked
+// secret on one OA never lets an attacker spoof events into another.
 
 const express = require('express');
 const lineSvc = require('../services/line');
+const lineOa = require('../services/lineOa');
 const lineBinding = require('../services/lineBinding');
 const notifier = require('../services/notifier');
 const features = require('../services/features');
 
 module.exports = function buildWebhooksRouter(ctx) {
-  const { pool, audit } = ctx;
+  const { pool } = ctx;
   const r = express.Router();
 
-  // POST /webhook/line
-  // LINE sends Bot events here. We use the raw body (captured by the json
-  // parser's `verify` callback in server.js) to compute HMAC over the exact
-  // bytes LINE sent — re-stringifying req.body would change whitespace +
-  // key order and break verification.
-  r.post('/line', async (req, res) => {
-    const raw = req.rawBody || JSON.stringify(req.body || {});
-    const sig = req.headers['x-line-signature'];
-    if (!lineSvc.verifyWebhookSignature(raw, sig)) {
-      return res.status(403).json({ error: 'invalid signature' });
-    }
-    // Always 200 quickly so LINE doesn't retry. Process events asynchronously.
-    res.json({ ok: true });
-    try {
-      const events = Array.isArray(req.body?.events) ? req.body.events : [];
-      for (const ev of events) handleEvent(ev).catch((e) => {
-        console.error('[line webhook] event handler:', e.message);
-      });
-    } catch (err) {
-      console.error('line webhook outer:', err);
-    }
-  });
+  // ---- handler factory ---------------------------------------------------
+  // Returns an Express handler bound to a specific OA-resolution strategy.
+  // For the legacy /line route, oaResolver is a no-op that yields the default
+  // OA (via env or DB). For /line/:slug, the resolver loads by slug.
+  function makeHandler(oaResolver) {
+    return async (req, res) => {
+      let oa;
+      try {
+        oa = await oaResolver(req);
+      } catch (err) {
+        console.error('[line webhook] OA resolve failed:', err.message);
+        return res.status(500).json({ error: 'internal' });
+      }
+      if (!oa) {
+        // Slug not found, or no OA configured at all
+        return res.status(404).json({ error: 'oa not found' });
+      }
+      if (oa.enabled === false) {
+        return res.status(503).json({ error: 'oa disabled' });
+      }
+      const raw = req.rawBody || JSON.stringify(req.body || {});
+      const sig = req.headers['x-line-signature'];
+      if (!lineSvc.verifyWebhookSignature(oa, raw, sig)) {
+        return res.status(403).json({ error: 'invalid signature' });
+      }
+      // Always 200 quickly so LINE doesn't retry. Process async.
+      res.json({ ok: true });
+      try {
+        const events = Array.isArray(req.body?.events) ? req.body.events : [];
+        for (const ev of events) {
+          handleEvent(oa, ev).catch((e) => {
+            console.error(`[line:${oa.slug}] event handler:`, e.message);
+          });
+        }
+      } catch (err) {
+        console.error(`[line:${oa.slug}] webhook outer:`, err);
+      }
+      // Touch last_seen on real DB OAs (env OA is ephemeral)
+      if (oa.id && oa.id !== 0) {
+        pool.query(
+          `UPDATE line_oas SET last_seen_at=NOW() WHERE id=$1`,
+          [oa.id]
+        ).catch(() => {});
+      }
+    };
+  }
 
-  async function handleEvent(ev) {
+  // ---- routes ------------------------------------------------------------
+  // Legacy single-OA endpoint: tries default DB OA first, falls back to env.
+  r.post('/line', makeHandler(async () => {
+    return await lineOa.getDefault(pool, { withSecrets: true });
+  }));
+
+  // Per-OA endpoint. The slug is part of the URL admin configures in the
+  // LINE Developer Console for each OA; pick a hard-to-guess slug for
+  // defence in depth, even though the HMAC signature is the real auth.
+  r.post('/line/:slug', makeHandler(async (req) => {
+    return await lineOa.getBySlug(pool, req.params.slug, { withSecrets: true });
+  }));
+
+  // ---- event handler -----------------------------------------------------
+  async function handleEvent(oa, ev) {
     const userId = ev.source?.userId || ev.source?.groupId || '';
 
-    // Always log the inbound event for forensics.
+    // Always log the inbound event for forensics. Tag with OA slug so we can
+    // audit which channel an event came in on.
     try {
       await pool.query(
         `INSERT INTO notifications_log (channel, recipient, subject, body, status)
          VALUES ('line-in', $1, $2, $3, 'sent')`,
-        [userId, ev.type || 'unknown', JSON.stringify(ev).slice(0, 4000)]
+        [userId, `${ev.type || 'unknown'} oa:${oa.slug}`, JSON.stringify(ev).slice(0, 4000)]
       );
     } catch { /* ignore */ }
 
-    // Only handle text messages from individual users.
     if (ev.type !== 'message' || ev.message?.type !== 'text') return;
     if (!userId || !ev.replyToken) return;
 
     const text = String(ev.message.text || '').trim();
 
-    // 1) Binding code — match BIND-XXXXXXXX
+    // 1) Binding code — match BIND-XXXXXXXX (case-insensitive, 4-16 hex)
     if (/^BIND-[A-F0-9]{4,16}$/i.test(text)) {
       let result;
       try {
         result = await lineBinding.tryBind(pool, {
-          code: text,
-          lineUserId: userId,
+          code: text, lineUserId: userId, oaId: oa.id || null,
         });
       } catch (err) {
-        console.error('[line bind] error:', err.message);
-        await lineSvc.replyText(ev.replyToken, '⚠️ ระบบขัดข้อง — โปรดลองใหม่ภายหลัง');
+        console.error(`[line:${oa.slug}] bind error:`, err.message);
+        await lineSvc.replyText(oa, ev.replyToken, '⚠️ ระบบขัดข้อง — โปรดลองใหม่ภายหลัง');
         return;
       }
       if (result.ok) {
         const room = result.roomId ? ` (ห้อง ${result.roomId})` : '';
-        await lineSvc.replyText(
-          ev.replyToken,
+        await lineSvc.replyText(oa, ev.replyToken,
           `✅ ผูกบัญชี LINE สำเร็จ\n` +
-          `${result.fullName}${room}\n\n` +
+          `${result.fullName}${room}\n` +
+          `ผ่าน OA: ${oa.name}\n\n` +
           `คุณจะได้รับแจ้งเตือนบิล / แจ้งซ่อม / ประกาศต่าง ๆ ผ่านช่องนี้`
         );
-        // Tell the owner so they have visibility
+        // Tell the operator owner so they have visibility
         try {
           const flags = await features.load(pool);
           notifier.notifyOwner({ pool, features: flags }, {
             subject: 'มีผู้เช่าผูก LINE OA',
-            text: `${result.fullName}${room} ผูกบัญชี LINE สำเร็จ`,
+            text: `${result.fullName}${room} ผูก LINE OA สำเร็จ ผ่าน ${oa.name}`,
           }).catch(() => {});
         } catch { /* ignore */ }
         return;
       }
-      // Failed bind — give a specific but non-leaking message
       const messages = {
-        invalid:               '❌ รหัสไม่ถูกต้อง — โปรดติดต่อแอดมินเพื่อขอรหัสใหม่',
-        expired:               '❌ รหัสหมดอายุ — โปรดติดต่อแอดมินเพื่อขอรหัสใหม่',
-        already_bound:         '❌ รหัสนี้ถูกใช้ไปแล้ว',
-        tenant_blocked:        '❌ บัญชีถูกระงับจาก LINE binding — ติดต่อแอดมิน',
+        invalid:                 '❌ รหัสไม่ถูกต้อง — โปรดติดต่อแอดมินเพื่อขอรหัสใหม่',
+        expired:                 '❌ รหัสหมดอายุ — โปรดติดต่อแอดมินเพื่อขอรหัสใหม่',
+        already_bound:           '❌ รหัสนี้ถูกใช้ไปแล้ว',
+        tenant_blocked:          '❌ บัญชีถูกระงับจาก LINE binding — ติดต่อแอดมิน',
         line_user_already_bound: '❌ LINE บัญชีนี้ผูกกับห้องอื่นอยู่แล้ว — ติดต่อแอดมินเพื่อยกเลิกก่อน',
+        wrong_oa:                '❌ รหัสนี้ออกให้ใช้กับ LINE OA อื่น — โปรดส่งไปที่ OA ที่แอดมินระบุ',
       };
-      await lineSvc.replyText(ev.replyToken, messages[result.reason] || '❌ ไม่สามารถผูกบัญชีได้');
+      await lineSvc.replyText(oa, ev.replyToken, messages[result.reason] || '❌ ไม่สามารถผูกบัญชีได้');
       return;
     }
 
     // 2) Help / unknown — guide the tenant
     if (/^(help|ช่วย|เริ่ม|start|menu|เมนู)$/i.test(text)) {
-      await lineSvc.replyText(
-        ev.replyToken,
-        '📌 คำสั่งที่ใช้ได้:\n' +
+      await lineSvc.replyText(oa, ev.replyToken,
+        `📌 คำสั่งที่ใช้ได้ (${oa.name}):\n` +
         '• BIND-XXXXXXXX — ผูกบัญชี (ขอรหัสจากแอดมิน)\n' +
         '• "บิล" หรือ "bills" — ดูบิลล่าสุด\n' +
         '• "สถานะ" หรือ "status" — สถานะห้องของคุณ\n' +
@@ -110,61 +153,65 @@ module.exports = function buildWebhooksRouter(ctx) {
       return;
     }
 
-    // 3) Intent matching for already-bound tenants. We resolve the LINE
-    //    userId → tenant row first; if no match, fall through to the
-    //    generic reply (pre-binding state).
-    const tenantRow = await getBoundTenant(userId);
+    // 3) Intent matching for already-bound tenants — scoped to THIS OA so
+    //    tenant on OA #2 doesn't accidentally read tenant #1's bills via the
+    //    same human userId across different OAs.
+    const tenantRow = await getBoundTenant(userId, oa.id || null);
 
     if (/^(บิล|bills?|invoice)$/i.test(text)) {
-      if (!tenantRow) return await replyUnbound(ev.replyToken);
-      await replyLatestBill(ev.replyToken, tenantRow);
+      if (!tenantRow) return await replyUnbound(oa, ev.replyToken);
+      await replyLatestBill(oa, ev.replyToken, tenantRow);
       return;
     }
 
     if (/^(สถานะ|status|ห้อง|room)$/i.test(text)) {
-      if (!tenantRow) return await replyUnbound(ev.replyToken);
-      await replyRoomStatus(ev.replyToken, tenantRow);
+      if (!tenantRow) return await replyUnbound(oa, ev.replyToken);
+      await replyRoomStatus(oa, ev.replyToken, tenantRow);
       return;
     }
 
     if (/^(แจ้งซ่อม|maintenance|ซ่อม|repair)$/i.test(text)) {
       const base = process.env.PUBLIC_BASE_URL || '';
-      await lineSvc.replyText(
-        ev.replyToken,
+      await lineSvc.replyText(oa, ev.replyToken,
         '🔧 แจ้งซ่อม:\n' + (base ? `${base}/maintenance` : '/maintenance') +
         '\n\nหรือพิมพ์ "help" เพื่อดูคำสั่งทั้งหมด'
       );
       return;
     }
 
-    // 4) Anything else — short generic reply (admin will follow up).
     if (text.length < 200) {
-      await lineSvc.replyText(
-        ev.replyToken,
-        'ขอบคุณค่ะ — พิมพ์ "help" เพื่อดูคำสั่งที่ใช้ได้\nหรือรอแอดมินตอบกลับ'
-      );
+      await lineSvc.replyText(oa, ev.replyToken,
+        'ขอบคุณค่ะ — พิมพ์ "help" เพื่อดูคำสั่งที่ใช้ได้\nหรือรอแอดมินตอบกลับ');
     }
   }
 
   // --- intent helpers ----------------------------------------------------
-  async function getBoundTenant(lineUserId) {
+  // Lookup must include the OA scope: a single human has different LINE
+  // userIds in different OAs, but the userId space is global per-OA so two
+  // tenants COULD share a userId across OAs without colliding.
+  async function getBoundTenant(lineUserId, oaId) {
     if (!lineUserId) return null;
     const { rows } = await pool.query(
-      `SELECT id, full_name, phone, current_room_id, status
-         FROM tenants
-         WHERE line_user_id=$1 AND deleted_at IS NULL AND status='active'
-         LIMIT 1`,
-      [lineUserId]
+      `SELECT t.id, t.full_name, t.phone, t.current_room_id, t.status
+         FROM tenants t
+         JOIN line_bindings b ON b.tenant_id = t.id
+        WHERE b.line_user_id = $1
+          AND COALESCE(b.oa_id, 0) = COALESCE($2::bigint, 0)
+          AND b.status = 'bound'
+          AND t.deleted_at IS NULL
+          AND t.status = 'active'
+        LIMIT 1`,
+      [lineUserId, oaId]
     );
     return rows[0] || null;
   }
 
-  async function replyUnbound(replyToken) {
-    await lineSvc.replyText(replyToken,
+  async function replyUnbound(oa, replyToken) {
+    await lineSvc.replyText(oa, replyToken,
       'บัญชีนี้ยังไม่ได้ผูกห้อง — ส่งรหัส BIND-XXXXXXXX (ขอจากแอดมิน) ก่อนนะครับ');
   }
 
-  async function replyLatestBill(replyToken, tenant) {
+  async function replyLatestBill(oa, replyToken, tenant) {
     const { rows } = await pool.query(
       `SELECT bill_no, period, total, due_date, status
          FROM bills WHERE tenant_id=$1 AND deleted_at IS NULL
@@ -172,7 +219,7 @@ module.exports = function buildWebhooksRouter(ctx) {
       [tenant.id]
     );
     if (!rows.length) {
-      await lineSvc.replyText(replyToken, '📑 ยังไม่มีบิลในระบบ');
+      await lineSvc.replyText(oa, replyToken, '📑 ยังไม่มีบิลในระบบ');
       return;
     }
     const fmt = (n) => {
@@ -184,12 +231,11 @@ module.exports = function buildWebhooksRouter(ctx) {
     const lines = rows.map((b, i) =>
       `${i + 1}) ${b.bill_no} (${b.period})\n   ฿${fmt(b.total)} · ${STATUS_TH[b.status] || b.status}\n   ครบกำหนด ${b.due_date}`
     ).join('\n');
-    await lineSvc.replyText(replyToken, `📑 บิลล่าสุด:\n${lines}\n\nเข้าพอร์ทัลเพื่อดูบิลทั้งหมด`);
+    await lineSvc.replyText(oa, replyToken, `📑 บิลล่าสุด:\n${lines}\n\nเข้าพอร์ทัลเพื่อดูบิลทั้งหมด`);
   }
 
-  async function replyRoomStatus(replyToken, tenant) {
+  async function replyRoomStatus(oa, replyToken, tenant) {
     const room = tenant.current_room_id || '-';
-    // Pull room blob for status (optional)
     let extra = '';
     try {
       const { rows } = await pool.query(`SELECT value FROM app_data WHERE key='baankarn_rooms_v1'`);
@@ -202,7 +248,7 @@ module.exports = function buildWebhooksRouter(ctx) {
         if (r.waterUnits != null) extra += `\nน้ำ: ${r.waterUnits} หน่วย`;
       }
     } catch { /* ignore */ }
-    await lineSvc.replyText(replyToken,
+    await lineSvc.replyText(oa, replyToken,
       `🏠 ${tenant.full_name}\nห้อง: ${room}${extra}\n\nพิมพ์ "บิล" เพื่อดูบิลล่าสุด`);
   }
 

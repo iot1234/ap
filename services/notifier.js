@@ -7,9 +7,33 @@
 // originating request.
 
 const lineNotify = require('./line');
+const lineOa = require('./lineOa');
 const email = require('./email');
 const sms = require('./sms');
 const secrets = require('./secrets');
+
+// Per-tenant LINE dispatch: figure out which OA the tenant is bound on,
+// load that OA's credentials, push through it. Falls back to env-OA when
+// tenant.line_oa_id is null (legacy bindings predating multi-OA).
+async function pushLineToTenant(pool, tenant, text) {
+  const lineId = tenant.line_user_id || tenant.lineUserId || null;
+  if (!lineId) return { ok: false, reason: 'no_line_id' };
+  const oaId = tenant.line_oa_id != null ? tenant.line_oa_id : null;
+  let oa;
+  try {
+    oa = await lineOa.resolveForTenant(pool, oaId, { withSecrets: true });
+  } catch (err) {
+    return { ok: false, reason: 'oa_lookup_failed', error: err.message };
+  }
+  if (!oa || !oa.channelAccessToken) {
+    return { ok: false, reason: 'oa_not_configured' };
+  }
+  if (oa.enabled === false) {
+    return { ok: false, reason: 'oa_disabled' };
+  }
+  const ok = await lineNotify.pushText(oa, lineId, text);
+  return { ok, oaId: oa.id, oaSlug: oa.slug, lineId };
+}
 
 async function logResult(pool, row) {
   try {
@@ -37,17 +61,23 @@ async function notifyOwner(ctx, msg) {
   const text = msg.text || msg.subject || '';
   const subject = msg.subject || 'แจ้งเตือนระบบ';
 
-  // 1. LINE (primary)
-  const lineOwner = secrets.get('LINE_OWNER_USER_ID');
-  if (lineNotify.isConfigured() && lineOwner) {
-    const ok = await lineNotify.notifyOwner(text);
+  // 1. LINE — try the default OA's owner first, then fall back to env owner.
+  // Each OA can have its own ownerUserId so a multi-building deployment can
+  // send "OA #1 events" to OA #1's owner contact and "OA #2 events" to its
+  // own contact, but for system-wide messages we just use the default OA.
+  let oaForOwner = null;
+  try { oaForOwner = await lineOa.getDefault(pool, { withSecrets: true }); }
+  catch { /* env OA still works below */ }
+  const lineOwner = (oaForOwner && oaForOwner.ownerUserId) || secrets.get('LINE_OWNER_USER_ID');
+  if (oaForOwner && oaForOwner.channelAccessToken && lineOwner) {
+    const ok = await lineNotify.pushText(oaForOwner, lineOwner, text);
     await logResult(pool, {
       channel: 'line',
       recipient: lineOwner,
-      subject, body: text,
+      subject, body: `[oa:${oaForOwner.slug}] ${text}`,
       status: ok ? 'sent' : 'failed',
     });
-    if (ok) return { channel: 'line', ok: true };
+    if (ok) return { channel: 'line', ok: true, oa: oaForOwner.slug };
   }
 
   // 2. Email (fallback)
@@ -89,13 +119,31 @@ async function notifyTenant(ctx, tenant, msg) {
   const phone = tenant.phone || null;
   const mail = tenant.email || null;
 
-  if (lineId && lineNotify.isConfigured()) {
-    const ok = await lineNotify.pushText(lineId, text);
+  // Don't push to ex-tenants. The "moved_out" / "blacklist" / soft-deleted
+  // states all silence delivery. This is the user-facing safety mentioned in
+  // the spec: "ผู้เช่าออกระบบก็จะไม่ส่งแล้ว". The caller can still set
+  // `force=true` on msg if they need a one-off message (e.g. final bill).
+  const status = tenant.status || tenant.tenant_status || 'active';
+  const isInactive = status !== 'active' || tenant.deleted_at;
+  if (isInactive && !msg.force) {
+    await logResult(pool, {
+      channel: 'none', recipient: phone || mail || '',
+      subject, body: text, status: 'skipped',
+      error: `tenant inactive (status=${status})`,
+    });
+    return { channel: 'none', ok: false, skipped: true, reason: 'inactive' };
+  }
+
+  if (lineId) {
+    const result = await pushLineToTenant(pool, tenant, text);
     await logResult(pool, {
       channel: 'line', recipient: lineId,
-      subject, body: text, status: ok ? 'sent' : 'failed',
+      subject,
+      body: result.oaSlug ? `[oa:${result.oaSlug}] ${text}` : text,
+      status: result.ok ? 'sent' : 'failed',
+      error: result.ok ? null : (result.reason || result.error || 'failed'),
     });
-    if (ok) return { channel: 'line', ok: true };
+    if (result.ok) return { channel: 'line', ok: true, oa: result.oaSlug };
   }
 
   if (mail && email.isConfigured(features)) {

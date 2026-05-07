@@ -9,7 +9,9 @@ const lb = require('../services/lineBinding');
 function buildFakePool(scenarios = {}) {
   const calls = [];
   async function query(sql, params) {
-    calls.push({ sql: sql.trim().split('\n')[0].slice(0, 80), params });
+    // Store the full SQL so multi-line statements can be matched in
+    // assertions (e.g. `UPDATE tenants\n  SET line_user_id=...`).
+    calls.push({ sql: sql.trim(), params });
     for (const [pattern, fn] of Object.entries(scenarios)) {
       if (sql.includes(pattern)) return fn(sql, params);
     }
@@ -146,7 +148,7 @@ test('tryBind: detects LINE userId already bound to other tenant', async () => {
         line_binding_blocked: false,
       }],
     }),
-    "WHERE line_user_id=$1 AND status='bound' AND tenant_id <> $2": () => ({
+    "WHERE line_user_id=$1": () => ({
       rows: [{ tenant_id: 99 }],
     }),
   });
@@ -166,7 +168,7 @@ test('tryBind: success — updates binding + tenant', async () => {
         line_binding_blocked: false,
       }],
     }),
-    "WHERE line_user_id=$1 AND status='bound' AND tenant_id <> $2": () => ({ rows: [] }),
+    "WHERE line_user_id=$1": () => ({ rows: [] }),
   });
   const r = await lb.tryBind(pool, { code: 'BIND-DEADBEEF', lineUserId: 'Uabc123' });
   assert.equal(r.ok, true);
@@ -176,7 +178,10 @@ test('tryBind: success — updates binding + tenant', async () => {
   // Verify both the binding and the tenant were updated
   const calls = pool._calls.map((c) => c.sql);
   assert.ok(calls.some((s) => s.startsWith('UPDATE line_bindings')));
-  assert.ok(calls.some((s) => s.includes('UPDATE tenants SET line_user_id')));
+  // SQL may span multiple lines (e.g. "UPDATE tenants\n  SET line_user_id=$1")
+  // — normalize whitespace before substring-match so the test stays robust
+  // against multi-OA refactors that reformat the query.
+  assert.ok(calls.some((s) => s.replace(/\s+/g, ' ').includes('UPDATE tenants SET line_user_id')));
 });
 
 test('CODE_PREFIX is BIND-', () => {

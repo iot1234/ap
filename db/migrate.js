@@ -269,6 +269,12 @@ async function migrate(pool, opts = {}) {
       ua      TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+    -- sid stored hashed (sha256) so a DB-only leak doesn't yield directly
+    -- replayable session cookies. Older deployments used plaintext sid;
+    -- post-migration, those rows fail lookup and tenants re-login (sessions
+    -- are 30-day max, opt-in flag — acceptable churn).
+    ALTER TABLE tenant_sessions ADD COLUMN IF NOT EXISTS sid_hash TEXT;
+    CREATE INDEX IF NOT EXISTS idx_tsess_sid_hash ON tenant_sessions(sid_hash);
     CREATE INDEX IF NOT EXISTS idx_tsess_expire ON tenant_sessions(expire);
     CREATE INDEX IF NOT EXISTS idx_tsess_tenant ON tenant_sessions(tenant_id);
 

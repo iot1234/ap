@@ -196,11 +196,15 @@ module.exports = function buildTenantOpsRouter(ctx) {
         const newHash = await bcrypt.hash(newPin, 10);
         await pool.query(`UPDATE tenants SET pin_hash=$1, updated_at=NOW() WHERE id=$2`,
           [newHash, req.tenant.tenant_id]);
-        // Invalidate all other sessions for this tenant
+        // Invalidate all other sessions for this tenant. tenant_sessions.sid
+        // now stores sha256(raw cookie), so hash before comparing.
         const sid = (req.headers.cookie || '').match(/(?:^|;\s*)tenant_sid=([^;]+)/)?.[1];
         if (sid) {
-          await pool.query(`DELETE FROM tenant_sessions WHERE tenant_id=$1 AND sid<>$2`,
-            [req.tenant.tenant_id, sid]);
+          const sidHash = require('crypto').createHash('sha256').update(sid).digest('hex');
+          await pool.query(
+            `DELETE FROM tenant_sessions WHERE tenant_id=$1 AND sid_hash<>$2`,
+            [req.tenant.tenant_id, sidHash]
+          );
         }
         audit(req, 'tenant.pin_change', 'tenant', String(req.tenant.tenant_id));
         res.json({ ok: true });

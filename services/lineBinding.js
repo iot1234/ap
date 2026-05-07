@@ -154,7 +154,7 @@ async function revoke(pool, { tenantId }) {
 /**
  * Block a tenant from LINE binding entirely. Revokes their codes too.
  */
-async function block(pool, { tenantId, reason, by }) {
+async function block(pool, { tenantId, reason }) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -164,6 +164,7 @@ async function block(pool, { tenantId, reason, by }) {
               line_binding_blocked_at=NOW(),
               line_binding_blocked_reason=$2,
               line_user_id=NULL,
+              line_oa_id=NULL,
               updated_at=NOW()
         WHERE id=$1`,
       [tenantId, String(reason || '').slice(0, 500) || null]
@@ -201,7 +202,7 @@ async function unblock(pool, { tenantId }) {
  */
 async function getStatus(pool, tenantId) {
   const t = await pool.query(
-    `SELECT id, full_name, phone, line_user_id, line_binding_blocked,
+    `SELECT id, full_name, phone, line_user_id, line_oa_id, line_binding_blocked,
             line_binding_blocked_at, line_binding_blocked_reason, current_room_id
        FROM tenants WHERE id=$1 AND deleted_at IS NULL`,
     [tenantId]
@@ -209,12 +210,17 @@ async function getStatus(pool, tenantId) {
   if (!t.rows.length) return null;
   const tenant = t.rows[0];
   const b = await pool.query(
-    `SELECT id, code, status, line_user_id, expires_at, bound_at,
-            blocked_at, blocked_reason, created_at
-       FROM line_bindings
-       WHERE tenant_id=$1
-       ORDER BY (CASE status WHEN 'pending' THEN 0 WHEN 'bound' THEN 1 ELSE 2 END), created_at DESC
-       LIMIT 5`,
+    `SELECT b.id, b.code, b.status, b.line_user_id, b.expires_at, b.bound_at,
+            b.blocked_at, b.blocked_reason, b.created_at,
+            b.oa_id, b.target_oa_id,
+            o.name AS oa_name, o.slug AS oa_slug,
+            tg.name AS target_oa_name, tg.slug AS target_oa_slug
+       FROM line_bindings b
+       LEFT JOIN line_oas o  ON o.id  = b.oa_id        AND o.deleted_at  IS NULL
+       LEFT JOIN line_oas tg ON tg.id = b.target_oa_id AND tg.deleted_at IS NULL
+       WHERE b.tenant_id=$1
+       ORDER BY (CASE b.status WHEN 'pending' THEN 0 WHEN 'bound' THEN 1 ELSE 2 END), b.created_at DESC
+       LIMIT 10`,
     [tenantId]
   );
   return {
@@ -358,18 +364,23 @@ async function listAll(pool) {
   const { rows } = await pool.query(`
     SELECT
       t.id AS tenant_id, t.full_name, t.phone, t.current_room_id,
-      t.line_user_id, t.line_binding_blocked, t.status AS tenant_status,
+      t.line_user_id, t.line_oa_id, t.line_binding_blocked,
+      t.status AS tenant_status,
       b.id AS binding_id, b.code, b.status AS binding_status,
-      b.expires_at, b.bound_at
+      b.expires_at, b.bound_at, b.oa_id, b.target_oa_id,
+      o.name  AS oa_name,        o.slug  AS oa_slug,
+      tg.name AS target_oa_name, tg.slug AS target_oa_slug
     FROM tenants t
     LEFT JOIN LATERAL (
-      SELECT id, code, status, expires_at, bound_at
+      SELECT id, code, status, expires_at, bound_at, oa_id, target_oa_id
         FROM line_bindings
         WHERE tenant_id = t.id
           AND status IN ('pending', 'bound')
         ORDER BY (CASE status WHEN 'pending' THEN 0 ELSE 1 END), created_at DESC
         LIMIT 1
     ) b ON TRUE
+    LEFT JOIN line_oas o  ON o.id  = b.oa_id        AND o.deleted_at  IS NULL
+    LEFT JOIN line_oas tg ON tg.id = b.target_oa_id AND tg.deleted_at IS NULL
     WHERE t.deleted_at IS NULL
     ORDER BY
       CASE
