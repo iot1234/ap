@@ -329,6 +329,57 @@ async function migrate(pool, opts = {}) {
     ALTER TABLE tenants ADD COLUMN IF NOT EXISTS line_binding_blocked_at TIMESTAMPTZ;
     ALTER TABLE tenants ADD COLUMN IF NOT EXISTS line_binding_blocked_reason TEXT;
 
+    -- Multi-OA support. Operator can register N LINE Official Accounts;
+    -- tenant can be bound through any of them, and notifications are routed
+    -- back through whichever OA they bound on. Each OA has its own webhook
+    -- URL (slug-based) so signature verification stays isolated per channel.
+    --
+    -- Tokens are stored encrypted (services/encryption.js handles versioned
+    -- keys). The legacy single-OA env vars (LINE_CHANNEL_ACCESS_TOKEN +
+    -- LINE_CHANNEL_SECRET) are still honoured by services/lineOa.js as a
+    -- "virtual env OA" with id = 0, so existing deployments keep working.
+    CREATE TABLE IF NOT EXISTS line_oas (
+      id                              BIGSERIAL PRIMARY KEY,
+      slug                            TEXT NOT NULL,
+      name                            TEXT NOT NULL,
+      description                     TEXT,
+      bot_basic_id                    TEXT,
+      channel_id                      TEXT,
+      channel_secret_encrypted        TEXT,
+      channel_access_token_encrypted  TEXT,
+      enabled                         BOOLEAN NOT NULL DEFAULT TRUE,
+      is_default                      BOOLEAN NOT NULL DEFAULT FALSE,
+      owner_user_id                   TEXT,
+      bound_count                     INTEGER NOT NULL DEFAULT 0,
+      last_seen_at                    TIMESTAMPTZ,
+      last_error                      TEXT,
+      created_by                      TEXT,
+      created_at                      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at                      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      deleted_at                      TIMESTAMPTZ
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_line_oas_slug
+      ON line_oas(slug) WHERE deleted_at IS NULL;
+    -- Only one OA can be flagged default at a time.
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_line_oas_default
+      ON line_oas((is_default)) WHERE is_default = TRUE AND deleted_at IS NULL;
+
+    -- Track which OA a binding was created through. NULL = legacy env-OA.
+    ALTER TABLE line_bindings ADD COLUMN IF NOT EXISTS oa_id BIGINT;
+    ALTER TABLE line_bindings ADD COLUMN IF NOT EXISTS target_oa_id BIGINT;
+    -- The active-user uniqueness must be scoped per OA — a single human has
+    -- a different LINE userId in each OA they're friends with, so the same
+    -- userId across two OAs would collide on the old global index.
+    DROP INDEX IF EXISTS uq_line_bindings_active_user;
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_line_bindings_active_user_per_oa
+      ON line_bindings(COALESCE(oa_id, 0), line_user_id)
+      WHERE status = 'bound' AND line_user_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_line_bindings_oa ON line_bindings(oa_id);
+
+    -- Cache the binding's OA on the tenant row too, so notifier doesn't have
+    -- to JOIN every push. Updated by lineBinding.tryBind / revoke / block.
+    ALTER TABLE tenants ADD COLUMN IF NOT EXISTS line_oa_id BIGINT;
+
     -- Recurring monthly charges per room (parking, internet, locker, etc.).
     -- Bulk-generate auto-pulls active rows for a room → adds them as line
     -- items on the next bill. start_at/end_at let admin pre-schedule

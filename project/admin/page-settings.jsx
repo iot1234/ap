@@ -158,21 +158,69 @@ function TabBuilding({ draft, updatePath }) {
 }
 
 // ============================================================
+// Validate Thai PromptPay target. Accepts a 10-digit phone (must start with 0)
+// or a 13-digit citizen ID. Hyphens/spaces are stripped before checking.
+function validatePromptpay(s) {
+  if (!s) return { ok: false, reason: 'ยังไม่ได้กรอกหมายเลข' };
+  const cleaned = String(s).replace(/[\s-]/g, '');
+  if (/^0\d{9}$/.test(cleaned)) return { ok: true, kind: 'phone' };
+  if (/^\d{13}$/.test(cleaned)) return { ok: true, kind: 'citizen' };
+  return { ok: false, reason: 'ต้องเป็นเบอร์ 10 หลัก (ขึ้นต้น 0) หรือเลขบัตรประชาชน 13 หลัก' };
+}
+
+// Demo placeholder bundled in DEFAULT_CONFIG. We show a soft warning if the
+// admin hasn't replaced it yet so tenants don't get bills routed to the dev's
+// test number.
+const DEMO_PROMPTPAY = '0801234567';
+const DEMO_BANK_ACC  = '123-456789-0';
+
 function TabPayment({ draft, updatePath }) {
   const C = window.ADMIN_C;
   const { Card, Input, Toggle, Select, SectionHeading, Pill } = window;
+  const ppCheck = validatePromptpay(draft.payment.promptpay);
+  const isDemoPp   = (draft.payment.promptpay || '').replace(/[\s-]/g, '') === DEMO_PROMPTPAY;
+  const isDemoBank = (draft.payment.bankAcc || '') === DEMO_BANK_ACC;
+  const promptpayDisplayHint = ppCheck.ok
+    ? (ppCheck.kind === 'phone' ? '✓ รูปแบบเบอร์โทรศัพท์' : '✓ รูปแบบเลขบัตรประชาชน')
+    : ppCheck.reason;
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 800 }}>
       <Card>
         <SectionHeading title="พร้อมเพย์ (PromptPay)" subtitle="ช่องทางหลักสำหรับรับชำระบิล" level={3}
-          action={<Pill color="success" icon="✓">เปิดใช้งาน</Pill>} />
+          action={
+            ppCheck.ok && !isDemoPp
+              ? <Pill color="success" icon="✓">พร้อมใช้งาน</Pill>
+              : <Pill color="warning" icon="⚠">ต้องตั้งค่า</Pill>
+          } />
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-          <Input label="หมายเลขพร้อมเพย์" value={draft.payment.promptpay} onChange={(v) => updatePath('payment.promptpay', v)} hint="เบอร์โทรศัพท์หรือเลขประจำตัวประชาชน" />
+          <Input
+            label="หมายเลขพร้อมเพย์"
+            value={draft.payment.promptpay}
+            onChange={(v) => updatePath('payment.promptpay', v)}
+            hint={promptpayDisplayHint}
+            placeholder="0812345678 หรือ 1234567890123"
+          />
+          <Input
+            label="ชื่อที่แสดงบน QR (ไม่บังคับ)"
+            value={draft.payment.promptpayDisplayName || ''}
+            onChange={(v) => updatePath('payment.promptpayDisplayName', v)}
+            hint="เว้นว่างได้ ระบบจะใช้ชื่อบัญชีธนาคารแทน"
+          />
         </div>
+        {isDemoPp && (
+          <div style={{ marginTop: 10, padding: 10, background: C.warningSoft || '#fff7e0', borderRadius: 8, fontSize: 12.5, color: C.warningInk || '#7a5a00' }}>
+            ⚠ ตอนนี้ใช้หมายเลขตัวอย่างของระบบอยู่ — กรุณาเปลี่ยนเป็นเบอร์/บัตรประชาชนของคุณก่อนใช้งานจริง
+          </div>
+        )}
       </Card>
 
       <Card>
-        <SectionHeading title="โอนผ่านธนาคาร" level={3} />
+        <SectionHeading title="โอนผ่านธนาคาร" subtitle="แสดงในบิล PDF + tenant portal" level={3}
+          action={
+            (draft.payment.bankAcc && draft.payment.bankAcc.replace(/[\s-]/g, '').length >= 6 && !isDemoBank)
+              ? <Pill color="success" icon="✓">พร้อมใช้งาน</Pill>
+              : <Pill color="muted">ปิด</Pill>
+          } />
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
           <Select
             label="ธนาคาร"
@@ -180,16 +228,26 @@ function TabPayment({ draft, updatePath }) {
             onChange={(v) => updatePath('payment.bank', v)}
             options={['ไทยพาณิชย์','กสิกรไทย','กรุงเทพ','กรุงไทย','กรุงศรี','ทหารไทยธนชาต','ออมสิน','ธ.ก.ส.']}
           />
-          <Input label="เลขที่บัญชี" value={draft.payment.bankAcc}  onChange={(v) => updatePath('payment.bankAcc', v)} />
+          <Input label="เลขที่บัญชี" value={draft.payment.bankAcc}  onChange={(v) => updatePath('payment.bankAcc', v)} placeholder="123-4-56789-0" />
           <Input label="ชื่อบัญชี"     value={draft.payment.bankName} onChange={(v) => updatePath('payment.bankName', v)} style={{ gridColumn: 'span 2' }} />
         </div>
+        {isDemoBank && (
+          <div style={{ marginTop: 10, padding: 10, background: C.warningSoft || '#fff7e0', borderRadius: 8, fontSize: 12.5, color: C.warningInk || '#7a5a00' }}>
+            ⚠ ตอนนี้ใช้เลขบัญชีตัวอย่างของระบบอยู่ — เปลี่ยนเป็นบัญชีจริงก่อนเปิดให้ผู้เช่าใช้งาน
+          </div>
+        )}
       </Card>
 
       <Card>
-        <SectionHeading title="ช่องทางอื่นๆ" level={3} />
-        <Toggle label="LINE Pay"     hint="รับชำระผ่าน LINE Pay (ค่าธรรมเนียม 1.99%)" checked={draft.payment.linePay}    onChange={(v) => updatePath('payment.linePay', v)} />
-        <Toggle label="TrueMoney Wallet" hint="รับชำระผ่าน TrueMoney"                       checked={draft.payment.truemoney}  onChange={(v) => updatePath('payment.truemoney', v)} />
-        <Toggle label="บัตรเครดิต/เดบิต"  hint="ค่าธรรมเนียม 2.7-3.5%"                             checked={draft.payment.creditCard} onChange={(v) => updatePath('payment.creditCard', v)} />
+        <SectionHeading title="ช่องทางอื่นๆ" subtitle="ปรากฏในบิล PDF เพื่อแจ้งผู้เช่าว่าหอพักรับช่องทางใดบ้าง" level={3} />
+        <Toggle label="LINE Pay"          hint="แจ้งผู้เช่าว่ารับชำระผ่าน LINE Pay (ต้องประสานกับร้านค้า LINE Pay เอง)" checked={draft.payment.linePay}    onChange={(v) => updatePath('payment.linePay', v)} />
+        <Toggle label="TrueMoney Wallet" hint="แจ้งผู้เช่าว่ารับชำระผ่าน TrueMoney (ต้องประสานกับ Ascend เอง)"      checked={draft.payment.truemoney}  onChange={(v) => updatePath('payment.truemoney', v)} />
+        <Toggle label="บัตรเครดิต/เดบิต"   hint="แจ้งผู้เช่าว่ารับชำระด้วยบัตรที่ออฟฟิศ"                                       checked={draft.payment.creditCard} onChange={(v) => updatePath('payment.creditCard', v)} />
+        <div style={{ marginTop: 10, padding: 10, background: C.surfaceAlt, borderRadius: 8, fontSize: 12, color: C.muted }}>
+          💡 ระบบนี้ไม่ได้เชื่อมตรงกับ LINE Pay / TrueMoney / payment gateway —
+          toggle ที่เปิดจะปรากฏเป็นรายการ "ช่องทางที่รับชำระอื่น" ในบิล PDF + หน้า tenant portal
+          เพื่อแจ้งผู้เช่าให้ทราบเท่านั้น การชำระจริงทำผ่าน PromptPay/โอนธนาคารแล้วอัปโหลดสลิป
+        </div>
       </Card>
     </div>
   );
