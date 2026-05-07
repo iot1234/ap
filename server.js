@@ -728,7 +728,7 @@ app.post('/api/auth/login', sameOrigin, loginLimiter, validateBody(schemas.login
   }
 });
 
-app.post('/api/auth/logout', sameOrigin, (req, res) => {
+app.post('/api/auth/logout', sameOrigin, csrfGuard, (req, res) => {
   const username = req.session && req.session.user ? req.session.user.username : null;
   if (username) audit(req, 'auth.logout', 'user', username);
   req.session.destroy(() => res.json({ ok: true }));
@@ -834,7 +834,7 @@ app.get('/api/data', async (req, res) => {
   }
 });
 
-app.put('/api/data/:key', sameOrigin, requireAuth, async (req, res) => {
+app.put('/api/data/:key', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager', 'staff'), async (req, res) => {
   const key = req.params.key;
   if (!ALLOWED_KEYS.has(key)) return res.status(400).json({ error: 'invalid key' });
   let value = req.body && req.body.value !== undefined ? req.body.value : req.body;
@@ -985,7 +985,7 @@ async function mirrorRoomsToTenants(roomsObj, updatedBy) {
   }
 }
 
-app.delete('/api/data/:key', sameOrigin, requireAuth, async (req, res) => {
+app.delete('/api/data/:key', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'), async (req, res) => {
   const key = req.params.key;
   if (!ALLOWED_KEYS.has(key)) return res.status(400).json({ error: 'invalid key' });
   try {
@@ -1127,7 +1127,7 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBooking, validateBody(sche
 // POST /api/notify/bill — admin-auth. Trigger a LINE notification for a bill
 // the admin just sent. Body: { tenantName, roomId, period, total, billNo,
 // recipientUserId? } — if recipientUserId omitted, falls back to LINE_OWNER_USER_ID.
-app.post('/api/notify/bill', sameOrigin, requireAuth, async (req, res) => {
+app.post('/api/notify/bill', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager', 'staff'), async (req, res) => {
   const b = req.body || {};
   if (!b.tenantName || !b.total) {
     return res.status(400).json({ error: 'tenantName and total required' });
@@ -1188,7 +1188,7 @@ function releasePdfSlot() {
 // client-side from rooms+config; server renders Thai-language PDF with QR
 // embedded. We don't persist bills server-side (they're computed on demand
 // from rooms+config in the admin UI), so the body carries everything needed.
-app.post('/api/bills/render', sameOrigin, requireAuth, async (req, res) => {
+app.post('/api/bills/render', sameOrigin, csrfGuard, requireAuth, async (req, res) => {
   const bill = req.body && req.body.bill ? req.body.bill : req.body;
   if (!bill || !bill.tenantName || !bill.total) {
     return res.status(400).json({ error: 'bill.tenantName and bill.total required' });
@@ -1368,7 +1368,7 @@ app.get('/api/maintenance/lookup', rateLimitLookup, lookupJitter, async (req, re
 });
 
 // PUT /api/maintenance/:id — admin updates status / assigned / cost / scheduled.
-app.put('/api/maintenance/:id', sameOrigin, requireAuth, async (req, res) => {
+app.put('/api/maintenance/:id', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager', 'staff'), async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id < 1) {
     return res.status(400).json({ error: 'invalid id' });
@@ -1700,7 +1700,7 @@ app.get('/api/admin/features', requireAuth, async (_req, res) => {
   }
 });
 
-app.put('/api/admin/features', sameOrigin, requireAuth, async (req, res) => {
+app.put('/api/admin/features', sameOrigin, csrfGuard, requireAuth, requireRole('owner'), async (req, res) => {
   const partial = req.body && req.body.features ? req.body.features : req.body;
   if (!partial || typeof partial !== 'object') {
     return res.status(400).json({ error: 'features object required' });
@@ -1788,7 +1788,7 @@ app.get('/api/tenants/:id', requireAuth, async (req, res) => {
   }
 });
 
-app.post('/api/tenants', sameOrigin, requireAuth, async (req, res) => {
+app.post('/api/tenants', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'), async (req, res) => {
   const b = req.body || {};
   const str = (v, max) => (typeof v === 'string' ? v.slice(0, max) : '');
   const fullName = str(b.fullName, 200).trim();
@@ -1846,7 +1846,7 @@ app.post('/api/tenants', sameOrigin, requireAuth, async (req, res) => {
   }
 });
 
-app.put('/api/tenants/:id', sameOrigin, requireAuth, async (req, res) => {
+app.put('/api/tenants/:id', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'), async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
   const b = req.body || {};
@@ -1932,7 +1932,7 @@ app.put('/api/tenants/:id', sameOrigin, requireAuth, async (req, res) => {
   }
 });
 
-app.delete('/api/tenants/:id', sameOrigin, requireAuth, async (req, res) => {
+app.delete('/api/tenants/:id', sameOrigin, csrfGuard, requireAuth, requireRole('owner'), async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
   try {
@@ -2090,7 +2090,7 @@ app.post('/api/tenant/login', sameOrigin, rateLimitTenantLogin, features.require
   }
 });
 
-app.post('/api/tenant/logout', sameOrigin, async (req, res) => {
+app.post('/api/tenant/logout', sameOrigin, csrfGuard, async (req, res) => {
   try {
     const sid = req.headers.cookie ? (req.headers.cookie.match(/(?:^|;\s*)tenant_sid=([^;]+)/) || [])[1] : null;
     if (sid) await pool.query(`DELETE FROM tenant_sessions WHERE sid=$1`, [sid]);
@@ -2121,7 +2121,7 @@ app.get('/api/tenant/me', async (req, res) => {
 // Tenant updates their own profile (locale + email only). Locale was
 // previously persisted to localStorage only, so it reset every time the
 // tenant cleared cookies or used another device.
-app.put('/api/tenant/me', sameOrigin, requireTenant, async (req, res) => {
+app.put('/api/tenant/me', sameOrigin, csrfGuard, requireTenant, async (req, res) => {
   const b = req.body || {};
   const fields = [], params = [];
   let i = 1;
@@ -2259,7 +2259,7 @@ app.get('/api/tenant/payments', requireTenant, async (req, res) => {
 // (no need to re-pass phone — we know who the tenant is). The ticket must
 // be both for this tenant's current room AND in 'completed' status, AND
 // not already rated. We also stamp `updated_at` for activity tracking.
-app.post('/api/tenant/maintenance/:id/rate', sameOrigin, requireTenant, async (req, res) => {
+app.post('/api/tenant/maintenance/:id/rate', sameOrigin, csrfGuard, requireTenant, async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
   const rating = Number(req.body?.rating);
@@ -2329,7 +2329,7 @@ app.get('/api/bills', requireAuth, async (req, res) => {
   }
 });
 
-app.post('/api/bills', sameOrigin, requireAuth, async (req, res) => {
+app.post('/api/bills', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'), async (req, res) => {
   const b = req.body || {};
   const flags = await features.load(pool);
   // Admin sends either a fully-formed bill, or roomId+period and we compute it.
@@ -2460,7 +2460,7 @@ app.post('/api/bills', sameOrigin, requireAuth, async (req, res) => {
   }
 });
 
-app.put('/api/bills/:id/void', sameOrigin, requireAuth, async (req, res) => {
+app.put('/api/bills/:id/void', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'), async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
   const reason = String(req.body?.reason || '').slice(0, 500);
@@ -2491,7 +2491,7 @@ async function ensureSlipUpload(req, res, next) {
   next();
 }
 
-app.post('/api/tenant/payments', sameOrigin, requireTenant, ensureSlipUpload, async (req, res) => {
+app.post('/api/tenant/payments', sameOrigin, csrfGuard, requireTenant, ensureSlipUpload, async (req, res) => {
   const b = req.body || {};
   const billId = Number(b.billId);
   if (!Number.isInteger(billId) || billId < 1) return res.status(400).json({ error: 'billId required' });
@@ -2600,7 +2600,7 @@ app.get('/api/payments', requireAuth, async (req, res) => {
 // paths converge on `bills.status='paid' + payments.status='verified'`.
 // Also notifies the tenant on outcome so they see the verdict in their
 // portal / LINE without polling.
-app.put('/api/payments/:id/verify', sameOrigin, requireAuth, async (req, res) => {
+app.put('/api/payments/:id/verify', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'), async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
   const accept = req.body?.accept !== false;
@@ -2685,7 +2685,7 @@ const BOOKING_TRANSITIONS = {
   cancelled: [],                     // terminal
 };
 
-app.put('/api/bookings/:id', sameOrigin, requireAuth, requireRole('owner', 'manager'), async (req, res) => {
+app.put('/api/bookings/:id', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'), async (req, res) => {
   const id = String(req.params.id).slice(0, 64);
   const b = req.body || {};
   if (b.status && !BOOKING_STATUSES.has(String(b.status))) {
@@ -2789,7 +2789,7 @@ async function loadRecurringFor(pool, { tenantId, roomId }) {
 }
 
 // === v2: Photo upload (rooms / signatures / citizen-id images) ============
-app.post('/api/uploads', sameOrigin, requireAuth, features.requireFeature('photoUpload'), async (req, res) => {
+app.post('/api/uploads', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager', 'staff'), features.requireFeature('photoUpload'), async (req, res) => {
   const b = req.body || {};
   const category = String(b.category || 'misc');
   if (!['room_photo', 'contract_signature', 'citizen_id_image', 'misc'].includes(category)) {
@@ -2813,7 +2813,7 @@ app.post('/api/uploads', sameOrigin, requireAuth, features.requireFeature('photo
 });
 
 // === v2: Meter readings ===================================================
-app.post('/api/meters/:roomId/readings', sameOrigin, requireAuth, features.requireFeature('meterIot'), async (req, res) => {
+app.post('/api/meters/:roomId/readings', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager', 'staff'), features.requireFeature('meterIot'), async (req, res) => {
   const roomId = String(req.params.roomId).slice(0, 32);
   const { meterType, reading, source } = req.body || {};
   try {
@@ -2932,7 +2932,7 @@ app.get('/api/admin/users', requireAuth, requireRole('owner'), async (_req, res)
     res.status(500).json({ error: 'internal error' });
   }
 });
-app.post('/api/admin/users', sameOrigin, requireAuth, requireRole('owner'), async (req, res) => {
+app.post('/api/admin/users', sameOrigin, csrfGuard, requireAuth, requireRole('owner'), async (req, res) => {
   const r = require('./schemas').schemas.adminCreateUser.safeParse(req.body || {});
   if (!r.success) return res.status(400).json(require('./middleware/validate').formatZodError(r.error));
   // Force lowercase username so "admin"/"Admin"/"ADMIN" can't all coexist as
@@ -2970,7 +2970,7 @@ app.post('/api/admin/users', sameOrigin, requireAuth, requireRole('owner'), asyn
     res.status(500).json({ error: 'internal error' });
   }
 });
-app.put('/api/admin/users/:id', sameOrigin, requireAuth, requireRole('owner'), async (req, res) => {
+app.put('/api/admin/users/:id', sameOrigin, csrfGuard, requireAuth, requireRole('owner'), async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
   const r = require('./schemas').schemas.adminUpdateUser.safeParse(req.body || {});
@@ -3075,7 +3075,7 @@ app.put('/api/admin/users/:id', sameOrigin, requireAuth, requireRole('owner'), a
     res.status(500).json({ error: 'internal error' });
   }
 });
-app.delete('/api/admin/users/:id', sameOrigin, requireAuth, requireRole('owner'), async (req, res) => {
+app.delete('/api/admin/users/:id', sameOrigin, csrfGuard, requireAuth, requireRole('owner'), async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
   if (req.session.user.id === id) {
@@ -3183,7 +3183,7 @@ app.get('/api/admin/access-devices', requireAuth, requireRole('owner', 'manager'
     res.status(500).json({ error: 'internal error' });
   }
 });
-app.post('/api/admin/access-devices', sameOrigin, requireAuth, requireRole('owner'), async (req, res) => {
+app.post('/api/admin/access-devices', sameOrigin, csrfGuard, requireAuth, requireRole('owner'), async (req, res) => {
   const deviceId = String(req.body?.deviceId || '').trim().slice(0, 64);
   const description = String(req.body?.description || '').slice(0, 200);
   if (!deviceId || !/^[A-Za-z0-9_.-]{2,64}$/.test(deviceId)) {
@@ -3207,7 +3207,7 @@ app.post('/api/admin/access-devices', sameOrigin, requireAuth, requireRole('owne
     res.status(500).json({ error: 'internal error' });
   }
 });
-app.delete('/api/admin/access-devices/:id', sameOrigin, requireAuth, requireRole('owner'), async (req, res) => {
+app.delete('/api/admin/access-devices/:id', sameOrigin, csrfGuard, requireAuth, requireRole('owner'), async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
   try {
@@ -3302,7 +3302,7 @@ app.get('/api/admin/notifications', requireAuth, requireRole('owner', 'manager')
     res.status(500).json({ error: 'internal error' });
   }
 });
-app.post('/api/admin/notifications/:id/retry', sameOrigin, requireAuth, requireRole('owner', 'manager'), async (req, res) => {
+app.post('/api/admin/notifications/:id/retry', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'), async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
   try {

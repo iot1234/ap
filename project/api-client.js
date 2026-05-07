@@ -26,6 +26,27 @@
   let isAuthenticated = false;     // tenant pages skip PUTs entirely
   let hydratedKeys = new Set();    // which keys came from the server (vs local seed)
 
+  // CSRF token cache — server endpoints under csrfGuard require both the
+  // CSRF cookie (set on /api/csrf-token GET) and the matching X-CSRF-Token
+  // header on every state-changing request. We fetch once and reuse; a 403
+  // response invalidates the cache so the next call refetches.
+  let _csrfToken = null;
+  async function getCsrfToken() {
+    if (_csrfToken) return _csrfToken;
+    try {
+      const r = await fetch('/api/csrf-token', { credentials: 'include' });
+      if (!r.ok) return null;
+      const j = await r.json();
+      _csrfToken = j.csrfToken || null;
+      return _csrfToken;
+    } catch { return null; }
+  }
+  // Build headers for state-changing requests. Always JSON; attach CSRF.
+  async function csrfHeaders(extra = {}) {
+    const t = await getCsrfToken();
+    return { 'Content-Type': 'application/json', ...(t ? { 'X-CSRF-Token': t } : {}), ...extra };
+  }
+
   // Save references to original methods BEFORE we wrap them
   const origSetItem = window.localStorage.setItem.bind(window.localStorage);
   const origRemoveItem = window.localStorage.removeItem.bind(window.localStorage);
@@ -89,9 +110,10 @@
         const r = await fetch(`/api/data/${encodeURIComponent(key)}`, {
           method: 'PUT',
           credentials: 'include',
-          headers: { 'Content-Type': 'application/json' },
+          headers: await csrfHeaders(),
           body: JSON.stringify({ value }),
         });
+        if (r.status === 403) _csrfToken = null;     // token rotated → refetch
         if (!r.ok) console.warn(`[api-client] retry PUT ${key} failed`, r.status);
       } catch (err) {
         console.warn(`[api-client] retry PUT ${key} error`, err);
@@ -111,9 +133,10 @@
         const res = await fetch(`/api/data/${encodeURIComponent(key)}`, {
           method: 'PUT',
           credentials: 'include',
-          headers: { 'Content-Type': 'application/json' },
+          headers: await csrfHeaders(),
           body: JSON.stringify({ value }),
         });
+        if (res.status === 403) _csrfToken = null;   // token rotated → refetch
         if (res.status === 401) {
           // Session expired or never authenticated. Stash the value so we
           // don't lose admin's edit on the next page load — flushed by
@@ -182,9 +205,15 @@
         clearTimeout(pendingTimers.get(key));
         pendingTimers.delete(key);
       }
-      fetch(`/api/data/${encodeURIComponent(key)}`, {
-        method: 'DELETE',
-        credentials: 'include',
+      // DELETE also goes through csrfGuard now — fetch token first.
+      csrfHeaders().then((headers) =>
+        fetch(`/api/data/${encodeURIComponent(key)}`, {
+          method: 'DELETE',
+          credentials: 'include',
+          headers,
+        })
+      ).then((r) => {
+        if (r.status === 403) _csrfToken = null;
       }).catch((err) => console.warn(`[api-client] DELETE ${key} error`, err));
     }
   };
@@ -212,7 +241,11 @@
       return data;
     },
     async logout() {
-      await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
+      // /api/auth/logout went under csrfGuard — must include token.
+      await fetch('/api/auth/logout', {
+        method: 'POST', credentials: 'include',
+        headers: await csrfHeaders(),
+      });
       isAuthenticated = false;
       window.location.href = '/login';
     },
