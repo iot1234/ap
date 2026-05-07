@@ -88,10 +88,22 @@ async function preload(pool) {
 /**
  * Synchronously read a secret. Env wins over DB so ops can pin a value
  * via Railway Variables when they need to override the UI's setting.
+ *
+ * We trim whitespace + strip control chars on read too — operators who
+ * pasted a token with a trailing newline before the input-time validation
+ * shipped would otherwise stay broken until they re-saved manually.
  */
 function get(key) {
-  if (key in process.env && process.env[key] !== '') return process.env[key];
-  return _cache.get(key);
+  let v;
+  if (key in process.env && process.env[key] !== '') {
+    v = process.env[key];
+  } else {
+    v = _cache.get(key);
+  }
+  if (typeof v !== 'string') return v;
+  // Trim + strip CR/LF/tab + DEL/control chars. Keep printable ASCII +
+  // anything ≥ 0x20 (covers all valid LINE/SMTP/R2 token characters).
+  return v.trim().replace(/[\x00-\x1F\x7F]/g, '');
 }
 
 /**
@@ -101,12 +113,33 @@ async function set(pool, key, value, updatedBy) {
   if (!CATALOG_BY_KEY[key]) {
     throw new Error(`unknown secret key: ${key}`);
   }
-  if (value == null || value === '') {
+  // Sanitise: strip surrounding whitespace + reject embedded control chars
+  // (CR/LF/tab/non-printable). Operators frequently paste tokens with a
+  // trailing newline from the LINE/SMTP UI, and that single \n inside the
+  // saved token then breaks every outbound request — Node's http module
+  // refuses to put a header line containing CR/LF into the wire ("Invalid
+  // character in header content"). Catch it at write time so the value
+  // never makes it to the DB in a broken state.
+  let cleaned = value;
+  if (cleaned != null && cleaned !== '') {
+    cleaned = String(cleaned).trim();
+    if (/[\r\n\t]/.test(cleaned)) {
+      throw new Error('ค่าห้ามมีขึ้นบรรทัดใหม่หรือ tab — copy-paste ใหม่โดยไม่ติดบรรทัดใหม่');
+    }
+    if (/[\x00-\x1F\x7F]/.test(cleaned)) {
+      throw new Error('ค่ามีอักขระที่ใช้ใน HTTP header ไม่ได้ — โปรดตรวจสอบ');
+    }
+    if (cleaned.length === 0) {
+      // Was all-whitespace; treat as delete.
+      cleaned = '';
+    }
+  }
+  if (cleaned == null || cleaned === '') {
     await pool.query('DELETE FROM secrets WHERE key=$1', [key]);
     _cache.delete(key);
     return { key, deleted: true };
   }
-  const enc = encryption.encryptString(String(value));
+  const enc = encryption.encryptString(cleaned);
   const desc = CATALOG_BY_KEY[key].description || null;
   await pool.query(
     `INSERT INTO secrets (key, value_encrypted, description, updated_by)
@@ -118,7 +151,7 @@ async function set(pool, key, value, updatedBy) {
        updated_at = NOW()`,
     [key, enc, desc, updatedBy || 'system']
   );
-  _cache.set(key, String(value));
+  _cache.set(key, cleaned);
   return { key, set: true };
 }
 

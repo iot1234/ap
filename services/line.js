@@ -39,12 +39,32 @@ function _splitArgs(args, fnLen /* expected: oa-form arg count */) {
   return { oa: null, rest: args };
 }
 
+// Trim + reject control chars in a token before it goes into an HTTP header.
+// Without this, a token with a stray newline or whitespace surfaces as
+// "Invalid character in header content [\"Authorization\"]" which is opaque
+// to operators. Strip whitespace + control bytes; throw a clear error if
+// what's left is empty or still illegal.
+function sanitiseToken(raw) {
+  if (typeof raw !== 'string') throw new Error('LINE token missing or wrong type');
+  const cleaned = raw.trim().replace(/[\x00-\x1F\x7F]/g, '');
+  if (!cleaned) throw new Error('LINE token is empty after trim');
+  // HTTP header values must stay in 0x20-0x7E (printable ASCII). Anything
+  // else means the operator pasted a token that includes a non-token char.
+  if (/[^\x20-\x7E]/.test(cleaned)) {
+    throw new Error('LINE token contains non-ASCII characters — re-paste');
+  }
+  return cleaned;
+}
+
 // --- HTTP helpers ---------------------------------------------------------
 function postJson(oa, pathname, body) {
   return new Promise((resolve, reject) => {
     if (!oa || !oa.channelAccessToken) {
       return reject(new Error('LINE OA not configured'));
     }
+    let token;
+    try { token = sanitiseToken(oa.channelAccessToken); }
+    catch (err) { return reject(err); }
     const data = Buffer.from(JSON.stringify(body), 'utf8');
     const req = https.request(
       {
@@ -52,7 +72,7 @@ function postJson(oa, pathname, body) {
         headers: {
           'Content-Type': 'application/json',
           'Content-Length': data.length,
-          Authorization: `Bearer ${oa.channelAccessToken}`,
+          Authorization: `Bearer ${token}`,
         },
         timeout: 5000,
       },

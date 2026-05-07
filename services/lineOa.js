@@ -357,11 +357,19 @@ async function testConnection(pool, id) {
   const oa = await getById(pool, id, { withSecrets: true });
   if (!oa) throw new Error('not found');
   if (!oa.channelAccessToken) throw new Error('ยังไม่ได้ตั้ง access token');
+  // Trim + reject control chars (operators commonly paste tokens with a
+  // trailing newline; that single \n breaks the http module with
+  // "Invalid character in header content")
+  const tokenClean = String(oa.channelAccessToken).trim().replace(/[\x00-\x1F\x7F]/g, '');
+  if (!tokenClean) throw new Error('access token ว่างหลัง trim — ลอง paste ใหม่');
+  if (/[^\x20-\x7E]/.test(tokenClean)) {
+    throw new Error('access token มีอักขระที่ใส่ใน HTTP header ไม่ได้ — โปรดวางใหม่');
+  }
   return await new Promise((resolve) => {
     const https = require('https');
     const req = https.request({
       hostname: 'api.line.me', path: '/v2/bot/info', method: 'GET',
-      headers: { Authorization: `Bearer ${oa.channelAccessToken}` },
+      headers: { Authorization: `Bearer ${tokenClean}` },
       timeout: 5000,
     }, (res) => {
       let buf = '';
