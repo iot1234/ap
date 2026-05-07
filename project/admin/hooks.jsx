@@ -157,14 +157,25 @@
 
   // CSRF token helper for state-changing fetch calls.
   let _csrfToken = null;
-  async function getCsrfToken() {
-    if (_csrfToken) return _csrfToken;
+  async function getCsrfToken(forceRefresh) {
+    if (_csrfToken && !forceRefresh) return _csrfToken;
     try {
       const r = await fetch('/api/csrf-token', { credentials: 'same-origin' });
+      if (!r.ok) {
+        console.warn('[apiFetch] csrf-token endpoint returned', r.status);
+        return null;
+      }
       const j = await r.json();
+      if (!j || !j.csrfToken) {
+        console.warn('[apiFetch] csrf-token response missing csrfToken field');
+        return null;
+      }
       _csrfToken = j.csrfToken;
       return _csrfToken;
-    } catch { return null; }
+    } catch (err) {
+      console.warn('[apiFetch] csrf-token fetch failed:', err && err.message);
+      return null;
+    }
   }
   async function apiFetch(url, opts = {}) {
     const method = (opts.method || 'GET').toUpperCase();
@@ -212,8 +223,23 @@
       }, 0);
     }
     if (res.status === 403) {
-      // CSRF token may have rotated — clear cache so next call refetches.
+      // CSRF token may have rotated — clear cache + retry ONCE with a fresh
+      // token. Without this auto-retry, every save after a session token
+      // rotation surfaces "invalid CSRF token" until the user refreshes.
       _csrfToken = null;
+      if (method !== 'GET' && method !== 'HEAD' && !opts._csrfRetried) {
+        try {
+          const fresh = await getCsrfToken(true);
+          if (fresh) {
+            const retryHeaders = { ...headers, 'X-CSRF-Token': fresh };
+            return await fetch(url, {
+              credentials: 'same-origin', ...opts,
+              signal, headers: retryHeaders,
+              _csrfRetried: true,
+            });
+          }
+        } catch { /* fall through with original 403 */ }
+      }
     }
     return res;
   }
