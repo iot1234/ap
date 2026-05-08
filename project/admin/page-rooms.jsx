@@ -111,27 +111,98 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
           const waterIdx    = header.findIndex(h => /หน่วย.*น้ำ|water.*units|^น้ำ\(หน่วย\)$/i.test(h));
           const elecIdx     = header.findIndex(h => /หน่วย.*ไฟ|elec.*units|^ไฟ\(หน่วย\)$/i.test(h));
           const statusMap = {}; for (const k of Object.keys(window.ADMIN_STATUS)) statusMap[window.ADMIN_STATUS[k].th] = k;
+          // DRY-RUN FIRST: parse the file without mutating state, gather a
+          // diff (matched rooms, skipped rows, columns being applied), and
+          // show a confirm before committing. Without this dry-run, importing
+          // a CSV with a bad column header silently overwrites every room's
+          // rent/status with NaN/empty — and there's no undo.
+          const willUpdate = [];
+          const skippedNoMatch = [];
+          const skippedNoChange = [];
+          const validStatuses = new Set(Object.keys(window.ADMIN_STATUS));
+          for (let i = 1; i < lines.length; i++) {
+            const row = parseRow(lines[i]);
+            const id = row[idIdx]?.trim();
+            if (!id) continue;
+            if (!rooms[id]) { skippedNoMatch.push(id); continue; }
+            const patch = {};
+            if (rentIdx > -1 && row[rentIdx])     patch.rent = Number(row[rentIdx]);
+            if (statusIdx > -1 && row[statusIdx]) {
+              const s = row[statusIdx].trim();
+              const mapped = statusMap[s] || s;
+              if (validStatuses.has(mapped)) patch.status = mapped;
+              // else: ignore — don't let bad CSV poison status values.
+            }
+            if (notesIdx > -1)                    patch.notes = row[notesIdx] || '';
+            if (waterIdx > -1 && row[waterIdx])   patch.waterUnits = Number(row[waterIdx]);
+            if (elecIdx > -1 && row[elecIdx])     patch.elecUnits  = Number(row[elecIdx]);
+            // Reject NaN values silently — happens when the CSV cell is
+            // empty or has trailing characters from a different format.
+            if (patch.rent != null && !Number.isFinite(patch.rent)) delete patch.rent;
+            if (patch.waterUnits != null && !Number.isFinite(patch.waterUnits)) delete patch.waterUnits;
+            if (patch.elecUnits != null && !Number.isFinite(patch.elecUnits)) delete patch.elecUnits;
+            if (Object.keys(patch).length === 0) {
+              skippedNoChange.push(id);
+            } else {
+              willUpdate.push({ id, patch });
+            }
+          }
+          // Build a human-readable summary showing first 5 changes so admin
+          // can spot wrong-column-mapping issues before committing.
+          const sample = willUpdate.slice(0, 5).map((u) => {
+            const fields = Object.keys(u.patch).map((k) => `${k}=${u.patch[k]}`).join(', ');
+            return `  • ห้อง ${u.id}: ${fields}`;
+          }).join('\n');
+          const cols = [
+            rentIdx > -1 && 'ค่าเช่า',
+            statusIdx > -1 && 'สถานะ',
+            notesIdx > -1 && 'หมายเหตุ',
+            waterIdx > -1 && 'น้ำ(หน่วย)',
+            elecIdx > -1 && 'ไฟ(หน่วย)',
+          ].filter(Boolean).join(', ');
+          if (willUpdate.length === 0) {
+            setToast && setToast({
+              kind: 'warning',
+              message: {
+                title: 'ไม่พบข้อมูลที่จะอัปเดต',
+                description: skippedNoMatch.length
+                  ? `${skippedNoMatch.length} แถวมีเลขห้องที่ไม่ตรงกับห้องในระบบ — ตรวจคอลัมน์ "เลขห้อง" ในไฟล์`
+                  : 'ทุกแถวมีค่าเหมือนเดิม หรือไฟล์ไม่มีคอลัมน์ที่จะอัปเดต',
+              },
+            });
+            return;
+          }
+          const ok = window.confirm(
+            `📥 ตรวจสอบก่อนนำเข้า CSV\n\n` +
+            `📊 สรุป:\n` +
+            `  • จะอัปเดต: ${willUpdate.length} ห้อง\n` +
+            `  • ข้าม (ไม่พบเลขห้องในระบบ): ${skippedNoMatch.length} แถว\n` +
+            `  • ข้าม (ไม่มีคอลัมน์ที่จะอัปเดต): ${skippedNoChange.length} แถว\n\n` +
+            `📋 คอลัมน์ที่จะถูกอัปเดต: ${cols || '(ไม่มี)'}\n\n` +
+            `🔍 ตัวอย่าง 5 ห้องแรก:\n${sample}` +
+            (willUpdate.length > 5 ? `\n  ... อีก ${willUpdate.length - 5} ห้อง` : '') +
+            (skippedNoMatch.length > 0
+              ? `\n\n⚠️ ${skippedNoMatch.length} แถวจะถูกข้ามเพราะเลขห้องไม่ตรง:\n${skippedNoMatch.slice(0, 3).join(', ')}` +
+                (skippedNoMatch.length > 3 ? `, ...` : '')
+              : '') +
+            `\n\n📌 ทับค่าเดิมทันที — แนะนำส่งออก backup ก่อน\n\nดำเนินการต่อ?`
+          );
+          if (!ok) return;
           let count = 0;
           setRooms(prev => {
             const next = { ...prev };
-            for (let i = 1; i < lines.length; i++) {
-              const row = parseRow(lines[i]);
-              const id = row[idIdx]?.trim();
-              if (!id || !next[id]) continue;
-              const patch = {};
-              if (rentIdx > -1 && row[rentIdx])   patch.rent = Number(row[rentIdx]);
-              if (statusIdx > -1 && row[statusIdx]) patch.status = statusMap[row[statusIdx].trim()] || row[statusIdx].trim();
-              if (notesIdx > -1)                  patch.notes = row[notesIdx] || '';
-              if (waterIdx > -1 && row[waterIdx]) patch.waterUnits = Number(row[waterIdx]);
-              if (elecIdx > -1 && row[elecIdx])   patch.elecUnits  = Number(row[elecIdx]);
-              if (Object.keys(patch).length) {
-                next[id] = { ...next[id], ...patch };
-                count++;
-              }
+            for (const { id, patch } of willUpdate) {
+              next[id] = { ...next[id], ...patch };
+              count++;
             }
             return next;
           });
-          setToast && setToast({ kind: 'success', message: `นำเข้า CSV สำเร็จ — อัปเดต ${count} ห้อง` });
+          setToast && setToast({
+            kind: 'success',
+            message: skippedNoMatch.length || skippedNoChange.length
+              ? `อัปเดต ${count} ห้อง · ข้าม ${skippedNoMatch.length + skippedNoChange.length} แถว`
+              : `อัปเดต ${count} ห้องเรียบร้อย`,
+          });
           addActivity && addActivity({ icon: '📥', text: `นำเข้า CSV ห้องพัก ${count} รายการ`, type: 'system' });
         } catch (err) {
           setToast && setToast({ kind: 'danger', message: 'นำเข้า CSV ไม่สำเร็จ: ' + err.message });
@@ -699,8 +770,37 @@ function TenantSection({ room, onUpdate }) {
           </>
         }
       >
-        <div style={{ fontSize: 14, color: C.ink2, lineHeight: 1.6 }}>
-          ลบข้อมูลผู้เช่า <b style={{ color: C.ink }}>{room.tenant?.name}</b> ออกจากห้อง <b>{room.id}</b> และตั้งสถานะเป็นว่าง?
+        <div style={{ fontSize: 14, color: C.ink2, lineHeight: 1.7 }}>
+          <div style={{ marginBottom: 12 }}>
+            ลบข้อมูลผู้เช่า <b style={{ color: C.ink }}>{room.tenant?.name}</b>
+            {room.tenant?.phone && <span style={{ color: C.muted }}> ({room.tenant.phone})</span>}
+            {' '}ออกจากห้อง <b>{room.id}</b> และตั้งสถานะเป็น "ว่าง"
+          </div>
+          {/* Sanity-check checklist for the things that DON'T move with this
+              action — admin must clear them manually before/after. The room
+              blob's `tenant` field is just a display copy; bills, contracts,
+              and tickets in the relational DB still point at this room and
+              tenant_id, and they're correct to do so (audit trail). */}
+          <div style={{
+            padding: 12, background: C.warningSoft || '#fbf1de',
+            borderLeft: `3px solid ${C.warning || '#c98a2b'}`,
+            borderRadius: 6, fontSize: 12.5,
+          }}>
+            <div style={{ fontWeight: 700, marginBottom: 6 }}>📌 สิ่งที่ "ย้ายออก" จะไม่ทำให้</div>
+            <div style={{ lineHeight: 1.7 }}>
+              ● บิลที่ยังไม่ชำระ — ยังเปิดอยู่ในชื่อผู้เช่าเดิม (ดูได้ที่ <b>บิล/ใบแจ้งหนี้</b>)<br/>
+              ● สัญญาเช่า — สถานะใน DB ยังคงเดิม (ปิดสัญญาเองที่หน้า <b>ผู้เช่า</b>)<br/>
+              ● ตั๋วแจ้งซ่อม — ยังเชื่อมกับ tenant_id เดิม<br/>
+              ● PIN portal + LINE binding — ยังใช้ login/รับแจ้งเตือนได้
+            </div>
+            <div style={{ marginTop: 8, fontWeight: 600, color: C.warningInk || '#5a3a0d' }}>
+              💡 แนะนำขั้นตอนที่ถูก: <br/>
+              &nbsp;&nbsp; 1) เคลียร์บิลค้างที่หน้า "บิล/ใบแจ้งหนี้"<br/>
+              &nbsp;&nbsp; 2) ปิด PIN/binding ที่ "ผู้เช่า → Portal Access" (เพื่อความปลอดภัย)<br/>
+              &nbsp;&nbsp; 3) ตั้งสถานะ tenant เป็น "moved_out" หรือ "blacklist"<br/>
+              &nbsp;&nbsp; 4) ค่อยกด "ย้ายออก" ที่นี่
+            </div>
+          </div>
         </div>
       </Modal>
       {editMode ? (

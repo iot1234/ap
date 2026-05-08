@@ -51,6 +51,11 @@ function PageLineOas({ setToast }) {
       channelSecret: '',
       enabled: o.enabled, isDefault: o.isDefault,
       isEnvOa: o.isEnvOa,
+      // Carry the original enabled state + bound count so the save guard
+      // below can detect "user just toggled OFF" and warn that bindings
+      // will silently stop receiving notifications.
+      _wasEnabled: o.enabled,
+      _boundCount: o.boundCount || 0,
     });
   }
 
@@ -62,6 +67,31 @@ function PageLineOas({ setToast }) {
     if (!editing.id && !editing.channelAccessToken) {
       setToast && setToast({ kind: 'error', message: 'ต้องใส่ channel access token' });
       return;
+    }
+    // Pre-flight: disabling an OA that has bound tenants stops every push
+    // through that channel — silently. The Toggle's hint says "ปิดเพื่อหยุด
+    // ส่ง+รับชั่วคราว ไม่ลบ binding" but doesn't mention how many people
+    // are affected. Confirm with the actual count so admin spots a misclick.
+    const turningOff = editing._wasEnabled === true && editing.enabled === false;
+    if (turningOff && editing._boundCount > 0) {
+      const ok = window.confirm(
+        `🔌 ปิด OA "${editing.name}" — ผู้เช่า ${editing._boundCount} คนผูกกับ OA นี้\n\n` +
+        `📌 จะเกิดอะไรขึ้น:\n` +
+        `   ● bindings ที่มีอยู่จะ "ค้าง" ไม่ถูก revoke (พร้อมเปิดใหม่ได้)\n` +
+        `   ● ส่ง LINE notify ไป tenant ${editing._boundCount} คนนี้จะหยุดทำงานทันที\n` +
+        `   ● bills/maintenance/booking notify จะ fall-back ไป email — ถ้า tenant ไม่มี email ก็ไม่ได้รับเลย\n` +
+        `   ● webhook /webhook/line/${editing.slug} จะตอบ 503 — tenant ส่ง BIND-XXXX ใหม่ผูกไม่ได้\n\n` +
+        `💡 ทางเลือกที่ปลอดภัยกว่า:\n` +
+        `   • ถ้าจะเปลี่ยน OA — สร้าง OA ใหม่ก่อน, set default, แล้วค่อยปิดอันเก่า\n` +
+        `   • ถ้าจะรีโทเค็น — แค่อัปเดต channelAccessToken (ปุ่มนี้ไม่ต้องปิด)\n\n` +
+        `ยืนยันปิด OA นี้ใช่หรือไม่?`
+      );
+      if (!ok) {
+        // Roll the toggle back so admin doesn't accidentally save again
+        // — the modal stays open with the toggle now showing "on".
+        setEditing({ ...editing, enabled: true });
+        return;
+      }
     }
     setBusy(true);
     try {
