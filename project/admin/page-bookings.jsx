@@ -304,15 +304,59 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
             <Btn variant="ghost" onClick={() => setConfirmAction(null)}>ยกเลิก</Btn>
             {confirmAction?.type === 'approve'
               ? <Btn variant="success" onClick={() => handleApprove(confirmAction.id)}>อนุมัติ</Btn>
-              : <Btn variant="danger" onClick={() => handleReject(confirmAction.id)}>ปฏิเสธ</Btn>}
+              : <Btn variant="danger" onClick={() => handleReject(confirmAction.id)}>ปฏิเสธการจอง</Btn>}
           </>
         }
       >
-        <div style={{ fontSize: 14, color: C.ink2, lineHeight: 1.6 }}>
-          {confirmAction?.type === 'approve'
-            ? <>ต้องการอนุมัติการจอง <b style={{ color: C.ink }}>{confirmAction.id}</b> หรือไม่? ระบบจะส่งข้อความยืนยันไปยังผู้จอง</>
-            : <>ต้องการปฏิเสธการจอง <b style={{ color: C.ink }}>{confirmAction?.id}</b> หรือไม่?</>}
-        </div>
+        {(() => {
+          // Pull the actual booking so the confirm shows context (name,
+          // phone, what kind of room they wanted) rather than just an
+          // opaque id like "BK-PUB-abc123". Helps admin double-check this
+          // is the right booking before the destructive click.
+          const b = confirmAction ? bookings.find((x) => x.id === confirmAction.id) : null;
+          const isApprove = confirmAction?.type === 'approve';
+          return (
+            <div style={{ fontSize: 14, color: C.ink2, lineHeight: 1.7 }}>
+              <div style={{ marginBottom: 12 }}>
+                {isApprove ? 'อนุมัติการจอง:' : 'ปฏิเสธการจอง:'}
+                <div style={{ marginTop: 6, padding: '8px 12px',
+                              background: C.surfaceAlt || '#faf6ee',
+                              borderRadius: 8, fontSize: 13.5 }}>
+                  <b style={{ color: C.ink }}>{b?.name || confirmAction?.id}</b>
+                  {b?.phone && <span style={{ color: C.muted }}> · {b.phone}</span>}
+                  {b?.wantType && (
+                    <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>
+                      ต้องการ {ADMIN_ROOM_TYPES[b.wantType]?.th || b.wantType}
+                      {b.wantFloor ? ` · ชั้น ${b.wantFloor}` : ''}
+                      {b.moveIn ? ` · เข้าพัก ${fmtDateTH(b.moveIn)}` : ''}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div style={{
+                padding: '10px 12px',
+                background: isApprove ? (C.successSoft || '#e6f4ec') : (C.warningSoft || '#fbf1de'),
+                borderLeft: `3px solid ${isApprove ? (C.success || '#2e9b6a') : (C.warning || '#c98a2b')}`,
+                borderRadius: 6, fontSize: 12.5, color: C.ink2,
+              }}>
+                <div style={{ fontWeight: 600, marginBottom: 4 }}>📌 สิ่งที่จะเกิดขึ้น</div>
+                {isApprove ? (
+                  <>
+                    1) ระบบจะหาห้องว่างตรงเงื่อนไขแล้วตั้งเป็น "จองแล้ว" อัตโนมัติ<br/>
+                    2) ผู้จองจะได้รับแจ้งเตือนทาง LINE/อีเมล (ถ้ามีข้อมูล)<br/>
+                    3) <b style={{ color: C.warning || '#c98a2b' }}>ขั้นต่อไป:</b> ตั้ง PIN + ผูก LINE ที่หน้า "ผู้เช่า" — ไม่งั้นผู้เช่า login portal ไม่ได้
+                  </>
+                ) : (
+                  <>
+                    1) สถานะการจองจะเปลี่ยนเป็น "ปฏิเสธ" — กดดู/เปลี่ยนกลับได้ในแท็บ "ปฏิเสธ"<br/>
+                    2) ผู้จองจะได้รับ LINE/อีเมลแจ้ง "ขออภัย — ไม่ได้รับการอนุมัติ" (ใส่ adminNotes ใน drawer ก่อนถ้าต้องการระบุเหตุผล)
+                  </>
+                )}
+              </div>
+            </div>
+          );
+        })()}
       </Modal>
     </PageContainer>
   );

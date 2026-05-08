@@ -127,10 +127,54 @@ function PageMeters({ rooms, setToast }) {
       });
       return;
     }
+    // Pre-flight rollback check: cheap client-side guard BEFORE POSTing.
+    // The server's 3σ anomaly detection runs AFTER insert and only emits a
+    // warning toast — by then the bad reading is already in the table and
+    // will silently corrupt the next bill (rooms.elecUnits / waterUnits
+    // gets jsonb_set'd from the delta in services/meter.js). Catch the
+    // most common typo ("999" instead of "9999", missing decimal) up
+    // front by comparing against the most-recent reading we already have
+    // loaded; force admin to confirm before posting.
+    const newVal = Number(reading);
+    const latest = list && list.length ? Number(list[list.length - 1].reading) : null;
+    if (latest != null && Number.isFinite(latest) && newVal < latest) {
+      const t = type === 'water' ? 'ค่าน้ำ' : 'ค่าไฟ';
+      const ok = window.confirm(
+        `⚠ ${t}ห้อง ${roomId} กำลังจะลดลง — ผิดปกติ\n\n` +
+        `ค่าล่าสุด:  ${latest.toFixed(2)} หน่วย\n` +
+        `ค่าใหม่:    ${newVal.toFixed(2)} หน่วย\n` +
+        `ลดลง:      ${(latest - newVal).toFixed(2)} หน่วย\n\n` +
+        `📌 มิเตอร์ปกติเดินขึ้นเสมอ — ค่าลดลงมักเกิดจาก:\n` +
+        `   1) พิมพ์ผิด (เช่น พิมพ์ 999 แทน 9999)\n` +
+        `   2) มิเตอร์ถูก reset/เปลี่ยนตัวใหม่ — ในกรณีนี้ควรแจ้ง admin ก่อนบันทึก\n\n` +
+        `ยืนยันบันทึกตามนี้ใช่หรือไม่?`
+      );
+      if (!ok) return;
+    }
+    // Detect "huge jump" — new value > 5× the last delta (cheap heuristic;
+    // server's 3σ is more accurate but only fires after save). Helps catch
+    // an extra zero ("99999" instead of "9999").
+    if (latest != null && newVal > latest && list.length >= 2) {
+      const prevPrev = Number(list[list.length - 2].reading);
+      const lastDelta = latest - prevPrev;
+      const newDelta = newVal - latest;
+      if (lastDelta > 0 && newDelta > lastDelta * 10 && newDelta > 100) {
+        const t = type === 'water' ? 'ค่าน้ำ' : 'ค่าไฟ';
+        const ok = window.confirm(
+          `⚠ ${t}ห้อง ${roomId} กระโดดขึ้นเยอะกว่าปกติมาก\n\n` +
+          `ค่าล่าสุด:  ${latest.toFixed(2)}\n` +
+          `ค่าใหม่:    ${newVal.toFixed(2)}\n` +
+          `Delta:     +${newDelta.toFixed(2)} (ปกติประมาณ +${lastDelta.toFixed(2)})\n\n` +
+          `📌 อาจเป็นการพิมพ์ผิด (เกินศูนย์ 1 ตัว) — ตรวจเลขอีกครั้งก่อนบันทึก\n\n` +
+          `ยืนยันบันทึกใช่หรือไม่?`
+        );
+        if (!ok) return;
+      }
+    }
     try {
       const d = await window.apiCall(`/api/meters/${encodeURIComponent(roomId)}/readings`, {
         method: 'POST',
-        body: JSON.stringify({ meterType: type, reading: Number(reading), source: 'manual' }),
+        body: JSON.stringify({ meterType: type, reading: newVal, source: 'manual' }),
       });
       setReading('');
       // Anomaly is NOT a save failure — it's a successful save with a

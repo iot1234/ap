@@ -217,12 +217,54 @@ function SlipModal({ payment, busy, onClose, onDecide }) {
         {payment.status === 'pending' ? (
           <>
             <input value={reason} onChange={(e) => setReason(e.target.value)}
-              placeholder="เหตุผล (กรณีปฏิเสธ)" maxLength={500}
+              placeholder="เหตุผลที่ปฏิเสธ (จำเป็นเมื่อกดปฏิเสธ — ผู้เช่าจะเห็นข้อความนี้)" maxLength={500}
               style={{ width: '100%', marginTop: 12, padding: '8px 12px',
                 borderRadius: 6, border: '1px solid ' + C.border, background: C.bg, color: C.ink }} />
+            {/* Inline impact preview — admin sees EXACTLY what each click does
+                before clicking. Without this, "อนุมัติ" was a single
+                irreversible click that flipped bill→paid + notified the
+                tenant; "ปฏิเสธ" silently sent an empty reason. */}
+            <div style={{ marginTop: 8, padding: '10px 12px',
+                          background: C.bgSoft || '#fbf6ec',
+                          border: `1px solid ${C.borderSoft || C.border}`,
+                          borderRadius: 8, fontSize: 12, color: C.ink2, lineHeight: 1.6 }}>
+              <div style={{ fontWeight: 600, marginBottom: 4 }}>📌 สิ่งที่จะเกิดขึ้น</div>
+              <div>• <b>อนุมัติ</b> → บิล <code>#{payment.bill_id || payment.bill_no}</code> จะถูกตั้งเป็น "ชำระแล้ว" + ส่งแจ้งเตือนผู้เช่าทาง LINE/อีเมล</div>
+              <div>• <b>ปฏิเสธ</b> → บิลคงสถานะ "รอชำระ" + ส่งเหตุผลให้ผู้เช่า ผู้เช่าต้องอัปโหลดสลิปใหม่</div>
+            </div>
             <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-              <Btn onClick={() => onDecide(payment.id, true)} disabled={busy} variant="primary" style={{ flex: 1 }}>อนุมัติ + ทำเครื่องหมายชำระแล้ว</Btn>
-              <Btn onClick={() => onDecide(payment.id, false, reason)} disabled={busy} style={{ flex: 1 }}>ปฏิเสธ</Btn>
+              <Btn
+                onClick={() => {
+                  // Confirm before approving — this is the moment money
+                  // status flips. Show the amount + bill so admin spots a
+                  // mismatched slip image (e.g. tenant uploaded the wrong
+                  // month's slip).
+                  const amt = Number(payment.amount).toLocaleString('th-TH', { minimumFractionDigits: 2 });
+                  const ok = window.confirm(
+                    `อนุมัติสลิป — ตั้งบิลเป็น "ชำระแล้ว"?\n\n` +
+                    `ผู้เช่า: ${payment.tenant_name || '-'}\n` +
+                    `บิล: ${payment.bill_no || payment.bill_id}\n` +
+                    `จำนวน: ฿${amt}\n\n` +
+                    `📌 บิลจะถูก mark paid ทันที + ผู้เช่าจะได้แจ้งเตือนทาง LINE/อีเมล\n` +
+                    `📌 ถ้าจำนวนเงินไม่ตรงกับสลิปจริง ให้ปฏิเสธก่อนแล้วขอสลิปใหม่`
+                  );
+                  if (ok) onDecide(payment.id, true);
+                }}
+                disabled={busy} variant="primary" style={{ flex: 1 }}>✓ อนุมัติ + ตั้งเป็นชำระแล้ว</Btn>
+              <Btn
+                onClick={() => {
+                  // Reason is now REQUIRED — without it the tenant gets a
+                  // generic "rejected" message and won't know what to fix.
+                  // Server schema accepts empty string, so this guard is
+                  // purely client-side UX.
+                  const trimmed = reason.trim();
+                  if (trimmed.length < 3) {
+                    alert('โปรดกรอกเหตุผลในการปฏิเสธ (อย่างน้อย 3 ตัวอักษร)\n\nผู้เช่าจะเห็นข้อความนี้ — เขียนชัดเจนเพื่อให้รู้ว่าต้องแก้อะไร เช่น "ยอดไม่ตรงกับบิล" หรือ "เลขที่อ้างอิงผิด"');
+                    return;
+                  }
+                  onDecide(payment.id, false, trimmed);
+                }}
+                disabled={busy} variant="danger" style={{ flex: 1 }}>✗ ปฏิเสธ</Btn>
             </div>
           </>
         ) : (

@@ -250,8 +250,37 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
   };
 
   // Bulk-send all pending/overdue bills via LINE+email.
+  // Pre-flight: count from local DB-bills overlay so admin sees exactly
+  // how many notifications they're about to dispatch + total amount.
+  // Without this, a single "OK" click could fire 200 LINE pushes (which
+  // hits LINE's rate limit AND looks spammy to tenants), or fire ZERO
+  // because the admin filtered the list and forgot the bulk-send acts
+  // on ALL bills not just the visible ones.
   const handleBulkSend = async () => {
-    if (!window.confirm('ส่งแจ้งเตือนทุกบิลที่ยังไม่ชำระ/ค้างชำระทาง LINE+อีเมล?')) return;
+    const pending = (dbBills || []).filter((b) => b.status === 'pending' || b.status === 'overdue');
+    const totalAmount = pending.reduce((s, b) => s + (Number(b.total) || 0), 0);
+    if (pending.length === 0) {
+      setToast && setToast({
+        kind: 'info',
+        message: {
+          title: 'ไม่มีบิลค้างชำระ',
+          description: 'ทุกบิลในระบบอยู่ในสถานะ "ชำระแล้ว" หรือ "ยกเลิก" — ไม่มีอะไรต้องส่ง',
+        },
+      });
+      return;
+    }
+    const overdueCnt = pending.filter((b) => b.status === 'overdue').length;
+    const fmt = (n) => Number(n).toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const ok = window.confirm(
+      `ส่งแจ้งเตือนทุกบิลที่ยังไม่ชำระ?\n\n` +
+      `📊 จำนวน: ${pending.length} ใบ` +
+      (overdueCnt > 0 ? ` (ค้างชำระ ${overdueCnt}, รอชำระ ${pending.length - overdueCnt})` : '') + `\n` +
+      `💰 ยอดรวม: ฿${fmt(totalAmount)}\n\n` +
+      `📌 ระบบจะ enqueue LINE + อีเมล (fallback) ตาม channels ที่ tenant ผูกไว้\n` +
+      `📌 ดูคิวที่ /admin#notifications-queue — ส่งจริงภายใน ~1 นาที\n` +
+      `📌 ถ้ามี tenant ที่ผูก LINE ไว้ — เขาจะได้ข้อความซ้ำถ้ากดปุ่มนี้บ่อย`
+    );
+    if (!ok) return;
     const apiCall = window.apiCall;
     try {
       const d = await apiCall('/api/bills/bulk-send', { method: 'POST' });
