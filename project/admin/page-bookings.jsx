@@ -108,11 +108,36 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
         : `อนุมัติการจอง ${id} (ยังไม่ได้กำหนดห้อง — ไม่มีห้องว่างตรงเงื่อนไข)`,
       type: 'booking',
     });
+
+    // Surface the unfinished workflow EXPLICITLY: an approved booking is
+    // only halfway done. Without these next steps the tenant can't login to
+    // /tenant (no PIN), can't be reached on LINE (no binding code), and
+    // can't be added to the legal contract. The previous flow ended with a
+    // generic "approved" toast that gave no hint anything was missing —
+    // operators kept asking "ทำไม tenant login ไม่ได้".
+    //
+    // We use the rich-toast payload (kind:'success' with title+description+
+    // action) so the next step is one click away from the approval moment.
     setToast && setToast({
       kind: 'success',
-      message: assignedRoomId
-        ? `อนุมัติแล้ว — กำหนดห้อง ${assignedRoomId}`
-        : 'อนุมัติแล้ว — กรุณากำหนดห้องด้วยตนเอง',
+      message: {
+        title: assignedRoomId
+          ? `✅ อนุมัติแล้ว — จัดห้อง ${assignedRoomId}`
+          : '✅ อนุมัติแล้ว',
+        description: assignedRoomId
+          ? 'ขั้นต่อไป: ตั้ง PIN ให้ผู้เช่า + ผูก LINE เพื่อให้เข้าใช้ portal และรับแจ้งเตือนได้'
+          : 'ยังไม่มีห้องว่างตรงเงื่อนไข — กำหนดห้องด้วยตนเองที่หน้า "ห้องพัก" ก่อนตั้งค่าผู้เช่า',
+        action: assignedRoomId ? {
+          label: 'ตั้งค่าผู้เช่า →',
+          // Jump to tenants page; admin can find the just-mirrored row
+          // (mirrorRoomsToTenants creates it from the rooms-blob save) and
+          // set PIN + issue a LINE binding code from there.
+          onClick: () => { window.location.hash = '#tenants'; },
+        } : {
+          label: 'ไปจัดห้อง →',
+          onClick: () => { window.location.hash = '#rooms'; },
+        },
+      },
     });
     setActiveId(null); setConfirmAction(null);
   };

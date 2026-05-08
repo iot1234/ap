@@ -162,9 +162,13 @@
         <div>
           <label for="priority">ความสำคัญ</label>
           <select id="priority" name="priority">
-            <option value="medium">กลาง (ปกติ)</option>
+            <!-- Severity-descending so the most-urgent option is at top —
+                 matches mental model "how broken is it?" + matches the order
+                 used by admin Kanban filters. Default stays 'medium' since
+                 most submissions don't warrant escalation. -->
             <option value="critical">วิกฤต (ใช้งานไม่ได้)</option>
             <option value="high">สูง (กระทบการใช้งาน)</option>
+            <option value="medium" selected>กลาง (ปกติ)</option>
             <option value="low">ต่ำ (ปรับปรุง)</option>
           </select>
         </div>
@@ -212,7 +216,19 @@
       <h2>ได้รับคำขอแจ้งซ่อมแล้ว</h2>
       <p>เจ้าหน้าที่จะติดต่อกลับโดยเร็วที่สุด</p>
       <p>หมายเลขอ้างอิง: <span class="ref" id="refNo"></span></p>
-      <p style="margin-top:24px"><a href="/" style="color:#c46a3e;text-decoration:none;font-weight:500">← กลับหน้าแรก</a></p>
+      <div style="display:flex; gap:12px; justify-content:center; margin-top:24px; flex-wrap:wrap">
+        <button type="button" id="goHistoryBtn" style="
+          background:#c46a3e; color:#fff; border:none; border-radius:9px;
+          padding:10px 18px; font-family:inherit; font-size:13.5px; font-weight:500; cursor:pointer">
+          ดูสถานะของฉัน →
+        </button>
+        <a href="/" style="
+          background:#fff; color:#5b4f40; border:1px solid #ece4d4; border-radius:9px;
+          padding:10px 18px; font-family:inherit; font-size:13.5px; font-weight:500;
+          text-decoration:none; display:inline-block">
+          กลับหน้าแรก
+        </a>
+      </div>
     </div>
   </template>
 </div>
@@ -233,14 +249,48 @@
     alert.style.display = 'block';
   }
 
-  tabSubmit.onclick = () => {
-    tabSubmit.classList.add('active'); tabHistory.classList.remove('active');
-    formContainer.style.display = ''; historyContainer.style.display = 'none';
-  };
-  tabHistory.onclick = () => {
-    tabHistory.classList.add('active'); tabSubmit.classList.remove('active');
-    formContainer.style.display = 'none'; historyContainer.style.display = '';
-  };
+  // Pre-fill the History tab inputs from the last successful submit, OR from
+  // anything the tenant typed into Submit but hasn't sent yet — so a tenant
+  // who just submitted can switch tabs and see their tickets immediately
+  // without re-typing room+phone. sessionStorage so it clears with the tab,
+  // not localStorage (less PII persistence on shared/hotel-lobby browsers).
+  const SS_KEY = 'baankarn_maint_lookup';
+  function rememberLookup(roomId, phone) {
+    try { sessionStorage.setItem(SS_KEY, JSON.stringify({ roomId, phone })); }
+    catch { /* private mode — ignore */ }
+  }
+  function getRememberedLookup() {
+    try {
+      const raw = sessionStorage.getItem(SS_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch { return null; }
+  }
+
+  function activateTab(which) {
+    if (which === 'history') {
+      tabHistory.classList.add('active'); tabSubmit.classList.remove('active');
+      formContainer.style.display = 'none'; historyContainer.style.display = '';
+      // Pre-fill from remembered values OR from currently-typed Submit form.
+      const hRoom = document.getElementById('hRoomId');
+      const hPhone = document.getElementById('hPhone');
+      if (!hRoom.value && !hPhone.value) {
+        const saved = getRememberedLookup();
+        const typedRoom = document.getElementById('roomId').value.trim();
+        const typedPhone = document.getElementById('tenantPhone').value.trim();
+        hRoom.value = typedRoom || (saved && saved.roomId) || '';
+        hPhone.value = typedPhone || (saved && saved.phone) || '';
+        // Auto-search if both are filled — saves a click for the common path.
+        if (hRoom.value && hPhone.value) {
+          document.getElementById('lookupBtn').click();
+        }
+      }
+    } else {
+      tabSubmit.classList.add('active'); tabHistory.classList.remove('active');
+      formContainer.style.display = ''; historyContainer.style.display = 'none';
+    }
+  }
+  tabSubmit.onclick = () => activateTab('submit');
+  tabHistory.onclick = () => activateTab('history');
 
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -279,6 +329,15 @@
       formContainer.innerHTML = '';
       formContainer.appendChild(tpl.content.cloneNode(true));
       document.getElementById('refNo').textContent = result.ticket.ticket_no;
+      // Remember room+phone so the History tab can auto-look-up without
+      // re-typing. Only persists across this session (sessionStorage).
+      rememberLookup(data.roomId, data.tenantPhone);
+      // Wire up the new "ดูสถานะของฉัน" button in the success card to flip
+      // straight into the History tab + run the lookup.
+      const goHistoryBtn = document.getElementById('goHistoryBtn');
+      if (goHistoryBtn) {
+        goHistoryBtn.addEventListener('click', () => activateTab('history'));
+      }
       window.scrollTo({ top: 0, behavior: 'smooth' });
     } catch (err) {
       showError('เชื่อมต่อเซิร์ฟเวอร์ไม่ได้');

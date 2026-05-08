@@ -266,6 +266,121 @@ async function checkBootConfig() {
   return { status: 'warn', message: `${issues.length} config issue(s)`, detail: { issues } };
 }
 
+// Cross-feature dependency audit. Each entry below describes a flag combination
+// that's silently broken. Returns warnings so admin sees them in the health
+// dashboard + anomalyDetector pings them in the nightly Health alert.
+//
+// This catches the class of bug where admin toggles flag A on without
+// realising flag B (or some env/secret) is required — currently the symptom
+// is a silent feature failure: clicks happen, nothing breaks visibly, but
+// notifications never arrive / cards never revoke / slips can't upload.
+async function checkFeatureDependencies(features) {
+  const warnings = [];
+
+  // slipUpload requires tenantPortal — tenants must have a session to upload.
+  // Without tenantPortal, /api/tenant/payments returns 401 even though the
+  // slipUpload flag is on, and the admin UI's slip queue stays empty forever.
+  if (features?.slipUpload?.enabled && !features?.tenantPortal?.enabled) {
+    warnings.push({
+      flag: 'slipUpload',
+      issue: 'slipUpload เปิด แต่ tenantPortal ปิด — ผู้เช่าจะ upload สลิปไม่ได้ (login ไม่ได้)',
+      fix: 'เปิด tenantPortal ในหน้า Features',
+    });
+  }
+
+  // accessControl auto-revoke needs bills with tenant_id. If admin only uses
+  // the legacy rooms blob (no tenant rows), bills will have NULL tenant_id
+  // and the scheduler's revoke query never matches anyone.
+  if (features?.accessControl?.enabled && features?.accessControl?.requirePaymentForCard
+      && !features?.tenantPortal?.enabled) {
+    warnings.push({
+      flag: 'accessControl',
+      issue: 'accessControl.requirePaymentForCard ON แต่ tenantPortal ปิด — บัตรจะไม่ถูกเพิกถอนอัตโนมัติเมื่อค้างชำระ (ต้องมี tenant rows)',
+      fix: 'เปิด tenantPortal เพื่อสร้าง tenant rows + bills.tenant_id ที่จำเป็น',
+    });
+  }
+
+  // email channel: flag on but SMTP_PASS missing. Email never sends, but
+  // notifier's fallback chain would be expected by admin to work.
+  if (features?.email?.enabled) {
+    const host = secrets.get('SMTP_HOST');
+    const pass = secrets.get('SMTP_PASS');
+    if (!host || !pass) {
+      warnings.push({
+        flag: 'email',
+        issue: 'email เปิด แต่ SMTP_HOST/SMTP_PASS ยังไม่ครบ — ส่งอีเมล fallback ไม่ได้',
+        fix: 'ตั้งค่าใน Settings → Secrets',
+      });
+    }
+  }
+
+  // SMS provider: flag on but provider not configured / SDK not installed.
+  if (features?.sms?.enabled) {
+    const provider = features.sms.provider || '';
+    let configured = false;
+    if (provider === 'twilio') {
+      configured = !!(secrets.get('TWILIO_ACCOUNT_SID') && secrets.get('TWILIO_AUTH_TOKEN') && secrets.get('TWILIO_FROM'));
+      if (configured) {
+        try { require.resolve('twilio'); }
+        catch { warnings.push({ flag: 'sms', issue: 'sms=twilio แต่ SDK ไม่ได้ติดตั้ง', fix: 'รัน `npm i twilio`' }); }
+      }
+    } else if (provider === 'thsms') {
+      configured = !!(secrets.get('THSMS_API_KEY') && secrets.get('THSMS_API_SECRET'));
+    }
+    if (!configured) {
+      warnings.push({
+        flag: 'sms',
+        issue: `sms เปิด แต่ provider "${provider || '?'}" ยังไม่ได้ตั้งค่า credentials`,
+        fix: 'ตั้งค่าใน Settings → Secrets หรือเลือก provider ใหม่',
+      });
+    }
+  }
+
+  // autoBackup without R2 secrets: backup runs locally only — Railway disk is
+  // ephemeral and resets on every redeploy, so "auto-backup is on" gives a
+  // false sense of safety.
+  if (features?.autoBackup?.enabled) {
+    const r2Set = !!(secrets.get('R2_ACCESS_KEY_ID') && secrets.get('R2_BUCKET'));
+    if (!r2Set) {
+      warnings.push({
+        flag: 'autoBackup',
+        issue: 'autoBackup เปิด แต่ R2 ไม่ได้ตั้งค่า — backup จะอยู่บนดิสก์ container (หายเมื่อ redeploy)',
+        fix: 'ตั้งค่า R2_* ในหน้า Secrets เพื่อ upload ขึ้น cloud',
+      });
+    }
+  }
+
+  // errorTracking: flag on but no SENTRY_DSN.
+  if (features?.errorTracking?.enabled
+      && !secrets.get('SENTRY_DSN') && !process.env.SENTRY_DSN) {
+    warnings.push({
+      flag: 'errorTracking',
+      issue: 'errorTracking เปิด แต่ SENTRY_DSN ยังไม่ตั้งค่า',
+      fix: 'ใส่ DSN ในหน้า Secrets',
+    });
+  }
+
+  // recurringCharges flag on but billAutoGenerate off → charges defined but
+  // never applied automatically. Manual bill gen still works, so this is a
+  // soft warning.
+  if (features?.recurringCharges?.enabled && !features?.billAutoGenerate?.enabled) {
+    warnings.push({
+      flag: 'recurringCharges',
+      issue: 'recurringCharges เปิด แต่ billAutoGenerate ปิด — ต้องสร้างบิลด้วยมือทุกเดือนถึงจะรวม recurring',
+      fix: 'เปิด billAutoGenerate ถ้าต้องการ schedule อัตโนมัติ',
+    });
+  }
+
+  if (warnings.length === 0) {
+    return { status: 'ok', message: 'Feature dependencies look consistent' };
+  }
+  return {
+    status: 'warn',
+    message: `พบความไม่สอดคล้องระหว่าง flag ${warnings.length} จุด`,
+    detail: { warnings },
+  };
+}
+
 async function checkPoolStats(pool) {
   try {
     const total = pool.totalCount ?? 0;
@@ -293,6 +408,7 @@ const CHECKS = [
   { id: 'lockouts',            label: 'Active lockouts',       fn: (p) => checkActiveLockouts(p) },
   { id: 'scheduler',           label: 'Scheduler heartbeat',   fn: () => checkSchedulerHeartbeat() },
   { id: 'config',              label: 'Boot configuration',    fn: () => checkBootConfig() },
+  { id: 'feature_deps',        label: 'Feature dependencies',  fn: (_p, f) => checkFeatureDependencies(f) },
 ];
 
 /**

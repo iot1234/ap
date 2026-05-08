@@ -230,19 +230,24 @@
     e.preventDefault();
     alert.style.display = 'none';
 
+    // schemas.publicBooking has roomId as optional — earlier the form sent
+    // "floor-3" / "unspecified" placeholders to satisfy a perceived
+    // requirement, which leaked into the admin booking list as garbage data.
+    // Now we only send fields the user actually filled, with empty strings
+    // omitted so server-side defaulting works cleanly.
     const data = {
       tenantName: document.getElementById('name').value.trim(),
       phone: document.getElementById('phone').value.trim(),
       email: document.getElementById('email').value.trim(),
       checkInDate: document.getElementById('checkInDate').value,
-      floor: document.getElementById('floor').value,
-      roomType: document.getElementById('roomType').value,
+      floor: document.getElementById('floor').value || undefined,
+      roomType: document.getElementById('roomType').value || undefined,
       message: document.getElementById('message').value.trim(),
-      // server requires roomId; for unspecified preference, send a placeholder
-      roomId: document.getElementById('floor').value
-        ? `floor-${document.getElementById('floor').value}`
-        : 'unspecified',
     };
+    // Strip empty strings so the JSON payload only carries real values —
+    // server's Zod schema treats `undefined` as "not provided" but treats
+    // `''` as a string-type value that fails .max() / .email() checks.
+    Object.keys(data).forEach((k) => { if (data[k] === '') delete data[k]; });
 
     if (!data.tenantName || !data.phone || !data.checkInDate) {
       showError('กรุณากรอกข้อมูลที่จำเป็นให้ครบถ้วน');

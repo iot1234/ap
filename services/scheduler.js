@@ -151,7 +151,13 @@ async function tickBillGen(pool, flags, now, state) {
       // scheduler-generated bill matches what the manual /api/bills POST
       // would produce. Without this, scheduler bills silently miss line
       // items that the admin UI shows when generating manually.
+      //
+      // Track one_off ids so we can deactivate them after a successful insert
+      // — manual bill gen at server.js:2287 already does this; scheduler
+      // previously didn't, so a one_off charge would re-bill every month
+      // forever (real data bug found in May 2026 cross-feature audit).
       let recurring = [];
+      let usedOneOffIds = [];
       if (flags.recurringCharges?.enabled) {
         try {
           const params = [];
@@ -159,13 +165,14 @@ async function tickBillGen(pool, flags, now, state) {
           if (tenantId) { params.push(tenantId); ors.push(`tenant_id = $${params.length}`); }
           params.push(room.id); ors.push(`room_id = $${params.length}`);
           const rc = await pool.query(
-            `SELECT label, amount FROM recurring_charges
+            `SELECT id, label, amount, frequency FROM recurring_charges
                WHERE active = TRUE AND (${ors.join(' OR ')})
                  AND (start_at IS NULL OR start_at <= CURRENT_DATE)
                  AND (end_at IS NULL OR end_at >= CURRENT_DATE)`,
             params
           );
           recurring = rc.rows.map((r) => ({ label: r.label, amount: Number(r.amount) }));
+          usedOneOffIds = rc.rows.filter((r) => r.frequency === 'one_off').map((r) => r.id);
         } catch { /* table may not exist on older deployments */ }
       }
 
@@ -190,12 +197,13 @@ async function tickBillGen(pool, flags, now, state) {
 
       const bill = billing.buildBill({ room, config, features: flags, previous, recurring, period, dueDate });
       try {
-        await pool.query(
+        const ins = await pool.query(
           `INSERT INTO bills (bill_no, tenant_id, room_id, period, rent,
               water_units, water_rate, water_amount,
               elec_units, elec_rate, elec_amount, wifi, subtotal, vat, late_fee, total, due_date, status)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'pending')
-           ON CONFLICT (bill_no) DO NOTHING`,
+           ON CONFLICT (bill_no) DO NOTHING
+           RETURNING id`,
           [
             bill.billNo, tenantId, bill.roomId, bill.period,
             bill.rent, bill.waterUnits, bill.waterRate, bill.waterAmount,
@@ -204,7 +212,25 @@ async function tickBillGen(pool, flags, now, state) {
             bill.dueDate,
           ]
         );
-        made++;
+        // Only count the bill as "made" + deactivate one_off charges if the
+        // INSERT actually wrote a row (rowCount > 0). ON CONFLICT DO NOTHING
+        // returns 0 rows when the bill_no collided with an existing one —
+        // and in that case we DON'T want to mark one_offs inactive (they
+        // weren't billed this run).
+        if (ins.rowCount > 0) {
+          made++;
+          if (usedOneOffIds.length) {
+            try {
+              await pool.query(
+                `UPDATE recurring_charges SET active=FALSE, updated_at=NOW()
+                   WHERE id = ANY($1::bigint[])`,
+                [usedOneOffIds]
+              );
+            } catch (e) {
+              console.warn('[scheduler] one_off deactivate failed for room', room.id, ':', e.message);
+            }
+          }
+        }
       } catch (e) {
         // Partial-unique on (room_id, period) blocks duplicates even when
         // bill_no differs across paths; treat as silent skip.
@@ -228,9 +254,30 @@ async function tickBillGen(pool, flags, now, state) {
 // fake water + one fake elec reading per active room each tick (capped to
 // once per hour so we don't flood the table). Real-world dorms see ~1
 // reading/day per meter; simulator runs hourly so demos look lively.
+//
+// Belt-and-braces: even though the PUT /api/admin/features route refuses to
+// save mode='simulator' in production, the flag could already be 'simulator'
+// from a pre-production toggle that survives a NODE_ENV change (e.g. flipping
+// the same DB from staging to prod). Hard-block at the tick site too — the
+// only way to enable simulator in production is to lower NODE_ENV deliberately.
 async function tickMeterSimulator(pool, flags, now, state) {
   if (!flags.meterIot || !flags.meterIot.enabled) return;
   if (flags.meterIot.mode !== 'simulator') return;
+  if ((process.env.NODE_ENV || 'production') === 'production') {
+    // Only log once per state to avoid Railway log spam — guard via the
+    // shared scheduler-state file. Operators see ONE warning at boot, not
+    // one per hour.
+    if (!state.simulatorBlockedLogged) {
+      console.warn(
+        '[scheduler] meter simulator is enabled but NODE_ENV=production — ' +
+        'refusing to fabricate readings; flip mode to "manual" or "mqtt" in /admin#features.'
+      );
+      state.simulatorBlockedLogged = true;
+    }
+    return;
+  }
+  // Reset the warning latch when we leave production so the next tick logs again.
+  state.simulatorBlockedLogged = false;
   const hourKey = `${now.toISOString().slice(0, 13)}`;  // YYYY-MM-DDTHH
   if (state.lastSimHour === hourKey) return;
   try {

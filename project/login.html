@@ -113,6 +113,36 @@
     color: #c46a3e;
     text-decoration: none;
   }
+  /* Password show/hide toggle — eye button overlaid on the input. */
+  .pw-wrap { position: relative; }
+  .pw-wrap input { padding-right: 42px; }
+  .pw-toggle {
+    position: absolute;
+    right: 6px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 32px; height: 32px;
+    margin: 0;
+    padding: 0;
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    color: #8a7d6b;
+    font-size: 16px;
+    line-height: 1;
+    cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center;
+    transition: background .15s, color .15s;
+  }
+  .pw-toggle:hover { background: #faf6ee; color: #2c241b; }
+  .pw-toggle:focus { outline: 2px solid #c46a3e; outline-offset: 1px; }
+  /* CapsLock warning — shown by JS when keydown fires with capsLock state */
+  .caps-hint {
+    margin-top: 6px;
+    font-size: 11.5px;
+    color: #a4542d;
+    font-weight: 500;
+  }
 </style>
 </head>
 <body>
@@ -125,7 +155,17 @@
     <input type="text" id="username" name="username" autocomplete="username" required autofocus/>
 
     <label for="password">รหัสผ่าน</label>
-    <input type="password" id="password" name="password" autocomplete="current-password" required/>
+    <div class="pw-wrap">
+      <input type="password" id="password" name="password" autocomplete="current-password" required/>
+      <button type="button" id="pwToggle" class="pw-toggle"
+              aria-label="แสดง/ซ่อนรหัสผ่าน" aria-pressed="false"
+              tabindex="-1">
+        <span aria-hidden="true">👁</span>
+      </button>
+    </div>
+    <div id="capsLockHint" class="caps-hint" style="display:none">
+      ⚠ Caps Lock เปิดอยู่
+    </div>
 
     <button type="submit" id="submitBtn">เข้าสู่ระบบ</button>
 
@@ -140,6 +180,10 @@
     const form = document.getElementById('loginForm');
     const btn = document.getElementById('submitBtn');
     const errBox = document.getElementById('error');
+    const pwInput = document.getElementById('password');
+    const pwToggle = document.getElementById('pwToggle');
+    const capsHint = document.getElementById('capsLockHint');
+    const usernameInput = document.getElementById('username');
 
     // If already logged in, skip login. Only redirect on a real 200 with a
     // user payload — a 5xx error response containing {user:null} happens when
@@ -149,13 +193,54 @@
       .then((d) => { if (d && d.user) window.location.href = '/admin'; })
       .catch(() => {});
 
+    // --- Password show/hide --------------------------------------------------
+    // Toggling type=text is a recognized accessibility pattern (NN/g, MDN).
+    // Form auto-submit risk is mitigated by tabindex=-1 on the toggle so it
+    // doesn't capture focus during keyboard nav.
+    pwToggle.addEventListener('click', () => {
+      const showing = pwInput.type === 'text';
+      pwInput.type = showing ? 'password' : 'text';
+      pwToggle.setAttribute('aria-pressed', String(!showing));
+      pwToggle.querySelector('span').textContent = showing ? '👁' : '🙈';
+      // Keep focus on the input so the user can keep typing without
+      // re-clicking — a lost focus mid-password-entry is a common irritation.
+      pwInput.focus();
+    });
+
+    // --- CapsLock warning ---------------------------------------------------
+    // Fires on keydown so the warning shows mid-typing, not only on first key.
+    // event.getModifierState() works in all evergreen browsers.
+    function updateCaps(ev) {
+      const on = ev.getModifierState && ev.getModifierState('CapsLock');
+      capsHint.style.display = on ? 'block' : 'none';
+    }
+    pwInput.addEventListener('keydown', updateCaps);
+    pwInput.addEventListener('keyup', updateCaps);
+    pwInput.addEventListener('blur', () => { capsHint.style.display = 'none'; });
+
+    // Remember the LAST USED USERNAME (never password) so returning admins
+    // can hit Enter twice. localStorage so it survives browser restart;
+    // common pattern, low risk since it's identifying info not credentials.
+    const LAST_USER_KEY = '__admin_last_username';
+    try {
+      const last = localStorage.getItem(LAST_USER_KEY);
+      if (last && !usernameInput.value) {
+        usernameInput.value = last;
+        // Move autofocus to the password field since username is pre-filled.
+        usernameInput.removeAttribute('autofocus');
+        pwInput.setAttribute('autofocus', '');
+        // Manual focus call too — autofocus attribute only fires on initial render.
+        setTimeout(() => pwInput.focus(), 0);
+      }
+    } catch { /* private mode — ignore */ }
+
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
       errBox.style.display = 'none';
       btn.disabled = true;
       btn.textContent = 'กำลังเข้าสู่ระบบ...';
-      const username = document.getElementById('username').value.trim();
-      const password = document.getElementById('password').value;
+      const username = usernameInput.value.trim();
+      const password = pwInput.value;
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), 8000);
       try {
@@ -168,7 +253,22 @@
         });
         const data = await res.json().catch(() => ({}));
         if (res.status === 429) {
-          errBox.textContent = 'พยายามเข้าระบบบ่อยเกินไป กรุณารอสักครู่แล้วลองใหม่';
+          // Rate-limit response. Server sets Retry-After header; surface that
+          // value so admins know exactly how long to wait instead of just
+          // "ลองใหม่อีกครั้ง" with no timeline.
+          const retryAfter = Number(res.headers.get('Retry-After'));
+          let waitMsg = 'อีก 15 นาที'; // matches loginLimiter windowMs in server.js
+          if (Number.isFinite(retryAfter) && retryAfter > 0) {
+            const mins = Math.ceil(retryAfter / 60);
+            waitMsg = mins >= 1 ? `อีก ${mins} นาที` : `อีก ${retryAfter} วินาที`;
+          } else if (data && data.code === 'LOCKED_OUT' && /\d+\s*นาที/.test(String(data.error || ''))) {
+            // LockedOut — server's Thai message already says "ลองใหม่ใน N นาที"
+            errBox.textContent = data.error;
+            errBox.style.display = 'block';
+            btn.disabled = false; btn.textContent = 'เข้าสู่ระบบ';
+            return;
+          }
+          errBox.textContent = `พยายามเข้าระบบบ่อยเกินไป — ลองใหม่ ${waitMsg}`;
           errBox.style.display = 'block';
           btn.disabled = false;
           btn.textContent = 'เข้าสู่ระบบ';
@@ -183,6 +283,8 @@
           btn.textContent = 'เข้าสู่ระบบ';
           return;
         }
+        // Save username only AFTER a successful login (don't burn-in a typo).
+        try { localStorage.setItem(LAST_USER_KEY, username); } catch { /* ignore */ }
         window.location.href = '/admin';
       } catch (err) {
         errBox.textContent = err && err.name === 'AbortError'

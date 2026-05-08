@@ -261,6 +261,61 @@
     sessionStorage.removeItem('__admin_redirected_401');
   }
 
+  // === ApiError + apiCall ================================================
+  // Structured error class so callers can branch on `.code` / `.status`
+  // without re-parsing JSON in every catch block. apiCall(url, opts)
+  // wraps apiFetch + JSON parse + throw-on-not-ok in one call. The error
+  // it throws plays nicely with toastError() for one-line error handling:
+  //
+  //   try {
+  //     const out = await apiCall('/api/bills', { method: 'POST', body });
+  //   } catch (err) {
+  //     toastError(setToast, err, { action: 'ออกบิล' });
+  //   }
+  class ApiError extends Error {
+    constructor(payload) {
+      super(payload.error || payload.message || `HTTP ${payload.status}`);
+      this.name = 'ApiError';
+      this.status = payload.status;
+      this.code = payload.code;
+      this.error = payload.error;
+      this.issues = payload.issues;
+      this.requestId = payload.requestId;
+      this.raw = payload.raw;
+    }
+  }
+  async function apiCall(url, opts = {}) {
+    let res;
+    try {
+      res = await apiFetch(url, opts);
+    } catch (err) {
+      // apiFetch may throw on TIMEOUT — preserve its code so toastError
+      // can render the right "took too long" message instead of generic.
+      throw new ApiError({
+        status: 0,
+        code: err && err.code,
+        error: err && err.message,
+        message: err && err.message,
+      });
+    }
+    let body = null;
+    const ct = res.headers.get('content-type') || '';
+    if (ct.includes('application/json')) {
+      try { body = await res.json(); } catch { body = null; }
+    }
+    if (!res.ok) {
+      throw new ApiError({
+        status: res.status,
+        code: (body && body.code) || null,
+        error: (body && body.error) || `HTTP ${res.status}`,
+        issues: body && body.issues,
+        requestId: body && body.requestId,
+        raw: body,
+      });
+    }
+    return body;
+  }
+
   // === Global Esc-to-close modals ========================================
   // Modals across pages call window.useEscClose(open, onClose) to register.
   // The most recently opened modal handles Esc first.
@@ -434,6 +489,165 @@
     ]);
   }
 
+  // === toastError(setToast, err, ctx) ====================================
+  // Central error-to-toast formatter. Translates server `code` strings into
+  // actionable Thai messages with a "what to do next" hint, surfaces Zod
+  // validation issues field-by-field, and keeps generic fallback for
+  // anything unrecognised. Usage:
+  //
+  //   try { ... }
+  //   catch (err) { toastError(setToast, err, { action: 'บันทึกผู้เช่า' }); }
+  //
+  // ctx (optional): { action: 'บันทึกผู้เช่า' } — verb that prefixes the
+  //   "X ไม่สำเร็จ" headline; default 'การทำงาน'.
+  // err can be:
+  //   - Error instance (e.g. from apiFetch / fetch reject)
+  //   - { status, code, error, issues, message } object (parsed JSON body)
+  //   - { res, body } pair — tell-once shortcut for handlers that already
+  //     fetched + parsed
+  //
+  // Returns the toast payload it dispatched (for tests / chaining).
+  const ERROR_CODE_MAP = {
+    // === Auth / session =================================================
+    UNAUTHORIZED: {
+      title: 'หมดเวลาเข้าสู่ระบบ',
+      description: 'โปรดล็อกอินอีกครั้งเพื่อทำต่อ',
+    },
+    FORBIDDEN: {
+      title: 'สิทธิ์ไม่เพียงพอ',
+      description: (e) => `บัญชีนี้ (${e.actual || 'ปัจจุบัน'}) ไม่มีสิทธิ์ทำรายการนี้ — ติดต่อ owner`,
+    },
+    LOCKED_OUT: {
+      title: 'บัญชีถูกล็อกชั่วคราว',
+      description: 'พยายามเข้าระบบบ่อยเกินไป — ลองใหม่ในไม่กี่นาทีข้างหน้า',
+    },
+    STEP_UP_REQUIRED: {
+      title: 'ต้องยืนยันรหัสผ่านปัจจุบัน',
+      description: 'การเปลี่ยนรหัสผ่านของตัวเองต้องกรอกรหัสปัจจุบันก่อน',
+    },
+    SELF_ROLE_CHANGE: {
+      title: 'เปลี่ยนสิทธิ์ตัวเองไม่ได้',
+      description: 'ขอให้ owner คนอื่นเป็นคนปรับ role ให้',
+    },
+    LAST_OWNER: {
+      title: 'ลด/ลบ owner คนสุดท้ายไม่ได้',
+      description: 'สร้าง owner คนใหม่ก่อนแล้วค่อยปรับบัญชีนี้',
+    },
+    CSRF_INVALID: {
+      title: 'โทเค็นความปลอดภัยหมดอายุ',
+      description: 'ลองใหม่อีกครั้ง — ถ้ายังไม่ได้ ให้รีเฟรชหน้า',
+    },
+    RATE_LIMIT: {
+      title: 'คำขอบ่อยเกินไป',
+      description: 'รอสักครู่แล้วลองใหม่',
+    },
+    // === Data integrity =================================================
+    VALIDATION_ERROR: {
+      title: 'ข้อมูลที่กรอกไม่ถูกต้อง',
+      description: (e) => {
+        if (!e.issues || !e.issues.length) return null;
+        // Show up to 3 field errors so the toast doesn't grow huge; "+N more"
+        // for the rest. Field path looks like "phone" or "tenant.fullName".
+        const top = e.issues.slice(0, 3)
+          .map((it) => `• ${it.path || 'ฟิลด์'}: ${it.message}`).join('\n');
+        const more = e.issues.length > 3 ? `\n• …และอีก ${e.issues.length - 3} จุด` : '';
+        return top + more;
+      },
+    },
+    BAD_SHAPE: {
+      title: 'รูปแบบข้อมูลไม่ถูกต้อง',
+      description: 'ข้อมูลที่ส่งไปไม่ตรงกับรูปแบบที่คาดหวัง — ลองรีเฟรชแล้วบันทึกใหม่',
+    },
+    INVALID_JSON: { title: 'ข้อมูลไม่ใช่ JSON ที่ถูกต้อง' },
+    NOT_SERIALISABLE: { title: 'ข้อมูลมีโครงสร้างซับซ้อนเกินไป (circular reference)' },
+    TOO_LARGE: {
+      title: 'ข้อมูลใหญ่เกินกำหนด',
+      description: (e) => e.error || 'ลดขนาดไฟล์/รูปภาพแล้วลองใหม่',
+    },
+    NOT_FOUND: { title: 'ไม่พบข้อมูล', description: 'ข้อมูลอาจถูกลบไปแล้ว — กดรีเฟรชเพื่อโหลดใหม่' },
+    VERSION_CONFLICT: {
+      title: 'มีคนอื่นแก้ไขข้อมูลนี้แล้ว',
+      description: 'โปรดรีเฟรชหน้าเพื่อโหลดข้อมูลใหม่ ก่อนแก้ไขซ้ำ',
+    },
+    BILL_DUPLICATE: {
+      title: 'มีบิลของรอบนี้อยู่แล้ว',
+      description: 'ทำการ void บิลเดิมก่อน หากต้องการสร้างใหม่',
+    },
+    TENANT_HAS_REFS: {
+      title: 'ลบผู้เช่าไม่ได้',
+      description: 'ผู้เช่ายังมีบิล/สัญญา/บัตรเข้า-ออกเชื่อมโยง — เปิด softDelete หรือลบข้อมูลที่อ้างถึงก่อน',
+    },
+    // === Service availability ==========================================
+    BUSY: { title: 'ระบบกำลังประมวลผลอยู่', description: 'ลองใหม่ในอีกครู่' },
+    DB_ERROR: { title: 'ฐานข้อมูลขัดข้อง', description: 'ทีมงานได้รับแจ้งแล้ว — ลองอีกครั้งภายหลัง' },
+    TIMEOUT: {
+      title: 'คำขอใช้เวลานานเกินกำหนด',
+      description: 'เซิร์ฟเวอร์ช้า — ลองใหม่ในไม่กี่วินาที',
+    },
+  };
+
+  function toastError(setToast, err, ctx) {
+    if (!setToast) return null;
+    const action = (ctx && ctx.action) || 'การทำงาน';
+
+    // Normalise into one shape regardless of source.
+    let status, code, msg, issues, raw;
+    if (err && typeof err === 'object') {
+      status = err.status;
+      code = err.code;
+      msg = err.error || err.message;
+      issues = err.issues;
+      raw = err.raw || err;
+    } else {
+      msg = String(err || 'unknown error');
+    }
+
+    // Network-level: TypeError "Failed to fetch" or AbortError
+    if (!status && (msg === 'Failed to fetch' || /NetworkError/i.test(msg))) {
+      const t = { kind: 'danger', message: {
+        title: `${action}ไม่สำเร็จ — เชื่อมต่อเซิร์ฟเวอร์ไม่ได้`,
+        description: navigator.onLine === false
+          ? 'อุปกรณ์ของคุณออฟไลน์อยู่ — เชื่อม Wi-Fi/4G แล้วลองใหม่'
+          : 'เซิร์ฟเวอร์อาจกำลังรีสตาร์ท — ลองใหม่ในไม่กี่วินาที',
+      } };
+      setToast(t); return t;
+    }
+    if (code === 'TIMEOUT' || msg === 'AbortError') {
+      const t = { kind: 'danger', message: {
+        title: `${action}ใช้เวลานานเกินกำหนด`,
+        description: 'ระบบยังตอบไม่กลับมา — ลองใหม่ในอีกครู่',
+      } };
+      setToast(t); return t;
+    }
+
+    // 401/403 special-case before code map (status alone is enough).
+    if (status === 401) code = code || 'UNAUTHORIZED';
+    if (status === 403 && !code) code = 'FORBIDDEN';
+    if (status === 429 && !code) code = 'RATE_LIMIT';
+
+    // Look up the friendly mapping. Description can be a function for
+    // dynamic substitution (e.g. quote the violating field list).
+    const tpl = code && ERROR_CODE_MAP[code];
+    if (tpl) {
+      const description = typeof tpl.description === 'function'
+        ? tpl.description({ ...raw, code, error: msg, issues })
+        : tpl.description;
+      const t = { kind: 'danger', message: {
+        title: tpl.title,
+        description: description || (msg && msg !== tpl.title ? msg : null),
+      } };
+      setToast(t); return t;
+    }
+
+    // Generic fallback — always prefix with the action verb so the user
+    // knows WHAT failed, not just THAT something failed.
+    const t = { kind: 'danger', message: {
+      title: `${action}ไม่สำเร็จ`,
+      description: msg && msg.length > 200 ? msg.slice(0, 200) + '…' : msg,
+    } };
+    setToast(t); return t;
+  }
+
   window.useFeatureFlag = useFeatureFlag;
   window.FeatureGate = FeatureGate;
   window.useApi = useApi;
@@ -447,4 +661,8 @@
   window.getCsrfToken = getCsrfToken;
   window.useEscClose = useEscClose;
   window.AdminSkeleton = Skeleton;
+  window.toastError = toastError;
+  window.ERROR_CODE_MAP = ERROR_CODE_MAP;
+  window.ApiError = ApiError;
+  window.apiCall = apiCall;
 })();

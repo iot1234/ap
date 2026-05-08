@@ -724,9 +724,39 @@ async function mirrorRoomsToTenants(roomsObj, updatedBy) {
 app.delete('/api/data/:key', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'), async (req, res) => {
   const key = req.params.key;
   if (!ALLOWED_KEYS.has(key)) return res.status(400).json({ error: 'invalid key' });
+  // Production safety: refuse to wipe `baankarn_rooms_v1` (the master room
+  // record) when the system has real data behind it — i.e. ≥1 tenant row,
+  // ≥1 bill, or ≥1 contract. Without this guard, a hijacked owner session
+  // could call DELETE /api/data/baankarn_rooms_v1 (the "Reset sample data"
+  // path) and silently destroy operational state without leaving any
+  // recoverable trail beyond the audit log. Override with `?force=1` after
+  // confirming in the UI; the override is audit-logged.
+  const force = req.query && (req.query.force === '1' || req.query.force === 'true');
+  if (key === 'baankarn_rooms_v1' && !force) {
+    try {
+      const guard = await pool.query(
+        `SELECT
+           (SELECT COUNT(*)::int FROM tenants WHERE deleted_at IS NULL) AS tenants,
+           (SELECT COUNT(*)::int FROM bills WHERE deleted_at IS NULL) AS bills,
+           (SELECT COUNT(*)::int FROM contracts WHERE deleted_at IS NULL) AS contracts`
+      );
+      const g = guard.rows[0];
+      const realData = (g.tenants > 0) || (g.bills > 0) || (g.contracts > 0);
+      if (realData) {
+        return res.status(409).json({
+          error: 'ระบบมีข้อมูลจริงอยู่แล้ว — ลบ rooms blob ไม่ได้',
+          code: 'PRODUCTION_DATA_PRESENT',
+          counts: g,
+          hint: 'ส่ง ?force=1 เพื่อยืนยัน (จะถูกบันทึกใน audit log)',
+        });
+      }
+    } catch (err) {
+      console.warn('[data DELETE] production-data check skipped:', err.message);
+    }
+  }
   try {
     await pool.query('DELETE FROM app_data WHERE key=$1', [key]);
-    audit(req, 'data.delete', 'app_data', key);
+    audit(req, 'data.delete', 'app_data', key, { forced: !!force });
     res.json({ ok: true, key });
   } catch (err) {
     console.error('data DELETE error:', err);
@@ -1135,12 +1165,29 @@ app.get('/api/maintenance/lookup', rateLimitLookup, lookupJitter, async (req, re
     return res.status(400).json({ error: 'phone and roomId required' });
   }
   try {
+    // Cross-feature consistency: also resolve any tenant rows matching the
+    // current phone, then OR-match by tenant_id too. Without this, a tenant
+    // who changed their phone number after submitting a ticket loses access
+    // to their own old tickets — the tenant portal endpoint
+    // /api/tenant/maintenance already does this dual match (server.js:2059)
+    // and the public path was inconsistent. Privacy is preserved because
+    // we still require room_id match.
+    const tenantRows = await pool.query(
+      `SELECT id FROM tenants
+         WHERE phone = $1 AND deleted_at IS NULL
+         LIMIT 5`,
+      [phone]
+    );
+    const tenantIds = tenantRows.rows.map((r) => r.id);
+
+    let where = `(tenant_phone = $1 OR tenant_id = ANY($2::bigint[])) AND room_id = $3`;
+    const params = [phone, tenantIds, roomId];
     const { rows } = await pool.query(
       `SELECT id, ticket_no, room_id, category, priority, status, title, created_at, completed_at, rating
          FROM maintenance_tickets
-         WHERE tenant_phone = $1 AND room_id = $2
+         WHERE ${where}
          ORDER BY created_at DESC LIMIT 50`,
-      [phone, roomId]
+      params
     );
     res.json({ ok: true, tickets: rows });
   } catch (err) {
@@ -1534,6 +1581,22 @@ app.put('/api/admin/features', sameOrigin, csrfGuard, requireAuth, requireRole('
   const partial = req.body && req.body.features ? req.body.features : req.body;
   if (!partial || typeof partial !== 'object') {
     return res.status(400).json({ error: 'features object required' });
+  }
+  // Production safety: refuse to set the meter simulator mode in production.
+  // The simulator generates fake hourly readings — running it on a live
+  // building would silently overwrite real meter data with random walks and
+  // poison every bill computed from `rooms.elecUnits`/`waterUnits`. Demo /
+  // staging deploys can still flip it, but production must stay 'manual' or
+  // 'mqtt'. The check honors NODE_ENV explicitly so a developer running
+  // dev locally with NODE_ENV unset can still toggle the simulator.
+  if (NODE_ENV === 'production' && partial.meterIot && partial.meterIot.mode === 'simulator') {
+    audit(req, 'features.simulator_blocked', 'config', 'features',
+      { attemptedBy: req.session.user.username });
+    return res.status(403).json({
+      error: 'ห้ามเปิด meter simulator ใน production — จะสร้างค่าเทียมทับข้อมูลมิเตอร์จริง',
+      code: 'PRODUCTION_SIMULATOR_BLOCKED',
+      hint: 'ตั้ง mode = "manual" หรือ "mqtt" แทน',
+    });
   }
   try {
     const next = await features.save(pool, partial, req.session.user.username);
@@ -2313,13 +2376,38 @@ app.put('/api/bills/:id/void', sameOrigin, csrfGuard, requireAuth, requireRole('
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
   const reason = String(req.body?.reason || '').slice(0, 500);
+  const force = req.body && req.body.force === true;
   try {
+    // Cross-feature consistency guard: if there's already a verified payment
+    // pointing at this bill, voiding silently would leave the payment row
+    // orphaned (tenant uploaded slip → admin verified → admin then voids the
+    // bill = "we accepted your money but the bill never existed"). Block by
+    // default; let admin pass `force: true` after explicit confirmation in
+    // the UI. Audit captures the override so the trail is clear.
+    const verified = await pool.query(
+      `SELECT id, amount FROM payments WHERE bill_id=$1 AND status='verified' LIMIT 1`,
+      [id]
+    );
+    if (verified.rows.length && !force) {
+      return res.status(409).json({
+        error: 'บิลนี้มีสลิปที่ยืนยันแล้ว — โปรดยืนยันการ void ก่อนทำต่อ',
+        code: 'BILL_HAS_VERIFIED_PAYMENT',
+        verifiedPaymentId: verified.rows[0].id,
+        verifiedAmount: Number(verified.rows[0].amount),
+        hint: 'ส่ง { force: true } เพื่อยืนยันการ void ทั้งที่มีการชำระแล้ว',
+      });
+    }
+
     const { rows } = await pool.query(
       `UPDATE bills SET status='void', void_reason=$1 WHERE id=$2 AND status<>'paid' RETURNING *`,
       [reason, id]
     );
     if (!rows.length) return res.status(404).json({ error: 'not found or already paid' });
-    audit(req, 'bill.void', 'bill', String(id), { reason });
+    audit(req, 'bill.void', 'bill', String(id), {
+      reason,
+      force: !!force,
+      hadVerifiedPayment: verified.rows.length > 0,
+    });
     res.json({ ok: true, bill: rows[0] });
   } catch (err) {
     console.error('bill void error:', err);
@@ -3263,6 +3351,187 @@ app.post('/api/admin/notifications/:id/retry', sameOrigin, csrfGuard, requireAut
 //   secrets     : 'configured' / 'partial' / 'none' (no values, just shape)
 //   uptime      : process uptime in seconds
 //   memory_mb   : RSS in MB
+// Production-readiness checklist. Different from /api/admin/health (which
+// is "is it currently working") — this is "is it CONFIGURED for real use."
+// Catches the common gotchas that turn a demo into a half-broken production:
+// no real building info, no LINE OA bound, simulator still on, default
+// admin password, no real PromptPay number, etc.
+//
+// Owner-only — the response surfaces config gaps that could be useful to an
+// attacker scoping a target.
+app.get('/api/admin/production-readiness', requireAuth, requireRole('owner'), async (_req, res) => {
+  const checks = [];
+  const ok    = (id, label, msg)        => checks.push({ id, label, status: 'ok',   message: msg });
+  const warn  = (id, label, msg, hint)  => checks.push({ id, label, status: 'warn', message: msg, hint });
+  const fail  = (id, label, msg, hint)  => checks.push({ id, label, status: 'fail', message: msg, hint });
+
+  // 1. NODE_ENV
+  if (NODE_ENV === 'production') {
+    ok('node_env', 'Environment', 'NODE_ENV=production');
+  } else {
+    warn('node_env', 'Environment', `NODE_ENV=${NODE_ENV} — secure cookies + simulator block jut active in 'production'`,
+      'ตั้ง NODE_ENV=production ใน Railway Variables');
+  }
+
+  // 2. Building info filled in
+  try {
+    const cfgRow = await pool.query(`SELECT value FROM app_data WHERE key='baankarn_config_v1'`);
+    const cfg = cfgRow.rows.length ? cfgRow.rows[0].value : {};
+    const b = (cfg && cfg.building) || {};
+    const missing = [];
+    if (!b.name || b.name === 'บ้านกาญจน์ เรสซิเดนซ์') missing.push('building.name (ยังเป็น default)');
+    if (!b.address) missing.push('building.address');
+    if (!b.phone)   missing.push('building.phone');
+    if (missing.length) {
+      warn('building', 'ข้อมูลตึก',
+        `ยังไม่ได้ตั้งค่า: ${missing.join(', ')}`,
+        'แก้ที่ Settings → ข้อมูลตึก');
+    } else {
+      ok('building', 'ข้อมูลตึก', `${b.name} · ${b.phone || ''}`);
+    }
+    // 3. PromptPay target set?
+    const ppDb = (cfg && cfg.payment) ? (cfg.payment.promptpay || cfg.payment.promptpayTarget) : null;
+    const ppEnv = require('./services/secrets').get('PROMPTPAY_TARGET');
+    if (!ppDb && !ppEnv) {
+      fail('promptpay', 'PromptPay',
+        'ยังไม่ได้ตั้งค่า PromptPay target — บิล PDF จะไม่มี QR code',
+        'แก้ที่ Settings → การชำระเงิน หรือใส่ PROMPTPAY_TARGET ใน Secrets');
+    } else {
+      ok('promptpay', 'PromptPay', 'ตั้งค่าเรียบร้อย');
+    }
+  } catch (err) {
+    warn('config_read', 'อ่าน config', `ตรวจไม่ได้: ${err.message}`);
+  }
+
+  // 4. At least one owner exists with strong password (we can't read the
+  //    hash but we can warn if there's exactly the bootstrap user with the
+  //    default username 'admin' — operator should rename or rotate password).
+  try {
+    const ownersQ = await pool.query(`SELECT username FROM auth_users WHERE role='owner' ORDER BY id ASC`);
+    const owners = ownersQ.rows.map((r) => r.username);
+    if (owners.length === 0) {
+      fail('owner', 'Owner accounts', 'ไม่มี owner เลย — ระบบจะล็อกเอง',
+        'รัน scripts/promote-to-owner.js หรือลบบัญชีเก่าแล้ว bootstrap ใหม่');
+    } else if (owners.length === 1 && owners[0] === 'admin') {
+      warn('owner', 'Owner accounts',
+        'มี owner คนเดียวด้วย username="admin" (default)',
+        'สร้าง owner คนที่สองและตั้งชื่อจริง — กันถูกล็อกออกถ้ารหัสหาย');
+    } else {
+      ok('owner', 'Owner accounts', `${owners.length} owner: ${owners.join(', ')}`);
+    }
+  } catch (err) {
+    warn('owner_read', 'Owner check', err.message);
+  }
+
+  // 5. Critical secrets configured (boot-time + DB)
+  const sec = require('./services/secrets');
+  const secretChecks = [
+    { key: 'SESSION_SECRET',    label: 'SESSION_SECRET',     fatal: true,
+      val: SESSION_SECRET, fromEnv: true },
+    { key: 'CITIZEN_ID_KEY',    label: 'CITIZEN_ID_KEY',     fatal: false,
+      val: process.env.CITIZEN_ID_KEY || process.env.ENCRYPTION_KEY_V1,
+      hint: 'ป้องกัน citizen-id ถ้าหมุน SESSION_SECRET — ถ้าไม่ตั้ง ข้อมูลที่เข้ารหัสไว้จะถอดไม่ได้หลังหมุน' },
+    { key: 'LINE_CHANNEL_ACCESS_TOKEN', label: 'LINE Channel Access Token', fatal: false,
+      val: sec.get('LINE_CHANNEL_ACCESS_TOKEN'),
+      hint: 'ไม่มี → ส่งแจ้งเตือนทาง LINE ไม่ได้' },
+    { key: 'LINE_CHANNEL_SECRET', label: 'LINE Channel Secret', fatal: false,
+      val: sec.get('LINE_CHANNEL_SECRET'),
+      hint: 'ไม่มี → webhook signature verification ปฏิเสธทุก request' },
+  ];
+  for (const s of secretChecks) {
+    if (!s.val) {
+      (s.fatal ? fail : warn)('secret_' + s.key.toLowerCase(), s.label,
+        `ยังไม่ได้ตั้งค่า`, s.hint || `ตั้งค่าใน ${s.fromEnv ? 'Railway Variables' : 'Settings → Secrets'}`);
+    } else {
+      ok('secret_' + s.key.toLowerCase(), s.label, 'ตั้งค่าเรียบร้อย');
+    }
+  }
+
+  // 6. Feature flags appropriate for production
+  let flags = {};
+  try { flags = await features.load(pool); } catch { /* keep going */ }
+  if (flags.meterIot?.mode === 'simulator') {
+    fail('simulator', 'Meter simulator',
+      'meterIot.mode = "simulator" — กำลังสร้างค่าเทียมทับมิเตอร์จริง',
+      'เปลี่ยนเป็น "manual" หรือ "mqtt" ที่หน้า Features');
+  } else {
+    ok('simulator', 'Meter simulator', `mode=${flags.meterIot?.mode || 'manual'}`);
+  }
+  if (flags.citizenIdEncryption && !flags.citizenIdEncryption.enabled) {
+    warn('citizen_enc', 'Citizen ID encryption',
+      'ปิดอยู่ — citizen ID ถูกเก็บเป็น plaintext',
+      'เปิดที่หน้า Features (ข้อมูลใหม่จะถูกเข้ารหัส; ของเก่ายังเป็น plaintext)');
+  } else {
+    ok('citizen_enc', 'Citizen ID encryption', 'เปิดอยู่');
+  }
+  if (flags.autoBackup && flags.autoBackup.enabled) {
+    const r2 = !!(sec.get('R2_ACCESS_KEY_ID') && sec.get('R2_BUCKET'));
+    if (!r2) {
+      warn('backup_target', 'Auto-backup target',
+        'autoBackup เปิด แต่ R2 ไม่ได้ตั้งค่า — backup เก็บบน container disk (หายเมื่อ redeploy)',
+        'ตั้งค่า R2_* ที่ Settings → Secrets');
+    } else {
+      ok('backup_target', 'Auto-backup target', 'R2 พร้อม');
+    }
+  } else {
+    warn('autobackup', 'Auto-backup',
+      'autoBackup ปิดอยู่ — ต้อง backup ด้วยมือ',
+      'เปิดที่หน้า Features (แนะนำให้เปิดเสมอใน production)');
+  }
+  if (flags.errorTracking && flags.errorTracking.enabled) {
+    const dsn = sec.get('SENTRY_DSN') || process.env.SENTRY_DSN;
+    if (!dsn) {
+      warn('sentry', 'Error tracking',
+        'errorTracking เปิด แต่ SENTRY_DSN ว่าง',
+        'ใส่ DSN ที่ Settings → Secrets');
+    } else {
+      ok('sentry', 'Error tracking', 'Sentry พร้อม');
+    }
+  }
+
+  // 7. Real data signal vs default (helps spot fresh deploys vs live ones)
+  try {
+    const c = await pool.query(`
+      SELECT
+        (SELECT COUNT(*)::int FROM tenants WHERE deleted_at IS NULL) AS tenants,
+        (SELECT COUNT(*)::int FROM bills   WHERE deleted_at IS NULL) AS bills,
+        (SELECT COUNT(*)::int FROM contracts WHERE deleted_at IS NULL) AS contracts,
+        (SELECT COUNT(*)::int FROM line_oas  WHERE deleted_at IS NULL) AS line_oas
+    `);
+    const cnt = c.rows[0];
+    if (cnt.tenants === 0 && cnt.bills === 0) {
+      warn('data_volume', 'ปริมาณข้อมูล',
+        `ยังไม่มี tenant/bill ในระบบ — ดูเหมือนยังไม่ได้เริ่มใช้งานจริง`,
+        'เพิ่มผู้เช่าและออกบิลเดือนแรกเพื่อทดสอบ flow ทั้งหมด');
+    } else {
+      ok('data_volume', 'ปริมาณข้อมูล',
+        `${cnt.tenants} tenants · ${cnt.bills} bills · ${cnt.contracts} contracts · ${cnt.line_oas} OA`);
+    }
+  } catch (err) {
+    warn('data_volume_read', 'อ่านปริมาณข้อมูล', err.message);
+  }
+
+  // Summarise — count fail / warn for badge
+  const summary = {
+    fail: checks.filter((c) => c.status === 'fail').length,
+    warn: checks.filter((c) => c.status === 'warn').length,
+    ok:   checks.filter((c) => c.status === 'ok').length,
+    total: checks.length,
+  };
+  // Production-ready when zero fails AND warnings ≤ N (here 2: tolerable
+  // soft-warnings like "1 warn for staging-quality config"). Operator can
+  // gate "go live" on this in their runbook.
+  const ready = summary.fail === 0 && summary.warn <= 2;
+  res.json({
+    ok: true,
+    ready,
+    nodeEnv: NODE_ENV,
+    summary,
+    checks,
+    checkedAt: new Date().toISOString(),
+  });
+});
+
 // Detailed admin-only health dashboard. Aggregates every subsystem probe
 // (DB, schema sanity, LINE OA, SMTP, R2, queue, lockouts, scheduler) into
 // one report with status+detail per check. Owner|manager only — exposes
@@ -3544,6 +3813,48 @@ migrate()
     try {
       const flags = await features.load(pool);
       sentry.init(flags);
+
+      // Production-readiness summary at boot. Logs once at startup so
+      // operators see the gap before the first user request — much earlier
+      // than waiting for them to load /admin#health. Mirrors the
+      // /api/admin/production-readiness endpoint logic but lives in-process
+      // so it runs every restart.
+      if (NODE_ENV === 'production') {
+        const issues = [];
+        if (flags.meterIot && flags.meterIot.mode === 'simulator') {
+          issues.push('🔴 meterIot.mode=simulator (จะถูก scheduler block แต่ flag ยังตั้งผิด)');
+        }
+        if (flags.autoBackup && flags.autoBackup.enabled) {
+          const sec = require('./services/secrets');
+          if (!sec.get('R2_ACCESS_KEY_ID') || !sec.get('R2_BUCKET')) {
+            issues.push('🟡 autoBackup ON but R2 not configured (backup จะหายเมื่อ redeploy)');
+          }
+        }
+        const cfgRow = await pool.query(`SELECT value FROM app_data WHERE key='baankarn_config_v1'`);
+        const cfg = cfgRow.rows.length ? cfgRow.rows[0].value : {};
+        const b = (cfg && cfg.building) || {};
+        if (!b.address || !b.phone) {
+          issues.push('🟡 ข้อมูลตึก (address/phone) ยังไม่ครบ');
+        }
+        const sec = require('./services/secrets');
+        const ppDb = (cfg && cfg.payment) ? (cfg.payment.promptpay || cfg.payment.promptpayTarget) : null;
+        if (!ppDb && !sec.get('PROMPTPAY_TARGET')) {
+          issues.push('🔴 PROMPTPAY_TARGET ยังไม่ตั้ง — บิล PDF จะไม่มี QR');
+        }
+        const ownersQ = await pool.query(`SELECT COUNT(*)::int n, MIN(username) u FROM auth_users WHERE role='owner'`);
+        const oc = ownersQ.rows[0];
+        if (oc.n === 0) issues.push('🔴 ไม่มี owner — ระบบล็อกตัวเอง');
+        else if (oc.n === 1 && oc.u === 'admin') {
+          issues.push('🟡 มี owner คนเดียว (default username "admin") — แนะนำสร้างคนที่สอง');
+        }
+        if (issues.length) {
+          console.warn('[boot] production-readiness issues:');
+          for (const i of issues) console.warn('  ' + i);
+          console.warn('[boot] ดูทั้งหมด: GET /api/admin/production-readiness');
+        } else {
+          console.log('[boot] ✅ production-readiness: all checks passed');
+        }
+      }
     } catch (err) {
       console.warn('[boot] features load failed:', err.message);
     }

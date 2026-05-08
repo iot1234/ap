@@ -90,8 +90,8 @@ const NAV_GROUPS = [
       { id: 'payments',    label: 'สลิป/การชำระ',    icon: '💳' },
       { id: 'pricing',     label: 'ตั้งราคา',         icon: '💰', minRole: 'manager' },
       { id: 'recurring',   label: 'ค่าใช้จ่ายประจำ',  icon: '💸', minRole: 'manager' },
-      { id: 'reports',     label: 'รายงาน (เก่า)',    icon: '📊' },
-      { id: 'reports-v2',  label: 'รายงานจริง',      icon: '📈', minRole: 'manager' },
+      { id: 'reports',     label: 'รายงาน · กราฟ',    icon: '📊' },
+      { id: 'reports-v2',  label: 'รายงาน · ตาราง',   icon: '📈', minRole: 'manager' },
     ],
   },
   {
@@ -107,6 +107,7 @@ const NAV_GROUPS = [
     title: 'ระบบ',
     items: [
       { id: 'health',              label: 'สถานะระบบ',           icon: '🩺', minRole: 'manager' },
+      { id: 'production-readiness', label: 'ตรวจความพร้อม',       icon: '🚦', minRole: 'owner' },
       { id: 'notifications',       label: 'ประวัติแจ้งเตือน',     icon: '🔔', minRole: 'manager' },
       { id: 'notifications-queue', label: 'คิวแจ้งเตือน',         icon: '📤', minRole: 'manager' },
       { id: 'security-events',     label: 'เหตุการณ์ปลอดภัย',    icon: '🛡️', minRole: 'manager' },
@@ -145,23 +146,33 @@ const PAGE_TITLES = {
   'notifications-queue': 'คิวการแจ้งเตือน',
   'security-events':    'เหตุการณ์ปลอดภัย',
   'access-devices':     'Hardware API Tokens',
-  reports:     'รายงาน',
-  'reports-v2': 'รายงานจริง (DB)',
+  reports:     'รายงาน · กราฟภาพรวม',
+  'reports-v2': 'รายงาน · ตารางและส่งออก',
   pricing:     'ตั้งราคา',
   recurring:   'ค่าใช้จ่ายประจำ',
   features:    'ฟีเจอร์ระบบ',
   secrets:     'ตั้งค่า API/Keys',
   settings:    'ตั้งค่าระบบ',
   health:      'สถานะระบบ',
+  'production-readiness': 'ตรวจความพร้อม Production',
 };
 
 // ---------- Sidebar -------------------------------------------------------
-function Sidebar({ page, setPage, mobileOpen, setMobileOpen, isMobile, pendingBookings, overdueRooms, buildingName, currentUser }) {
+// Width modes:
+//   - 260px (expanded, default) — full labels + section headings
+//   - 64px  (collapsed) — icons only, label appears on hover via title attr
+//   - mobile drawer — always 260px expanded, slides in from left
+// User's choice persists in localStorage so a wide-monitor user who collapsed
+// once doesn't have to re-collapse every reload.
+function Sidebar({ page, setPage, mobileOpen, setMobileOpen, isMobile, pendingBookings, overdueRooms, buildingName, currentUser, collapsed, setCollapsed }) {
   const C = window.ADMIN_C;
   const shortName = (buildingName || 'บ้านกาญจน์').replace(/\s*(เรสซิเดนซ์|residence).*/i, '').trim();
+  // Collapse only applies to non-mobile. Mobile drawer is always full width.
+  const isCollapsed = !isMobile && collapsed;
+  const railWidth = isCollapsed ? 64 : 260;
 
   const sidebarStyle = {
-    width: 260,
+    width: railWidth,
     background: C.navBg,
     color: C.navInk,
     display: 'flex',
@@ -173,7 +184,7 @@ function Sidebar({ page, setPage, mobileOpen, setMobileOpen, isMobile, pendingBo
     left: 0,
     zIndex: 100,
     transform: isMobile ? `translateX(${mobileOpen ? 0 : -260}px)` : 'none',
-    transition: 'transform .25s ease',
+    transition: 'transform .25s ease, width .2s ease',
     boxShadow: isMobile ? '4px 0 24px -8px rgba(0,0,0,0.3)' : 'none',
   };
 
@@ -181,7 +192,7 @@ function Sidebar({ page, setPage, mobileOpen, setMobileOpen, isMobile, pendingBo
     display: 'flex',
     alignItems: 'center',
     gap: 11,
-    padding: '9px 14px',
+    padding: isCollapsed ? '9px 0' : '9px 14px',
     margin: '0 8px',
     borderRadius: 8,
     cursor: 'pointer',
@@ -191,7 +202,8 @@ function Sidebar({ page, setPage, mobileOpen, setMobileOpen, isMobile, pendingBo
     fontWeight: active ? 600 : 500,
     border: 'none',
     width: 'calc(100% - 16px)',
-    textAlign: 'left',
+    textAlign: isCollapsed ? 'center' : 'left',
+    justifyContent: isCollapsed ? 'center' : 'flex-start',
     fontFamily: 'inherit',
     transition: 'background .15s, color .15s',
     position: 'relative',
@@ -208,41 +220,96 @@ function Sidebar({ page, setPage, mobileOpen, setMobileOpen, isMobile, pendingBo
           }}
         />
       )}
-      <aside style={sidebarStyle}>
-        {/* Logo */}
+      <aside id="admin-sidebar" style={sidebarStyle}>
+        {/* Logo + collapse toggle (desktop only) */}
         <div style={{
-          padding: '20px 20px 18px',
+          padding: isCollapsed ? '20px 8px 18px' : '20px 20px 18px',
           borderBottom: `1px solid ${C.navBorder}`,
         }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <div style={{
-              width: 38, height: 38, borderRadius: 9,
-              background: `linear-gradient(135deg, ${C.accent} 0%, ${C.accentDark} 100%)`,
-              display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-              color: '#fff', fontFamily: 'Sora, sans-serif', fontWeight: 700, fontSize: 18,
-              flexShrink: 0,
-            }}>{(shortName[0] || 'บ').toUpperCase()}</div>
-            <div style={{ minWidth: 0 }}>
-              <div style={{ fontFamily: 'Sora, sans-serif', fontWeight: 700, fontSize: 14.5, color: '#fff', lineHeight: 1.2,
-                            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {shortName}
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            justifyContent: isCollapsed ? 'center' : 'flex-start',
+          }}>
+            <div
+              title={isCollapsed ? shortName : null}
+              style={{
+                width: 38, height: 38, borderRadius: 9,
+                background: `linear-gradient(135deg, ${C.accent} 0%, ${C.accentDark} 100%)`,
+                display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                color: '#fff', fontFamily: 'Sora, sans-serif', fontWeight: 700, fontSize: 18,
+                flexShrink: 0,
+              }}>{(shortName[0] || 'บ').toUpperCase()}</div>
+            {!isCollapsed && (
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ fontFamily: 'Sora, sans-serif', fontWeight: 700, fontSize: 14.5, color: '#fff', lineHeight: 1.2,
+                              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {shortName}
+                </div>
+                <div style={{ fontSize: 10, color: C.navMuted, textTransform: 'uppercase', letterSpacing: '0.08em', marginTop: 2 }}>
+                  Admin Console
+                </div>
               </div>
-              <div style={{ fontSize: 10, color: C.navMuted, textTransform: 'uppercase', letterSpacing: '0.08em', marginTop: 2 }}>
-                Admin Console
-              </div>
-            </div>
+            )}
+            {!isMobile && (
+              <button
+                onClick={() => setCollapsed(!collapsed)}
+                title={isCollapsed ? 'ขยายแถบเมนู' : 'ย่อแถบเมนู'}
+                aria-label={isCollapsed ? 'ขยายแถบเมนู' : 'ย่อแถบเมนู'}
+                style={{
+                  background: 'transparent',
+                  border: `1px solid ${C.navBorder}`,
+                  color: C.navInkSoft,
+                  width: 26, height: 26, borderRadius: 6,
+                  cursor: 'pointer',
+                  fontSize: 14, lineHeight: 1,
+                  flexShrink: 0,
+                  display: isCollapsed ? 'none' : 'inline-flex',
+                  alignItems: 'center', justifyContent: 'center',
+                  fontFamily: 'inherit',
+                }}>‹</button>
+            )}
           </div>
+          {isCollapsed && !isMobile && (
+            <button
+              onClick={() => setCollapsed(false)}
+              title="ขยายแถบเมนู"
+              aria-label="ขยายแถบเมนู"
+              style={{
+                marginTop: 10,
+                background: 'transparent',
+                border: `1px solid ${C.navBorder}`,
+                color: C.navInkSoft,
+                width: '100%', height: 26, borderRadius: 6,
+                cursor: 'pointer',
+                fontSize: 14, lineHeight: 1,
+                display: 'inline-flex',
+                alignItems: 'center', justifyContent: 'center',
+                fontFamily: 'inherit',
+              }}>›</button>
+          )}
         </div>
 
         {/* Nav — role-aware */}
         <nav style={{ flex: 1, overflowY: 'auto', padding: '14px 0' }}>
           {filterNavByRole(NAV_GROUPS, currentUser?.role).map(group => (
-            <div key={group.title} style={{ marginBottom: 18 }}>
-              <div style={{
-                padding: '4px 22px', fontSize: 10.5, color: C.navMuted,
-                textTransform: 'uppercase', letterSpacing: '0.1em', fontWeight: 600,
-                marginBottom: 6,
-              }}>{group.title}</div>
+            <div key={group.title} style={{ marginBottom: isCollapsed ? 8 : 18 }}>
+              {!isCollapsed && (
+                <div style={{
+                  padding: '4px 22px', fontSize: 10.5, color: C.navMuted,
+                  textTransform: 'uppercase', letterSpacing: '0.1em', fontWeight: 600,
+                  marginBottom: 6,
+                }}>{group.title}</div>
+              )}
+              {isCollapsed && (
+                // Subtle separator between groups when label is hidden, so the
+                // structure is still visible without text.
+                <div style={{
+                  height: 1, background: C.navBorder, margin: '6px 14px 6px',
+                  opacity: 0.4,
+                }} />
+              )}
               {group.items.map(it => {
                 const active = page === it.id;
                 let badge = null;
@@ -252,14 +319,22 @@ function Sidebar({ page, setPage, mobileOpen, setMobileOpen, isMobile, pendingBo
                   <button
                     key={it.id}
                     onClick={() => { setPage(it.id); if (isMobile) setMobileOpen(false); }}
+                    title={isCollapsed ? it.label : null}
+                    aria-label={it.label}
                     style={navItemStyle(active)}>
                     <span style={{ fontSize: 15, width: 18, textAlign: 'center', flexShrink: 0 }}>{it.icon}</span>
-                    <span style={{ flex: 1 }}>{it.label}</span>
+                    {!isCollapsed && <span style={{ flex: 1 }}>{it.label}</span>}
                     {badge != null && (
                       <span style={{
                         background: it.id === 'billing' ? C.danger : C.accent,
-                        color: '#fff', fontSize: 10, fontWeight: 700,
-                        padding: '1px 7px', borderRadius: 999, minWidth: 18, textAlign: 'center',
+                        color: '#fff', fontSize: isCollapsed ? 9 : 10, fontWeight: 700,
+                        padding: isCollapsed ? '0 4px' : '1px 7px',
+                        borderRadius: 999,
+                        minWidth: isCollapsed ? 14 : 18,
+                        textAlign: 'center',
+                        position: isCollapsed ? 'absolute' : 'static',
+                        top: isCollapsed ? 4 : undefined,
+                        right: isCollapsed ? 8 : undefined,
                       }}>{badge}</span>
                     )}
                     {active && (
@@ -277,52 +352,77 @@ function Sidebar({ page, setPage, mobileOpen, setMobileOpen, isMobile, pendingBo
 
         {/* Footer */}
         <div style={{
-          padding: '14px 20px',
+          padding: isCollapsed ? '14px 8px' : '14px 20px',
           borderTop: `1px solid ${C.navBorder}`,
           background: C.navBgAlt,
         }}>
           <a
             href="/"
+            title={isCollapsed ? 'ดูในมุมผู้เช่า' : null}
             style={{
               display: 'flex', alignItems: 'center', gap: 10,
-              padding: '8px 10px', borderRadius: 7,
+              padding: isCollapsed ? '8px 0' : '8px 10px', borderRadius: 7,
               background: 'rgba(255,255,255,0.05)',
               color: C.navInkSoft, fontSize: 12.5, fontWeight: 500,
               textDecoration: 'none', transition: 'background .15s',
+              justifyContent: isCollapsed ? 'center' : 'flex-start',
             }}
             onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(255,255,255,0.1)'}
             onMouseLeave={(e) => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}>
             <span style={{ fontSize: 14 }}>👁</span>
-            <span style={{ flex: 1 }}>ดูในมุมผู้เช่า</span>
-            <span style={{ color: C.navMuted, fontSize: 11 }}>→</span>
+            {!isCollapsed && <span style={{ flex: 1 }}>ดูในมุมผู้เช่า</span>}
+            {!isCollapsed && <span style={{ color: C.navMuted, fontSize: 11 }}>→</span>}
           </a>
           <div style={{
-            display: 'flex', alignItems: 'center', gap: 10, marginTop: 10,
-            padding: '6px 4px',
+            display: 'flex', alignItems: 'center',
+            gap: 10, marginTop: 10,
+            padding: isCollapsed ? '6px 0' : '6px 4px',
+            justifyContent: isCollapsed ? 'center' : 'flex-start',
           }}>
-            <div style={{
-              width: 32, height: 32, borderRadius: '50%',
-              background: C.accent, color: '#fff',
-              display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-              fontSize: 12, fontWeight: 600, flexShrink: 0,
-            }}>{(currentUser && currentUser.username ? currentUser.username[0] : 'A').toUpperCase()}</div>
-            <div style={{ minWidth: 0, flex: 1 }}>
-              <div style={{ fontSize: 12.5, color: '#fff', fontWeight: 500 }}>{currentUser ? currentUser.username : 'admin'}</div>
-              <div style={{ fontSize: 10.5, color: C.navMuted }}>{currentUser ? currentUser.role : 'ผู้ดูแลระบบ'}</div>
-            </div>
+            <div
+              title={isCollapsed && currentUser ? `${currentUser.username} (${currentUser.role})` : null}
+              style={{
+                width: 32, height: 32, borderRadius: '50%',
+                background: C.accent, color: '#fff',
+                display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                fontSize: 12, fontWeight: 600, flexShrink: 0,
+              }}>{(currentUser && currentUser.username ? currentUser.username[0] : 'A').toUpperCase()}</div>
+            {!isCollapsed && (
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ fontSize: 12.5, color: '#fff', fontWeight: 500 }}>{currentUser ? currentUser.username : 'admin'}</div>
+                <div style={{ fontSize: 10.5, color: C.navMuted }}>{currentUser ? currentUser.role : 'ผู้ดูแลระบบ'}</div>
+              </div>
+            )}
             <button
               onClick={() => { if (window.AP && window.AP.logout) window.AP.logout(); }}
               title="ออกจากระบบ"
+              aria-label="ออกจากระบบ"
               style={{
                 background: 'transparent', border: `1px solid ${C.navBorder}`,
-                color: C.navInkSoft, fontSize: 11, padding: '4px 8px',
+                color: C.navInkSoft, fontSize: 11,
+                padding: isCollapsed ? '4px 6px' : '4px 8px',
                 borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit',
+                display: isCollapsed ? 'none' : 'inline-block',
               }}
               onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255,255,255,0.08)'; e.currentTarget.style.color = '#fff'; }}
               onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = C.navInkSoft; }}>
               ออก
             </button>
           </div>
+          {isCollapsed && (
+            // Logout button as a separate row when collapsed (icon-only).
+            <button
+              onClick={() => { if (window.AP && window.AP.logout) window.AP.logout(); }}
+              title="ออกจากระบบ"
+              aria-label="ออกจากระบบ"
+              style={{
+                marginTop: 8, width: '100%', height: 28,
+                background: 'transparent', border: `1px solid ${C.navBorder}`,
+                color: C.navInkSoft, fontSize: 14,
+                borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit',
+                display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+              }}>⏻</button>
+          )}
         </div>
       </aside>
     </>
@@ -405,40 +505,70 @@ function TopBar({ page, setPage, onMenuClick, isMobile, search, setSearch, notif
         {showResults && search && (
           <>
             <div onClick={() => setShowResults(false)} style={{ position: 'fixed', inset: 0, zIndex: 90 }} />
-            <div style={{
+            <div id="admin-search-results" role="listbox" style={{
               position: 'absolute', top: 'calc(100% + 6px)', left: 0, right: 0,
               background: C.surface, border: `1px solid ${C.border}`,
               borderRadius: 10, boxShadow: '0 12px 32px -8px rgba(30,20,10,0.18)',
-              zIndex: 100, maxHeight: 400, overflow: 'auto',
+              zIndex: 100, maxHeight: 440, overflow: 'auto',
             }}>
               {(searchResults || []).length === 0 ? (
                 <div style={{ padding: 16, fontSize: 13, color: C.muted, textAlign: 'center' }}>
                   ไม่พบผลการค้นหาสำหรับ "{search}"
                 </div>
-              ) : (
-                <>
-                  {(searchResults || []).map((r, i) => (
-                    <button
-                      key={i}
-                      onClick={() => { onSelectResult && onSelectResult(r); setShowResults(false); setSearch(''); }}
-                      style={{
-                        width: '100%', display: 'flex', gap: 10, alignItems: 'center',
-                        padding: '10px 14px', border: 'none', borderBottom: i < searchResults.length - 1 ? `1px solid ${C.borderSoft}` : 'none',
-                        background: 'transparent', cursor: 'pointer', textAlign: 'left',
-                        fontFamily: 'inherit',
-                      }}
-                      onMouseEnter={(e) => e.currentTarget.style.background = C.surfaceAlt}
-                      onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}>
-                      <span style={{ fontSize: 14 }}>{r.icon}</span>
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontSize: 13, fontWeight: 500, color: C.ink }}>{r.title}</div>
-                        <div style={{ fontSize: 11.5, color: C.muted }}>{r.subtitle}</div>
-                      </div>
-                      <span style={{ fontSize: 10, color: C.muted, padding: '1px 6px', background: C.surfaceAlt, borderRadius: 999 }}>{r.kind}</span>
-                    </button>
-                  ))}
-                </>
-              )}
+              ) : (() => {
+                // Group results by `kind` so a search hitting multiple
+                // categories (e.g. tenant name + booking name) reads as
+                // "Rooms (3) / Tenants (2) / Bookings (1)" instead of a
+                // flat unsorted list. Order preserved within group.
+                const groups = {};
+                const order = [];
+                for (const r of searchResults) {
+                  const k = r.kind || 'อื่นๆ';
+                  if (!groups[k]) { groups[k] = []; order.push(k); }
+                  groups[k].push(r);
+                }
+                let flatIndex = 0;
+                return order.map((k) => (
+                  <div key={k}>
+                    <div style={{
+                      padding: '8px 14px 4px',
+                      fontSize: 10.5, color: C.muted,
+                      textTransform: 'uppercase', letterSpacing: '0.08em',
+                      fontWeight: 600,
+                      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                      background: C.surfaceAlt,
+                      borderTop: flatIndex === 0 ? 'none' : `1px solid ${C.borderSoft}`,
+                    }}>
+                      <span>{k}</span>
+                      <span style={{ color: C.muted, fontWeight: 500 }}>{groups[k].length}</span>
+                    </div>
+                    {groups[k].map((r) => {
+                      const i = flatIndex++;
+                      return (
+                        <button
+                          key={i}
+                          role="option"
+                          onClick={() => { onSelectResult && onSelectResult(r); setShowResults(false); setSearch(''); }}
+                          style={{
+                            width: '100%', display: 'flex', gap: 10, alignItems: 'center',
+                            padding: '10px 14px', border: 'none',
+                            background: 'transparent', cursor: 'pointer', textAlign: 'left',
+                            fontFamily: 'inherit',
+                          }}
+                          onMouseEnter={(e) => e.currentTarget.style.background = C.surfaceAlt}
+                          onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}>
+                          <span style={{ fontSize: 14 }}>{r.icon}</span>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ fontSize: 13, fontWeight: 500, color: C.ink, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.title}</div>
+                            <div style={{ fontSize: 11.5, color: C.muted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.subtitle}</div>
+                          </div>
+                          <span style={{ fontSize: 16, color: C.muted, opacity: 0.5 }}>›</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                ));
+              })()}
             </div>
           </>
         )}
@@ -523,15 +653,29 @@ function TopBar({ page, setPage, onMenuClick, isMobile, search, setSearch, notif
         )}
       </div>
 
-      {/* Settings menu */}
+      {/* Reset-to-sample-data — destructive, hence the danger color hint.
+          Was previously a generic ↻ with tooltip "รีเฟรชข้อมูลตัวอย่าง" which
+          looked like an innocent refresh button — admins clicked it expecting
+          to reload the page and were surprised by the destructive modal. */}
       <button
         onClick={onResetData}
-        title="รีเฟรชข้อมูลตัวอย่าง"
+        title="รีเซ็ตเป็นข้อมูลตัวอย่าง (ลบของเดิม)"
+        aria-label="รีเซ็ตเป็นข้อมูลตัวอย่าง"
         style={{
           width: 38, height: 38, border: `1px solid ${C.border}`,
           background: C.surface, color: C.ink2, cursor: 'pointer',
           borderRadius: 9, fontSize: 14, flexShrink: 0,
-        }}>↻</button>
+        }}
+        onMouseEnter={(e) => {
+          e.currentTarget.style.background = C.dangerSoft || '#fde2dc';
+          e.currentTarget.style.color = C.danger || '#b94a48';
+          e.currentTarget.style.borderColor = C.danger || '#b94a48';
+        }}
+        onMouseLeave={(e) => {
+          e.currentTarget.style.background = C.surface;
+          e.currentTarget.style.color = C.ink2;
+          e.currentTarget.style.borderColor = C.border;
+        }}>♻︎</button>
     </header>
   );
 }
@@ -654,6 +798,19 @@ function App() {
   }, []);
   const [mobileOpen, setMobileOpen] = useState(false);
 
+  // --- Sidebar collapsed (desktop only, persisted) ---
+  // Wrap localStorage calls in try/catch — Safari private mode + some embedded
+  // webviews throw on access. Default to expanded on read failure.
+  const SIDEBAR_KEY = '__admin_sidebar_collapsed_v1';
+  const [collapsed, setCollapsedState] = useState(() => {
+    try { return localStorage.getItem(SIDEBAR_KEY) === '1'; }
+    catch { return false; }
+  });
+  const setCollapsed = (next) => {
+    setCollapsedState(next);
+    try { localStorage.setItem(SIDEBAR_KEY, next ? '1' : '0'); } catch { /* ignore */ }
+  };
+
   // --- Toast ---
   const [toast, setToast] = useState(null);
 
@@ -668,7 +825,34 @@ function App() {
     setActivities(prev => [{ time: new Date().toISOString(), ...act }, ...prev].slice(0, 30));
   };
 
-  const handleResetData = () => setConfirmRefresh(true);
+  // Reset-data button is a "wipe local cache + go back to seed" action that
+  // makes sense during demos but is dangerous on a live deployment. Treat
+  // ANY of these as a signal that real operations are happening, and disable
+  // the button entirely:
+  //   - ≥1 tenant in the rooms blob (admin entered real people)
+  //   - ≥1 pending/active booking (real submission via /book)
+  //   - ≥10 activities in the feed (real audit history accumulated)
+  // Operator can still wipe via psql if they really need to.
+  const hasRealData = useMemo(() => {
+    const tenantCount = Object.values(rooms || {}).filter((r) => r && r.tenant).length;
+    const bookingCount = (bookings || []).length;
+    const activityCount = (activities || []).length;
+    return tenantCount > 0 || bookingCount > 0 || activityCount >= 10;
+  }, [rooms, bookings, activities]);
+
+  const handleResetData = () => {
+    if (hasRealData) {
+      setToast({
+        kind: 'warning',
+        message: {
+          title: 'ปิดปุ่มรีเซ็ตเพราะระบบมีข้อมูลจริงแล้ว',
+          description: 'มีผู้เช่า/การจอง/กิจกรรมในระบบ — ลบไม่ได้จากปุ่มนี้ (ป้องกันลบบังเอิญ) ใช้ psql ถ้าจำเป็นจริง',
+        },
+      });
+      return;
+    }
+    setConfirmRefresh(true);
+  };
   const doResetData = () => {
     resetAll();
     location.reload();
@@ -815,6 +999,7 @@ function App() {
     secrets:     window.PageSecrets,
     settings:    PageSettings,
     health:      window.PageHealth,
+    'production-readiness': window.PageProductionReadiness,
   };
   // PAGES[page] can be undefined if (a) the route is unknown, or (b) the
   // page module hasn't loaded yet (slow CDN, blocked script). Rendering
@@ -824,8 +1009,10 @@ function App() {
   let Page = PAGES[page];
   // Diagnostic: log what page the shell resolved to. Helps debug "white
   // screen on menu click" by showing whether window.PageX was registered
-  // at the time the click was handled.
-  if (typeof console !== 'undefined' && console.log) {
+  // at the time the click was handled. Hidden behind ?debug=1 so the
+  // admin's normal console isn't spammed with one log per render.
+  if (typeof console !== 'undefined' && console.log
+      && typeof location !== 'undefined' && /[?&]debug=1\b/.test(location.search)) {
     console.log('[shell] page=' + page + ' resolved=' + (typeof Page === 'function' ? Page.name || 'anonymous' : '<missing>'));
   }
   if (typeof Page !== 'function') {
@@ -863,6 +1050,8 @@ function App() {
         overdueRooms={overdueRoomCount}
         buildingName={config.building?.name}
         currentUser={currentUser}
+        collapsed={collapsed}
+        setCollapsed={setCollapsed}
       />
       <main style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
         <TopBar

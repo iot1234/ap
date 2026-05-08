@@ -286,6 +286,47 @@ async function testGroup(group) {
       return { ok: false, error: err.message };
     }
   }
+  if (group === 'promptpay') {
+    // Lightweight format check + try-build the EMV payload. Catches the
+    // common "saved 9-digit phone" / "saved citizen-id with dashes" mistakes
+    // before bills go out with a broken QR. We don't render the actual PNG
+    // (caller can do that via /api/promptpay/qr if they want a visual).
+    const target = get('PROMPTPAY_TARGET');
+    if (!target) return { ok: false, error: 'PROMPTPAY_TARGET ยังไม่ตั้ง' };
+    const cleaned = String(target).replace(/[\s-]/g, '');
+    const isPhone = /^0\d{9}$/.test(cleaned);
+    const isCitizen = /^\d{13}$/.test(cleaned);
+    if (!isPhone && !isCitizen) {
+      return {
+        ok: false,
+        error: `รูปแบบไม่ถูกต้อง — ต้องเป็นเบอร์โทร 10 หลัก (0XXXXXXXXX) หรือเลขบัตร ปชช. 13 หลัก`,
+        detail: { saved: target.length + ' chars', cleaned: cleaned.length + ' digits' },
+      };
+    }
+    try {
+      const { buildPayload } = require('./promptpay');
+      // Build a payload with a small test amount — proves the underlying
+      // EMV encoder accepts the target without surprises.
+      const payload = buildPayload(cleaned, 1);
+      // EMV PromptPay payloads start with "00020101" (Payload Format Indicator
+      // + Point of Initiation Method static). If the encoder produced
+      // something completely different, surface that instead of "ok".
+      if (!payload || !payload.startsWith('0002')) {
+        return { ok: false, error: 'EMV payload looks malformed', detail: { head: payload?.slice(0, 16) } };
+      }
+      return {
+        ok: true,
+        info: {
+          format: isPhone ? 'phone' : 'citizen_id',
+          masked: isPhone
+            ? cleaned.slice(0, 3) + '-XXX-' + cleaned.slice(-4)
+            : cleaned.slice(0, 4) + '-XXXXX-' + cleaned.slice(-4),
+        },
+      };
+    } catch (err) {
+      return { ok: false, error: 'EMV encode failed: ' + err.message };
+    }
+  }
   return { ok: false, error: 'unknown group' };
 }
 

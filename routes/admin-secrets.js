@@ -53,8 +53,10 @@ module.exports = function buildAdminSecretsRouter(ctx) {
 
   r.post('/test', sameOrigin, csrfGuard, requireAuth, requireRole('owner'), async (req, res) => {
     const group = String(req.body?.group || '').slice(0, 16);
-    if (!['line', 'smtp', 'r2'].includes(group)) {
-      return res.status(400).json({ error: 'group must be one of: line, smtp, r2' });
+    // Accept the same set the secrets service supports — adding 'promptpay'
+    // here so the UI can validate the saved target before bills go out.
+    if (!['line', 'smtp', 'r2', 'promptpay'].includes(group)) {
+      return res.status(400).json({ error: 'group must be one of: line, smtp, r2, promptpay' });
     }
     try {
       const result = await secrets.testGroup(group);

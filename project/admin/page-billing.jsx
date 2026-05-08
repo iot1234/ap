@@ -197,23 +197,26 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
     if (!b) return;
     const apiFetch = window.apiFetch || ((u, o) => fetch(u, { credentials: 'same-origin', ...o }));
     try {
-      const r = await apiFetch('/api/notify/bill', {
-        method: 'POST',
-        body: JSON.stringify({
-          tenantName: b.tenant, roomId: b.roomId,
-          period: b.period, total: b.total, billNo: b.id,
-        }),
-      });
-      const d = await r.json().catch(() => ({}));
-      if (!r.ok || d.ok === false) {
-        const err = (d && d.error) || `HTTP ${r.status}`;
-        setToast && setToast({ kind: 'error', message: `ส่งเตือนไม่สำเร็จ: ${err}` });
-        return;
+      // Use apiCall (the new structured-error wrapper) so we get a proper
+      // ApiError on failure — toastError then translates server `code` like
+      // RATE_LIMIT / FORBIDDEN / NOT_FOUND into actionable Thai messages
+      // instead of the previous "ส่งเตือนไม่สำเร็จ: HTTP 403" stub.
+      const apiCall = window.apiCall;
+      try {
+        await apiCall('/api/notify/bill', {
+          method: 'POST',
+          body: JSON.stringify({
+            tenantName: b.tenant, roomId: b.roomId,
+            period: b.period, total: b.total, billNo: b.id,
+          }),
+        });
+        setToast && setToast({ kind: 'success', message: `ส่งเตือนบิล ${id} ทาง LINE แล้ว` });
+        addActivity && addActivity({ icon: '🔔', text: `ส่งเตือนชำระบิล ${id}`, type: 'system' });
+      } catch (err) {
+        window.toastError(setToast, err, { action: `ส่งเตือนบิล ${id}` });
       }
-      setToast && setToast({ kind: 'success', message: `ส่งเตือนบิล ${id} ทาง LINE แล้ว` });
-      addActivity && addActivity({ icon: '🔔', text: `ส่งเตือนชำระบิล ${id}`, type: 'system' });
     } catch (e) {
-      setToast && setToast({ kind: 'error', message: `ส่งเตือนไม่สำเร็จ: ${e.message}` });
+      window.toastError(setToast, e, { action: `ส่งเตือนบิล ${id}` });
     }
   };
 
@@ -222,49 +225,45 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
     // occupied room's bill in one transaction. Faster + atomic + uses
     // services/billing.js (single source of truth for VAT, late fee, etc).
     setConfirmGenerate(false);
-    const apiFetch = window.apiFetch || fetch;
+    const apiCall = window.apiCall;
     try {
       const now = new Date();
       const period = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
       const dueDay = Number(config.notify?.dueOnDay) || 7;
-      const r = await apiFetch('/api/bills/bulk-generate', {
-        method: 'POST', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
+      const d = await apiCall('/api/bills/bulk-generate', {
+        method: 'POST',
         body: JSON.stringify({ period, dueDay }),
       });
-      const d = await r.json();
-      if (!r.ok) throw new Error(d.error || 'failed');
       addActivity && addActivity({ icon: '📋', text: `ออกบิลรอบ ${period}: ${d.made} ใบ (ข้าม ${d.skipped})`, type: 'billing' });
       setToast && setToast({
         kind: d.made > 0 ? 'success' : 'info',
-        message: `ออกบิล ${d.made} ใบ${d.skipped ? ` (ข้าม ${d.skipped})` : ''}`,
+        message: d.made > 0
+          ? `ออกบิล ${d.made} ใบสำเร็จ${d.skipped ? ` (ข้าม ${d.skipped} ใบที่มีอยู่แล้ว)` : ''}`
+          : `ทุกห้องมีบิลรอบ ${period} อยู่แล้ว — ไม่ได้สร้างเพิ่ม`,
       });
       // Refresh the DB-bills overlay so the banner + per-row badge flip
       // from "ประมาณการ" to "ออกแล้ว" without needing a manual reload.
       fetchDbBills();
     } catch (e) {
-      setToast && setToast({ kind: 'error', message: 'ออกบิลไม่สำเร็จ: ' + (e.message || 'unknown') });
+      window.toastError(setToast, e, { action: 'ออกบิล' });
     }
   };
 
   // Bulk-send all pending/overdue bills via LINE+email.
   const handleBulkSend = async () => {
     if (!window.confirm('ส่งแจ้งเตือนทุกบิลที่ยังไม่ชำระ/ค้างชำระทาง LINE+อีเมล?')) return;
-    const apiFetch = window.apiFetch || fetch;
+    const apiCall = window.apiCall;
     try {
-      const r = await apiFetch('/api/bills/bulk-send', {
-        method: 'POST', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-      });
-      const d = await r.json();
-      if (!r.ok) throw new Error(d.error || 'failed');
+      const d = await apiCall('/api/bills/bulk-send', { method: 'POST' });
       setToast && setToast({
         kind: d.enqueued > 0 ? 'success' : 'info',
-        message: `จัดคิวแล้ว ${d.enqueued}/${d.attempted} ใบ${d.failed ? ` (พลาด ${d.failed})` : ''}`,
+        message: d.enqueued > 0
+          ? `จัดคิวแจ้งเตือน ${d.enqueued}/${d.attempted} ใบ${d.failed ? ` — พลาด ${d.failed} ใบ (ดูรายละเอียดใน "คิวแจ้งเตือน")` : ''}`
+          : `ไม่มีบิลค้างที่ต้องแจ้งเตือน`,
       });
       addActivity && addActivity({ icon: '🔔', text: `ส่งเตือนทุกบิลค้าง: ${d.enqueued} ใบ`, type: 'system' });
     } catch (e) {
-      setToast && setToast({ kind: 'error', message: 'ส่งไม่สำเร็จ: ' + e.message });
+      window.toastError(setToast, e, { action: 'ส่งแจ้งเตือนทุกบิล' });
     }
   };
 

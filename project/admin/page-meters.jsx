@@ -105,36 +105,57 @@ function PageMeters({ rooms, setToast }) {
   async function record(e) {
     e.preventDefault();
     if (!roomId) {
-      setToast && setToast({ kind: 'error', message: 'กรุณาเลือกห้องก่อนบันทึก' });
+      setToast && setToast({
+        kind: 'warning',
+        message: { title: 'ยังไม่ได้เลือกห้อง', description: 'กรุณาเลือกห้องที่จะบันทึกค่ามิเตอร์ก่อน' },
+      });
       return;
     }
-    if (!reading) return;
+    if (!reading) {
+      setToast && setToast({
+        kind: 'warning',
+        message: { title: 'กรุณากรอกค่ามิเตอร์', description: 'ค่ามิเตอร์ต้องเป็นตัวเลข ≥ 0' },
+      });
+      return;
+    }
     // No more silent CSRF bypass via raw fetch — if hooks.jsx didn't load,
     // alert the user instead of POSTing without a token (which would 403).
-    if (!window.apiFetch) {
-      setToast && setToast({ kind: 'error', message: 'ระบบยังไม่พร้อม — กรุณารีเฟรชหน้า' });
+    if (!window.apiCall) {
+      setToast && setToast({
+        kind: 'danger',
+        message: { title: 'ระบบยังไม่พร้อม', description: 'สคริปต์โหลดไม่ครบ — กรุณารีเฟรชหน้า' },
+      });
       return;
     }
     try {
-      const r = await window.apiFetch(`/api/meters/${encodeURIComponent(roomId)}/readings`, {
+      const d = await window.apiCall(`/api/meters/${encodeURIComponent(roomId)}/readings`, {
         method: 'POST',
         body: JSON.stringify({ meterType: type, reading: Number(reading), source: 'manual' }),
       });
-      const d = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
       setReading('');
+      // Anomaly is NOT a save failure — it's a successful save with a
+      // warning attached. Use kind:'warning' so the visual matches.
       if (d.anomaly) {
         const a = d.anomaly;
-        const msg = a.kind === 'rollback'
-          ? `ค่ามิเตอร์ลดลง ${Number(a.last).toFixed(2)} หน่วย — โปรดตรวจสอบ`
-          : `ค่าผิดปกติ z=${Number(a.z).toFixed(2)}`;
-        setToast && setToast({ kind: 'error', message: msg });
+        const t = type === 'water' ? 'ค่าน้ำ' : 'ค่าไฟ';
+        const isRollback = a.kind === 'rollback';
+        setToast && setToast({
+          kind: 'warning',
+          message: {
+            title: isRollback
+              ? `บันทึกแล้ว — แต่${t}ลดลงผิดปกติ`
+              : `บันทึกแล้ว — แต่${t}ผิดปกติ (>${a.threshold}σ)`,
+            description: isRollback
+              ? `ค่าลดลง ${Math.abs(Number(a.last)).toFixed(2)} หน่วย — อาจเป็นการ reset มิเตอร์หรือพิมพ์ผิด ตรวจสอบก่อนออกบิล`
+              : `z=${Number(a.z).toFixed(2)} · ค่าล่าสุด ${a.last} · เฉลี่ย ${Number(a.mean).toFixed(2)}`,
+          },
+        });
       } else {
-        setToast && setToast({ kind: 'success', message: 'บันทึกแล้ว' });
+        setToast && setToast({ kind: 'success', message: `บันทึก${type === 'water' ? 'ค่าน้ำ' : 'ค่าไฟ'}ห้อง ${roomId} แล้ว` });
       }
       load();
     } catch (e2) {
-      setToast && setToast({ kind: 'error', message: e2.message || 'บันทึกไม่สำเร็จ' });
+      window.toastError(setToast, e2, { action: 'บันทึกค่ามิเตอร์' });
     }
   }
 

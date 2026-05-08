@@ -750,12 +750,33 @@ function FilterChip({ label, active, onClick, count, color }) {
 }
 
 // --- Toast (controlled) ---------------------------------------------------
-function Toast({ open, kind = 'success', children, onClose, duration = 2800 }) {
+// Supports two payload shapes via children:
+//   - string                              → simple line
+//   - { title, description?, action? }    → rich; description shows below;
+//                                            action: { label, onClick }
+// Kind aliases:
+//   - 'error' → 'danger'  (61 callsites used 'error' historically before the
+//     Toast knew the kind; without the alias they all rendered as gray info,
+//     visually undistinguishable from a success message — bug found during
+//     the May 2026 usability audit).
+// Duration:
+//   - success / info:  2.8s (default — non-blocking)
+//   - warning:        4.5s
+//   - danger / error: 7s   (errors deserve a longer dwell; we also add an
+//                           explicit × so the user can dismiss earlier)
+function Toast({ open, kind = 'success', children, onClose, duration }) {
+  // Normalise legacy alias before any branching below.
+  if (kind === 'error') kind = 'danger';
+  const isUrgent = kind === 'danger' || kind === 'warning';
+  // Resolve duration: explicit prop wins; otherwise pick by kind.
+  const resolvedDuration = duration != null
+    ? duration
+    : (kind === 'danger' ? 7000 : kind === 'warning' ? 4500 : 2800);
   useEffect(() => {
-    if (!open || !duration) return;
-    const t = setTimeout(() => onClose && onClose(), duration);
+    if (!open || !resolvedDuration) return;
+    const t = setTimeout(() => onClose && onClose(), resolvedDuration);
     return () => clearTimeout(t);
-  }, [open, duration, onClose]);
+  }, [open, resolvedDuration, onClose]);
   if (!open) return null;
   const colors = {
     success: { bg: C.successInk, fg: '#fff' },
@@ -764,9 +785,21 @@ function Toast({ open, kind = 'success', children, onClose, duration = 2800 }) {
     warning: { bg: C.warning,    fg: '#fff' },
   };
   const cc = colors[kind] || colors.info;
+
+  // Unpack the rich-payload shape if the caller passed an object instead of
+  // a plain string. Plain string keeps the simple display the existing 60+
+  // callsites assume — backward-compat.
+  let title = children;
+  let description = null;
+  let action = null;
+  if (children && typeof children === 'object' && !React.isValidElement(children)) {
+    title = children.title || children.message || '';
+    description = children.description || null;
+    action = children.action || null;
+  }
+
   // role=status (polite) for success/info; role=alert (assertive) for danger
   // / warning so the urgency matches what screen readers announce.
-  const isUrgent = kind === 'danger' || kind === 'warning';
   return (
     <div
       role={isUrgent ? 'alert' : 'status'}
@@ -775,13 +808,53 @@ function Toast({ open, kind = 'success', children, onClose, duration = 2800 }) {
       style={{
         position: 'fixed', bottom: 24, left: '50%', transform: 'translateX(-50%)',
         background: cc.bg, color: cc.fg,
-        padding: '11px 18px', borderRadius: 10,
+        padding: description ? '12px 16px 12px 18px' : '11px 14px 11px 18px',
+        borderRadius: 10,
         fontSize: 13.5, fontWeight: 500,
         boxShadow: '0 12px 32px -8px rgba(30,20,10,0.42)',
         zIndex: 1200,
         animation: 'slideUp .3s ease',
         maxWidth: 'calc(100vw - 32px)',
-      }}>{children}</div>
+        minWidth: 280,
+        display: 'flex', alignItems: description ? 'flex-start' : 'center', gap: 12,
+      }}>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ wordBreak: 'break-word' }}>{title}</div>
+        {description && (
+          <div style={{
+            marginTop: 4,
+            fontSize: 12.5, fontWeight: 400, opacity: 0.85,
+            wordBreak: 'break-word',
+          }}>{description}</div>
+        )}
+      </div>
+      {action && action.label && action.onClick && (
+        <button
+          onClick={() => { try { action.onClick(); } finally { onClose && onClose(); } }}
+          style={{
+            background: 'rgba(255,255,255,0.18)', color: '#fff',
+            border: '1px solid rgba(255,255,255,0.28)', borderRadius: 7,
+            fontSize: 12.5, fontWeight: 600, padding: '5px 11px',
+            cursor: 'pointer', flexShrink: 0, fontFamily: 'inherit',
+          }}>{action.label}</button>
+      )}
+      {/* Manual dismiss for urgent kinds — gives the user time to read AND
+          a way to close early without waiting 7s. Less-urgent kinds rely on
+          the auto-dismiss alone (they're announcements, not blockers). */}
+      {isUrgent && (
+        <button
+          onClick={onClose}
+          aria-label="ปิด"
+          style={{
+            background: 'transparent', color: '#fff', border: 'none',
+            fontSize: 16, lineHeight: 1, padding: '0 2px 2px',
+            cursor: 'pointer', opacity: 0.75, flexShrink: 0,
+            fontFamily: 'inherit',
+          }}
+          onMouseEnter={(e) => e.currentTarget.style.opacity = 1}
+          onMouseLeave={(e) => e.currentTarget.style.opacity = 0.75}>×</button>
+      )}
+    </div>
   );
 }
 

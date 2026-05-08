@@ -70,13 +70,36 @@ function PageSecrets({ setToast }) {
       });
       const d = await r.json();
       if (d.ok) {
-        const detail = d.info ? ` (${d.info.displayName || d.info.basicId || 'ok'})` : '';
-        setToast && setToast({ kind: 'success', message: `ทดสอบ ${group} สำเร็จ${detail}` });
+        // Each group surfaces a different "info" shape — render whichever
+        // is present so the toast confirms what was actually verified, not
+        // just "ok". Helps admin spot "I tested LINE but the OA shown is
+        // not the one I intended" type mistakes.
+        let detail = '';
+        if (d.info) {
+          if (d.info.displayName) detail = ` — OA: ${d.info.displayName}`;
+          else if (d.info.basicId) detail = ` — ${d.info.basicId}`;
+          else if (d.info.format && d.info.masked) detail = ` — ${d.info.format} ${d.info.masked}`;
+          else if (d.bucket) detail = ` — bucket: ${d.bucket}`;
+        } else if (d.bucket) {
+          detail = ` — bucket: ${d.bucket}`;
+        }
+        setToast && setToast({
+          kind: 'success',
+          message: { title: `✅ ทดสอบ ${group} สำเร็จ`, description: detail || null },
+        });
       } else {
-        setToast && setToast({ kind: 'error', message: `${group} ใช้ไม่ได้: ${d.error || 'unknown'}` });
+        setToast && setToast({
+          kind: 'danger',
+          message: {
+            title: `❌ ${group} ใช้ไม่ได้`,
+            description: d.error || 'unknown error',
+          },
+        });
       }
     } catch (e) {
-      setToast && setToast({ kind: 'error', message: e.message });
+      window.toastError
+        ? window.toastError(setToast, e, { action: `ทดสอบ ${group}` })
+        : setToast && setToast({ kind: 'danger', message: e.message });
     } finally {
       setTesting((t) => ({ ...t, [group]: false }));
     }
@@ -108,7 +131,12 @@ function PageSecrets({ setToast }) {
                 </div>
                 <div style={{ color: C.muted, fontSize: 13, marginTop: 2 }}>{meta.desc}</div>
               </div>
-              {(group === 'line' || group === 'smtp') && (
+              {/* Test button shown for any group the server supports. r2
+                  and promptpay are now supported (server: services/secrets.testGroup);
+                  the test endpoint's allowlist gates which group strings are
+                  accepted. Sentry omitted: there's no read-side probe — sending
+                  a fake event would litter the project's Issues stream. */}
+              {(group === 'line' || group === 'smtp' || group === 'r2' || group === 'promptpay') && (
                 <Btn size="sm" onClick={() => testGroup(group)} disabled={!!testing[group]}>
                   {testing[group] ? 'กำลังทดสอบ…' : '🔌 ทดสอบ'}
                 </Btn>

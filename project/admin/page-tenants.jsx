@@ -184,6 +184,7 @@ function PageTenants({ rooms, setRooms, addActivity, setToast }) {
             <Tabs
               items={[
                 { value: 'profile',  label: 'โปรไฟล์',  icon: '👤' },
+                { value: 'portal',   label: 'Portal Access', icon: '🔑' },
                 { value: 'contract', label: 'สัญญา',     icon: '📄' },
                 { value: 'bills',    label: 'บิล',         icon: '🧾' },
                 { value: 'notes',    label: 'บันทึก',     icon: '📝' },
@@ -193,6 +194,7 @@ function PageTenants({ rooms, setRooms, addActivity, setToast }) {
               style={{ margin: '20px 0 16px' }}
             />
             {drawerTab === 'profile'  && <TabProfile  t={active} />}
+            {drawerTab === 'portal'   && <TabPortal   t={active} setToast={setToast} addActivity={addActivity} apiFetch={apiFetch} />}
             {drawerTab === 'contract' && <TabContract t={active} setToast={setToast} addActivity={addActivity} />}
             {drawerTab === 'bills'    && <TabBills    t={active} />}
             {drawerTab === 'notes'    && <TabNotes    t={active} setRooms={setRooms} setToast={setToast} addActivity={addActivity} />}
@@ -302,7 +304,9 @@ function AddTenantModal({ open, onClose, rooms, setRooms, busy, setBusy, addActi
       setToast && setToast({ kind: 'success', message: `เพิ่มผู้เช่า ${fullName} เรียบร้อย` });
       onClose && onClose();
     } catch (err) {
-      setToast && setToast({ kind: 'error', message: err.message });
+      window.toastError
+        ? window.toastError(setToast, err, { action: 'เพิ่มผู้เช่า' })
+        : setToast && setToast({ kind: 'danger', message: err.message });
     } finally {
       setBusy(false);
     }
@@ -407,6 +411,280 @@ function TabProfile({ t }) {
         { label: 'คะแนนเครดิต', value: t.score },
       ]}
     />
+  );
+}
+
+// === TabPortal ===========================================================
+// Consolidates post-onboarding setup that the booking-approval flow leaves
+// undone:
+//   1) Set/reset PIN — required for /tenant portal login
+//   2) Issue LINE binding code — required for LINE notifications
+//
+// Why this lives on the tenants page (not bookings):
+//   - mirrorRoomsToTenants() in server.js auto-creates a tenants table row
+//     when admin saves the rooms blob, so by the time this tab renders the
+//     tenant_id is resolvable by phone.
+//   - The flow is the same for "approved booking → new tenant" AND for
+//     "existing tenant lost their PIN" — one path, one screen.
+//
+// Lookup is by phone because the rooms-blob view doesn't carry tenant_id;
+// we hit GET /api/tenants?q=<phone> on mount to find the row, then route
+// PIN updates through PUT /api/tenants/:id and binding through
+// /api/admin/line-bindings/tenants/:id.
+function TabPortal({ t, setToast, addActivity, apiFetch }) {
+  const C = window.ADMIN_C;
+  const { Card, Btn, Pill } = window;
+  const [tenantRow, setTenantRow] = React.useState(null);   // null=loading
+  const [tenantErr, setTenantErr] = React.useState(null);
+  const [binding, setBinding] = React.useState(null);
+  const [bindingErr, setBindingErr] = React.useState(null);
+  const [pinDraft, setPinDraft] = React.useState('');
+  const [pinBusy, setPinBusy] = React.useState(false);
+  const [bindBusy, setBindBusy] = React.useState(false);
+
+  async function load() {
+    setTenantErr(null);
+    setBindingErr(null);
+    try {
+      // Search by phone — server's tenants list endpoint accepts ?q=<text>
+      // and matches across full_name / phone / email. Using the phone here
+      // because it's the most uniquely-matching field for a single person.
+      const cleanPhone = String(t.phone || '').replace(/[\s-]/g, '');
+      if (!cleanPhone) {
+        setTenantErr(new Error('ไม่มีเบอร์โทรในระบบ — เพิ่มเบอร์ให้ผู้เช่าก่อน'));
+        return;
+      }
+      const r = await fetch(`/api/tenants?q=${encodeURIComponent(cleanPhone)}`,
+        { credentials: 'same-origin' });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      // Prefer the tenant whose room_id matches t.roomId (handles
+      // shared-phone households where two tenants share a number).
+      const list = Array.isArray(d.tenants) ? d.tenants : [];
+      const exact = list.find((row) => row.current_room_id === t.roomId) || list[0];
+      if (!exact) {
+        setTenantErr(new Error('ยังไม่มี tenant row สำหรับเบอร์นี้ — บันทึกห้องก่อนเพื่อให้ระบบสร้างให้อัตโนมัติ'));
+        return;
+      }
+      setTenantRow(exact);
+      // Now fetch binding status — this endpoint already returns full state
+      // (pending code / bound user / blocked) in one call.
+      const r2 = await fetch(`/api/admin/line-bindings/tenants/${exact.id}`,
+        { credentials: 'same-origin' });
+      if (r2.ok) {
+        const d2 = await r2.json();
+        setBinding(d2);
+      } else if (r2.status !== 404) {
+        const d2 = await r2.json().catch(() => ({}));
+        setBindingErr(new Error(d2.error || `HTTP ${r2.status}`));
+      }
+    } catch (err) {
+      setTenantErr(err);
+    }
+  }
+  React.useEffect(() => { load(); /* eslint-disable-next-line */ }, [t.roomId, t.phone]);
+
+  // === PIN actions ======================================================
+  async function setPin() {
+    const pin = pinDraft.trim();
+    if (!/^\d{4,8}$/.test(pin)) {
+      setToast && setToast({
+        kind: 'warning',
+        message: { title: 'รูปแบบ PIN ไม่ถูกต้อง', description: 'ต้องเป็นตัวเลข 4-8 หลัก' },
+      });
+      return;
+    }
+    setPinBusy(true);
+    try {
+      const r = await apiFetch(`/api/tenants/${tenantRow.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ pin }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw Object.assign(new Error(d.error || `HTTP ${r.status}`),
+        { status: r.status, code: d.code, issues: d.issues });
+      setToast && setToast({
+        kind: 'success',
+        message: { title: '✅ บันทึก PIN แล้ว',
+          description: `แจ้งให้ผู้เช่าใช้ PIN นี้ login ที่ /tenant ครั้งแรก แล้วเปลี่ยนเอง` },
+      });
+      addActivity && addActivity({
+        icon: '🔑',
+        text: `ตั้ง PIN ให้ ${t.name} (ห้อง ${t.roomId})`,
+        type: 'tenant',
+      });
+      setPinDraft('');
+      load();
+    } catch (err) {
+      window.toastError
+        ? window.toastError(setToast, err, { action: 'ตั้ง PIN' })
+        : setToast && setToast({ kind: 'danger', message: err.message });
+    } finally {
+      setPinBusy(false);
+    }
+  }
+
+  function generateRandomPin() {
+    // 6-digit, avoiding the trivial patterns the server rejects (1234, 0000,
+    // 1111, sequential, repeating). Loop until we land on a good one.
+    const TRIVIAL = new Set(['000000', '111111', '222222', '333333', '444444',
+      '555555', '666666', '777777', '888888', '999999', '123456', '654321']);
+    for (let i = 0; i < 50; i++) {
+      const n = Math.floor(Math.random() * 1_000_000).toString().padStart(6, '0');
+      if (!TRIVIAL.has(n)) return n;
+    }
+    return '472938';   // hard-coded fallback — should be statistically unreachable
+  }
+
+  // === LINE binding actions ============================================
+  async function issueBinding() {
+    setBindBusy(true);
+    try {
+      const r = await apiFetch(`/api/admin/line-bindings/tenants/${tenantRow.id}`, {
+        method: 'POST',
+        body: JSON.stringify({ ttlDays: 7 }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw Object.assign(new Error(d.error || `HTTP ${r.status}`),
+        { status: r.status, code: d.code });
+      setToast && setToast({
+        kind: 'success',
+        message: { title: `✅ ออกรหัสแล้ว: ${d.code}`,
+          description: 'ผู้เช่าต้อง add OA + ส่งรหัสในแชต' },
+      });
+      addActivity && addActivity({
+        icon: '🔗',
+        text: `ออกรหัสผูก LINE ให้ ${t.name}`,
+        type: 'tenant',
+      });
+      load();
+    } catch (err) {
+      window.toastError
+        ? window.toastError(setToast, err, { action: 'ออกรหัสผูก LINE' })
+        : setToast && setToast({ kind: 'danger', message: err.message });
+    } finally {
+      setBindBusy(false);
+    }
+  }
+
+  // === Render ==========================================================
+  if (tenantErr) {
+    return (
+      <Card style={{ padding: 16, background: C.warningSoft || '#fbf1de', color: C.ink2 }}>
+        <div style={{ fontSize: 13.5, lineHeight: 1.6 }}>
+          ⚠️ {tenantErr.message}
+        </div>
+        {tenantErr.message.includes('สร้าง') && (
+          <div style={{ fontSize: 12.5, marginTop: 8, color: C.muted }}>
+            หลังจากบันทึกข้อมูลห้องในหน้า "ห้องพัก" — ระบบจะ auto-mirror ผู้เช่านี้เข้า tenants table แล้วเปิดหน้านี้อีกครั้ง
+          </div>
+        )}
+      </Card>
+    );
+  }
+  if (!tenantRow) {
+    return <div style={{ padding: 16, color: C.muted }}>กำลังโหลดข้อมูล portal…</div>;
+  }
+
+  const pinSet = !!tenantRow.pin_hash;     // server doesn't return hash; we use a presence flag if we ever add one
+  // Note: maskTenantOut() strips pin_hash, so tenantRow.pin_hash is always
+  // undefined here. We display "ไม่ทราบสถานะ" with a hint instead — the
+  // common case is "admin set it manually" or "PIN never set yet".
+  const bindingStatus = binding && binding.bound
+    ? { label: `ผูก LINE แล้ว (ผ่าน ${binding.bound.oa_name || 'OA'})`, color: C.success }
+    : binding && binding.pending
+      ? { label: `รอผูก — รหัส ${binding.pending.code}`, color: C.warning }
+      : { label: 'ยังไม่ผูก LINE', color: C.muted };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      {/* Status overview */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+        <Card style={{ padding: 14 }}>
+          <div style={{ fontSize: 11, color: C.muted, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 6 }}>
+            Tenant Portal Login
+          </div>
+          <div style={{ fontSize: 13.5, color: C.ink, lineHeight: 1.5 }}>
+            เบอร์ <code style={{ background: 'rgba(0,0,0,0.05)', padding: '1px 5px', borderRadius: 3 }}>{tenantRow.phone}</code> + PIN
+          </div>
+          <div style={{ fontSize: 11.5, color: C.muted, marginTop: 4 }}>
+            {pinSet ? '✅ PIN ตั้งไว้แล้ว' : 'ℹ️ ตั้ง PIN ด้านล่างเพื่อให้ผู้เช่า login ได้'}
+          </div>
+        </Card>
+        <Card style={{ padding: 14 }}>
+          <div style={{ fontSize: 11, color: C.muted, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 6 }}>
+            LINE Binding
+          </div>
+          <div style={{ fontSize: 13.5, color: bindingStatus.color, fontWeight: 600 }}>
+            {bindingStatus.label}
+          </div>
+          {bindingErr && (
+            <div style={{ fontSize: 11.5, color: C.danger, marginTop: 4 }}>
+              โหลดสถานะไม่สำเร็จ: {bindingErr.message}
+            </div>
+          )}
+        </Card>
+      </div>
+
+      {/* PIN management */}
+      <Card style={{ padding: 16 }}>
+        <div style={{ fontFamily: 'Sora, sans-serif', fontSize: 14, fontWeight: 600, marginBottom: 8 }}>
+          🔑 ตั้ง / รีเซ็ต PIN
+        </div>
+        <div style={{ fontSize: 12.5, color: C.muted, lineHeight: 1.6, marginBottom: 12 }}>
+          PIN เป็นตัวเลข 4-8 หลัก · ห้ามใช้รูปแบบที่คาดเดาง่าย (1234, 0000, 1111)<br/>
+          แนะนำให้ผู้เช่าเปลี่ยนเองหลัง login ครั้งแรก
+        </div>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <input
+            type="text"
+            inputMode="numeric"
+            pattern="\d{4,8}"
+            value={pinDraft}
+            onChange={(e) => setPinDraft(e.target.value.replace(/[^0-9]/g, '').slice(0, 8))}
+            placeholder="กรอก PIN ใหม่"
+            style={{
+              flex: '1 1 200px', minWidth: 160,
+              padding: '8px 12px', borderRadius: 7,
+              border: '1px solid ' + C.border, background: C.bg, color: C.ink,
+              fontSize: 14, fontFamily: 'JetBrains Mono, monospace', letterSpacing: '0.15em',
+            }}
+          />
+          <Btn variant="ghost" size="sm" onClick={() => setPinDraft(generateRandomPin())}>
+            🎲 สุ่ม
+          </Btn>
+          <Btn variant="primary" disabled={pinBusy || !pinDraft} onClick={setPin}>
+            {pinBusy ? 'กำลังบันทึก…' : 'บันทึก PIN'}
+          </Btn>
+        </div>
+      </Card>
+
+      {/* LINE binding management */}
+      <Card style={{ padding: 16 }}>
+        <div style={{ fontFamily: 'Sora, sans-serif', fontSize: 14, fontWeight: 600, marginBottom: 8 }}>
+          🔗 ผูกบัญชี LINE
+        </div>
+        <div style={{ fontSize: 12.5, color: C.muted, lineHeight: 1.6, marginBottom: 12 }}>
+          {binding && binding.bound
+            ? 'ผูกแล้ว — ระบบส่งบิล/แจ้งเตือนผ่าน LINE OA นี้'
+            : binding && binding.pending
+              ? `รหัสค้างอยู่: ${binding.pending.code} (หมดอายุ ${new Date(binding.pending.expires_at).toLocaleDateString('th-TH')})`
+              : 'ออกรหัส 8 หลัก ให้ผู้เช่า — add OA + ส่งรหัสในแชต = ผูกอัตโนมัติ'}
+        </div>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <Btn variant={binding && binding.bound ? 'secondary' : 'primary'}
+               disabled={bindBusy} onClick={issueBinding}>
+            {bindBusy ? 'กำลังออกรหัส…'
+              : binding && binding.bound ? 'ออกรหัสใหม่ (เปลี่ยน OA)'
+              : binding && binding.pending ? 'ออกรหัสใหม่ (ยกเลิกอันเก่า)'
+              : 'ออกรหัสผูก LINE'}
+          </Btn>
+          <Btn variant="ghost" onClick={() => { window.location.hash = '#line-bindings'; }}>
+            จัดการเต็มในหน้า "ผูก LINE" →
+          </Btn>
+        </div>
+      </Card>
+    </div>
   );
 }
 

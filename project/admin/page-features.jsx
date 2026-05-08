@@ -111,11 +111,96 @@ function PageFeatures({ setToast }) {
     );
   };
 
+  // Compute cross-feature dependency warnings client-side. Mirrors the
+  // server's checkFeatureDependencies() in healthCheck.js — kept here too so
+  // the admin sees the warning IMMEDIATELY after toggling a flag, not on the
+  // next /admin#health refresh.
+  const dependencyWarnings = useMemo(() => {
+    if (!features) return [];
+    const w = [];
+    if (features.slipUpload?.enabled && !features.tenantPortal?.enabled) {
+      w.push({
+        flag: 'slipUpload',
+        msg: 'slipUpload เปิด แต่ tenantPortal ปิด — ผู้เช่าจะ login ไม่ได้ ทำให้ upload สลิปไม่ได้',
+        fix: 'เปิด tenantPortal ด้านบน',
+      });
+    }
+    if (features.accessControl?.enabled && features.accessControl?.requirePaymentForCard
+        && !features.tenantPortal?.enabled) {
+      w.push({
+        flag: 'accessControl',
+        msg: 'accessControl.requirePaymentForCard ON แต่ tenantPortal ปิด — บัตรไม่ถูก revoke เพราะ bills ไม่มี tenant_id',
+        fix: 'เปิด tenantPortal เพื่อให้ระบบสร้าง tenant rows',
+      });
+    }
+    if (features.meterIot?.enabled && features.meterIot?.mode === 'simulator') {
+      w.push({
+        flag: 'meterIot',
+        msg: 'mode = simulator — กำลังสร้างค่ามิเตอร์เทียม (block ใน NODE_ENV=production)',
+        fix: 'เปลี่ยนเป็น manual หรือ mqtt ก่อน deploy production',
+      });
+    }
+    if (features.recurringCharges?.enabled && !features.billAutoGenerate?.enabled) {
+      w.push({
+        flag: 'recurringCharges',
+        msg: 'recurringCharges เปิด แต่ billAutoGenerate ปิด — ต้องสร้างบิลด้วยมือถึงจะรวม recurring',
+        fix: 'เปิด billAutoGenerate ถ้าต้องการให้รวมอัตโนมัติทุกเดือน',
+      });
+    }
+    if (features.errorTracking?.enabled) {
+      // We can't read secrets from frontend, so just remind the operator.
+      w.push({
+        flag: 'errorTracking',
+        msg: 'errorTracking ON — ต้องตั้ง SENTRY_DSN ที่หน้า "ตั้งค่า API/Keys" ด้วย',
+        fix: 'ดูเพิ่มที่ /admin#secrets',
+        soft: true,
+      });
+    }
+    if (features.email?.enabled) {
+      w.push({
+        flag: 'email',
+        msg: 'email channel ON — ต้องตั้ง SMTP_HOST/USER/PASS ด้วย',
+        fix: 'ดูเพิ่มที่ /admin#secrets',
+        soft: true,
+      });
+    }
+    if (features.autoBackup?.enabled) {
+      w.push({
+        flag: 'autoBackup',
+        msg: 'autoBackup ON — ถ้าไม่ตั้ง R2 credentials backup จะอยู่บนดิสก์ container (หายเมื่อ redeploy)',
+        fix: 'ดูเพิ่มที่ /admin#secrets',
+        soft: true,
+      });
+    }
+    return w;
+  }, [features]);
+
   return (
     <PageContainer>
       <PageHeader title="ฟีเจอร์ระบบ"
         subtitle="เปิด/ปิดฟีเจอร์ของระบบ — รายการที่ปิดจะถูกบล็อกที่ฝั่ง server (503)" />
       {err ? <Card style={{ color: C.danger }}>{err}</Card> : null}
+
+      {dependencyWarnings.length > 0 && (
+        <Card style={{
+          background: C.warningSoft || '#fbf1de',
+          borderLeft: `4px solid ${C.warning || '#c98a2b'}`,
+          marginBottom: 12,
+        }}>
+          <div style={{ fontFamily: 'Sora', fontSize: 14, fontWeight: 600, marginBottom: 6 }}>
+            ⚠️ ความสัมพันธ์ของ flag ที่ต้องตรวจ ({dependencyWarnings.length})
+          </div>
+          <ul style={{ margin: 0, paddingLeft: 20, fontSize: 13, lineHeight: 1.7, color: C.ink2 }}>
+            {dependencyWarnings.map((w, i) => (
+              <li key={i} style={{ opacity: w.soft ? 0.8 : 1 }}>
+                <code style={{ background: 'rgba(0,0,0,0.06)', padding: '1px 5px', borderRadius: 3, fontSize: 11.5 }}>{w.flag}</code>{' '}
+                {w.msg}
+                <span style={{ color: C.muted, fontSize: 12, marginLeft: 6 }}>→ {w.fix}</span>
+              </li>
+            ))}
+          </ul>
+        </Card>
+      )}
 
       <Card>
         <SectionHeading>ฝั่งผู้เช่า</SectionHeading>
