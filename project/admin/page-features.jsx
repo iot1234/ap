@@ -57,64 +57,16 @@ function PageFeatures({ setToast }) {
     save({ [key]: { [field]: value } });
   }
 
-  if (!features) {
-    return (
-      <PageContainer>
-        <PageHeader title="ฟีเจอร์ระบบ" subtitle="เปิด/ปิดฟีเจอร์ของระบบ" />
-        <Card>{err || 'กำลังโหลด…'}</Card>
-      </PageContainer>
-    );
-  }
-
-  // Render row helper
-  const Row = ({ id, title, desc, children }) => {
-    const f = features[id] || {};
-    return (
-      <div style={{
-        display: 'grid', gridTemplateColumns: '1fr auto', gap: 16,
-        padding: '14px 0', borderBottom: '1px solid ' + C.border, alignItems: 'flex-start',
-      }}>
-        <div>
-          <div style={{ fontWeight: 600, fontSize: 14.5, marginBottom: 4 }}>{title}</div>
-          <div style={{ color: C.muted, fontSize: 13, marginBottom: 8 }}>{desc}</div>
-          {f.enabled && children ? (
-            <div style={{ marginTop: 8, display: 'flex', flexWrap: 'wrap', gap: 12 }}>
-              {children}
-            </div>
-          ) : null}
-        </div>
-        <Toggle on={!!f.enabled} disabled={busy} onChange={() => toggle(id)} />
-      </div>
-    );
-  };
-
-  const Field = ({ id, field, label, type = 'text', step }) => {
-    const v = (features[id] || {})[field];
-    return (
-      <label style={{ fontSize: 12.5, color: C.muted, display: 'flex', flexDirection: 'column' }}>
-        {label}
-        <input
-          type={type} step={step}
-          defaultValue={v ?? ''}
-          onBlur={(e) => {
-            let next = e.target.value;
-            if (type === 'number') next = next === '' ? null : Number(next);
-            if (next !== v) setField(id, field, next);
-          }}
-          style={{
-            marginTop: 4, padding: '6px 10px', borderRadius: 6,
-            border: '1px solid ' + C.border, background: C.bg, color: C.ink,
-            width: type === 'number' ? 100 : 220, fontSize: 13,
-          }}
-        />
-      </label>
-    );
-  };
-
   // Compute cross-feature dependency warnings client-side. Mirrors the
   // server's checkFeatureDependencies() in healthCheck.js — kept here too so
   // the admin sees the warning IMMEDIATELY after toggling a flag, not on the
   // next /admin#health refresh.
+  //
+  // CRITICAL: this useMemo MUST stay above any early `return` — React's
+  // Rules of Hooks require the same hook order across every render, and the
+  // `if (!features)` placeholder return below otherwise skipped this hook
+  // on the first render and triggered Minified React error #310 the moment
+  // /api/admin/features resolved.
   const dependencyWarnings = useMemo(() => {
     if (!features) return [];
     const w = [];
@@ -174,6 +126,60 @@ function PageFeatures({ setToast }) {
     }
     return w;
   }, [features]);
+
+  if (!features) {
+    return (
+      <PageContainer>
+        <PageHeader title="ฟีเจอร์ระบบ" subtitle="เปิด/ปิดฟีเจอร์ของระบบ" />
+        <Card>{err || 'กำลังโหลด…'}</Card>
+      </PageContainer>
+    );
+  }
+
+  // Render row helper
+  const Row = ({ id, title, desc, children }) => {
+    const f = features[id] || {};
+    return (
+      <div style={{
+        display: 'grid', gridTemplateColumns: '1fr auto', gap: 16,
+        padding: '14px 0', borderBottom: '1px solid ' + C.border, alignItems: 'flex-start',
+      }}>
+        <div>
+          <div style={{ fontWeight: 600, fontSize: 14.5, marginBottom: 4 }}>{title}</div>
+          <div style={{ color: C.muted, fontSize: 13, marginBottom: 8 }}>{desc}</div>
+          {f.enabled && children ? (
+            <div style={{ marginTop: 8, display: 'flex', flexWrap: 'wrap', gap: 12 }}>
+              {children}
+            </div>
+          ) : null}
+        </div>
+        <Toggle on={!!f.enabled} disabled={busy} onChange={() => toggle(id)} />
+      </div>
+    );
+  };
+
+  const Field = ({ id, field, label, type = 'text', step }) => {
+    const v = (features[id] || {})[field];
+    return (
+      <label style={{ fontSize: 12.5, color: C.muted, display: 'flex', flexDirection: 'column' }}>
+        {label}
+        <input
+          type={type} step={step}
+          defaultValue={v ?? ''}
+          onBlur={(e) => {
+            let next = e.target.value;
+            if (type === 'number') next = next === '' ? null : Number(next);
+            if (next !== v) setField(id, field, next);
+          }}
+          style={{
+            marginTop: 4, padding: '6px 10px', borderRadius: 6,
+            border: '1px solid ' + C.border, background: C.bg, color: C.ink,
+            width: type === 'number' ? 100 : 220, fontSize: 13,
+          }}
+        />
+      </label>
+    );
+  };
 
   return (
     <PageContainer>

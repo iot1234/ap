@@ -26,15 +26,13 @@ function PageProductionReadiness({ setToast }) {
   const PageContainer = window.PageContainer;
   const PageHeader = window.PageHeader;
 
-  // Defensive guard mirroring page-payments.jsx pattern — if any of the
-  // foundational components didn't load (CDN slow, blocked script), render a
-  // graceful placeholder instead of an "Element type is invalid" stack.
-  if (!C || !Card || !Btn || !PageContainer || !PageHeader) {
-    return React.createElement('div', {
-      style: { padding: 32, fontSize: 14, color: '#5b4f40', fontFamily: 'inherit' },
-    }, 'กำลังเตรียมหน้าตรวจความพร้อม...');
-  }
-
+  // CRITICAL: every hook (useState / useEffect / useMemo) MUST come BEFORE
+  // any early `return`. React's Rules of Hooks require an identical hook
+  // order across every render — a guard like `if (!Card) return <stub>`
+  // before useState would skip 3+ hooks on the first render and throw
+  // Minified React error #310 the moment the globals load. Same pattern was
+  // shipped in page-features.jsx and broke /admin#features. The defensive
+  // missing-globals guard now lives BELOW the hooks (line ~85).
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -61,7 +59,7 @@ function PageProductionReadiness({ setToast }) {
       setLoading(false);
     }
   }
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, []);
 
   // Severity → visual mapping. Matches the kind aliases the toast component
   // accepts so the same color words are used throughout the admin shell.
@@ -82,6 +80,18 @@ function PageProductionReadiness({ setToast }) {
     }
     return out;
   }, [data]);
+
+  // ===== Early returns are SAFE below this line — every hook above has
+  // already been called in the same order on every render path. =====
+
+  // Defensive guard mirroring page-payments.jsx pattern — if any of the
+  // foundational components didn't load (CDN slow, blocked script), render
+  // a graceful placeholder instead of an "Element type is invalid" stack.
+  if (!C || !Card || !Btn || !PageContainer || !PageHeader) {
+    return React.createElement('div', {
+      style: { padding: 32, fontSize: 14, color: '#5b4f40', fontFamily: 'inherit' },
+    }, 'กำลังเตรียมหน้าตรวจความพร้อม...');
+  }
 
   // Permission failure → friendly explanation instead of a generic error.
   if (error && error.status === 403) {
