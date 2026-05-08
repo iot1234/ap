@@ -127,14 +127,26 @@ test('IP limiter blocks at threshold even across mixed IPs', () => {
   assert.equal(nextCount, 2);
 });
 
-test('rooms router: bootstrap creates the rooms_v2 table', async () => {
+test('rooms_v2 schema lives in db/migrate.js (single source of truth)', async () => {
+  // rooms_v2 used to be created by routes/rooms.bootstrap(); it's now in
+  // db/migrate.js so any caller that runs migrations gets the schema, even
+  // when the rooms router isn't mounted.
   const calls = [];
   const pool = {
     query: async (sql) => { calls.push(sql); return { rows: [] }; },
   };
+  const dbMigrate = require('../db/migrate');
+  // skip the bcrypt/admin bootstrap path by passing an empty password
+  await dbMigrate.migrate(pool, { adminPassword: '' });
+  assert.ok(calls.some((s) => s.includes('CREATE TABLE IF NOT EXISTS rooms_v2')),
+    'migrate.js should create rooms_v2');
+
+  // routes/rooms.bootstrap is kept as a no-op for backwards-compatibility
+  // with routes/index.js's bootstrap collection — confirm it exists and
+  // doesn't issue any schema statements of its own.
   const buildRouter = require('../routes/rooms');
   const ctx = {
-    pool,
+    pool: { query: async () => { throw new Error('bootstrap should not call pool.query'); } },
     requireAuth: (req, res, next) => next(),
     requireRole: () => (req, res, next) => next(),
     sameOrigin: (req, res, next) => next(),
@@ -142,8 +154,8 @@ test('rooms router: bootstrap creates the rooms_v2 table', async () => {
     audit: () => Promise.resolve(),
   };
   const r = buildRouter(ctx);
-  await r.bootstrap();
-  assert.ok(calls.some((s) => s.includes('CREATE TABLE IF NOT EXISTS rooms_v2')));
+  assert.equal(typeof r.bootstrap, 'function', 'bootstrap export preserved');
+  await r.bootstrap();   // must not throw — no-op
 });
 
 test('billing.buildBill respects feature flags', () => {

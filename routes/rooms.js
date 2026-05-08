@@ -13,37 +13,12 @@ module.exports = function buildRoomsRouter(ctx) {
   const r = express.Router();
 
   // === Schema ============================================================
-  // Migration is idempotent and hosted in db/migrate.js so it runs at boot.
-  // We add the rooms table via this router's bootstrap so routes/* modules
-  // remain self-contained when integrators want to opt in/out per feature.
-  r.bootstrap = async () => {
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS rooms_v2 (
-        id            BIGSERIAL PRIMARY KEY,
-        room_code     TEXT UNIQUE NOT NULL,
-        floor         INT NOT NULL,
-        room_no       INT NOT NULL,
-        room_type     TEXT NOT NULL,
-        status        TEXT NOT NULL DEFAULT 'vacant',
-        rent_price    NUMERIC(10,2) NOT NULL,
-        deposit_price NUMERIC(10,2) NOT NULL DEFAULT 0,
-        wifi_fee      NUMERIC(10,2) DEFAULT 0,
-        view_type     TEXT,
-        has_balcony   BOOLEAN DEFAULT FALSE,
-        has_parking   BOOLEAN DEFAULT FALSE,
-        has_kitchen   BOOLEAN DEFAULT FALSE,
-        has_ac        BOOLEAN DEFAULT TRUE,
-        size_sqm      NUMERIC(6,2),
-        bed_count     INT DEFAULT 1,
-        notes         TEXT,
-        created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        deleted_at    TIMESTAMPTZ
-      );
-      CREATE INDEX IF NOT EXISTS idx_rooms_v2_floor ON rooms_v2(floor) WHERE deleted_at IS NULL;
-      CREATE INDEX IF NOT EXISTS idx_rooms_v2_status ON rooms_v2(status) WHERE deleted_at IS NULL;
-    `);
-  };
+  // rooms_v2 is now created by db/migrate.js (single source of truth) so
+  // every code path that runs migrations gets the schema, not just paths
+  // that mount this router. Bootstrap kept as a no-op alias for backwards
+  // compatibility with routes/index.js's bootstrap collection + the
+  // existing integration test that pins this method's existence.
+  r.bootstrap = async () => { /* no-op: schema lives in db/migrate.js */ };
 
   function makeRoomCode(floor, roomNo) {
     return `${floor}${String(roomNo).padStart(2, '0')}`;

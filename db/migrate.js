@@ -489,6 +489,40 @@ async function migrate(pool, opts = {}) {
     );
     CREATE INDEX IF NOT EXISTS idx_bookings_status ON bookings(status);
     CREATE INDEX IF NOT EXISTS idx_bookings_created ON bookings(created_at DESC);
+
+    -- rooms_v2: relational rooms table that replaces baankarn_rooms_v1 JSONB
+    -- for new code paths. Previously created lazily by routes/rooms.bootstrap()
+    -- — moved here so any caller that runs migrate.js (tests, manual scripts)
+    -- gets the schema without needing to mount the rooms router.
+    CREATE TABLE IF NOT EXISTS rooms_v2 (
+      id            BIGSERIAL PRIMARY KEY,
+      room_code     TEXT UNIQUE NOT NULL,
+      floor         INT NOT NULL,
+      room_no       INT NOT NULL,
+      room_type     TEXT NOT NULL,
+      status        TEXT NOT NULL DEFAULT 'vacant',
+      rent_price    NUMERIC(10,2) NOT NULL,
+      deposit_price NUMERIC(10,2) NOT NULL DEFAULT 0,
+      wifi_fee      NUMERIC(10,2) DEFAULT 0,
+      view_type     TEXT,
+      has_balcony   BOOLEAN DEFAULT FALSE,
+      has_parking   BOOLEAN DEFAULT FALSE,
+      has_kitchen   BOOLEAN DEFAULT FALSE,
+      has_ac        BOOLEAN DEFAULT TRUE,
+      size_sqm      NUMERIC(6,2),
+      bed_count     INT DEFAULT 1,
+      notes         TEXT,
+      created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      deleted_at    TIMESTAMPTZ
+    );
+    CREATE INDEX IF NOT EXISTS idx_rooms_v2_floor ON rooms_v2(floor) WHERE deleted_at IS NULL;
+    CREATE INDEX IF NOT EXISTS idx_rooms_v2_status ON rooms_v2(status) WHERE deleted_at IS NULL;
+
+    -- payments(tenant_id) is a frequent filter (server.js: tenant payments
+    -- list at GET /api/tenant/payments). Add index to keep the query off a
+    -- seq scan as the table grows.
+    CREATE INDEX IF NOT EXISTS idx_payments_tenant ON payments(tenant_id);
   `);
 
   // === One-time role backfill =============================================
@@ -520,8 +554,12 @@ async function migrate(pool, opts = {}) {
       console.log(`[db] coerced ${upd2.rowCount} user(s) with unknown role to 'staff'`);
     }
     // Ensure at least one owner exists so the operator isn't locked out.
+    // Defensive `?.n ?? 0` because some test stubs return rows: [] for COUNT
+    // queries — without the guard the catch below would log a confusing
+    // "Cannot read properties of undefined" warning during boot.
     const ownersQ = await pool.query(`SELECT COUNT(*)::int n FROM auth_users WHERE role='owner'`);
-    if (ownersQ.rows[0].n === 0) {
+    const ownerCount = ownersQ.rows[0]?.n ?? 0;
+    if (ownerCount === 0) {
       const promoted = await pool.query(
         `UPDATE auth_users SET role='owner'
            WHERE id = (SELECT id FROM auth_users ORDER BY id ASC LIMIT 1)

@@ -63,6 +63,13 @@ const DEFAULTS = Object.freeze({
   sms: {
     enabled: false,
     provider: 'thsms',           // thsms | twilio
+    // SMS provider SDK is NOT bundled — neither `twilio` nor any thsms client
+    // is in package.json. Toggling this on alone changes nothing visible:
+    // services/sms.isConfigured() returns false until an operator runs
+    // `npm i twilio` (or installs a thsms client) and supplies credentials
+    // via the secrets registry. Surfaced in the admin Features page as
+    // "needs operator install" so this isn't surprising.
+    requiresOperatorSetup: true,
   },
   i18n: {
     enabled: true,
@@ -70,7 +77,12 @@ const DEFAULTS = Object.freeze({
     available: ['th', 'en'],
   },
   darkMode: {
-    enabled: true,               // tenant + admin can toggle
+    enabled: true,
+    // Currently consumed by the tenant portal (tenant.jsx) only — admin
+    // shell does not implement a dark theme, so toggling this OFF only
+    // hides the tenant-side switch. Marked here so the Features page can
+    // surface scope honestly.
+    scope: 'tenant',
   },
   softDelete: {
     enabled: true,               // delete keeps row + sets deleted_at

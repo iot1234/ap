@@ -201,7 +201,7 @@ function PageFeatures({ setToast }) {
         </Row>
         <Row id="sms"
           title="SMS (สำรองช่องทาง LINE/email)"
-          desc="ต้องตั้ง provider credentials ในหน้า Secrets ก่อน">
+          desc="⚠ ต้องติดตั้ง SDK ผู้ให้บริการเองก่อน (npm i twilio) แล้วตั้ง credentials ในหน้า Secrets — เปิดอย่างเดียวจะไม่ส่งข้อความ">
           <SelectField id="sms" field="provider" label="ผู้ให้บริการ"
             features={features} setField={setField}
             options={[['thsms', 'thsms.com'], ['twilio', 'Twilio']]} />
@@ -212,7 +212,7 @@ function PageFeatures({ setToast }) {
         <SectionHeading>UX</SectionHeading>
         <Row id="darkMode"
           title="โหมดมืด"
-          desc="ผู้ใช้สามารถสลับ theme ได้" />
+          desc="ใช้ในพอร์ทัลผู้เช่า (/tenant) เท่านั้น — admin console ใช้ธีมเดียว" />
         <Row id="i18n"
           title="หลายภาษา (i18n)"
           desc="เปลี่ยนภาษาไทย/อังกฤษ ในพอร์ทัลผู้เช่า">
