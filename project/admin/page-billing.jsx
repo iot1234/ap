@@ -195,28 +195,60 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
   const handleSendReminder = async (id) => {
     const b = bills.find((x) => x.id === id);
     if (!b) return;
-    const apiFetch = window.apiFetch || ((u, o) => fetch(u, { credentials: 'same-origin', ...o }));
+    // Pre-flight reachability: see if THIS specific tenant can actually
+    // receive a notification. Without the check, admin clicks "ส่งเตือน"
+    // on a tenant with no LINE binding and no email — the notifier
+    // logs a "skipped" row and the admin thinks it was sent.
     try {
-      // Use apiCall (the new structured-error wrapper) so we get a proper
-      // ApiError on failure — toastError then translates server `code` like
-      // RATE_LIMIT / FORBIDDEN / NOT_FOUND into actionable Thai messages
-      // instead of the previous "ส่งเตือนไม่สำเร็จ: HTTP 403" stub.
-      const apiCall = window.apiCall;
-      try {
-        await apiCall('/api/notify/bill', {
-          method: 'POST',
-          body: JSON.stringify({
-            tenantName: b.tenant, roomId: b.roomId,
-            period: b.period, total: b.total, billNo: b.id,
-          }),
-        });
-        setToast && setToast({ kind: 'success', message: `ส่งเตือนบิล ${id} ทาง LINE แล้ว` });
-        addActivity && addActivity({ icon: '🔔', text: `ส่งเตือนชำระบิล ${id}`, type: 'system' });
-      } catch (err) {
-        window.toastError(setToast, err, { action: `ส่งเตือนบิล ${id}` });
+      const room = Object.values(rooms || {}).find((r) => r.id === b.roomId);
+      const phone = room?.tenant?.phone ? String(room.tenant.phone).replace(/[\s-]/g, '') : null;
+      let tenantRow = null;
+      if (phone) {
+        const r = await fetch(`/api/tenants?q=${encodeURIComponent(phone)}`, { credentials: 'same-origin' });
+        if (r.ok) {
+          const j = await r.json();
+          tenantRow = (j.tenants || []).find((t) =>
+            String(t.phone || '').replace(/[\s-]/g, '') === phone
+          );
+        }
       }
-    } catch (e) {
-      window.toastError(setToast, e, { action: `ส่งเตือนบิล ${id}` });
+      const hasLine = !!tenantRow?.line_user_id;
+      const hasEmail = !!(tenantRow?.email || room?.tenant?.email);
+      if (!hasLine && !hasEmail) {
+        // Hard block — sending will silently drop. Suggest the fix path.
+        const ok = window.confirm(
+          `⚠ ผู้เช่าห้อง ${b.roomId} (${b.tenant}) ยังไม่มีช่องทางส่ง\n\n` +
+          `   ❌ ไม่ได้ผูก LINE\n` +
+          `   ❌ ไม่ใส่อีเมล\n\n` +
+          `กดยืนยันก็ส่งได้ — แต่ระบบจะ log "skipped: no channel" และข้อความจะไม่ถึงผู้เช่า\n\n` +
+          `📌 แนะนำ: ยกเลิก แล้วไป /admin#tenants → tab "Portal Access" ผูก LINE ก่อน\n\n` +
+          `ดำเนินการต่อ?`
+        );
+        if (!ok) return;
+      } else if (!hasLine && hasEmail) {
+        // Soft warn — email works but takes longer + spam folder risk
+        const ok = window.confirm(
+          `📧 ผู้เช่าห้อง ${b.roomId} ยังไม่ได้ผูก LINE — จะส่งทางอีเมลแทน\n\n` +
+          `อีเมลอาจไปอยู่ในกล่อง spam ได้ — แนะนำให้ผูก LINE เพื่อความเร็ว\n\n` +
+          `ส่งอีเมลต่อ?`
+        );
+        if (!ok) return;
+      }
+    } catch { /* fail-soft — pre-flight can't block on network error */ }
+
+    const apiCall = window.apiCall;
+    try {
+      await apiCall('/api/notify/bill', {
+        method: 'POST',
+        body: JSON.stringify({
+          tenantName: b.tenant, roomId: b.roomId,
+          period: b.period, total: b.total, billNo: b.id,
+        }),
+      });
+      setToast && setToast({ kind: 'success', message: `ส่งเตือนบิล ${id} ทาง LINE แล้ว` });
+      addActivity && addActivity({ icon: '🔔', text: `ส่งเตือนชำระบิล ${id}`, type: 'system' });
+    } catch (err) {
+      window.toastError(setToast, err, { action: `ส่งเตือนบิล ${id}` });
     }
   };
 
@@ -299,9 +331,14 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
       const now = new Date();
       const period = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
       const dueDay = Number(config.notify?.dueOnDay) || 7;
+      // Pass `force` when there were issues but admin confirmed the warning.
+      // The server has its own copy of the same checks (defence-in-depth)
+      // and will 412 unless we explicitly opt in. issues.length > 0 here
+      // means the client-side confirm modal showed warnings AND admin
+      // clicked OK — that's the signal to set force.
       const d = await apiCall('/api/bills/bulk-generate', {
         method: 'POST',
-        body: JSON.stringify({ period, dueDay }),
+        body: JSON.stringify({ period, dueDay, force: issues.length > 0 }),
       });
       addActivity && addActivity({ icon: '📋', text: `ออกบิลรอบ ${period}: ${d.made} ใบ (ข้าม ${d.skipped})`, type: 'billing' });
       setToast && setToast({

@@ -2481,13 +2481,21 @@ app.post('/api/tenant/payments', sameOrigin, csrfGuard, requireTenant, ensureSli
       autoVerifyAttempted = true;
       const ppTarget = require('./services/secrets').get('PROMPTPAY_TARGET');
       try {
-        verifyResult = await slipVerifier.verify(
+        // Use the fallback chain — tries every configured provider until
+        // one succeeds OR one issues a hard rejection (AMOUNT_MISMATCH,
+        // RECEIVER_MISMATCH, SLIPOK_REJECT, etc.). If all providers
+        // transient-fail (network timeout, parser glitch, 5xx), the result
+        // bubbles back with the last error and the upload endpoint
+        // demotes it to admin queue via TRANSIENT_CODES handling below.
+        verifyResult = await slipVerifier.verifyWithFallback(
           rawBuf,
           { amount, billId, promptpayTarget: ppTarget },
           req.features
         );
       } catch (err) {
-        verifyResult = { ok: false, error: err.message, code: 'VERIFIER_THREW' };
+        // Catch-all in case the fallback wrapper itself threw — shouldn't
+        // happen (each provider's catch is internal) but defensive.
+        verifyResult = { ok: false, error: err.message, code: 'VERIFIER_THREW', attempts: [] };
       }
     }
 
@@ -2567,6 +2575,11 @@ app.post('/api/tenant/payments', sameOrigin, csrfGuard, requireTenant, ensureSli
               receiver: verifyResult.receiver,
               transDate: verifyResult.transDate,
               error: verifyResult.error,
+              // Per-provider attempt trail (multi-provider fallback chain).
+              // Lets admin see "SlipOK was down so EasySlip handled this"
+              // or "Both providers rejected — fake slip suspected" in
+              // /admin#payments forensics.
+              attempts: verifyResult.attempts || [],
             }) : null,
             // For auto-verified rows we credit the provider as verifier so
             // admin can audit which slips were auto-approved vs hand-checked.

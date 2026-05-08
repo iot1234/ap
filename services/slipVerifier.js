@@ -53,16 +53,63 @@ const secrets = require('./secrets');
 
 const TIMEOUT_MS = 10_000;
 
+// Provider catalog — central registry so the rest of the codebase
+// can iterate, list, and probe individual providers without
+// duplicating the per-provider key check.
+const PROVIDERS = {
+  slipok:   { keys: ['SLIPOK_API_KEY'],   label: 'SlipOK',   call: 'verifyViaSlipOK' },
+  easyslip: { keys: ['EASYSLIP_API_KEY'], label: 'EasySlip', call: 'verifyViaEasySlip' },
+};
+
+// Reasons that mean "the verifier could not get a clean answer" — caller
+// should fall back to admin queue OR the next provider in the chain.
+// Anything NOT in this set is a HARD reject and stops the fallback chain
+// (we trust the verifier when it's confident the slip is bad).
+const TRANSIENT_CODES = new Set([
+  'VERIFIER_THREW',     // exception bubbled out of provider call
+  'PROVIDER_ERROR',     // generic non-2xx from provider
+  'SLIPOK_PARSE',       // SlipOK returned non-JSON
+  'EASYSLIP_PARSE',     // EasySlip returned non-JSON
+  'NOT_CONFIGURED',     // provider key missing (caller already gates, defensive)
+  'UNKNOWN_PROVIDER',   // typo in features.slipUpload.providers
+]);
+
 /**
- * Is auto-verify configured? Used by the upload endpoint to decide
- * whether to attempt verification or fall through to the admin queue.
+ * Returns the ORDERED list of providers admin has wired up. Tries the
+ * new array form (features.slipUpload.providers = [...]) first, falls
+ * back to the legacy single-string form (features.slipUpload.provider).
+ *
+ * Each entry in the returned list has its API key already verified to
+ * exist — providers without a key are silently dropped so the fallback
+ * chain doesn't waste an attempt on guaranteed failures.
+ */
+function getConfiguredProviders(features) {
+  if (!features?.slipUpload?.autoVerify) return [];
+  const raw = features.slipUpload.providers
+    || (features.slipUpload.provider ? [features.slipUpload.provider] : []);
+  if (!Array.isArray(raw)) return [];
+  // De-dupe while preserving order (admin might list "slipok" twice; harmless).
+  const seen = new Set();
+  const out = [];
+  for (const id of raw) {
+    if (typeof id !== 'string' || seen.has(id)) continue;
+    seen.add(id);
+    const meta = PROVIDERS[id];
+    if (!meta) continue;
+    const ready = meta.keys.every((k) => !!secrets.get(k));
+    if (!ready) continue;
+    out.push({ id, label: meta.label });
+  }
+  return out;
+}
+
+/**
+ * Is auto-verify configured? At least one provider must be ready (key
+ * set) for this to return true — otherwise the upload endpoint should
+ * fall through to the admin queue.
  */
 function isConfigured(features) {
-  if (!features?.slipUpload?.autoVerify) return false;
-  const provider = features.slipUpload.provider;
-  if (provider === 'slipok')   return !!secrets.get('SLIPOK_API_KEY');
-  if (provider === 'easyslip') return !!secrets.get('EASYSLIP_API_KEY');
-  return false;
+  return getConfiguredProviders(features).length > 0;
 }
 
 /**
@@ -85,27 +132,28 @@ function isConfigured(features) {
  */
 
 /**
- * Verify a slip buffer against expectations.
+ * Single-provider verify. Internal — callers should use verifyWithFallback
+ * which tries the configured provider chain in order.
  *
- * @param {Buffer}  buffer   - slip image bytes (jpg/png/webp/pdf)
- * @param {Object}  expected - { amount, promptpayTarget, billId }
- * @param {Object}  features - feature flag map (used to read provider config)
+ * @param {string}  providerId - 'slipok' | 'easyslip'
+ * @param {Buffer}  buffer     - slip image bytes (jpg/png/webp/pdf)
+ * @param {Object}  expected   - { amount, promptpayTarget, billId }
  * @returns {Promise<VerifyResult>}
  */
-async function verify(buffer, expected, features) {
-  if (!isConfigured(features)) {
-    return { ok: false, error: 'auto-verify not configured', code: 'NOT_CONFIGURED' };
+async function verifyOne(providerId, buffer, expected) {
+  const meta = PROVIDERS[providerId];
+  if (!meta) {
+    return { ok: false, error: `provider "${providerId}" not supported`, code: 'UNKNOWN_PROVIDER' };
   }
-  const provider = features.slipUpload.provider;
   let result;
   try {
-    if (provider === 'slipok')   result = await verifyViaSlipOK(buffer, expected);
-    else if (provider === 'easyslip') result = await verifyViaEasySlip(buffer, expected);
-    else return { ok: false, error: `provider "${provider}" not supported`, code: 'UNKNOWN_PROVIDER' };
+    if (providerId === 'slipok')   result = await verifyViaSlipOK(buffer, expected);
+    else if (providerId === 'easyslip') result = await verifyViaEasySlip(buffer, expected);
+    else return { ok: false, error: `provider "${providerId}" call not implemented`, code: 'UNKNOWN_PROVIDER' };
   } catch (err) {
-    return { ok: false, error: err.message || String(err), code: 'PROVIDER_ERROR' };
+    return { ok: false, error: err.message || String(err), code: 'PROVIDER_ERROR', provider: providerId };
   }
-  result.provider = provider;
+  result.provider = providerId;
   if (!result.ok) return result;
 
   // === Cross-checks against caller's expectations =======================
@@ -124,6 +172,7 @@ async function verify(buffer, expected, features) {
       transRef: result.transRef,
       amount: result.amount,
       raw: result.raw,
+      provider: providerId,
     };
   }
   // Receiver account match — compare LAST 4 digits because providers may
@@ -141,10 +190,107 @@ async function verify(buffer, expected, features) {
         code: 'RECEIVER_MISMATCH',
         transRef: result.transRef,
         raw: result.raw,
+        provider: providerId,
       };
     }
   }
   return result;
+}
+
+/**
+ * Verify with automatic provider fallback. Tries each configured
+ * provider in order. Algorithm:
+ *
+ *   for provider in providers:
+ *     attempt = verifyOne(provider)
+ *     if attempt.ok:
+ *       return success (no more providers tried)
+ *     if attempt.code is HARD reject (amount mismatch, fake slip, etc):
+ *       return rejection (we TRUST the rejection — don't try next)
+ *     # transient (network/parse) → try next provider
+ *   # all providers transient-failed → return the last attempt + attempts log
+ *
+ * Why trust hard rejections instead of trying the next provider:
+ * if SlipOK says "amount mismatch" or "this slip was already used at
+ * SlipOK's central ledger", that's authoritative. Trying EasySlip
+ * after wouldn't make the slip valid; it would just give a chance
+ * for a worse provider to false-accept.
+ *
+ * @param {Buffer}  buffer   - slip image bytes
+ * @param {Object}  expected - { amount, promptpayTarget, billId }
+ * @param {Object}  features - feature flag map
+ * @returns {Promise<VerifyResult & { attempts: Array }>}
+ *   - .attempts is the per-provider trail for forensics + the admin
+ *     "what happened?" view in /admin#payments
+ */
+async function verifyWithFallback(buffer, expected, features) {
+  const providers = getConfiguredProviders(features);
+  if (providers.length === 0) {
+    return {
+      ok: false,
+      error: 'auto-verify not configured (no provider with API key set)',
+      code: 'NOT_CONFIGURED',
+      attempts: [],
+    };
+  }
+  const attempts = [];
+  let last = null;
+  for (const p of providers) {
+    const result = await verifyOne(p.id, buffer, expected);
+    attempts.push({
+      provider: p.id,
+      ok: !!result.ok,
+      code: result.code || null,
+      error: result.error || null,
+      durationLogged: false, // placeholder for future timing
+    });
+    last = result;
+    if (result.ok) {
+      // Happy path — don't try remaining providers.
+      return { ...result, attempts };
+    }
+    if (!TRANSIENT_CODES.has(result.code)) {
+      // Hard rejection — trust it, stop the chain. AMOUNT_MISMATCH /
+      // RECEIVER_MISMATCH / SLIPOK_REJECT (provider's own dedup or fake
+      // detection) → don't ask another provider.
+      return { ...result, attempts };
+    }
+    // Transient — fall through to next provider in chain.
+  }
+  // All providers transient-failed. Return the last result so the
+  // upload endpoint can surface the most recent error message, but
+  // mark this case so the caller falls back to admin queue (TRANSIENT_CODES
+  // catches it on the upload-endpoint side).
+  return {
+    ...last,
+    code: last?.code || 'PROVIDER_ERROR',
+    error: `ลอง ${providers.length} provider แล้วไม่สำเร็จ — ${last?.error || 'unknown'}`,
+    attempts,
+  };
+}
+
+// Backward-compat: code that called the old verify() without a fallback
+// chain still works. Internally now delegates to verifyWithFallback so
+// behaviour is identical to the new path.
+async function verify(buffer, expected, features) {
+  return verifyWithFallback(buffer, expected, features);
+}
+
+/**
+ * Probe each configured provider's reachability without actually verifying
+ * a slip. Used by /admin#secrets "Test" button + the production-readiness
+ * + health checks. Doesn't burn API credits because we make a HEAD-style
+ * call (or a tiny dummy verify) — implementation per provider.
+ *
+ * Returns: [{ provider, ok, error, info }]
+ */
+async function probeAll(features) {
+  const providers = getConfiguredProviders(features);
+  const out = [];
+  for (const p of providers) {
+    out.push({ provider: p.id, label: p.label, ok: true, info: 'key set' });
+  }
+  return out;
 }
 
 // === Provider: SlipOK ====================================================

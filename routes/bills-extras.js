@@ -22,13 +22,18 @@ module.exports = function buildBillsExtrasRouter(ctx) {
   const r = express.Router();
 
   // POST /api/bills/bulk-generate
-  // body (optional): { period: "YYYY-MM", dueDay: 15 }
+  // body (optional): { period: "YYYY-MM", dueDay: 15, force: false }
+  // body.force=true bypasses server-side config validation (admin already
+  // confirmed the issues client-side). When force is missing/false and
+  // critical config is missing, returns 412 PRECONDITION_FAILED with the
+  // exact issue list so the UI can show actionable warnings.
   r.post('/bulk-generate', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'),
     async (req, res) => {
       const now = new Date();
       const period = String(req.body?.period
         || `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`).slice(0, 7);
       const dueDay = Number(req.body?.dueDay || 15);
+      const force = req.body?.force === true;
       try {
         const flags = await features.load(pool);
         const [roomsRow, configRow] = await Promise.all([
@@ -37,6 +42,58 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         ]);
         const rooms = Object.values(roomsRow.rows.length ? roomsRow.rows[0].value : {});
         const config = configRow.rows.length ? configRow.rows[0].value : {};
+
+        // === Server-side config validation =================================
+        // Belt-and-braces: even when admin clicks past the client-side warn,
+        // refuse to silently produce broken bills if a HIGH-severity issue
+        // exists. The client UI now sends `force:true` after admin confirms
+        // the warning explicitly. Without that flag we 412 with details so
+        // a 3rd-party caller (cron, script, future mobile app) can't blindly
+        // generate empty bills either.
+        const issues = [];
+        const ppTarget = config?.payment?.promptpay
+          || config?.payment?.promptpayTarget
+          || require('../services/secrets').get('PROMPTPAY_TARGET');
+        if (!ppTarget) {
+          issues.push({ sev: 'high', code: 'NO_PROMPTPAY',
+            msg: 'PROMPTPAY_TARGET ไม่ตั้ง — บิล PDF จะไม่มี QR' });
+        }
+        const wRate = Number(config?.utilities?.waterRate);
+        const eRate = Number(config?.utilities?.elecRate);
+        if (!Number.isFinite(wRate) || wRate <= 0) {
+          issues.push({ sev: 'high', code: 'NO_WATER_RATE',
+            msg: 'อัตราค่าน้ำต่อหน่วยไม่ตั้ง — ยอดค่าน้ำในบิลจะ ฿0' });
+        }
+        if (!Number.isFinite(eRate) || eRate <= 0) {
+          issues.push({ sev: 'high', code: 'NO_ELEC_RATE',
+            msg: 'อัตราค่าไฟต่อหน่วยไม่ตั้ง — ยอดค่าไฟในบิลจะ ฿0' });
+        }
+        const eligibleRooms = rooms.filter((r) => r && r.tenant
+          && (r.status === 'occupied' || r.status === 'overdue'));
+        if (eligibleRooms.length === 0) {
+          issues.push({ sev: 'high', code: 'NO_ELIGIBLE_ROOMS',
+            msg: 'ไม่มีห้องที่มีผู้เช่าแสดงสถานะ occupied/overdue — จะออกบิล 0 ใบ' });
+        }
+        // High-severity issues block unless force=true; medium/low are
+        // returned as warnings in the response (informational, doesn't block).
+        const hardIssues = issues.filter((i) => i.sev === 'high');
+        if (hardIssues.length > 0 && !force) {
+          return res.status(412).json({
+            error: `ตั้งค่าระบบไม่ครบสำหรับการออกบิล (${hardIssues.length} ข้อสำคัญ)`,
+            code: 'PRECONDITION_FAILED',
+            issues,
+            hint: 'แก้ปัญหาด้านบนแล้วลองใหม่ — หรือส่ง { force: true } เพื่อออกบิลทั้งที่ค่ายังไม่ครบ (audit-logged)',
+          });
+        }
+        if (force && hardIssues.length > 0) {
+          // Audit the override so we can track operators who routinely
+          // bypass — useful when a tenant disputes a malformed bill later.
+          audit(req, 'bill.bulk_generate.forced', 'period', period, {
+            issues: hardIssues.map((i) => i.code),
+            forcedBy: req.session.user.username,
+          });
+        }
+
         const dueDate = new Date(now.getFullYear(), now.getMonth(), dueDay).toISOString().slice(0, 10);
         let made = 0, skipped = 0;
         for (const room of rooms) {
