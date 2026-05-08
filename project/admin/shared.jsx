@@ -214,6 +214,36 @@ const STORAGE_KEYS = {
 function safeParse(s, fallback) {
   try { return JSON.parse(s); } catch (e) { return fallback; }
 }
+
+// Hard cap on raw localStorage strings BEFORE they reach JSON.parse. V8 hangs
+// the renderer trying to parse strings past ~30-50 MB even on desktop hardware
+// (Chrome reports it as RESULT_CODE_HUNG, not OOM, because the renderer never
+// finishes — it just stops responding to the OS). The earlier `stripDataUrls()`
+// runs AFTER parse, so it can't help here. If we see an oversized blob we drop
+// it via AP.localBypass.removeItem (which DOESN'T trigger a server DELETE on
+// the cleaner row that was about to be re-hydrated).
+const MAX_RAW_BYTES = 5 * 1024 * 1024;
+function bailOnOversize(key, raw) {
+  if (raw == null || raw.length <= MAX_RAW_BYTES) return raw;
+  console.warn(
+    `[shared] localStorage[${key}] is ${raw.length.toLocaleString()} bytes ` +
+    `(cap ${MAX_RAW_BYTES.toLocaleString()}) — discarding stale cache to avoid ` +
+    `JSON.parse hanging the renderer. Will re-hydrate from server on next load.`
+  );
+  try {
+    if (window.AP && window.AP.localBypass && window.AP.localBypass.removeItem) {
+      window.AP.localBypass.removeItem(key);
+    } else {
+      // Fallback: api-client.js hasn't loaded yet (shouldn't happen given the
+      // <script> order in Admin Dashboard.html, but defensive). The wrapped
+      // removeItem in that case is just the native one — no DELETE-to-server
+      // side effect to worry about.
+      localStorage.removeItem(key);
+    }
+  } catch {}
+  return null;
+}
+
 // One-shot sanitiser. The tenant-side photo uploader at project/app.jsx
 // readsAsDataURL() and pushed `data:image/jpeg;base64,…` strings straight
 // into rooms[id].photos[]. With 12 photos × 40 rooms × 1-3 MB each, the
@@ -249,7 +279,8 @@ function stripDataUrls(rooms) {
 }
 function loadRooms() {
   if (typeof localStorage === 'undefined') return buildAdminRooms();
-  const raw = localStorage.getItem(STORAGE_KEYS.rooms);
+  let raw = localStorage.getItem(STORAGE_KEYS.rooms);
+  raw = bailOnOversize(STORAGE_KEYS.rooms, raw);
   if (!raw) return buildAdminRooms();
   const parsed = safeParse(raw, null);
   if (!parsed || typeof parsed !== 'object' || Object.keys(parsed).length === 0) {
@@ -268,7 +299,8 @@ function saveRooms(rooms) {
 }
 function loadConfig() {
   if (typeof localStorage === 'undefined') return DEFAULT_CONFIG;
-  const raw = localStorage.getItem(STORAGE_KEYS.config);
+  let raw = localStorage.getItem(STORAGE_KEYS.config);
+  raw = bailOnOversize(STORAGE_KEYS.config, raw);
   if (!raw) return DEFAULT_CONFIG;
   const parsed = safeParse(raw, null);
   return parsed ? deepMerge(DEFAULT_CONFIG, parsed) : DEFAULT_CONFIG;
@@ -279,7 +311,8 @@ function saveConfig(cfg) {
 }
 function loadBookings() {
   if (typeof localStorage === 'undefined') return buildBookings();
-  const raw = localStorage.getItem(STORAGE_KEYS.bookings);
+  let raw = localStorage.getItem(STORAGE_KEYS.bookings);
+  raw = bailOnOversize(STORAGE_KEYS.bookings, raw);
   if (!raw) return buildBookings();
   return safeParse(raw, buildBookings());
 }
@@ -289,7 +322,8 @@ function saveBookings(b) {
 }
 function loadActivities() {
   if (typeof localStorage === 'undefined') return buildActivities();
-  const raw = localStorage.getItem(STORAGE_KEYS.activities);
+  let raw = localStorage.getItem(STORAGE_KEYS.activities);
+  raw = bailOnOversize(STORAGE_KEYS.activities, raw);
   if (!raw) return buildActivities();
   return safeParse(raw, buildActivities());
 }

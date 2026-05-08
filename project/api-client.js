@@ -73,8 +73,22 @@
       let count = 0;
       for (const key of SYNCED_KEYS) {
         if (data[key] !== undefined && data[key] !== null) {
+          const serialised = JSON.stringify(data[key]);
+          // Reject oversized server values too. If somehow the DB still has
+          // a >5 MB row (e.g. cleanup script not yet run on this environment),
+          // we'd rather render with a stale-but-tiny localStorage value than
+          // hand the renderer a 50 MB string and watch it hang.
+          if (serialised.length > 5 * 1024 * 1024) {
+            console.warn(
+              `[api-client] server returned oversized ${key} ` +
+              `(${serialised.length.toLocaleString()} bytes) — discarding ` +
+              `to protect the renderer. Run scripts/strip-rooms-photos.js on the server.`
+            );
+            origRemoveItem(key);
+            continue;
+          }
           // Use the ORIGINAL setItem so we don't trigger a PUT back to server
-          origSetItem(key, JSON.stringify(data[key]));
+          origSetItem(key, serialised);
           hydratedKeys.add(key);
           count++;
         } else {
@@ -236,6 +250,12 @@
     isInflight: () => inflight.size > 0,
     isAuthenticated: () => isAuthenticated,
     isHydrated: (key) => hydratedKeys.has(key),
+    // Bypass for the wrapped setItem/removeItem. Use these when you need to
+    // mutate localStorage WITHOUT triggering a PUT/DELETE to the server —
+    // e.g. shared.jsx clearing a corrupt/oversized stale blob during load
+    // (where the wrapped removeItem would inadvertently DELETE the (good)
+    // server-side row that we're about to re-hydrate from).
+    localBypass: { setItem: origSetItem, removeItem: origRemoveItem },
     async login(username, password) {
       const res = await fetch('/api/auth/login', {
         method: 'POST',
