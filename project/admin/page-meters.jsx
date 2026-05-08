@@ -98,11 +98,25 @@ function PageMeters({ rooms, setToast }) {
 function SparkChart({ data }) {
   const C = window.ADMIN_C;
   const W = 560, H = 120, P = 8;
-  const min = Math.min(...data), max = Math.max(...data);
+  // Use a fold instead of Math.min(...data) — spreading a large array into
+  // function args trips a stack-overflow on Chromium when data.length grows
+  // past a few tens of thousands, freezing the renderer. We never expect
+  // > 200 readings (server cap), but guard anyway because if a future code
+  // path widens the cap, the freeze would only show up in production.
+  let min = Infinity, max = -Infinity;
+  for (let i = 0; i < data.length; i++) {
+    const v = data[i];
+    if (typeof v === 'number' && Number.isFinite(v)) {
+      if (v < min) min = v;
+      if (v > max) max = v;
+    }
+  }
+  if (!Number.isFinite(min) || !Number.isFinite(max)) return null;
   const span = max - min || 1;
+  const denom = data.length > 1 ? (data.length - 1) : 1;
   const pts = data.map((v, i) => {
-    const x = P + ((W - 2 * P) * i) / (data.length - 1);
-    const y = H - P - ((v - min) / span) * (H - 2 * P);
+    const x = P + ((W - 2 * P) * i) / denom;
+    const y = H - P - ((Number(v) - min) / span) * (H - 2 * P);
     return `${x},${y}`;
   }).join(' ');
   return (

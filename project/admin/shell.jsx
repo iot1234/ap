@@ -5,6 +5,25 @@
 
 const { useState, useEffect, useMemo, useRef } = React;
 
+// ---------- PageBoundary --------------------------------------------------
+// Stable wrapper that delegates to window.ErrorBoundary if available, else
+// just renders children. Defined at MODULE scope so React sees the same
+// component type across re-renders — the previous IIFE-with-fallback-fn
+// pattern was creating a new fallback function literal each parent render
+// (when window.ErrorBoundary wasn't yet defined), which forced a full
+// page subtree unmount/remount on every shell state change. On the
+// access + meters pages this manifested as the page never settling and
+// the screen appearing frozen because the load() effect kept restarting.
+function PageBoundary({ pageKey, children }) {
+  const B = window.ErrorBoundary;
+  if (B) {
+    return React.createElement(B, { key: pageKey }, children);
+  }
+  // No ErrorBoundary loaded yet — render children with a stable wrapping div
+  // (also keyed) so React still resets the subtree on page change.
+  return React.createElement('div', { key: pageKey }, children);
+}
+
 // ---------- Navigation config ---------------------------------------------
 // Groups are organised by user task, not by feature. Each item can declare
 // `minRole` — the sidebar hides it if the current user's role is below.
@@ -791,13 +810,11 @@ function App() {
           onResetData={handleResetData}
         />
         <div style={{ flex: 1, minWidth: 0 }}>
-          {/* Per-page ErrorBoundary so a render error in one page doesn't
-              kill the whole shell — admin can still navigate to a working
-              page or click "Retry" to remount the failing one. */}
-          {(() => {
-            const Boundary = window.ErrorBoundary || (({ children }) => children);
-            return <Boundary key={page}><Page {...pageProps} /></Boundary>;
-          })()}
+          {/* Module-scoped PageBoundary keeps a stable component type so
+              React never thrashes the page subtree on shell state changes. */}
+          <PageBoundary pageKey={page}>
+            <Page {...pageProps} />
+          </PageBoundary>
         </div>
       </main>
 

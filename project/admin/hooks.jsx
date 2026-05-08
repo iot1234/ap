@@ -391,12 +391,10 @@
   function FeatureGate({ flag, children, label }) {
     const f = useFeatureFlag(flag);
     // Fail-open: render the page immediately while the flag fetch is in
-    // flight. The page's own load() effect will see 503 if the feature is
-    // truly off and surface that as an empty list — much better UX than
-    // staring at a skeleton bar that may never resolve. Once the flag
-    // resolves, if it's actually disabled we swap to the "off" placeholder.
-    if (!f.ready) return children;
-    if (f.enabled) return children;
+    // flight. Both the !ready and enabled branches return the same
+    // children reference, so React reuses the existing page instance —
+    // no remount thrash between "checking..." and "enabled".
+    if (!f.ready || f.enabled) return children;
     const C = window.ADMIN_C || {};
     return React.createElement('div', {
       style: {
