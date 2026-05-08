@@ -5,7 +5,7 @@
 
 const { useState, useMemo } = React;
 
-function PagePricing({ config, setConfig, addActivity, setToast }) {
+function PagePricing({ config, setConfig, rooms, addActivity, setToast }) {
   const C = window.ADMIN_C;
   const ADMIN_ROOM_TYPES = window.ADMIN_ROOM_TYPES;
   const ADMIN_ROOM_TYPE_KEYS = window.ADMIN_ROOM_TYPE_KEYS;
@@ -19,6 +19,30 @@ function PagePricing({ config, setConfig, addActivity, setToast }) {
   const [confirmReset, setConfirmReset] = useState(false);
 
   const dirty = useMemo(() => JSON.stringify(draft) !== JSON.stringify(config), [draft, config]);
+
+  // Derive the unique sorted list of floors actually present so the
+  // "พรีเมียมตามชั้น" inputs + preview floor selector show every floor an
+  // admin has added. Previously hardcoded [1,2,3,4,5]; floor 6+ silently
+  // had no premium-rate UI even though the underlying floorPremium dict
+  // accepts arbitrary keys. Falls back to [1..config.building.floors] for
+  // an empty rooms blob (first-run UX).
+  const floorsForPricing = useMemo(() => {
+    const set = new Set();
+    if (rooms) {
+      for (const r of Object.values(rooms)) {
+        const f = Number(r && r.floor);
+        if (Number.isInteger(f) && f >= 1 && f <= 99) set.add(f);
+      }
+    }
+    if (set.size === 0) {
+      // Empty rooms → use the configured floor count as the upper bound,
+      // capped at 99 for sanity. Lets admin pre-set premiums BEFORE adding
+      // any room.
+      const N = Math.max(1, Math.min(99, Number(config?.building?.floors) || 5));
+      return Array.from({ length: N }, (_, i) => i + 1);
+    }
+    return Array.from(set).sort((a, b) => a - b);
+  }, [rooms, config]);
 
   // Update helpers
   const updatePath = (path, value) => {
@@ -177,7 +201,7 @@ function TabRates({ draft, updatePath }) {
         <Card>
           <SectionHeading title="พรีเมียมตามชั้น" subtitle="ส่วนเพิ่มราคาเช่าตามชั้นที่อยู่" level={3} />
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 12 }}>
-            {[1,2,3,4,5].map(f => (
+            {floorsForPricing.map(f => (
               <Input
                 key={f}
                 label={`ชั้น ${f}`}
@@ -236,7 +260,7 @@ function TabRates({ draft, updatePath }) {
             <DarkSelect label="ประเภทห้อง" value={previewType} onChange={setPreviewType}
               options={ADMIN_ROOM_TYPE_KEYS.map(k => ({ value: k, label: ADMIN_ROOM_TYPES[k].th }))} />
             <DarkSelect label="ชั้น" value={previewFloor} onChange={setPreviewFloor}
-              options={[1,2,3,4,5].map(f => ({ value: String(f), label: `ชั้น ${f}` }))} />
+              options={floorsForPricing.map(f => ({ value: String(f), label: `ชั้น ${f}` }))} />
             <DarkSelect label="วิว" value={previewView} onChange={setPreviewView}
               options={ADMIN_VIEWS.map(v => ({ value: v, label: v }))} />
             <div style={{

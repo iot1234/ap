@@ -909,12 +909,35 @@ function App() {
     } catch (e) {}
     return buildRooms();
   });
-  const [floor, setFloor] = useState(3);
+  // Initial floor: pick the middle floor of whatever floors actually exist
+  // so the user lands on a populated view, not on a hardcoded "3" that may
+  // not exist in this building (e.g. admin running a 7-floor or 2-floor
+  // configuration). Falls back to floor 1 for an empty-rooms first paint.
+  const [floor, setFloor] = useState(() => {
+    const fs = getAllFloors(rooms);
+    return fs[Math.floor(fs.length / 2)] || 1;
+  });
   const [selectedId, setSelectedId] = useState(null);
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState('all');
   const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+
+  // Self-heal: if the currently-viewed floor has no rooms (admin deleted
+  // every room there, or rooms were hydrated from server with a different
+  // shape than the localStorage seed), auto-jump to a floor that does.
+  // Without this the user gets stuck on an empty floor with no rooms to
+  // click — the BuildingDiagram won't even highlight the active row.
+  useEffect(() => {
+    const fs = getAllFloors(rooms);
+    if (fs.length === 0) return;     // building is empty — nothing to do
+    if (!fs.includes(floor)) {
+      // Pick the closest floor above the current one; if none, the closest below.
+      const above = fs.find((f) => f >= floor);
+      const below = fs.slice().reverse().find((f) => f <= floor);
+      setFloor(above ?? below ?? fs[0]);
+    }
+  }, [rooms, floor]);
 
   const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
     "accentColor": "#c46a3e",

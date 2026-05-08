@@ -148,14 +148,29 @@ function PageReports({ rooms, config, addActivity, setToast }) {
     .sort((a, b) => b.total - a.total)
     .slice(0, 8), [list]);
 
-  // Floor performance
-  const floorPerf = useMemo(() => [1,2,3,4,5].map(f => {
-    const rooms = list.filter(r => r.floor === f);
-    const occupied = rooms.filter(r => r.status === 'occupied' || r.status === 'overdue' || r.status === 'reserved').length;
-    const total = rooms.length;
-    const revenue = rooms.filter(r => r.tenant).reduce((s, r) => s + r.rent + (r.water||0) + (r.elec||0) + (r.wifi||0), 0);
-    return { floor: f, total, occupied, occupancy: Math.round(occupied/total*100), revenue };
-  }), [list]);
+  // Floor performance — derive floors from actual rooms data so floors 6+
+  // an admin added show up in the breakdown. Previously hardcoded
+  // [1,2,3,4,5] left newly-added floors invisible in this report and
+  // could divide-by-zero on total=0 (NaN occupancy %). Filter empty
+  // floors out so we don't render rows for floors that don't exist.
+  const floorPerf = useMemo(() => {
+    const set = new Set();
+    for (const r of list) {
+      const f = Number(r && r.floor);
+      if (Number.isInteger(f) && f >= 1 && f <= 99) set.add(f);
+    }
+    const floors = Array.from(set).sort((a, b) => a - b);
+    return floors.map(f => {
+      const rooms = list.filter(r => r.floor === f);
+      const occupied = rooms.filter(r => r.status === 'occupied' || r.status === 'overdue' || r.status === 'reserved').length;
+      const total = rooms.length;
+      const revenue = rooms.filter(r => r.tenant).reduce((s, r) => s + r.rent + (r.water||0) + (r.elec||0) + (r.wifi||0), 0);
+      // Guard against division-by-zero — floors that exist in `floors` always
+      // have at least one room so total > 0 in practice, but defensive.
+      const occupancy = total > 0 ? Math.round(occupied / total * 100) : 0;
+      return { floor: f, total, occupied, occupancy, revenue };
+    });
+  }, [list]);
 
   return (
     <PageContainer>
