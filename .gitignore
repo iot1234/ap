@@ -9,3 +9,4 @@ uploads/
 backups/
 .scheduler-state.json
 .claude/
+.tmp-*/
