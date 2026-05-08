@@ -2996,6 +2996,173 @@ const BOOKING_TRANSITIONS = {
   cancelled: [],                     // terminal
 };
 
+// POST /api/bookings/:id/approve-and-assign
+//
+// Atomically (1) flip the booking to 'approved', (2) find a vacant room
+// matching its wantType/wantFloor, (3) mark that room 'reserved' with the
+// applicant's tenant info, all under SELECT FOR UPDATE so two admins
+// approving different bookings simultaneously can't race onto the same
+// room. The previous client-side approval flow had this race: both admins
+// saw room 301 as vacant, both wrote rooms blob with different tenants in
+// 301, last write won — one tenant ended up homeless from the system's
+// perspective. This endpoint serialises the read+write so the second
+// caller sees the first's reservation + falls through to the next vacant
+// room (or returns NO_VACANT_ROOM cleanly).
+app.post('/api/bookings/:id/approve-and-assign', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'), async (req, res) => {
+  const id = String(req.params.id).slice(0, 64);
+  const adminNotes = req.body?.adminNotes !== undefined ? String(req.body.adminNotes).slice(0, 1000) : undefined;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Lock the two blobs we'll mutate. Order matters: bookings first
+    // (alphabetical) — keeps a global lock order so two endpoints that
+    // touch both blobs can't deadlock against each other.
+    const bRes = await client.query(
+      `SELECT value FROM app_data WHERE key='baankarn_bookings_v1' FOR UPDATE`
+    );
+    const rRes = await client.query(
+      `SELECT value FROM app_data WHERE key='baankarn_rooms_v1' FOR UPDATE`
+    );
+    const bookings = bRes.rows.length && Array.isArray(bRes.rows[0].value) ? bRes.rows[0].value : [];
+    const rooms = rRes.rows.length ? rRes.rows[0].value : {};
+
+    const bIdx = bookings.findIndex((x) => x && x.id === id);
+    if (bIdx < 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'booking not found', code: 'NOT_FOUND' });
+    }
+    const booking = bookings[bIdx];
+    // Transition guard — match the BOOKING_TRANSITIONS rules.
+    const allowedFrom = new Set(['pending', 'reviewing']);
+    if (!allowedFrom.has(booking.status || 'pending')) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        error: `cannot approve from status "${booking.status}"`,
+        code: 'BAD_TRANSITION',
+        allowed: ['pending', 'reviewing'],
+      });
+    }
+
+    // Find a vacant room matching wantType + wantFloor. Same logic the
+    // frontend used to do client-side, but now under the FOR UPDATE lock
+    // so two callers see consistent state.
+    const want = (r) => (
+      (!booking.wantType || r.type === booking.wantType) &&
+      (!booking.wantFloor || Number(r.floor) === Number(booking.wantFloor))
+    );
+    const candidate = Object.values(rooms || {})
+      .filter((r) => r && r.status === 'vacant' && want(r))
+      .sort((a, b) => String(a.id).localeCompare(String(b.id)))[0];
+
+    let assignedRoomId = null;
+    if (candidate) {
+      assignedRoomId = candidate.id;
+      rooms[candidate.id] = {
+        ...candidate,
+        status: 'reserved',
+        tenant: {
+          name: booking.name,
+          phone: booking.phone || '',
+          email: booking.email || '',
+          occupation: '',
+          score: 'A',
+          since: new Date().toISOString().slice(0, 10),
+        },
+        // Track the booking that reserved this room so admin can see the
+        // link in the room editor + un-reserve cleanly if booking is
+        // later cancelled. Useful for the no-show case (booked but never
+        // moved in) where admin needs to know where the reservation came
+        // from before flipping back to vacant.
+        reservedBy: id,
+        reservedAt: new Date().toISOString(),
+      };
+    }
+
+    // Update the booking entry.
+    bookings[bIdx] = {
+      ...booking,
+      status: 'approved',
+      roomId: assignedRoomId || booking.roomId || null,
+      adminNotes: adminNotes !== undefined ? adminNotes : booking.adminNotes,
+      assignedRoomId,
+      approvedAt: new Date().toISOString(),
+      approvedBy: req.session.user.username,
+      updatedAt: new Date().toISOString(),
+      updatedBy: req.session.user.username,
+    };
+
+    // Persist both blobs in the same transaction.
+    await client.query(
+      `INSERT INTO app_data (key, value, updated_by) VALUES ($1, $2, $3)
+         ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW(), updated_by=EXCLUDED.updated_by`,
+      ['baankarn_bookings_v1', JSON.stringify(bookings), req.session.user.username]
+    );
+    await client.query(
+      `INSERT INTO app_data (key, value, updated_by) VALUES ($1, $2, $3)
+         ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW(), updated_by=EXCLUDED.updated_by`,
+      ['baankarn_rooms_v1', JSON.stringify(rooms), req.session.user.username]
+    );
+    await client.query('COMMIT');
+
+    audit(req, 'booking.approve', 'booking', id, {
+      assignedRoomId, wantType: booking.wantType, wantFloor: booking.wantFloor,
+    });
+    // Bridge tenant row out-of-tx (mirror function does its own writes;
+    // we don't want to block the response on it).
+    if (assignedRoomId) {
+      mirrorRoomsToTenants(rooms, req.session.user.username).catch((err) => {
+        console.error('[bridge] rooms→tenants mirror failed after approve:', err.message);
+      });
+    }
+    // Notify owner + tenant fire-and-forget.
+    try {
+      const flags = await features.load(pool);
+      notifier.notifyOwner({ pool, features: flags }, {
+        subject: `✅ อนุมัติการจอง ${id}${assignedRoomId ? ` → ห้อง ${assignedRoomId}` : ''}`,
+        text: `${booking.name || '-'} (${booking.phone || '-'})\n` +
+              (assignedRoomId ? `จัดให้ห้อง ${assignedRoomId}` : 'ยังไม่ได้กำหนดห้อง — ไม่มีห้องว่างตรงเงื่อนไข'),
+      }).catch(() => {});
+      // Tenant gets the same approval message that the legacy PUT path sends.
+      if (booking.phone) {
+        const tenantInfo = { full_name: booking.name, email: booking.email, phone: booking.phone };
+        try {
+          const tq = await pool.query(
+            `SELECT line_user_id, line_oa_id FROM tenants WHERE phone=$1 AND deleted_at IS NULL ORDER BY updated_at DESC LIMIT 1`,
+            [booking.phone]
+          );
+          if (tq.rows.length) {
+            tenantInfo.line_user_id = tq.rows[0].line_user_id;
+            tenantInfo.line_oa_id = tq.rows[0].line_oa_id;
+          }
+        } catch { /* ignore */ }
+        if (tenantInfo.line_user_id || tenantInfo.email) {
+          notifier.notifyTenant({ pool, features: flags }, tenantInfo, {
+            subject: 'การจองห้องได้รับการอนุมัติแล้ว',
+            text: `✅ การจองห้องของคุณได้รับการอนุมัติ\n` +
+                  (assignedRoomId ? `ห้อง: ${assignedRoomId}\n` : '') +
+                  `กรุณาติดต่อสำนักงานเพื่อเซ็นสัญญา`,
+          }).catch(() => {});
+        }
+      }
+    } catch { /* ignore notify failures */ }
+
+    res.json({
+      ok: true,
+      booking: bookings[bIdx],
+      assignedRoomId,
+      room: assignedRoomId ? rooms[assignedRoomId] : null,
+      noVacantRoomMatch: !assignedRoomId,
+    });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('booking approve-and-assign error:', err);
+    res.status(500).json({ error: 'internal error', code: 'DB_ERROR' });
+  } finally {
+    client.release();
+  }
+});
+
 app.put('/api/bookings/:id', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'), async (req, res) => {
   const id = String(req.params.id).slice(0, 64);
   const b = req.body || {};

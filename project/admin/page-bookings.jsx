@@ -64,41 +64,48 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
     }
   };
 
-  const handleApprove = (id) => {
+  const handleApprove = async (id) => {
     const booking = bookings.find(b => b.id === id);
     if (!booking) return;
-    updateStatus(id, 'approved');
-
-    // Find a vacant room of the requested type+floor (best fit). If found,
-    // mark it as 'reserved' and seed tenant info from the booking. Admin can
-    // change the assignment in /admin#rooms after this — this just removes
-    // the manual data-entry duplication on approval.
-    const want = (b) => (
-      (!booking.wantType || b.type === booking.wantType) &&
-      (!booking.wantFloor || b.floor === Number(booking.wantFloor))
-    );
-    const candidate = Object.values(rooms || {})
-      .filter((r) => r.status === 'vacant' && want(r))
-      .sort((a, b) => String(a.id).localeCompare(String(b.id)))[0];
-
+    // Atomic server-side approve+assign — replaces the previous client-side
+    // optimistic update which had a race condition: two admins approving
+    // different bookings simultaneously could both pick the same vacant
+    // room (last write wins → one tenant displaced). The new endpoint
+    // SELECTs both blobs FOR UPDATE so the second caller sees the first's
+    // reservation + falls through to the next vacant room cleanly.
     let assignedRoomId = null;
-    if (candidate && setRooms) {
-      assignedRoomId = candidate.id;
-      setRooms((prev) => ({
-        ...prev,
-        [candidate.id]: {
-          ...prev[candidate.id],
-          status: 'reserved',
-          tenant: {
-            name: booking.name,
-            phone: booking.phone || '',
-            email: booking.email || '',
-            occupation: '',
-            score: 'A',
-            since: new Date().toISOString().slice(0, 10),
-          },
-        },
-      }));
+    let serverApproved = false;
+    try {
+      const apiCall = window.apiCall;
+      if (apiCall) {
+        const out = await apiCall(`/api/bookings/${encodeURIComponent(id)}/approve-and-assign`, {
+          method: 'POST',
+          body: JSON.stringify({}),
+        });
+        assignedRoomId = out.assignedRoomId;
+        serverApproved = true;
+        // Mirror the server's mutation into local React state so the table
+        // + drawer reflect "approved" + "reserved" without waiting for the
+        // next /api/data poll.
+        setBookings((prev) => prev.map((b) => b.id === id ? out.booking : b));
+        if (out.room && out.assignedRoomId) {
+          setRooms((prev) => ({ ...prev, [out.assignedRoomId]: out.room }));
+        }
+      } else {
+        // Fallback (apiCall unavailable — shouldn't happen). Fire the
+        // legacy optimistic path so admin isn't blocked, but warn.
+        console.warn('[bookings] apiCall not available, falling back to legacy approve path');
+        updateStatus(id, 'approved');
+      }
+    } catch (err) {
+      // Server refused — propagate the error and DON'T touch local state.
+      // Common reasons: bad transition (already approved/cancelled), 404
+      // (booking not found in current blob — admin's tab is stale).
+      window.toastError
+        ? window.toastError(setToast, err, { action: `อนุมัติการจอง ${id}` })
+        : setToast && setToast({ kind: 'danger', message: err.message || 'อนุมัติไม่สำเร็จ' });
+      setActiveId(null); setConfirmAction(null);
+      return;
     }
 
     addActivity && addActivity({

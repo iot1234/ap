@@ -512,6 +512,27 @@ function BillDetail({ bill, locale, onClose, slipFeature, refresh }) {
             {msg ? <div style={{ marginTop: 8, color: 'var(--muted)', fontSize: 13 }}>{msg}</div> : null}
           </div>
         ) : null}
+        {/* When slip upload is gated off, the tenant still sees this bill
+            but has NO obvious payment channel — leading to "I see ฿4500
+            owed but how do I pay?" tickets. Surface a fallback explainer
+            with the QR + bank info that's already rendered above as the
+            answer + a path to reach the operator. */}
+        {bill.status !== 'paid' && bill.status !== 'void' && !slipFeature?.enabled ? (
+          <div style={{
+            marginTop: 16, padding: 12,
+            background: 'var(--bg-soft, #faf6ee)',
+            border: '1px solid var(--border, #ece4d4)',
+            borderRadius: 8,
+            fontSize: 13, color: 'var(--ink2, #5b4f40)', lineHeight: 1.6,
+          }}>
+            <div style={{ fontWeight: 600, marginBottom: 4 }}>📌 วิธีชำระเงิน</div>
+            <div>1) สแกน PromptPay QR ด้านบน หรือโอนเข้าบัญชีธนาคาร</div>
+            <div>2) ส่งสลิปให้เจ้าหน้าที่ทางช่องทางที่สะดวก (LINE, อีเมล หรือ ติดต่อสำนักงาน)</div>
+            <div style={{ marginTop: 6, fontSize: 12, color: 'var(--muted, #8a7d6b)' }}>
+              ℹ️ ระบบอัปโหลดสลิปอัตโนมัติยังไม่เปิดใช้งาน — ติดต่อสำนักงานเพื่อยืนยันการชำระ
+            </div>
+          </div>
+        ) : null}
         <button onClick={onClose} style={btnLink}>ปิด</button>
       </div>
     </div>
