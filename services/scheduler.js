@@ -128,6 +128,52 @@ async function tickBillGen(pool, flags, now, state) {
     ]);
     const rooms = Object.values(roomsRow.rows.length ? roomsRow.rows[0].value : {});
     const config = configRow.rows.length ? configRow.rows[0].value : {};
+
+    // Match the server-side bulk-generate guard (routes/bills-extras.js):
+    // refuse to run automatically when critical config is missing — would
+    // produce 12+ broken bills (no QR / 0฿ utilities) and notify tenants
+    // about them. Once-per-period log + owner alert so operator can fix
+    // the gap without finding out via tenant complaints next month.
+    const issues = [];
+    const ppTarget = config?.payment?.promptpay
+      || config?.payment?.promptpayTarget
+      || require('./secrets').get('PROMPTPAY_TARGET');
+    if (!ppTarget)                          issues.push('PROMPTPAY_TARGET ไม่ตั้ง');
+    const wRate = Number(config?.utilities?.waterRate);
+    const eRate = Number(config?.utilities?.elecRate);
+    if (!Number.isFinite(wRate) || wRate <= 0) issues.push('waterRate ไม่ตั้ง / ≤ 0');
+    if (!Number.isFinite(eRate) || eRate <= 0) issues.push('elecRate ไม่ตั้ง / ≤ 0');
+    const eligibleCount = rooms.filter((r) => r && r.tenant
+      && (r.status === 'occupied' || r.status === 'overdue')).length;
+    if (eligibleCount === 0) issues.push('ไม่มีห้อง occupied/overdue ที่จะออกบิล');
+
+    if (issues.length > 0) {
+      // Latch via state so we don't re-alert every hourly tick — only
+      // first encounter per period gets the owner notification. Same
+      // pattern as `simulatorBlockedLogged`.
+      const skipKey = `billGenSkipped_${period}`;
+      if (!state[skipKey]) {
+        console.warn(`[scheduler] bill auto-gen for ${period} SKIPPED — ${issues.length} config issue(s):`);
+        for (const i of issues) console.warn('  • ' + i);
+        try {
+          await notifier.notifyOwner({ pool, features: flags }, {
+            subject: `⚠️ ออกบิลอัตโนมัติรอบ ${period} ถูกข้าม`,
+            text: `ระบบไม่สามารถออกบิลอัตโนมัติเพราะตั้งค่ายังไม่ครบ:\n\n` +
+                  issues.map((i, n) => `${n + 1}. ${i}`).join('\n') +
+                  `\n\nแก้ไขที่ /admin#secrets และ /admin#pricing แล้ว ` +
+                  `กดออกบิลด้วยมือที่ /admin#billing (ระบบจะลองอัตโนมัติอีกครั้งรอบหน้า)`,
+          });
+        } catch { /* ignore */ }
+        state[skipKey] = true;
+        writeState(state);
+      }
+      // Record period as "handled" so the daily latch doesn't keep retrying
+      // infinitely; admin must redo manually for THIS period.
+      state.lastBillPeriod = period;
+      writeState(state);
+      return;
+    }
+
     const dueDay = Number(flags.billAutoGenerate.dueDay || 15);
     const dueDate = new Date(now.getFullYear(), now.getMonth(), dueDay).toISOString().slice(0, 10);
     let made = 0;

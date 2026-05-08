@@ -2592,6 +2592,18 @@ app.post('/api/tenant/payments', sameOrigin, csrfGuard, requireTenant, ensureSli
       } catch (err) {
         await client.query('ROLLBACK').catch(() => {});
         if (err.code === '23505') {
+          // Race condition cleanup: the early `SELECT id FROM payments WHERE
+          // slip_hash=$1` check above is non-locking, so two near-simultaneous
+          // uploads of the same slip can both pass the dup gate and both hit
+          // saveBase64. The second one then hits the unique constraint here.
+          // The first call's file is already on disk — the second's storage
+          // row is now an orphan (not referenced by any payment). Best-effort
+          // cleanup so we don't leak files on every dup attempt.
+          if (slip && slip.id) {
+            require('./services/storage').remove(pool, slip.id).catch((e) => {
+              console.warn('[slip-upload] orphan file cleanup failed for id=' + slip.id + ':', e.message);
+            });
+          }
           // Differentiate the two unique-violation paths so the tenant gets
           // an actionable message rather than a generic "duplicate".
           if (/uq_payments_tx_ref/.test(err.constraint || '')) {

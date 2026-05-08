@@ -60,6 +60,13 @@ async function checkSchemaSanity(pool) {
     ['line_bindings',   'oa_id'],
     ['recurring_charges','start_at'],
     ['bills',           'deleted_at'],
+    // Slip auto-verify columns added in commit 972dc23. Without these,
+    // POST /api/tenant/payments crashes with "column does not exist"
+    // when slipUpload.autoVerify is enabled — the upload request reaches
+    // INSERT before the missing-column error surfaces.
+    ['payments',        'transaction_ref'],
+    ['payments',        'verify_provider'],
+    ['payments',        'verify_payload'],
   ];
   const missing = [];
   try {
