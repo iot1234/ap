@@ -66,15 +66,46 @@ function PageRecurringCharges({ setToast }) {
     } finally { setBusy(false); }
   }
 
-  async function remove(id) {
-    if (!confirm('ลบรายการนี้?')) return;
+  async function remove(item) {
+    // Build a context-rich confirm so admin sees what they're about to drop:
+    //   - the label (so they don't delete the wrong "ที่จอดรถ" row)
+    //   - the binding (per-tenant vs per-room) so they understand scope
+    //   - amount + frequency so they spot a "monthly 5,000" row that'll
+    //     stop appearing on next month's bill
+    // For one_off charges that may have already been billed, suggest
+    // toggling active=false instead of delete to keep the audit trail.
+    const id = typeof item === 'object' ? item.id : item;
+    const it = items.find((x) => x.id === id) || (typeof item === 'object' ? item : null);
+    if (!it) {
+      setToast && setToast({ kind: 'danger', message: 'ไม่พบรายการที่จะลบ' });
+      return;
+    }
+    const target = it.tenant_id ? `ผู้เช่า: ${tenantLabel(it.tenant_id)}`
+      : it.room_id ? `ห้อง ${it.room_id}` : '—';
+    const amt = Number(it.amount).toLocaleString('th-TH', { minimumFractionDigits: 2 });
+    const isOneOff = it.frequency === 'one_off';
+    const lines = [
+      `ลบรายการ "${it.label}" (${amt} บาท · ${FREQ_LABEL[it.frequency] || it.frequency})?`,
+      ``,
+      `ผูกกับ: ${target}`,
+      it.active ? '✅ ปัจจุบันเปิดอยู่ — จะหายจากการคำนวณบิลรอบถัดไป' : 'ℹ️ ปิดอยู่แล้ว',
+      ``,
+      isOneOff
+        ? '⚠️ เป็นรายการ one_off — ถ้าใช้ในบิลที่ออกไปแล้ว แนะนำ "ปิดใช้งาน" แทน เพื่อเก็บ audit trail'
+        : '⚠️ การลบเปลี่ยนแปลงถาวร — เก่าที่อยู่ในบิลที่ออกไปแล้วยังคงอยู่',
+      '',
+      'ดำเนินการต่อ?',
+    ];
+    if (!window.confirm(lines.join('\n'))) return;
     try {
       const r = await apiFetch(`/api/recurring-charges/${id}`, { method: 'DELETE' });
       if (!r.ok) throw new Error('delete failed');
-      setToast && setToast({ kind: 'success', message: 'ลบแล้ว' });
+      setToast && setToast({ kind: 'success', message: `ลบ "${it.label}" แล้ว` });
       await load();
     } catch (e) {
-      setToast && setToast({ kind: 'error', message: e.message });
+      window.toastError
+        ? window.toastError(setToast, e, { action: 'ลบรายการประจำ' })
+        : setToast && setToast({ kind: 'danger', message: e.message });
     }
   }
 
@@ -115,7 +146,7 @@ function PageRecurringCharges({ setToast }) {
             {it.active ? 'ปิด' : 'เปิด'}
           </Btn>
           <Btn size="sm" variant="ghost" onClick={() => setForm(it)}>แก้ไข</Btn>
-          <Btn size="sm" variant="danger" onClick={() => remove(it.id)}>ลบ</Btn>
+          <Btn size="sm" variant="danger" onClick={() => remove(it)}>ลบ</Btn>
         </div>
       ) },
   ];

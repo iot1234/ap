@@ -47,9 +47,49 @@ function PageFeatures({ setToast }) {
     finally { setBusy(false); }
   }
 
+  // Toggling some flags has consequences that aren't reversible without
+  // operator action — citizenIdEncryption OFF puts new IDs in plaintext
+  // (mixing with already-encrypted rows that won't decrypt cleanly later);
+  // softDelete OFF turns the next admin DELETE into a permanent FK-cascade
+  // that can fail with "TENANT_HAS_REFS" or actually drop linked rows.
+  // Block these toggles behind a confirm so admin can't tap them
+  // accidentally.
+  const DANGEROUS_OFF = {
+    citizenIdEncryption: {
+      title: '🔓 ปิดการเข้ารหัสเลขบัตรประชาชน',
+      description:
+        'เลขบัตร ปชช. ของผู้เช่าใหม่จะถูกเก็บเป็น plaintext ใน DB' +
+        '\n• ข้อมูลเก่าที่ encrypted อยู่จะปนกันกับ plaintext ใหม่ (decrypt fail บางแถว)' +
+        '\n• ผิด PDPA ถ้าเก็บ plaintext PII แบบจงใจ' +
+        '\n\nต้องการปิดจริง ๆ ใช่หรือไม่?',
+    },
+    softDelete: {
+      title: '🗑️ ปิด Soft Delete',
+      description:
+        'การลบข้อมูลครั้งต่อไปจะเป็นการลบถาวร (DELETE จาก DB จริง)' +
+        '\n• tenant ที่มี bills/contracts/payments อ้างถึงจะลบไม่ได้ (FK)' +
+        '\n• ของที่ลบสำเร็จไม่มีทางกู้คืน — ต้อง restore จาก backup' +
+        '\n\nต้องการปิดจริง ๆ ใช่หรือไม่?',
+    },
+    photoUpload: {
+      title: '📷 ปิดการอัปโหลดรูป',
+      description:
+        'รูปห้อง/ลายเซ็น/สำเนาบัตรที่มีอยู่ยังเก็บไว้ แต่ admin/tenant อัปโหลดเพิ่มไม่ได้' +
+        '\n\nต้องการปิดจริง ๆ ใช่หรือไม่?',
+    },
+  };
+
   function toggle(key) {
     if (!features) return;
-    save({ [key]: { enabled: !features[key].enabled } });
+    const cur = features[key];
+    if (!cur) return;
+    const turningOff = cur.enabled === true;
+    const danger = turningOff ? DANGEROUS_OFF[key] : null;
+    if (danger) {
+      const ok = window.confirm(`${danger.title}\n\n${danger.description}`);
+      if (!ok) return;
+    }
+    save({ [key]: { enabled: !cur.enabled } });
   }
 
   function setField(key, field, value) {

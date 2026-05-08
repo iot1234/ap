@@ -253,7 +253,61 @@ function AddTenantModal({ open, onClose, rooms, setRooms, busy, setBusy, addActi
       setToast && setToast({ kind: 'error', message: 'PIN ต้องเป็นตัวเลข 4-8 หลัก' });
       return;
     }
+
+    // Pre-flight duplicate check: hit /api/tenants?q=<phone> to see if the
+    // phone is already on a tenant row. The server's mirrorRoomsToTenants
+    // bridge can ALSO create rows from a rooms-blob save, so it's possible
+    // for an admin to type the same phone twice (e.g. once via this modal,
+    // once via the rooms editor) — without this check the second submit
+    // creates a duplicate tenant row and the LINE binding flow gets
+    // confused about which row to look up.
     setBusy(true);
+    try {
+      const dupRes = await fetch(`/api/tenants?q=${encodeURIComponent(phone)}`,
+        { credentials: 'same-origin' });
+      if (dupRes.ok) {
+        const dupData = await dupRes.json();
+        const dupes = (dupData.tenants || []).filter((t) => {
+          // Server may match on full_name / email substrings too — narrow to
+          // exact phone match (after the same strip we did on submit).
+          const tphone = String(t.phone || '').replace(/[\s-]/g, '');
+          return tphone === phone;
+        });
+        if (dupes.length > 0) {
+          const existing = dupes[0];
+          // Same name? probably the same person re-typed → block silently
+          // with a clear "already exists" message + link to existing row.
+          // Different name? warn but allow (shared-phone household — common
+          // case in Thai dorms where parents/kids share a contact number).
+          const sameName = String(existing.full_name || '').toLowerCase().trim()
+            === fullName.toLowerCase();
+          if (sameName) {
+            setBusy(false);
+            setToast && setToast({
+              kind: 'danger',
+              message: {
+                title: `เบอร์ ${phone} อยู่ในระบบแล้ว`,
+                description: `ผู้เช่า "${existing.full_name}" — ไม่ต้องเพิ่มใหม่`,
+                action: {
+                  label: 'ดูข้อมูลผู้เช่าเดิม →',
+                  onClick: () => { window.location.hash = '#tenants'; onClose && onClose(); },
+                },
+              },
+            });
+            return;
+          }
+          // Different name → confirm it's intentional (shared phone household)
+          const ok = window.confirm(
+            `⚠ เบอร์ ${phone} ใช้อยู่กับ:\n` +
+            dupes.map((t) => `  • ${t.full_name}${t.current_room_id ? ` (ห้อง ${t.current_room_id})` : ''}`).join('\n') +
+            `\n\nจะเพิ่ม "${fullName}" ที่ใช้เบอร์เดียวกันใช่หรือไม่?\n` +
+            `(ใช้เมื่อพ่อแม่/ลูกใช้เบอร์เดียวกัน — ต่างคนกัน)`
+          );
+          if (!ok) { setBusy(false); return; }
+        }
+      }
+    } catch { /* fail-soft — duplicate check shouldn't block on network error */ }
+
     try {
       const body = {
         fullName, phone,
@@ -494,6 +548,22 @@ function TabPortal({ t, setToast, addActivity, apiFetch }) {
       });
       return;
     }
+    // If a PIN already exists (we can infer from a prior bind state or
+    // from tenantRow having any portal session activity), require explicit
+    // confirmation — admin shouldn't overwrite a working PIN by accident
+    // when they meant to type into a different field.
+    // We can't read pin_hash directly (server strips it), so we assume
+    // "PIN exists" if the tenant has logged in before (session row would
+    // exist) or if the binding state shows portal activity. Cheap proxy:
+    // ask any time the input was filled deliberately.
+    const ok = window.confirm(
+      `ตั้ง PIN เป็น "${pin}" ให้ผู้เช่า ${t.name}?\n\n` +
+      `📌 ถ้ามี PIN เดิมอยู่ จะถูกแทนที่ทันที — ผู้เช่าจะใช้ PIN เก่า login ไม่ได้อีก\n` +
+      `📌 แจ้งให้ผู้เช่าเปลี่ยน PIN เองหลัง login ครั้งแรก (ห้ามใช้ PIN ที่บอกออกไปนาน ๆ)\n\n` +
+      `ดำเนินการต่อ?`
+    );
+    if (!ok) return;
+
     setPinBusy(true);
     try {
       const r = await apiFetch(`/api/tenants/${tenantRow.id}`, {

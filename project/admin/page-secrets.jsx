@@ -216,7 +216,37 @@ function SecretRow({ spec, editing, draft, busy, onEdit, onCancel, onDraft, onSa
               background: C.accent, color: '#fff', cursor: busy ? 'not-allowed' : 'pointer', fontWeight: 500,
             }}>บันทึก</button>
             {spec.isSet && spec.source === 'db' && (
-              <button onClick={() => { if (window.confirm('ลบค่านี้?')) onClear(); }} disabled={busy} style={{
+              <button onClick={() => {
+                // Tell the admin EXACTLY what stops working when this key
+                // is cleared. Generic "ลบค่านี้?" let people drop critical
+                // tokens (LINE_CHANNEL_ACCESS_TOKEN, SMTP_PASS) without
+                // realising notifications would silently die afterward.
+                const IMPACT = {
+                  LINE_CHANNEL_ACCESS_TOKEN: 'แจ้งเตือนผ่าน LINE ทั้งหมดจะหยุดทำงาน (รวมถึง bill push, slip alert, maintenance notify)',
+                  LINE_CHANNEL_SECRET: 'webhook /webhook/line จะปฏิเสธทุก request เพราะ verify signature ไม่ผ่าน — tenant ส่งรหัส BIND-XXXX ไม่ได้',
+                  LINE_OWNER_USER_ID: 'system notifications (ผู้เช่าใหม่จอง / สลิปใหม่ / ticket ใหม่) จะไม่ถึง LINE ของ owner',
+                  SMTP_HOST: 'อีเมล fallback ของ LINE จะใช้ไม่ได้',
+                  SMTP_USER: 'อีเมล fallback ของ LINE จะใช้ไม่ได้',
+                  SMTP_PASS: 'อีเมล fallback ของ LINE จะใช้ไม่ได้ (auth fail)',
+                  SMTP_FROM: 'อีเมลจะส่งจากที่อยู่ default แทน — ผู้รับอาจมองว่าเป็น spam',
+                  OWNER_EMAIL: 'อีเมลแจ้งเตือน owner จะใช้ไม่ได้',
+                  PROMPTPAY_TARGET: 'บิล PDF จะไม่มี QR — ผู้เช่า scan-to-pay ไม่ได้',
+                  SENTRY_DSN: 'error report จะไม่ถูกส่งไป Sentry (มองไม่เห็น exception ใน production)',
+                  R2_ACCESS_KEY_ID: 'autoBackup จะ fall-back ไปบนดิสก์ container — backup จะหายเมื่อ redeploy',
+                  R2_SECRET_ACCESS_KEY: 'autoBackup + photo upload upload R2 ไม่ได้',
+                  R2_ENDPOINT: 'autoBackup + photo upload เชื่อม R2 ไม่ได้',
+                  R2_BUCKET: 'autoBackup + photo upload หาที่จัดเก็บไม่เจอ',
+                  R2_REGION: 'อาจส่งผลกับ AWS region routing (ไม่ใช่ R2 เพราะ R2 ใช้ "auto")',
+                };
+                const impact = IMPACT[spec.key] || 'ฟีเจอร์ที่อ้างถึง key นี้จะหยุดทำงาน';
+                const ok = window.confirm(
+                  `ลบค่า ${spec.key}?\n\n` +
+                  `📌 ผลกระทบ:\n${impact}\n\n` +
+                  `ค่าจะหายจาก DB ทันที — ตั้งใหม่ได้ตลอด แต่ระหว่างนี้ฟีเจอร์ที่เกี่ยวข้องจะใช้ไม่ได้\n\n` +
+                  `ดำเนินการต่อ?`
+                );
+                if (ok) onClear();
+              }} disabled={busy} style={{
                 padding: '8px 14px', borderRadius: 6, border: '1px solid ' + (C.danger || '#b94a48'),
                 background: 'transparent', color: C.danger || '#b94a48', fontFamily: 'inherit', fontSize: 13, cursor: 'pointer',
               }}>ลบค่า</button>

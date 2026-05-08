@@ -226,6 +226,30 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
   const handleDelete = () => {
     if (!confirmDelete) return;
     const id = confirmDelete;
+    const room = rooms[id];
+    // Pre-check: block delete if the room is occupied/reserved/overdue OR
+    // has a tenant attached. Without this guard, admin can wipe a room
+    // that's actively rented — leaving the tenant's contracts/bills/maint
+    // tickets orphaned (FK references a room id that no longer exists in
+    // the rooms blob, even though the relational tables still think the
+    // room exists by id-string).
+    if (room && (room.tenant || (room.status && room.status !== 'vacant' && room.status !== 'maintenance'))) {
+      const reason = room.tenant
+        ? `มีผู้เช่า "${room.tenant.name}" อยู่`
+        : `สถานะ "${room.status}" ไม่ใช่ห้องว่าง`;
+      setToast && setToast({
+        kind: 'danger',
+        message: {
+          title: `ลบห้อง ${id} ไม่ได้`,
+          description: `${reason} — ย้ายผู้เช่าออกหรือเปลี่ยนสถานะเป็น "ว่าง"/"ปรับปรุง" ก่อน`,
+          action: {
+            label: 'แก้ไขห้องนี้ →',
+            onClick: () => { setConfirmDelete(null); setEditId(id); },
+          },
+        },
+      });
+      return;
+    }
     setRooms(prev => {
       const next = { ...prev };
       delete next[id];
@@ -386,22 +410,85 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
         {editing && <RoomEditForm room={editing} onUpdate={(patch) => updateRoom(editing.id, patch)} config={config} />}
       </Drawer>
 
-      {/* Delete confirm */}
+      {/* Delete confirm — preview the actual room state so admin doesn't
+          delete blind. Block button when the pre-check (tenant/non-vacant)
+          would reject anyway, surfacing the reason inline + linking to the
+          room editor for the right next step. */}
       <Modal
         open={!!confirmDelete}
         onClose={() => setConfirmDelete(null)}
         title="ยืนยันการลบห้อง"
-        footer={
-          <>
-            <Btn variant="ghost" onClick={() => setConfirmDelete(null)}>ยกเลิก</Btn>
-            <Btn variant="danger" onClick={handleDelete}>ลบห้อง</Btn>
-          </>
-        }
+        footer={(() => {
+          const r = confirmDelete ? rooms[confirmDelete] : null;
+          const blocked = !!(r && (r.tenant || (r.status && r.status !== 'vacant' && r.status !== 'maintenance')));
+          return (
+            <>
+              <Btn variant="ghost" onClick={() => setConfirmDelete(null)}>ยกเลิก</Btn>
+              {blocked ? (
+                <Btn variant="primary" onClick={() => { const id = confirmDelete; setConfirmDelete(null); setEditId(id); }}>
+                  ไปแก้ไขห้องนี้
+                </Btn>
+              ) : (
+                <Btn variant="danger" onClick={handleDelete}>ลบห้อง</Btn>
+              )}
+            </>
+          );
+        })()}
       >
-        <div style={{ fontSize: 14, color: C.ink2, lineHeight: 1.6 }}>
-          ต้องการลบห้อง <b style={{ color: C.ink }}>{confirmDelete}</b> ใช่หรือไม่?
-          การกระทำนี้ไม่สามารถย้อนกลับได้
-        </div>
+        {(() => {
+          const r = confirmDelete ? rooms[confirmDelete] : null;
+          if (!r) {
+            return (
+              <div style={{ fontSize: 14, color: C.ink2 }}>
+                ห้อง <b style={{ color: C.ink }}>{confirmDelete}</b> ไม่พบในข้อมูล (อาจถูกลบไปแล้ว)
+              </div>
+            );
+          }
+          const blocked = !!r.tenant || (r.status && r.status !== 'vacant' && r.status !== 'maintenance');
+          return (
+            <div style={{ fontSize: 14, color: C.ink2, lineHeight: 1.7 }}>
+              <div style={{ marginBottom: 12 }}>
+                จะลบห้อง <b style={{ color: C.ink }}>{confirmDelete}</b> · ชั้น {r.floor} · {ADMIN_ROOM_TYPES[r.type]?.th || r.type}
+              </div>
+
+              {blocked ? (
+                <div style={{
+                  background: C.dangerSoft || '#f9e7e3',
+                  border: `1px solid ${C.danger || '#b94a48'}33`,
+                  borderRadius: 8, padding: 14,
+                  color: C.dangerInk || '#5a1a13',
+                }}>
+                  <div style={{ fontWeight: 700, marginBottom: 6 }}>🛑 ลบไม่ได้</div>
+                  <div style={{ fontSize: 13, lineHeight: 1.6 }}>
+                    {r.tenant ? (
+                      <>มีผู้เช่า <b>"{r.tenant.name}"</b>{r.tenant.phone ? ` (${r.tenant.phone})` : ''} อยู่ในห้องนี้</>
+                    ) : (
+                      <>สถานะปัจจุบันคือ <b>"{ADMIN_STATUS[r.status]?.th || r.status}"</b> — ไม่ใช่ห้องว่าง</>
+                    )}
+                    <div style={{ marginTop: 8 }}>
+                      💡 ขั้นตอนที่ถูกต้อง:<br/>
+                      1) เปิดห้องนี้ → ย้ายผู้เช่าออก (ถ้ามี)<br/>
+                      2) เปลี่ยนสถานะเป็น "ว่าง" หรือ "ปรับปรุง"<br/>
+                      3) กลับมากดลบใหม่
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div style={{
+                  background: C.warningSoft || '#fbf1de',
+                  border: `1px solid ${C.warning || '#c98a2b'}44`,
+                  borderRadius: 8, padding: 14,
+                  color: C.warningInk || '#5a3a0d',
+                }}>
+                  <div style={{ fontWeight: 700, marginBottom: 4 }}>⚠ การลบห้องเป็นการเปลี่ยนแปลงถาวร</div>
+                  <div style={{ fontSize: 12.5, lineHeight: 1.6 }}>
+                    บิลและสัญญาเก่าใน DB ที่อ้างถึงห้อง <code>{confirmDelete}</code> จะ<b>ยังอยู่</b> (ไม่ถูกลบตาม) — เก็บไว้สำหรับ audit
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })()}
       </Modal>
 
       <AddRoomModal
