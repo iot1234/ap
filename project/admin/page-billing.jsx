@@ -221,9 +221,78 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
   };
 
   const handleGenerate = async () => {
-    // Use the server-side /api/bills/bulk-generate which writes every
-    // occupied room's bill in one transaction. Faster + atomic + uses
-    // services/billing.js (single source of truth for VAT, late fee, etc).
+    // Pre-flight config sanity check. Without these, admin can blindly
+    // click "ออกบิล" and produce bills with: missing PromptPay (no QR
+    // on PDFs), default rates (4500/8/18 — which the operator may have
+    // never reviewed), zero water/elec readings (rooms ที่ไม่ได้บันทึก
+    // มิเตอร์เลย → bill ไม่มียอดน้ำ/ไฟ), or no rates set at all.
+    const issues = [];
+    const tenantsWithBills = Object.values(rooms || {}).filter(
+      (r) => r && r.tenant && (r.status === 'occupied' || r.status === 'overdue')
+    );
+    const ppTarget = config?.payment?.promptpay || config?.payment?.promptpayTarget;
+    if (!ppTarget) {
+      issues.push({
+        sev: 'high',
+        msg: 'ยังไม่ได้ตั้ง PromptPay — บิล PDF จะไม่มี QR (ผู้เช่าจะ scan-to-pay ไม่ได้)',
+        fix: 'ตั้งที่ /admin#secrets → กลุ่ม PromptPay หรือ Settings → การชำระเงิน',
+      });
+    }
+    const wRate = Number(config?.utilities?.waterRate);
+    const eRate = Number(config?.utilities?.elecRate);
+    if (!Number.isFinite(wRate) || wRate <= 0) {
+      issues.push({ sev: 'high', msg: 'ค่าน้ำต่อหน่วยไม่ได้ตั้ง — บิลจะ ฿0 ในส่วนค่าน้ำ', fix: '/admin#pricing → ค่าน้ำ-ไฟ' });
+    }
+    if (!Number.isFinite(eRate) || eRate <= 0) {
+      issues.push({ sev: 'high', msg: 'ค่าไฟต่อหน่วยไม่ได้ตั้ง — บิลจะ ฿0 ในส่วนค่าไฟ', fix: '/admin#pricing → ค่าน้ำ-ไฟ' });
+    }
+    // Count rooms with zero meter readings — admin probably forgot to
+    // record them. The bill will still generate but the utilities line
+    // items show 0 หน่วย, leading to "ทำไมบิลเดือนนี้ถูกจัง" tickets.
+    const noMeter = tenantsWithBills.filter((r) =>
+      (Number(r.waterUnits) || 0) === 0 && (Number(r.elecUnits) || 0) === 0
+    ).length;
+    if (noMeter > 0) {
+      issues.push({
+        sev: 'med',
+        msg: `${noMeter} ห้องยังไม่บันทึกค่าน้ำ/ไฟ — บิลจะออกแต่ยอดน้ำ/ไฟเป็น 0`,
+        fix: '/admin#meters → บันทึกค่ามิเตอร์ก่อนออกบิล',
+      });
+    }
+    if (tenantsWithBills.length === 0) {
+      issues.push({
+        sev: 'high',
+        msg: 'ยังไม่มีห้องที่มีผู้เช่าแสดงสถานะ "occupied" — จะออกบิล 0 ใบ',
+        fix: '/admin#rooms → กำหนดผู้เช่าให้ห้องก่อน',
+      });
+    }
+    // Building info — bill PDFs render building name + address + phone.
+    // Default placeholder makes the bill look unprofessional.
+    if (!config?.building?.name || config.building.name === 'บ้านกาญจน์ เรสซิเดนซ์') {
+      issues.push({
+        sev: 'low',
+        msg: 'ชื่อตึกยังเป็น default — บิล PDF จะแสดง "บ้านกาญจน์ เรสซิเดนซ์"',
+        fix: '/admin#settings → ข้อมูลตึก',
+      });
+    }
+
+    if (issues.length > 0) {
+      const high = issues.filter((i) => i.sev === 'high').length;
+      const lines = issues.map((i, idx) => {
+        const icon = i.sev === 'high' ? '🔴' : i.sev === 'med' ? '🟡' : '⚪';
+        return `${idx + 1}. ${icon} ${i.msg}\n   → ${i.fix}`;
+      }).join('\n\n');
+      const ok = window.confirm(
+        `⚠️ พบ ${issues.length} ปัญหา${high > 0 ? ` (${high} ข้อสำคัญ)` : ''} ก่อนออกบิล:\n\n` +
+        lines +
+        `\n\n📌 ออกบิลเดี๋ยวนี้ทั้งที่ปัญหาข้างบนยังไม่แก้?\n` +
+        (high > 0 ? `   ⚠ บิลที่ออกอาจมี QR หาย / ยอดน้ำ-ไฟ ผิด — ผู้เช่าจ่ายไม่ได้ / ทักท้วงสูง\n` : '') +
+        `\n   • กดยกเลิก → แก้ปัญหาก่อนแล้วค่อยมาออกบิล (แนะนำ)\n` +
+        `   • กดตกลง → ออกบิลตามค่าปัจจุบัน (รับผิดชอบเอง)`
+      );
+      if (!ok) return;
+    }
+
     setConfirmGenerate(false);
     const apiCall = window.apiCall;
     try {
@@ -271,14 +340,50 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
     }
     const overdueCnt = pending.filter((b) => b.status === 'overdue').length;
     const fmt = (n) => Number(n).toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+    // Pre-flight reachability check: count how many of the pending bills'
+    // tenants actually have a contactable channel. server-side sender
+    // skips bills with no LINE userId AND no email — those tenants get
+    // ZERO notifications, but admin doesn't see that distinction without
+    // digging through the queue. Surface it up front so admin knows
+    // "12 bills sent → 9 will reach a person, 3 will silently drop".
+    let unreachable = 0;
+    try {
+      const r = await fetch('/api/tenants?status=active', { credentials: 'same-origin' });
+      if (r.ok) {
+        const j = await r.json();
+        const byPhone = new Map();
+        for (const t of (j.tenants || [])) {
+          if (t.phone) byPhone.set(String(t.phone).replace(/[\s-]/g, ''), t);
+        }
+        for (const b of pending) {
+          // Tenants without LINE binding AND without email are unreachable
+          // via the bulk-send pipeline. b.tenant_id is what server uses;
+          // we approximate with the rooms-blob data we have.
+          const room = Object.values(rooms || {}).find((r) => r.id === b.room_id);
+          const phone = room?.tenant?.phone ? String(room.tenant.phone).replace(/[\s-]/g, '') : null;
+          const tenantRow = phone ? byPhone.get(phone) : null;
+          const hasLine = !!tenantRow?.line_user_id;
+          const hasEmail = !!tenantRow?.email || !!room?.tenant?.email;
+          if (!hasLine && !hasEmail) unreachable++;
+        }
+      }
+    } catch { /* fail-soft — show the warning conservatively when we can't tell */ }
+
     const ok = window.confirm(
       `ส่งแจ้งเตือนทุกบิลที่ยังไม่ชำระ?\n\n` +
       `📊 จำนวน: ${pending.length} ใบ` +
       (overdueCnt > 0 ? ` (ค้างชำระ ${overdueCnt}, รอชำระ ${pending.length - overdueCnt})` : '') + `\n` +
-      `💰 ยอดรวม: ฿${fmt(totalAmount)}\n\n` +
-      `📌 ระบบจะ enqueue LINE + อีเมล (fallback) ตาม channels ที่ tenant ผูกไว้\n` +
-      `📌 ดูคิวที่ /admin#notifications-queue — ส่งจริงภายใน ~1 นาที\n` +
-      `📌 ถ้ามี tenant ที่ผูก LINE ไว้ — เขาจะได้ข้อความซ้ำถ้ากดปุ่มนี้บ่อย`
+      `💰 ยอดรวม: ฿${fmt(totalAmount)}\n` +
+      (unreachable > 0
+        ? `\n⚠ ${unreachable} ใบจะส่งไม่ถึงผู้เช่า:\n` +
+          `   ผู้เช่า ${unreachable} คน ไม่ได้ผูก LINE และไม่ใส่อีเมล\n` +
+          `   📌 แนะนำ: ไป /admin#tenants → tab "Portal Access" ผูก LINE ก่อน,\n` +
+          `   หรือใส่อีเมลใน Settings ของผู้เช่า\n`
+        : '\n✅ ทุกบิลมีช่องทางส่งถึง (LINE หรือ อีเมล)\n') +
+      `\n📌 ระบบจะ enqueue ในคิว — ส่งจริงภายใน ~1 นาที\n` +
+      `📌 ดูคิวที่ /admin#notifications-queue\n` +
+      `📌 กดบ่อย = ผู้เช่าได้ข้อความซ้ำ (rate-limit ของ LINE = 1000/วัน)`
     );
     if (!ok) return;
     const apiCall = window.apiCall;

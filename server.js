@@ -2491,18 +2491,45 @@ app.post('/api/tenant/payments', sameOrigin, csrfGuard, requireTenant, ensureSli
       }
     }
 
-    // Decide the payment row's initial status:
-    //   - autoVerify ON + verifier passed         → 'verified' (mark bill paid)
-    //   - autoVerify ON + verifier rejected       → 'rejected' (with reason)
-    //   - autoVerify OFF + requireVerification    → 'pending'  (admin queue)
-    //   - autoVerify OFF + !requireVerification   → 'verified' (legacy trust mode)
+    // Decide the payment row's initial status. The matrix is:
+    //
+    //   autoVerify | verify result        | requireVerification | → status
+    //   ---------- + -------------------- + ------------------- + --------
+    //   OFF        | (n/a — not called)   | true                | pending
+    //   OFF        | (n/a — not called)   | false               | verified  ← legacy
+    //   ON         | ok                   | true                | pending   ← paranoid mode (advisory)
+    //   ON         | ok                   | false               | verified  ← happy path
+    //   ON         | rejected (clear)     | any                 | rejected  ← bad slip
+    //   ON         | rejected (transient) | any                 | pending   ← fall back to admin
+    //
+    // CRITICAL: a transient error (network timeout, provider 5xx, parser
+    // glitch) MUST NOT auto-reject. If we set 'rejected' on a flaky
+    // provider blip, the tenant sees a false "fake slip" message and
+    // their slip_hash + transaction_ref are now in the unique indexes,
+    // so even uploading the same legit slip again returns 409. The slip
+    // is effectively LOST. Map provider/transport-level errors to
+    // 'pending' so the admin queue catches them.
+    const TRANSIENT_CODES = new Set([
+      'VERIFIER_THREW', 'PROVIDER_ERROR',
+      'SLIPOK_PARSE', 'EASYSLIP_PARSE',
+      'NOT_CONFIGURED',     // can't actually reach here (isConfigured gates), but defensive
+    ]);
     let initialStatus, initialReason = null;
     if (autoVerifyAttempted) {
       if (verifyResult && verifyResult.ok) {
         initialStatus = req.features.slipUpload.requireVerification
           ? 'pending'   // paranoid mode: auto-verify is advisory; admin still confirms
           : 'verified';
+      } else if (verifyResult && TRANSIENT_CODES.has(verifyResult.code)) {
+        // Provider couldn't talk → fall back to pending so admin handles
+        // it manually rather than stranding the tenant with a false reject.
+        initialStatus = 'pending';
+        initialReason = `auto-verify ตกชั่วคราว (${verifyResult.code}) — รอเจ้าหน้าที่ตรวจสอบ`;
       } else {
+        // Verifier confirmed the slip is bad: amount mismatch, receiver
+        // mismatch, provider explicitly rejected (fake / expired / replay
+        // detected on their side), or unknown rejection code → tenant
+        // gets a clear "rejected" with reason.
         initialStatus = 'rejected';
         initialReason = (verifyResult && verifyResult.error) || 'การตรวจสอบไม่ผ่าน';
       }
@@ -2668,12 +2695,20 @@ app.post('/api/tenant/payments', sameOrigin, csrfGuard, requireTenant, ensureSli
           ].join('\n'),
         };
       } else {
-        // Pending — either autoVerify off (manual queue) or paranoid mode
-        // (auto-verified but admin still confirms). Same message either way:
-        // tenant is reassured, set expectation 24h.
-        const extra = verifyResult?.ok
-          ? `\n✅ ระบบยืนยันว่าสลิปถูกต้องแล้ว — รออนุมัติจากเจ้าหน้าที่`
-          : '';
+        // Pending — three sub-cases depending on why we landed here:
+        //   1. autoVerify off, manual queue (legacy)
+        //   2. autoVerify on + verifier ok + paranoid mode (admin still confirms)
+        //   3. autoVerify on + verifier transient error (network/parsing)
+        // Tell the tenant the truth so they don't get a false "verified"
+        // signal in case 3.
+        let extra = '';
+        if (verifyResult?.ok) {
+          extra = `\n✅ ระบบยืนยันว่าสลิปถูกต้องแล้ว — รออนุมัติจากเจ้าหน้าที่`;
+        } else if (autoVerifyAttempted) {
+          // Transient error path — be honest that the auto-check didn't
+          // get a clean answer. Don't surface "fake slip" wording.
+          extra = `\nℹ️ ระบบตรวจอัตโนมัติไม่สามารถยืนยันได้ในขณะนี้ — เจ้าหน้าที่จะตรวจให้`;
+        }
         tenantNotice = {
           subject: '📥 ได้รับสลิปแล้ว — กำลังตรวจสอบ',
           text: [
