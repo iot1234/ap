@@ -78,14 +78,15 @@ module.exports = function buildSystemSettingsRouter(ctx) {
     }
   });
 
-  r.put('/:key', sameOrigin, csrfGuard, requireAuth, validateBody(schemas.systemSettingPut), async (req, res) => {
+  // requireRole('owner','manager') front-loaded so the role check is visible
+  // alongside the rest of the route's middleware chain (consistent with other
+  // routes in the codebase). The OWNER_ONLY per-key check below is still
+  // needed because it varies by which key is being written.
+  r.put('/:key', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'), validateBody(schemas.systemSettingPut), async (req, res) => {
     const key = String(req.params.key).slice(0, 128);
     const role = req.session.user.role;
     if (OWNER_ONLY.has(key) && role !== 'owner') {
       return res.status(403).json({ error: 'this setting is owner-only', code: 'FORBIDDEN' });
-    }
-    if (role === 'readonly' || role === 'staff') {
-      return res.status(403).json({ error: 'forbidden', code: 'FORBIDDEN' });
     }
     const { value, description } = req.body;
     try {

@@ -3,46 +3,128 @@
 // reading. The chart is a simple inline SVG (no extra libs).
 // ===========================================================================
 
-const { useState, useEffect, useMemo } = React;
+const { useState, useEffect, useMemo, useRef } = React;
 
 function PageMeters({ rooms, setToast }) {
+  // Guard every window global we depend on. If shared.jsx / ui.jsx / hooks.jsx
+  // failed to load (CDN hiccup, slow mobile, blocked script), missing globals
+  // would throw "Cannot read property X of undefined" inside render — which
+  // ErrorBoundary catches but the user sees a generic error card. Render a
+  // friendly "loading" stub instead so the page keeps polling and recovers
+  // when the foundation scripts finish.
   const C = window.ADMIN_C;
-  const { Card, SectionHeading, Btn, PageContainer, PageHeader, EmptyState } = window;
-  const roomList = useMemo(() => Object.values(rooms || {}).sort((a, b) => String(a.id).localeCompare(String(b.id))), [rooms]);
+  const Card = window.Card;
+  const SectionHeading = window.SectionHeading;
+  const Btn = window.Btn;
+  const PageContainer = window.PageContainer;
+  const PageHeader = window.PageHeader;
+  const EmptyState = window.EmptyState;
+  if (!C || !Card || !PageContainer || !PageHeader || !Btn || !EmptyState) {
+    return React.createElement('div', {
+      style: { padding: 32, fontSize: 14, color: '#5b4f40', fontFamily: 'inherit' },
+    }, 'กำลังเตรียมหน้ามิเตอร์...');
+  }
+
+  const roomList = useMemo(() => {
+    const r = rooms || {};
+    return Object.values(r)
+      .filter((x) => x && typeof x === 'object' && x.id)
+      .sort((a, b) => String(a.id).localeCompare(String(b.id)));
+  }, [rooms]);
   const [roomId, setRoomId] = useState(roomList[0]?.id || '');
   const [type, setType] = useState('elec');
   const [list, setList] = useState([]);
   const [reading, setReading] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState(null);
+
+  // Track the in-flight load() so a rapid roomId/type switch can't pile up
+  // overlapping fetches that resolve out of order and overwrite fresh state
+  // with stale data.
+  const abortRef = useRef(null);
 
   async function load() {
-    if (!roomId) return;
+    if (!roomId) { setList([]); return; }
+    if (abortRef.current) abortRef.current.abort();
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+    const timer = setTimeout(() => ctrl.abort(), 15_000);
+    setLoading(true);
+    setLoadError(null);
     try {
-      const r = await fetch(`/api/meters/${encodeURIComponent(roomId)}/readings?type=${type}`, { credentials: 'same-origin' });
-      const d = await r.json();
-      if (r.ok) setList((d.readings || []).slice().reverse());
-    } catch {}
+      const r = await fetch(
+        `/api/meters/${encodeURIComponent(roomId)}/readings?type=${encodeURIComponent(type)}`,
+        { credentials: 'same-origin', signal: ctrl.signal }
+      );
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        // 503 means the meterIot feature is OFF on the server. Don't surface
+        // as an error — FeatureGate already shows the "feature off" placeholder
+        // when it's off; if we're rendering the page at all the flag was
+        // believed-on at gate time, so this is a transient race.
+        if (r.status !== 503) {
+          setLoadError(d.error || `HTTP ${r.status}`);
+        }
+        setList([]);
+      } else {
+        setList((d.readings || []).slice().reverse());
+      }
+    } catch (err) {
+      if (err.name !== 'AbortError') {
+        setLoadError(err.message || 'network error');
+        setList([]);
+      }
+    } finally {
+      clearTimeout(timer);
+      if (abortRef.current === ctrl) abortRef.current = null;
+      setLoading(false);
+    }
   }
-  useEffect(() => { load(); }, [roomId, type]);
+  useEffect(() => {
+    load();
+    return () => { if (abortRef.current) abortRef.current.abort(); };
+  }, [roomId, type]);
+
+  // Initial roomId selection: when rooms hydrate after the page mounts, pick
+  // the first one so the user doesn't have to.
+  useEffect(() => {
+    if (!roomId && roomList.length > 0) setRoomId(roomList[0].id);
+  }, [roomList, roomId]);
 
   async function record(e) {
     e.preventDefault();
+    if (!roomId) {
+      setToast && setToast({ kind: 'error', message: 'กรุณาเลือกห้องก่อนบันทึก' });
+      return;
+    }
     if (!reading) return;
+    // No more silent CSRF bypass via raw fetch — if hooks.jsx didn't load,
+    // alert the user instead of POSTing without a token (which would 403).
+    if (!window.apiFetch) {
+      setToast && setToast({ kind: 'error', message: 'ระบบยังไม่พร้อม — กรุณารีเฟรชหน้า' });
+      return;
+    }
     try {
-      // Must use apiFetch — POST goes through csrfGuard server-side, raw
-      // fetch was 403'ing silently and the meter reading never landed.
-      const apiFetch = window.apiFetch
-        || ((u, o) => fetch(u, { credentials: 'same-origin', ...o }));
-      const r = await apiFetch(`/api/meters/${encodeURIComponent(roomId)}/readings`, {
+      const r = await window.apiFetch(`/api/meters/${encodeURIComponent(roomId)}/readings`, {
         method: 'POST',
         body: JSON.stringify({ meterType: type, reading: Number(reading), source: 'manual' }),
       });
-      const d = await r.json();
-      if (!r.ok) throw new Error(d.error);
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
       setReading('');
-      if (d.anomaly) setToast && setToast({ kind: 'error', message:`ค่าผิดปกติ z=${d.anomaly.z.toFixed(2)}` });
-      else setToast && setToast({ kind: 'success', message:'บันทึกแล้ว' });
+      if (d.anomaly) {
+        const a = d.anomaly;
+        const msg = a.kind === 'rollback'
+          ? `ค่ามิเตอร์ลดลง ${Number(a.last).toFixed(2)} หน่วย — โปรดตรวจสอบ`
+          : `ค่าผิดปกติ z=${Number(a.z).toFixed(2)}`;
+        setToast && setToast({ kind: 'error', message: msg });
+      } else {
+        setToast && setToast({ kind: 'success', message: 'บันทึกแล้ว' });
+      }
       load();
-    } catch (e2) { setToast && setToast({ kind: 'error', message:e2.message }); }
+    } catch (e2) {
+      setToast && setToast({ kind: 'error', message: e2.message || 'บันทึกไม่สำเร็จ' });
+    }
   }
 
   return (
@@ -53,7 +135,9 @@ function PageMeters({ rooms, setToast }) {
           <label style={lblStyle(C)}>
             ห้อง
             <select value={roomId} onChange={(e) => setRoomId(e.target.value)} style={selStyle(C)}>
-              {roomList.map((r) => <option key={r.id} value={r.id}>{r.id}</option>)}
+              {roomList.length === 0
+                ? <option value="">— ไม่มีข้อมูลห้อง —</option>
+                : roomList.map((r) => <option key={r.id} value={r.id}>{r.id}</option>)}
             </select>
           </label>
           <label style={lblStyle(C)}>
@@ -68,13 +152,29 @@ function PageMeters({ rooms, setToast }) {
               ค่ามิเตอร์ใหม่
               <input type="number" step="0.01" value={reading} onChange={(e) => setReading(e.target.value)} style={selStyle(C)} />
             </label>
-            <Btn type="submit" variant="primary">บันทึก</Btn>
+            <Btn type="submit" variant="primary" disabled={!roomId}>บันทึก</Btn>
           </form>
         </div>
 
+        {loadError && (
+          <div style={{
+            padding: 10, marginBottom: 12, borderRadius: 8,
+            background: C.dangerSoft || '#fff5f4', color: C.danger || '#a23',
+            fontSize: 13,
+          }}>
+            โหลดข้อมูลไม่สำเร็จ: {loadError}
+            {' '}<button onClick={load} style={{
+              border: 0, background: 'transparent', color: 'inherit',
+              textDecoration: 'underline', cursor: 'pointer', fontFamily: 'inherit',
+            }}>ลองใหม่</button>
+          </div>
+        )}
+
         {list.length >= 2 ? <SparkChart data={list.map((x) => Number(x.reading))} /> : null}
 
-        {list.length === 0 ? <EmptyState title="ยังไม่มีค่ามิเตอร์ห้องนี้" /> : (
+        {loading ? (
+          <div style={{ padding: 24, textAlign: 'center', color: C.muted, fontSize: 13 }}>กำลังโหลด...</div>
+        ) : list.length === 0 ? <EmptyState title="ยังไม่มีค่ามิเตอร์ห้องนี้" /> : (
           <div style={{ marginTop: 16 }}>
             <div style={{ color: C.muted, fontSize: 12.5, marginBottom: 8 }}>ประวัติ {list.length} รายการ</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 1, background: C.border, maxHeight: 360, overflow: 'auto' }}>
@@ -96,7 +196,7 @@ function PageMeters({ rooms, setToast }) {
 }
 
 function SparkChart({ data }) {
-  const C = window.ADMIN_C;
+  const C = window.ADMIN_C || {};
   const W = 560, H = 120, P = 8;
   // Use a fold instead of Math.min(...data) — spreading a large array into
   // function args trips a stack-overflow on Chromium when data.length grows
@@ -120,12 +220,12 @@ function SparkChart({ data }) {
     return `${x},${y}`;
   }).join(' ');
   return (
-    <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{ background: C.bgSoft, borderRadius: 8 }}>
-      <polyline points={pts} fill="none" stroke={C.accent} strokeWidth="2" />
+    <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{ background: C.bgSoft || '#f5efe3', borderRadius: 8 }}>
+      <polyline points={pts} fill="none" stroke={C.accent || '#c46a3e'} strokeWidth="2" />
       {data.map((v, i) => {
         const x = P + ((W - 2 * P) * i) / (data.length - 1);
         const y = H - P - ((v - min) / span) * (H - 2 * P);
-        return <circle key={i} cx={x} cy={y} r="2.5" fill={C.accent} />;
+        return <circle key={i} cx={x} cy={y} r="2.5" fill={C.accent || '#c46a3e'} />;
       })}
     </svg>
   );

@@ -49,12 +49,18 @@ function send(req, res, rows, sheetName) {
 }
 
 module.exports = function buildReportsRouter(ctx) {
-  const { pool, requireAuth } = ctx;
+  const { pool, requireAuth, requireRole } = ctx;
   const r = express.Router();
+  // All financial endpoints below require manager+. Same rationale as the
+  // legacy /api/reports/* routes: revenue and cashflow numbers are
+  // commercially sensitive and shouldn't be visible to staff or readonly
+  // accounts. Maintenance stats are kept open since they're needed for
+  // day-to-day work.
+  const managerOrOwner = requireRole ? requireRole('owner', 'manager') : (_req, _res, next) => next();
 
   // GET /api/reports/revenue?year=2026&month=5
   // Sum of paid bills per period. If month omitted → 12-month series for the year.
-  r.get('/revenue', requireAuth, async (req, res) => {
+  r.get('/revenue', requireAuth, managerOrOwner, async (req, res) => {
     const year = Number(req.query.year) || new Date().getFullYear();
     const month = req.query.month ? Number(req.query.month) : null;
     try {
@@ -99,7 +105,7 @@ module.exports = function buildReportsRouter(ctx) {
   // Months count rooms occupied at any point during the month; vs. total
   // active rooms snapshot. Without history table we approximate using
   // current rooms blob + bills count.
-  r.get('/occupancy', requireAuth, async (req, res) => {
+  r.get('/occupancy', requireAuth, managerOrOwner, async (req, res) => {
     const year = Number(req.query.year) || new Date().getFullYear();
     try {
       const totalRoomsRow = await pool.query(
@@ -140,7 +146,7 @@ module.exports = function buildReportsRouter(ctx) {
 
   // GET /api/reports/overdue — aged-receivable on real bills (replaces the
   // app_data-derived /api/reports/aged-receivable from server.js).
-  r.get('/overdue', requireAuth, async (req, res) => {
+  r.get('/overdue', requireAuth, managerOrOwner, async (req, res) => {
     try {
       const { rows } = await pool.query(`
         SELECT
@@ -193,7 +199,7 @@ module.exports = function buildReportsRouter(ctx) {
   });
 
   // GET /api/reports/cashflow?months=12 — naive projection from recent average
-  r.get('/cashflow', requireAuth, async (req, res) => {
+  r.get('/cashflow', requireAuth, managerOrOwner, async (req, res) => {
     const months = Math.min(Math.max(Number(req.query.months) || 12, 1), 24);
     try {
       const avg = await pool.query(`

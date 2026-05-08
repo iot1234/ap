@@ -30,6 +30,24 @@ test('rejects sequence PINs (long form)', () => {
     assert.equal(isTrivialPin(p), true, `should reject ${p}`);
   }
 });
+test('rejects arithmetic progressions', () => {
+  // Step 2: 1357, 2468, 0246. Step 3: 0369, 1470 (with mod 10 wrap).
+  // The classic 8-digit "13579246" is step=2 wrapping 9→1, then 1→3...
+  // wait — actually digits 1,3,5,7,9,2,4,6 → wraparound after 9: 9+2=11%10=1,
+  // not 2. So that exact sequence doesn't match step=2; but 13579135, 24682468
+  // and similar do. We test the mod-10 wrap case explicitly below.
+  for (const p of ['1357', '2468', '0246', '9876', '9630', '9012']) {
+    assert.equal(isTrivialPin(p), true, `should reject ${p}`);
+  }
+});
+test('rejects common years (rolling window)', () => {
+  // Years from 1925 up to current+2 are rejected as common birth/anniversary
+  // PINs even when they don't form a sequence.
+  const thisYear = new Date().getFullYear();
+  for (const p of ['1990', '1985', '2003', String(thisYear)]) {
+    assert.equal(isTrivialPin(p), true, `should reject year ${p}`);
+  }
+});
 test('rejects non-digit input', () => {
   for (const p of ['abcd', '12-34', '12 34']) {
     assert.equal(isTrivialPin(p), false);

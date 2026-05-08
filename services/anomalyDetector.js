@@ -46,7 +46,16 @@ function diffAndUpdate(state, report) {
       c.status === 'error' &&
       prev.status === 'error' &&
       ageMin(prev.notifiedAt) >= RE_ALERT_AFTER_MIN;
-    const recovered = (prev.status === 'warn' || prev.status === 'error') && c.status === 'ok';
+    // Partial recovery: error → warn is *better* than before, so the owner
+    // should know the system is healing even though it isn't fully OK yet.
+    // Treated as a "recovered" alert (single ✅-flavoured message). Without
+    // this branch the transition fell through every guard and the owner
+    // never learned the issue partially resolved until full recovery (or
+    // until the 60-minute escalation re-fired the original error message).
+    const partialRecovery = prev.status === 'error' && c.status === 'warn';
+    const recovered =
+      ((prev.status === 'warn' || prev.status === 'error') && c.status === 'ok') ||
+      partialRecovery;
 
     if (worsened || escalate || recovered) {
       alerts.push({

@@ -4,37 +4,84 @@
 // (e.g. visitor) and review history.
 // ===========================================================================
 
-const { useState, useEffect } = React;
+const { useState, useEffect, useRef } = React;
 
 function PageAccess({ setToast }) {
+  // Guard window globals so a partial CDN load doesn't throw a destructure
+  // error on first render. See page-meters.jsx for context.
   const C = window.ADMIN_C;
-  const { Card, Btn, Pill, PageContainer, PageHeader, EmptyState } = window;
+  const Card = window.Card;
+  const Btn = window.Btn;
+  const Pill = window.Pill;
+  const PageContainer = window.PageContainer;
+  const PageHeader = window.PageHeader;
+  const EmptyState = window.EmptyState;
+  if (!C || !Card || !PageContainer || !PageHeader || !Btn || !EmptyState || !Pill) {
+    return React.createElement('div', {
+      style: { padding: 32, fontSize: 14, color: '#5b4f40', fontFamily: 'inherit' },
+    }, 'กำลังเตรียมหน้าเข้า-ออก...');
+  }
+
   const [list, setList] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState(null);
   const [form, setForm] = useState({ device: 'main_door', method: 'manual', result: 'granted', roomId: '', cardId: '', reason: '' });
+  const abortRef = useRef(null);
 
   async function load() {
+    if (abortRef.current) abortRef.current.abort();
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+    const timer = setTimeout(() => ctrl.abort(), 15_000);
+    setLoading(true);
+    setLoadError(null);
     try {
-      const r = await fetch('/api/access/logs?limit=200', { credentials: 'same-origin' });
-      const d = await r.json();
-      if (r.ok) setList(d.logs || []);
-    } catch {}
+      const r = await fetch('/api/access/logs?limit=200', {
+        credentials: 'same-origin',
+        signal: ctrl.signal,
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        if (r.status !== 503) setLoadError(d.error || `HTTP ${r.status}`);
+        setList([]);
+      } else {
+        setList(d.logs || []);
+      }
+    } catch (err) {
+      if (err.name !== 'AbortError') {
+        setLoadError(err.message || 'network error');
+        setList([]);
+      }
+    } finally {
+      clearTimeout(timer);
+      if (abortRef.current === ctrl) abortRef.current = null;
+      setLoading(false);
+    }
   }
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    load();
+    return () => { if (abortRef.current) abortRef.current.abort(); };
+  }, []);
 
   async function submit(e) {
     e.preventDefault();
-    const apiFetch = window.apiFetch || ((u, o) => fetch(u, { credentials: 'same-origin', ...o }));
+    if (!window.apiFetch) {
+      setToast && setToast({ kind: 'error', message: 'ระบบยังไม่พร้อม — กรุณารีเฟรชหน้า' });
+      return;
+    }
     try {
-      const r = await apiFetch('/api/access/log', {
+      const r = await window.apiFetch('/api/access/log', {
         method: 'POST',
         body: JSON.stringify(form),
       });
-      const d = await r.json();
-      if (!r.ok) throw new Error(d.error);
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
       setForm({ ...form, cardId: '', reason: '' });
-      setToast && setToast({ kind: 'success', message:'บันทึกแล้ว' });
+      setToast && setToast({ kind: 'success', message: 'บันทึกแล้ว' });
       load();
-    } catch (e2) { setToast && setToast({ kind: 'error', message:e2.message }); }
+    } catch (e2) {
+      setToast && setToast({ kind: 'error', message: e2.message || 'บันทึกไม่สำเร็จ' });
+    }
   }
 
   return (
@@ -74,7 +121,22 @@ function PageAccess({ setToast }) {
         </form>
       </Card>
       <Card>
-        {list.length === 0 ? <EmptyState title="ยังไม่มี log" /> : (
+        {loadError && (
+          <div style={{
+            padding: 10, marginBottom: 12, borderRadius: 8,
+            background: C.dangerSoft || '#fff5f4', color: C.danger || '#a23',
+            fontSize: 13,
+          }}>
+            โหลด log ไม่สำเร็จ: {loadError}
+            {' '}<button onClick={load} style={{
+              border: 0, background: 'transparent', color: 'inherit',
+              textDecoration: 'underline', cursor: 'pointer', fontFamily: 'inherit',
+            }}>ลองใหม่</button>
+          </div>
+        )}
+        {loading ? (
+          <div style={{ padding: 24, textAlign: 'center', color: C.muted, fontSize: 13 }}>กำลังโหลด...</div>
+        ) : list.length === 0 ? <EmptyState title="ยังไม่มี log" /> : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 1, background: C.border, maxHeight: 600, overflow: 'auto' }}>
             {list.map((x) => (
               <div key={x.id} style={{
@@ -96,7 +158,7 @@ function PageAccess({ setToast }) {
 }
 
 function Field({ label, children }) {
-  const C = window.ADMIN_C;
+  const C = window.ADMIN_C || {};
   return (
     <label style={{ fontSize: 12, color: C.muted, display: 'flex', flexDirection: 'column', gap: 4 }}>
       {label}{children}

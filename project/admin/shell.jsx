@@ -779,7 +779,34 @@ function App() {
     settings:    PageSettings,
     health:      window.PageHealth,
   };
-  const Page = PAGES[page] || PageOverview;
+  // PAGES[page] can be undefined if (a) the route is unknown, or (b) the
+  // page module hasn't loaded yet (slow CDN, blocked script). Rendering
+  // <undefined /> throws "Element type is invalid" inside React, which
+  // ErrorBoundary catches but presents as a generic error card. Show a
+  // friendly placeholder instead so the user can navigate elsewhere.
+  let Page = PAGES[page];
+  if (typeof Page !== 'function') {
+    Page = function MissingPage() {
+      return React.createElement('div', {
+        style: { padding: 32, fontSize: 14, color: C.ink2, fontFamily: 'inherit' },
+      }, [
+        React.createElement('div', { key: 'h', style: { fontSize: 18, fontWeight: 600, marginBottom: 8 } },
+          PAGES[page] === undefined ? `หน้า "${page}" ยังโหลดไม่เสร็จ` : `ไม่พบหน้า "${page}"`),
+        React.createElement('div', { key: 'd', style: { color: C.muted, marginBottom: 16 } },
+          PAGES[page] === undefined
+            ? 'หากเครือข่ายช้า กรุณารอ 2-3 วินาทีหรือรีเฟรชหน้า'
+            : 'เลือกเมนูจากแถบด้านซ้าย'),
+        React.createElement('button', {
+          key: 'b',
+          onClick: () => setPage('overview'),
+          style: {
+            padding: '8px 16px', borderRadius: 8, border: 0,
+            background: C.accent, color: '#fff', cursor: 'pointer', fontFamily: 'inherit',
+          },
+        }, 'ไปหน้าแดชบอร์ด'),
+      ]);
+    };
+  }
 
   return (
     <div style={{ display: 'flex', minHeight: '100vh', background: C.bg }}>

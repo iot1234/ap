@@ -139,15 +139,59 @@ async function processOne(pool, features, row) {
 
 /**
  * Drain up to `batchSize` due rows. Returns count processed.
+ *
+ * Multi-instance safe: claims rows inside a transaction with `FOR UPDATE
+ * SKIP LOCKED`, then immediately marks them `status='processing'` so a
+ * second worker (different pod / different node) can't pick the same id.
+ * Without this, every replica would emit duplicate LINE pushes / SMS texts
+ * for every message in a 60s window.
+ *
+ * If the worker process dies between claim and dispatch, the row stays
+ * stuck at `processing` forever — the cleanup query at the top of each
+ * tick reaps any `processing` row whose claim is older than 10 minutes
+ * (much longer than the 5s LINE timeout × 25 batch worst case).
  */
 async function tick(pool, features, batchSize = 25) {
-  const { rows } = await pool.query(
-    `SELECT id, channel, recipient, subject, body, payload, retry_count
-       FROM notifications_queue
-       WHERE status='pending' AND next_attempt_at <= NOW()
-       ORDER BY next_attempt_at ASC LIMIT $1`,
-    [batchSize]
-  );
+  const client = await pool.connect();
+  let rows;
+  try {
+    // Reaper: messages stuck `processing` for >10 min are presumed orphaned
+    // (worker died). Reset to `pending` so they get retried — bumps
+    // retry_count so a poison message still parks at MAX_RETRY.
+    await client.query(
+      `UPDATE notifications_queue
+         SET status='pending', retry_count = retry_count + 1,
+             last_error = COALESCE(last_error, '') || ' [reaped after stuck processing]'
+       WHERE status='processing' AND sent_at IS NULL
+         AND next_attempt_at < NOW() - INTERVAL '10 minutes'`
+    );
+
+    await client.query('BEGIN');
+    const claim = await client.query(
+      `SELECT id, channel, recipient, subject, body, payload, retry_count
+         FROM notifications_queue
+         WHERE status='pending' AND next_attempt_at <= NOW()
+         ORDER BY next_attempt_at ASC
+         LIMIT $1
+         FOR UPDATE SKIP LOCKED`,
+      [batchSize]
+    );
+    rows = claim.rows;
+    if (rows.length) {
+      await client.query(
+        `UPDATE notifications_queue
+           SET status='processing', next_attempt_at=NOW()
+         WHERE id = ANY($1::bigint[])`,
+        [rows.map((r) => r.id)]
+      );
+    }
+    await client.query('COMMIT');
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch { /* ignore */ }
+    throw err;
+  } finally {
+    client.release();
+  }
   for (const row of rows) await processOne(pool, features, row);
   return rows.length;
 }

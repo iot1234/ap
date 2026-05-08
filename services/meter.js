@@ -73,9 +73,18 @@ function consumption(a, b) {
 }
 
 /**
- * Detect anomalies: returns true if the latest delta is more than
- * features.meterIot.anomalySigmas standard deviations from the past mean.
- * Needs at least 4 prior readings to be meaningful.
+ * Detect anomalies: returns an object describing the anomaly when the latest
+ * delta is more than `sigmas` standard deviations from the past mean, OR when
+ * a meter rollback (negative delta) is observed. Returns null otherwise.
+ *
+ * Needs at least 4 prior consecutive deltas to be meaningful for the σ test.
+ *
+ * Why surface negative deltas:
+ *   - Meter physically replaced/reset → admin needs to know so the bill
+ *     calculation doesn't silently undercount.
+ *   - Data-entry typo (entered 1234 instead of 12345) → notify before the
+ *     wrong reading is used to bill someone.
+ *   - Tamper / fraud signal — readings should monotonically increase.
  */
 async function detectAnomaly(pool, roomId, meterType, sigmas = 3) {
   const { rows } = await pool.query(
@@ -84,8 +93,26 @@ async function detectAnomaly(pool, roomId, meterType, sigmas = 3) {
        ORDER BY reading_at DESC LIMIT 30`,
     [roomId, meterType]
   );
-  if (rows.length < 5) return null;
+  if (rows.length < 2) return null;
   const sorted = rows.reverse();  // oldest → newest
+
+  // Latest delta first — a negative reading is itself an anomaly signal,
+  // independent of how many prior samples we have.
+  const lastDelta = Number(sorted[sorted.length - 1].reading)
+                  - Number(sorted[sorted.length - 2].reading);
+  if (lastDelta < 0) {
+    return {
+      kind: 'rollback',
+      last: lastDelta,
+      mean: null,
+      std: null,
+      z: null,
+      threshold: sigmas,
+    };
+  }
+
+  // σ test on the prior positive-only deltas (excluding the just-observed one).
+  if (sorted.length < 5) return null;
   const deltas = [];
   for (let i = 1; i < sorted.length; i++) {
     const d = Number(sorted[i].reading) - Number(sorted[i - 1].reading);
@@ -99,7 +126,7 @@ async function detectAnomaly(pool, roomId, meterType, sigmas = 3) {
   if (std === 0) return null;
   const z = (last - mean) / std;
   if (Math.abs(z) >= sigmas) {
-    return { z, mean, std, last, threshold: sigmas };
+    return { kind: 'sigma', z, mean, std, last, threshold: sigmas };
   }
   return null;
 }

@@ -462,18 +462,37 @@ function maskRoomsPublic(roomsObj) {
   return out;
 }
 
-// Fields in baankarn_config_v1 that are operator-internal — strip when public.
+// Hard allowlist of fields safe to expose to unauthenticated visitors of
+// the public room board. Switched from a denylist (delete users/notification/
+// automation) to a strict allowlist so any new sensitive field admin adds to
+// baankarn_config_v1 stays internal by default. The previous shape would
+// silently leak any new top-level key — exactly the kind of regression you
+// can't spot in code review.
 function maskConfigPublic(cfg) {
   if (!cfg || typeof cfg !== 'object') return cfg;
-  const c = { ...cfg };
-  if (c.payment) {
-    c.payment = {
-      promptpayDisplayName: c.payment.promptpayDisplayName || c.payment.bankName,
-      promptpayTarget: c.payment.promptpay || c.payment.promptpayTarget,
+  const out = {};
+  if (cfg.building && typeof cfg.building === 'object') {
+    out.building = {
+      name: cfg.building.name,
+      logo: cfg.building.logo,
+      address: cfg.building.address,
+      phone: cfg.building.phone,
     };
   }
-  delete c.users; delete c.notification; delete c.automation;
-  return c;
+  if (cfg.payment && typeof cfg.payment === 'object') {
+    out.payment = {
+      promptpayDisplayName: cfg.payment.promptpayDisplayName || cfg.payment.bankName,
+      promptpayTarget: cfg.payment.promptpay || cfg.payment.promptpayTarget,
+    };
+  }
+  // Pricing fields are visible on the public booking form, so let them through.
+  if (cfg.utilities && typeof cfg.utilities === 'object') {
+    out.utilities = {
+      waterRate: cfg.utilities.waterRate,
+      elecRate: cfg.utilities.elecRate,
+    };
+  }
+  return out;
 }
 
 app.get('/api/data/:key', async (req, res) => {
@@ -740,6 +759,11 @@ const rateLimitQr      = makeIpLimiter({ windowMs: 60_000, max: 30 });
 // A7 — lookup endpoint can leak phone↔room mapping by enumeration. Tight
 // per-IP cap + small random jitter on the response to neutralise timing.
 const rateLimitLookup  = makeIpLimiter({ windowMs: 60_000, max: 10 });
+// Public ticket-rating endpoint. The "rating IS NULL" guard at the SQL
+// level prevents repeat updates, but without a rate limit a script can
+// race a legitimate rate by spamming until one wins. 5/min/IP is enough
+// for honest re-tries, way below script-attack throughput.
+const rateLimitTicketRate = makeIpLimiter({ windowMs: 60_000, max: 5 });
 function lookupJitter(_req, _res, next) {
   const ms = 200 + Math.floor(Math.random() * 300);
   setTimeout(next, ms);
@@ -1188,7 +1212,9 @@ app.put('/api/maintenance/:id', sameOrigin, csrfGuard, requireAuth, requireRole(
 });
 
 // POST /api/maintenance/:id/rate — public, requires matching phone.
-app.post('/api/maintenance/:id/rate', sameOrigin, validateBody(schemas.rateTicket), async (req, res) => {
+// rateLimitTicketRate caps brute-force attempts at racing the SQL
+// `rating IS NULL` guard with a flood of POSTs.
+app.post('/api/maintenance/:id/rate', sameOrigin, rateLimitTicketRate, validateBody(schemas.rateTicket), async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
   const b = req.body;
@@ -1260,7 +1286,10 @@ app.get('/api/audit', requireAuth, requireRole('owner', 'manager'), async (req, 
 // --- Reports (Phase B2): real DB aggregates --------------------------------
 // Replaces the Math.sin-based mocks. We derive metrics from the existing
 // app_data JSONB store (rooms + bookings + audit) so no new schema needed.
-app.get('/api/reports/overview', requireAuth, async (_req, res) => {
+// Financial reports (revenue, AR, bill exports) are gated to manager+ — staff
+// don't need to see aggregate cashflow to do their day-to-day work, and
+// readonly accounts (used for stakeholder demos) shouldn't see it at all.
+app.get('/api/reports/overview', requireAuth, requireRole('owner', 'manager'), async (_req, res) => {
   try {
     const [roomsRow, bookingsRow] = await Promise.all([
       pool.query(`SELECT value FROM app_data WHERE key='baankarn_rooms_v1'`),
@@ -1296,9 +1325,9 @@ app.get('/api/reports/overview', requireAuth, async (_req, res) => {
   }
 });
 
-// GET /api/reports/aged-receivable — admin-auth. Bins overdue rooms by how
+// GET /api/reports/aged-receivable — manager+. Bins overdue rooms by how
 // many days overdue. Reads from app_data rooms (which carry overdueDays).
-app.get('/api/reports/aged-receivable', requireAuth, async (_req, res) => {
+app.get('/api/reports/aged-receivable', requireAuth, requireRole('owner', 'manager'), async (_req, res) => {
   try {
     const { rows } = await pool.query(
       `SELECT value FROM app_data WHERE key='baankarn_rooms_v1'`
@@ -1328,9 +1357,9 @@ app.get('/api/reports/aged-receivable', requireAuth, async (_req, res) => {
   }
 });
 
-// GET /api/reports/bills.xlsx — admin-auth. Streams an Excel workbook of
+// GET /api/reports/bills.xlsx — manager+. Streams an Excel workbook of
 // the current-month bill estimates for every room.
-app.get('/api/reports/bills.xlsx', requireAuth, async (_req, res) => {
+app.get('/api/reports/bills.xlsx', requireAuth, requireRole('owner', 'manager'), async (_req, res) => {
   let ExcelJS;
   try { ExcelJS = require('exceljs'); }
   catch (e) { return res.status(500).json({ error: 'exceljs not installed' }); }
@@ -2680,13 +2709,21 @@ app.post('/api/meters/:roomId/readings', sameOrigin, csrfGuard, requireAuth, req
       anomaly = await meter.detectAnomaly(pool, roomId, row.meter_type, sigmas);
     } catch (e) { console.warn('[meter] anomaly detect failed:', e.message); }
     if (anomaly) {
+      const isRollback = anomaly.kind === 'rollback';
+      const subject = isRollback ? '⚠️ มิเตอร์ค่าลดลง' : '⚠️ มิเตอร์ผิดปกติ';
+      const text = isRollback
+        ? `ห้อง ${roomId} (${row.meter_type}) ค่ามิเตอร์ลดลง ${Number(anomaly.last).toFixed(2)} หน่วย\n`
+          + `น่าจะเป็น meter reset / ป้อนค่าผิด — โปรดตรวจสอบก่อนออกบิล`
+        : `ห้อง ${roomId} (${row.meter_type}) z=${Number(anomaly.z).toFixed(2)} เกิน ${sigmas}σ\n`
+          + `ค่าล่าสุด: ${anomaly.last}, ค่าเฉลี่ย: ${Number(anomaly.mean).toFixed(2)}`;
       notifier.notifyOwner(
         { pool, features: flags },
-        { subject: '⚠️ มิเตอร์ผิดปกติ',
-          text: `ห้อง ${roomId} (${row.meter_type}) z=${Number(anomaly.z).toFixed(2)} เกิน ${sigmas}σ\nค่าล่าสุด: ${anomaly.last}, ค่าเฉลี่ย: ${Number(anomaly.mean).toFixed(2)}` }
+        { subject, text }
       ).catch(() => {});
-      audit(req, 'meter.anomaly', 'meter', String(row.id),
-        { z: anomaly.z, sigmas, mean: anomaly.mean });
+      audit(req, 'meter.anomaly', 'meter', String(row.id), {
+        kind: anomaly.kind || 'sigma',
+        z: anomaly.z, sigmas, mean: anomaly.mean,
+      });
     }
     audit(req, 'meter.record', 'meter', String(row.id), { meterType: row.meter_type, reading: row.reading });
     res.json({ ok: true, reading: row, anomaly });
@@ -3127,7 +3164,9 @@ app.get('/api/admin/notifications', requireAuth, requireRole('owner', 'manager')
   const status = String(req.query.status || '').slice(0, 16);
   const params = [];
   let where = '';
-  if (['pending', 'sent', 'failed'].includes(status)) {
+  // 'processing' = claimed by a worker but dispatch not finished yet
+  // (used by the multi-instance-safe queue tick).
+  if (['pending', 'sent', 'failed', 'processing'].includes(status)) {
     params.push(status); where = `WHERE status = $1`;
   }
   try {
