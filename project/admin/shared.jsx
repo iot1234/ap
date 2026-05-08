@@ -214,17 +214,57 @@ const STORAGE_KEYS = {
 function safeParse(s, fallback) {
   try { return JSON.parse(s); } catch (e) { return fallback; }
 }
+// One-shot sanitiser. The tenant-side photo uploader at project/app.jsx
+// readsAsDataURL() and pushed `data:image/jpeg;base64,…` strings straight
+// into rooms[id].photos[]. With 12 photos × 40 rooms × 1-3 MB each, the
+// rooms blob ballooned past 50 MB — Chrome OOM'd the renderer when /admin#billing
+// re-parsed + closed-over the whole tree. Stripping here means the next
+// load gets a small blob; the next save (any room edit) will persist the
+// trimmed version back to the server, and the storage.js URL-ref pipeline
+// will be used for new uploads.
+function stripDataUrls(rooms) {
+  if (!rooms || typeof rooms !== 'object') return rooms;
+  let droppedCount = 0;
+  for (const id of Object.keys(rooms)) {
+    const r = rooms[id];
+    if (r && Array.isArray(r.photos)) {
+      const before = r.photos.length;
+      r.photos = r.photos.filter((p) => typeof p === 'string' && !p.startsWith('data:'));
+      droppedCount += before - r.photos.length;
+    }
+    // Same defense for any tenant-attached base64 fields seen in the wild.
+    if (r && r.tenant && typeof r.tenant === 'object') {
+      for (const k of ['idCardImage', 'signatureImage', 'avatar']) {
+        if (typeof r.tenant[k] === 'string' && r.tenant[k].startsWith('data:')) {
+          delete r.tenant[k];
+          droppedCount++;
+        }
+      }
+    }
+  }
+  if (droppedCount > 0) {
+    console.warn(`[shared] stripped ${droppedCount} embedded base64 image(s) from rooms blob`);
+  }
+  return rooms;
+}
 function loadRooms() {
   if (typeof localStorage === 'undefined') return buildAdminRooms();
   const raw = localStorage.getItem(STORAGE_KEYS.rooms);
   if (!raw) return buildAdminRooms();
   const parsed = safeParse(raw, null);
-  return parsed && typeof parsed === 'object' && Object.keys(parsed).length > 0
-    ? parsed : buildAdminRooms();
+  if (!parsed || typeof parsed !== 'object' || Object.keys(parsed).length === 0) {
+    return buildAdminRooms();
+  }
+  return stripDataUrls(parsed);
 }
 function saveRooms(rooms) {
-  try { localStorage.setItem(STORAGE_KEYS.rooms, JSON.stringify(rooms)); }
-  catch (e) { console.warn('saveRooms failed', e); }
+  try {
+    // Strip again on save — belt + braces. Keeps any code path that mutated
+    // photos in-memory (e.g. legacy app.jsx still writing data URLs from a
+    // stale tab) from re-poisoning the server-side blob.
+    const safe = stripDataUrls(rooms);
+    localStorage.setItem(STORAGE_KEYS.rooms, JSON.stringify(safe));
+  } catch (e) { console.warn('saveRooms failed', e); }
 }
 function loadConfig() {
   if (typeof localStorage === 'undefined') return DEFAULT_CONFIG;

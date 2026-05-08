@@ -571,6 +571,23 @@ app.put('/api/data/:key', sameOrigin, csrfGuard, requireAuth, requireRole('owner
       hint: e.message,
     });
   }
+  // Hard size cap on persisted JSONB rows. Without this, a tenant-side photo
+  // upload that embedded base64 data URLs into rooms blob could push the
+  // server-side row past 50 MB — and then every `/api/data` hydrate would
+  // OOM the Chrome renderer on /admin#billing. 6 MB is generous (rooms blob
+  // with proper URL-ref photos sits well under 200 KB) and slightly above
+  // the client's 5 MB shapeIsValid cap so the client error is the one that
+  // surfaces first in normal operation. The client also strips data: URLs
+  // before save (project/admin/shared.jsx stripDataUrls) — this is the
+  // belt-and-braces server-side guard.
+  const MAX_BYTES = 6 * 1024 * 1024;
+  if (serialised.length > MAX_BYTES) {
+    console.warn(`[data] rejecting oversize PUT for ${key} (${serialised.length} bytes)`);
+    return res.status(413).json({
+      error: `value too large for key '${key}' (${(serialised.length / 1_048_576).toFixed(1)} MB > 6 MB cap). Strip embedded base64 images and re-save.`,
+      code: 'TOO_LARGE',
+    });
+  }
   // Sanity check: enforce expected top-level shape per key. Some legacy
   // clients sent malformed structures (e.g. activities became an array of
   // mixed objects + JSON-strings) which then choked Postgres on read.

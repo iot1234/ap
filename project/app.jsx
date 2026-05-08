@@ -383,8 +383,23 @@ function DetailPanel({ room, onUpdate, onClose }) {
   const totalMonthly = room.rent + room.water + room.elec + room.wifi;
 
   function handleFiles(files) {
+    // Per-file 1.5 MB cap. Without this, 12 photos × 4 MB phone-camera JPEGs
+    // plus the 1.33× base64 overhead pushed the rooms blob past 50 MB and
+    // OOM'd the Chrome renderer on /admin#billing the next time it loaded.
+    // shared.jsx now strips any data: URL it sees on load anyway, but the
+    // first line of defense is refusing the oversize file at upload time.
+    const MAX_BYTES = 1_500_000;
     const arr = Array.from(files).slice(0, 8);
-    Promise.all(arr.map(f => new Promise(res => {
+    const accepted = arr.filter((f) => {
+      if (f.size > MAX_BYTES) {
+        const mb = (f.size / 1_048_576).toFixed(1);
+        try { alert(`ไฟล์ "${f.name}" ใหญ่เกินกำหนด (${mb} MB) — สูงสุด 1.5 MB ต่อภาพ`); } catch {}
+        return false;
+      }
+      return true;
+    });
+    if (!accepted.length) return;
+    Promise.all(accepted.map(f => new Promise(res => {
       const r = new FileReader();
       r.onload = e => res(e.target.result);
       r.readAsDataURL(f);

@@ -167,10 +167,21 @@
     baankarn_bookings_v1:   'array',
     baankarn_activities_v1: 'array',
   };
+  // Hard size cap on every PUT. Without this, a base64 photo upload that
+  // accidentally lands in the rooms blob (see project/app.jsx legacy path)
+  // could push a 50-100 MB JSON payload to the server every keystroke,
+  // causing both server-side memory pressure AND a Chrome renderer OOM
+  // when the next page load reads it back. 5 MB is a generous ceiling —
+  // a 40-room blob with reasonable metadata sits well under 200 KB.
+  const MAX_SYNCED_BYTES = 5 * 1024 * 1024;
   function shapeIsValid(key, raw) {
     const want = EXPECTED_TYPE[key];
     if (!want) return false;
     if (typeof raw !== 'string') return false;
+    if (raw.length > MAX_SYNCED_BYTES) {
+      console.warn(`[api-client] dropped oversized value for ${key} (${raw.length} bytes > ${MAX_SYNCED_BYTES})`);
+      return false;
+    }
     let parsed;
     try { parsed = JSON.parse(raw); } catch { return false; }
     if (parsed === null) return false;
