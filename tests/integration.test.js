@@ -170,6 +170,66 @@ test('billing.buildBill respects feature flags', () => {
   assert.ok(b.vat > 0);
 });
 
+test('migrate.js creates composite index on payments(status, created_at)', async () => {
+  // Pins the index added to defend the slip-queue listing query against
+  // a full sort on every page load. If this test fails because the index
+  // was renamed/removed, also update server.js's GET /api/payments handler
+  // (which relies on the planner using this index for ORDER BY DESC LIMIT).
+  const calls = [];
+  const pool = { query: async (sql) => { calls.push(sql); return { rows: [] }; } };
+  const dbMigrate = require('../db/migrate');
+  await dbMigrate.migrate(pool, { adminPassword: '' });
+  assert.ok(
+    calls.some((s) => s.includes('idx_payments_status_created')
+                   && s.includes('payments(status, created_at')),
+    'migrate.js should create idx_payments_status_created composite index'
+  );
+});
+
+test('strip-payments-base64 SQL targets data:* and oversize rows', () => {
+  // Pins the WHERE-clause shape of the cleanup script so a future refactor
+  // can't silently widen it (e.g. accidentally NULL slip_url for the
+  // canonical /files/<id> rows). Reads the script as text rather than
+  // executing it because the script needs DATABASE_URL to run.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const script = fs.readFileSync(
+    path.join(__dirname, '..', 'scripts', 'strip-payments-base64.js'),
+    'utf8'
+  );
+  assert.match(script, /slip_url LIKE 'data:%'/);
+  assert.match(script, /length\(slip_url\) > 2048/);
+  assert.match(script, /UPDATE payments[\s\S]+SET slip_url = NULL/);
+  // Must support --dry-run so an operator can inspect before writing.
+  assert.match(script, /--dry-run/);
+});
+
+test('GET /api/payments list query omits slip_url to bound response size', () => {
+  // Pins the explicit-column SELECT introduced to defend against legacy
+  // base64 in slip_url. If a future refactor reverts to `SELECT p.*`, the
+  // renderer-OOM regression returns. The detail endpoint (GET
+  // /api/payments/:id) is the only sanctioned path that ships slip_url.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  // Locate the list handler and isolate its SELECT statement.
+  const m = server.match(
+    /app\.get\('\/api\/payments',[\s\S]*?const \{ rows \} = await pool\.query\(\s*`([\s\S]*?)`/
+  );
+  assert.ok(m, 'should find GET /api/payments handler');
+  const sql = m[1];
+  assert.ok(!/SELECT\s+p\.\*/i.test(sql),
+    'list query must not use SELECT p.* — that would re-introduce slip_url');
+  // slip_url may appear in IS NULL / IS NOT NULL probes (used to derive
+  // has_slip), but must never appear as a returned column. Matches like
+  // "p.slip_url," or "p.slip_url AS ..." are disallowed; "p.slip_url IS"
+  // is allowed.
+  assert.ok(!/p\.slip_url\s*(?:,|\bAS\b)/i.test(sql),
+    'list query must not select slip_url as a column');
+  assert.ok(/has_slip/i.test(sql),
+    'list query should expose has_slip boolean instead of the URL');
+});
+
 test('encryption module round-trips with versioned prefix', () => {
   // Force a clean load with the current env + ENCRYPTION_KEY_V1 set
   process.env.ENCRYPTION_KEY_V1 = Buffer.alloc(32, 1).toString('base64');

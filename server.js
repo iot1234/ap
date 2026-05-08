@@ -2432,8 +2432,18 @@ app.get('/api/payments', requireAuth, async (req, res) => {
   const offset = Math.max(Number(req.query.offset) || 0, 0);
   params.push(limit, offset);
   try {
+    // Explicit column list (no `SELECT p.*`) so a legacy `slip_url` containing
+    // a multi-MB base64 data URL — possible in pre-storage-service rows —
+    // can't blow up the response size and OOM the renderer when the list is
+    // long. The slip image is fetched lazily by GET /api/payments/:id when
+    // admin opens a row in the modal.
     const { rows } = await pool.query(
-      `SELECT p.*, b.bill_no, b.period, t.full_name AS tenant_name, t.phone AS tenant_phone
+      `SELECT p.id, p.bill_id, p.tenant_id, p.amount, p.method, p.ref,
+              p.status, p.verified_by, p.verified_at, p.rejected_reason,
+              p.created_at,
+              CASE WHEN p.slip_url IS NOT NULL THEN true ELSE false END AS has_slip,
+              b.bill_no, b.period,
+              t.full_name AS tenant_name, t.phone AS tenant_phone
          FROM payments p
          LEFT JOIN bills b ON b.id = p.bill_id
          LEFT JOIN tenants t ON t.id = p.tenant_id
@@ -2444,6 +2454,40 @@ app.get('/api/payments', requireAuth, async (req, res) => {
     res.json({ ok: true, payments: rows, limit, offset });
   } catch (err) {
     console.error('payments list error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// GET /api/payments/:id — full row including slip_url, used by the admin
+// modal when opening a payment from the queue. Split from the list endpoint
+// so the list response stays small (see comment on the list query above).
+app.get('/api/payments/:id', requireAuth, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+  try {
+    const { rows } = await pool.query(
+      `SELECT p.*, b.bill_no, b.period,
+              t.full_name AS tenant_name, t.phone AS tenant_phone
+         FROM payments p
+         LEFT JOIN bills b ON b.id = p.bill_id
+         LEFT JOIN tenants t ON t.id = p.tenant_id
+        WHERE p.id=$1`,
+      [id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'not found' });
+    const row = rows[0];
+    // Belt-and-braces: if slip_url is a base64 data URL (legacy data) or
+    // absurdly large, drop it from the response so a single oversized row
+    // can't OOM the admin's tab. The cleanup script should fix this in DB.
+    if (typeof row.slip_url === 'string'
+        && (row.slip_url.startsWith('data:') || row.slip_url.length > 2048)) {
+      console.warn(`[payments] dropping oversized/data: slip_url for payment id=${id} (${row.slip_url.length} bytes)`);
+      row.slip_url = null;
+      row._slip_dropped = true;
+    }
+    res.json({ ok: true, payment: row });
+  } catch (err) {
+    console.error('payment detail error:', err);
     res.status(500).json({ error: 'internal error' });
   }
 });

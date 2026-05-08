@@ -172,6 +172,14 @@ async function migrate(pool, opts = {}) {
     );
     CREATE INDEX IF NOT EXISTS idx_payments_bill ON payments(bill_id);
     CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status);
+    -- The slip queue listing query (GET /api/payments?status=pending)
+    -- ORDER BYs created_at DESC. Without this composite, Postgres has to
+    -- sort the entire matching set on every page load — slow on busy
+    -- buildings and was implicated in the renderer-hung complaint when
+    -- combined with no client-side fetch timeout. The composite lets the
+    -- planner satisfy WHERE+ORDER BY in a single index scan.
+    CREATE INDEX IF NOT EXISTS idx_payments_status_created
+      ON payments(status, created_at DESC);
     CREATE UNIQUE INDEX IF NOT EXISTS uq_payments_slip_hash ON payments(slip_hash) WHERE slip_hash IS NOT NULL;
 
     CREATE TABLE IF NOT EXISTS meter_readings (
