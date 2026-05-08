@@ -21,9 +21,23 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
   const [editId, setEditId]        = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [addOpen, setAddOpen]      = useState(false);
+  const [bulkAddOpen, setBulkAddOpen] = useState(false);
   const fileInputRef               = React.useRef(null);
 
   const list = useMemo(() => Object.values(rooms).sort((a, b) => a.id.localeCompare(b.id)), [rooms]);
+
+  // Derive the unique sorted list of floors actually present so the filter
+  // dropdown auto-grows when admin adds floor 6, 7, …, N. Previously the
+  // list was hardcoded [1,2,3,4,5] which left newly-added floors invisible
+  // in the dropdown even though their rooms appeared in the table.
+  const allFloors = useMemo(() => {
+    const set = new Set();
+    for (const r of list) {
+      const f = Number(r && r.floor);
+      if (Number.isInteger(f) && f >= 1 && f <= 99) set.add(f);
+    }
+    return Array.from(set).sort((a, b) => a - b);
+  }, [list]);
 
   const filtered = useMemo(() => list.filter(r => {
     if (filterStatus !== 'all' && r.status !== filterStatus) return false;
@@ -152,6 +166,63 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
     return true;
   };
 
+  // Bulk-add a whole floor in one action (e.g., "ชั้น 6 มี 12 ห้อง"). Faster
+  // than clicking "เพิ่มห้อง" 12 times. Skips IDs that already exist so it's
+  // safe to re-run if the admin gets interrupted halfway.
+  const handleBulkAddFloor = (data) => {
+    const f = Number(data.floor);
+    const start = Number(data.startNo) || 1;
+    const count = Number(data.count) || 0;
+    if (!Number.isInteger(f) || f < 1 || f > 99) {
+      setToast && setToast({ kind: 'danger', message: 'เลขชั้นต้องอยู่ระหว่าง 1-99' });
+      return false;
+    }
+    if (count < 1 || count > 99) {
+      setToast && setToast({ kind: 'danger', message: 'จำนวนห้องต้องอยู่ระหว่าง 1-99' });
+      return false;
+    }
+    if (start + count - 1 > 99) {
+      setToast && setToast({ kind: 'danger', message: 'เลขห้องสุดท้ายเกิน 99 — ลดจำนวนลง' });
+      return false;
+    }
+    const t = ADMIN_ROOM_TYPES[data.type] || ADMIN_ROOM_TYPES.standard;
+    let added = 0, skipped = 0;
+    setRooms(prev => {
+      const next = { ...prev };
+      for (let n = start; n < start + count; n++) {
+        const id = `${f}${String(n).padStart(2, '0')}`;
+        if (next[id]) { skipped++; continue; }
+        next[id] = {
+          id, floor: f, no: n, type: data.type, status: 'vacant',
+          rent: Number(data.rent) || t.baseRent,
+          deposit: (Number(data.rent) || t.baseRent) * 2,
+          tenant: null, since: null, contractEnd: null,
+          water: 0, elec: 0, waterUnits: 0, elecUnits: 0,
+          wifi: config.utilities.wifi || 250,
+          photos: [], notes: '',
+          view: data.view || 'วิวสวน',
+          balcony: !!data.balcony, parking: !!data.parking, kitchen: !!data.kitchen,
+          lastCleaned: window.fmtDateTH(new Date()),
+          lastBillDate: null, billStatus: 'none', overdueDays: 0,
+        };
+        added++;
+      }
+      return next;
+    });
+    addActivity && addActivity({
+      icon: '🏗️',
+      text: `เพิ่มชั้น ${f} จำนวน ${added} ห้อง (${t.th})${skipped ? ` — ข้าม ${skipped} ที่มีอยู่แล้ว` : ''}`,
+      type: 'system',
+    });
+    setToast && setToast({
+      kind: added > 0 ? 'success' : 'warning',
+      message: added > 0
+        ? `เพิ่มห้อง ${added} ห้องในชั้น ${f}${skipped ? ` (ข้าม ${skipped})` : ''}`
+        : 'ไม่ได้เพิ่ม — ทุกห้องในช่วงนี้มีอยู่แล้ว',
+    });
+    return added > 0;
+  };
+
   const handleDelete = () => {
     if (!confirmDelete) return;
     const id = confirmDelete;
@@ -240,6 +311,7 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
           <>
             <Btn variant="secondary" icon="📥" onClick={handleImportCSV}>นำเข้า CSV</Btn>
             <Btn variant="secondary" icon="📤" onClick={handleExportCSV}>ส่งออก CSV</Btn>
+            <Btn variant="secondary" icon="🏗️" onClick={() => setBulkAddOpen(true)}>เพิ่มชั้นใหม่</Btn>
             <Btn variant="primary" icon="+" onClick={() => setAddOpen(true)}>เพิ่มห้อง</Btn>
           </>
         }
@@ -268,7 +340,7 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
               fullWidth={false}
               options={[
                 { value: 'all', label: 'ทุกชั้น' },
-                ...[1,2,3,4,5].map(f => ({ value: String(f), label: `ชั้น ${f}` })),
+                ...allFloors.map(f => ({ value: String(f), label: `ชั้น ${f}` })),
               ]}
               style={{ width: 130 }}
             />
@@ -338,7 +410,133 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
         onAdd={handleAddRoom}
         existingIds={Object.keys(rooms)}
       />
+
+      <BulkAddFloorModal
+        open={bulkAddOpen}
+        onClose={() => setBulkAddOpen(false)}
+        onAdd={(data) => { if (handleBulkAddFloor(data)) setBulkAddOpen(false); }}
+        existingFloors={allFloors}
+      />
     </PageContainer>
+  );
+}
+
+// --- BulkAddFloorModal ---------------------------------------------------
+// "Add a whole floor in one click" — common when a building has 8-16 rooms
+// per floor and admin would otherwise click "เพิ่มห้อง" per room. Generates
+// `count` rooms in floor `floor` starting at `startNo`, all with the same
+// type/rent/view. Idempotent — re-running skips IDs that already exist.
+function BulkAddFloorModal({ open, onClose, onAdd, existingFloors }) {
+  const C = window.ADMIN_C;
+  const ADMIN_ROOM_TYPES = window.ADMIN_ROOM_TYPES;
+  const ADMIN_ROOM_TYPE_KEYS = window.ADMIN_ROOM_TYPE_KEYS;
+  const ADMIN_VIEWS = window.ADMIN_VIEWS;
+  const { Modal, Btn, Input, Select, Toggle } = window;
+
+  // Default the new floor to "next floor up from the highest existing one".
+  // Same UX shortcut as AddRoomModal for the per-room flow — the operator
+  // expects "I'm building floor 6 next" without having to compute it.
+  const defaultFloor = (existingFloors && existingFloors.length)
+    ? Math.min(99, existingFloors[existingFloors.length - 1] + 1)
+    : 1;
+
+  const [form, setForm] = React.useState({
+    floor: defaultFloor,
+    startNo: 1,
+    count: 8,
+    type: 'standard',
+    rent: ADMIN_ROOM_TYPES.standard.baseRent,
+    view: 'วิวสวน',
+    balcony: false, parking: false, kitchen: false,
+  });
+  React.useEffect(() => {
+    if (open) {
+      setForm({
+        floor: defaultFloor,
+        startNo: 1,
+        count: 8,
+        type: 'standard',
+        rent: ADMIN_ROOM_TYPES.standard.baseRent,
+        view: 'วิวสวน',
+        balcony: false, parking: false, kitchen: false,
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  const update = (k, v) => {
+    setForm(p => {
+      const next = { ...p, [k]: v };
+      if (k === 'type') next.rent = ADMIN_ROOM_TYPES[v].baseRent;
+      return next;
+    });
+  };
+
+  const floorExists = existingFloors && existingFloors.includes(Number(form.floor));
+  const lastNo = Number(form.startNo) + Number(form.count) - 1;
+  const lastId = `${form.floor}${String(lastNo).padStart(2, '0')}`;
+  const firstId = `${form.floor}${String(form.startNo).padStart(2, '0')}`;
+  const tooMany = lastNo > 99;
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title="เพิ่มชั้นใหม่ (Bulk)"
+      width={520}
+      footer={
+        <>
+          <Btn variant="ghost" onClick={onClose}>ยกเลิก</Btn>
+          <Btn variant="primary" disabled={tooMany || !form.count} onClick={() => onAdd(form)}>
+            เพิ่ม {form.count} ห้อง
+          </Btn>
+        </>
+      }
+    >
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <div style={{
+          padding: 12, background: floorExists ? (C.warningSoft || '#fbf1de') : (C.surfaceAlt || '#faf6ee'),
+          borderRadius: 8, fontSize: 13, color: C.ink2, lineHeight: 1.6,
+        }}>
+          {floorExists ? (
+            <>⚠️ <b>ชั้น {form.floor} มีอยู่แล้ว</b> — ห้องที่ id ซ้ำจะถูกข้าม จะเพิ่มเฉพาะที่ยังไม่มี</>
+          ) : (
+            <>จะสร้างห้อง <code style={{ background: 'rgba(0,0,0,0.05)', padding: '1px 5px', borderRadius: 3 }}>{firstId}</code> ถึง <code style={{ background: 'rgba(0,0,0,0.05)', padding: '1px 5px', borderRadius: 3 }}>{lastId}</code> ({form.count} ห้อง) ใน <b>ชั้น {form.floor}</b></>
+          )}
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10 }}>
+          <Input label="ชั้น" type="number" value={form.floor}
+                 onChange={(v) => update('floor', Math.max(1, Math.min(99, Number(v) || 1)))} />
+          <Input label="เริ่มห้องที่" type="number" value={form.startNo}
+                 onChange={(v) => update('startNo', Math.max(1, Math.min(99, Number(v) || 1)))} />
+          <Input label="จำนวน" type="number" value={form.count}
+                 onChange={(v) => update('count', Math.max(1, Math.min(99, Number(v) || 1)))}
+                 error={tooMany ? `ห้องสุดท้ายเกิน ${lastNo}>99` : null} />
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+          <Select label="ประเภทห้อง (ทุกห้อง)" value={form.type}
+                  onChange={(v) => update('type', v)}
+                  options={ADMIN_ROOM_TYPE_KEYS.map(k => ({ value: k, label: ADMIN_ROOM_TYPES[k].th }))} />
+          <Select label="วิว (ทุกห้อง)" value={form.view}
+                  onChange={(v) => update('view', v)}
+                  options={ADMIN_VIEWS} />
+        </div>
+
+        <Input label="ค่าเช่า/เดือน (ทุกห้อง)" type="number" suffix="บาท"
+               value={form.rent} onChange={(v) => update('rent', Number(v))} />
+
+        <div style={{ padding: 10, background: C.surfaceAlt, borderRadius: 8 }}>
+          <div style={{ fontSize: 12, color: C.muted, marginBottom: 6 }}>
+            คุณสมบัติพิเศษ (ติดทุกห้องที่สร้าง — แก้ทีหลังรายห้องได้)
+          </div>
+          <Toggle label="มีระเบียง"  checked={form.balcony} onChange={(v) => update('balcony', v)} />
+          <Toggle label="ที่จอดรถ"   checked={form.parking} onChange={(v) => update('parking', v)} />
+          <Toggle label="ครัวในห้อง" checked={form.kitchen} onChange={(v) => update('kitchen', v)} />
+        </div>
+      </div>
+    </Modal>
   );
 }
 
@@ -462,24 +660,70 @@ function AddRoomModal({ open, onClose, onAdd, existingIds }) {
     id: '', floor: 1, no: 1, type: 'standard',
     rent: 4500, view: 'วิวสวน', balcony: false, parking: false, kitchen: false,
   });
+
+  // Suggest the next-available room id based on what's ALREADY in the
+  // rooms blob (not a hardcoded 5×8 grid). Strategy:
+  //   1. Find the highest floor that currently has rooms.
+  //   2. On that floor, suggest (max room number + 1).
+  //   3. If that floor is "full" (>= 99 rooms), bump to next floor / room 1.
+  //   4. Empty building → start with 1, room 1 (id = '101').
+  // Admin can override the suggested id; uniqueness is enforced via
+  // `existingIds.includes(form.id)` below + server's room_code unique index.
   React.useEffect(() => {
-    if (open) {
-      // Find a sensible default ID — next available
-      const ids = new Set(existingIds);
-      let next = '';
-      for (let f = 1; f <= 5 && !next; f++) {
-        for (let r = 1; r <= 8 && !next; r++) {
-          const id = `${f}${String(r).padStart(2,'0')}`;
-          if (!ids.has(id)) next = id;
-        }
-      }
-      setForm(prev => ({ ...prev,
-        id: next || '999',
-        floor: next ? Number(next[0]) : 9,
-        no: next ? Number(next.slice(1)) : 99,
-        rent: ADMIN_ROOM_TYPES.standard.baseRent,
-      }));
+    if (!open) return;
+    const ids = new Set(existingIds);
+
+    // Parse room ids in the form `${floor}${roomNo.padStart(2,0)}` — same
+    // as buildAdminRooms() generates. Free-form ids that don't match are
+    // ignored for the purpose of suggestion (admin still sees them in the
+    // table; we just don't try to extrapolate from them).
+    const byFloor = new Map();
+    for (const id of ids) {
+      const m = String(id).match(/^(\d{1,2})(\d{2})$/);
+      if (!m) continue;
+      const f = Number(m[1]);
+      const n = Number(m[2]);
+      if (!byFloor.has(f)) byFloor.set(f, []);
+      byFloor.get(f).push(n);
     }
+
+    let suggestedFloor = 1, suggestedNo = 1;
+    if (byFloor.size > 0) {
+      // Pick the most-recently-used floor (highest number) and bump by one.
+      const floors = Array.from(byFloor.keys()).sort((a, b) => a - b);
+      const topFloor = floors[floors.length - 1];
+      const topRooms = byFloor.get(topFloor).sort((a, b) => a - b);
+      const nextOnTop = topRooms[topRooms.length - 1] + 1;
+      if (nextOnTop <= 99) {
+        suggestedFloor = topFloor;
+        suggestedNo = nextOnTop;
+      } else {
+        // Top floor is full — suggest first room of a new floor above.
+        suggestedFloor = Math.min(topFloor + 1, 99);
+        suggestedNo = 1;
+      }
+    }
+    // Resolve to a free id (defensive against bizarre overlap).
+    let id = `${suggestedFloor}${String(suggestedNo).padStart(2, '0')}`;
+    let bump = 0;
+    while (ids.has(id) && bump < 200) {
+      bump++;
+      const fNo = suggestedNo + bump;
+      if (fNo <= 99) {
+        id = `${suggestedFloor}${String(fNo).padStart(2, '0')}`;
+      } else {
+        suggestedFloor = Math.min(suggestedFloor + 1, 99);
+        suggestedNo = 1;
+        bump = 0;
+        id = `${suggestedFloor}${String(suggestedNo).padStart(2, '0')}`;
+      }
+    }
+    setForm(prev => ({ ...prev,
+      id,
+      floor: Number(id.match(/^(\d{1,2})/)[1]),
+      no: Number(id.slice(-2)),
+      rent: ADMIN_ROOM_TYPES.standard.baseRent,
+    }));
   }, [open]);
 
   const exists = existingIds.includes(form.id);

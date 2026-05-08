@@ -45,10 +45,12 @@ const ROOM_TYPES = {
 // even though the demo room generator that used it has been retired.
 function seedRand(seed) { let x = Math.sin(seed) * 10000; return x - Math.floor(x); }
 
-// Empty 5×8 scaffold. Replaces the previous deterministic-random demo that
-// generated 40 rooms with seeded tenants/statuses on first paint. The public
-// dashboard now starts blank and fills in from /api/data/baankarn_rooms_v1
-// once the server has been seeded by an admin.
+// Empty 5×8 scaffold for first-run UX. The public dashboard hydrates from
+// /api/data/baankarn_rooms_v1 (server is the source of truth), but having
+// some rooms in initial state means the layout doesn't flash empty before
+// the fetch resolves. Admins can add/remove rooms freely after — the
+// derived `allFloors` below picks up whatever floors actually exist in
+// the data, so floor 6, 7, …, N just work.
 function buildRooms() {
   const rooms = {};
   [1,2,3,4,5].forEach((f) => {
@@ -68,6 +70,25 @@ function buildRooms() {
     }
   });
   return rooms;
+}
+
+// Derive the unique sorted list of floors actually present in the rooms
+// blob. Replaces the previous [1,2,3,4,5] literal that stopped the public
+// dashboard from showing any floor an admin added beyond 5. Returns
+// floor numbers sorted ascending; callers reverse for "diagram top-down".
+//
+// Defensive: filters non-numeric / negative / > 99 floors so a corrupted
+// rooms entry can't make the floor strip render with NaN buttons or balloon
+// out to thousands of rows. Caps at 99 for sanity.
+function getAllFloors(rooms) {
+  if (!rooms || typeof rooms !== 'object') return [1];
+  const set = new Set();
+  for (const r of Object.values(rooms)) {
+    const f = Number(r && r.floor);
+    if (Number.isInteger(f) && f >= 1 && f <= 99) set.add(f);
+  }
+  if (set.size === 0) return [1];   // empty rooms → still show floor 1 stub
+  return Array.from(set).sort((a, b) => a - b);
 }
 
 const fmt = (n) => n.toLocaleString('th-TH');
@@ -160,17 +181,21 @@ function KpiBar({ totals, isMobile }) {
 }
 
 function BuildingDiagram({ rooms, currentFloor, onSelectFloor }) {
+  // Top-down view: highest floor at the top, ground floor (lobby) at the
+  // bottom. Derived from real rooms data — works for any number of floors
+  // an admin has added, not just the legacy 1-5.
+  const floorsDesc = getAllFloors(rooms).slice().reverse();
   return (
     <div style={{ padding: '24px 20px' }}>
       <div style={{ fontSize: 11, letterSpacing: 1.8, color: C.muted, fontWeight: 600, marginBottom: 12 }}>
-        อาคาร · BUILDING A
+        อาคาร · BUILDING A · {floorsDesc.length} ชั้น
       </div>
       <div style={{
         background: 'linear-gradient(180deg, #fbf6ec 0%, #f1e8d6 100%)',
         borderRadius: 12, padding: '12px 12px 16px', border: `1px solid ${C.border}`,
       }}>
         <div style={{ height: 14, background: C.dark, borderRadius: '6px 6px 2px 2px', marginBottom: 6 }}/>
-        {[5,4,3,2,1].map(f => {
+        {floorsDesc.map(f => {
           const list = Object.values(rooms).filter(r => r.floor === f);
           const vacant = list.filter(r => r.status === 'vacant').length;
           const active = currentFloor === f;
@@ -231,13 +256,22 @@ function BuildingDiagram({ rooms, currentFloor, onSelectFloor }) {
 }
 
 function FloorTabs({ rooms, currentFloor, onSelectFloor }) {
+  // Mobile floor strip — derive floors from data so floors 6+ become
+  // tappable instead of being silently dropped. Grid columns adapt to
+  // the count: ≤6 floors → equal split; >6 → fixed-width buttons that
+  // overflow horizontally (mobile users get a swipe strip).
+  const floors = getAllFloors(rooms);
+  const tight = floors.length <= 6;
   return (
     <div style={{
-      display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)',
+      display: tight ? 'grid' : 'flex',
+      gridTemplateColumns: tight ? `repeat(${Math.max(floors.length, 1)}, 1fr)` : undefined,
+      overflowX: tight ? 'visible' : 'auto',
       gap: 6, padding: '10px 14px',
       background: C.surface, borderBottom: `1px solid ${C.border}`,
+      WebkitOverflowScrolling: 'touch',
     }}>
-      {[1,2,3,4,5].map(f => {
+      {floors.map(f => {
         const list = Object.values(rooms).filter(r => r.floor === f);
         const vacant = list.filter(r => r.status === 'vacant').length;
         const active = currentFloor === f;
@@ -248,6 +282,10 @@ function FloorTabs({ rooms, currentFloor, onSelectFloor }) {
             border: active ? 'none' : `1px solid ${C.border}`,
             borderRadius: 10, padding: '8px 6px', cursor: 'pointer',
             fontFamily: 'inherit', textAlign: 'center', transition: 'all 0.15s',
+            // When the floor count exceeds the tight-grid threshold we
+            // switch to a horizontal scroll strip; force a min-width so
+            // each button stays tappable.
+            minWidth: tight ? undefined : 64, flexShrink: 0,
           }}>
             <div style={{
               fontFamily: 'Sora', fontWeight: 600, fontSize: 18,
@@ -963,7 +1001,17 @@ function App() {
               fontSize: isMobile ? 12 : 14, color: C.muted,
               fontWeight: 400, marginLeft: 10,
             }}>
-              · {floor === 5 ? 'เพนท์เฮาส์' : floor === 4 ? 'พรีเมียม' : 'มาตรฐาน'}
+              {/* Tier label derives from this floor's RANK among all floors
+                  (top floor = penthouse, second-from-top = premium, others
+                  standard) so adding floor 6 / 7 / N still gets the right
+                  label without hardcoded "floor === 5" branches. */}
+              · {(() => {
+                const all = getAllFloors(rooms);
+                const max = all[all.length - 1];
+                if (floor === max && all.length >= 2) return 'เพนท์เฮาส์';
+                if (floor === max - 1 && all.length >= 3) return 'พรีเมียม';
+                return 'มาตรฐาน';
+              })()}
             </span>
           </h1>
         </div>
