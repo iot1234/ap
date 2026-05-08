@@ -172,6 +172,28 @@ async function migrate(pool, opts = {}) {
     );
     CREATE INDEX IF NOT EXISTS idx_payments_bill ON payments(bill_id);
     CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status);
+
+    -- Auto-verify columns. transaction_ref is the BANK's transaction id
+    -- pulled from the slip QR (PromptPay slip carries transRef in EMV
+    -- payload). Uniquely identifies one real bank transaction — different
+    -- from slip_hash which only catches a re-uploaded byte-identical image.
+    -- A tenant who edits the slip image (crops, recompresses, screenshots
+    -- the screenshot) gets a different slip_hash but the same transaction_ref;
+    -- the partial-unique index below blocks that replay attack.
+    --
+    -- verify_provider records WHICH service confirmed the slip (slipok,
+    -- easyslip, manual) so admin can audit the auto-verify pipeline +
+    -- spot which slips bypassed it.
+    --
+    -- verify_payload stores the raw provider response for forensics —
+    -- helpful when a tenant disputes "I paid 5000 but you marked 500".
+    ALTER TABLE payments ADD COLUMN IF NOT EXISTS transaction_ref TEXT;
+    ALTER TABLE payments ADD COLUMN IF NOT EXISTS verify_provider TEXT;
+    ALTER TABLE payments ADD COLUMN IF NOT EXISTS verify_payload  JSONB;
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_payments_tx_ref
+      ON payments(transaction_ref) WHERE transaction_ref IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_payments_provider
+      ON payments(verify_provider) WHERE verify_provider IS NOT NULL;
     -- The slip queue listing query (GET /api/payments?status=pending)
     -- ORDER BYs created_at DESC. Without this composite, Postgres has to
     -- sort the entire matching set on every page load — slow on busy

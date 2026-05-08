@@ -23,6 +23,20 @@ const DEFAULTS = Object.freeze({
     requireVerification: true,   // admin must verify before bill is marked paid
     maxBytes: 1_500_000,         // 1.5MB base64 budget
     allowedMimes: ['image/jpeg', 'image/png', 'image/webp'],
+    // Auto-verify: when ON + a provider is configured (SLIPOK_API_KEY or
+    // EASYSLIP_API_KEY in secrets), uploaded slips are sent to that service
+    // for instant verification. Bills auto-flip to paid + tenant gets a
+    // "ชำระเงินสำเร็จ" push within seconds — no admin step needed for the
+    // happy path. Safety: receiver-account match + amount match + DB
+    // transaction_ref uniqueness are checked before accepting.
+    // requireVerification still acts as a server-side override — when ON,
+    // even auto-verified slips can be set to 'pending' instead of 'verified'
+    // (operator chooses). Sensible production combo:
+    //   autoVerify: true, requireVerification: false  → fully automatic
+    //   autoVerify: true, requireVerification: true   → auto-verify is
+    //     advisory; admin still confirms (paranoid mode)
+    autoVerify: false,
+    provider: 'slipok',          // 'slipok' | 'easyslip' (operator choice)
   },
   photoUpload: {
     enabled: true,

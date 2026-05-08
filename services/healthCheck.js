@@ -371,6 +371,35 @@ async function checkFeatureDependencies(features) {
     });
   }
 
+  // slipUpload.autoVerify ON but no provider key → silently never auto-
+  // verifies anything (every slip falls back to admin queue). Operator
+  // expects "instant payment" but actually nothing changed. Surface this.
+  if (features?.slipUpload?.enabled && features?.slipUpload?.autoVerify) {
+    const provider = features.slipUpload.provider || 'slipok';
+    let configured = false;
+    if (provider === 'slipok')   configured = !!secrets.get('SLIPOK_API_KEY');
+    if (provider === 'easyslip') configured = !!secrets.get('EASYSLIP_API_KEY');
+    if (!configured) {
+      warnings.push({
+        flag: 'slipUpload.autoVerify',
+        issue: `autoVerify เปิด + provider="${provider}" แต่ API key ยังไม่ตั้ง — สลิปจะตกเข้าคิว admin เหมือนเดิม`,
+        fix: provider === 'slipok'
+          ? 'ตั้ง SLIPOK_API_KEY ใน Settings → Secrets'
+          : 'ตั้ง EASYSLIP_API_KEY ใน Settings → Secrets',
+      });
+    }
+    // Receiver-account match needs PROMPTPAY_TARGET to be set — without it
+    // we can't safely auto-accept (any slip paid to ANY account would pass
+    // amount-only check).
+    if (configured && !secrets.get('PROMPTPAY_TARGET')) {
+      warnings.push({
+        flag: 'slipUpload.autoVerify',
+        issue: 'autoVerify เปิด แต่ PROMPTPAY_TARGET ไม่ตั้ง — auto-verify ไม่สามารถตรวจสอบบัญชีปลายทาง',
+        fix: 'ตั้ง PROMPTPAY_TARGET ใน Secrets เพื่อให้ระบบยืนยันว่าโอนเข้าบัญชีหอพัก',
+      });
+    }
+  }
+
   if (warnings.length === 0) {
     return { status: 'ok', message: 'Feature dependencies look consistent' };
   }

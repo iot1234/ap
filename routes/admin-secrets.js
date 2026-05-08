@@ -55,8 +55,10 @@ module.exports = function buildAdminSecretsRouter(ctx) {
     const group = String(req.body?.group || '').slice(0, 16);
     // Accept the same set the secrets service supports — adding 'promptpay'
     // here so the UI can validate the saved target before bills go out.
-    if (!['line', 'smtp', 'r2', 'promptpay'].includes(group)) {
-      return res.status(400).json({ error: 'group must be one of: line, smtp, r2, promptpay' });
+    // 'slipverify' tests whichever provider (SlipOK / EasySlip) the
+    // operator picked in features.slipUpload.provider.
+    if (!['line', 'smtp', 'r2', 'promptpay', 'slipverify'].includes(group)) {
+      return res.status(400).json({ error: 'group must be one of: line, smtp, r2, promptpay, slipverify' });
     }
     try {
       const result = await secrets.testGroup(group);

@@ -2461,6 +2461,55 @@ app.post('/api/tenant/payments', sameOrigin, csrfGuard, requireTenant, ensureSli
       maxBytes: req.features.slipUpload.maxBytes || 1_500_000,
       allowedMimes: req.features.slipUpload.allowedMimes || ['image/jpeg', 'image/png', 'image/webp'],
     });
+
+    // === Auto-verify the slip via configured provider (SlipOK/EasySlip) ==
+    // When slipUpload.autoVerify is on AND a provider key is configured,
+    // we send the slip to the provider for instant validation BEFORE
+    // touching the DB. The provider returns the bank's transaction
+    // reference + actual amount + receiver account. We cross-check:
+    //   1) amount ±1฿ vs bill.total
+    //   2) receiver account tail vs PROMPTPAY_TARGET (so a slip paid to
+    //      someone else's account is rejected)
+    //   3) transaction_ref unique in DB (catches replay even when image
+    //      bytes differ — re-screenshot, crop, recompress)
+    // All three must pass for auto-verify; one mismatch → status='rejected'
+    // with a tenant-facing reason.
+    const slipVerifier = require('./services/slipVerifier');
+    let verifyResult = null;
+    let autoVerifyAttempted = false;
+    if (slipVerifier.isConfigured(req.features)) {
+      autoVerifyAttempted = true;
+      const ppTarget = require('./services/secrets').get('PROMPTPAY_TARGET');
+      try {
+        verifyResult = await slipVerifier.verify(
+          rawBuf,
+          { amount, billId, promptpayTarget: ppTarget },
+          req.features
+        );
+      } catch (err) {
+        verifyResult = { ok: false, error: err.message, code: 'VERIFIER_THREW' };
+      }
+    }
+
+    // Decide the payment row's initial status:
+    //   - autoVerify ON + verifier passed         → 'verified' (mark bill paid)
+    //   - autoVerify ON + verifier rejected       → 'rejected' (with reason)
+    //   - autoVerify OFF + requireVerification    → 'pending'  (admin queue)
+    //   - autoVerify OFF + !requireVerification   → 'verified' (legacy trust mode)
+    let initialStatus, initialReason = null;
+    if (autoVerifyAttempted) {
+      if (verifyResult && verifyResult.ok) {
+        initialStatus = req.features.slipUpload.requireVerification
+          ? 'pending'   // paranoid mode: auto-verify is advisory; admin still confirms
+          : 'verified';
+      } else {
+        initialStatus = 'rejected';
+        initialReason = (verifyResult && verifyResult.error) || 'การตรวจสอบไม่ผ่าน';
+      }
+    } else {
+      initialStatus = req.features.slipUpload.requireVerification ? 'pending' : 'verified';
+    }
+
     // Atomic: payment INSERT + (optional) bill mark-paid run in one tx so
     // we never end up with a verified payment row pointing at a bill still
     // marked 'pending', or vice-versa, if either statement crashes mid-way.
@@ -2469,21 +2518,60 @@ app.post('/api/tenant/payments', sameOrigin, csrfGuard, requireTenant, ensureSli
     try {
       await client.query('BEGIN');
       try {
+        // INSERT now carries transaction_ref + verify_provider + raw payload
+        // when auto-verify ran. The unique index on transaction_ref catches
+        // a replay attempt (same bank tx, different image bytes) — comes
+        // back as 23505 and we surface a clear 409 below.
         const ins = await client.query(
-          `INSERT INTO payments (bill_id, tenant_id, amount, method, slip_url, slip_hash, status)
-           VALUES ($1,$2,$3,'promptpay',$4,$5,$6)
+          `INSERT INTO payments (bill_id, tenant_id, amount, method, slip_url, slip_hash,
+                                 status, rejected_reason, transaction_ref, verify_provider, verify_payload, verified_by, verified_at)
+           VALUES ($1,$2,$3,'promptpay',$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12)
            RETURNING *`,
-          [billId, req.tenant.tenant_id, amount, slip.url, slipHash,
-           req.features.slipUpload.requireVerification ? 'pending' : 'verified']
+          [
+            billId, req.tenant.tenant_id, amount, slip.url, slipHash,
+            initialStatus, initialReason,
+            verifyResult?.transRef || null,
+            verifyResult?.provider || null,
+            verifyResult ? JSON.stringify({
+              ok: verifyResult.ok,
+              code: verifyResult.code,
+              amount: verifyResult.amount,
+              sender: verifyResult.sender,
+              receiver: verifyResult.receiver,
+              transDate: verifyResult.transDate,
+              error: verifyResult.error,
+            }) : null,
+            // For auto-verified rows we credit the provider as verifier so
+            // admin can audit which slips were auto-approved vs hand-checked.
+            (initialStatus === 'verified' && verifyResult?.ok)
+              ? `auto:${verifyResult.provider}` : null,
+            (initialStatus === 'verified' && verifyResult?.ok) ? new Date() : null,
+          ]
         );
         row = ins.rows[0];
       } catch (err) {
         await client.query('ROLLBACK').catch(() => {});
-        if (err.code === '23505') return res.status(409).json({ error: 'duplicate slip' });
+        if (err.code === '23505') {
+          // Differentiate the two unique-violation paths so the tenant gets
+          // an actionable message rather than a generic "duplicate".
+          if (/uq_payments_tx_ref/.test(err.constraint || '')) {
+            return res.status(409).json({
+              error: 'สลิปนี้ถูกใช้ไปแล้ว — transaction reference ซ้ำกับสลิปก่อนหน้า',
+              code: 'DUPLICATE_TRANSACTION',
+            });
+          }
+          return res.status(409).json({
+            error: 'duplicate slip',
+            code: 'DUPLICATE_SLIP_HASH',
+          });
+        }
         throw err;
       }
-      if (!req.features.slipUpload.requireVerification) {
-        await client.query(`UPDATE bills SET status='paid', paid_at=NOW() WHERE id=$1 AND status IN ('pending','overdue')`, [billId]);
+      if (initialStatus === 'verified') {
+        await client.query(
+          `UPDATE bills SET status='paid', paid_at=NOW() WHERE id=$1 AND status IN ('pending','overdue')`,
+          [billId]
+        );
       }
       await client.query('COMMIT');
     } catch (err) {
@@ -2493,7 +2581,14 @@ app.post('/api/tenant/payments', sameOrigin, csrfGuard, requireTenant, ensureSli
       client.release();
     }
     audit(req, 'tenant.slip_upload', 'payment', String(row.id),
-      { billId, amount, autoVerified: !req.features.slipUpload.requireVerification },
+      {
+        billId, amount,
+        initialStatus,
+        autoVerifyAttempted,
+        autoVerifyOk: !!(verifyResult && verifyResult.ok),
+        autoVerifyCode: verifyResult?.code,
+        transRef: verifyResult?.transRef,
+      },
       `tenant:${req.tenant.tenant_id}`).catch(() => {});
 
     // Owner receives "new slip" alert so they know to go review.
@@ -2522,39 +2617,80 @@ app.post('/api/tenant/payments', sameOrigin, csrfGuard, requireTenant, ensureSli
       const amtStr = amount.toLocaleString('th-TH', { minimumFractionDigits: 2 });
       const buildingName = await loadBuildingName(pool);
 
-      const tenantNotice = req.features.slipUpload.requireVerification
-        ? {
-            subject: '📥 ได้รับสลิปแล้ว — กำลังตรวจสอบ',
-            text: [
-              `เรียน คุณ${req.tenant.full_name}`,
-              ``,
-              `เราได้รับสลิปการชำระเงินของคุณเรียบร้อยแล้ว`,
-              `บิล: ${billNo}${period ? ` (รอบ ${period})` : ''}`,
-              `จำนวน: ฿${amtStr}`,
-              ``,
-              `🔍 เจ้าหน้าที่กำลังตรวจสอบ — ปกติใช้เวลาภายใน 24 ชั่วโมง`,
-              `📩 จะแจ้งผลการตรวจสอบกลับ (ผ่าน LINE/อีเมลนี้) เมื่อยืนยันแล้ว`,
-              ``,
-              `หากมีข้อสงสัย ติดต่อ ${buildingName}`,
-            ].join('\n'),
-          }
-        : {
-            subject: '✅ ชำระเงินเรียบร้อยแล้ว — ขอบคุณ',
-            text: [
-              `เรียน คุณ${req.tenant.full_name}`,
-              ``,
-              `🎉 ขอบคุณที่ชำระเงินตรงเวลา`,
-              ``,
-              `บิล: ${billNo}${period ? ` (รอบ ${period})` : ''}`,
-              `จำนวน: ฿${amtStr}`,
-              `สถานะ: ชำระแล้ว ✓`,
-              ``,
-              `ใบเสร็จ: ดูได้ที่พอร์ทัลผู้เช่า /tenant`,
-              `รอบถัดไป: บิลใหม่จะออกตามรอบปกติของหอพัก`,
-              ``,
-              `หากต้องการใบเสร็จเพิ่มเติม ติดต่อ ${buildingName}`,
-            ].join('\n'),
-          };
+      // Pick the tenant message based on the actual decision the row
+      // landed on. Three outcomes possible now: verified (auto), rejected
+      // (auto), or pending (manual queue).
+      let tenantNotice;
+      if (initialStatus === 'verified') {
+        tenantNotice = {
+          subject: '✅ ชำระเงินเรียบร้อยแล้ว — ขอบคุณ',
+          text: [
+            `เรียน คุณ${req.tenant.full_name}`,
+            ``,
+            `🎉 ขอบคุณที่ชำระเงินตรงเวลา`,
+            ``,
+            `บิล: ${billNo}${period ? ` (รอบ ${period})` : ''}`,
+            `จำนวน: ฿${amtStr}`,
+            `สถานะ: ชำระแล้ว ✓`,
+            verifyResult?.ok
+              ? `ตรวจสอบโดย: ระบบอัตโนมัติ (${verifyResult.provider})${verifyResult.transRef ? ` · ref ${verifyResult.transRef}` : ''}`
+              : null,
+            ``,
+            `ใบเสร็จ: ดูได้ที่พอร์ทัลผู้เช่า /tenant`,
+            ``,
+            `${buildingName}`,
+          ].filter(Boolean).join('\n'),
+        };
+      } else if (initialStatus === 'rejected') {
+        // Auto-verifier rejected the slip — give the tenant the SPECIFIC
+        // reason from the verifier so they know what to fix. Common cases:
+        //   AMOUNT_MISMATCH   → "ยอดไม่ตรง — สลิป ฿X แต่บิล ฿Y"
+        //   RECEIVER_MISMATCH → "บัญชีปลายทางไม่ใช่ของหอพัก"
+        //   DUPLICATE_*       → "สลิปนี้ถูกใช้ไปแล้ว"
+        //   SLIPOK_REJECT     → "QR ไม่สามารถอ่าน / สลิปหมดอายุ / ฯลฯ"
+        tenantNotice = {
+          subject: '❌ สลิปไม่ผ่านการตรวจสอบอัตโนมัติ',
+          text: [
+            `เรียน คุณ${req.tenant.full_name}`,
+            ``,
+            `ระบบตรวจพบความไม่ถูกต้องในสลิปของคุณ — บิลยังไม่ถูกทำเครื่องหมายว่าชำระแล้ว`,
+            ``,
+            `บิล: ${billNo}${period ? ` (รอบ ${period})` : ''}`,
+            `จำนวนที่คาดหวัง: ฿${amtStr}`,
+            `สถานะ: ยังไม่ชำระ`,
+            ``,
+            `เหตุผล: ${initialReason}`,
+            ``,
+            `📋 ขั้นตอนถัดไป:`,
+            `   1) ตรวจว่าโอนถูกบัญชีและถูกยอดหรือไม่`,
+            `   2) อัปโหลดสลิปใหม่ที่ /tenant (สลิปเดิมใช้ไม่ได้แล้ว)`,
+            `   3) ถ้ายอดถูกต้องแต่ระบบยังปฏิเสธ — ติดต่อ ${buildingName}`,
+          ].join('\n'),
+        };
+      } else {
+        // Pending — either autoVerify off (manual queue) or paranoid mode
+        // (auto-verified but admin still confirms). Same message either way:
+        // tenant is reassured, set expectation 24h.
+        const extra = verifyResult?.ok
+          ? `\n✅ ระบบยืนยันว่าสลิปถูกต้องแล้ว — รออนุมัติจากเจ้าหน้าที่`
+          : '';
+        tenantNotice = {
+          subject: '📥 ได้รับสลิปแล้ว — กำลังตรวจสอบ',
+          text: [
+            `เรียน คุณ${req.tenant.full_name}`,
+            ``,
+            `เราได้รับสลิปการชำระเงินของคุณเรียบร้อยแล้ว`,
+            `บิล: ${billNo}${period ? ` (รอบ ${period})` : ''}`,
+            `จำนวน: ฿${amtStr}`,
+            ``,
+            `🔍 เจ้าหน้าที่กำลังตรวจสอบ — ปกติใช้เวลาภายใน 24 ชั่วโมง${extra}`,
+            `📩 จะแจ้งผลการตรวจสอบกลับ (ผ่าน LINE/อีเมลนี้) เมื่อยืนยันแล้ว`,
+            ``,
+            `หากมีข้อสงสัย ติดต่อ ${buildingName}`,
+          ].join('\n'),
+        };
+      }
+
       const flags = req.features || (await features.load(pool));
       // Use the tenant data from the request session — req.tenant carries
       // line_user_id + line_oa_id from tenantSessionLookup, so the notifier
