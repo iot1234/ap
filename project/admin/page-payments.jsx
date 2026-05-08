@@ -4,6 +4,7 @@
 // with a reason.
 // ===========================================================================
 
+(function () {
 const { useState, useEffect, useMemo, useRef } = React;
 
 function PagePayments({ setToast }) {
@@ -51,15 +52,14 @@ function PagePayments({ setToast }) {
 
   async function load() {
     if (abortRef.current) abortRef.current.abort();
-    const ctrl = new AbortController();
-    abortRef.current = ctrl;
-    const timer = setTimeout(() => ctrl.abort(), 15_000);
+    const req = makeAbortableRequest(15_000);
+    abortRef.current = req;
     setLoading(true);
     setLoadError(null);
     try {
       const r = await fetch(`/api/payments?status=${encodeURIComponent(filter)}`, {
         credentials: 'same-origin',
-        signal: ctrl.signal,
+        ...(req.signal ? { signal: req.signal } : {}),
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) {
@@ -79,8 +79,8 @@ function PagePayments({ setToast }) {
         setList([]);
       }
     } finally {
-      clearTimeout(timer);
-      if (abortRef.current === ctrl) abortRef.current = null;
+      req.done();
+      if (abortRef.current === req) abortRef.current = null;
       setLoading(false);
     }
   }
@@ -240,6 +240,19 @@ function SlipModal({ payment, busy, onClose, onDecide }) {
   );
 }
 
+function makeAbortableRequest(ms) {
+  if (typeof AbortController === 'undefined') {
+    return { signal: null, abort() {}, done() {} };
+  }
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  return {
+    signal: ctrl.signal,
+    abort: () => ctrl.abort(),
+    done: () => clearTimeout(timer),
+  };
+}
+
 window.PagePayments = window.FeatureGate
   ? function PagePaymentsGated(props) {
       return React.createElement(window.FeatureGate,
@@ -247,3 +260,4 @@ window.PagePayments = window.FeatureGate
         React.createElement(PagePayments, props));
     }
   : PagePayments;
+})();

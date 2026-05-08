@@ -3,6 +3,7 @@
 // reading. The chart is a simple inline SVG (no extra libs).
 // ===========================================================================
 
+(function () {
 const { useState, useEffect, useMemo, useRef } = React;
 
 function PageMeters({ rooms, setToast }) {
@@ -57,15 +58,14 @@ function PageMeters({ rooms, setToast }) {
   async function load() {
     if (!roomId) { setList([]); return; }
     if (abortRef.current) abortRef.current.abort();
-    const ctrl = new AbortController();
-    abortRef.current = ctrl;
-    const timer = setTimeout(() => ctrl.abort(), 15_000);
+    const req = makeAbortableRequest(15_000);
+    abortRef.current = req;
     setLoading(true);
     setLoadError(null);
     try {
       const r = await fetch(
         `/api/meters/${encodeURIComponent(roomId)}/readings?type=${encodeURIComponent(type)}`,
-        { credentials: 'same-origin', signal: ctrl.signal }
+        { credentials: 'same-origin', ...(req.signal ? { signal: req.signal } : {}) }
       );
       const d = await r.json().catch(() => ({}));
       if (!r.ok) {
@@ -86,8 +86,8 @@ function PageMeters({ rooms, setToast }) {
         setList([]);
       }
     } finally {
-      clearTimeout(timer);
-      if (abortRef.current === ctrl) abortRef.current = null;
+      req.done();
+      if (abortRef.current === req) abortRef.current = null;
       setLoading(false);
     }
   }
@@ -250,6 +250,19 @@ function selStyle(C) {
   };
 }
 
+function makeAbortableRequest(ms) {
+  if (typeof AbortController === 'undefined') {
+    return { signal: null, abort() {}, done() {} };
+  }
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  return {
+    signal: ctrl.signal,
+    abort: () => ctrl.abort(),
+    done: () => clearTimeout(timer),
+  };
+}
+
 // Wrap with FeatureGate so the page renders a friendly "feature is off"
 // placeholder when admin disables `meterIot`, instead of letting every
 // /api/meters/... call return 503 and stack error toasts.
@@ -260,3 +273,4 @@ window.PageMeters = window.FeatureGate
         React.createElement(PageMeters, props));
     }
   : PageMeters;
+})();

@@ -390,11 +390,24 @@
   // render and stack 503-error toasts as every API call fails.
   function FeatureGate({ flag, children, label }) {
     const f = useFeatureFlag(flag);
-    // Fail-open: render the page immediately while the flag fetch is in
-    // flight. Both the !ready and enabled branches return the same
-    // children reference, so React reuses the existing page instance —
-    // no remount thrash between "checking..." and "enabled".
-    if (!f.ready || f.enabled) return children;
+    if (!f.ready) {
+      const C = window.ADMIN_C || {};
+      return React.createElement('div', {
+        style: {
+          padding: 40, margin: 24, borderRadius: 12,
+          background: C.bgSoft || '#fff7e0',
+          color: C.ink2 || '#5b4f40',
+          textAlign: 'center', fontFamily: 'inherit',
+        },
+      }, [
+        React.createElement('div', { key: 'i', style: { fontSize: 28, marginBottom: 10 } }, '...'),
+        React.createElement('div', { key: 'h', style: { fontFamily: 'Sora', fontSize: 16, fontWeight: 600, marginBottom: 4 } },
+          `กำลังตรวจสอบฟีเจอร์ "${label || flag}"`),
+        React.createElement('div', { key: 'd', style: { fontSize: 13.5 } },
+          'กรุณารอสักครู่'),
+      ]);
+    }
+    if (f.enabled) return children;
     const C = window.ADMIN_C || {};
     return React.createElement('div', {
       style: {

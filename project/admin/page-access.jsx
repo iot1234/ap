@@ -4,6 +4,7 @@
 // (e.g. visitor) and review history.
 // ===========================================================================
 
+(function () {
 const { useState, useEffect, useRef } = React;
 
 function PageAccess({ setToast }) {
@@ -41,15 +42,14 @@ function PageAccess({ setToast }) {
 
   async function load() {
     if (abortRef.current) abortRef.current.abort();
-    const ctrl = new AbortController();
-    abortRef.current = ctrl;
-    const timer = setTimeout(() => ctrl.abort(), 15_000);
+    const req = makeAbortableRequest(15_000);
+    abortRef.current = req;
     setLoading(true);
     setLoadError(null);
     try {
       const r = await fetch('/api/access/logs?limit=200', {
         credentials: 'same-origin',
-        signal: ctrl.signal,
+        ...(req.signal ? { signal: req.signal } : {}),
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) {
@@ -64,8 +64,8 @@ function PageAccess({ setToast }) {
         setList([]);
       }
     } finally {
-      clearTimeout(timer);
-      if (abortRef.current === ctrl) abortRef.current = null;
+      req.done();
+      if (abortRef.current === req) abortRef.current = null;
       setLoading(false);
     }
   }
@@ -183,6 +183,19 @@ function inp(C) {
   };
 }
 
+function makeAbortableRequest(ms) {
+  if (typeof AbortController === 'undefined') {
+    return { signal: null, abort() {}, done() {} };
+  }
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  return {
+    signal: ctrl.signal,
+    abort: () => ctrl.abort(),
+    done: () => clearTimeout(timer),
+  };
+}
+
 window.PageAccess = window.FeatureGate
   ? function PageAccessGated(props) {
       return React.createElement(window.FeatureGate,
@@ -190,3 +203,4 @@ window.PageAccess = window.FeatureGate
         React.createElement(PageAccess, props));
     }
   : PageAccess;
+})();
