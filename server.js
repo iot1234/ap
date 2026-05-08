@@ -2495,17 +2495,108 @@ app.post('/api/tenant/payments', sameOrigin, csrfGuard, requireTenant, ensureSli
     audit(req, 'tenant.slip_upload', 'payment', String(row.id),
       { billId, amount, autoVerified: !req.features.slipUpload.requireVerification },
       `tenant:${req.tenant.tenant_id}`).catch(() => {});
+
+    // Owner receives "new slip" alert so they know to go review.
     notifier.notifyOwner(
       { pool, features: req.features },
       { subject: 'มีผู้ส่งสลิปชำระเงินใหม่',
         text: `บิล #${billId} จำนวน ${amount.toLocaleString('th-TH')} บาท จาก ${req.tenant.full_name} (${req.tenant.phone})` }
     ).catch(() => {});
+
+    // Tenant receives an immediate acknowledgment so they don't wonder
+    // whether their slip went through. Two flavours: auto-verified (no
+    // admin step needed) → "thanks, paid" final receipt; pending review
+    // → "got it, we'll check" with expected timeline. Without this the
+    // tenant uploaded a slip and got nothing back until admin manually
+    // approved hours later — fueling "ส่งไปแล้วทำไมเงียบ" support tickets.
+    try {
+      // Pull the bill period so the tenant's confirmation message can
+      // reference the rounded "เดือน X" instead of just bill_id (less
+      // friendly).
+      const billQ = await pool.query(
+        `SELECT bill_no, period FROM bills WHERE id=$1 LIMIT 1`,
+        [billId]
+      );
+      const billNo = billQ.rows[0]?.bill_no || `#${billId}`;
+      const period = billQ.rows[0]?.period || '';
+      const amtStr = amount.toLocaleString('th-TH', { minimumFractionDigits: 2 });
+      const buildingName = await loadBuildingName(pool);
+
+      const tenantNotice = req.features.slipUpload.requireVerification
+        ? {
+            subject: '📥 ได้รับสลิปแล้ว — กำลังตรวจสอบ',
+            text: [
+              `เรียน คุณ${req.tenant.full_name}`,
+              ``,
+              `เราได้รับสลิปการชำระเงินของคุณเรียบร้อยแล้ว`,
+              `บิล: ${billNo}${period ? ` (รอบ ${period})` : ''}`,
+              `จำนวน: ฿${amtStr}`,
+              ``,
+              `🔍 เจ้าหน้าที่กำลังตรวจสอบ — ปกติใช้เวลาภายใน 24 ชั่วโมง`,
+              `📩 จะแจ้งผลการตรวจสอบกลับ (ผ่าน LINE/อีเมลนี้) เมื่อยืนยันแล้ว`,
+              ``,
+              `หากมีข้อสงสัย ติดต่อ ${buildingName}`,
+            ].join('\n'),
+          }
+        : {
+            subject: '✅ ชำระเงินเรียบร้อยแล้ว — ขอบคุณ',
+            text: [
+              `เรียน คุณ${req.tenant.full_name}`,
+              ``,
+              `🎉 ขอบคุณที่ชำระเงินตรงเวลา`,
+              ``,
+              `บิล: ${billNo}${period ? ` (รอบ ${period})` : ''}`,
+              `จำนวน: ฿${amtStr}`,
+              `สถานะ: ชำระแล้ว ✓`,
+              ``,
+              `ใบเสร็จ: ดูได้ที่พอร์ทัลผู้เช่า /tenant`,
+              `รอบถัดไป: บิลใหม่จะออกตามรอบปกติของหอพัก`,
+              ``,
+              `หากต้องการใบเสร็จเพิ่มเติม ติดต่อ ${buildingName}`,
+            ].join('\n'),
+          };
+      const flags = req.features || (await features.load(pool));
+      // Use the tenant data from the request session — req.tenant carries
+      // line_user_id + line_oa_id from tenantSessionLookup, so the notifier
+      // routes through the right OA without a second DB roundtrip.
+      notifier.notifyTenant({ pool, features: flags },
+        {
+          id: req.tenant.tenant_id,
+          full_name: req.tenant.full_name,
+          phone: req.tenant.phone,
+          email: req.tenant.email,
+          line_user_id: req.tenant.line_user_id,
+          line_oa_id: req.tenant.line_oa_id,
+          status: req.tenant.status,
+        },
+        tenantNotice
+      ).catch(() => {});
+    } catch (err) {
+      console.warn('[slip-upload] tenant ack failed:', err.message);
+    }
+
     res.json({ ok: true, payment: row });
   } catch (err) {
     console.error('tenant payment error:', err);
     res.status(400).json({ error: err.message || 'upload failed' });
   }
 });
+
+// Small cached helper — building name shows up in every tenant-facing
+// notification so they know who's writing. Lookup the building config
+// once per call (rooms + config blob); for high-volume notification
+// flows this could be cached but the in-process notifier queue is
+// already deduplicating retries.
+async function loadBuildingName(pool) {
+  try {
+    const { rows } = await pool.query(
+      `SELECT value FROM app_data WHERE key='baankarn_config_v1' LIMIT 1`
+    );
+    const cfg = rows.length ? rows[0].value : {};
+    return (cfg && cfg.building && cfg.building.name)
+      || 'บ้านกาญจน์ เรสซิเดนซ์';
+  } catch { return 'บ้านกาญจน์ เรสซิเดนซ์'; }
+}
 
 app.get('/api/payments', requireAuth, async (req, res) => {
   const status = req.query.status;
@@ -2627,28 +2718,72 @@ app.put('/api/payments/:id/verify', sameOrigin, csrfGuard, requireAuth, requireR
 // Helper for both verify endpoints — pushes a notification to the tenant
 // when their slip is verified or rejected. Fire-and-forget; logs to
 // notifications_log via notifier.
+//
+// Message is intentionally formal + actionable. For verify=accept the
+// tenant gets a friendly receipt with bill no, period, and amount; for
+// reject they get the rejection reason + clear next-step instructions
+// (re-upload slip / contact admin) so the failure isn't a dead end.
 async function notifyTenantOnPayment(payment, outcome, reason) {
   if (!payment || !payment.tenant_id) return;
   try {
     const flags = await features.load(pool);
-    const { rows } = await pool.query(
-      `SELECT id, full_name, phone, email, line_user_id, line_oa_id
-         FROM tenants
-         WHERE id=$1 AND deleted_at IS NULL`,
-      [payment.tenant_id]
-    );
-    if (!rows.length) return;
-    const t = rows[0];
-    const subject = outcome === 'verified' ? '✅ ตรวจสอบการชำระเงินแล้ว' : '❌ สลิปไม่ผ่านการตรวจสอบ';
+    const [{ rows: tRows }, { rows: bRows }] = await Promise.all([
+      pool.query(
+        `SELECT id, full_name, phone, email, line_user_id, line_oa_id
+           FROM tenants
+           WHERE id=$1 AND deleted_at IS NULL`,
+        [payment.tenant_id]
+      ),
+      payment.bill_id ? pool.query(
+        `SELECT bill_no, period, total, due_date FROM bills WHERE id=$1 LIMIT 1`,
+        [payment.bill_id]
+      ) : Promise.resolve({ rows: [] }),
+    ]);
+    if (!tRows.length) return;
+    const t = tRows[0];
+    const b = bRows[0] || {};
+    const billLabel = b.bill_no || (payment.bill_id ? `#${payment.bill_id}` : '-');
+    const period = b.period || '';
     const amt = Number(payment.amount);
     const amtStr = Number.isFinite(amt) ? amt.toLocaleString('th-TH', { minimumFractionDigits: 2 }) : '-';
-    const lines = [
-      outcome === 'verified'
-        ? `ชำระเงินบิล #${payment.bill_id || '-'} จำนวน ${amtStr} บาท ได้รับการยืนยันแล้ว`
-        : `สลิปสำหรับบิล #${payment.bill_id || '-'} ไม่ผ่านการตรวจสอบ`,
-      reason ? `เหตุผล: ${reason}` : null,
-      'ติดต่อเจ้าหน้าที่หากมีข้อสงสัย',
-    ].filter(Boolean);
+    const buildingName = await loadBuildingName(pool);
+
+    let subject, lines;
+    if (outcome === 'verified') {
+      subject = '✅ ชำระเงินเรียบร้อยแล้ว — ขอบคุณ';
+      lines = [
+        `เรียน คุณ${t.full_name}`,
+        ``,
+        `🎉 ขอบคุณที่ชำระเงินตรงเวลา`,
+        ``,
+        `บิล: ${billLabel}${period ? ` (รอบ ${period})` : ''}`,
+        `จำนวน: ฿${amtStr}`,
+        `สถานะ: ชำระแล้ว ✓`,
+        ``,
+        `ใบเสร็จ: ดูได้ที่พอร์ทัลผู้เช่า /tenant`,
+        ``,
+        `${buildingName}`,
+      ];
+    } else {
+      // Rejected — surface the reason + concrete next steps so the tenant
+      // knows what to do. "ติดต่อเจ้าหน้าที่" alone leaves them stuck.
+      subject = '❌ สลิปไม่ผ่านการตรวจสอบ — กรุณาส่งใหม่';
+      lines = [
+        `เรียน คุณ${t.full_name}`,
+        ``,
+        `เสียใจที่ต้องแจ้งให้ทราบ — สลิปที่ส่งสำหรับบิลด้านล่างไม่ผ่านการตรวจสอบ`,
+        ``,
+        `บิล: ${billLabel}${period ? ` (รอบ ${period})` : ''}`,
+        `จำนวน: ฿${amtStr}`,
+        `สถานะ: ยังไม่ชำระ`,
+        reason ? `\nเหตุผลที่ปฏิเสธ:\n${reason}` : null,
+        ``,
+        `📋 ขั้นตอนถัดไป:`,
+        `   1) ตรวจสอบสลิปและจำนวนเงินอีกครั้ง`,
+        `   2) อัปโหลดสลิปใหม่ที่พอร์ทัลผู้เช่า /tenant`,
+        `   3) หากไม่แน่ใจ ติดต่อ ${buildingName}`,
+      ].filter(Boolean);
+    }
     await notifier.notifyTenant({ pool, features: flags }, t, {
       subject, text: lines.join('\n'),
     });

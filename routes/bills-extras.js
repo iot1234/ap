@@ -268,11 +268,66 @@ module.exports = function buildBillsExtrasRouter(ctx) {
                WHERE p.id=$1`, [pid]
           );
           if (pq.rows.length && pq.rows[0].t_id) {
+            // Build the same friendly receipt that server.js'
+            // notifyTenantOnPayment uses for the /api/payments/:id/verify
+            // path — keeps the two verify entry points consistent so a
+            // tenant gets the same wording regardless of which admin
+            // button was pressed.
             const flags = await features.load(pool);
-            const subject = accept ? '✅ ตรวจสอบการชำระเงินแล้ว' : '❌ สลิปไม่ผ่านการตรวจสอบ';
-            const text = accept
-              ? `ชำระเงินบิล #${id} ได้รับการยืนยันแล้ว`
-              : `สลิปสำหรับบิล #${id} ไม่ผ่านการตรวจสอบ${reason ? `\nเหตุผล: ${reason}` : ''}`;
+            const billQ = await pool.query(
+              `SELECT bill_no, period FROM bills WHERE id=$1 LIMIT 1`,
+              [id]
+            );
+            const billLabel = billQ.rows[0]?.bill_no || `#${id}`;
+            const period = billQ.rows[0]?.period || '';
+            const amt = Number(pq.rows[0].amount);
+            const amtStr = Number.isFinite(amt)
+              ? amt.toLocaleString('th-TH', { minimumFractionDigits: 2 }) : '-';
+            // Cheap building-name lookup — config blob is one row, hot in
+            // pg cache. Fallback to default if the blob isn't initialised.
+            let buildingName = 'บ้านกาญจน์ เรสซิเดนซ์';
+            try {
+              const cfgQ = await pool.query(
+                `SELECT value FROM app_data WHERE key='baankarn_config_v1' LIMIT 1`
+              );
+              const cfg = cfgQ.rows[0]?.value;
+              if (cfg && cfg.building && cfg.building.name) buildingName = cfg.building.name;
+            } catch { /* keep default */ }
+
+            let subject, text;
+            if (accept) {
+              subject = '✅ ชำระเงินเรียบร้อยแล้ว — ขอบคุณ';
+              text = [
+                `เรียน คุณ${pq.rows[0].full_name || ''}`,
+                ``,
+                `🎉 ขอบคุณที่ชำระเงินตรงเวลา`,
+                ``,
+                `บิล: ${billLabel}${period ? ` (รอบ ${period})` : ''}`,
+                `จำนวน: ฿${amtStr}`,
+                `สถานะ: ชำระแล้ว ✓`,
+                ``,
+                `ใบเสร็จ: ดูได้ที่พอร์ทัลผู้เช่า /tenant`,
+                ``,
+                `${buildingName}`,
+              ].join('\n');
+            } else {
+              subject = '❌ สลิปไม่ผ่านการตรวจสอบ — กรุณาส่งใหม่';
+              text = [
+                `เรียน คุณ${pq.rows[0].full_name || ''}`,
+                ``,
+                `เสียใจที่ต้องแจ้งให้ทราบ — สลิปที่ส่งสำหรับบิลด้านล่างไม่ผ่านการตรวจสอบ`,
+                ``,
+                `บิล: ${billLabel}${period ? ` (รอบ ${period})` : ''}`,
+                `จำนวน: ฿${amtStr}`,
+                `สถานะ: ยังไม่ชำระ`,
+                reason ? `\nเหตุผลที่ปฏิเสธ:\n${reason}` : null,
+                ``,
+                `📋 ขั้นตอนถัดไป:`,
+                `   1) ตรวจสอบสลิปและจำนวนเงินอีกครั้ง`,
+                `   2) อัปโหลดสลิปใหม่ที่พอร์ทัลผู้เช่า /tenant`,
+                `   3) หากไม่แน่ใจ ติดต่อ ${buildingName}`,
+              ].filter(Boolean).join('\n');
+            }
             notifier.notifyTenant({ pool, features: flags },
               { id: pq.rows[0].t_id,
                 line_user_id: pq.rows[0].line_user_id,

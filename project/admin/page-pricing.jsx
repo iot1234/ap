@@ -109,7 +109,7 @@ function PagePricing({ config, setConfig, rooms, addActivity, setToast }) {
         style={{ marginBottom: 20 }}
       />
 
-      {tab === 'rates'    && <TabRates    draft={draft} updatePath={updatePath} />}
+      {tab === 'rates'    && <TabRates    draft={draft} updatePath={updatePath} floorsForPricing={floorsForPricing} />}
       {tab === 'utils'    && <TabUtils    draft={draft} updatePath={updatePath} />}
       {tab === 'discount' && <TabDiscount draft={draft} updatePath={updatePath} />}
       {tab === 'fees'     && <TabFees     draft={draft} updatePath={updatePath} />}
@@ -138,7 +138,20 @@ function PagePricing({ config, setConfig, rooms, addActivity, setToast }) {
 // ============================================================
 // Tab 1: Base rates per type + floor premium + view + features
 // ============================================================
-function TabRates({ draft, updatePath }) {
+// floorsForPricing is computed in the parent (PagePricing) from the actual
+// rooms blob — passed in as a prop because TabRates doesn't receive `rooms`
+// or `config` directly. Falls back to a sensible default if the parent
+// somehow forgets to pass it (defensive — without this guard, the page
+// crashed with "floorsForPricing is not defined" the moment admin opened
+// /admin#pricing).
+function TabRates({ draft, updatePath, floorsForPricing }) {
+  // Defensive default: if we somehow got rendered without the prop (hot-reload
+  // edge case, older shell.jsx, etc.), derive a list from draft.building.floors
+  // so the page renders something useful instead of throwing.
+  if (!Array.isArray(floorsForPricing) || floorsForPricing.length === 0) {
+    const N = Math.max(1, Math.min(99, Number(draft?.building?.floors) || 5));
+    floorsForPricing = Array.from({ length: N }, (_, i) => i + 1);
+  }
   const C = window.ADMIN_C;
   const ADMIN_ROOM_TYPES = window.ADMIN_ROOM_TYPES;
   const ADMIN_ROOM_TYPE_KEYS = window.ADMIN_ROOM_TYPE_KEYS;
