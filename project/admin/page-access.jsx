@@ -7,6 +7,12 @@
 const { useState, useEffect, useRef } = React;
 
 function PageAccess({ setToast }) {
+  // Diagnostic: confirm the component mounted. See page-payments.jsx for context.
+  React.useEffect(() => {
+    console.log('[PageAccess] mounted');
+    return () => console.log('[PageAccess] unmounted');
+  }, []);
+
   // Guard window globals so a partial CDN load doesn't throw a destructure
   // error on first render. See page-meters.jsx for context.
   const C = window.ADMIN_C;
@@ -17,9 +23,14 @@ function PageAccess({ setToast }) {
   const PageHeader = window.PageHeader;
   const EmptyState = window.EmptyState;
   if (!C || !Card || !PageContainer || !PageHeader || !Btn || !EmptyState || !Pill) {
+    const missing = [
+      !C && 'ADMIN_C', !Card && 'Card', !Btn && 'Btn', !Pill && 'Pill',
+      !PageContainer && 'PageContainer', !PageHeader && 'PageHeader', !EmptyState && 'EmptyState',
+    ].filter(Boolean).join(', ');
+    console.warn('[PageAccess] missing window globals:', missing);
     return React.createElement('div', {
       style: { padding: 32, fontSize: 14, color: '#5b4f40', fontFamily: 'inherit' },
-    }, 'กำลังเตรียมหน้าเข้า-ออก...');
+    }, `กำลังเตรียมหน้าเข้า-ออก... (รอ: ${missing})`);
   }
 
   const [list, setList] = useState([]);

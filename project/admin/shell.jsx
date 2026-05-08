@@ -17,7 +17,44 @@ const { useState, useEffect, useMemo, useRef } = React;
 function PageBoundary({ pageKey, children }) {
   const B = window.ErrorBoundary;
   if (B) {
-    return React.createElement(B, { key: pageKey }, children);
+    return React.createElement(B, {
+      key: pageKey,
+      // Per-page friendly fallback that's GUARANTEED to be visible (high
+      // contrast, fixed-size text). Defends against the "white screen + no
+      // console error" symptom where a page silently returns null/empty
+      // because of a Babel transpile race or a missing window global a
+      // page's own guard didn't catch. The fallback also tells the operator
+      // which page failed — invaluable when the bug only repros for one
+      // user.
+      fallback: (err, retry) => React.createElement('div', {
+        style: {
+          padding: 32, margin: 24, borderRadius: 12,
+          background: '#fff5f4', color: '#5a1a13',
+          fontFamily: 'inherit', fontSize: 14, lineHeight: 1.5,
+          border: '1px solid #f0c5c0',
+        },
+      }, [
+        React.createElement('div', { key: 'h', style: { fontSize: 18, fontWeight: 700, marginBottom: 8 } },
+          `⚠ หน้า "${pageKey}" เปิดไม่สำเร็จ`),
+        React.createElement('pre', {
+          key: 'm',
+          style: {
+            margin: '8px 0 16px', padding: 12, background: '#fff',
+            borderRadius: 6, fontSize: 12, overflow: 'auto', maxHeight: 200,
+            fontFamily: 'JetBrains Mono, Menlo, monospace',
+          },
+        }, String((err && err.message) || err || 'unknown error')),
+        React.createElement('button', {
+          key: 'b',
+          onClick: () => { try { retry(); } catch {} },
+          style: {
+            padding: '8px 16px', borderRadius: 8, border: '1px solid #c46a3e',
+            background: '#c46a3e', color: '#fff', cursor: 'pointer',
+            fontFamily: 'inherit', fontSize: 13.5, fontWeight: 600,
+          },
+        }, 'ลองใหม่'),
+      ]),
+    }, children);
   }
   // No ErrorBoundary loaded yet — render children with a stable wrapping div
   // (also keyed) so React still resets the subtree on page change.
@@ -785,6 +822,12 @@ function App() {
   // ErrorBoundary catches but presents as a generic error card. Show a
   // friendly placeholder instead so the user can navigate elsewhere.
   let Page = PAGES[page];
+  // Diagnostic: log what page the shell resolved to. Helps debug "white
+  // screen on menu click" by showing whether window.PageX was registered
+  // at the time the click was handled.
+  if (typeof console !== 'undefined' && console.log) {
+    console.log('[shell] page=' + page + ' resolved=' + (typeof Page === 'function' ? Page.name || 'anonymous' : '<missing>'));
+  }
   if (typeof Page !== 'function') {
     Page = function MissingPage() {
       return React.createElement('div', {

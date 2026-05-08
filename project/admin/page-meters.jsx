@@ -6,6 +6,12 @@
 const { useState, useEffect, useMemo, useRef } = React;
 
 function PageMeters({ rooms, setToast }) {
+  // Diagnostic: confirm the component mounted. See page-payments.jsx for context.
+  React.useEffect(() => {
+    console.log('[PageMeters] mounted');
+    return () => console.log('[PageMeters] unmounted');
+  }, []);
+
   // Guard every window global we depend on. If shared.jsx / ui.jsx / hooks.jsx
   // failed to load (CDN hiccup, slow mobile, blocked script), missing globals
   // would throw "Cannot read property X of undefined" inside render — which
@@ -20,9 +26,14 @@ function PageMeters({ rooms, setToast }) {
   const PageHeader = window.PageHeader;
   const EmptyState = window.EmptyState;
   if (!C || !Card || !PageContainer || !PageHeader || !Btn || !EmptyState) {
+    const missing = [
+      !C && 'ADMIN_C', !Card && 'Card', !Btn && 'Btn',
+      !PageContainer && 'PageContainer', !PageHeader && 'PageHeader', !EmptyState && 'EmptyState',
+    ].filter(Boolean).join(', ');
+    console.warn('[PageMeters] missing window globals:', missing);
     return React.createElement('div', {
       style: { padding: 32, fontSize: 14, color: '#5b4f40', fontFamily: 'inherit' },
-    }, 'กำลังเตรียมหน้ามิเตอร์...');
+    }, `กำลังเตรียมหน้ามิเตอร์... (รอ: ${missing})`);
   }
 
   const roomList = useMemo(() => {

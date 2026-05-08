@@ -7,6 +7,14 @@
 const { useState, useEffect, useMemo, useRef } = React;
 
 function PagePayments({ setToast }) {
+  // Diagnostic: prove the component actually mounted. Visible in DevTools
+  // console — useful when the user reports a "white screen with no error"
+  // because we can confirm whether render even reached this far.
+  React.useEffect(() => {
+    console.log('[PagePayments] mounted');
+    return () => console.log('[PagePayments] unmounted');
+  }, []);
+
   // Guard every window global we depend on. If shared.jsx / ui.jsx / hooks.jsx
   // failed to load (CDN hiccup, slow mobile, blocked script), missing globals
   // would throw "Element type is invalid" inside render. Render a friendly
@@ -20,9 +28,14 @@ function PagePayments({ setToast }) {
   const PageHeader = window.PageHeader;
   const EmptyState = window.EmptyState;
   if (!C || !Card || !Btn || !Pill || !PageContainer || !PageHeader || !EmptyState) {
+    const missing = [
+      !C && 'ADMIN_C', !Card && 'Card', !Btn && 'Btn', !Pill && 'Pill',
+      !PageContainer && 'PageContainer', !PageHeader && 'PageHeader', !EmptyState && 'EmptyState',
+    ].filter(Boolean).join(', ');
+    console.warn('[PagePayments] missing window globals:', missing);
     return React.createElement('div', {
       style: { padding: 32, fontSize: 14, color: '#5b4f40', fontFamily: 'inherit' },
-    }, 'กำลังเตรียมหน้าสลิปชำระเงิน...');
+    }, `กำลังเตรียมหน้าสลิปชำระเงิน... (รอ: ${missing})`);
   }
 
   const [filter, setFilter] = useState('pending');
