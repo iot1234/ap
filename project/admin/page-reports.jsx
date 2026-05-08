@@ -15,21 +15,35 @@ function PageReports({ rooms, config, addActivity, setToast }) {
   const [range, setRange] = useState('6m');
   const [liveOverview, setLiveOverview] = React.useState(null);
   const [agedReceivable, setAgedReceivable] = React.useState(null);
+  // Real revenue + occupancy series from /api/reports2/{revenue,occupancy}.
+  // Spans the full year (12 months); the chart slices to `range` below.
+  // Replaced Math.sin fabrications — see audit, May 2026.
+  const [revRows, setRevRows] = React.useState(null);   // null=loading
+  const [occRows, setOccRows] = React.useState(null);
 
   // Pull live aggregates from the server. Falls back gracefully to local
   // computeStats if the server is unreachable.
   React.useEffect(() => {
     let cancel = false;
+    const year = new Date().getFullYear();
     (async () => {
       try {
-        const [oRes, aRes] = await Promise.all([
+        const [oRes, aRes, revRes, occRes] = await Promise.all([
           fetch('/api/reports/overview', { credentials: 'include' }),
           fetch('/api/reports/aged-receivable', { credentials: 'include' }),
+          fetch(`/api/reports2/revenue?year=${year}`, { credentials: 'include' }),
+          fetch(`/api/reports2/occupancy?year=${year}`, { credentials: 'include' }),
         ]);
         if (cancel) return;
-        if (oRes.ok) setLiveOverview(await oRes.json());
-        if (aRes.ok) setAgedReceivable(await aRes.json());
-      } catch {}
+        if (oRes.ok)   setLiveOverview(await oRes.json());
+        if (aRes.ok)   setAgedReceivable(await aRes.json());
+        if (revRes.ok) setRevRows(((await revRes.json()).rows) || []);
+        else           setRevRows([]);
+        if (occRes.ok) setOccRows(((await occRes.json()).rows) || []);
+        else           setOccRows([]);
+      } catch {
+        if (!cancel) { setRevRows([]); setOccRows([]); }
+      }
     })();
     return () => { cancel = true; };
   }, []);
@@ -37,34 +51,65 @@ function PageReports({ rooms, config, addActivity, setToast }) {
   const stats = useMemo(() => computeStats(rooms, config), [rooms, config]);
   const list = useMemo(() => Object.values(rooms), [rooms]);
 
-  // Revenue trend
+  // Revenue trend — slice the year-long /api/reports2/revenue series down to
+  // the selected range (3 / 6 / 12 months). Each row carries paid_amount;
+  // unbilled months show as 0 so the operator can see the gap.
   const revenue = useMemo(() => {
+    if (!revRows) return [];
     const now = new Date();
     const len = range === '12m' ? 12 : (range === '3m' ? 3 : 6);
     const months = [];
     for (let i = len - 1; i >= 0; i--) {
       const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-      const factor = 0.78 + Math.sin(i * 1.3) * 0.06 + i * 0.012;
+      const period = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+      const row = revRows.find((x) => x.period === period);
       months.push({
         label: fmtMonthTH(d).replace(' 25', "'").split(' ')[0],
-        value: Math.round(stats.revenue * factor),
+        value: Math.round(Number(row?.paid_amount || 0)),
       });
     }
-    months[months.length - 1].color = C.accent;
+    if (months.length) months[months.length - 1].color = C.accent;
     return months;
-  }, [stats.revenue, range]);
+  }, [revRows, range]);
 
-  // Occupancy by month
+  // Occupancy by month — last 6 months, real `rate_pct` from server.
   const occByMonth = useMemo(() => {
+    if (!occRows) return [];
     const now = new Date();
-    return [0,1,2,3,4,5].reverse().map(i => {
+    const months = [];
+    for (let i = 5; i >= 0; i--) {
       const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-      return {
+      const period = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+      const row = occRows.find((x) => x.period === period);
+      months.push({
         label: fmtMonthTH(d).split(' ')[0],
-        value: 70 + Math.round(Math.sin(i*1.2) * 8 + i * 1.5),
-      };
-    });
-  }, []);
+        value: row ? Math.round(Number(row.rate_pct || 0)) : 0,
+      });
+    }
+    return months;
+  }, [occRows]);
+
+  // Real revenue prev-month delta (replaces hardcoded change={12}).
+  const revChangePct = useMemo(() => {
+    if (!revRows || revRows.length < 2) return null;
+    const now = new Date();
+    const cur = Number(revRows.find((x) => x.period === `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`)?.paid_amount || 0);
+    const prevDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const prev = Number(revRows.find((x) => x.period === `${prevDate.getFullYear()}-${String(prevDate.getMonth() + 1).padStart(2, '0')}`)?.paid_amount || 0);
+    if (!prev) return null;
+    return Math.round(((cur - prev) / prev) * 100);
+  }, [revRows]);
+
+  // Real occupancy prev-month delta (replaces hardcoded change={3}).
+  const occChangePct = useMemo(() => {
+    if (!occRows || occRows.length < 2) return null;
+    const now = new Date();
+    const cur = Number(occRows.find((x) => x.period === `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`)?.rate_pct || 0);
+    const prevDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const prev = Number(occRows.find((x) => x.period === `${prevDate.getFullYear()}-${String(prevDate.getMonth() + 1).padStart(2, '0')}`)?.rate_pct || 0);
+    if (!prev) return null;
+    return Math.round(cur - prev);   // pct-point delta, not relative %
+  }, [occRows]);
 
   // Status distribution
   const statusSegs = [
@@ -144,17 +189,25 @@ function PageReports({ rooms, config, addActivity, setToast }) {
       />
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 14, marginBottom: 20 }}>
-        <KpiCard label="รายได้รวม"  value={fmtCurrency(stats.revenue)} change={12} sub="เดือนนี้" color="accent" icon="💰" />
-        <KpiCard label="อัตราเข้าพักเฉลี่ย" value={`${stats.occupancy}%`} change={3} color="success" icon="📊" />
+        <KpiCard label="รายได้รวม"  value={fmtCurrency(stats.revenue)} change={revChangePct} sub="เดือนนี้" color="accent" icon="💰" />
+        <KpiCard label="อัตราเข้าพักเฉลี่ย" value={`${stats.occupancy}%`} change={occChangePct} color="success" icon="📊" />
         <KpiCard label="รายได้/ห้อง"     value={fmtCurrency(Math.round(stats.revenue / Math.max(1, stats.counts.occupied + stats.counts.overdue)))} sub="ต่อเดือน" color="info" icon="🏠" />
         <KpiCard label="ค้างชำระ"      value={fmtCurrency(stats.overdueAmt)} sub={`${stats.counts.overdue} ห้อง`} color="danger" icon="⚠️" />
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 16, marginBottom: 16 }}>
         <Card style={{ gridColumn: 'span 2', minWidth: 0 }}>
-          <SectionHeading title="แนวโน้มรายได้" subtitle={range === '12m' ? '12 เดือนล่าสุด' : (range === '3m' ? '3 เดือน' : '6 เดือน')} level={3} />
-          <BarChart data={revenue} height={240} color={C.accent} showValues
-                    formatValue={(v) => '฿' + (v/1000).toFixed(0) + 'k'} />
+          <SectionHeading title="แนวโน้มรายได้" subtitle={(range === '12m' ? '12 เดือนล่าสุด' : (range === '3m' ? '3 เดือน' : '6 เดือน')) + ' — จากบิลที่ชำระแล้ว'} level={3} />
+          {revRows == null ? (
+            <div style={{ padding: 32, textAlign: 'center', color: C.muted, fontSize: 13 }}>กำลังโหลดข้อมูลรายได้...</div>
+          ) : revenue.every((m) => !m.value) ? (
+            <div style={{ padding: 32, textAlign: 'center', color: C.muted, fontSize: 13.5 }}>
+              ยังไม่มีบิลที่ชำระแล้วในช่วงนี้
+            </div>
+          ) : (
+            <BarChart data={revenue} height={240} color={C.accent} showValues
+                      formatValue={(v) => '฿' + (v/1000).toFixed(0) + 'k'} />
+          )}
         </Card>
 
         <Card>
@@ -178,13 +231,21 @@ function PageReports({ rooms, config, addActivity, setToast }) {
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 16, marginBottom: 16 }}>
         <Card>
-          <SectionHeading title="อัตราเข้าพักรายเดือน" level={3} />
-          <BarChart
-            data={occByMonth.map(m => ({ ...m, color: m.value > 80 ? C.success : (m.value > 70 ? C.accent : C.warning) }))}
-            height={200}
-            showValues
-            formatValue={(v) => v + '%'}
-          />
+          <SectionHeading title="อัตราเข้าพักรายเดือน" subtitle="จากบิลที่ออกในแต่ละรอบ" level={3} />
+          {occRows == null ? (
+            <div style={{ padding: 32, textAlign: 'center', color: C.muted, fontSize: 13 }}>กำลังโหลดข้อมูลการเข้าพัก...</div>
+          ) : occByMonth.every((m) => !m.value) ? (
+            <div style={{ padding: 32, textAlign: 'center', color: C.muted, fontSize: 13.5 }}>
+              ยังไม่มีบิลในช่วง 6 เดือน — ออกบิลเพื่อดูอัตราเข้าพักจริง
+            </div>
+          ) : (
+            <BarChart
+              data={occByMonth.map(m => ({ ...m, color: m.value > 80 ? C.success : (m.value > 70 ? C.accent : C.warning) }))}
+              height={200}
+              showValues
+              formatValue={(v) => v + '%'}
+            />
+          )}
         </Card>
 
         <Card>

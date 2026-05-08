@@ -16,6 +16,41 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
   const [confirmGenerate, setConfirmGenerate] = useState(false);
   const [previewBill, setPreviewBill] = useState(null);
 
+  // Real bills from DB for the current period. Falls back to client estimate
+  // (computed from rooms blob below) when no bills have been issued yet, so
+  // the page still shows what bills WOULD look like — the difference is now
+  // visible via `realBillsByRoom` so admin can tell estimate from issued.
+  const currentPeriod = useMemo(() => {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  }, []);
+  const [dbBills, setDbBills] = React.useState(null);   // null = loading
+  const [dbBillsErr, setDbBillsErr] = React.useState(null);
+  const fetchDbBills = React.useCallback(() => {
+    let cancel = false;
+    setDbBills(null);
+    setDbBillsErr(null);
+    fetch(`/api/bills?period=${encodeURIComponent(currentPeriod)}&limit=500`, {
+      credentials: 'same-origin',
+    })
+      .then(async (r) => {
+        const d = await r.json().catch(() => ({}));
+        if (cancel) return;
+        if (!r.ok) { setDbBillsErr(d.error || `HTTP ${r.status}`); setDbBills([]); return; }
+        setDbBills(Array.isArray(d.bills) ? d.bills : []);
+      })
+      .catch((e) => { if (!cancel) { setDbBillsErr(e.message || 'network error'); setDbBills([]); } });
+    return () => { cancel = true; };
+  }, [currentPeriod]);
+  React.useEffect(() => fetchDbBills(), [fetchDbBills]);
+  // Map room_id → real DB bill so the in-memory estimate can adopt the
+  // real status / total for any room that's already been billed this month.
+  const realBillsByRoom = useMemo(() => {
+    const map = {};
+    (dbBills || []).forEach((b) => { if (b.room_id) map[String(b.room_id)] = b; });
+    return map;
+  }, [dbBills]);
+
   // Generate bills from rooms — recompute with CURRENT config rates so
   // changes in Pricing engine reflect immediately in this month's bills
   const bills = useMemo(() => {
@@ -72,8 +107,27 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
           status: r.billPaidAt ? 'paid' : 'unpaid',
           overdueDays: r.overdueDays || 0,
         };
+      })
+      // Overlay real DB bill status on top of the estimate so the row
+      // accurately reflects what was actually issued + collected. The
+      // estimate stays as the breakdown source (waterUnits/elecUnits etc.
+      // from the rooms blob), but status + total come from the bills row
+      // when one exists for this room+period. The `_source` flag drives
+      // the per-row "ออกแล้ว/ประมาณ" badge in the table.
+      .map((est) => {
+        const real = realBillsByRoom[String(est.roomId)];
+        if (!real) return { ...est, _source: 'estimate' };
+        return {
+          ...est,
+          _source: 'db',
+          dbBillId: real.id,
+          dbBillNo: real.bill_no,
+          status: real.status === 'paid' ? 'paid' : 'unpaid',
+          dbStatus: real.status,                     // pending / paid / overdue / void
+          total: Number(real.total) || est.total,    // trust DB total over estimate
+        };
       });
-  }, [rooms, config]);
+  }, [rooms, config, realBillsByRoom]);
 
   const filtered = useMemo(() => {
     if (tab === 'current') return bills;
@@ -185,6 +239,9 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         kind: d.made > 0 ? 'success' : 'info',
         message: `ออกบิล ${d.made} ใบ${d.skipped ? ` (ข้าม ${d.skipped})` : ''}`,
       });
+      // Refresh the DB-bills overlay so the banner + per-row badge flip
+      // from "ประมาณการ" to "ออกแล้ว" without needing a manual reload.
+      fetchDbBills();
     } catch (e) {
       setToast && setToast({ kind: 'error', message: 'ออกบิลไม่สำเร็จ: ' + (e.message || 'unknown') });
     }
@@ -259,10 +316,23 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
       ),
     },
     {
-      key: 'status', label: 'สถานะ', minWidth: 120,
-      render: b => b.status === 'paid'
-        ? <Pill color="success" size="sm" icon="✓">ชำระแล้ว</Pill>
-        : <Pill color="danger" size="sm">ค้าง {b.overdueDays} วัน</Pill>,
+      key: 'status', label: 'สถานะ', minWidth: 140,
+      render: b => (
+        <div style={{ display: 'inline-flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start' }}>
+          {b.status === 'paid'
+            ? <Pill color="success" size="sm" icon="✓">ชำระแล้ว</Pill>
+            : <Pill color="danger" size="sm">ค้าง {b.overdueDays} วัน</Pill>}
+          <span title={b._source === 'db' ? `บิล #${b.dbBillNo || b.dbBillId}` : 'ยังไม่ได้บันทึกเข้าระบบ'}
+                style={{
+                  fontSize: 10, padding: '1px 6px', borderRadius: 4,
+                  background: b._source === 'db' ? (C.successSoft || '#e3f3e8') : (C.warningSoft || '#fef6e0'),
+                  color: b._source === 'db' ? (C.successInk || '#1d4a2c') : (C.warningInk || '#7a5a18'),
+                  fontWeight: 600, letterSpacing: '0.02em',
+                }}>
+            {b._source === 'db' ? 'ออกแล้ว' : 'ประมาณการ'}
+          </span>
+        </div>
+      ),
     },
     {
       key: 'actions', label: '', align: 'right', minWidth: 130,
@@ -305,6 +375,66 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
           </>
         }
       />
+
+      {/* Real-vs-estimate banner. Tells admin at a glance whether what
+          they're seeing came from issued bills (DB) or is just a forecast
+          built from rooms × rate. Without this, the previous version
+          showed a perfect-looking estimate even when 0 bills had been
+          issued for the period — false reassurance. */}
+      {dbBills != null && (() => {
+        const dbCount = dbBills.length;
+        const estCount = bills.filter((b) => b._source === 'estimate').length;
+        if (dbCount === 0 && estCount > 0) {
+          return (
+            <div style={{
+              padding: '10px 14px', marginBottom: 14, borderRadius: 8,
+              background: C.warningSoft || '#fef6e0', color: C.warningInk || '#7a5a18',
+              fontSize: 13, display: 'flex', alignItems: 'center', gap: 10,
+            }}>
+              <span style={{ fontSize: 16 }}>⚠️</span>
+              <span><strong>ยังไม่ได้ออกบิลรอบ {currentPeriod}</strong> — ตารางด้านล่างเป็นการประมาณการจากข้อมูลห้อง กดปุ่ม "ออกบิลเดือนนี้" เพื่อบันทึกเข้า DB</span>
+            </div>
+          );
+        }
+        if (dbCount > 0 && estCount > 0) {
+          return (
+            <div style={{
+              padding: '10px 14px', marginBottom: 14, borderRadius: 8,
+              background: C.infoSoft || '#e3eef7', color: C.infoInk || '#1d3b5a',
+              fontSize: 13, display: 'flex', alignItems: 'center', gap: 10,
+            }}>
+              <span style={{ fontSize: 16 }}>ℹ️</span>
+              <span>ออกบิลแล้ว {dbCount} ใบ (รอบ {currentPeriod}) · เหลือห้องที่ยังไม่ออก {estCount} ห้อง — กด "ออกบิลเดือนนี้" เพื่อออกบิลส่วนที่เหลือ</span>
+            </div>
+          );
+        }
+        if (dbCount > 0 && estCount === 0) {
+          return (
+            <div style={{
+              padding: '10px 14px', marginBottom: 14, borderRadius: 8,
+              background: C.successSoft || '#e3f3e8', color: C.successInk || '#1d4a2c',
+              fontSize: 13, display: 'flex', alignItems: 'center', gap: 10,
+            }}>
+              <span style={{ fontSize: 16 }}>✓</span>
+              <span>ออกบิลครบทุกห้องแล้วสำหรับรอบ {currentPeriod} ({dbCount} ใบ)</span>
+            </div>
+          );
+        }
+        return null;
+      })()}
+      {dbBillsErr && (
+        <div style={{
+          padding: '10px 14px', marginBottom: 14, borderRadius: 8,
+          background: C.dangerSoft || '#fff1f0', color: C.danger || '#a23',
+          fontSize: 13,
+        }}>
+          โหลดข้อมูลบิลจาก DB ไม่สำเร็จ: {dbBillsErr} — แสดงประมาณการจากข้อมูลห้อง
+          {' '}<button onClick={fetchDbBills} style={{
+            border: 0, background: 'transparent', color: 'inherit',
+            textDecoration: 'underline', cursor: 'pointer', fontFamily: 'inherit',
+          }}>ลองใหม่</button>
+        </div>
+      )}
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 14, marginBottom: 20 }}>
         <KpiCard label="บิลที่ออก"     value={fmt(stats.issued)}     sub="ใบประจำเดือน" icon="📋" />

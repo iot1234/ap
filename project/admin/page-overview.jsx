@@ -13,21 +13,52 @@ function PageOverview({ rooms, config, bookings, activities, addActivity, setToa
   const stats = useMemo(() => computeStats(rooms, config), [rooms, config]);
   const list  = useMemo(() => Object.values(rooms), [rooms]);
 
-  // --- 6-month revenue trend (mock from current revenue) ----
+  // --- Real revenue trend from DB. Pulls 12 months of bills, slices to last
+  // 6 for the dashboard chart. Falls back to an empty series if the endpoint
+  // is unreachable (manager+ role required by /api/reports2/revenue) so the
+  // page still renders. The previous Math.sin formula fabricated numbers
+  // unrelated to the actual `bills` table — see audit, May 2026.
+  const [revenueRows, setRevenueRows] = React.useState(null);  // null = loading, [] = error/empty
+  React.useEffect(() => {
+    let cancel = false;
+    const year = new Date().getFullYear();
+    fetch(`/api/reports2/revenue?year=${year}`, { credentials: 'same-origin' })
+      .then(async (r) => (r.ok ? (await r.json()).rows : []))
+      .then((rows) => { if (!cancel) setRevenueRows(Array.isArray(rows) ? rows : []); })
+      .catch(() => { if (!cancel) setRevenueRows([]); });
+    return () => { cancel = true; };
+  }, []);
   const revenueTrend = useMemo(() => {
+    if (!revenueRows) return [];   // still loading
     const now = new Date();
     const months = [];
     for (let i = 5; i >= 0; i--) {
       const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-      const factor = 0.78 + Math.sin(i * 1.3) * 0.06 + i * 0.01;
+      const period = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+      const row = revenueRows.find((x) => x.period === period);
       months.push({
         label: fmtMonthTH(d).replace(' 25', "'"),
-        value: Math.round(stats.revenue * factor),
+        value: Math.round(Number(row?.paid_amount || 0)),
       });
     }
-    months[months.length - 1].color = C.accent;
+    if (months.length) months[months.length - 1].color = C.accent;
     return months;
-  }, [stats.revenue]);
+  }, [revenueRows]);
+
+  // Real prev-month delta for the revenue KPI (replaces hardcoded +12%).
+  // Returns null when there's no prior data to compare against — KpiCard
+  // just hides the change badge in that case.
+  const revChangePct = useMemo(() => {
+    if (!revenueRows || revenueRows.length < 2) return null;
+    const now = new Date();
+    const thisP = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    const prevDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const prevP = `${prevDate.getFullYear()}-${String(prevDate.getMonth() + 1).padStart(2, '0')}`;
+    const cur = Number(revenueRows.find((x) => x.period === thisP)?.paid_amount || 0);
+    const prev = Number(revenueRows.find((x) => x.period === prevP)?.paid_amount || 0);
+    if (!prev) return null;   // can't compute % change from zero
+    return Math.round(((cur - prev) / prev) * 100);
+  }, [revenueRows]);
 
   // --- Status distribution ----
   const statusSegs = [
@@ -90,8 +121,8 @@ function PageOverview({ rooms, config, bookings, activities, addActivity, setToa
         <KpiCard
           label="รายได้เดือนนี้"
           value={fmtCurrency(stats.revenue)}
-          change={12}
-          sub="เทียบเดือนก่อน"
+          change={revChangePct}
+          sub={revChangePct == null ? 'ยังไม่มีข้อมูลเปรียบเทียบ' : 'เทียบเดือนก่อน'}
           color="accent"
           icon="💰"
         />
@@ -101,7 +132,6 @@ function PageOverview({ rooms, config, bookings, activities, addActivity, setToa
           sub={`${stats.counts.occupied + stats.counts.overdue + stats.counts.reserved}/${stats.total} ห้อง`}
           color="success"
           icon="🏠"
-          change={3}
         />
         <KpiCard
           label="ห้องว่าง"
@@ -131,12 +161,25 @@ function PageOverview({ rooms, config, bookings, activities, addActivity, setToa
         <Card style={{ gridColumn: 'span 2', minWidth: 0 }} className="grid-span-2">
           <SectionHeading
             title="รายได้รายเดือน"
-            subtitle="6 เดือนล่าสุด รวมค่าห้อง+ค่าน้ำ+ค่าไฟ+wifi"
+            subtitle="6 เดือนล่าสุด — จากบิลที่ชำระแล้วในระบบ"
             level={3}
-            action={<Pill color="success" icon="▲">+12% เทียบเดือนก่อน</Pill>}
+            action={revChangePct != null
+              ? <Pill color={revChangePct >= 0 ? 'success' : 'danger'}
+                      icon={revChangePct >= 0 ? '▲' : '▼'}>
+                  {(revChangePct >= 0 ? '+' : '') + revChangePct + '% เทียบเดือนก่อน'}
+                </Pill>
+              : null}
           />
-          <BarChart data={revenueTrend} height={220} color={C.accent} showValues
-                    formatValue={(v) => '฿' + (v/1000).toFixed(0) + 'k'} />
+          {revenueRows == null ? (
+            <div style={{ padding: 32, textAlign: 'center', color: C.muted, fontSize: 13 }}>กำลังโหลดข้อมูลรายได้...</div>
+          ) : revenueTrend.every((m) => !m.value) ? (
+            <div style={{ padding: 32, textAlign: 'center', color: C.muted, fontSize: 13.5 }}>
+              ยังไม่มีบิลที่ชำระแล้วในช่วง 6 เดือน — ออกบิลและรับชำระเพื่อดูแนวโน้มจริง
+            </div>
+          ) : (
+            <BarChart data={revenueTrend} height={220} color={C.accent} showValues
+                      formatValue={(v) => '฿' + (v/1000).toFixed(0) + 'k'} />
+          )}
         </Card>
 
         <Card>

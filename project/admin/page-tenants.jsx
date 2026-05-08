@@ -485,31 +485,59 @@ function TabContract({ t, setToast, addActivity }) {
 
 function TabBills({ t }) {
   const C = window.ADMIN_C;
-  const { fmtCurrency } = window;
-  const { DataTable, Pill, Btn } = window;
+  const { fmtCurrency, fmtMonthTH } = window;
+  const { DataTable, Pill, EmptyState } = window;
 
-  // Generate sample 6-month bill history
-  const bills = useMemo(() => {
-    const now = new Date();
-    return [0,1,2,3,4,5].map(i => {
-      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-      const months = ['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.','ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'];
-      return {
-        id: `INV-${t.roomId}-${(d.getFullYear()+543).toString().slice(-2)}${(d.getMonth()+1).toString().padStart(2,'0')}`,
-        period: `${months[d.getMonth()]} ${d.getFullYear()+543}`,
-        amount: t.rent + (t.room?.water || 0) + (t.room?.elec || 0) + (t.room?.wifi || 250),
-        status: i === 0 && t.status === 'overdue' ? 'unpaid' : 'paid',
-      };
-    });
-  }, [t]);
+  // Real bill history from /api/bills?roomId=X. Replaces a hardcoded
+  // 6-month fake history that lied to admins about payment status.
+  const [bills, setBills] = React.useState(null);   // null = loading
+  const [err, setErr] = React.useState(null);
+  React.useEffect(() => {
+    if (!t.roomId) { setBills([]); return; }
+    let cancel = false;
+    setBills(null);
+    setErr(null);
+    fetch(`/api/bills?roomId=${encodeURIComponent(t.roomId)}&limit=24`, { credentials: 'same-origin' })
+      .then(async (r) => {
+        const d = await r.json().catch(() => ({}));
+        if (cancel) return;
+        if (!r.ok) { setErr(d.error || `HTTP ${r.status}`); setBills([]); return; }
+        setBills(Array.isArray(d.bills) ? d.bills : []);
+      })
+      .catch((e) => { if (!cancel) { setErr(e.message || 'network error'); setBills([]); } });
+    return () => { cancel = true; };
+  }, [t.roomId]);
+
+  const periodTH = (period) => {
+    if (!period || typeof period !== 'string') return period || '';
+    const m = period.match(/^(\d{4})-(\d{2})/);
+    if (!m) return period;
+    const d = new Date(Number(m[1]), Number(m[2]) - 1, 1);
+    return fmtMonthTH ? fmtMonthTH(d) : period;
+  };
+  const statusLabel = { paid: 'ชำระแล้ว', pending: 'รอชำระ', overdue: 'ค้างชำระ', void: 'ยกเลิก' };
+  const statusColor = { paid: 'success', pending: 'warning', overdue: 'danger', void: 'muted' };
 
   const columns = [
-    { key: 'id', label: 'เลขที่บิล', minWidth: 140, render: b => <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 12 }}>{b.id}</span> },
-    { key: 'period', label: 'งวด',  minWidth: 100 },
-    { key: 'amount', label: 'จำนวน', align: 'right', minWidth: 110, render: b => <span style={{ fontWeight: 600 }}>{fmtCurrency(b.amount)}</span> },
-    { key: 'status', label: 'สถานะ', minWidth: 100, render: b => <Pill color={b.status === 'paid' ? 'success' : 'danger'} size="sm">{b.status === 'paid' ? 'ชำระแล้ว' : 'ค้างชำระ'}</Pill> },
+    { key: 'bill_no', label: 'เลขที่บิล', minWidth: 140, render: b => <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 12 }}>{b.bill_no || `#${b.id}`}</span> },
+    { key: 'period',  label: 'งวด',     minWidth: 100, render: b => periodTH(b.period) },
+    { key: 'total',   label: 'จำนวน',   align: 'right', minWidth: 110,
+      render: b => <span style={{ fontWeight: 600 }}>{fmtCurrency(Number(b.total) || 0)}</span> },
+    { key: 'status',  label: 'สถานะ',   minWidth: 100,
+      render: b => <Pill color={statusColor[b.status] || 'muted'} size="sm">{statusLabel[b.status] || b.status}</Pill> },
   ];
 
+  if (bills == null) {
+    return <div style={{ padding: 24, textAlign: 'center', color: C.muted, fontSize: 13 }}>กำลังโหลดประวัติบิล...</div>;
+  }
+  if (err) {
+    return <div style={{ padding: 16, color: C.danger || '#a23', fontSize: 13 }}>โหลดประวัติบิลไม่สำเร็จ: {err}</div>;
+  }
+  if (bills.length === 0) {
+    return EmptyState
+      ? <EmptyState title="ยังไม่มีประวัติบิล" description="เมื่อออกบิลให้ห้องนี้แล้ว ประวัติจะแสดงที่นี่" />
+      : <div style={{ padding: 16, color: C.muted, fontSize: 13 }}>ยังไม่มีประวัติบิลสำหรับห้องนี้</div>;
+  }
   return (
     <div>
       <DataTable columns={columns} rows={bills} density="compact" stickyHeader={false} />
