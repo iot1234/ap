@@ -132,6 +132,35 @@ check "PUT /api/data with foreign Origin → 403"  403 \
   "$BASE_URL/api/data/baankarn_rooms_v1"
 
 echo ""
+echo "v3 endpoints (May 2026 audit cycle):"
+# Production-readiness — owner-only. Without cookie should 401, with
+# cookie should 200 (admin user from bootstrap is owner). Both flows
+# tested so the endpoint is proven reachable.
+check "GET /api/admin/production-readiness (no auth)"  401 \
+  "$BASE_URL/api/admin/production-readiness"
+check "GET /api/admin/production-readiness (auth)"     200 \
+  -b "$COOKIE_JAR" "$BASE_URL/api/admin/production-readiness"
+
+# Health endpoint — schema sanity check now lists the new payment
+# columns. Reachability proves the migration ran + columns exist.
+check "GET /api/admin/health (auth)"                   200 \
+  -b "$COOKIE_JAR" "$BASE_URL/api/admin/health"
+
+# New atomic booking approve endpoint — POST + CSRF required. Without
+# a CSRF token it should reject (403 from csrfGuard). Picks a fake
+# booking id so we don't accidentally approve a real one.
+check "POST /api/bookings/X/approve-and-assign (no csrf)"  403 \
+  -X POST -H "Content-Type: application/json" -H "Origin: $BASE_URL" \
+  -b "$COOKIE_JAR" -d '{}' \
+  "$BASE_URL/api/bookings/BK-SMOKE-NOPE/approve-and-assign"
+
+# Slip auto-verify column existence (indirect): GET /api/payments
+# implicitly references payments.* columns. If a column is missing
+# from the SELECT projection, this 500s instead of 200.
+check "GET /api/payments (smoke schema)"               200 \
+  -b "$COOKIE_JAR" "$BASE_URL/api/payments"
+
+echo ""
 echo "==========================================="
 echo "Summary: $PASS passed, $FAIL failed"
 echo "==========================================="

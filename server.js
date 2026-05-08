@@ -2997,11 +2997,16 @@ async function notifyTenantOnPayment(payment, outcome, reason) {
 
 const BOOKING_STATUSES = new Set(['pending', 'reviewing', 'approved', 'rejected', 'cancelled']);
 const BOOKING_TRANSITIONS = {
-  // Approve must go through `reviewing` first — direct pending → approved
-  // bypassed the verification checklist (call-back, ID check, credit
-  // history, room match) and made it easy for a distracted admin to
-  // greenlight an unverified applicant.
-  pending:   ['reviewing', 'rejected', 'cancelled'],
+  // pending → approved is allowed since 5534b48 introduced the new
+  // POST /api/bookings/:id/approve-and-assign endpoint that runs the
+  // verification checklist via a context-rich confirm modal showing
+  // applicant details + tells admin about the follow-up steps (PIN
+  // setup, LINE binding) — the "force admin to first click reviewing"
+  // gate became redundant once the approve action itself surfaced the
+  // applicant data. Keeping reviewing as an optional intermediate
+  // state for cases where admin wants to mark "I've started looking"
+  // separately from "I've decided to approve".
+  pending:   ['reviewing', 'approved', 'rejected', 'cancelled'],
   reviewing: ['approved', 'rejected', 'cancelled'],
   approved:  ['cancelled'],          // can revoke an approval if tenant backs out
   rejected:  ['reviewing'],          // re-open if admin reconsidered
