@@ -677,6 +677,63 @@ async function migrate(pool, opts = {}) {
     -- removed — the rendered PDF will fall back to defaults at print time.
     ALTER TABLE contracts ADD COLUMN IF NOT EXISTS template_id BIGINT REFERENCES contract_templates(id) ON DELETE SET NULL;
 
+    -- Contract immutability flag. Set when admin approves the tenant's
+    -- self-fill submission OR explicitly locks via the contract editor.
+    -- Once locked, /api/contracts/:id PUT refuses edits and the public
+    -- fill token is invalidated. Stored as a timestamp (NULL = unlocked,
+    -- non-NULL = locked at this time).
+    ALTER TABLE contracts ADD COLUMN IF NOT EXISTS locked_at TIMESTAMPTZ;
+    ALTER TABLE contracts ADD COLUMN IF NOT EXISTS locked_by TEXT;
+
+    -- === Tenant self-fill invitations =====================================
+    -- Admin generates a tokenised URL → tenant opens (no login) → fills
+    -- personal info + ID photos + signature → submits → admin reviews →
+    -- approves (which applies draft to tenants/contracts + locks) OR
+    -- rejects (kicks back to tenant with reason).
+    --
+    -- The token in the URL is base64url(32 random bytes); we store ONLY
+    -- the SHA-256 hash so a DB-only leak doesn't yield directly-replayable
+    -- live tokens. Token is one-time-ish: usable until status leaves
+    -- pending/submitted (then it's effectively dead).
+    CREATE TABLE IF NOT EXISTS contract_invitations (
+      id              BIGSERIAL PRIMARY KEY,
+      contract_id     BIGINT NOT NULL REFERENCES contracts(id) ON DELETE CASCADE,
+      tenant_id       BIGINT REFERENCES tenants(id) ON DELETE SET NULL,
+      token_hash      TEXT NOT NULL,
+      status          TEXT NOT NULL DEFAULT 'pending',
+        -- pending | submitted | approved | rejected | revoked | expired
+      draft           JSONB NOT NULL DEFAULT '{}'::jsonb,
+        -- holds the tenant's in-progress fields: address, emergencyContact,
+        -- citizenId (encrypted at submit time), citizenIdImageFrontId,
+        -- citizenIdImageBackId, signatureFileId, agreedTermsAt
+      submitted_at    TIMESTAMPTZ,
+      approved_at     TIMESTAMPTZ,
+      approved_by     TEXT,
+      rejected_at     TIMESTAMPTZ,
+      rejected_by     TEXT,
+      rejection_reason TEXT,
+      revoked_at      TIMESTAMPTZ,
+      revoked_by      TEXT,
+      expires_at      TIMESTAMPTZ NOT NULL,
+      created_by      TEXT,
+      created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_contract_invitations_token_hash
+      ON contract_invitations(token_hash);
+    CREATE INDEX IF NOT EXISTS idx_contract_invitations_status
+      ON contract_invitations(status);
+    CREATE INDEX IF NOT EXISTS idx_contract_invitations_contract
+      ON contract_invitations(contract_id);
+    -- At most one ACTIVE invitation per contract — admin shouldn't be able
+    -- to spawn a fleet of valid tokens for the same contract by accident.
+    -- 'pending' + 'submitted' are the active states; once approved/rejected
+    -- /revoked/expired, the invitation is closed and a new one can be
+    -- issued. Partial unique enforces this without blocking history.
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_contract_invitations_active_per_contract
+      ON contract_invitations(contract_id)
+      WHERE status IN ('pending', 'submitted');
+
     -- === file_uploads: distinguish front vs back of citizen ID ============
     -- Without the side column, the admin UI has to dig into the URL or rely
     -- on upload order. Explicit column is cheap and lets queries filter cleanly.

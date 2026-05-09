@@ -5982,6 +5982,476 @@ app.post('/api/contracts/:id/template', sameOrigin, csrfGuard, requireAuth, requ
     }
   });
 
+// === Tenant self-fill invitations ==========================================
+// Admin generates a tokenised URL for the tenant to fill on their own
+// device (no login). Tenant submits → admin reviews → approves (which
+// applies the draft to tenants/contracts and LOCKS the contract). Token
+// lives ~7 days by default; expired/approved/rejected/revoked links 404.
+//
+// Rate limits: public endpoints get the same per-IP limiter as the booking
+// page; admin endpoints inherit the standard requireAuth + csrfGuard.
+const rateLimitContractFill = makeIpLimiter({
+  windowMs: 60_000, max: 30,
+  message: 'too many requests to the contract fill endpoint',
+});
+
+// POST /api/contracts/:id/invite-tenant
+// Admin clicks "📨 ส่งให้ผู้เช่ากรอก" → backend generates a fresh token,
+// revokes any prior active invitation for the same contract (so admin
+// can't accidentally have two valid links floating around), returns the
+// tenant URL exactly ONCE in the response.
+app.post('/api/contracts/:id/invite-tenant',
+  sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'),
+  async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+    const expiresInHours = req.body && Number(req.body.expiresInHours);
+    try {
+      // Verify the contract exists + is unlocked. Locked contracts can't
+      // accept fresh tenant input — admin must unlock first (a deliberate
+      // step) before re-soliciting tenant data.
+      const cQ = await pool.query(
+        `SELECT id, contract_no, tenant_id, locked_at FROM contracts
+           WHERE id=$1 AND deleted_at IS NULL`,
+        [id]
+      );
+      if (!cQ.rows.length) return res.status(404).json({ error: 'contract not found' });
+      if (cQ.rows[0].locked_at) {
+        return res.status(409).json({
+          error: 'สัญญาถูก lock แล้ว — ส่งลิงก์ไม่ได้',
+          code: 'CONTRACT_LOCKED',
+          lockedAt: cQ.rows[0].locked_at,
+        });
+      }
+      const contractInvitation = require('./services/contractInvitation');
+      const inv = await contractInvitation.createInvitation(pool, {
+        contractId: id,
+        tenantId: cQ.rows[0].tenant_id,
+        expiresInHours,
+        createdBy: req.session.user.username,
+      });
+      // Construct the absolute URL so admin can copy/paste directly. Use
+      // the request's host so the link works behind a reverse proxy.
+      const proto = req.headers['x-forwarded-proto'] || req.protocol || 'https';
+      const host = req.headers['x-forwarded-host'] || req.headers.host || 'localhost';
+      const url = `${proto}://${host}/contract/fill/${inv.token}`;
+      audit(req, 'contract.invite_tenant', 'contract', String(id),
+        { invitationId: inv.id, expiresAt: inv.expiresAt });
+      res.json({
+        ok: true,
+        invitation: {
+          id: inv.id,
+          token: inv.token,           // ONLY exposed here — never again
+          url,
+          expiresAt: inv.expiresAt,
+        },
+      });
+    } catch (err) {
+      console.error('invite-tenant error:', err);
+      res.status(500).json({ error: 'internal error' });
+    }
+  });
+
+// GET /api/admin/contract-invitations — list (defaults to active queue)
+app.get('/api/admin/contract-invitations',
+  requireAuth, requireRole('owner', 'manager'),
+  async (req, res) => {
+    const status = req.query.status;
+    const where = [];
+    const params = [];
+    if (status === 'active') {
+      where.push(`i.status IN ('pending','submitted')`);
+    } else if (status === 'submitted' || status === 'approved'
+               || status === 'rejected' || status === 'revoked'
+               || status === 'expired' || status === 'pending') {
+      params.push(status);
+      where.push(`i.status=$${params.length}`);
+    }
+    try {
+      const { rows } = await pool.query(
+        `SELECT i.id, i.contract_id, i.tenant_id, i.status,
+                i.draft, i.submitted_at, i.approved_at, i.approved_by,
+                i.rejected_at, i.rejected_by, i.rejection_reason,
+                i.expires_at, i.created_by, i.created_at, i.updated_at,
+                c.contract_no, c.room_id,
+                t.full_name AS tenant_name, t.phone AS tenant_phone
+           FROM contract_invitations i
+           LEFT JOIN contracts c ON c.id = i.contract_id
+           LEFT JOIN tenants   t ON t.id = i.tenant_id
+          ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+          ORDER BY
+            CASE i.status WHEN 'submitted' THEN 0 WHEN 'pending' THEN 1
+                          WHEN 'approved' THEN 2 ELSE 3 END,
+            i.updated_at DESC
+          LIMIT 200`,
+        params
+      );
+      res.json({ ok: true, invitations: rows });
+    } catch (err) {
+      console.error('invitations list error:', err);
+      res.status(500).json({ error: 'internal error' });
+    }
+  });
+
+// GET /api/admin/contract-invitations/:id
+app.get('/api/admin/contract-invitations/:id',
+  requireAuth, requireRole('owner', 'manager'),
+  async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+    try {
+      const { rows } = await pool.query(
+        `SELECT i.*, c.contract_no, c.room_id, c.monthly_rent, c.deposit,
+                t.full_name AS tenant_name, t.phone AS tenant_phone, t.email AS tenant_email,
+                ff.url AS draft_front_url, bf.url AS draft_back_url, sf.url AS draft_signature_url
+           FROM contract_invitations i
+           LEFT JOIN contracts c ON c.id = i.contract_id
+           LEFT JOIN tenants   t ON t.id = i.tenant_id
+           LEFT JOIN file_uploads ff ON ff.id = (i.draft->>'citizenIdImageFrontId')::bigint
+           LEFT JOIN file_uploads bf ON bf.id = (i.draft->>'citizenIdImageBackId')::bigint
+           LEFT JOIN file_uploads sf ON sf.id = (i.draft->>'signatureFileId')::bigint
+          WHERE i.id=$1`,
+        [id]
+      );
+      if (!rows.length) return res.status(404).json({ error: 'not found' });
+      res.json({ ok: true, invitation: rows[0] });
+    } catch (err) {
+      console.error('invitation get error:', err);
+      res.status(500).json({ error: 'internal error' });
+    }
+  });
+
+// POST /api/admin/contract-invitations/:id/approve
+// Admin reviews tenant's submitted draft + clicks approve. Server applies
+// the draft to tenants + contracts in a single transaction, marks the
+// invitation 'approved', and locks the contract (subsequent edits forbidden).
+app.post('/api/admin/contract-invitations/:id/approve',
+  sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'),
+  async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const iQ = await client.query(
+        `SELECT * FROM contract_invitations WHERE id=$1 FOR UPDATE`,
+        [id]
+      );
+      if (!iQ.rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'invitation not found' });
+      }
+      const inv = iQ.rows[0];
+      if (inv.status !== 'submitted') {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: `อนุมัติได้เฉพาะ invitation สถานะ submitted (ตอนนี้: ${inv.status})`,
+          code: 'BAD_STATUS',
+          currentStatus: inv.status,
+        });
+      }
+      const draft = inv.draft || {};
+
+      // Apply draft → tenants row (when one is linked).
+      if (inv.tenant_id) {
+        const sets = [];
+        const params = [];
+        let i = 1;
+        const set = (col, v) => { sets.push(`${col}=$${i++}`); params.push(v); };
+        if (draft.address)               set('address', String(draft.address).slice(0, 500));
+        if (draft.emergencyContactName)  set('emergency_contact_name', String(draft.emergencyContactName).slice(0, 200));
+        if (draft.emergencyContactPhone) set('emergency_contact_phone', String(draft.emergencyContactPhone).slice(0, 32));
+        if (draft.emergencyContactRelation) set('emergency_contact_relation', String(draft.emergencyContactRelation).slice(0, 64));
+        if (draft.citizenIdImageFrontId) set('citizen_id_image_front_id', Number(draft.citizenIdImageFrontId));
+        if (draft.citizenIdImageBackId)  set('citizen_id_image_back_id', Number(draft.citizenIdImageBackId));
+        // Citizen ID — re-validate checksum here (tenant might have edited
+        // a prior valid value to garbage). On checksum failure we still
+        // accept it but with hash=NULL (legacy data path); admin can fix
+        // later via tenant edit.
+        if (draft.citizenId) {
+          const thaiId = require('./services/thaiId');
+          const norm = thaiId.normalize(draft.citizenId);
+          if (norm) {
+            const flags = await features.load(pool);
+            const enc = (flags.citizenIdEncryption && flags.citizenIdEncryption.enabled)
+              ? cryptoSvc.encryptString(norm) : norm;
+            set('citizen_id_encrypted', enc);
+            set('citizen_id_tail', norm.slice(-4));
+            set('citizen_id_hash', thaiId.validateChecksum(norm)
+              ? thaiId.hashForLookup(norm) : null);
+          }
+        }
+        if (sets.length) {
+          sets.push('updated_at = NOW()');
+          params.push(inv.tenant_id);
+          await client.query(
+            `UPDATE tenants SET ${sets.join(', ')} WHERE id=$${i}`,
+            params
+          ).catch((err) => {
+            // Dedup race: another tenant already has this hash. Treat as
+            // a clean rejection — admin must reconcile manually.
+            if (err.code === '23505' && err.constraint === 'uq_tenants_citizen_id_hash_active') {
+              throw Object.assign(new Error('CITIZEN_ID_DUPLICATE'),
+                { http: 409, code: 'CITIZEN_ID_DUPLICATE' });
+            }
+            throw err;
+          });
+        }
+      }
+
+      // Apply signature → contracts row + lock the contract.
+      const updateSets = ['updated_at=NOW()', 'locked_at=NOW()', 'locked_by=$2'];
+      const updateParams = [inv.contract_id, req.session.user.username];
+      let pi = 3;
+      if (draft.signatureFileId) {
+        updateSets.push(`signature_image_id=$${pi++}`,
+                        `signed_at = COALESCE(signed_at, NOW())`);
+        updateParams.push(Number(draft.signatureFileId));
+      }
+      if (draft.agreedTermsVersion) {
+        updateSets.push(`agreed_terms_version=$${pi++}`,
+                        `agreed_terms_at = COALESCE(agreed_terms_at, NOW())`);
+        updateParams.push(String(draft.agreedTermsVersion).slice(0, 64));
+      }
+      await client.query(
+        `UPDATE contracts SET ${updateSets.join(', ')}
+          WHERE id=$1 AND deleted_at IS NULL`,
+        updateParams
+      );
+
+      await client.query(
+        `UPDATE contract_invitations
+            SET status='approved', approved_at=NOW(), approved_by=$2, updated_at=NOW()
+          WHERE id=$1`,
+        [id, req.session.user.username]
+      );
+      await client.query('COMMIT');
+      audit(req, 'contract.invitation_approve', 'contract', String(inv.contract_id),
+        { invitationId: id, draftKeys: Object.keys(draft) });
+
+      // Owner notify so a third party sees the approval activity. Same
+      // legal-trail rationale as identity capture / contract sign.
+      try {
+        const flags = await features.load(pool);
+        notifier.notifyOwner({ pool, features: flags }, {
+          subject: `✅ อนุมัติสัญญาที่ผู้เช่ากรอกเอง`,
+          text: `admin ${req.session.user.username} อนุมัติ invitation #${id} `
+            + `(contract ${inv.contract_id})\nสัญญาถูก lock เรียบร้อย`,
+        }).catch(() => {});
+      } catch { /* ignore */ }
+      res.json({ ok: true, invitationId: id, contractId: inv.contract_id, locked: true });
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      if (err.http) return res.status(err.http).json({ error: err.message, code: err.code });
+      console.error('invitation approve error:', err);
+      res.status(500).json({ error: 'internal error' });
+    } finally {
+      client.release();
+    }
+  });
+
+// POST /api/admin/contract-invitations/:id/reject
+// Send the submission back to the tenant with a reason. Status flips back
+// to 'pending' so the tenant can edit + resubmit.
+app.post('/api/admin/contract-invitations/:id/reject',
+  sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'),
+  async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+    const reason = String((req.body && req.body.reason) || '').slice(0, 500);
+    if (!reason) return res.status(400).json({ error: 'reason required', code: 'REASON_REQUIRED' });
+    try {
+      const { rows } = await pool.query(
+        `UPDATE contract_invitations
+            SET status='pending', rejected_at=NOW(), rejected_by=$2,
+                rejection_reason=$3, updated_at=NOW()
+          WHERE id=$1 AND status='submitted'
+          RETURNING id, contract_id`,
+        [id, req.session.user.username, reason]
+      );
+      if (!rows.length) return res.status(409).json({
+        error: 'reject ได้เฉพาะ invitation สถานะ submitted', code: 'BAD_STATUS',
+      });
+      audit(req, 'contract.invitation_reject', 'contract', String(rows[0].contract_id),
+        { invitationId: id, reason });
+      res.json({ ok: true, invitationId: id });
+    } catch (err) {
+      console.error('invitation reject error:', err);
+      res.status(500).json({ error: 'internal error' });
+    }
+  });
+
+// POST /api/admin/contract-invitations/:id/revoke — kill the link
+app.post('/api/admin/contract-invitations/:id/revoke',
+  sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'),
+  async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+    try {
+      const { rows } = await pool.query(
+        `UPDATE contract_invitations
+            SET status='revoked', revoked_at=NOW(), revoked_by=$2, updated_at=NOW()
+          WHERE id=$1 AND status IN ('pending','submitted')
+          RETURNING id, contract_id`,
+        [id, req.session.user.username]
+      );
+      if (!rows.length) return res.status(409).json({
+        error: 'revoke ได้เฉพาะ invitation ที่ยังไม่ปิด', code: 'BAD_STATUS',
+      });
+      audit(req, 'contract.invitation_revoke', 'contract', String(rows[0].contract_id),
+        { invitationId: id });
+      res.json({ ok: true, invitationId: id });
+    } catch (err) {
+      console.error('invitation revoke error:', err);
+      res.status(500).json({ error: 'internal error' });
+    }
+  });
+
+// === Public endpoints (no auth, token-gated) ==============================
+// All wrapped with a per-IP rate limiter — token guess is not trivial
+// (32-byte random) but limiting requests prevents a noisy abuser from
+// hammering the server cycling through guesses.
+
+// GET /api/contract-fill/:token — load the form data
+app.get('/api/contract-fill/:token', rateLimitContractFill, async (req, res) => {
+  const token = String(req.params.token).slice(0, 80);
+  const contractInvitation = require('./services/contractInvitation');
+  try {
+    const inv = await contractInvitation.resolveActiveByToken(pool, token);
+    if (!inv) return res.status(404).json({
+      error: 'ลิงก์นี้ใช้ไม่ได้แล้ว (อาจหมดอายุ ถูกอนุมัติ หรือถูกยกเลิก)',
+      code: 'TOKEN_INVALID',
+    });
+    let building = { name: 'บ้านกาญจน์ เรสซิเดนซ์' };
+    try {
+      const cfgQ = await pool.query(
+        `SELECT value FROM app_data WHERE key='baankarn_config_v1' LIMIT 1`
+      );
+      const cfg = cfgQ.rows[0]?.value || {};
+      if (cfg.building) building = { ...building, ...cfg.building };
+    } catch { /* keep default */ }
+    res.json({ ok: true, view: contractInvitation.buildPublicView(inv, building) });
+  } catch (err) {
+    console.error('contract-fill GET error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// PUT /api/contract-fill/:token — save draft (intermediate state)
+app.put('/api/contract-fill/:token', rateLimitContractFill, async (req, res) => {
+  const token = String(req.params.token).slice(0, 80);
+  const contractInvitation = require('./services/contractInvitation');
+  try {
+    const inv = await contractInvitation.resolveActiveByToken(pool, token);
+    if (!inv) return res.status(404).json({ error: 'TOKEN_INVALID', code: 'TOKEN_INVALID' });
+    if (inv.status !== 'pending') {
+      return res.status(409).json({
+        error: 'ส่งให้ตรวจสอบแล้ว — แก้ไขไม่ได้จนกว่า admin จะ reject',
+        code: 'NOT_EDITABLE',
+      });
+    }
+    const draft = contractInvitation.sanitiseDraft(req.body);
+    // Merge over existing — tenant might be saving partial fields.
+    const merged = Object.assign({}, inv.draft || {}, draft);
+    await pool.query(
+      `UPDATE contract_invitations SET draft=$1::jsonb, updated_at=NOW() WHERE id=$2`,
+      [JSON.stringify(merged), inv.id]
+    );
+    res.json({ ok: true, draft: merged });
+  } catch (err) {
+    console.error('contract-fill PUT error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// POST /api/contract-fill/:token/upload — tenant uploads ID front/back/signature
+app.post('/api/contract-fill/:token/upload', rateLimitContractFill, async (req, res) => {
+  const token = String(req.params.token).slice(0, 80);
+  const contractInvitation = require('./services/contractInvitation');
+  try {
+    const inv = await contractInvitation.resolveActiveByToken(pool, token);
+    if (!inv) return res.status(404).json({ error: 'TOKEN_INVALID', code: 'TOKEN_INVALID' });
+    if (inv.status !== 'pending') {
+      return res.status(409).json({ error: 'NOT_EDITABLE', code: 'NOT_EDITABLE' });
+    }
+    const b = req.body || {};
+    const kind = String(b.kind || '');
+    if (!['front', 'back', 'signature'].includes(kind)) {
+      return res.status(400).json({ error: 'kind must be front|back|signature' });
+    }
+    if (!b.dataUrl) return res.status(400).json({ error: 'dataUrl required' });
+    const category = kind === 'signature' ? 'contract_signature' : 'citizen_id_image';
+    const side = kind === 'signature' ? null : kind;
+    const out = await storage.saveBase64({
+      pool, category,
+      dataUrl: b.dataUrl,
+      // refId points at the invitation so admin can audit which token
+      // produced the file. Approval moves it onto the tenant id.
+      refId: `invitation-${inv.id}`,
+      uploadedBy: 'tenant-fill',
+      maxBytes: 1_500_000,
+      side,
+    });
+    res.json({ ok: true, file: { id: out.id, url: out.url, kind } });
+  } catch (err) {
+    console.error('contract-fill upload error:', err.message);
+    res.status(400).json({ error: err.message || 'upload failed' });
+  }
+});
+
+// POST /api/contract-fill/:token/submit — tenant flips to status='submitted'
+app.post('/api/contract-fill/:token/submit', rateLimitContractFill, async (req, res) => {
+  const token = String(req.params.token).slice(0, 80);
+  const contractInvitation = require('./services/contractInvitation');
+  try {
+    const inv = await contractInvitation.resolveActiveByToken(pool, token);
+    if (!inv) return res.status(404).json({ error: 'TOKEN_INVALID', code: 'TOKEN_INVALID' });
+    if (inv.status !== 'pending') {
+      return res.status(409).json({ error: 'NOT_EDITABLE', code: 'NOT_EDITABLE' });
+    }
+    // Optional final-edit payload sent with the submit click — merge as one
+    // last save before flipping status.
+    let draft = inv.draft || {};
+    if (req.body && Object.keys(req.body).length > 0) {
+      const next = contractInvitation.sanitiseDraft(req.body);
+      draft = Object.assign({}, draft, next);
+    }
+    // Required fields at submit time. The renderer needs at minimum the
+    // signature + the legal trail (terms version) to produce a valid PDF.
+    const missing = [];
+    if (!draft.signatureFileId) missing.push('signature');
+    if (!draft.address) missing.push('address');
+    if (!draft.emergencyContactName) missing.push('emergencyContactName');
+    if (!draft.emergencyContactPhone) missing.push('emergencyContactPhone');
+    if (!draft.citizenIdImageFrontId) missing.push('citizenIdFront');
+    if (!draft.citizenIdImageBackId) missing.push('citizenIdBack');
+    if (missing.length > 0) {
+      return res.status(400).json({
+        error: `กรอกไม่ครบ — ขาด: ${missing.join(', ')}`,
+        code: 'INCOMPLETE', missing,
+      });
+    }
+    await pool.query(
+      `UPDATE contract_invitations
+          SET status='submitted', draft=$1::jsonb, submitted_at=NOW(), updated_at=NOW()
+        WHERE id=$2 AND status='pending'`,
+      [JSON.stringify(draft), inv.id]
+    );
+    // Owner notify so admin sees a fresh submission immediately.
+    try {
+      const flags = await features.load(pool);
+      notifier.notifyOwner({ pool, features: flags }, {
+        subject: '📥 ผู้เช่าส่งสัญญาให้ตรวจสอบ',
+        text: `invitation #${inv.id} (contract ${inv.contract_id}) — เข้าตรวจที่ /admin#contract-invitations`,
+      }).catch(() => {});
+    } catch { /* ignore */ }
+    res.json({ ok: true, invitationId: inv.id, status: 'submitted' });
+  } catch (err) {
+    console.error('contract-fill submit error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
 // === Legacy single-template alias (backwards compat) =======================
 // /api/admin/contract-terms still works — it operates on the default
 // contract_templates row. New code should use /api/admin/contract-templates.
@@ -7112,6 +7582,13 @@ app.get('/maintenance', (_req, res) => {
 
 app.get('/tenant', (_req, res) => {
   res.sendFile(path.join(__dirname, 'project', 'tenant.html'));
+});
+
+// Public contract-fill landing page. The :token segment is consumed by
+// the client-side React component (it reads window.location.pathname),
+// so the server just serves the HTML shell.
+app.get('/contract/fill/:token', (_req, res) => {
+  res.sendFile(path.join(__dirname, 'project', 'contract-fill.html'));
 });
 
 // Final Express error handler — captures unhandled route errors so they

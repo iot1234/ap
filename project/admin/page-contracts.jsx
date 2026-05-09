@@ -20,6 +20,7 @@ function PageContracts({ setToast, addActivity }) {
   const [editing, setEditing] = useState(null);
   const [signing, setSigning] = useState(null);     // contract being signed online
   const [assigning, setAssigning] = useState(null); // contract for template assignment
+  const [inviting, setInviting] = useState(null);   // contract for self-fill invite
   const [templates, setTemplates] = useState([]);   // for assignment dropdown
 
   // Pre-load templates list for the assign-template modal. Cheap call,
@@ -197,6 +198,10 @@ function PageContracts({ setToast, addActivity }) {
                       ) : null}
                       <Btn size="sm" variant="ghost" onClick={() => setAssigning(c)}
                         title="เลือก template สำหรับสัญญานี้">🎨</Btn>
+                      {c.status === 'active' && !c.locked_at ? (
+                        <Btn size="sm" variant="ghost" onClick={() => setInviting(c)}
+                          title="ส่งลิงก์ให้ผู้เช่ากรอกสัญญาเอง">📨</Btn>
+                      ) : null}
                       <Btn size="sm" variant="ghost" onClick={() => setEditing(c)}>แก้ไข</Btn>
                     </td>
                   </tr>
@@ -252,7 +257,141 @@ function PageContracts({ setToast, addActivity }) {
           onPreview={(tid) => openPdf(assigning, { templateId: tid })}
         />
       ) : null}
+
+      {inviting ? (
+        <InviteTenantModal
+          contract={inviting}
+          onClose={() => setInviting(null)}
+          onSaved={() => {
+            setInviting(null);
+            setToast && setToast({ kind: 'success',
+              message: `สร้างลิงก์สำหรับ ${inviting.contract_no} เรียบร้อย` });
+            addActivity && addActivity({ icon: '📨',
+              text: `ส่งลิงก์ให้ผู้เช่ากรอก ${inviting.contract_no}`, type: 'system' });
+            refresh();
+          }}
+          onError={(msg) => setToast && setToast({ kind: 'danger', message: msg })}
+        />
+      ) : null}
     </PageContainer>
+  );
+}
+
+// === Invite tenant to self-fill modal =====================================
+// Generates a tokenised URL on the server, displays it ONCE for admin to
+// copy/share. Token is never re-shown after this modal closes — admin must
+// generate a fresh one if they lose it.
+function InviteTenantModal({ contract, onClose, onSaved, onError }) {
+  const C = window.ADMIN_C;
+  const { Modal, Btn } = window;
+  const apiCall = window.apiCall;
+  const [hours, setHours] = useState(168);   // 7 days default
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState(null);
+  const [copied, setCopied] = useState(false);
+
+  const generate = async () => {
+    setBusy(true);
+    try {
+      const d = await apiCall(`/api/contracts/${contract.id}/invite-tenant`, {
+        method: 'POST',
+        body: JSON.stringify({ expiresInHours: hours }),
+      });
+      setResult(d.invitation);
+    } catch (err) {
+      onError && onError('สร้างลิงก์ล้มเหลว: ' + err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const copy = async () => {
+    if (!result || !result.url) return;
+    try {
+      await navigator.clipboard.writeText(result.url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Fallback: select-and-copy via temp input
+      const t = document.createElement('input');
+      t.value = result.url;
+      document.body.appendChild(t);
+      t.select();
+      document.execCommand('copy');
+      document.body.removeChild(t);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+  };
+
+  return (
+    <Modal
+      open={true}
+      onClose={() => { if (result) onSaved(); else onClose(); }}
+      width={620}
+      title={`ส่งลิงก์ให้ผู้เช่ากรอก — ${contract.contract_no}`}
+      footer={
+        result ? (
+          <Btn variant="primary" onClick={onSaved}>เสร็จสิ้น</Btn>
+        ) : (
+          <>
+            <Btn variant="ghost" onClick={onClose} disabled={busy}>ยกเลิก</Btn>
+            <Btn variant="primary" onClick={generate} disabled={busy}>
+              {busy ? 'กำลังสร้าง…' : 'สร้างลิงก์'}
+            </Btn>
+          </>
+        )
+      }
+    >
+      {!result ? (
+        <div>
+          <div style={{ fontSize: 13, color: C.muted, lineHeight: 1.6, marginBottom: 16 }}>
+            ระบบจะสร้างลิงก์เฉพาะตัวสำหรับผู้เช่า — เปิดได้โดยไม่ต้องล็อกอิน<br/>
+            ผู้เช่ากรอกที่อยู่ ผู้ติดต่อฉุกเฉิน ถ่ายภาพบัตรประชาชน และเซ็นในหน้านั้นเลย<br/>
+            หลังจากคุณกดอนุมัติ ลิงก์นี้จะใช้ไม่ได้อีกต่อไป
+          </div>
+          <div style={{
+            padding: 12, background: '#fff7e0', border: '1px solid #f1b32d',
+            borderRadius: 8, fontSize: 13, color: '#6b4d10', marginBottom: 16,
+          }}>
+            ⚠️ ลิงก์เก่าที่ยังไม่ได้อนุมัติจะถูกยกเลิกอัตโนมัติเมื่อคุณสร้างลิงก์ใหม่
+          </div>
+          <label style={lbl}>อายุของลิงก์</label>
+          <select style={inp} value={hours} onChange={(e) => setHours(Number(e.target.value))}>
+            <option value={24}>24 ชั่วโมง (1 วัน)</option>
+            <option value={72}>72 ชั่วโมง (3 วัน)</option>
+            <option value={168}>168 ชั่วโมง (7 วัน) — แนะนำ</option>
+            <option value={336}>336 ชั่วโมง (14 วัน)</option>
+            <option value={720}>720 ชั่วโมง (30 วัน)</option>
+          </select>
+        </div>
+      ) : (
+        <div>
+          <div style={{ padding: 12, background: '#e8f5e8', border: '1px solid #4a8b4a',
+                        borderRadius: 8, fontSize: 13, color: '#2d5a2c', marginBottom: 16 }}>
+            ✅ สร้างลิงก์เรียบร้อย — ส่งให้ผู้เช่าผ่าน LINE / SMS หรือก็อปแล้วส่งทางอื่นได้เลย
+          </div>
+          <label style={lbl}>ลิงก์สำหรับผู้เช่า</label>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <input readOnly value={result.url} style={{ ...inp, fontFamily: 'monospace', fontSize: 11 }}
+              onFocus={(e) => e.target.select()} />
+            <Btn variant="primary" onClick={copy}>{copied ? '✓ ก็อปแล้ว' : 'ก็อป'}</Btn>
+          </div>
+          <div style={{ marginTop: 12, fontSize: 12, color: C.muted }}>
+            อายุลิงก์: หมดอายุ {new Date(result.expiresAt).toLocaleString('th-TH', {
+              year: 'numeric', month: 'short', day: 'numeric',
+              hour: '2-digit', minute: '2-digit',
+            })}
+          </div>
+          <div style={{ marginTop: 16, padding: 12, background: '#fff7e0',
+                        border: '1px solid #f1b32d', borderRadius: 8,
+                        fontSize: 12, color: '#6b4d10', lineHeight: 1.6 }}>
+            🔒 <b>ลิงก์นี้แสดงครั้งเดียว</b> — ปิดหน้าต่างแล้วจะดูซ้ำไม่ได้<br/>
+            ตรวจสอบว่าได้ก็อปไว้แล้ว หรือส่งหาผู้เช่าทันที
+          </div>
+        </div>
+      )}
+    </Modal>
   );
 }
 

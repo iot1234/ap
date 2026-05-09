@@ -1486,6 +1486,179 @@ test('features.tenancyContract defaults are sane (require ID images + emergency)
     'deposit cap default = 3 months');
 });
 
+test('contract_invitations table + state machine columns', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'db', 'migrate.js'), 'utf8');
+  assert.match(src, /CREATE TABLE IF NOT EXISTS contract_invitations/,
+    'invitations table must be created');
+  // Token stored as hash, not plaintext — DB-only leak shouldn't yield
+  // replayable URLs.
+  assert.match(src, /token_hash\s+TEXT NOT NULL/);
+  assert.ok(!/token\s+TEXT NOT NULL/.test(src.match(/CREATE TABLE IF NOT EXISTS contract_invitations[\s\S]*?\);/)[0]),
+    'must NOT store the raw token in the DB');
+  // State machine status with all 6 states
+  assert.match(src, /pending \| submitted \| approved \| rejected \| revoked \| expired/);
+  // Partial unique: at most one active invitation per contract
+  assert.match(src,
+    /uq_contract_invitations_active_per_contract[\s\S]{0,200}status IN \('pending', 'submitted'\)/,
+    'at most one active invitation per contract');
+  // contracts.locked_at + locked_by columns
+  assert.match(src, /ALTER TABLE contracts ADD COLUMN IF NOT EXISTS locked_at TIMESTAMPTZ/);
+  assert.match(src, /ALTER TABLE contracts ADD COLUMN IF NOT EXISTS locked_by TEXT/);
+});
+
+test('admin invitation endpoints exist + role-gated owner+manager', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  // Five admin endpoints
+  assert.match(src,
+    /app\.post\('\/api\/contracts\/:id\/invite-tenant'[\s\S]{0,200}requireRole\('owner', 'manager'\)/);
+  assert.match(src,
+    /app\.get\('\/api\/admin\/contract-invitations'[\s\S]{0,200}requireRole\('owner', 'manager'\)/);
+  assert.match(src,
+    /app\.get\('\/api\/admin\/contract-invitations\/:id'[\s\S]{0,200}requireRole\('owner', 'manager'\)/);
+  assert.match(src,
+    /app\.post\('\/api\/admin\/contract-invitations\/:id\/approve'[\s\S]{0,300}requireRole\('owner', 'manager'\)/);
+  assert.match(src,
+    /app\.post\('\/api\/admin\/contract-invitations\/:id\/reject'[\s\S]{0,300}requireRole\('owner', 'manager'\)/);
+  assert.match(src,
+    /app\.post\('\/api\/admin\/contract-invitations\/:id\/revoke'[\s\S]{0,300}requireRole\('owner', 'manager'\)/);
+});
+
+test('invite-tenant refuses to issue link for locked contract', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(src, /CONTRACT_LOCKED/,
+    'invite-tenant must surface CONTRACT_LOCKED when locked_at is set');
+});
+
+test('approve atomically applies draft + locks contract in single transaction', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  // The approve endpoint must:
+  //   - run in a transaction (BEGIN ... COMMIT)
+  //   - flip the invitation to status='approved'
+  //   - lock the contract (locked_at = NOW())
+  // We verify each piece independently rather than chained-regex (the
+  // intermediate code is long and adding gap limits is brittle).
+  const approveBlock = src.match(/\/approve'[\s\S]+?app\.post\('\/api\/admin\/contract-invitations\/:id\/reject'/);
+  assert.ok(approveBlock, 'approve handler must be present');
+  const block = approveBlock[0];
+  assert.match(block, /BEGIN/, 'approve handler must open a transaction');
+  assert.match(block, /COMMIT/, 'approve handler must commit');
+  assert.match(block, /locked_at=NOW\(\)/, 'approve handler must lock contract');
+  assert.match(block, /status='approved'/, 'approve handler must flip status');
+  // Dedup escape: when applying tenant's draft, the partial unique on
+  // citizen_id_hash can fire — must be mapped to a clean 409.
+  assert.match(block, /uq_tenants_citizen_id_hash_active/);
+  assert.match(block, /CITIZEN_ID_DUPLICATE/);
+});
+
+test('public fill endpoints: token-gated, rate-limited, no auth required', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  // Three public endpoints
+  assert.match(src, /app\.get\('\/api\/contract-fill\/:token'/);
+  assert.match(src, /app\.put\('\/api\/contract-fill\/:token'/);
+  assert.match(src, /app\.post\('\/api\/contract-fill\/:token\/submit'/);
+  assert.match(src, /app\.post\('\/api\/contract-fill\/:token\/upload'/);
+  // All three use the rate limiter — token guess is hard but limit prevents
+  // a noisy abuser from cycling through guesses.
+  assert.match(src, /rateLimitContractFill = makeIpLimiter/);
+  // No auth middleware on any of them (no requireAuth, no requireTenant)
+  // The `tokenGate` is the auth equivalent — token IS the credential.
+  const fillBlock = src.match(/app\.get\('\/api\/contract-fill\/:token'[\s\S]{0,2000}/);
+  assert.ok(fillBlock, 'fill endpoint must exist');
+  assert.ok(!/requireAuth/.test(fillBlock[0]),
+    'public endpoint must not require admin auth');
+});
+
+test('public fill: PUT rejects when status is not pending (NOT_EDITABLE)', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(src, /'NOT_EDITABLE'[\s\S]{0,200}'NOT_EDITABLE'/,
+    'NOT_EDITABLE must guard PUT and upload + submit when status is submitted');
+});
+
+test('public fill: submit requires all critical fields before flipping status', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  // signature, address, emergency contact, both ID photos required.
+  assert.match(src, /missing\.push\('signature'\)/);
+  assert.match(src, /missing\.push\('address'\)/);
+  assert.match(src, /missing\.push\('emergencyContactName'\)/);
+  assert.match(src, /missing\.push\('emergencyContactPhone'\)/);
+  assert.match(src, /missing\.push\('citizenIdFront'\)/);
+  assert.match(src, /missing\.push\('citizenIdBack'\)/);
+});
+
+test('admin UI: contract-invitations page registered + script-loaded', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  // HTML loads the new JSX
+  const html = fs.readFileSync(path.join(__dirname, '..', 'project', 'Admin Dashboard.html'), 'utf8');
+  assert.match(html, /\/admin\/page-contract-invitations\.jsx/);
+  // shell wires the page into PAGES + NAV + PAGE_TITLES
+  const shell = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'shell.jsx'), 'utf8');
+  assert.match(shell, /'contract-invitations':\s+window\.PageContractInvitations/);
+  assert.match(shell, /id: 'contract-invitations'[\s\S]{0,80}'ใบเชิญผู้เช่ากรอก'/);
+  assert.match(shell, /'contract-invitations':\s+'ใบเชิญให้ผู้เช่ากรอกสัญญา'/);
+  // Page file attaches component to window
+  const page = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-contract-invitations.jsx'), 'utf8');
+  assert.match(page, /window\.PageContractInvitations = PageContractInvitations/);
+  // Three tabs exist
+  assert.match(page, /tab === 'submitted'/);
+  assert.match(page, /tab === 'pending'/);
+  assert.match(page, /tab === 'closed'/);
+  // Approve / reject / revoke actions wired
+  assert.match(page, /\/api\/admin\/contract-invitations\/\$\{invitation\.id\}\/approve/);
+  assert.match(page, /\/api\/admin\/contract-invitations\/\$\{invitation\.id\}\/reject/);
+  assert.match(page, /\/api\/admin\/contract-invitations\/\$\{invitation\.id\}\/revoke/);
+});
+
+test('contracts page has invite button + InviteTenantModal', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-contracts.jsx'), 'utf8');
+  // Button only shows for active+unlocked contracts
+  assert.match(src, /c\.status === 'active' && !c\.locked_at[\s\S]{0,300}setInviting\(c\)/);
+  // Modal generates link via API + shows token ONCE + offers copy
+  assert.match(src, /function InviteTenantModal/);
+  assert.match(src, /\/api\/contracts\/\$\{contract\.id\}\/invite-tenant/);
+  // Surface "show only once" warning so admin doesn't lose the URL
+  assert.match(src, /แสดงครั้งเดียว/);
+  // Copy-to-clipboard
+  assert.match(src, /navigator\.clipboard\.writeText/);
+});
+
+test('public contract-fill HTML page exists + has expected steps', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const html = fs.readFileSync(path.join(__dirname, '..', 'project', 'contract-fill.html'), 'utf8');
+  // Multi-step wizard
+  assert.match(html, /Step1Welcome/);
+  assert.match(html, /Step2Personal/);
+  assert.match(html, /Step3Identity/);
+  assert.match(html, /Step4Sign/);
+  // Auto-save draft
+  assert.match(html, /useDebouncedSave/);
+  // Token extracted from URL path
+  assert.match(html, /\\\/contract\\\/fill\\\//);
+  // Submit endpoint — uses `${tokenFromUrl}` template literal in this file.
+  assert.match(html, /\/contract-fill\/\$\{tokenFromUrl\}\/submit/);
+  // Server route serves this file
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(server,
+    /app\.get\('\/contract\/fill\/:token'[\s\S]{0,200}contract-fill\.html/);
+});
+
 test('checkOut schema declares generateClosingBill (zod must not strip the opt-out)', () => {
   // schemas/index.js's checkOut omitted the field, so zod's default
   // .strip() removed req.body.generateClosingBill before the handler
