@@ -1486,6 +1486,55 @@ test('features.tenancyContract defaults are sane (require ID images + emergency)
     'deposit cap default = 3 months');
 });
 
+test('admin UI: contract-templates page registered + script-loaded', () => {
+  // The new page-contract-templates.jsx must be loaded by the dashboard
+  // HTML AND wired into the shell PAGES + NAV map. Otherwise admin clicks
+  // "เทมเพลตสัญญา" → white screen.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const html = fs.readFileSync(path.join(__dirname, '..', 'project', 'Admin Dashboard.html'), 'utf8');
+  assert.match(html, /\/admin\/page-contract-templates\.jsx/,
+    'HTML must load page-contract-templates.jsx');
+  const shell = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'shell.jsx'), 'utf8');
+  assert.match(shell, /'contract-templates':\s*window\.PageContractTemplates/,
+    'shell PAGES map must register contract-templates');
+  assert.match(shell, /id: 'contract-templates'[\s\S]{0,80}'เทมเพลตสัญญา'/,
+    'shell NAV must include contract-templates entry');
+  assert.match(shell, /'contract-templates':\s*'เทมเพลตสัญญา'/,
+    'PAGE_TITLES must include contract-templates');
+  // Page file itself
+  const page = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-contract-templates.jsx'), 'utf8');
+  assert.match(page, /window\.PageContractTemplates = PageContractTemplates/,
+    'page must attach component to window');
+  // Critical UX bits — tab switcher + clause editor + section toggles
+  assert.match(page, /tab === 'clauses'/);
+  assert.match(page, /tab === 'sections'/);
+  assert.match(page, /tab === 'variables'/);
+  // Three-way mode picker
+  assert.match(page, /โหมด — clauses จะถูกประกอบ/);
+  // Built-in variables documentation surfaced in the variables tab
+  assert.match(page, /lessorName[\s\S]{0,80}tenantName[\s\S]{0,80}roomId/);
+});
+
+test('admin UI: page-contracts gains PDF + sign + assign-template actions', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const page = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-contracts.jsx'), 'utf8');
+  // Row actions: PDF, download, sign, assign template
+  assert.match(page, /openPdf\(c\)/,           'must have PDF view button');
+  assert.match(page, /openPdf\(c, \{ download: 1 \}\)/, 'must have download variant');
+  assert.match(page, /setSigning\(c\)/,        'must have online-sign button');
+  assert.match(page, /setAssigning\(c\)/,      'must have assign-template button');
+  // Sign modal — three input modes (draw + upload), guard against empty
+  assert.match(page, /SignContractModal/,      'sign modal component must exist');
+  assert.match(page, /canvas/,                 'sign modal must render canvas for draw mode');
+  assert.match(page, /กรุณาเซ็นชื่อก่อน/,       'must guard empty draw');
+  // Assign modal — preview support + null = use default
+  assert.match(page, /AssignTemplateModal/,    'assign modal component must exist');
+  assert.match(page, /onPreview/,              'assign modal must support preview');
+  assert.match(page, /ใช้ default ของระบบ/,    'must offer null/default option');
+});
+
 test('contract_templates table + auto-import sentinel migration', () => {
   const fs = require('node:fs');
   const path = require('node:path');

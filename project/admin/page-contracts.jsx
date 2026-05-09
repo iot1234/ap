@@ -18,6 +18,27 @@ function PageContracts({ setToast, addActivity }) {
   const [filter, setFilter] = useState('active');
   const [search, setSearch] = useState('');
   const [editing, setEditing] = useState(null);
+  const [signing, setSigning] = useState(null);     // contract being signed online
+  const [assigning, setAssigning] = useState(null); // contract for template assignment
+  const [templates, setTemplates] = useState([]);   // for assignment dropdown
+
+  // Pre-load templates list for the assign-template modal. Cheap call,
+  // single round-trip — fires once when the page mounts.
+  useEffect(() => {
+    apiCall('/api/admin/contract-templates').then((d) => {
+      setTemplates(d.templates || []);
+    }).catch(() => { /* fail-soft, modal will show fallback */ });
+  }, []);
+
+  // Open the contract PDF in a new tab. Inline by default so admin can
+  // print directly; ?download=1 flips to attachment for save-and-email.
+  const openPdf = (contract, opts = {}) => {
+    const params = new URLSearchParams();
+    if (opts.download) params.set('download', '1');
+    if (opts.templateId) params.set('templateId', String(opts.templateId));
+    const url = `/api/contracts/${contract.id}/pdf${params.toString() ? '?' + params : ''}`;
+    window.open(url, '_blank', 'noopener');
+  };
 
   const refresh = async () => {
     setLoading(true);
@@ -165,7 +186,17 @@ function PageContracts({ setToast, addActivity }) {
                     <td style={td}>
                       <Pill color={STATUS_PILL[c.status] || 'gray'}>{STATUS_TH[c.status] || c.status}</Pill>
                     </td>
-                    <td style={td}>
+                    <td style={{ ...td, whiteSpace: 'nowrap' }}>
+                      <Btn size="sm" variant="ghost" onClick={() => openPdf(c)}
+                        title="ดู PDF (ใช้ template ที่ผูกไว้ หรือ default)">📄 PDF</Btn>
+                      <Btn size="sm" variant="ghost" onClick={() => openPdf(c, { download: 1 })}
+                        title="ดาวน์โหลด PDF เพื่อ print">⬇</Btn>
+                      {c.status === 'active' && !c.signed_at ? (
+                        <Btn size="sm" variant="ghost" onClick={() => setSigning(c)}
+                          title="ลงนามออนไลน์">✍️ เซ็น</Btn>
+                      ) : null}
+                      <Btn size="sm" variant="ghost" onClick={() => setAssigning(c)}
+                        title="เลือก template สำหรับสัญญานี้">🎨</Btn>
                       <Btn size="sm" variant="ghost" onClick={() => setEditing(c)}>แก้ไข</Btn>
                     </td>
                   </tr>
@@ -189,7 +220,327 @@ function PageContracts({ setToast, addActivity }) {
           onError={(msg) => setToast && setToast({ kind: 'danger', message: msg })}
         />
       ) : null}
+
+      {signing ? (
+        <SignContractModal
+          contract={signing}
+          onClose={() => setSigning(null)}
+          onSaved={(c) => {
+            setSigning(null);
+            setToast && setToast({ kind: 'success',
+              message: `ลงนามสัญญา ${signing.contract_no} เรียบร้อย` });
+            addActivity && addActivity({ icon: '✍️',
+              text: `ลงนามสัญญา ${signing.contract_no}`, type: 'system' });
+            refresh();
+          }}
+          onError={(msg) => setToast && setToast({ kind: 'danger', message: msg })}
+        />
+      ) : null}
+
+      {assigning ? (
+        <AssignTemplateModal
+          contract={assigning}
+          templates={templates}
+          onClose={() => setAssigning(null)}
+          onSaved={() => {
+            setAssigning(null);
+            setToast && setToast({ kind: 'success',
+              message: `ผูก template เข้ากับ ${assigning.contract_no} แล้ว` });
+            refresh();
+          }}
+          onError={(msg) => setToast && setToast({ kind: 'danger', message: msg })}
+          onPreview={(tid) => openPdf(assigning, { templateId: tid })}
+        />
+      ) : null}
     </PageContainer>
+  );
+}
+
+// === Online signature modal ==============================================
+// Admin draws / pastes / uploads a signature image; we POST to /sign which
+// embeds it into the contract PDF. Three input modes:
+//   1. Draw on canvas (touch/mouse)
+//   2. Upload existing image file
+//   3. (future) Send link to tenant to sign on their device
+function SignContractModal({ contract, onClose, onSaved, onError }) {
+  const C = window.ADMIN_C;
+  const { Modal, Btn } = window;
+  const apiCall = window.apiCall;
+  const canvasRef = React.useRef(null);
+  const [mode, setMode] = useState('draw');   // 'draw' | 'upload'
+  const [hasInk, setHasInk] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [uploadedDataUrl, setUploadedDataUrl] = useState(null);
+
+  // Draw setup — vanilla 2D canvas, mouse + touch events. Aspect 3:1
+  // matches typical signature box dimensions on the PDF.
+  useEffect(() => {
+    if (mode !== 'draw') return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    canvas.width = 600;
+    canvas.height = 200;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.strokeStyle = '#1a1208';
+    ctx.lineWidth = 2.5;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    let drawing = false;
+    let lastX = 0, lastY = 0;
+    const pos = (e) => {
+      const rect = canvas.getBoundingClientRect();
+      const t = e.touches ? e.touches[0] : e;
+      return {
+        x: (t.clientX - rect.left) * (canvas.width / rect.width),
+        y: (t.clientY - rect.top)  * (canvas.height / rect.height),
+      };
+    };
+    const start = (e) => {
+      e.preventDefault();
+      drawing = true;
+      const p = pos(e);
+      lastX = p.x; lastY = p.y;
+    };
+    const move = (e) => {
+      if (!drawing) return;
+      e.preventDefault();
+      const p = pos(e);
+      ctx.beginPath();
+      ctx.moveTo(lastX, lastY);
+      ctx.lineTo(p.x, p.y);
+      ctx.stroke();
+      lastX = p.x; lastY = p.y;
+      setHasInk(true);
+    };
+    const end = () => { drawing = false; };
+
+    canvas.addEventListener('mousedown', start);
+    canvas.addEventListener('mousemove', move);
+    canvas.addEventListener('mouseup', end);
+    canvas.addEventListener('mouseleave', end);
+    canvas.addEventListener('touchstart', start, { passive: false });
+    canvas.addEventListener('touchmove', move, { passive: false });
+    canvas.addEventListener('touchend', end);
+    return () => {
+      canvas.removeEventListener('mousedown', start);
+      canvas.removeEventListener('mousemove', move);
+      canvas.removeEventListener('mouseup', end);
+      canvas.removeEventListener('mouseleave', end);
+      canvas.removeEventListener('touchstart', start);
+      canvas.removeEventListener('touchmove', move);
+      canvas.removeEventListener('touchend', end);
+    };
+  }, [mode]);
+
+  const clearCanvas = () => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    setHasInk(false);
+  };
+
+  const onUpload = (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    if (f.size > 1_500_000) {
+      onError && onError('ไฟล์ใหญ่เกิน 1.5MB');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = (ev) => setUploadedDataUrl(ev.target.result);
+    reader.readAsDataURL(f);
+  };
+
+  const submit = async () => {
+    setBusy(true);
+    try {
+      let dataUrl;
+      if (mode === 'draw') {
+        if (!hasInk) {
+          onError && onError('กรุณาเซ็นชื่อก่อน');
+          setBusy(false);
+          return;
+        }
+        dataUrl = canvasRef.current.toDataURL('image/png');
+      } else {
+        if (!uploadedDataUrl) {
+          onError && onError('กรุณาอัปโหลดไฟล์ก่อน');
+          setBusy(false);
+          return;
+        }
+        dataUrl = uploadedDataUrl;
+      }
+      const d = await apiCall(`/api/contracts/${contract.id}/sign`, {
+        method: 'POST',
+        body: JSON.stringify({ signatureDataUrl: dataUrl }),
+      });
+      onSaved && onSaved(d.contract);
+    } catch (err) {
+      onError && onError('ลงนามล้มเหลว: ' + err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal
+      open={true}
+      onClose={onClose}
+      size="lg"
+      title={`ลงนามสัญญา ${contract.contract_no}`}
+      footer={
+        <>
+          <Btn variant="ghost" onClick={onClose} disabled={busy}>ยกเลิก</Btn>
+          {mode === 'draw' ? (
+            <Btn variant="ghost" onClick={clearCanvas} disabled={busy || !hasInk}>ล้าง</Btn>
+          ) : null}
+          <Btn variant="primary" onClick={submit} disabled={busy}>
+            {busy ? 'กำลังบันทึก…' : 'บันทึกลายเซ็น'}
+          </Btn>
+        </>
+      }
+    >
+      <div style={{ fontSize: 13, color: C.muted, marginBottom: 12, lineHeight: 1.5 }}>
+        ผู้เช่า: <b>{contract.tenant_name || '-'}</b> · ห้อง <b>{contract.room_id || '-'}</b><br/>
+        ลายเซ็นจะถูกฝังลงใน PDF อัตโนมัติ — ตรวจ PDF อีกครั้งก่อนพิมพ์
+      </div>
+
+      <div style={{ display: 'flex', gap: 4, borderBottom: `1px solid ${C.border}`, marginBottom: 12 }}>
+        {[
+          { k: 'draw',   label: '✍️ เซ็นด้วยเมาส์/ทัช' },
+          { k: 'upload', label: '📤 อัปโหลดรูปลายเซ็น' },
+        ].map((m) => (
+          <button key={m.k} onClick={() => setMode(m.k)}
+            style={{
+              padding: '8px 14px', border: 'none',
+              borderBottom: `2px solid ${mode === m.k ? C.accent : 'transparent'}`,
+              background: 'transparent', cursor: 'pointer',
+              fontSize: 13, fontFamily: 'inherit',
+              color: mode === m.k ? C.ink : C.muted,
+              fontWeight: mode === m.k ? 600 : 400,
+            }}>{m.label}</button>
+        ))}
+      </div>
+
+      {mode === 'draw' ? (
+        <div>
+          <div style={{ fontSize: 11, color: C.muted, marginBottom: 6 }}>
+            ลากเส้นในช่องเพื่อเซ็นชื่อ
+          </div>
+          <canvas ref={canvasRef}
+            style={{
+              width: '100%', maxWidth: 600, aspectRatio: '3/1',
+              background: '#fff', border: `2px dashed ${C.border}`,
+              borderRadius: 6, cursor: 'crosshair', touchAction: 'none',
+            }} />
+        </div>
+      ) : (
+        <div>
+          <div style={{ fontSize: 11, color: C.muted, marginBottom: 6 }}>
+            อัปโหลดภาพลายเซ็น (JPG/PNG/WEBP, ไม่เกิน 1.5MB)
+          </div>
+          <input type="file" accept="image/jpeg,image/png,image/webp"
+            onChange={onUpload}
+            style={{ marginBottom: 8 }} />
+          {uploadedDataUrl ? (
+            <div style={{ marginTop: 8 }}>
+              <img src={uploadedDataUrl} alt="signature preview"
+                style={{ maxWidth: '100%', maxHeight: 200, border: `1px solid ${C.border}`, borderRadius: 6 }} />
+            </div>
+          ) : null}
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+// === Assign template to contract ==========================================
+function AssignTemplateModal({ contract, templates, onClose, onSaved, onError, onPreview }) {
+  const C = window.ADMIN_C;
+  const { Modal, Btn } = window;
+  const apiCall = window.apiCall;
+  const [tid, setTid] = useState(contract.template_id || '');
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    setBusy(true);
+    try {
+      await apiCall(`/api/contracts/${contract.id}/template`, {
+        method: 'POST',
+        body: JSON.stringify({ templateId: tid ? Number(tid) : null }),
+      });
+      onSaved && onSaved();
+    } catch (err) {
+      onError && onError('บันทึกล้มเหลว: ' + err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal
+      open={true}
+      onClose={onClose}
+      title={`เลือก template สำหรับ ${contract.contract_no}`}
+      footer={
+        <>
+          <Btn variant="ghost" onClick={onClose} disabled={busy}>ยกเลิก</Btn>
+          <Btn variant="primary" onClick={submit} disabled={busy}>
+            {busy ? '…' : 'บันทึก'}
+          </Btn>
+        </>
+      }
+    >
+      <div style={{ fontSize: 13, color: C.muted, marginBottom: 12, lineHeight: 1.5 }}>
+        เลือก template สำหรับสัญญาฉบับนี้ — ถ้าไม่ตั้งจะใช้ template default ของระบบ
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <label style={{
+          display: 'flex', gap: 10, alignItems: 'flex-start', padding: 10,
+          border: `1px solid ${tid === '' ? C.accent : C.border}`,
+          borderRadius: 6, cursor: 'pointer',
+          background: tid === '' ? '#fff7ee' : 'transparent',
+        }}>
+          <input type="radio" checked={tid === ''} onChange={() => setTid('')}
+            style={{ marginTop: 2 }} />
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 500 }}>ใช้ default ของระบบ</div>
+            <div style={{ fontSize: 11, color: C.muted }}>
+              เปลี่ยน default ที่ "เทมเพลตสัญญา" — สัญญาฉบับนี้จะใช้ตามเสมอ
+            </div>
+          </div>
+        </label>
+        {templates.map((t) => (
+          <label key={t.id} style={{
+            display: 'flex', gap: 10, alignItems: 'flex-start', padding: 10,
+            border: `1px solid ${tid === String(t.id) || tid === t.id ? C.accent : C.border}`,
+            borderRadius: 6, cursor: 'pointer',
+            background: tid === String(t.id) || tid === t.id ? '#fff7ee' : 'transparent',
+          }}>
+            <input type="radio" checked={tid === String(t.id) || tid === t.id}
+              onChange={() => setTid(String(t.id))}
+              style={{ marginTop: 2 }} />
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 13, fontWeight: 500 }}>
+                {t.name}
+                {t.is_default ? <span style={{ marginLeft: 6, fontSize: 10, color: '#92651a' }}>⭐</span> : null}
+              </div>
+              {t.description ? (
+                <div style={{ fontSize: 11, color: C.muted }}>{t.description}</div>
+              ) : null}
+            </div>
+            <Btn size="sm" variant="ghost"
+              onClick={(e) => { e.preventDefault(); onPreview && onPreview(t.id); }}
+              title="ดู PDF preview">👁</Btn>
+          </label>
+        ))}
+      </div>
+    </Modal>
   );
 }
 
