@@ -553,6 +553,15 @@ async function migrate(pool, opts = {}) {
     -- list at GET /api/tenant/payments). Add index to keep the query off a
     -- seq scan as the table grows.
     CREATE INDEX IF NOT EXISTS idx_payments_tenant ON payments(tenant_id);
+
+    -- Contract-length discount. The pricing UI lets admin configure
+    -- discount percentages by contract term (sixMonth/twelveMonth/
+    -- twentyFourMonth) — but until now those numbers were never applied
+    -- to actual bills. discount_pct is the resolved % stamped on the
+    -- contract at check-in, so billing.buildBill can apply it without
+    -- having to derive contract length on every bill.
+    ALTER TABLE contracts ADD COLUMN IF NOT EXISTS discount_pct NUMERIC(5,2) DEFAULT 0;
+    ALTER TABLE contracts ADD COLUMN IF NOT EXISTS term_months INT;
   `);
 
   // === One-time role backfill =============================================

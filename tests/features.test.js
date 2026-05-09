@@ -19,7 +19,7 @@ test('withDefaults shallow-merges enabled flags', () => {
   const f = features.withDefaults({ tenantPortal: { enabled: true } });
   assert.equal(f.tenantPortal.enabled, true);
   // Other defaults preserved
-  assert.equal(f.tenantPortal.requirePin, true);
+  assert.equal(f.tenantPortal.sessionDays, 30);
   assert.equal(f.lateFee.enabled, true);
 });
 

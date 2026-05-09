@@ -15,7 +15,11 @@ const FEATURES_KEY = 'baankarn_features_v1';
 const DEFAULTS = Object.freeze({
   tenantPortal: {
     enabled: false,
-    requirePin: true,            // tenants log in with phone + 6-digit PIN
+    // requirePin used to live here but had no effect — the login flow always
+    // forced PIN regardless of the flag. Removed so the Features page can't
+    // mislead operators into thinking they can disable it. If a future build
+    // wants to support magic-link or OTP login as an alternative to PIN, add
+    // it back AND wire it into routes/tenant-ops + server.js's /api/tenant/login.
     sessionDays: 30,
   },
   slipUpload: {

@@ -431,4 +431,15 @@ async function verifyViaEasySlip(buffer, expected) {
   });
 }
 
-module.exports = { verify, isConfigured };
+module.exports = {
+  verify,
+  verifyWithFallback,
+  isConfigured,
+  getConfiguredProviders,
+  probeAll,
+  // Exported so server.js (and any future caller) can reuse the same set
+  // without re-declaring it. A drift between server.js's local copy and the
+  // verifier's would silently mis-classify rejections — a 'UNKNOWN_PROVIDER'
+  // reply (admin typo) would become a hard reject instead of falling through.
+  TRANSIENT_CODES,
+};

@@ -205,7 +205,8 @@ function RecurringForm({ initial, tenants, onCancel, onSave, busy }) {
     tenant_id: initial.tenant_id || '',
     room_id:   initial.room_id || '',
     active:    initial.active !== false,
-    end_at:  initial.end_at || '',
+    start_at:  initial.start_at ? String(initial.start_at).slice(0, 10) : '',
+    end_at:    initial.end_at ? String(initial.end_at).slice(0, 10) : '',
     notes:     initial.notes || '',
   });
   const [scope, setScope] = useState(
@@ -225,6 +226,7 @@ function RecurringForm({ initial, tenants, onCancel, onSave, busy }) {
       active: form.active,
       tenantId: scope === 'tenant' ? Number(form.tenant_id) || null : null,
       roomId:   scope === 'room' ? form.room_id.trim() || null : null,
+      startAt:  form.start_at || null,
       endAt:    form.end_at || null,
       notes:    form.notes.trim() || null,
     };
@@ -290,9 +292,27 @@ function RecurringForm({ initial, tenants, onCancel, onSave, busy }) {
             placeholder="เช่น 1A" maxLength={32} style={inp} />
         )}
 
-        <label style={lbl}>หมดอายุ (optional)</label>
-        <input type="date" value={form.end_at}
-          onChange={(e) => setForm({ ...form, end_at: e.target.value })} style={inp} />
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+          <div>
+            <label style={lbl}>เริ่มเรียกเก็บ (optional)</label>
+            <input type="date" value={form.start_at || ''}
+              onChange={(e) => setForm({ ...form, start_at: e.target.value })} style={inp} />
+          </div>
+          <div>
+            <label style={lbl}>หมดอายุ (optional)</label>
+            <input type="date" value={form.end_at || ''}
+              onChange={(e) => setForm({ ...form, end_at: e.target.value })} style={inp} />
+          </div>
+        </div>
+        {form.frequency === 'quarterly' ? (
+          <div style={{
+            marginTop: 4, padding: 8, background: C.surfaceAlt, borderRadius: 6,
+            fontSize: 12, color: C.muted, lineHeight: 1.5,
+          }}>
+            ℹ️ <b>รายไตรมาส</b> — ระบบจะออกบิลทุก 3 เดือนนับจากเดือนของ "เริ่มเรียกเก็บ"
+            (ถ้าไม่ระบุ จะนับจาก ม.ค.) · เช่น <i>เริ่มเรียกเก็บ มี.ค.</i> → จะออกบิลใน <b>มี.ค. มิ.ย. ก.ย. ธ.ค.</b>
+          </div>
+        ) : null}
 
         <label style={lbl}>หมายเหตุ</label>
         <textarea value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })}

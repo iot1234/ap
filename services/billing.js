@@ -16,24 +16,57 @@
  * @param {string} [opts.dueDate]  - ISO date "YYYY-MM-DD"
  * @returns {object} bill ready for PDF rendering or DB insert
  */
-function buildBill({ room, config, features, previous = null, recurring = [], period, dueDate }) {
+function buildBill({ room, config, features, previous = null, recurring = [], period, dueDate, discountPct = 0, isFirstBill = false }) {
   const u = (config && config.utilities) || {};
   const waterRate = Number(u.waterRate ?? 18);
   const elecRate  = Number(u.elecRate  ?? 8);
   const wifiFee   = Number(u.wifi      ?? 0);
 
-  const rent = Number(room.rent) || 0;
+  const rentBase = Number(room.rent) || 0;
   const waterUnits = Number(room.waterUnits) || 0;
   const elecUnits  = Number(room.elecUnits)  || 0;
   const waterAmount = waterUnits * waterRate;
   const elecAmount  = elecUnits  * elecRate;
 
+  // Contract-length discount applies only to the rent portion (utilities
+  // are pass-through cost — discounting kWh would underbill). discountPct
+  // comes from contracts.discount_pct, populated at check-in based on
+  // termMonths + config.discounts.{sixMonth,twelveMonth,twentyFourMonth}.
+  // Cap at 50% defensively so a misconfigured row can't zero the rent.
+  // First-month discount stacks on top of the contract discount when
+  // isFirstBill is true — caller flips this on for the welcome bill so
+  // tenants who took the "first-month-X%-off" promotion actually see it
+  // applied. Without isFirstBill, only the contract discount fires.
+  const contractPct = Math.max(0, Math.min(50, Number(discountPct) || 0));
+  const firstMonthPctRaw = isFirstBill && config?.discounts?.firstMonth
+    ? Number(config.discounts.firstMonth) || 0
+    : 0;
+  const firstMonthPct = Math.max(0, Math.min(50, firstMonthPctRaw));
+  // Combine multiplicatively so 10% + 5% = 14.5% off, not 15%. Caps
+  // total effective discount at 50% so even stacked promos can't zero the rent.
+  const combinedPct = Math.min(50,
+    100 * (1 - (1 - contractPct / 100) * (1 - firstMonthPct / 100)));
+  const safePct = round2(combinedPct);
+  const rent = round2(rentBase * (1 - safePct / 100));
+  const discountAmount = round2(rentBase - rent);
+
+  // Items show the FULL rent on the rent line and the discount as a
+  // separate negative line — keeps the receipt transparent (tenant sees
+  // both the headline rent and the discount they're getting). Subtotal
+  // math matches: rentBase + utilities + (-discountAmount) = rent + utilities.
   const items = [
-    { label: 'ค่าเช่าห้องพัก', qty: '1 เดือน', amount: rent },
+    { label: 'ค่าเช่าห้องพัก', qty: '1 เดือน', amount: rentBase },
     { label: 'ค่าน้ำ', qty: `${waterUnits} หน่วย × ${waterRate}`, amount: waterAmount },
     { label: 'ค่าไฟฟ้า', qty: `${elecUnits} หน่วย × ${elecRate}`, amount: elecAmount },
   ];
   if (wifiFee > 0) items.push({ label: 'ค่าอินเทอร์เน็ต', qty: '1 เดือน', amount: wifiFee });
+  if (discountAmount > 0) {
+    items.push({
+      label: `ส่วนลดสัญญา ${safePct}%`,
+      qty: '',
+      amount: -discountAmount,
+    });
+  }
 
   // Recurring extras (parking, cleaning, etc.)
   if (features?.recurringCharges?.enabled && Array.isArray(recurring)) {
@@ -83,7 +116,8 @@ function buildBill({ room, config, features, previous = null, recurring = [], pe
     period: period || formatPeriodNow(),
     dueDate: dueDate || formatDueDate(15),
     items,
-    rent, waterUnits, waterRate, waterAmount,
+    rent, rentBase, discountPct: safePct, discountAmount,
+    waterUnits, waterRate, waterAmount,
     elecUnits, elecRate, elecAmount,
     wifi: wifiFee,
     subtotal: round2(subtotal),
@@ -154,4 +188,62 @@ function statusOf(bill, now = new Date()) {
   return 'pending';
 }
 
-module.exports = { buildBill, buildPaymentBlock, statusOf, makeBillNo, formatPeriodNow, formatDueDate, round2 };
+/**
+ * Decide whether a recurring_charge row should be included on the bill for
+ * the given period. Honors `frequency`:
+ *   - 'monthly'   : every month
+ *   - 'one_off'   : every month while active (caller is responsible for
+ *                   deactivating after first use — see scheduler.js + bills POST)
+ *   - 'quarterly' : every 3rd month, anchored to start_at month (1 if not set)
+ *
+ * Without this filter, quarterly charges were being billed every month —
+ * silent overcharge to tenants on charges like "ค่าทำความสะอาดทุก 3 เดือน".
+ *
+ * @param {object} charge - { frequency, start_at?, end_at? }
+ * @param {string} period - "YYYY-MM"
+ */
+function isChargeApplicableForPeriod(charge, period) {
+  if (!charge || !period) return false;
+  const m = String(period).match(/^(\d{4})-(\d{2})$/);
+  if (!m) return false;
+  const periodYear = Number(m[1]);
+  const periodMonth = Number(m[2]);
+  // Reject impossible months — the regex above accepts "2026-13" / "2026-00"
+  // because it only checks digit count. Without this, a malformed period
+  // would slip through and the JS Date math below produces garbage.
+  if (periodMonth < 1 || periodMonth > 12) return false;
+  // Use the first day of the period for date comparisons.
+  const periodStart = new Date(Date.UTC(periodYear, periodMonth - 1, 1));
+  if (charge.start_at) {
+    const s = new Date(charge.start_at);
+    if (Number.isFinite(s.getTime())) {
+      // Compare to the LAST day of the period so a charge starting mid-month
+      // still counts for that month.
+      const periodEnd = new Date(Date.UTC(periodYear, periodMonth, 0, 23, 59, 59));
+      if (s.getTime() > periodEnd.getTime()) return false;
+    }
+  }
+  if (charge.end_at) {
+    const e = new Date(charge.end_at);
+    if (Number.isFinite(e.getTime()) && e.getTime() < periodStart.getTime()) return false;
+  }
+  const freq = charge.frequency || 'monthly';
+  if (freq === 'monthly' || freq === 'one_off') return true;
+  if (freq === 'quarterly') {
+    // Anchor month: start_at month if set, otherwise January.
+    const anchorMonth = charge.start_at && Number.isFinite(new Date(charge.start_at).getTime())
+      ? new Date(charge.start_at).getUTCMonth() + 1
+      : 1;
+    // (periodMonth - anchorMonth) mod 3 === 0  → fires this month.
+    // Add 12 before modulo to handle negatives (Jan period vs Apr anchor).
+    return (((periodMonth - anchorMonth) % 3) + 3) % 3 === 0;
+  }
+  // Unknown frequency — treat as monthly (safest default; surfaced via admin).
+  return true;
+}
+
+module.exports = {
+  buildBill, buildPaymentBlock, statusOf, makeBillNo,
+  formatPeriodNow, formatDueDate, round2,
+  isChargeApplicableForPeriod,
+};

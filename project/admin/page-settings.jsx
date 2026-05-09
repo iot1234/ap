@@ -841,15 +841,17 @@ function TabSystem({ onResetAll, rooms, setRooms, config, setConfig, bookings, s
         />
       </Card>
 
+      <SqlBackupSection setToast={setToast} addActivity={addActivity} />
+
       <Card>
-        <SectionHeading title="การส่งออก/นำเข้าข้อมูล" subtitle="สำรองข้อมูลทั้งหมดเป็นไฟล์ JSON หรือ CSV" level={3} />
+        <SectionHeading title="ส่งออกอย่างย่อ" subtitle="สำหรับเปิดใน Excel หรือ archive ห้องเร็วๆ" level={3} />
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          <Btn variant="secondary" icon="💾" onClick={handleBackup}>ส่งออกทั้งหมด (JSON)</Btn>
-          <Btn variant="secondary" icon="📤" onClick={handleImport}>นำเข้าจากไฟล์</Btn>
-          <Btn variant="secondary" icon="📊" onClick={handleExportExcel}>ส่งออก CSV (Excel)</Btn>
+          <Btn variant="secondary" icon="💾" onClick={handleBackup}>ส่งออก rooms+config (JSON)</Btn>
+          <Btn variant="secondary" icon="📤" onClick={handleImport}>นำเข้า rooms+config</Btn>
+          <Btn variant="secondary" icon="📊" onClick={handleExportExcel}>ส่งออก CSV ห้อง</Btn>
         </div>
         <div style={{ marginTop: 10, padding: 10, background: C.surfaceAlt, borderRadius: 8, fontSize: 12, color: C.muted }}>
-          💡 ไฟล์ JSON จะรวมข้อมูลห้อง, การตั้งค่า, การจอง และกิจกรรมทั้งหมด — สามารถนำกลับมาใช้ได้ในภายหลัง
+          ⚠ JSON ในส่วนนี้รวมเฉพาะ rooms + config + bookings (legacy blob) — <b>ไม่</b> รวม bills/payments/tenants/audit_logs ที่อยู่ในฐานข้อมูล SQL · สำหรับสำรองข้อมูลครบทุกอย่างให้ใช้ <b>Backup ฐานข้อมูล (SQL)</b> ด้านบน
         </div>
       </Card>
 
@@ -900,6 +902,293 @@ function TabSystem({ onResetAll, rooms, setRooms, config, setConfig, bookings, s
         )}
       </Modal>
     </div>
+  );
+}
+
+// ============================================================
+// SqlBackupSection — full DB-level backup/restore via /api/admin/backup/*
+// ============================================================
+// The legacy "ส่งออกทั้งหมด" button only dumped rooms/config/bookings JSONB
+// blobs — bills, payments, tenants, audit_logs were ALL missing. Operators
+// who restored from such a backup would lose months of financial records.
+// This component talks to the new SQL-level endpoints so what gets exported
+// is actually what gets restored.
+function SqlBackupSection({ setToast, addActivity }) {
+  const C = window.ADMIN_C;
+  const { Card, Btn, SectionHeading, Modal } = window;
+  const apiCall = window.apiCall;
+
+  const [busy, setBusy] = React.useState(false);
+  const [list, setList] = React.useState([]);
+  const [confirmRestore, setConfirmRestore] = React.useState(null);
+
+  const refresh = React.useCallback(async () => {
+    try {
+      const d = await apiCall('/api/admin/backup/list');
+      setList(d.backups || []);
+    } catch (e) {
+      // Don't toast on initial load failure — section just shows empty.
+      console.warn('[backup] list failed:', e.message);
+    }
+  }, []);
+  React.useEffect(() => { refresh(); }, [refresh]);
+
+  const create = async () => {
+    setBusy(true);
+    try {
+      const d = await apiCall('/api/admin/backup/create', { method: 'POST' });
+      setToast && setToast({
+        kind: 'success',
+        message: `สำรองข้อมูลเรียบร้อย (${(d.size / 1024).toFixed(1)} KB)`,
+      });
+      addActivity && addActivity({
+        icon: '💾',
+        text: `สำรองฐานข้อมูล: ${d.filename}`,
+        type: 'system',
+      });
+      // Auto-trigger download after creating so admin gets the file in
+      // their browser without an extra click.
+      window.location.href = d.downloadUrl;
+      refresh();
+    } catch (e) {
+      setToast && setToast({ kind: 'danger', message: 'สำรองล้มเหลว: ' + (e.message || 'unknown') });
+    } finally { setBusy(false); }
+  };
+
+  const downloadFile = (filename) => {
+    window.location.href = `/api/admin/backup/download/${encodeURIComponent(filename)}`;
+  };
+
+  const remove = async (filename) => {
+    if (!confirm(`ลบไฟล์ ${filename}?`)) return;
+    try {
+      await apiCall(`/api/admin/backup/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+      setToast && setToast({ kind: 'info', message: 'ลบไฟล์แล้ว' });
+      refresh();
+    } catch (e) {
+      setToast && setToast({ kind: 'danger', message: 'ลบล้มเหลว: ' + (e.message || 'unknown') });
+    }
+  };
+
+  const restoreFromFile = async (filename) => {
+    setBusy(true);
+    try {
+      const d = await apiCall('/api/admin/restore', {
+        method: 'POST',
+        body: JSON.stringify({ filename, confirm: true }),
+      });
+      const counts = Object.entries(d.restored || {})
+        .filter(([, v]) => v && (v.inserted || 0) > 0)
+        .map(([t, v]) => `${t}: ${v.inserted}`)
+        .join(', ');
+      setToast && setToast({
+        kind: 'success',
+        message: `กู้คืนสำเร็จ — ${counts || 'no rows'}${d.errorCount ? ` (มี ${d.errorCount} แถวที่ข้าม)` : ''}`,
+      });
+      addActivity && addActivity({
+        icon: '📥', text: `กู้คืนฐานข้อมูลจาก ${filename}`, type: 'system',
+      });
+      setConfirmRestore(null);
+      // Force a hard reload so the admin shell rehydrates from the new state
+      // (rooms/config/users may have changed underneath).
+      setTimeout(() => window.location.reload(), 1500);
+    } catch (e) {
+      setToast && setToast({
+        kind: 'danger',
+        message: 'กู้คืนล้มเหลว: ' + (e.message || 'unknown'),
+      });
+    } finally { setBusy(false); }
+  };
+
+  // Upload-and-restore: lets admin pick a JSON file from disk (e.g. backup
+  // they downloaded last week) and POST it directly. Server validates the
+  // integrity hash + schemaVersion before touching the DB.
+  const uploadRestore = () => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'application/json';
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      // Cap at 50MB to match server-side body limit. Bigger dumps need to
+      // come via the server-side filename path (uploaded out-of-band).
+      if (file.size > 50 * 1024 * 1024) {
+        setToast && setToast({
+          kind: 'danger',
+          message: `ไฟล์ใหญ่เกินไป (${(file.size / 1024 / 1024).toFixed(1)} MB) — ต้องไม่เกิน 50 MB`,
+        });
+        return;
+      }
+      let backup;
+      try {
+        backup = JSON.parse(await file.text());
+      } catch (err) {
+        setToast && setToast({ kind: 'danger', message: 'ไฟล์ไม่ใช่ JSON ที่ถูกต้อง' });
+        return;
+      }
+      if (!backup || backup.schemaVersion !== 1) {
+        setToast && setToast({ kind: 'danger', message: 'รูปแบบ backup ไม่ถูกต้อง (ต้อง schemaVersion=1)' });
+        return;
+      }
+      const counts = backup.integrity?.rowCounts || {};
+      const summary = Object.entries(counts)
+        .filter(([, n]) => Number(n) > 0)
+        .map(([t, n]) => `${t}: ${n}`)
+        .join('\n');
+      setConfirmRestore({
+        kind: 'upload',
+        backup,
+        filename: file.name,
+        createdAt: backup.createdAt,
+        summary,
+        size: file.size,
+      });
+    };
+    input.click();
+  };
+
+  const applyUploadRestore = async () => {
+    if (!confirmRestore || confirmRestore.kind !== 'upload') return;
+    setBusy(true);
+    try {
+      const d = await apiCall('/api/admin/restore', {
+        method: 'POST',
+        body: JSON.stringify({ backup: confirmRestore.backup, confirm: true }),
+      });
+      const counts = Object.entries(d.restored || {})
+        .filter(([, v]) => v && (v.inserted || 0) > 0)
+        .map(([t, v]) => `${t}: ${v.inserted}`)
+        .join(', ');
+      setToast && setToast({
+        kind: 'success',
+        message: `กู้คืนจาก ${confirmRestore.filename} สำเร็จ — ${counts || 'no rows'}`,
+      });
+      addActivity && addActivity({
+        icon: '📥',
+        text: `กู้คืนฐานข้อมูลจาก ${confirmRestore.filename}`,
+        type: 'system',
+      });
+      setConfirmRestore(null);
+      setTimeout(() => window.location.reload(), 1500);
+    } catch (e) {
+      setToast && setToast({
+        kind: 'danger',
+        message: 'กู้คืนล้มเหลว: ' + (e.message || 'unknown'),
+      });
+    } finally { setBusy(false); }
+  };
+
+  const fmtSize = (n) => n >= 1024 * 1024
+    ? (n / 1024 / 1024).toFixed(2) + ' MB'
+    : (n / 1024).toFixed(1) + ' KB';
+  const fmtDate = (s) => {
+    try { return new Date(s).toLocaleString('th-TH', { dateStyle: 'short', timeStyle: 'short' }); }
+    catch { return s; }
+  };
+
+  return (
+    <Card>
+      <SectionHeading
+        title="🗄 Backup ฐานข้อมูล (SQL)"
+        subtitle="สำรองทุกตาราง: bills, payments, tenants, audit_logs และอื่นๆ"
+        level={3}
+      />
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        <Btn variant="primary" icon="💾" onClick={create} disabled={busy}>
+          สำรองฐานข้อมูลตอนนี้
+        </Btn>
+        <Btn variant="secondary" icon="📤" onClick={uploadRestore} disabled={busy}>
+          กู้คืนจากไฟล์ที่อัปโหลด
+        </Btn>
+      </div>
+      {list.length > 0 ? (
+        <div style={{ marginTop: 14 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>
+            ไฟล์ backup บนเซิร์ฟเวอร์ ({list.length})
+          </div>
+          <div style={{ border: `1px solid ${C.border}`, borderRadius: 8 }}>
+            {list.map((b) => (
+              <div key={b.filename} style={{
+                display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                padding: '8px 12px', borderBottom: `1px solid ${C.border}`,
+                fontSize: 13,
+              }}>
+                <div style={{ overflow: 'hidden' }}>
+                  <div style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 12 }}>{b.filename}</div>
+                  <div style={{ color: C.muted, fontSize: 11 }}>
+                    {fmtDate(b.createdAt)} · {fmtSize(b.size)}
+                  </div>
+                </div>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <Btn size="sm" variant="ghost" onClick={() => downloadFile(b.filename)}>ดาวน์โหลด</Btn>
+                  <Btn size="sm" variant="warning" onClick={() => setConfirmRestore({ kind: 'server', filename: b.filename })}>
+                    กู้คืน
+                  </Btn>
+                  <Btn size="sm" variant="danger" onClick={() => remove(b.filename)}>ลบ</Btn>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+      <div style={{ marginTop: 10, padding: 10, background: C.surfaceAlt, borderRadius: 8, fontSize: 12, color: C.muted }}>
+        ✅ Backup นี้ครอบคลุม: rooms, tenants, bills, payments, contracts,
+        recurring_charges, maintenance_tickets, access_cards/logs, line_oas,
+        line_bindings, audit_logs, notifications_log, meter_readings, bookings
+        · ❌ ไม่รวม secrets (เข้ารหัสไว้ — ตั้งใหม่หลังกู้คืน), tenant_sessions
+        (ผู้เช่า login ใหม่), notifications_queue (transient)
+      </div>
+
+      <Modal
+        open={!!confirmRestore}
+        onClose={() => setConfirmRestore(null)}
+        title="ยืนยันการกู้คืนฐานข้อมูล"
+        footer={
+          <>
+            <Btn variant="ghost" onClick={() => setConfirmRestore(null)} disabled={busy}>ยกเลิก</Btn>
+            <Btn
+              variant="danger"
+              disabled={busy}
+              onClick={() => confirmRestore?.kind === 'upload'
+                ? applyUploadRestore()
+                : restoreFromFile(confirmRestore.filename)
+              }
+            >
+              {busy ? 'กำลังกู้คืน…' : 'ยืนยัน — ทับข้อมูลปัจจุบัน'}
+            </Btn>
+          </>
+        }
+      >
+        {confirmRestore && (
+          <div style={{ fontSize: 14, color: C.ink2, lineHeight: 1.6 }}>
+            <div style={{ marginBottom: 10 }}>
+              {confirmRestore.kind === 'upload'
+                ? `กำลังจะกู้คืนจากไฟล์ที่อัปโหลด: ${confirmRestore.filename}`
+                : `กำลังจะกู้คืนจากไฟล์บนเซิร์ฟเวอร์: ${confirmRestore.filename}`
+              }
+            </div>
+            {confirmRestore.createdAt ? (
+              <div style={{ fontSize: 13, color: C.muted, marginBottom: 8 }}>
+                ส่งออกเมื่อ: {fmtDate(confirmRestore.createdAt)}
+              </div>
+            ) : null}
+            {confirmRestore.summary ? (
+              <div style={{
+                padding: 10, background: C.surfaceAlt, borderRadius: 8,
+                fontSize: 12, fontFamily: 'monospace', whiteSpace: 'pre-wrap',
+                marginBottom: 10,
+              }}>
+                {confirmRestore.summary}
+              </div>
+            ) : null}
+            <div style={{ padding: 10, background: C.dangerSoft, borderRadius: 8, color: C.dangerInk, fontSize: 12.5 }}>
+              ⚠️ การกู้คืนจะ <b>ลบและทับ</b> ข้อมูลปัจจุบันทั้งหมด · session ผู้เช่าจะถูกล้าง
+              ผู้เช่าต้อง login ใหม่ · หน้านี้จะ reload หลังกู้คืน
+            </div>
+          </div>
+        )}
+      </Modal>
+    </Card>
   );
 }
 

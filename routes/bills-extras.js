@@ -132,15 +132,33 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             if (tenantIdForRoom) { params.push(tenantIdForRoom); ors.push(`tenant_id = $${params.length}`); }
             params.push(room.id); ors.push(`room_id = $${params.length}`);
             const rc = await pool.query(
-              `SELECT label, amount FROM recurring_charges
+              `SELECT label, amount, frequency, start_at, end_at FROM recurring_charges
                  WHERE active = TRUE AND (${ors.join(' OR ')})
                    AND (start_at IS NULL OR start_at <= CURRENT_DATE)
                    AND (end_at IS NULL OR end_at >= CURRENT_DATE)`,
               params
             );
-            recurring = rc.rows.map((x) => ({ label: x.label, amount: Number(x.amount) }));
+            // Honor `frequency` — quarterly charges only fire every 3 months
+            // anchored to start_at. Without this the bulk-generate path
+            // re-billed quarterly fees every month.
+            recurring = rc.rows
+              .filter((x) => billing.isChargeApplicableForPeriod(x, period))
+              .map((x) => ({ label: x.label, amount: Number(x.amount) }));
           } catch { /* table may not exist on older deployments */ }
-          const bill = billing.buildBill({ room, config, features: flags, previous, recurring, period, dueDate });
+          // Match the manual + scheduler paths: pull discount_pct from the
+          // active contract so bulk-generate honors the contract-length
+          // discount the admin recorded at check-in.
+          let discountPct = 0;
+          try {
+            const cq = await pool.query(
+              `SELECT discount_pct FROM contracts
+                 WHERE room_id=$1 AND status='active' AND deleted_at IS NULL
+                 ORDER BY start_date DESC LIMIT 1`,
+              [room.id]
+            );
+            if (cq.rows[0]) discountPct = Number(cq.rows[0].discount_pct) || 0;
+          } catch { /* legacy deploys */ }
+          const bill = billing.buildBill({ room, config, features: flags, previous, recurring, period, dueDate, discountPct });
           try {
             // Persist the recurring line items in bills.other so the PDF
             // render + tenant-portal bill detail can reproduce them later.

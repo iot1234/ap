@@ -874,6 +874,29 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBooking, validateBody(sche
        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW(), updated_by = 'public'`,
       ['baankarn_bookings_v1', JSON.stringify(capped)]
     );
+    // Dual-write into the relational `bookings` table. Reads still go to the
+    // JSONB blob (admin pages, approve-and-assign flow) — this is just so
+    // reports + future SQL-backed admin views have a real table to query
+    // without scanning a 500-element JSONB array. external_id is unique so
+    // re-running the same insert (e.g. retried after a transient failure) is
+    // idempotent. Best-effort: a failure here doesn't unwind the JSONB write.
+    try {
+      await client.query(
+        `INSERT INTO bookings
+            (external_id, name, phone, email, want_type, want_floor,
+             move_in, months, deposit, status, source, message, room_id)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'pending','public-form',$10,$11)
+          ON CONFLICT (external_id) DO NOTHING`,
+        [
+          newBooking.id, newBooking.name, newBooking.phone || null,
+          cleaned.email || null, wantType, wantFloor,
+          cleaned.checkInDate || null, 12, 0,
+          cleaned.message || null, cleaned.roomId || null,
+        ]
+      );
+    } catch (err) {
+      console.warn('[booking] relational dual-write skipped:', err.message);
+    }
     await client.query('COMMIT');
     audit(req, 'booking.public_create', 'booking', newBooking.id,
       { phone: cleaned.phone, roomId: cleaned.roomId, wantType, wantFloor },
@@ -1555,7 +1578,7 @@ app.get('/api/features', async (_req, res) => {
       // Expose a few non-secret display fields so the client can render
       // (e.g. i18n.defaultLocale, lateFee.ratePctPerMonth)
       const safe = ['defaultLocale', 'available', 'ratePctPerMonth', 'ratePct',
-        'gracePeriodDays', 'requirePin', 'mode', 'autoIncludeOnBillGen',
+        'gracePeriodDays', 'mode', 'autoIncludeOnBillGen',
         'overdueDaysThreshold', 'requirePaymentForCard'];
       for (const s of safe) if (v[s] !== undefined) out[k][s] = v[s];
     }
@@ -2112,6 +2135,113 @@ app.get('/api/tenant/bills', requireTenant, async (req, res) => {
   }
 });
 
+// Tenant-side PDF download for a specific bill they own. Mirrors the
+// admin /api/bills/render endpoint, but the source-of-truth here is the
+// stored bills row (tenant doesn't get to dictate amounts), and ownership
+// is enforced via tenant_id. Without this, a tenant who wants a printed
+// receipt has to ask admin every month — annoying, and the data is
+// already on the server.
+app.get('/api/tenant/bills/:id/pdf', requireTenant, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id < 1) {
+    return res.status(400).json({ error: 'invalid id' });
+  }
+  let acquired = false;
+  try {
+    const { rows } = await pool.query(
+      `SELECT b.*, t.full_name AS tenant_name, t.phone AS tenant_phone
+         FROM bills b
+         LEFT JOIN tenants t ON t.id = b.tenant_id
+        WHERE b.id=$1 AND b.deleted_at IS NULL`,
+      [id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'bill not found' });
+    const b = rows[0];
+    // Ownership: tenant can only download their own bill. Match the same
+    // logic as /api/tenant/bills (tenant_id), so a guessable bill_id can't
+    // be used to fetch someone else's PDF.
+    if (Number(b.tenant_id) !== Number(req.tenant.tenant_id)) {
+      return res.status(403).json({ error: 'not your bill' });
+    }
+    // Compose the bill object expected by services/pdf.renderBillPdf —
+    // the same shape the admin POST /api/bills/render builds. Field
+    // name remap: snake_case (DB) → camelCase (PDF renderer).
+    const cfgQ = await pool.query(
+      `SELECT value FROM app_data WHERE key='baankarn_config_v1' LIMIT 1`
+    );
+    const config = cfgQ.rows[0]?.value || {};
+    const paymentBlock = billing.buildPaymentBlock(config);
+    if (!paymentBlock.promptpayTarget) {
+      const envPp = require('./services/secrets').get('PROMPTPAY_TARGET');
+      if (envPp) paymentBlock.promptpayTarget = envPp;
+    }
+    // Reconstruct line items from the persisted columns + `other` JSONB.
+    // Admin's render endpoint receives a pre-built items array; the tenant
+    // path has to assemble it from the row.
+    const items = [
+      { label: 'ค่าเช่าห้องพัก', qty: '1 เดือน', amount: Number(b.rent) || 0 },
+      { label: 'ค่าน้ำ', qty: `${b.water_units || 0} หน่วย × ${b.water_rate || 0}`, amount: Number(b.water_amount) || 0 },
+      { label: 'ค่าไฟฟ้า', qty: `${b.elec_units || 0} หน่วย × ${b.elec_rate || 0}`, amount: Number(b.elec_amount) || 0 },
+    ];
+    if (Number(b.wifi) > 0) {
+      items.push({ label: 'ค่าอินเทอร์เน็ต', qty: '1 เดือน', amount: Number(b.wifi) });
+    }
+    const otherList = Array.isArray(b.other) ? b.other : [];
+    for (const it of otherList) {
+      const amt = Number(it.amount) || 0;
+      if (amt > 0) items.push({ label: String(it.label || 'อื่นๆ'), qty: '', amount: amt });
+    }
+    if (Number(b.late_fee) > 0) {
+      items.push({ label: 'ค่าปรับชำระล่าช้า', qty: '', amount: Number(b.late_fee) });
+    }
+    if (Number(b.vat) > 0) {
+      items.push({ label: 'ภาษีมูลค่าเพิ่ม', qty: '', amount: Number(b.vat) });
+    }
+    const bill = {
+      billNo: b.bill_no,
+      roomId: b.room_id,
+      tenantName: b.tenant_name || '',
+      tenantPhone: b.tenant_phone || '',
+      period: b.period,
+      dueDate: b.due_date,
+      items,
+      rent: Number(b.rent) || 0,
+      waterUnits: Number(b.water_units) || 0,
+      waterRate: Number(b.water_rate) || 0,
+      waterAmount: Number(b.water_amount) || 0,
+      elecUnits: Number(b.elec_units) || 0,
+      elecRate: Number(b.elec_rate) || 0,
+      elecAmount: Number(b.elec_amount) || 0,
+      wifi: Number(b.wifi) || 0,
+      subtotal: Number(b.subtotal) || 0,
+      vat: Number(b.vat) || 0,
+      lateFee: Number(b.late_fee) || 0,
+      total: Number(b.total) || 0,
+      status: b.status,
+      paidAt: b.paid_at,
+      building: config.building || {},
+      ...paymentBlock,
+    };
+
+    await acquirePdfSlot();
+    acquired = true;
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader(
+      'Content-Disposition',
+      `inline; filename="bill-${(bill.billNo || 'invoice').replace(/[^A-Za-z0-9_-]/g, '')}.pdf"`
+    );
+    await renderBillPdf(bill, res);
+  } catch (err) {
+    console.error('tenant bill pdf error:', err);
+    if (!res.headersSent) {
+      const code = String(err.message || '').includes('PDF queue timeout') ? 503 : 500;
+      res.status(code).json({ error: 'pdf render failed', code: code === 503 ? 'BUSY' : 'PDF_ERROR' });
+    }
+  } finally {
+    if (acquired) releasePdfSlot();
+  }
+});
+
 app.get('/api/tenant/maintenance', requireTenant, async (req, res) => {
   // Pagination support, capped at 100/page; default 50.
   const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 100);
@@ -2285,14 +2415,35 @@ app.post('/api/bills', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 
         } catch { /* ignore */ }
       }
       const dbRecurring = await loadRecurringFor(pool, { tenantId: tid, roomId: b.roomId });
-      recurringList = dbRecurring.map((r) => ({ label: r.label, amount: Number(r.amount) }));
-      usedOneOffIds = dbRecurring.filter((r) => r.frequency === 'one_off').map((r) => r.id);
+      // Honor `frequency` so quarterly charges only land on bills for the
+      // appropriate quarter (every 3 months from start_at) — previously
+      // every recurring row was added every month regardless of frequency,
+      // silently overcharging tenants with quarterly fees.
+      const periodForFilter = b.period || billing.formatPeriodNow();
+      const applicable = dbRecurring.filter((r) => billing.isChargeApplicableForPeriod(r, periodForFilter));
+      recurringList = applicable.map((r) => ({ label: r.label, amount: Number(r.amount) }));
+      // Only deactivate one_off charges that actually got billed this period.
+      usedOneOffIds = applicable.filter((r) => r.frequency === 'one_off').map((r) => r.id);
     }
+    // Resolve the active contract's discount_pct so the contract-length
+    // discount the admin configured at check-in actually shows up on the
+    // bill. Best-effort: no contract → no discount (rent-as-is).
+    let discountPct = 0;
+    try {
+      const cq = await pool.query(
+        `SELECT discount_pct FROM contracts
+           WHERE room_id=$1 AND status='active' AND deleted_at IS NULL
+           ORDER BY start_date DESC LIMIT 1`,
+        [b.roomId]
+      );
+      if (cq.rows[0]) discountPct = Number(cq.rows[0].discount_pct) || 0;
+    } catch { /* contracts may be empty on legacy deploys */ }
     computed = billing.buildBill({
       room, config, features: flags,
       previous,
       recurring: recurringList,
       period: b.period, dueDate: b.dueDate,
+      discountPct,
     });
   }
   if (!computed.billNo || !computed.total || !computed.roomId) {
@@ -2444,13 +2595,59 @@ app.post('/api/tenant/payments', sameOrigin, csrfGuard, requireTenant, ensureSli
     if (billRes.rows[0].tenant_id && Number(billRes.rows[0].tenant_id) !== Number(req.tenant.tenant_id)) {
       return res.status(403).json({ error: 'not your bill' });
     }
+    // Refuse uploads against orphan bills (tenant_id IS NULL — legacy bills
+    // created before tenant auto-linking). Without this guard a logged-in
+    // tenant can pay any unattached bill by guessing the bill_id (sequential
+    // BIGSERIAL, easily enumerable). Admin must attach the tenant first.
+    if (!billRes.rows[0].tenant_id) {
+      return res.status(403).json({
+        error: 'บิลนี้ยังไม่ได้ผูกกับผู้เช่า — กรุณาติดต่อเจ้าหน้าที่',
+        code: 'BILL_NOT_LINKED',
+      });
+    }
+    // Refuse to mark a bill paid for a different amount than what's owed.
+    // Without this guard, a tenant could pay 100฿ on a 5,000฿ bill, upload
+    // the matching slip, and the auto-verify path would happily accept (slip
+    // amount matches `expected.amount` since that came from the same client
+    // input) — bill flips to 'paid' for a fraction of what's due. We tolerate
+    // ±1฿ to match the slipVerifier's own bank-rounding tolerance, but reject
+    // anything beyond that here BEFORE saving the slip / hitting the provider.
+    const billTotal = Number(billRes.rows[0].total) || 0;
+    if (Math.abs(amount - billTotal) > 1.0) {
+      return res.status(400).json({
+        error: `จำนวนเงินไม่ตรงกับยอดบิล — บิลนี้ ฿${billTotal.toLocaleString('th-TH', { minimumFractionDigits: 2 })} แต่ผู้เช่าระบุ ฿${amount.toLocaleString('th-TH', { minimumFractionDigits: 2 })}`,
+        code: 'AMOUNT_NOT_BILL_TOTAL',
+        billTotal,
+        submittedAmount: amount,
+      });
+    }
+    // Don't allow re-paying a bill that's already paid or void. Without this
+    // a tenant could re-upload after admin has already verified, creating a
+    // second 'verified' payment row pointing at the same bill (orphaned
+    // accounting). 'pending' and 'overdue' are the only states a slip is
+    // legitimately for.
+    const billStatus = billRes.rows[0].status;
+    if (billStatus !== 'pending' && billStatus !== 'overdue') {
+      return res.status(409).json({
+        error: billStatus === 'paid'
+          ? 'บิลนี้ชำระเรียบร้อยแล้ว ไม่ต้องส่งสลิปอีก'
+          : `บิลนี้สถานะ "${billStatus}" — ไม่สามารถส่งสลิปได้`,
+        code: 'BILL_NOT_PAYABLE',
+        status: billStatus,
+      });
+    }
     // Hash the actual slip bytes BEFORE saving so dedup works (prior version
     // hashed the URL+size which were always unique → unique index never
     // triggered).
     const rawBuf = Buffer.from(String(b.slip || '').replace(/^data:[^;]+;base64,/, ''), 'base64');
     const slipHash = cryptoSvc.hmac(rawBuf);
     const dup = await pool.query('SELECT id FROM payments WHERE slip_hash=$1 LIMIT 1', [slipHash]);
-    if (dup.rows.length) return res.status(409).json({ error: 'duplicate slip' });
+    if (dup.rows.length) {
+      return res.status(409).json({
+        error: 'สลิปนี้ถูกใช้ไปแล้ว — ไม่สามารถส่งซ้ำ',
+        code: 'DUPLICATE_SLIP_HASH',
+      });
+    }
 
     const slip = await storage.saveBase64({
       pool,
@@ -2487,9 +2684,15 @@ app.post('/api/tenant/payments', sameOrigin, csrfGuard, requireTenant, ensureSli
         // transient-fail (network timeout, parser glitch, 5xx), the result
         // bubbles back with the last error and the upload endpoint
         // demotes it to admin queue via TRANSIENT_CODES handling below.
+        // expected.amount comes from bills.total (authoritative ledger value)
+        // not from the tenant-submitted `amount` — that input was already
+        // bounded by the AMOUNT_NOT_BILL_TOTAL pre-check above, but using
+        // billTotal here closes the remaining ±1฿ drift between the two
+        // tolerances and means slipVerifier's amount-mismatch reasoning is
+        // pinned to the same number the bill is invoiced at.
         verifyResult = await slipVerifier.verifyWithFallback(
           rawBuf,
-          { amount, billId, promptpayTarget: ppTarget },
+          { amount: billTotal, billId, promptpayTarget: ppTarget },
           req.features
         );
       } catch (err) {
@@ -2517,11 +2720,13 @@ app.post('/api/tenant/payments', sameOrigin, csrfGuard, requireTenant, ensureSli
     // so even uploading the same legit slip again returns 409. The slip
     // is effectively LOST. Map provider/transport-level errors to
     // 'pending' so the admin queue catches them.
-    const TRANSIENT_CODES = new Set([
-      'VERIFIER_THREW', 'PROVIDER_ERROR',
-      'SLIPOK_PARSE', 'EASYSLIP_PARSE',
-      'NOT_CONFIGURED',     // can't actually reach here (isConfigured gates), but defensive
-    ]);
+    // Source of truth lives in services/slipVerifier.js — re-importing
+    // here keeps the two paths' classification identical when new codes
+    // (e.g. provider-specific timeout codes) are added.
+    const TRANSIENT_CODES = slipVerifier.TRANSIENT_CODES
+      || new Set(['VERIFIER_THREW', 'PROVIDER_ERROR',
+                  'SLIPOK_PARSE', 'EASYSLIP_PARSE',
+                  'NOT_CONFIGURED', 'UNKNOWN_PROVIDER']);
     let initialStatus, initialReason = null;
     if (autoVerifyAttempted) {
       if (verifyResult && verifyResult.ok) {
@@ -2548,10 +2753,75 @@ app.post('/api/tenant/payments', sameOrigin, csrfGuard, requireTenant, ensureSli
     // Atomic: payment INSERT + (optional) bill mark-paid run in one tx so
     // we never end up with a verified payment row pointing at a bill still
     // marked 'pending', or vice-versa, if either statement crashes mid-way.
+    //
+    // Concurrency guards inside the tx (NOT covered by the outside SELECT
+    // at the top of the handler):
+    //   1) SELECT bills FOR UPDATE — serializes concurrent uploads on the
+    //      same bill so two slips arriving in the same second can't both
+    //      flip the bill to 'paid' with two verified payments (double-credit).
+    //   2) Re-check bill.status hasn't moved to 'paid'/'void' since the
+    //      outside read (admin could have voided during the slipVerifier
+    //      RPC, which takes 5–10s).
+    //   3) Refuse if a verified payment ALREADY exists for this bill —
+    //      defensive against same-bill double-uploads and admin-side races.
+    //
+    // `paymentInserted` tracks whether we wrote a payments row, so the
+    // outer `finally` can scrub the orphan slip file on EVERY failure path
+    // — not just the 23505 case the inner catch handles. Without that, a
+    // pool timeout or a bill-status race leaks the file silently.
     let row;
+    let paymentInserted = false;
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
+
+      // (1) + (2) + (3): lock the bill, re-check status, and verify no other
+      // verified payment beat us to the COMMIT. SELECT FOR UPDATE blocks
+      // any other concurrent slip-upload on this bill until we commit/rollback.
+      const lock = await client.query(
+        `SELECT id, status, total FROM bills WHERE id=$1 AND deleted_at IS NULL FOR UPDATE`,
+        [billId]
+      );
+      if (!lock.rows.length) {
+        await client.query('ROLLBACK');
+        if (slip && slip.id) {
+          require('./services/storage').remove(pool, slip.id).catch(() => {});
+        }
+        return res.status(404).json({
+          error: 'ไม่พบบิล (อาจถูกลบระหว่างการส่งสลิป)',
+          code: 'BILL_NOT_FOUND_AT_COMMIT',
+        });
+      }
+      const lockedStatus = lock.rows[0].status;
+      if (lockedStatus !== 'pending' && lockedStatus !== 'overdue') {
+        await client.query('ROLLBACK');
+        if (slip && slip.id) {
+          require('./services/storage').remove(pool, slip.id).catch(() => {});
+        }
+        return res.status(409).json({
+          error: lockedStatus === 'paid'
+            ? 'บิลนี้ชำระเรียบร้อยแล้วระหว่างที่กำลังตรวจสลิป — ไม่ต้องส่งซ้ำ'
+            : `บิลสถานะ "${lockedStatus}" — ไม่สามารถส่งสลิปได้`,
+          code: 'BILL_NOT_PAYABLE_AT_COMMIT',
+          status: lockedStatus,
+        });
+      }
+      const existingVerified = await client.query(
+        `SELECT id FROM payments WHERE bill_id=$1 AND status='verified' LIMIT 1`,
+        [billId]
+      );
+      if (existingVerified.rows.length) {
+        await client.query('ROLLBACK');
+        if (slip && slip.id) {
+          require('./services/storage').remove(pool, slip.id).catch(() => {});
+        }
+        return res.status(409).json({
+          error: 'บิลนี้มีการชำระที่ยืนยันแล้ว ไม่สามารถส่งสลิปซ้ำ',
+          code: 'BILL_ALREADY_PAID',
+          existingPaymentId: existingVerified.rows[0].id,
+        });
+      }
+
       try {
         // INSERT now carries transaction_ref + verify_provider + raw payload
         // when auto-verify ran. The unique index on transaction_ref catches
@@ -2589,6 +2859,7 @@ app.post('/api/tenant/payments', sameOrigin, csrfGuard, requireTenant, ensureSli
           ]
         );
         row = ins.rows[0];
+        paymentInserted = true;
       } catch (err) {
         await client.query('ROLLBACK').catch(() => {});
         if (err.code === '23505') {
@@ -2613,7 +2884,7 @@ app.post('/api/tenant/payments', sameOrigin, csrfGuard, requireTenant, ensureSli
             });
           }
           return res.status(409).json({
-            error: 'duplicate slip',
+            error: 'สลิปนี้ถูกใช้ไปแล้ว — ไม่สามารถส่งซ้ำ',
             code: 'DUPLICATE_SLIP_HASH',
           });
         }
@@ -2628,6 +2899,17 @@ app.post('/api/tenant/payments', sameOrigin, csrfGuard, requireTenant, ensureSli
       await client.query('COMMIT');
     } catch (err) {
       await client.query('ROLLBACK').catch(() => {});
+      // Catch-all orphan-file cleanup. The 23505 path already cleans up
+      // before returning, but a transient DB error (connection reset,
+      // serialization failure, anything raised after saveBase64 succeeded
+      // but before the INSERT committed) used to leave the file on disk
+      // forever. Belt-and-braces: if the row never got inserted, the file
+      // has nothing pointing to it and must go.
+      if (!paymentInserted && slip && slip.id) {
+        require('./services/storage').remove(pool, slip.id).catch((e) => {
+          console.warn('[slip-upload] orphan file cleanup (outer) failed for id=' + slip.id + ':', e.message);
+        });
+      }
       throw err;
     } finally {
       client.release();
@@ -2643,12 +2925,27 @@ app.post('/api/tenant/payments', sameOrigin, csrfGuard, requireTenant, ensureSli
       },
       `tenant:${req.tenant.tenant_id}`).catch(() => {});
 
-    // Owner receives "new slip" alert so they know to go review.
-    notifier.notifyOwner(
-      { pool, features: req.features },
-      { subject: 'มีผู้ส่งสลิปชำระเงินใหม่',
-        text: `บิล #${billId} จำนวน ${amount.toLocaleString('th-TH')} บาท จาก ${req.tenant.full_name} (${req.tenant.phone})` }
-    ).catch(() => {});
+    // Owner receives "new slip" alert so they know to go review. Subject is
+    // adjusted by initialStatus so a queue full of self-resolving auto-verified
+    // slips doesn't overwhelm the owner's notification — only 'pending' and
+    // 'rejected' ones genuinely need their attention.
+    {
+      const statusEmoji = initialStatus === 'verified' ? '✅'
+        : initialStatus === 'rejected' ? '⚠️'
+        : '📥';
+      const statusTh = initialStatus === 'verified' ? 'ผ่านอัตโนมัติ'
+        : initialStatus === 'rejected' ? 'ปฏิเสธอัตโนมัติ'
+        : 'รอตรวจสอบ';
+      const reasonLine = initialReason ? `\nเหตุผล: ${initialReason}` : '';
+      const refLine = verifyResult?.transRef ? `\ntransRef: ${verifyResult.transRef}` : '';
+      notifier.notifyOwner(
+        { pool, features: req.features },
+        { subject: `${statusEmoji} สลิปใหม่ (${statusTh}) — บิล #${billId}`,
+          text: `บิล #${billId} จำนวน ฿${amount.toLocaleString('th-TH', { minimumFractionDigits: 2 })} `
+                + `จาก ${req.tenant.full_name} (${req.tenant.phone})\n`
+                + `สถานะเริ่มต้น: ${statusTh}${reasonLine}${refLine}` }
+      ).catch(() => {});
+    }
 
     // Tenant receives an immediate acknowledgment so they don't wonder
     // whether their slip went through. Two flavours: auto-verified (no
@@ -2774,7 +3071,28 @@ app.post('/api/tenant/payments', sameOrigin, csrfGuard, requireTenant, ensureSli
     res.json({ ok: true, payment: row });
   } catch (err) {
     console.error('tenant payment error:', err);
-    res.status(400).json({ error: err.message || 'upload failed' });
+    // The previous version forwarded `err.message` straight to the tenant —
+    // safe for our own throw-strings ("file too large", "mime not allowed")
+    // but a leak vector for native pg / fs errors that include connection
+    // strings, file paths, or stack traces. Allow-list the messages we
+    // actually generated; everything else collapses to a generic 500.
+    const knownUserFacing = [
+      'expected string',
+      'unrecognized file type',
+      'mime mismatch',
+      'mime not allowed',
+      'unknown mime',
+      'file too large',
+    ];
+    const msg = String(err.message || '');
+    const isUserFacing = knownUserFacing.some((s) => msg.startsWith(s));
+    if (isUserFacing) {
+      return res.status(400).json({ error: msg, code: 'INVALID_SLIP' });
+    }
+    return res.status(500).json({
+      error: 'อัปโหลดสลิปล้มเหลว — ลองใหม่อีกครั้ง',
+      code: 'UPLOAD_FAILED',
+    });
   }
 });
 
@@ -2879,35 +3197,63 @@ app.put('/api/payments/:id/verify', sameOrigin, csrfGuard, requireAuth, requireR
   if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
   const accept = req.body?.accept !== false;
   const reason = String(req.body?.reason || '').slice(0, 500);
+  // Both branches of this endpoint mutate two tables (payments + bills) so
+  // they MUST run in one transaction — the previous version issued the
+  // payment UPDATE first, then the bill UPDATE as a separate query. If the
+  // second query failed (DB hiccup, connection reset, deploy mid-request),
+  // the payment was 'verified' but the bill stayed 'pending' / 'overdue' —
+  // a verified payment for an unpaid bill, hard to spot until tenant
+  // disputed the next month. The transaction below makes the two-statement
+  // commit atomic.
+  const client = await pool.connect();
+  let row;
   try {
+    await client.query('BEGIN');
     if (accept) {
-      const { rows } = await pool.query(
+      const upd = await client.query(
         `UPDATE payments SET status='verified', verified_by=$1, verified_at=NOW()
            WHERE id=$2 AND status='pending' RETURNING *`,
         [req.session.user.username, id]
       );
-      if (!rows.length) return res.status(404).json({ error: 'not found or already decided' });
-      if (rows[0].bill_id) {
-        await pool.query(`UPDATE bills SET status='paid', paid_at=NOW() WHERE id=$1 AND status IN ('pending','overdue')`, [rows[0].bill_id]);
+      if (!upd.rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'not found or already decided' });
       }
-      audit(req, 'payment.verify', 'payment', String(id), { billId: rows[0].bill_id, amount: rows[0].amount });
-      // Notify the tenant fire-and-forget
-      notifyTenantOnPayment(rows[0], 'verified').catch(() => {});
-      res.json({ ok: true, payment: rows[0] });
-    } else {
-      const { rows } = await pool.query(
-        `UPDATE payments SET status='rejected', verified_by=$1, verified_at=NOW(), rejected_reason=$2
-           WHERE id=$3 AND status='pending' RETURNING *`,
-        [req.session.user.username, reason, id]
-      );
-      if (!rows.length) return res.status(404).json({ error: 'not found' });
-      audit(req, 'payment.reject', 'payment', String(id), { reason, billId: rows[0].bill_id });
-      notifyTenantOnPayment(rows[0], 'rejected', reason).catch(() => {});
-      res.json({ ok: true, payment: rows[0] });
+      row = upd.rows[0];
+      if (row.bill_id) {
+        await client.query(
+          `UPDATE bills SET status='paid', paid_at=NOW()
+             WHERE id=$1 AND status IN ('pending','overdue')`,
+          [row.bill_id]
+        );
+      }
+      await client.query('COMMIT');
+      audit(req, 'payment.verify', 'payment', String(id), { billId: row.bill_id, amount: row.amount });
+      notifyTenantOnPayment(row, 'verified').catch(() => {});
+      return res.json({ ok: true, payment: row });
     }
+    // accept === false — reject path. No bill UPDATE needed because a
+    // rejection doesn't move the bill out of pending/overdue.
+    const upd = await client.query(
+      `UPDATE payments SET status='rejected', verified_by=$1, verified_at=NOW(), rejected_reason=$2
+         WHERE id=$3 AND status='pending' RETURNING *`,
+      [req.session.user.username, reason, id]
+    );
+    if (!upd.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'not found' });
+    }
+    row = upd.rows[0];
+    await client.query('COMMIT');
+    audit(req, 'payment.reject', 'payment', String(id), { reason, billId: row.bill_id });
+    notifyTenantOnPayment(row, 'rejected', reason).catch(() => {});
+    return res.json({ ok: true, payment: row });
   } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
     console.error('payment verify error:', err);
-    res.status(500).json({ error: 'internal error' });
+    return res.status(500).json({ error: 'internal error' });
+  } finally {
+    client.release();
   }
 });
 
@@ -3120,6 +3466,20 @@ app.post('/api/bookings/:id/approve-and-assign', sameOrigin, csrfGuard, requireA
          ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW(), updated_by=EXCLUDED.updated_by`,
       ['baankarn_rooms_v1', JSON.stringify(rooms), req.session.user.username]
     );
+    // Mirror the status change into the relational `bookings` table so the
+    // SQL-backed views stay in sync. Best-effort: if the row was never
+    // written (e.g. legacy booking from before the dual-write landed),
+    // UPDATE affects 0 rows and we simply move on.
+    try {
+      await client.query(
+        `UPDATE bookings
+            SET status='approved', room_id=$2, updated_at=NOW()
+          WHERE external_id=$1`,
+        [id, assignedRoomId || null]
+      );
+    } catch (err) {
+      console.warn('[booking] relational status sync skipped:', err.message);
+    }
     await client.query('COMMIT');
 
     audit(req, 'booking.approve', 'booking', id, {
@@ -3215,6 +3575,21 @@ app.put('/api/bookings/:id', sameOrigin, csrfGuard, requireAuth, requireRole('ow
        ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW(), updated_by=EXCLUDED.updated_by`,
       ['baankarn_bookings_v1', JSON.stringify(list), req.session.user.username]
     );
+    // Mirror status / room changes into the relational bookings table.
+    // Best-effort: a missing row (legacy booking from before the dual-write
+    // landed) is fine — UPDATE is a no-op then.
+    if (b.status !== undefined || b.roomId !== undefined) {
+      try {
+        await pool.query(
+          `UPDATE bookings
+              SET status=$2, room_id=$3, updated_at=NOW()
+            WHERE external_id=$1`,
+          [id, updated.status, updated.roomId || null]
+        );
+      } catch (err) {
+        console.warn('[booking] relational status sync skipped:', err.message);
+      }
+    }
     audit(req, 'booking.update', 'booking', id, {
       from: before.status, to: updated.status, fields: Object.keys(b),
     });
@@ -3449,6 +3824,125 @@ app.get('/api/access/logs', requireAuth, async (req, res) => {
     res.status(500).json({ error: 'internal error' });
   }
 });
+
+// === v2: Access cards CRUD ================================================
+// Issue / list / revoke RFID (or other) cards for tenants. The scheduler
+// already auto-revokes cards for tenants who fall behind on bills (see
+// services/scheduler.tickAccessControlSync), but until now there was no
+// way for admin to actually CREATE the cards being revoked — the table
+// was effectively dead. These endpoints close that loop.
+app.get('/api/access/cards', requireAuth, async (req, res) => {
+  try {
+    const params = [];
+    const where = [];
+    if (req.query.tenantId) {
+      const tid = Number(req.query.tenantId);
+      if (Number.isInteger(tid) && tid > 0) {
+        params.push(tid); where.push(`tenant_id=$${params.length}`);
+      }
+    }
+    if (req.query.status === 'active' || req.query.status === 'revoked') {
+      params.push(req.query.status); where.push(`status=$${params.length}`);
+    }
+    const sql = `SELECT id, card_id, tenant_id, room_id, status,
+                        issued_at, revoked_at, revoke_reason
+                   FROM access_cards
+                   ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+                   ORDER BY issued_at DESC LIMIT 500`;
+    const { rows } = await pool.query(sql, params);
+    res.json({ ok: true, cards: rows });
+  } catch (err) {
+    console.error('access cards list error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+app.post('/api/access/cards', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'),
+  features.requireFeature('accessControl'),
+  async (req, res) => {
+    const cardId = String(req.body?.cardId || '').trim().slice(0, 64);
+    const tenantId = req.body?.tenantId ? Number(req.body.tenantId) : null;
+    const roomId = req.body?.roomId ? String(req.body.roomId).slice(0, 32) : null;
+    if (!cardId || !/^[A-Za-z0-9_.:-]{2,64}$/.test(cardId)) {
+      return res.status(400).json({ error: 'card_id ต้องเป็น 2-64 ตัวอักษร a-z 0-9 _.:-' });
+    }
+    if (tenantId !== null && (!Number.isInteger(tenantId) || tenantId < 1)) {
+      return res.status(400).json({ error: 'invalid tenant_id' });
+    }
+    try {
+      // Validate the tenant exists before inserting; otherwise the FK
+      // would yell with an unhelpful 23503 instead of a clean 404.
+      if (tenantId) {
+        const t = await pool.query(
+          `SELECT 1 FROM tenants WHERE id=$1 AND deleted_at IS NULL LIMIT 1`,
+          [tenantId]
+        );
+        if (!t.rows.length) return res.status(404).json({ error: 'tenant not found' });
+      }
+      const { rows } = await pool.query(
+        `INSERT INTO access_cards (card_id, tenant_id, room_id, status)
+         VALUES ($1,$2,$3,'active')
+         RETURNING id, card_id, tenant_id, room_id, status, issued_at`,
+        [cardId, tenantId, roomId]
+      );
+      audit(req, 'access_card.create', 'card', String(rows[0].id),
+        { cardId, tenantId, roomId });
+      res.json({ ok: true, card: rows[0] });
+    } catch (err) {
+      if (err.code === '23505') {
+        return res.status(409).json({ error: 'card_id ซ้ำ — ใช้รหัสอื่น', code: 'DUPLICATE_CARD_ID' });
+      }
+      console.error('access card create error:', err);
+      res.status(500).json({ error: 'internal error' });
+    }
+  });
+
+app.put('/api/access/cards/:id/revoke', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'),
+  async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+    const reason = String(req.body?.reason || 'manual').slice(0, 200);
+    try {
+      const { rows } = await pool.query(
+        `UPDATE access_cards
+            SET status='revoked', revoked_at=NOW(), revoke_reason=$1
+          WHERE id=$2 AND status='active'
+          RETURNING id, card_id, status, revoked_at, revoke_reason`,
+        [reason, id]
+      );
+      if (!rows.length) {
+        return res.status(404).json({ error: 'not found or already revoked' });
+      }
+      audit(req, 'access_card.revoke', 'card', String(id), { reason });
+      res.json({ ok: true, card: rows[0] });
+    } catch (err) {
+      console.error('access card revoke error:', err);
+      res.status(500).json({ error: 'internal error' });
+    }
+  });
+
+app.put('/api/access/cards/:id/restore', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'),
+  async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+    try {
+      const { rows } = await pool.query(
+        `UPDATE access_cards
+            SET status='active', revoked_at=NULL, revoke_reason=NULL
+          WHERE id=$1 AND status='revoked'
+          RETURNING id, card_id, status`,
+        [id]
+      );
+      if (!rows.length) {
+        return res.status(404).json({ error: 'not found or already active' });
+      }
+      audit(req, 'access_card.restore', 'card', String(id));
+      res.json({ ok: true, card: rows[0] });
+    } catch (err) {
+      console.error('access card restore error:', err);
+      res.status(500).json({ error: 'internal error' });
+    }
+  });
 
 // === v2: Admin user management (B1, C7) ===================================
 // Real CRUD against auth_users, replacing the localStorage-only stub in
@@ -3808,6 +4302,414 @@ const _routesCtx = {
   makeIpLimiter,                           // shared IP-based rate-limit factory
 };
 const _routesMounted = _routesIndex(app, _routesCtx);
+
+// === v2: Contracts CRUD ===================================================
+// The contracts table is populated by /api/tenants/:id/checkin (which is
+// finally accessible via UI in this round). These endpoints expose the
+// table for read + targeted edits — admin needs them to:
+//   - see who's coming up for renewal (paired with tickContractExpiry alerts)
+//   - tweak discount_pct or term_months on an existing contract without
+//     having to check the tenant out + back in
+app.get('/api/contracts', requireAuth, async (req, res) => {
+  const params = [];
+  const where = ['c.deleted_at IS NULL'];
+  if (req.query.status && ['active', 'ended', 'expired'].includes(String(req.query.status))) {
+    params.push(req.query.status); where.push(`c.status=$${params.length}`);
+  }
+  if (req.query.tenantId) {
+    const tid = Number(req.query.tenantId);
+    if (Number.isInteger(tid) && tid > 0) {
+      params.push(tid); where.push(`c.tenant_id=$${params.length}`);
+    }
+  }
+  if (req.query.roomId) {
+    params.push(String(req.query.roomId).slice(0, 32));
+    where.push(`c.room_id=$${params.length}`);
+  }
+  // Optional: only contracts ending within N days (for renewal dashboards)
+  if (req.query.expiringInDays) {
+    const days = Math.min(365, Math.max(1, Number(req.query.expiringInDays) || 0));
+    if (days > 0) {
+      where.push(`c.end_date IS NOT NULL`);
+      where.push(`c.end_date >= CURRENT_DATE`);
+      where.push(`c.end_date < CURRENT_DATE + INTERVAL '${days} days'`);
+    }
+  }
+  try {
+    const { rows } = await pool.query(
+      `SELECT c.id, c.contract_no, c.tenant_id, c.room_id,
+              c.start_date, c.end_date, c.term_months,
+              c.monthly_rent, c.deposit, c.discount_pct,
+              c.status, c.signed_at, c.created_at,
+              t.full_name AS tenant_name, t.phone AS tenant_phone,
+              CASE WHEN c.end_date IS NULL THEN NULL
+                   ELSE (c.end_date - CURRENT_DATE)::int
+              END AS days_left
+         FROM contracts c
+         LEFT JOIN tenants t ON t.id = c.tenant_id AND t.deleted_at IS NULL
+        WHERE ${where.join(' AND ')}
+        ORDER BY
+          CASE c.status WHEN 'active' THEN 0 WHEN 'expired' THEN 1 ELSE 2 END,
+          c.end_date NULLS LAST, c.created_at DESC
+        LIMIT 1000`,
+      params
+    );
+    res.json({ ok: true, contracts: rows });
+  } catch (err) {
+    console.error('contracts list error:', err);
+    res.status(500).json({ error: 'internal error', code: 'DB_ERROR' });
+  }
+});
+
+app.get('/api/contracts/:id', requireAuth, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+  try {
+    const { rows } = await pool.query(
+      `SELECT c.*, t.full_name AS tenant_name, t.phone AS tenant_phone
+         FROM contracts c
+         LEFT JOIN tenants t ON t.id = c.tenant_id AND t.deleted_at IS NULL
+        WHERE c.id=$1 AND c.deleted_at IS NULL`,
+      [id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'not found' });
+    res.json({ ok: true, contract: rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: 'internal error', code: 'DB_ERROR' });
+  }
+});
+
+app.put('/api/contracts/:id', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'),
+  async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+    const b = req.body || {};
+    const fields = []; const params = []; let i = 1;
+    // Allow-list mutable fields. monthly_rent is intentionally NOT here
+    // because the bill computation reads room.rent (rooms blob) — letting
+    // admin set monthly_rent on the contract would create a discrepancy.
+    if (b.discountPct !== undefined) {
+      const pct = Number(b.discountPct);
+      if (!Number.isFinite(pct) || pct < 0 || pct > 50) {
+        return res.status(400).json({ error: 'discountPct must be 0-50' });
+      }
+      fields.push(`discount_pct=$${i++}`); params.push(pct);
+    }
+    if (b.termMonths !== undefined) {
+      const t = Number(b.termMonths);
+      if (b.termMonths !== null && (!Number.isInteger(t) || t < 1 || t > 120)) {
+        return res.status(400).json({ error: 'termMonths must be 1-120' });
+      }
+      fields.push(`term_months=$${i++}`); params.push(b.termMonths === null ? null : t);
+    }
+    if (b.endDate !== undefined) {
+      // Either YYYY-MM-DD string or null to clear
+      if (b.endDate !== null && !/^\d{4}-\d{2}-\d{2}$/.test(String(b.endDate))) {
+        return res.status(400).json({ error: 'endDate must be YYYY-MM-DD' });
+      }
+      fields.push(`end_date=$${i++}::date`); params.push(b.endDate);
+    }
+    if (b.status !== undefined) {
+      if (!['active', 'ended', 'expired'].includes(String(b.status))) {
+        return res.status(400).json({ error: 'status must be active|ended|expired' });
+      }
+      fields.push(`status=$${i++}`); params.push(b.status);
+    }
+    if (!fields.length) return res.status(400).json({ error: 'nothing to update' });
+    params.push(id);
+    try {
+      const { rows } = await pool.query(
+        `UPDATE contracts SET ${fields.join(', ')} WHERE id=$${i} AND deleted_at IS NULL RETURNING *`,
+        params
+      );
+      if (!rows.length) return res.status(404).json({ error: 'not found' });
+      audit(req, 'contract.update', 'contract', String(id), { fields: Object.keys(b) });
+      res.json({ ok: true, contract: rows[0] });
+    } catch (err) {
+      console.error('contract update error:', err);
+      res.status(500).json({ error: 'internal error', code: 'DB_ERROR' });
+    }
+  });
+
+// === v2: Backup + restore (full SQL dump, owner-only) =====================
+// scripts/backup.js already does the heavy lifting (run() returns metadata
+// + a file on disk; verify() validates a file's SHA-256 integrity hash).
+// These endpoints just expose that machinery so admin can:
+//   - trigger a backup from the UI ("download" button)
+//   - list / download / delete prior backup files
+//   - restore from one (server-side file or uploaded JSON body)
+//
+// Critical UX note: the previous "backup" button in /admin#settings only
+// exported the in-memory rooms/config/bookings JSON blobs — bills,
+// payments, tenants, contracts, audit_logs were ALL missing. Operators
+// who restored from such a backup lost months of financial records.
+// These endpoints replace that path with a real DB-level dump.
+//
+// Filename format is fixed by scripts/backup.js: `backup-<ISO-stamp>.json`
+// where ISO chars `:` and `.` are replaced with `-`. We allow-list filenames
+// to that exact shape to defeat path traversal. path.basename() before any
+// fs op is belt-and-braces.
+const BACKUP_FILENAME_RE = /^backup-[A-Za-z0-9-]+\.json$/;
+function backupFile(filename) {
+  // Reject anything with a slash, dot-segment, etc. before touching disk.
+  if (!BACKUP_FILENAME_RE.test(filename)) return null;
+  const safe = require('path').basename(filename);
+  if (safe !== filename) return null;
+  return require('path').join(__dirname, 'backups', safe);
+}
+
+app.post('/api/admin/backup/create', sameOrigin, csrfGuard, requireAuth, requireRole('owner'),
+  async (req, res) => {
+    try {
+      const backup = require('./scripts/backup');
+      const result = await backup.run({ pool, retainDays: 30 });
+      const filename = require('path').basename(result.file);
+      audit(req, 'backup.create', 'backup', filename, {
+        size: result.size, digest: result.digest, rowCounts: result.rowCounts,
+      });
+      res.json({
+        ok: true,
+        filename,
+        size: result.size,
+        digest: result.digest,
+        rowCounts: result.rowCounts,
+        downloadUrl: `/api/admin/backup/download/${encodeURIComponent(filename)}`,
+      });
+    } catch (err) {
+      console.error('backup create error:', err);
+      res.status(500).json({ error: 'backup failed', code: 'BACKUP_FAILED' });
+    }
+  });
+
+app.get('/api/admin/backup/list', requireAuth, requireRole('owner', 'manager'), async (_req, res) => {
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    const dir = path.join(__dirname, 'backups');
+    if (!fs.existsSync(dir)) return res.json({ ok: true, backups: [] });
+    const files = fs.readdirSync(dir)
+      .filter((f) => BACKUP_FILENAME_RE.test(f))
+      .sort()
+      .reverse();
+    const items = files.map((f) => {
+      const stat = fs.statSync(path.join(dir, f));
+      return {
+        filename: f,
+        size: stat.size,
+        createdAt: stat.mtime.toISOString(),
+        downloadUrl: `/api/admin/backup/download/${encodeURIComponent(f)}`,
+      };
+    });
+    res.json({ ok: true, backups: items });
+  } catch (err) {
+    console.error('backup list error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+app.get('/api/admin/backup/download/:filename', requireAuth, requireRole('owner', 'manager'),
+  async (req, res) => {
+    const fp = backupFile(req.params.filename);
+    if (!fp) return res.status(400).json({ error: 'invalid filename' });
+    const fs = require('fs');
+    if (!fs.existsSync(fp)) return res.status(404).json({ error: 'not found' });
+    audit(req, 'backup.download', 'backup', req.params.filename).catch(() => {});
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${req.params.filename}"`
+    );
+    fs.createReadStream(fp).on('error', (err) => {
+      console.error('backup download stream error:', err.message);
+      if (!res.headersSent) res.status(500).json({ error: 'read failed' });
+    }).pipe(res);
+  });
+
+app.delete('/api/admin/backup/:filename', sameOrigin, csrfGuard, requireAuth, requireRole('owner'),
+  async (req, res) => {
+    const fp = backupFile(req.params.filename);
+    if (!fp) return res.status(400).json({ error: 'invalid filename' });
+    const fs = require('fs');
+    if (!fs.existsSync(fp)) return res.status(404).json({ error: 'not found' });
+    try {
+      fs.unlinkSync(fp);
+      audit(req, 'backup.delete', 'backup', req.params.filename);
+      res.json({ ok: true });
+    } catch (err) {
+      console.error('backup delete error:', err);
+      res.status(500).json({ error: 'delete failed' });
+    }
+  });
+
+// POST /api/admin/restore — destructive. Expects { confirm: true } AND either
+// `filename` (server-side backup) or `backup` (full JSON in the body).
+//
+// The default Express body limit is 3MB, way too small for a real dump
+// (audit_logs + meter_readings alone can exceed that). We mount a 100MB
+// JSON parser ONLY on this route so the rest of the app stays bounded.
+const restoreBodyParser = express.json({ limit: '100mb' });
+app.post('/api/admin/restore', restoreBodyParser, sameOrigin, csrfGuard, requireAuth, requireRole('owner'),
+  async (req, res) => {
+    const b = req.body || {};
+    if (b.confirm !== true) {
+      return res.status(400).json({
+        error: 'restore requires explicit confirm: true (this OVERWRITES current data)',
+        code: 'CONFIRM_REQUIRED',
+      });
+    }
+    let backup;
+    if (b.filename) {
+      const fp = backupFile(b.filename);
+      if (!fp) return res.status(400).json({ error: 'invalid filename' });
+      const fs = require('fs');
+      if (!fs.existsSync(fp)) return res.status(404).json({ error: 'backup file not found' });
+      try {
+        backup = JSON.parse(fs.readFileSync(fp, 'utf8'));
+      } catch (err) {
+        return res.status(400).json({ error: 'backup file is not valid JSON' });
+      }
+    } else if (b.backup && typeof b.backup === 'object') {
+      backup = b.backup;
+    } else {
+      return res.status(400).json({
+        error: 'either filename or backup body required',
+        code: 'MISSING_PAYLOAD',
+      });
+    }
+
+    if (!backup.tables || backup.schemaVersion !== 1) {
+      return res.status(400).json({
+        error: 'invalid backup format (schemaVersion=1 expected)',
+        code: 'BAD_FORMAT',
+      });
+    }
+    // Integrity check (skip if backup predates the integrity field — older
+    // local-only dumps from scripts/backup.js's main() path don't include it).
+    if (backup.integrity?.algorithm === 'sha256') {
+      const expected = backup.integrity.digest;
+      const stored = { ...backup };
+      delete stored.integrity;
+      const actual = require('crypto').createHash('sha256')
+        .update(JSON.stringify(stored)).digest('hex');
+      if (actual !== expected) {
+        return res.status(400).json({
+          error: 'integrity hash mismatch — backup may be corrupt or tampered',
+          code: 'INTEGRITY_FAILED',
+        });
+      }
+    }
+
+    // Tables to restore, in PARENT-FIRST order so per-row INSERT inside the
+    // tx satisfies FK constraints. Children (payments → bills → tenants)
+    // come after parents. Non-restorable tables are listed in SKIP_TABLES.
+    const RESTORABLE_TABLES = [
+      'app_data', 'auth_users', 'system_settings',
+      'line_oas',
+      'tenants',
+      'access_devices',
+      'contracts', 'bills', 'recurring_charges',
+      'payments', 'access_cards', 'line_bindings',
+      'meter_readings',
+      'maintenance_tickets',
+      'access_logs',
+      'audit_logs',
+      'notifications_log',
+      'file_uploads',
+      'bookings',
+    ];
+    const SKIP_NOTE = {
+      tenant_sessions: 'transient — users will re-login',
+      login_lockouts: 'ephemeral',
+      notifications_queue: 'transient — would replay outbound on restore',
+      secrets: 'not in backup (encrypted; admin restores secrets separately)',
+      rooms_v2: 'optional table; not in backup TABLES list',
+    };
+
+    const client = await pool.connect();
+    const stats = {};
+    const errors = [];
+    try {
+      await client.query('BEGIN');
+      // Defer FK so insert order within tx is forgiving (most FKs in this
+      // schema aren't DEFERRABLE so this is a no-op for them — we still
+      // rely on the parent-first ordering above).
+      try { await client.query('SET CONSTRAINTS ALL DEFERRED'); } catch { /* not all FKs deferrable */ }
+
+      // Phase 1: DELETE in REVERSE (child-first) order so FKs hold during wipe.
+      for (const t of [...RESTORABLE_TABLES].reverse()) {
+        const data = backup.tables[t];
+        if (!data || !Array.isArray(data)) continue;
+        try {
+          await client.query(`DELETE FROM ${t}`);
+        } catch (err) {
+          if (err.code === '42P01') continue; // table doesn't exist on this deploy
+          throw err;
+        }
+      }
+
+      // Phase 2: INSERT parent-first.
+      for (const t of RESTORABLE_TABLES) {
+        const rows = backup.tables[t];
+        if (!rows || !Array.isArray(rows)) {
+          stats[t] = { skipped: 'not in backup' };
+          continue;
+        }
+        if (rows.length === 0) { stats[t] = { inserted: 0 }; continue; }
+
+        const cols = Object.keys(rows[0]);
+        const colList = cols.map((c) => `"${c}"`).join(',');
+        const placeholders = cols.map((_, i) => `$${i + 1}`).join(',');
+        let inserted = 0, failed = 0;
+        for (const row of rows) {
+          const vals = cols.map((c) => row[c] === undefined ? null : row[c]);
+          try {
+            await client.query(
+              `INSERT INTO ${t} (${colList}) VALUES (${placeholders}) ON CONFLICT DO NOTHING`,
+              vals
+            );
+            inserted++;
+          } catch (err) {
+            failed++;
+            errors.push(`${t}: ${err.message.slice(0, 150)}`);
+          }
+        }
+        stats[t] = { inserted, failed };
+        // Reset BIGSERIAL sequence so next-insert id picks up where the
+        // restored data left off. Best-effort — non-serial PKs (text keys
+        // like app_data.key) just get a no-op.
+        try {
+          await client.query(
+            `SELECT setval(pg_get_serial_sequence($1, 'id'),
+                            COALESCE((SELECT MAX(id) FROM ${t}), 1), true)`,
+            [t]
+          );
+        } catch { /* table has no `id` SERIAL column */ }
+      }
+
+      await client.query('COMMIT');
+      audit(req, 'backup.restore', 'backup', b.filename || 'inline-body', {
+        stats, errorCount: errors.length,
+      });
+      res.json({
+        ok: true,
+        restored: stats,
+        skipped: SKIP_NOTE,
+        errors: errors.slice(0, 50), // cap response size
+        errorCount: errors.length,
+        warning: 'รอบทำงานต่อไปต้อง re-login + sequences ถูก reset แล้ว',
+      });
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      console.error('restore error:', err);
+      res.status(500).json({
+        error: 'restore failed — database rolled back to previous state',
+        detail: String(err.message || '').slice(0, 300),
+        code: 'RESTORE_FAILED',
+      });
+    } finally {
+      client.release();
+    }
+  });
 
 // === v2: Notification queue admin endpoints ===============================
 const notifQueue = require('./services/notificationQueue');
@@ -4260,6 +5162,11 @@ function startAuditPruner() {
       ['notifications_queue_failed', `DELETE FROM notifications_queue WHERE status='failed' AND created_at < NOW() - INTERVAL '30 days'`],
       ['access_logs',        `DELETE FROM access_logs WHERE occurred_at < NOW() - INTERVAL '180 days'`],
       ['login_lockouts',     `DELETE FROM login_lockouts WHERE last_fail_at < NOW() - INTERVAL '30 days' AND (locked_until IS NULL OR locked_until < NOW())`],
+      // meter_readings can grow fast — simulator mode adds 2 rows/room/hour,
+      // and even a small dorm with 50 rooms generates ~50k rows/month. We
+      // only need ~12 months for year-over-year comparisons + the σ-anomaly
+      // detector reads the latest 30 rows, so 365 days is plenty.
+      ['meter_readings',     `DELETE FROM meter_readings WHERE reading_at < NOW() - INTERVAL '365 days'`],
     ];
     for (const [name, sql] of tasks) {
       try {
@@ -4268,6 +5175,39 @@ function startAuditPruner() {
       } catch (err) {
         console.error(`[prune] ${name} failed:`, sanitizeError(err));
       }
+    }
+    // Slip-file orphan cleanup: file_uploads rows in category 'slip' older
+    // than 180 days that no payment row points to are unreachable and just
+    // burn disk/R2 storage. Common causes:
+    //   - 23505 race-condition rejected uploads where the in-tx cleanup
+    //     was best-effort and missed
+    //   - admin running scripts/strip-payments-base64 (NULLs slip_url)
+    //   - hard-deleted payment rows (rare; soft-delete is default)
+    // We use the storage helper so the on-disk / S3 file is also removed,
+    // not just the row. Bound to 50 per run so a long-tail backlog doesn't
+    // hammer R2 in one shot.
+    try {
+      const { rows: orphans } = await pool.query(
+        `SELECT id FROM file_uploads
+           WHERE category='slip' AND uploaded_at < NOW() - INTERVAL '180 days'
+             AND NOT EXISTS (
+               SELECT 1 FROM payments p
+                WHERE p.slip_url = '/files/' || file_uploads.id::text
+             )
+           LIMIT 50`
+      );
+      let cleaned = 0;
+      const storage = require('./services/storage');
+      for (const r of orphans) {
+        try {
+          if (await storage.remove(pool, r.id)) cleaned++;
+        } catch (err) {
+          console.warn(`[prune] orphan slip ${r.id} failed:`, err.message);
+        }
+      }
+      if (cleaned) stats.orphan_slips = cleaned;
+    } catch (err) {
+      console.error('[prune] orphan_slips failed:', sanitizeError(err));
     }
     if (Object.keys(stats).length) console.log('[prune]', stats);
   };

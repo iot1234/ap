@@ -78,6 +78,11 @@ schemas.checkIn = z.object({
   moveInDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'วันที่ต้องเป็น YYYY-MM-DD'),
   depositAmount: z.coerce.number().nonnegative().max(1_000_000),
   monthlyRent: z.coerce.number().positive().max(1_000_000),
+  // Contract length in months — used to derive the rent discount tier
+  // (config.discounts.{sixMonth,twelveMonth,twentyFourMonth}). Either
+  // termMonths (we resolve % from config) or discountPct (explicit) wins.
+  termMonths: z.coerce.number().int().min(1).max(120).optional(),
+  discountPct: z.coerce.number().nonnegative().max(50).optional(),
 });
 
 schemas.checkOut = z.object({

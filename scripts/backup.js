@@ -31,15 +31,23 @@ const pool = new Pool({
 });
 
 // All app-owned tables. v1 + v2 — anything missing from this list is
-// silently dropped on restore, so adding a new table requires updating here.
+// silently dropped on restore, so adding a new table requires updating
+// here AND in server.js's RESTORABLE_TABLES (the two must agree, or
+// restore silently won't repopulate something the dump captured).
 const TABLES = [
   // v1
   'app_data', 'auth_users', 'maintenance_tickets', 'audit_logs',
-  // v2
+  // v2 — financial / tenancy
   'tenants', 'contracts', 'bills', 'payments',
+  'recurring_charges',
+  // v2 — IoT / hardware / access
   'meter_readings', 'access_logs', 'access_cards', 'access_devices',
-  'notifications_log', 'notifications_queue', 'file_uploads',
-  'tenant_sessions', 'login_lockouts', 'system_settings', 'bookings',
+  // v2 — notifications + LINE multi-OA + bindings
+  'notifications_log', 'notifications_queue',
+  'line_oas', 'line_bindings',
+  // v2 — files / sessions / lockouts / settings / bookings
+  'file_uploads', 'tenant_sessions', 'login_lockouts',
+  'system_settings', 'bookings',
 ];
 
 async function dumpTable(name) {

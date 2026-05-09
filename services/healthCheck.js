@@ -367,6 +367,19 @@ async function checkFeatureDependencies(features) {
     });
   }
 
+  // meterIot.mode = 'mqtt' is advertised in the Features UI but no MQTT
+  // subscriber is wired in this build. Operators flipping to mqtt see no
+  // readings arrive — same effect as 'manual' but without the operator
+  // realising they need to enter readings by hand. Surface this so the
+  // mismatch is visible on /admin#health rather than silently broken.
+  if (features?.meterIot?.enabled && features?.meterIot?.mode === 'mqtt') {
+    warnings.push({
+      flag: 'meterIot',
+      issue: 'meterIot.mode = "mqtt" — MQTT subscriber ยังไม่ implement ในระบบนี้ จะไม่มี reading เข้ามาอัตโนมัติ',
+      fix: 'เปลี่ยนเป็น "manual" และให้ผู้ดูแลกรอกค่ามิเตอร์เอง หรือรอ MQTT integration',
+    });
+  }
+
   // recurringCharges flag on but billAutoGenerate off → charges defined but
   // never applied automatically. Manual bill gen still works, so this is a
   // soft warning.
@@ -381,24 +394,47 @@ async function checkFeatureDependencies(features) {
   // slipUpload.autoVerify ON but no provider key → silently never auto-
   // verifies anything (every slip falls back to admin queue). Operator
   // expects "instant payment" but actually nothing changed. Surface this.
+  // Use the verifier's own getConfiguredProviders so multi-provider config
+  // (features.slipUpload.providers = ['slipok','easyslip']) is checked too —
+  // not just the legacy single provider field.
   if (features?.slipUpload?.enabled && features?.slipUpload?.autoVerify) {
-    const provider = features.slipUpload.provider || 'slipok';
-    let configured = false;
-    if (provider === 'slipok')   configured = !!secrets.get('SLIPOK_API_KEY');
-    if (provider === 'easyslip') configured = !!secrets.get('EASYSLIP_API_KEY');
-    if (!configured) {
+    let slipVerifier;
+    try { slipVerifier = require('./slipVerifier'); } catch { /* ignore */ }
+    const ready = slipVerifier?.getConfiguredProviders
+      ? slipVerifier.getConfiguredProviders(features)
+      : [];
+    // Compute the operator's INTENDED list (regardless of key presence) so
+    // the warning can name the missing key precisely.
+    const intended = Array.isArray(features.slipUpload.providers)
+      ? features.slipUpload.providers
+      : (features.slipUpload.provider ? [features.slipUpload.provider] : ['slipok']);
+    const KEY_BY_PROVIDER = { slipok: 'SLIPOK_API_KEY', easyslip: 'EASYSLIP_API_KEY' };
+    const missing = intended.filter((p) => {
+      const k = KEY_BY_PROVIDER[p];
+      return k ? !secrets.get(k) : true;     // unknown provider name → "missing"
+    });
+    if (ready.length === 0) {
       warnings.push({
         flag: 'slipUpload.autoVerify',
-        issue: `autoVerify เปิด + provider="${provider}" แต่ API key ยังไม่ตั้ง — สลิปจะตกเข้าคิว admin เหมือนเดิม`,
-        fix: provider === 'slipok'
-          ? 'ตั้ง SLIPOK_API_KEY ใน Settings → Secrets'
-          : 'ตั้ง EASYSLIP_API_KEY ใน Settings → Secrets',
+        issue: `autoVerify เปิด แต่ไม่มี provider พร้อมใช้ (${intended.join(', ') || 'none'}) — สลิปจะตกเข้าคิว admin เหมือนเดิม`,
+        fix: missing.length
+          ? `ตั้งค่า key สำหรับ ${missing.map((p) => KEY_BY_PROVIDER[p] || `provider:${p}`).join(', ')} ใน Settings → Secrets`
+          : 'ตรวจรายชื่อ provider ใน features.slipUpload.providers',
+      });
+    } else if (missing.length > 0) {
+      // Some providers ready, some not — fallback chain still works on the
+      // ready ones, but surface the partial config so the operator can
+      // either complete it or remove the unused name.
+      warnings.push({
+        flag: 'slipUpload.autoVerify',
+        issue: `provider ${missing.join(', ')} ตั้งชื่อไว้แต่ key ยังไม่มา — ใช้ได้แค่ ${ready.map((p) => p.id).join(', ')}`,
+        fix: `ตั้ง ${missing.map((p) => KEY_BY_PROVIDER[p] || `key:${p}`).join(', ')} ใน Settings → Secrets หรือเอาชื่อนี้ออกจาก providers`,
       });
     }
     // Receiver-account match needs PROMPTPAY_TARGET to be set — without it
     // we can't safely auto-accept (any slip paid to ANY account would pass
     // amount-only check).
-    if (configured && !secrets.get('PROMPTPAY_TARGET')) {
+    if (ready.length > 0 && !secrets.get('PROMPTPAY_TARGET')) {
       warnings.push({
         flag: 'slipUpload.autoVerify',
         issue: 'autoVerify เปิด แต่ PROMPTPAY_TARGET ไม่ตั้ง — auto-verify ไม่สามารถตรวจสอบบัญชีปลายทาง',

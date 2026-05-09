@@ -53,6 +53,18 @@ const TR = {
     pinConfirmLabel: 'ยืนยัน PIN ใหม่',
     backLink: 'ย้อนกลับ',
     amountMismatchWarn: '⚠ จำนวนไม่ตรงยอดบิล',
+    downloadPdf: 'ดาวน์โหลด PDF',
+    receipt: 'ใบเสร็จ',
+    payments: 'การชำระเงิน',
+    paymentHistory: 'ประวัติการชำระเงิน',
+    paymentVerified: 'ยืนยันแล้ว',
+    paymentPending: 'รอตรวจสอบ',
+    paymentRejected: 'ไม่ผ่าน',
+    paymentDate: 'วันที่ส่ง',
+    paymentMethod: 'ช่องทาง',
+    rejectedReason: 'เหตุผลที่ปฏิเสธ',
+    transRef: 'เลขที่อ้างอิง',
+    viewSlip: 'ดูสลิป',
   },
   en: {
     portal: 'Tenant Portal', login: 'Sign in', phone: 'Phone number',
@@ -91,6 +103,18 @@ const TR = {
     pinConfirmLabel: 'Confirm new PIN',
     backLink: 'Back',
     amountMismatchWarn: '⚠ Amount does not match the bill',
+    downloadPdf: 'Download PDF',
+    receipt: 'Receipt',
+    payments: 'Payments',
+    paymentHistory: 'Payment history',
+    paymentVerified: 'Verified',
+    paymentPending: 'Pending',
+    paymentRejected: 'Rejected',
+    paymentDate: 'Submitted',
+    paymentMethod: 'Method',
+    rejectedReason: 'Rejected reason',
+    transRef: 'Reference',
+    viewSlip: 'View slip',
   },
 };
 function tr(locale, k) { return (TR[locale] || TR.th)[k] || k; }
@@ -533,7 +557,100 @@ function BillDetail({ bill, locale, onClose, slipFeature, refresh }) {
             </div>
           </div>
         ) : null}
-        <button onClick={onClose} style={btnLink}>ปิด</button>
+        {/* Always offer PDF download — paid bills become receipts, unpaid
+            bills become a printable invoice tenants can save offline. The
+            backend at /api/tenant/bills/:id/pdf re-renders from the stored
+            row so amounts are authoritative even if the on-screen rate
+            cards changed. Use a real <a target="_blank"> so the browser
+            handles streaming + native PDF viewer. */}
+        <a
+          href={`/api/tenant/bills/${bill.id}/pdf`}
+          target="_blank"
+          rel="noopener"
+          style={{ ...btnLink, display: 'inline-block', marginRight: 12, textDecoration: 'none' }}
+        >
+          📄 {bill.status === 'paid' ? t('receipt') : t('downloadPdf')}
+        </a>
+        <button onClick={onClose} style={btnLink}>{t('close')}</button>
+      </div>
+    </div>
+  );
+}
+
+// PaymentsView — tenant-side history of slip submissions. Pulls from
+// GET /api/tenant/payments which already returns the per-bill metadata
+// (status, transRef, rejected reason). Without this view, a tenant who
+// uploaded a slip earlier can't see whether it was accepted/rejected
+// without scrolling through their LINE/email — and there's no record of
+// rejected slips at all once the modal toast disappears.
+function PaymentsView({ locale }) {
+  const t = (k) => tr(locale, k);
+  const [items, setItems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState('');
+  React.useEffect(() => {
+    let cancelled = false;
+    api('/api/tenant/payments')
+      .then((d) => { if (!cancelled) setItems(d.payments || []); })
+      .catch((e) => { if (!cancelled) setErr(e.message || 'failed'); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, []);
+  const STATUS_LABEL = {
+    verified: t('paymentVerified'),
+    pending: t('paymentPending'),
+    rejected: t('paymentRejected'),
+  };
+  const STATUS_PILL = {
+    verified: 'green', pending: 'amber', rejected: 'red',
+  };
+  return (
+    <div style={{ padding: 20 }}>
+      <h2 style={h2}>{t('paymentHistory')}</h2>
+      {loading ? <p style={{ color: 'var(--muted)' }}>{t('loading')}</p> : null}
+      {err ? <p style={{ color: 'var(--red)' }}>{err}</p> : null}
+      {!loading && items.length === 0 ? (
+        <p style={{ color: 'var(--muted)' }}>{t('nothingHere')}</p>
+      ) : null}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {items.map((p) => (
+          <div key={p.id} style={card}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+              <div>
+                <div style={{ fontWeight: 600 }}>
+                  {p.bill_no || `#${p.bill_id}`}
+                  {p.period ? <span style={{ color: 'var(--muted)', fontWeight: 400 }}> · {p.period}</span> : null}
+                </div>
+                <div style={{ color: 'var(--muted)', fontSize: 12, marginTop: 2 }}>
+                  {t('paymentDate')}: {p.created_at ? new Date(p.created_at).toLocaleString(locale === 'th' ? 'th-TH' : 'en-US') : '-'}
+                </div>
+              </div>
+              <Pill color={STATUS_PILL[p.status] || 'gray'}>
+                {STATUS_LABEL[p.status] || p.status}
+              </Pill>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 8, fontSize: 14 }}>
+              <span>{t('total')}</span>
+              <strong>฿{fmtCurrency(p.amount)}</strong>
+            </div>
+            {p.method ? (
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, color: 'var(--muted)' }}>
+                <span>{t('paymentMethod')}</span>
+                <span>{p.method}</span>
+              </div>
+            ) : null}
+            {p.status === 'rejected' && p.rejected_reason ? (
+              <div style={{ marginTop: 6, fontSize: 13, color: 'var(--red)', lineHeight: 1.4 }}>
+                <strong>{t('rejectedReason')}:</strong> {p.rejected_reason}
+              </div>
+            ) : null}
+            {p.transaction_ref ? (
+              <div style={{ marginTop: 4, fontSize: 12, color: 'var(--muted)', fontFamily: 'JetBrains Mono, monospace' }}>
+                {t('transRef')}: {p.transaction_ref}
+              </div>
+            ) : null}
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -911,6 +1028,7 @@ function App() {
         {page === 'home' && <HomeView tenant={tenant} locale={locale} bills={bills} tickets={tickets} />}
         {page === 'bills' && <BillsView locale={locale} bills={bills}
           refresh={() => refresh(tenant)} slipFeature={features?.slipUpload} />}
+        {page === 'payments' && <PaymentsView locale={locale} />}
         {page === 'maintenance' && <MaintenanceView locale={locale} tenant={tenant}
           tickets={tickets} refresh={() => refresh(tenant)} />}
         {page === 'profile' && <ProfileView tenant={tenant} locale={locale} setLocale={setLocale}
@@ -922,6 +1040,7 @@ function App() {
       }}>
         <Tab id="home" page={page} setPage={setPage}>{tr(locale, 'home')}</Tab>
         <Tab id="bills" page={page} setPage={setPage}>{tr(locale, 'bills')}</Tab>
+        <Tab id="payments" page={page} setPage={setPage}>{tr(locale, 'payments')}</Tab>
         <Tab id="maintenance" page={page} setPage={setPage}>{tr(locale, 'maintenance')}</Tab>
         <Tab id="profile" page={page} setPage={setPage}>{tr(locale, 'profile')}</Tab>
       </nav>

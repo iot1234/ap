@@ -211,14 +211,18 @@ async function tickBillGen(pool, flags, now, state) {
           if (tenantId) { params.push(tenantId); ors.push(`tenant_id = $${params.length}`); }
           params.push(room.id); ors.push(`room_id = $${params.length}`);
           const rc = await pool.query(
-            `SELECT id, label, amount, frequency FROM recurring_charges
+            `SELECT id, label, amount, frequency, start_at, end_at FROM recurring_charges
                WHERE active = TRUE AND (${ors.join(' OR ')})
                  AND (start_at IS NULL OR start_at <= CURRENT_DATE)
                  AND (end_at IS NULL OR end_at >= CURRENT_DATE)`,
             params
           );
-          recurring = rc.rows.map((r) => ({ label: r.label, amount: Number(r.amount) }));
-          usedOneOffIds = rc.rows.filter((r) => r.frequency === 'one_off').map((r) => r.id);
+          // Honor `frequency` (monthly/quarterly/one_off) so quarterly
+          // charges only fire every 3 months anchored to start_at. Without
+          // this the scheduler kept billing quarterly fees every month.
+          const applicable = rc.rows.filter((r) => billing.isChargeApplicableForPeriod(r, period));
+          recurring = applicable.map((r) => ({ label: r.label, amount: Number(r.amount) }));
+          usedOneOffIds = applicable.filter((r) => r.frequency === 'one_off').map((r) => r.id);
         } catch { /* table may not exist on older deployments */ }
       }
 
@@ -241,20 +245,41 @@ async function tickBillGen(pool, flags, now, state) {
         }
       } catch { /* ignore */ }
 
-      const bill = billing.buildBill({ room, config, features: flags, previous, recurring, period, dueDate });
+      // Pull contract-length discount so scheduler bills match what the
+      // manual /api/bills POST + bulk-generate produce. Without this lookup
+      // every auto-generated bill billed full rent regardless of the
+      // discount the admin recorded at check-in.
+      let discountPct = 0;
       try {
+        const cq = await pool.query(
+          `SELECT discount_pct FROM contracts
+             WHERE room_id=$1 AND status='active' AND deleted_at IS NULL
+             ORDER BY start_date DESC LIMIT 1`,
+          [room.id]
+        );
+        if (cq.rows[0]) discountPct = Number(cq.rows[0].discount_pct) || 0;
+      } catch { /* legacy deploys without contracts table */ }
+      const bill = billing.buildBill({ room, config, features: flags, previous, recurring, period, dueDate, discountPct });
+      try {
+        // `other` JSONB persists the recurring breakdown so the PDF render
+        // and tenant portal bill-detail can reproduce the line items. The
+        // manual /api/bills POST + bulk-generate paths already write this;
+        // the scheduler used to skip it, so auto-generated bills lost their
+        // recurring breakdown on read (total stayed correct, but admins
+        // couldn't see WHICH charges made up the total).
+        const otherJson = JSON.stringify(recurring || []);
         const ins = await pool.query(
           `INSERT INTO bills (bill_no, tenant_id, room_id, period, rent,
               water_units, water_rate, water_amount,
-              elec_units, elec_rate, elec_amount, wifi, subtotal, vat, late_fee, total, due_date, status)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'pending')
+              elec_units, elec_rate, elec_amount, wifi, other, subtotal, vat, late_fee, total, due_date, status)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14,$15,$16,$17,$18,'pending')
            ON CONFLICT (bill_no) DO NOTHING
            RETURNING id`,
           [
             bill.billNo, tenantId, bill.roomId, bill.period,
             bill.rent, bill.waterUnits, bill.waterRate, bill.waterAmount,
             bill.elecUnits, bill.elecRate, bill.elecAmount,
-            bill.wifi, bill.subtotal, bill.vat, bill.lateFee, bill.total,
+            bill.wifi, otherJson, bill.subtotal, bill.vat, bill.lateFee, bill.total,
             bill.dueDate,
           ]
         );
@@ -427,6 +452,76 @@ async function tickAccessControlSync(pool, flags, now, state) {
   }
 }
 
+// === Contract expiry monitor ==============================================
+// Two responsibilities:
+//   1. Auto-flip contracts whose end_date is in the past from 'active' to
+//      'expired' so reports + access-control logic see them as ended. With-
+//      out this, a contract that ended 6 months ago still shows status=
+//      'active' and any "active contracts" view is wrong.
+//   2. Notify the owner once per day about contracts expiring within 30
+//      days so they can plan renewals + send the tenant a "would you like
+//      to extend?" message before the contract ends.
+//
+// Daily cadence — trigger once per day via the existing state latch.
+// Notification deduplicated via state.lastContractExpiryAt = todayKey.
+async function tickContractExpiry(pool, _flags, now, state) {
+  const todayKey = now.toISOString().slice(0, 10);
+  if (state.lastContractExpiryAt === todayKey) return;
+  try {
+    // (1) auto-expire — single statement, idempotent.
+    const expired = await pool.query(
+      `UPDATE contracts SET status='expired'
+         WHERE status='active' AND end_date IS NOT NULL AND end_date < CURRENT_DATE
+       RETURNING id, contract_no, tenant_id`
+    );
+    if (expired.rowCount > 0) {
+      console.log(`[scheduler] auto-expired ${expired.rowCount} contract(s) past end_date`);
+    }
+
+    // (2) upcoming expiries — anything ending in the next 30 days that's
+    // still active. Send ONE consolidated message to the owner so we don't
+    // spam them when 5 contracts end in the same week.
+    const { rows: upcoming } = await pool.query(
+      `SELECT c.id, c.contract_no, c.end_date, c.room_id,
+              t.full_name, t.phone, t.email, t.line_user_id, t.line_oa_id,
+              (c.end_date - CURRENT_DATE) AS days_left
+         FROM contracts c
+         LEFT JOIN tenants t ON t.id = c.tenant_id
+        WHERE c.status='active'
+          AND c.end_date IS NOT NULL
+          AND c.end_date >= CURRENT_DATE
+          AND c.end_date <  CURRENT_DATE + INTERVAL '30 days'
+        ORDER BY c.end_date ASC`
+    );
+
+    if (upcoming.length > 0 || expired.rowCount > 0) {
+      const lines = [];
+      if (expired.rowCount > 0) {
+        lines.push(`📋 สัญญา ${expired.rowCount} ฉบับสิ้นสุดแล้ว — เปลี่ยนสถานะเป็น expired`);
+      }
+      if (upcoming.length > 0) {
+        lines.push(`\n⏰ สัญญาใกล้หมดอายุ (≤ 30 วัน):`);
+        for (const c of upcoming) {
+          lines.push(`  • ${c.contract_no} (ห้อง ${c.room_id || '-'}) `
+            + `${c.full_name || '-'} — เหลือ ${c.days_left} วัน (${c.end_date})`);
+        }
+      }
+      try {
+        await notifier.notifyOwner({ pool, features: _flags || {} }, {
+          subject: '📋 รายงานสัญญา (รายวัน)',
+          text: lines.join('\n'),
+        });
+      } catch (err) {
+        console.warn('[scheduler] contract notify owner failed:', err.message);
+      }
+    }
+    state.lastContractExpiryAt = todayKey;
+    writeState(state);
+  } catch (err) {
+    console.error('[scheduler] contract expiry tick failed:', err.message);
+  }
+}
+
 async function tick(pool) {
   let flags;
   try { flags = await features.load(pool); } catch { return; }
@@ -442,6 +537,7 @@ async function tick(pool) {
     tickBillGen(pool, flags, now, state),
     tickMeterSimulator(pool, flags, now, state),
     tickAccessControlSync(pool, flags, now, state),
+    tickContractExpiry(pool, flags, now, state),
   ]);
   for (const r of results) {
     if (r.status === 'rejected') {

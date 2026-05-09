@@ -758,47 +758,95 @@ function TabPortal({ t, setToast, addActivity, apiFetch }) {
   );
 }
 
+// Replaces the previous hardcoded "fake contract no" view with one that
+// actually pulls from /api/contracts. When no contract exists, renders a
+// check-in form that POSTs /api/tenants/:id/checkin (the route that
+// records contract + monthly_rent + deposit + termMonths + discountPct).
+// Without this entry point, the contracts table stayed empty, the
+// contract-expiry alert had nothing to fire on, and the contract-length
+// discount was uncon­figurable from the UI.
 function TabContract({ t, setToast, addActivity }) {
   const C = window.ADMIN_C;
-  const { fmtCurrency, downloadFile } = window;
+  const { fmtCurrency } = window;
   const { Card, DefList, Btn, Pill } = window;
+  const apiCall = window.apiCall;
+  const [contract, setContract] = React.useState(null);
+  const [loading, setLoading] = React.useState(true);
+  const [tenantDbId, setTenantDbId] = React.useState(null);
+  const [showCheckin, setShowCheckin] = React.useState(false);
+  const [showEdit, setShowEdit] = React.useState(false);
 
-  const contractNo = `CT-${t.roomId}-${(t.since || '').slice(-4)}`;
+  const reload = React.useCallback(async () => {
+    setLoading(true);
+    try {
+      // Resolve tenants.id from phone (rooms blob has only the tenant snapshot).
+      // /api/tenants supports `q=` (LIKE search across name/phone/email) but
+      // not a direct `phone=` filter, so we filter client-side after the LIKE
+      // narrows the result set.
+      let tid = null;
+      try {
+        const tRes = await apiCall(`/api/tenants?q=${encodeURIComponent(t.phone || '')}`);
+        const match = (tRes.tenants || []).find((x) => x.phone === t.phone);
+        if (match) tid = match.id;
+      } catch { /* fall through */ }
+      setTenantDbId(tid);
+      if (!tid) { setContract(null); return; }
+      const d = await apiCall(`/api/contracts?tenantId=${tid}&status=active`);
+      setContract((d.contracts || [])[0] || null);
+    } finally { setLoading(false); }
+  }, [t.phone]);
+  React.useEffect(() => { reload(); }, [reload]);
 
-  const handleDownload = () => {
-    const today = new Date().toLocaleDateString('th-TH');
-    const text = [
-      'สัญญาเช่าห้องพัก — บ้านกาญจน์ เรสซิเดนซ์',
-      '='.repeat(48),
-      `หมายเลขสัญญา : ${contractNo}`,
-      `วันที่ออกเอกสาร : ${today}`,
-      '',
-      'ผู้เช่า',
-      `  ชื่อ-สกุล : ${t.name}`,
-      `  อาชีพ      : ${t.occupation}`,
-      `  เบอร์โทร  : ${t.phone}`,
-      `  อีเมล      : ${t.email}`,
-      '',
-      'ห้องพัก',
-      `  เลขห้อง   : ${t.roomId}`,
-      `  ชั้น          : ${t.floor}`,
-      '',
-      'เงื่อนไข',
-      `  ระยะเวลาสัญญา : 12 เดือน`,
-      `  เริ่มต้น           : ${t.since}`,
-      `  สิ้นสุด             : ${t.contractEnd}`,
-      `  ค่าเช่า/เดือน    : ${fmtCurrency(t.rent)}`,
-      `  เงินมัดจำ         : ${fmtCurrency(t.rent * 2)}`,
-      '',
-      'ลงชื่อ ............................. ผู้เช่า',
-      'ลงชื่อ ............................. ผู้ให้เช่า',
-    ].join('\n');
-    if (downloadFile(`contract_${contractNo}.txt`, text)) {
-      setToast && setToast({ kind: 'success', message: 'ดาวน์โหลดสัญญาเรียบร้อย' });
-      addActivity && addActivity({ icon: '📥', text: `ดาวน์โหลดสัญญา ${contractNo}`, type: 'contract' });
-    }
-  };
+  const fmtDate = (s) => s ? new Date(s).toLocaleDateString('th-TH') : '-';
 
+  if (loading) {
+    return <div style={{ padding: 20, color: C.muted }}>กำลังโหลด…</div>;
+  }
+  if (!tenantDbId) {
+    return (
+      <Card style={{ padding: 16 }}>
+        <div style={{ color: C.muted, fontSize: 13, lineHeight: 1.6 }}>
+          ⚠️ ไม่พบผู้เช่ารายนี้ในตาราง <code>tenants</code> — อาจเป็นข้อมูลเก่าจาก rooms blob เท่านั้น
+          <br />หากต้องการบันทึกสัญญา + ส่วนลด ให้สร้างผู้เช่าผ่าน "+ เพิ่มผู้เช่า" ก่อน
+        </div>
+      </Card>
+    );
+  }
+
+  if (!contract) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <Card style={{ padding: 16 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+            <span style={{ fontSize: 18 }}>📜</span>
+            <div style={{ fontSize: 14, fontWeight: 600 }}>ยังไม่มีสัญญาที่ active</div>
+          </div>
+          <p style={{ fontSize: 13, color: C.muted, lineHeight: 1.6, marginTop: 4 }}>
+            กดปุ่ม "เช็คอิน" เพื่อบันทึกสัญญา (รวมระยะเวลา + ส่วนลดตามอายุสัญญา)
+            ระบบจะตั้งสถานะห้องเป็น <b>occupied</b>, สร้าง contract row
+            และเริ่มออกบิลแบบมีส่วนลดตั้งแต่บิลถัดไป
+          </p>
+          <Btn variant="primary" icon="🔑" onClick={() => setShowCheckin(true)}>
+            เช็คอินผู้เช่า
+          </Btn>
+        </Card>
+        {showCheckin ? (
+          <CheckInModal
+            tenantId={tenantDbId}
+            tenant={t}
+            onClose={() => setShowCheckin(false)}
+            onDone={() => { setShowCheckin(false); reload();
+              setToast && setToast({ kind: 'success', message: `เช็คอิน ${t.name} เรียบร้อย` });
+              addActivity && addActivity({ icon: '🔑', text: `เช็คอิน ${t.name} (ห้อง ${t.roomId})`, type: 'contract' });
+            }}
+            onError={(msg) => setToast && setToast({ kind: 'danger', message: msg })}
+          />
+        ) : null}
+      </div>
+    );
+  }
+
+  // Contract exists — show real fields from DB.
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <Card style={{ padding: 16 }}>
@@ -810,26 +858,208 @@ function TabContract({ t, setToast, addActivity }) {
         <DefList
           columns={2}
           items={[
-            { label: 'หมายเลขสัญญา', value: contractNo },
-            { label: 'ระยะเวลาสัญญา', value: '12 เดือน' },
-            { label: 'วันที่เริ่มต้น',    value: t.since },
-            { label: 'วันที่สิ้นสุด',     value: t.contractEnd },
-            { label: 'ค่าเช่า/เดือน',     value: fmtCurrency(t.rent), bold: true },
-            { label: 'เงินมัดจำ',         value: fmtCurrency(t.rent * 2) },
+            { label: 'หมายเลขสัญญา', value: contract.contract_no },
+            { label: 'ระยะเวลาสัญญา', value: contract.term_months ? `${contract.term_months} เดือน` : 'เปิด-ไม่จำกัด' },
+            { label: 'วันที่เริ่มต้น',    value: fmtDate(contract.start_date) },
+            { label: 'วันที่สิ้นสุด',     value: fmtDate(contract.end_date) },
+            { label: 'ค่าเช่า/เดือน',     value: '฿' + fmtCurrency(contract.monthly_rent), bold: true },
+            { label: 'ส่วนลด',           value: Number(contract.discount_pct) > 0
+                                                ? `${Number(contract.discount_pct).toFixed(1)}%`
+                                                : 'ไม่มี' },
+            { label: 'เงินมัดจำ',         value: '฿' + fmtCurrency(contract.deposit) },
           ]}
         />
         <div style={{ marginTop: 14, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          <Btn variant="secondary" size="sm" icon="📥" onClick={handleDownload}>ดาวน์โหลด</Btn>
-          <Btn variant="ghost" size="sm" icon="✎" onClick={() => setToast && setToast({ kind: 'info', message: 'แก้ไขสัญญาทำได้จากหน้าห้องพัก' })}>แก้ไขสัญญา</Btn>
-          <Btn variant="ghost" size="sm" icon="↻" onClick={() => {
-            setToast && setToast({ kind: 'success', message: `เริ่มกระบวนการต่อสัญญาห้อง ${t.roomId}` });
-            addActivity && addActivity({ icon: '↻', text: `เริ่มต่อสัญญาห้อง ${t.roomId} (${t.name})`, type: 'contract' });
-          }}>ต่อสัญญา</Btn>
+          <Btn variant="secondary" size="sm" icon="✎" onClick={() => setShowEdit(true)}>
+            แก้ไขส่วนลด/ระยะเวลา
+          </Btn>
+          <Btn variant="ghost" size="sm" onClick={() => { window.location.hash = '#contracts'; }}>
+            ไปหน้ารายงานสัญญา
+          </Btn>
         </div>
       </Card>
+      {showEdit ? (
+        <ContractQuickEditModal
+          contract={contract}
+          onClose={() => setShowEdit(false)}
+          onSaved={() => { setShowEdit(false); reload();
+            setToast && setToast({ kind: 'success', message: 'บันทึกแล้ว' });
+          }}
+          onError={(msg) => setToast && setToast({ kind: 'danger', message: msg })}
+        />
+      ) : null}
     </div>
   );
 }
+
+function CheckInModal({ tenantId, tenant, onClose, onDone, onError }) {
+  const C = window.ADMIN_C;
+  const { Modal, Btn } = window;
+  const apiCall = window.apiCall;
+  const [form, setForm] = React.useState({
+    moveInDate: new Date().toISOString().slice(0, 10),
+    monthlyRent: String(tenant.rent || ''),
+    depositAmount: String((tenant.rent || 0) * 2),
+    termMonths: '12',
+    discountPct: '',  // empty → resolved from termMonths + config.discounts
+  });
+  const [busy, setBusy] = React.useState(false);
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!tenant.roomId) {
+      onError && onError('ไม่พบห้องของผู้เช่า — กำหนดห้องที่หน้ารายชื่อก่อน');
+      return;
+    }
+    setBusy(true);
+    try {
+      const payload = {
+        roomId: tenant.roomId,
+        moveInDate: form.moveInDate,
+        monthlyRent: Number(form.monthlyRent),
+        depositAmount: Number(form.depositAmount),
+      };
+      if (form.termMonths) payload.termMonths = Number(form.termMonths);
+      if (form.discountPct !== '') payload.discountPct = Number(form.discountPct);
+      await apiCall(`/api/tenants/${tenantId}/checkin`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      onDone && onDone();
+    } catch (err) {
+      onError && onError('เช็คอินล้มเหลว: ' + (err.message || 'unknown'));
+    } finally { setBusy(false); }
+  };
+  return (
+    <Modal open={true} onClose={onClose} title="เช็คอินผู้เช่า"
+      footer={
+        <>
+          <Btn variant="ghost" onClick={onClose} disabled={busy}>ยกเลิก</Btn>
+          <Btn variant="primary" onClick={submit} disabled={busy}>
+            {busy ? '…' : 'บันทึก + สร้างสัญญา'}
+          </Btn>
+        </>
+      }
+    >
+      <form onSubmit={submit} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <div style={{ fontSize: 13, color: C.muted, lineHeight: 1.6 }}>
+          ผู้เช่า: <b>{tenant.name}</b> · ห้อง <b>{tenant.roomId}</b>
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+          <div>
+            <label style={inLbl}>วันที่เข้าพัก</label>
+            <input type="date" value={form.moveInDate}
+              onChange={(e) => setForm({ ...form, moveInDate: e.target.value })}
+              required style={inInp} />
+          </div>
+          <div>
+            <label style={inLbl}>ระยะสัญญา (เดือน)</label>
+            <input type="number" min="1" max="120" value={form.termMonths}
+              onChange={(e) => setForm({ ...form, termMonths: e.target.value })}
+              placeholder="12" style={inInp} />
+          </div>
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+          <div>
+            <label style={inLbl}>ค่าเช่า/เดือน (บาท)</label>
+            <input type="number" step="0.01" min="0" value={form.monthlyRent}
+              onChange={(e) => setForm({ ...form, monthlyRent: e.target.value })}
+              required style={inInp} />
+          </div>
+          <div>
+            <label style={inLbl}>เงินมัดจำ (บาท)</label>
+            <input type="number" step="0.01" min="0" value={form.depositAmount}
+              onChange={(e) => setForm({ ...form, depositAmount: e.target.value })}
+              required style={inInp} />
+          </div>
+        </div>
+        <div>
+          <label style={inLbl}>ส่วนลด % (เว้นว่างเพื่อใช้จาก config.discounts ตามระยะสัญญา)</label>
+          <input type="number" step="0.1" min="0" max="50" value={form.discountPct}
+            onChange={(e) => setForm({ ...form, discountPct: e.target.value })}
+            placeholder="ปล่อยว่าง = auto" style={inInp} />
+        </div>
+        <div style={{
+          padding: 10, background: C.surfaceAlt, borderRadius: 6,
+          fontSize: 12, color: C.muted, lineHeight: 1.5,
+        }}>
+          ℹ️ ถ้าตั้ง <b>ระยะสัญญา</b> + เว้น <b>ส่วนลด</b> ว่าง ระบบจะหาว่าเข้าเกณฑ์ใด:
+          ≥ 24 เดือน → twentyFourMonth, ≥ 12 → twelveMonth, ≥ 6 → sixMonth
+          (จาก /admin#pricing)
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+function ContractQuickEditModal({ contract, onClose, onSaved, onError }) {
+  const C = window.ADMIN_C;
+  const { Modal, Btn } = window;
+  const apiCall = window.apiCall;
+  const [form, setForm] = React.useState({
+    discountPct: contract.discount_pct != null ? String(contract.discount_pct) : '0',
+    termMonths:  contract.term_months  != null ? String(contract.term_months)  : '',
+    endDate:     contract.end_date ? String(contract.end_date).slice(0, 10) : '',
+  });
+  const [busy, setBusy] = React.useState(false);
+  const submit = async (e) => {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      const payload = {};
+      if (form.discountPct !== '') payload.discountPct = Number(form.discountPct);
+      payload.termMonths = form.termMonths === '' ? null : Number(form.termMonths);
+      payload.endDate = form.endDate || null;
+      await apiCall(`/api/contracts/${contract.id}`, {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      });
+      onSaved && onSaved();
+    } catch (err) {
+      onError && onError('บันทึกล้มเหลว: ' + (err.message || 'unknown'));
+    } finally { setBusy(false); }
+  };
+  return (
+    <Modal open={true} onClose={onClose} title={`แก้ไข ${contract.contract_no}`}
+      footer={
+        <>
+          <Btn variant="ghost" onClick={onClose} disabled={busy}>ยกเลิก</Btn>
+          <Btn variant="primary" onClick={submit} disabled={busy}>
+            {busy ? '…' : 'บันทึก'}
+          </Btn>
+        </>
+      }
+    >
+      <form onSubmit={submit} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+          <div>
+            <label style={inLbl}>ส่วนลด %</label>
+            <input type="number" step="0.1" min="0" max="50" value={form.discountPct}
+              onChange={(e) => setForm({ ...form, discountPct: e.target.value })}
+              style={inInp} />
+          </div>
+          <div>
+            <label style={inLbl}>ระยะสัญญา (เดือน)</label>
+            <input type="number" min="1" max="120" value={form.termMonths}
+              onChange={(e) => setForm({ ...form, termMonths: e.target.value })}
+              style={inInp} />
+          </div>
+        </div>
+        <div>
+          <label style={inLbl}>วันสิ้นสุด</label>
+          <input type="date" value={form.endDate}
+            onChange={(e) => setForm({ ...form, endDate: e.target.value })}
+            style={inInp} />
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+const inLbl = { display: 'block', fontSize: 12, color: '#5b4f40', marginBottom: 4 };
+const inInp = {
+  width: '100%', padding: '8px 10px', border: '1px solid #ece4d4',
+  borderRadius: 6, fontSize: 13, fontFamily: 'inherit',
+};
 
 function TabBills({ t }) {
   const C = window.ADMIN_C;
