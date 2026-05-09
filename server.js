@@ -29,6 +29,8 @@ const { validateBody } = require('./middleware/validate');
 const PORT = process.env.PORT || 3000;
 const NODE_ENV = process.env.NODE_ENV || 'production';
 const DATABASE_URL = process.env.DATABASE_URL;
+const DISABLE_BACKGROUND_JOBS = process.env.DISABLE_BACKGROUND_JOBS === '1'
+  || /^true$/i.test(String(process.env.DISABLE_BACKGROUND_JOBS || ''));
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
 // No fallback for SESSION_SECRET / ADMIN_PASSWORD — refusing to boot is
 // safer than running with a known-weak default that anyone reading the
@@ -1267,17 +1269,36 @@ app.put('/api/maintenance/:id', sameOrigin, csrfGuard, requireAuth, requireRole(
     // Notify the tenant when the ticket transitions to `completed` so they
     // get a prompt to rate the service. Fire-and-forget; routes through
     // notifier (LINE → email) so multi-OA tenants get the right channel.
+    //
+    // Resolve by tenant_id (stamped on the ticket at creation time) instead
+    // of re-querying by phone. Without this, two tenants sharing a phone
+    // (couples, families) would race on `ORDER BY updated_at DESC LIMIT 1`
+    // and the completion notification could land on the wrong person.
+    // tenant_id was set when the ticket was created (server.js:1119) — that
+    // moment's match is the authoritative one. Fall back to phone lookup
+    // only for legacy tickets where tenant_id was never stamped.
     if (b.status === 'completed') {
       try {
         const t = rows[0];
-        // Look up the bound tenant (so we have line_user_id + line_oa_id).
-        const tq = await pool.query(
-          `SELECT id, full_name, phone, email, line_user_id, line_oa_id
-             FROM tenants
-             WHERE phone=$1 AND deleted_at IS NULL
-             ORDER BY updated_at DESC LIMIT 1`,
-          [t.tenant_phone || '']
-        );
+        let tq;
+        if (t.tenant_id) {
+          tq = await pool.query(
+            `SELECT id, full_name, phone, email, line_user_id, line_oa_id, status
+               FROM tenants
+               WHERE id=$1 AND deleted_at IS NULL`,
+            [t.tenant_id]
+          );
+        } else if (t.tenant_phone) {
+          tq = await pool.query(
+            `SELECT id, full_name, phone, email, line_user_id, line_oa_id, status
+               FROM tenants
+               WHERE phone=$1 AND deleted_at IS NULL
+               ORDER BY updated_at DESC LIMIT 1`,
+            [t.tenant_phone]
+          );
+        } else {
+          tq = { rows: [] };
+        }
         if (tq.rows.length) {
           const flags = await features.load(pool);
           notifier.notifyTenant({ pool, features: flags }, tq.rows[0], {
@@ -1530,9 +1551,9 @@ app.get('/api/reports/maintenance', requireAuth, async (req, res) => {
       ),
       pool.query(`SELECT
                     SUM(cost)::numeric(12,2) AS total_cost,
-                    AVG(cost)::numeric(10,2) FILTER (WHERE cost > 0) AS avg_cost,
+                    (AVG(cost) FILTER (WHERE cost > 0))::numeric(10,2) AS avg_cost,
                     COUNT(*) FILTER (WHERE cost > 0) AS billed_count,
-                    SUM(cost) FILTER (WHERE status='completed')::numeric(12,2) AS completed_cost
+                    (SUM(cost) FILTER (WHERE status='completed'))::numeric(12,2) AS completed_cost
                   FROM maintenance_tickets ${where}`, params),
       pool.query(
         `SELECT category, COUNT(*) AS n, SUM(cost)::numeric(12,2) AS cost_total
@@ -2778,8 +2799,12 @@ app.post('/api/tenant/payments', sameOrigin, csrfGuard, requireTenant, ensureSli
       // (1) + (2) + (3): lock the bill, re-check status, and verify no other
       // verified payment beat us to the COMMIT. SELECT FOR UPDATE blocks
       // any other concurrent slip-upload on this bill until we commit/rollback.
+      // Also re-fetch tenant_id under the lock so an admin-side reassignment
+      // happening during the 5-10s verifier RPC can't slip a payment into the
+      // wrong tenant's ledger (bill might have been re-pointed at tenant B
+      // while tenant A's upload was in flight).
       const lock = await client.query(
-        `SELECT id, status, total FROM bills WHERE id=$1 AND deleted_at IS NULL FOR UPDATE`,
+        `SELECT id, status, total, tenant_id FROM bills WHERE id=$1 AND deleted_at IS NULL FOR UPDATE`,
         [billId]
       );
       if (!lock.rows.length) {
@@ -2790,6 +2815,21 @@ app.post('/api/tenant/payments', sameOrigin, csrfGuard, requireTenant, ensureSli
         return res.status(404).json({
           error: 'ไม่พบบิล (อาจถูกลบระหว่างการส่งสลิป)',
           code: 'BILL_NOT_FOUND_AT_COMMIT',
+        });
+      }
+      // Re-validate ownership under the lock — protects against the
+      // bill.tenant_id changing between the outer SELECT (line 2592) and
+      // here, which would otherwise let a slip be attributed to a bill
+      // that's been reassigned to a different tenant.
+      if (lock.rows[0].tenant_id
+          && Number(lock.rows[0].tenant_id) !== Number(req.tenant.tenant_id)) {
+        await client.query('ROLLBACK');
+        if (slip && slip.id) {
+          require('./services/storage').remove(pool, slip.id).catch(() => {});
+        }
+        return res.status(403).json({
+          error: 'บิลนี้ถูกย้ายไปยังผู้เช่ารายอื่นระหว่างการส่งสลิป',
+          code: 'BILL_REASSIGNED',
         });
       }
       const lockedStatus = lock.rows[0].status;
@@ -5020,7 +5060,7 @@ app.use((req, res, next) => {
   }
   next();
 });
-app.use(express.static(path.join(__dirname, 'project')));
+app.use(express.static(path.join(__dirname, 'project'), { redirect: false }));
 
 // Files (slips, room photos, signatures, citizen-ID images) are sensitive
 // PII. Instead of mounting uploads/ as a public static path, we proxy through
@@ -5309,9 +5349,13 @@ migrate()
       console.log(`[server] login:   /login`);
       console.log(`[server] health:  /health`);
     });
-    startAuditPruner();
-    scheduler.start(pool);
-    notifQueue.start(pool, () => features.load(pool));
+    if (DISABLE_BACKGROUND_JOBS) {
+      console.warn('[server] background jobs disabled via DISABLE_BACKGROUND_JOBS=1');
+    } else {
+      startAuditPruner();
+      scheduler.start(pool);
+      notifQueue.start(pool, () => features.load(pool));
+    }
 
     // Graceful shutdown: drain in-flight requests before closing the DB pool
     // so Railway restarts don't kill mid-request work.

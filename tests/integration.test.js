@@ -758,6 +758,68 @@ test('TabContract resolves tenant phone with the same normaliser the DB uses', (
     'normaliser must strip whitespace + dashes (matches mirrorRoomsToTenants)');
 });
 
+test('slip upload re-validates bill.tenant_id under FOR UPDATE lock (BILL_REASSIGNED)', () => {
+  // The outside SELECT (line 2592) checks bill.tenant_id matches the
+  // session, but admin could change tenant_id during the 5-10s slipVerifier
+  // RPC. Without an inside-tx re-check, the slip would land on a bill that
+  // was reassigned mid-upload. Pin the inside-lock check that catches this.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  // The locked SELECT must include tenant_id so the reassignment guard has
+  // data to compare against.
+  assert.match(server,
+    /SELECT id, status, total, tenant_id FROM bills WHERE id=\$1 AND deleted_at IS NULL FOR UPDATE/,
+    'inside-tx lock must fetch tenant_id');
+  // The reassignment guard must run + ROLLBACK on mismatch.
+  assert.match(server,
+    /BILL_REASSIGNED/,
+    'inside-tx mismatch must surface BILL_REASSIGNED code');
+  assert.match(server,
+    /lock\.rows\[0\]\.tenant_id[\s\S]{0,200}!==\s*Number\(req\.tenant\.tenant_id\)/,
+    'must compare locked tenant_id vs session tenant_id');
+});
+
+test('maintenance completion notifies via tenant_id (not phone re-lookup)', () => {
+  // Two tenants sharing a phone (couples, families) would race the
+  // ORDER BY updated_at LIMIT 1 phone lookup — completion notification
+  // could land on the wrong person. The ticket's tenant_id (stamped at
+  // creation time) is authoritative; phone lookup is the fallback only
+  // for legacy tickets.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const idx = server.indexOf("if (b.status === 'completed')");
+  assert.ok(idx > 0, 'maintenance completed branch must exist');
+  const body = server.slice(idx, idx + 3000);
+  assert.match(body, /if \(t\.tenant_id\)[\s\S]{0,300}WHERE id=\$1/,
+    'must look up by tenant_id when stamped');
+  assert.match(body, /else if \(t\.tenant_phone\)/,
+    'phone fallback only when tenant_id is null');
+});
+
+test('maintenance report aggregate FILTER syntax is PostgreSQL-valid', () => {
+  // PostgreSQL requires FILTER to attach to the aggregate before the cast:
+  // (AVG(cost) FILTER (...))::numeric, not AVG(cost)::numeric FILTER (...).
+  // The wrong order only fails against a real DB, so pin it statically.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.doesNotMatch(server, /AVG\(cost\)::numeric\([^)]*\)\s+FILTER/i);
+  assert.match(server, /\(AVG\(cost\) FILTER \(WHERE cost > 0\)\)::numeric\(10,2\)/);
+  assert.match(server, /\(SUM\(cost\) FILTER \(WHERE status='completed'\)\)::numeric\(12,2\)/);
+});
+
+test('static assets do not intercept /admin auth route with directory redirect', () => {
+  // project/admin is a real static directory. express.static's default
+  // redirect=true turns /admin into /admin/ before the auth route runs,
+  // which breaks both the expected login redirect and authenticated page.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(server, /express\.static\(path\.join\(__dirname,\s*'project'\),\s*\{\s*redirect:\s*false\s*\}\)/);
+});
+
 test('encryption module round-trips with versioned prefix', () => {
   // Force a clean load with the current env + ENCRYPTION_KEY_V1 set
   process.env.ENCRYPTION_KEY_V1 = Buffer.alloc(32, 1).toString('base64');
