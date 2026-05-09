@@ -323,7 +323,7 @@ function TemplateEditor({ template, defaultClauses, onClose, onSaved, onError })
     <Modal
       open={true}
       onClose={onClose}
-      size="xl"
+      width={820}
       title={isNew ? 'สร้าง Template ใหม่' : `แก้ไข: ${template.name}`}
       footer={
         <>
@@ -533,37 +533,27 @@ function TemplateEditor({ template, defaultClauses, onClose, onSaved, onError })
             >+ เพิ่มตัวแปร</Btn>
           </div>
           {form.variables.length === 0 ? (
-            <div style={{ padding: 16, color: C.muted, fontSize: 12, textAlign: 'center',
-                          border: `1px dashed ${C.border}`, borderRadius: 6 }}>
-              ยังไม่มีตัวแปร — clauses จะใช้แค่ตัวแปรในระบบ ({'{{monthlyRent}}'}, {'{{depositAmount}}'} ฯลฯ)
+            <div style={{ padding: 20, color: C.muted, fontSize: 13, textAlign: 'center',
+                          border: `1px dashed ${C.border}`, borderRadius: 6, lineHeight: 1.6 }}>
+              ยังไม่มีตัวแปร — clauses จะใช้แค่ตัวแปรในระบบ ({'{{monthlyRent}}'}, {'{{depositAmount}}'} ฯลฯ)<br/>
+              <span style={{ fontSize: 12 }}>
+                กด <b>"+ เพิ่มตัวแปร"</b> ด้านบน เพื่อสร้างตัวแปรเฉพาะ เช่น <code>{'{{wifi_password}}'}</code>
+              </span>
             </div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               {form.variables.map((v, i) => (
-                <div key={i} style={{ display: 'grid', gridTemplateColumns: '180px 1fr 36px', gap: 8 }}>
-                  <input style={inp} placeholder="ชื่อ (เช่น wifi_password)"
-                    value={v.key}
-                    onChange={(e) => {
-                      const arr = [...form.variables];
-                      arr[i] = { ...arr[i], key: e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, '') };
-                      setForm({ ...form, variables: arr });
-                    }} />
-                  <input style={inp} placeholder="ค่า"
-                    maxLength={500}
-                    value={v.value}
-                    onChange={(e) => {
-                      const arr = [...form.variables];
-                      arr[i] = { ...arr[i], value: e.target.value };
-                      setForm({ ...form, variables: arr });
-                    }} />
-                  <Btn size="sm" variant="ghost"
-                    onClick={() => {
-                      const arr = [...form.variables];
-                      arr.splice(i, 1);
-                      setForm({ ...form, variables: arr });
-                    }}
-                    style={{ color: '#c0392b' }}>×</Btn>
-                </div>
+                <VariableRow key={i} pair={v}
+                  onChange={(next) => {
+                    const arr = [...form.variables];
+                    arr[i] = next;
+                    setForm({ ...form, variables: arr });
+                  }}
+                  onRemove={() => {
+                    const arr = [...form.variables];
+                    arr.splice(i, 1);
+                    setForm({ ...form, variables: arr });
+                  }} />
               ))}
             </div>
           )}
@@ -577,6 +567,56 @@ function TemplateEditor({ template, defaultClauses, onClose, onSaved, onError })
         </div>
       ) : null}
     </Modal>
+  );
+}
+
+// === Variable key/value row ===============================================
+// Cleans the key as the admin types (lowercase + alphanumeric + underscore)
+// and shows a small "→ cleaned" hint when the displayed value differs from
+// what they typed — silent transformation otherwise leaves admin confused
+// when "Wifi Password" becomes "wifipassword". Reserved names (e.g.
+// __proto__) get rejected at server side, but UI mirrors the constraint
+// so admin sees the issue immediately.
+function VariableRow({ pair, onChange, onRemove }) {
+  const C = window.ADMIN_C;
+  const { Btn } = window;
+  const [raw, setRaw] = React.useState(pair.key || '');
+  const cleaned = String(raw || '').toLowerCase().replace(/[^a-z0-9_]/g, '');
+  const wasCleaned = raw !== cleaned;
+  const isReserved = ['__proto__', 'constructor', 'prototype'].includes(cleaned);
+  return (
+    <div>
+      <div style={{ display: 'grid', gridTemplateColumns: '180px 1fr 36px', gap: 8 }}>
+        <input style={{
+          ...inp,
+          borderColor: isReserved ? '#c0392b' : C.border,
+        }}
+          placeholder="ชื่อ (เช่น wifi_password)"
+          value={raw}
+          onBlur={() => { setRaw(cleaned); onChange({ ...pair, key: cleaned }); }}
+          onChange={(e) => {
+            const next = e.target.value;
+            setRaw(next);
+            onChange({ ...pair, key: next.toLowerCase().replace(/[^a-z0-9_]/g, '') });
+          }} />
+        <input style={inp} placeholder="ค่า (≤ 500 ตัวอักษร)"
+          maxLength={500}
+          value={pair.value}
+          onChange={(e) => onChange({ ...pair, value: e.target.value })} />
+        <Btn size="sm" variant="ghost" onClick={onRemove}
+          style={{ color: '#c0392b' }} title="ลบตัวแปร">×</Btn>
+      </div>
+      {(wasCleaned || isReserved) ? (
+        <div style={{
+          fontSize: 11, color: isReserved ? '#c0392b' : C.muted,
+          marginTop: 2, marginLeft: 4,
+        }}>
+          {isReserved
+            ? `⚠ "${cleaned}" เป็นชื่อสงวน — กรุณาใช้ชื่ออื่น`
+            : `→ ระบบจะบันทึกเป็น "${cleaned}" (ใช้แค่ a-z, 0-9, _)`}
+        </div>
+      ) : null}
+    </div>
   );
 }
 

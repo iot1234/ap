@@ -2131,21 +2131,40 @@ app.post('/api/tenants', sameOrigin, csrfGuard, requireAuth, requireRole('owner'
     }
     pinHash = await bcrypt.hash(String(b.pin), 10);
   }
-  // Pre-flight dedup check on citizen_id_hash. The DB has a partial unique
-  // index that would catch the race anyway, but a 409 with the conflict's
-  // tenant id is more actionable than a generic 23505.
-  if (citizenHash && b.force !== true) {
+  // Pre-flight dedup check. Two cohorts to look at:
+  //   1. citizen_id_hash matches (high confidence) — the partial unique
+  //      index catches this at INSERT time too, but a 409 with the prior
+  //      tenant's id is more actionable than a generic 23505.
+  //   2. citizen_id_tail matches BUT hash is NULL on the prior row. This
+  //      catches the dedup escape where tenant A was created with a
+  //      checksum-invalid id + force=true (we set hash=NULL there to
+  //      preserve the legacy data path), and tenant B comes along with a
+  //      valid id whose tail matches A. Without this check, B would slip
+  //      past pre-flight + the partial unique because A's hash is NULL.
+  if (citizenIdNorm && b.force !== true) {
     try {
-      const dup = await pool.query(
-        `SELECT id, full_name, status FROM tenants
-           WHERE citizen_id_hash=$1 AND deleted_at IS NULL AND status='active' LIMIT 1`,
-        [citizenHash]
-      );
-      if (dup.rows.length) {
+      let dup = null;
+      if (citizenHash) {
+        const r = await pool.query(
+          `SELECT id, full_name, status FROM tenants
+             WHERE citizen_id_hash=$1 AND deleted_at IS NULL AND status='active' LIMIT 1`,
+          [citizenHash]
+        );
+        dup = r.rows[0] || null;
+      }
+      if (!dup) {
+        const r = await pool.query(
+          `SELECT id, full_name, status FROM tenants
+             WHERE citizen_id_tail=$1 AND deleted_at IS NULL AND status='active' LIMIT 1`,
+          [citizenTail]
+        );
+        dup = r.rows[0] || null;
+      }
+      if (dup) {
         return res.status(409).json({
           error: 'เลขบัตรนี้ถูกบันทึกในระบบแล้วกับผู้เช่ารายอื่น',
           code: 'CITIZEN_ID_DUPLICATE',
-          conflict: dup.rows[0],
+          conflict: dup,
           hint: 'ส่ง { force: true } ถ้ายืนยันว่าเป็นคนเดิม (audit-logged)',
         });
       }
@@ -2229,20 +2248,45 @@ app.post('/api/tenants', sameOrigin, csrfGuard, requireAuth, requireRole('owner'
     if (b.bookingId) {
       try {
         const bookingId = String(b.bookingId).slice(0, 64);
-        const bk = await pool.query(
-          `SELECT citizen_id_image_front_id FROM bookings WHERE external_id=$1 LIMIT 1`,
-          [bookingId]
-        ).catch(() => ({ rows: [] }));
-        const fid = bk.rows[0] && bk.rows[0].citizen_id_image_front_id;
+        let fid = null;
+        try {
+          const bk = await pool.query(
+            `SELECT citizen_id_image_front_id FROM bookings WHERE external_id=$1 LIMIT 1`,
+            [bookingId]
+          );
+          fid = bk.rows[0] && bk.rows[0].citizen_id_image_front_id;
+        } catch (err) {
+          // 42703 = pre-migration column absent. 42P01 = bookings table
+          // missing entirely (legacy deploy). Both are expected on older
+          // installs — skip carry-over silently. Anything else is a real
+          // error that should be visible.
+          if (err.code !== '42703' && err.code !== '42P01') throw err;
+        }
         if (fid) {
-          await pool.query(
-            `UPDATE tenants SET citizen_id_image_front_id=$1, updated_at=NOW() WHERE id=$2`,
-            [fid, rows[0].id]
+          // Verify the file is actually a citizen-ID image with the
+          // public-booking-pending placeholder ref_id we wrote at upload
+          // time. Without this, a corrupted booking row pointing at the
+          // wrong file_uploads.id (e.g. an unrelated contract_signature)
+          // would get re-targeted onto the tenant's identity FK column.
+          const fileQ = await pool.query(
+            `SELECT id FROM file_uploads
+               WHERE id=$1 AND category='citizen_id_image'
+                 AND (ref_id='public-booking-pending' OR ref_id IS NULL)
+               LIMIT 1`,
+            [fid]
           );
-          await pool.query(
-            `UPDATE file_uploads SET ref_id=$1 WHERE id=$2`,
-            [String(rows[0].id), fid]
-          );
+          if (fileQ.rows.length) {
+            await pool.query(
+              `UPDATE tenants SET citizen_id_image_front_id=$1, updated_at=NOW() WHERE id=$2`,
+              [fid, rows[0].id]
+            );
+            await pool.query(
+              `UPDATE file_uploads SET ref_id=$1 WHERE id=$2 AND category='citizen_id_image'`,
+              [String(rows[0].id), fid]
+            );
+          } else {
+            console.warn('[tenant.create] booking photo skipped — wrong category or ref_id');
+          }
         }
       } catch (err) {
         console.warn('[tenant.create] booking photo link skipped:', err.message);
@@ -5639,9 +5683,18 @@ function _validateTemplatePayload(b) {
   // Variables: string-only key/value, capped lengths so PDF text doesn't
   // overflow the page.
   const variablesIn = (b.variables && typeof b.variables === 'object') ? b.variables : {};
-  const variables = {};
+  const variables = Object.create(null);  // null prototype — no __proto__ surprise
+  // Blocklist names that would cause renderer surprises when spread into
+  // the interpolation context. The regex already excludes `-` etc, but
+  // identifier-shaped names that collide with Object.prototype methods
+  // would render as garbage. Keep the list short — only practical risks.
+  const RESERVED_VAR_NAMES = new Set([
+    '__proto__', 'constructor', 'prototype', 'hasOwnProperty',
+    'toString', 'valueOf',
+  ]);
   for (const [k, v] of Object.entries(variablesIn)) {
     if (typeof k !== 'string' || !/^[a-z_][a-z0-9_]{0,30}$/i.test(k)) continue;
+    if (RESERVED_VAR_NAMES.has(k)) continue;
     if (typeof v !== 'string') continue;
     variables[k] = v.slice(0, 500);
   }
@@ -5718,8 +5771,11 @@ app.post('/api/admin/contract-templates', sameOrigin, csrfGuard, requireAuth, re
       // If this template is being set as default, unset any existing default
       // first so the partial unique index doesn't 23505 us.
       if (p.isDefault) {
+        // Bump updated_at on the demoted row too so admin's "recently
+        // changed" view reflects the demotion. Without this, the demote
+        // looks invisible in the audit list.
         await client.query(
-          `UPDATE contract_templates SET is_default=FALSE
+          `UPDATE contract_templates SET is_default=FALSE, updated_at=NOW()
             WHERE is_default=TRUE AND deleted_at IS NULL`
         );
       }
@@ -5863,7 +5919,7 @@ app.post('/api/admin/contract-templates/:id/set-default',
         });
       }
       await client.query(
-        `UPDATE contract_templates SET is_default=FALSE
+        `UPDATE contract_templates SET is_default=FALSE, updated_at=NOW()
           WHERE is_default=TRUE AND deleted_at IS NULL`
       );
       await client.query(
@@ -6106,7 +6162,11 @@ app.delete('/api/admin/contract-terms', sameOrigin, csrfGuard, requireAuth, requ
 //
 // ?download=1 forces a download (Content-Disposition: attachment) so admin
 // can save → print. Default is inline so the browser PDF viewer opens.
-app.get('/api/contracts/:id/pdf', requireAuth, requireRole('owner', 'manager', 'staff'),
+// Restricted to owner+manager because the rendered PDF embeds the
+// citizen-ID tail + tenant emergency phone — same data class as
+// /api/tenants/:id/identity, which is owner+manager only. Letting staff
+// download contracts would route around that gate.
+app.get('/api/contracts/:id/pdf', requireAuth, requireRole('owner', 'manager'),
   async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });

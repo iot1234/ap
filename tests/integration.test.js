@@ -1486,6 +1486,164 @@ test('features.tenancyContract defaults are sane (require ID images + emergency)
     'deposit cap default = 3 months');
 });
 
+test('checkOut schema declares generateClosingBill (zod must not strip the opt-out)', () => {
+  // schemas/index.js's checkOut omitted the field, so zod's default
+  // .strip() removed req.body.generateClosingBill before the handler
+  // could read it. Admin's "skip closing bill" toggle was dead code.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'schemas', 'index.js'), 'utf8');
+  assert.match(src,
+    /schemas\.checkOut = z\.object\(\{[\s\S]{0,800}generateClosingBill: z\.boolean\(\)\.optional\(\)/,
+    'checkOut schema must declare generateClosingBill');
+});
+
+test('checkin uses pg_advisory_xact_lock to serialise parallel checkins per room', () => {
+  // SELECT-without-FOR-UPDATE used to let two parallel checkins both see
+  // the same room as vacant. Now we take a per-room advisory lock first.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'tenant-ops.js'), 'utf8');
+  assert.match(src, /pg_advisory_xact_lock\(\$1::int, \$2::int\)/,
+    'checkin must take a per-room advisory lock');
+  // The occupancy SELECT inside the locked region must use FOR UPDATE
+  // as belt-and-braces.
+  assert.match(src,
+    /SELECT id, full_name FROM tenants[\s\S]{0,400}current_room_id=\$1[\s\S]{0,200}FOR UPDATE/,
+    'occupancy check must lock matching tenant rows');
+});
+
+test('checkin IDENTITY_INCOMPLETE splits front/back into separate missing markers', () => {
+  // v1 just emitted "citizenIdImages" which left admin guessing which
+  // side they forgot. Now front + back each get their own marker.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'tenant-ops.js'), 'utf8');
+  assert.match(src, /missing\.push\('citizenIdFront'\)/);
+  assert.match(src, /missing\.push\('citizenIdBack'\)/);
+  // Human-friendly labels in the response — NOT just enum codes.
+  assert.match(src, /'รูปบัตรประชาชนด้านหน้า'/);
+  assert.match(src, /'รูปบัตรประชาชนด้านหลัง'/);
+});
+
+test('checkout closing bill uses Bangkok local-day for pro-rate, not server local', () => {
+  // Server in UTC, checkout at 00:30 ICT = 17:30 UTC previous day. Without
+  // the Bangkok shift, getDate() returns yesterday's day-of-month → off-
+  // by-one daysLived → wrong fraction. The fix shifts UTC by +07:00 then
+  // reads UTC* getters from that shifted Date.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'tenant-ops.js'), 'utf8');
+  assert.match(src, /utc\.getTime\(\) \+ 7 \* 3600 \* 1000/,
+    'closing-bill must shift UTC by +07:00');
+  assert.match(src, /bkk\.getUTCDate\(\)/,
+    'must read getUTCDate from the shifted timestamp');
+});
+
+test('PDF endpoint role tightened to owner+manager (no staff)', () => {
+  // Staff was reading citizen_id_tail + emergency_contact_phone via the
+  // PDF — same data class as /identity which is owner+manager only.
+  // Tighten the gate so staff can't route around the identity ACL.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(src,
+    /app\.get\('\/api\/contracts\/:id\/pdf', requireAuth, requireRole\('owner', 'manager'\)/,
+    'PDF endpoint must NOT include staff role');
+});
+
+test('citizen-ID dedup pre-flight checks tail when hash is NULL', () => {
+  // Tenant A created with bad checksum + force=true → hash=NULL stored.
+  // Pre-fix, tenant B with same plaintext ID would slip past pre-flight
+  // (looking only at hash) AND past the partial unique (A has hash NULL).
+  // Now pre-flight falls back to citizen_id_tail when hash lookup misses.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(src,
+    /WHERE citizen_id_tail=\$1 AND deleted_at IS NULL AND status='active'/,
+    'tail-fallback dedup query must exist');
+  // Sanity: the dedup branch must trigger when citizenIdNorm is set, not
+  // gated on citizenHash existing.
+  assert.match(src, /if \(citizenIdNorm && b\.force !== true\)/,
+    'dedup precondition must be on the normalised id, not the hash');
+});
+
+test('booking photo carryover only catches schema-missing errors silently', () => {
+  // Pre-fix: .catch(() => ({rows:[]})) swallowed every error including
+  // real bugs. Now we explicitly handle 42703 (column missing) and 42P01
+  // (table missing) — anything else throws so admin sees the real problem.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(src,
+    /err\.code !== '42703' && err\.code !== '42P01'\) throw err/,
+    'must throw on non-schema errors');
+  // Category verification — the file must be a citizen_id_image with the
+  // expected ref_id placeholder before re-targeting onto the new tenant.
+  assert.match(src,
+    /WHERE id=\$1 AND category='citizen_id_image'[\s\S]{0,200}ref_id='public-booking-pending'/,
+    'category check must verify citizen-ID before retargeting');
+});
+
+test('contract-templates UI passes width to Modal, not non-existent size prop', () => {
+  // Modal in ui.jsx accepts `width` (number, default 480) — `size="xl"`
+  // was silently ignored, leaving the editor at 480px (canvas overflow,
+  // 4-tab layout cramped).
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const tmplPage = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-contract-templates.jsx'), 'utf8');
+  const contPage = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-contracts.jsx'), 'utf8');
+  // Template editor needs ≥ 800px to fit tabs + clauses
+  assert.match(tmplPage, /width=\{8\d{2}\}/, 'template editor must use width={8xx}');
+  // Sign modal hosts a 600px canvas
+  assert.match(contPage, /width=\{6\d{2}\}/, 'sign modal must use width={6xx}');
+  // No <Modal> should still pass size= (the Btn/Pill `size="sm"` props
+  // are unrelated and stay legal). The pattern matches the JSX opening
+  // tag for Modal followed within ~500 chars by size=.
+  assert.ok(!/<Modal[\s\S]{0,500}size="(xl|lg|md|sm)"/.test(tmplPage),
+    'no Modal in template page may pass a size= prop');
+  assert.ok(!/<Modal[\s\S]{0,500}size="(xl|lg|md|sm)"/.test(contPage),
+    'no Modal in contracts page may pass a size= prop');
+});
+
+test('template variables block reserved names + use null-prototype map', () => {
+  // Pre-fix: __proto__ as a key would cause weird interpolation results.
+  // Defensive fix: blocklist + Object.create(null) so the merged object
+  // has no Object.prototype to shadow.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(src, /Object\.create\(null\)/,
+    'variables map must use null prototype');
+  assert.match(src, /RESERVED_VAR_NAMES = new Set\([\s\S]{0,200}'__proto__'/,
+    'reserved names blocklist must include __proto__');
+});
+
+test('signature canvas has minHeight floor for mobile', () => {
+  // 3:1 aspect on a 320px screen = 107px tall canvas — too small to sign
+  // legibly. minHeight=160 keeps the sign area usable on phones.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-contracts.jsx'), 'utf8');
+  assert.match(src, /aspectRatio: '3\/1', minHeight: 160/,
+    'sign canvas must keep ≥160px tall on narrow viewports');
+});
+
+test('VariableRow shows live cleanup hint when key auto-strips', () => {
+  // "Wifi Password" silently became "wifipassword" — admin saw the change
+  // without explanation. The row now shows "→ ระบบจะบันทึกเป็น ..." hint.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-contract-templates.jsx'), 'utf8');
+  assert.match(src, /function VariableRow/,
+    'extracted VariableRow component must exist');
+  assert.match(src, /ระบบจะบันทึกเป็น/,
+    'live key-cleanup hint must appear when transformation happens');
+  // Reserved-name warning
+  assert.match(src, /เป็นชื่อสงวน/);
+});
+
 test('admin UI: contract-templates page registered + script-loaded', () => {
   // The new page-contract-templates.jsx must be loaded by the dashboard
   // HTML AND wired into the shell PAGES + NAV map. Otherwise admin clicks

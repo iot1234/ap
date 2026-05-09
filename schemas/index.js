@@ -113,6 +113,12 @@ schemas.uploadIdentity = z.object({
 schemas.checkOut = z.object({
   reason: z.string().max(500).optional(),
   finalDepositReturn: z.coerce.number().nonnegative().max(1_000_000).optional(),
+  // Admin opts out of the auto-generated pro-rated closing bill (e.g. when
+  // checkout falls on the last day of the month and the regular monthly
+  // bill already covers everything). Without this field declared, zod's
+  // default .strip() removes it and `req.body.generateClosingBill !== false`
+  // is always true — the opt-out becomes dead code.
+  generateClosingBill: z.boolean().optional(),
 });
 
 // --- rooms ----------------------------------------------------------------

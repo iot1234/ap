@@ -180,15 +180,41 @@ module.exports = function buildTenantOpsRouter(ctx) {
         }
 
         // (4) Room must not be currently occupied by a DIFFERENT tenant.
-        // The old code did the room flip blindly — two checkins racing on
-        // the same room would result in the second one stomping the first
-        // and leaving the first tenant orphaned. Read rooms blob + rooms_v2
-        // under FOR UPDATE so the check + update are atomic.
+        // Two layers of protection against the parallel-checkin race:
+        //
+        //   (a) pg_advisory_xact_lock keyed on the room_id hash, taken
+        //       BEFORE the occupancy SELECT. Two parallel transactions
+        //       targeting the same room are now serialised — the second
+        //       blocks until the first commits, then sees the updated
+        //       state.
+        //   (b) Belt-and-braces SELECT FOR UPDATE on every active tenant
+        //       row currently assigned to this room. SELECT-without-FOR-
+        //       UPDATE used to let two parallel checkins both see the
+        //       room as vacant.
+        //
+        // The advisory lock is xact-scoped so it auto-releases on commit/
+        // rollback. The hash is FNV-1a of the room id string, clamped to
+        // int32 (Postgres advisory locks accept (int4, int4) signatures).
         if (!isForced) {
+          // Hash room_id → int32 advisory key (see scheduler's _lockKeyFor).
+          let h = 0x811c9dc5;
+          const s = String(roomId);
+          for (let i = 0; i < s.length; i++) {
+            h ^= s.charCodeAt(i);
+            h = Math.imul(h, 0x01000193);
+          }
+          const lockKey = (h >>> 0) & 0x7fffffff;
+          // Namespace 0x434b494e ("CKIN" — checkin) so advisory locks from
+          // unrelated subsystems can't collide.
+          await client.query(
+            'SELECT pg_advisory_xact_lock($1::int, $2::int)',
+            [0x434b494e, lockKey]
+          );
           const occupants = await client.query(
             `SELECT id, full_name FROM tenants
                WHERE current_room_id=$1 AND status='active' AND deleted_at IS NULL AND id<>$2
-               LIMIT 1`,
+               LIMIT 1
+               FOR UPDATE`,
             [roomId, id]
           );
           if (occupants.rows.length) {
@@ -204,10 +230,14 @@ module.exports = function buildTenantOpsRouter(ctx) {
 
         // (5) Identity / address / emergency contact required when the
         // feature flag insists. Lookup uses the FOR UPDATE-locked row.
+        // Identity images: split into two distinct missing markers so admin
+        // knows which side still needs uploading (the most common confusion
+        // in v1 was "I uploaded the front, why won't checkin let me proceed?"
+        // — admin had simply forgotten the back).
         const missing = [];
-        if (tenancy.requireIdentityImages !== false
-            && (!existing.citizen_id_image_front_id || !existing.citizen_id_image_back_id)) {
-          missing.push('citizenIdImages');
+        if (tenancy.requireIdentityImages !== false) {
+          if (!existing.citizen_id_image_front_id) missing.push('citizenIdFront');
+          if (!existing.citizen_id_image_back_id)  missing.push('citizenIdBack');
         }
         if (tenancy.requireAddress !== false && !existing.address) {
           missing.push('address');
@@ -218,12 +248,20 @@ module.exports = function buildTenantOpsRouter(ctx) {
         }
         if (!isForced && missing.length > 0) {
           await client.query('ROLLBACK');
+          // Build a human-friendly hint that lists each missing item by
+          // name so admin doesn't have to map error codes back to fields.
+          const labels = {
+            citizenIdFront: 'รูปบัตรประชาชนด้านหน้า',
+            citizenIdBack:  'รูปบัตรประชาชนด้านหลัง',
+            address:        'ที่อยู่ผู้เช่า',
+            emergencyContact: 'ผู้ติดต่อฉุกเฉิน (ชื่อ + เบอร์)',
+          };
           return res.status(412).json({
-            error: 'ผู้เช่ายังกรอกข้อมูลไม่ครบสำหรับการทำสัญญา',
+            error: `ผู้เช่ายังกรอกข้อมูลไม่ครบ — ขาด: ${missing.map((k) => labels[k] || k).join(', ')}`,
             code: 'IDENTITY_INCOMPLETE',
             missing,
-            hint: missing.includes('citizenIdImages')
-              ? 'ถ่ายภาพบัตรประชาชนหน้า + หลังที่ POST /api/tenants/:id/identity ก่อน'
+            hint: missing.some((m) => m.startsWith('citizenId'))
+              ? 'อัปโหลดภาพบัตรที่ POST /api/tenants/:id/identity (ส่ง frontDataUrl + backDataUrl)'
               : 'กรอกที่อยู่ + ผู้ติดต่อฉุกเฉินที่ /api/tenants/:id (PUT) ก่อน',
           });
         }
@@ -521,9 +559,16 @@ module.exports = function buildTenantOpsRouter(ctx) {
         // a 23505 error.
         let closingBill = null;
         if (wantClosingBill && oldRoom && closedContract) {
-          const today = new Date();
-          const ty = today.getFullYear();
-          const tm = today.getMonth() + 1;
+          // Asia/Bangkok local-time components — checkout at 00:30 ICT
+          // (UTC 17:30 prev day) on a UTC-deployed Railway server would
+          // otherwise read the previous day, off-by-one'ing pro-rate +
+          // potentially picking the wrong period at month boundaries.
+          // The same pattern as bills (Asia/Bangkok offset +07:00 baked in).
+          const utc = new Date();
+          const bkk = new Date(utc.getTime() + 7 * 3600 * 1000);
+          const ty = bkk.getUTCFullYear();
+          const tm = bkk.getUTCMonth() + 1;
+          const td = bkk.getUTCDate();
           const period = `${ty}-${String(tm).padStart(2, '0')}`;
           // Skip if a bill already exists for this room+period (active).
           const dup = await client.query(
@@ -533,8 +578,11 @@ module.exports = function buildTenantOpsRouter(ctx) {
             [oldRoom, period]
           );
           if (!dup.rows.length) {
-            const daysInMonth = new Date(ty, tm, 0).getDate();
-            const daysLived = today.getDate();   // 1..daysInMonth
+            // daysInMonth: day 0 of next month is the last day of this month.
+            // Use UTC math against the Bangkok-shifted date so DST/local-zone
+            // edge cases stay consistent with bills.
+            const daysInMonth = new Date(Date.UTC(ty, tm, 0)).getUTCDate();
+            const daysLived = td;   // 1..daysInMonth (Bangkok day-of-month)
             const fraction = Math.min(1, Math.max(0, daysLived / daysInMonth));
             const baseRent = Number(closedContract.monthly_rent) || 0;
             const discount = Number(closedContract.discount_pct) || 0;

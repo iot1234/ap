@@ -391,7 +391,7 @@ function SignContractModal({ contract, onClose, onSaved, onError }) {
     <Modal
       open={true}
       onClose={onClose}
-      size="lg"
+      width={680}
       title={`ลงนามสัญญา ${contract.contract_no}`}
       footer={
         <>
@@ -434,7 +434,11 @@ function SignContractModal({ contract, onClose, onSaved, onError }) {
           </div>
           <canvas ref={canvasRef}
             style={{
-              width: '100%', maxWidth: 600, aspectRatio: '3/1',
+              width: '100%', maxWidth: 600,
+              // aspectRatio 3/1 makes signing on phone (320px wide → 107px
+              // tall) basically impossible. Floor the height at 160px so
+              // narrow screens still have legible signing room.
+              aspectRatio: '3/1', minHeight: 160,
               background: '#fff', border: `2px dashed ${C.border}`,
               borderRadius: 6, cursor: 'crosshair', touchAction: 'none',
             }} />

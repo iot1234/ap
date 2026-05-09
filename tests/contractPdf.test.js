@@ -102,8 +102,34 @@ test('renderContractPdf: embeds online signature buffer when supplied', async ()
   // just: it doesn't throw + still produces a valid PDF.
 });
 
+test('renderContractPdf: PDFDocument constructed with bufferPages: true', () => {
+  // Without bufferPages:true, doc.bufferedPageRange() only covers the
+  // current page and doc.switchToPage(i) for any prior page throws —
+  // multi-page contracts crash on the footer pass. Lock the constructor
+  // option so a refactor can't drop it.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'contractPdf.js'), 'utf8');
+  assert.match(src,
+    /new PDFDocument\(\{[\s\S]{0,500}bufferPages: true/,
+    'bufferPages must be true so multi-page footer rendering works');
+});
+
+test('renderContractPdf: SIG_BLOCK_H scales with witness section flag', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'contractPdf.js'), 'utf8');
+  // ≥ 240pt when witnesses ON (sig boxes + witness lines fit), ≤ 200pt
+  // when OFF so a single-page contract isn't pushed onto a second page.
+  assert.match(src,
+    /SIG_BLOCK_H = sections\.showWitnesses \? 240 : 160/,
+    'SIG_BLOCK_H must adapt to whether witness block renders');
+});
+
 test('renderContractPdf: handles a long terms list across pages', async () => {
-  // 30 clauses → forces multiple pages.
+  // 30 clauses → forces multiple pages. Pre-bufferPages-fix this also
+  // implicitly verified that the footer pass doesn't crash on any prior
+  // page — keep the test as a regression lock for both behaviours.
   const longTerms = {
     mode: 'override',
     clauses: Array.from({ length: 30 }, (_, i) => ({

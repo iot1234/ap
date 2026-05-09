@@ -221,6 +221,12 @@ async function renderContractPdf(contract, tenant, room, building, options, stre
   const doc = new PDFDocument({
     size: 'A4',
     margins: { top: MARGIN, bottom: MARGIN, left: MARGIN, right: MARGIN },
+    // Required so doc.bufferedPageRange() returns ALL pages and
+    // doc.switchToPage(i) works for the page-number footer pass below.
+    // Without this, PDFKit only buffers the current page; multi-page
+    // contracts (12+ clauses → 2+ pages) crash on the footer iteration
+    // with "Cannot switch to a page that's already finalized."
+    bufferPages: true,
     info: {
       Title: `Contract ${contract.contractNo || ''}`,
       Author: building?.name || 'บ้านกาญจน์ เรสซิเดนซ์',
@@ -477,10 +483,11 @@ async function renderContractPdf(contract, tenant, room, building, options, stre
   }
 
   // =============== Signature block ======================================
-  // Reserve enough room — if we don't have it, push to a fresh page so
-  // the signature lines never get split across pages (looks unprofessional
-  // + creates legal ambiguity).
-  const SIG_BLOCK_H = 200;
+  // Reserve enough room for the WHOLE block — acknowledgment line (~20pt)
+  // + signature boxes (sigBoxH+labels = ~120pt) + witness block when
+  // enabled (~80pt). 240pt covers worst case so we never split across
+  // pages mid-witness — that's the legal ambiguity the comment guards.
+  const SIG_BLOCK_H = sections.showWitnesses ? 240 : 160;
   ensureRoom(SIG_BLOCK_H);
 
   // Acknowledgement line above signatures — admin can override the wording
