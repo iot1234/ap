@@ -6,7 +6,8 @@
 
 const express = require('express');
 const path = require('path');
-const { Pool } = require('pg');
+const pg = require('pg');
+const { Pool } = pg;
 const bcrypt = require('bcryptjs');
 const session = require('express-session');
 const PgSession = require('connect-pg-simple')(session);
@@ -90,6 +91,13 @@ if (NODE_ENV !== 'production' && !SESSION_SECRET) {
 }
 const _runtimeSessionSecret = SESSION_SECRET
   || require('crypto').randomBytes(48).toString('base64');
+
+// Keep DATE columns as date-only strings. The pg default can materialise DATE
+// as local-midnight Date objects, which JSON serialises to the previous UTC
+// day in Asia/Bangkok and breaks <input type="date"> values.
+if (pg.types && typeof pg.types.setTypeParser === 'function') {
+  pg.types.setTypeParser(1082, (value) => value);
+}
 
 // --- Process-level safety nets --------------------------------------------
 // Without these, an unhandled async rejection or uncaught exception silently
@@ -4791,7 +4799,7 @@ app.post('/api/admin/notifications/:id/retry', sameOrigin, csrfGuard, requireAut
 // --- Health ---------------------------------------------------------------
 // /health → liveness + dependency probe.
 //   db          : SELECT 1 latency in ms (or 'down')
-//   scheduler   : last fired key from .scheduler-state.json (sanity check)
+//   scheduler   : last fired key from .scheduler-state.json (or disabled)
 //   queue       : count of pending notifications (visibility on backlog)
 //   secrets     : 'configured' / 'partial' / 'none' (no values, just shape)
 //   uptime      : process uptime in seconds
@@ -5018,15 +5026,21 @@ app.get('/health', async (_req, res) => {
       FROM notifications_queue WHERE created_at > NOW() - INTERVAL '24 hours'`);
     out.queue = q.rows[0];
   } catch { out.queue = null; }
-  // Scheduler heartbeat — last-fired keys from state file
-  try {
-    const fs = require('fs');
-    const path = require('path');
-    const sf = path.join(__dirname, '.scheduler-state.json');
-    if (fs.existsSync(sf)) {
-      out.scheduler = JSON.parse(fs.readFileSync(sf, 'utf8'));
-    }
-  } catch { /* ignore */ }
+  // Scheduler heartbeat — last-fired keys from state file. In diagnostic
+  // mode, background jobs are intentionally disabled; do not surface stale
+  // scheduler errors from a prior production run as current health.
+  if (DISABLE_BACKGROUND_JOBS) {
+    out.scheduler = { disabled: true, reason: 'DISABLE_BACKGROUND_JOBS=1' };
+  } else {
+    try {
+      const fs = require('fs');
+      const path = require('path');
+      const sf = path.join(__dirname, '.scheduler-state.json');
+      if (fs.existsSync(sf)) {
+        out.scheduler = JSON.parse(fs.readFileSync(sf, 'utf8'));
+      }
+    } catch { /* ignore */ }
+  }
   // Secrets status — count, no values
   try {
     const c = await pool.query('SELECT COUNT(*)::int AS n FROM secrets');

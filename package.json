@@ -18,7 +18,7 @@
     "csrf-csrf": "^3.0.6",
     "exceljs": "^4.4.0",
     "express": "^4.21.0",
-    "express-rate-limit": "^8.5.0",
+    "express-rate-limit": "^8.5.1",
     "express-session": "^1.18.1",
     "helmet": "^8.1.0",
     "pdfkit": "^0.18.0",
@@ -30,6 +30,6 @@
   "optionalDependencies": {
     "@aws-sdk/client-s3": "^3.1044.0",
     "@sentry/node": "^8.40.0",
-    "nodemailer": "^6.9.16"
+    "nodemailer": "^8.0.7"
   }
 }

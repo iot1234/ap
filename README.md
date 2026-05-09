@@ -89,6 +89,7 @@ export ADMIN_PASSWORD="your-admin-password"
 # Optional env
 export ADMIN_USERNAME=admin                 # default 'admin'
 export NODE_ENV=production                  # enables secure cookies
+export DISABLE_BACKGROUND_JOBS=1            # optional: diagnostics only
 export PROMPTPAY_TARGET=0812345678          # phone or 13-digit citizen ID
 export LINE_CHANNEL_ACCESS_TOKEN=xxxxx      # from developers.line.biz
 export LINE_OWNER_USER_ID=Uxxxxxxxxxx       # owner LINE userId
@@ -158,11 +159,11 @@ admin user with `ADMIN_USERNAME` / `ADMIN_PASSWORD`.
 ## Testing
 
 ```bash
-npm test                  # 23 unit tests, no DB needed
+npm test                  # unit/integration tests, no live DB needed
 bash scripts/smoke-test.sh # end-to-end HTTP smoke (needs running server)
 ```
 
-ทดสอบครอบคลุม: `services/billing.js` (6), `services/crypto.js` (6), `services/features.js` (4), `services/storage.js` (3), `services/meter.js` (4)
+ทดสอบครอบคลุม service หลัก, schema validation, auth/rate-limit, billing, tenant payments, PDF/PromptPay, storage, encryption, backup/restore, LINE OA/binding, health checks และ regression guards สำหรับ route สำคัญ
 
 ## Database schema
 
@@ -192,8 +193,8 @@ Auto-created in `migrate()` on boot:
 - **Rate limit:** login 10/15min/IP, public booking 5/min/IP, maintenance
   submit 5/min/IP.
 - **CSRF defense:** `sameOrigin` middleware rejects cross-origin
-  Origin/Referer on all state-changing endpoints; combined with
-  SameSite=lax cookies blocks classic CSRF.
+  Origin/Referer on state-changing endpoints, then privileged writes also
+  require a double-submit CSRF cookie/header from `/api/csrf-token`.
 - **CSP:** helmet allows React+Babel CDN, Google Fonts; locks down
   everything else.
 - **SQL injection:** all queries parameterized.
@@ -203,10 +204,9 @@ Auto-created in `migrate()` on boot:
   with user_id, IP, UA.
 
 ### Security TODO
-- [ ] CSRF token (double-submit cookie via `csrf-csrf`)
-- [ ] AES-256-GCM at-rest encryption for citizen IDs (when tenant table added)
-- [ ] `npm audit` in CI
-- [ ] Move secrets to a vault
+- [ ] Add `npm audit --audit-level=high` to CI/deploy checks
+- [ ] Move secrets to a managed vault when available
+- [ ] Add browser-level smoke tests for admin/tenant critical flows
 
 ---
 

@@ -749,6 +749,20 @@ test('migrate backfills recurring_charges start_at/end_at from legacy columns', 
   assert.match(migrate, /end_at = COALESCE\(end_at, end_date\)/);
 });
 
+test('PostgreSQL DATE columns are returned as date-only strings', () => {
+  // Recurring-charge forms bind DATE values to <input type="date"> using
+  // String(value).slice(0, 10). If pg returns a Date object, JSON serialises
+  // local midnight in Thailand as the previous UTC day.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const pool = fs.readFileSync(path.join(__dirname, '..', 'db', 'pool.js'), 'utf8');
+  for (const source of [server, pool]) {
+    assert.match(source, /const pg = require\('pg'\)/);
+    assert.match(source, /pg\.types\.setTypeParser\(1082,\s*\(value\)\s*=>\s*value\)/);
+  }
+});
+
 test('TabContract resolves tenant phone with the same normaliser the DB uses', () => {
   // mirrorRoomsToTenants normalises phones (strip dashes/spaces) before
   // INSERT but the rooms-blob copy may still carry separators if admin
@@ -831,6 +845,16 @@ test('static assets do not intercept /admin auth route with directory redirect',
   const path = require('node:path');
   const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   assert.match(server, /express\.static\(path\.join\(__dirname,\s*'project'\),\s*\{\s*redirect:\s*false\s*\}\)/);
+});
+
+test('/health reports disabled scheduler explicitly in diagnostic mode', () => {
+  // DISABLE_BACKGROUND_JOBS is used for safe production diagnostics. /health
+  // must not read stale .scheduler-state.json errors from a previous run and
+  // present them as current failures.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(server, /if \(DISABLE_BACKGROUND_JOBS\) \{\s*out\.scheduler = \{ disabled: true, reason: 'DISABLE_BACKGROUND_JOBS=1' \};/);
 });
 
 test('checkin notifies the tenant about the welcome bill', () => {

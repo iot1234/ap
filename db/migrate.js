@@ -482,6 +482,31 @@ async function migrate(pool, opts = {}) {
     );
     CREATE INDEX IF NOT EXISTS idx_recurring_room ON recurring_charges(room_id) WHERE active = TRUE;
     CREATE INDEX IF NOT EXISTS idx_recurring_tenant ON recurring_charges(tenant_id) WHERE active = TRUE;
+    -- Older deployments used start_date/end_date. The application now uses
+    -- start_at/end_at everywhere, so add the new columns and copy legacy
+    -- values forward without dropping the old columns.
+    ALTER TABLE recurring_charges ADD COLUMN IF NOT EXISTS start_at DATE;
+    ALTER TABLE recurring_charges ADD COLUMN IF NOT EXISTS end_at DATE;
+    DO $$ BEGIN
+      IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_schema='public' AND table_name='recurring_charges'
+           AND column_name='start_date'
+      ) THEN
+        UPDATE recurring_charges
+           SET start_at = COALESCE(start_at, start_date)
+         WHERE start_at IS NULL AND start_date IS NOT NULL;
+      END IF;
+      IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_schema='public' AND table_name='recurring_charges'
+           AND column_name='end_date'
+      ) THEN
+        UPDATE recurring_charges
+           SET end_at = COALESCE(end_at, end_date)
+         WHERE end_at IS NULL AND end_date IS NOT NULL;
+      END IF;
+    END $$;
 
     -- Encrypted secret store. Holds API keys (LINE, SMTP, Sentry, R2) so
     -- admins can configure them from the UI instead of needing to redeploy

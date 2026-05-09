@@ -6,7 +6,14 @@
 //     until the next successful test query (probed every 30s)
 //   - sanitised error logging so DB password never leaks via stack traces
 
-const { Pool } = require('pg');
+const pg = require('pg');
+const { Pool } = pg;
+
+// DATE has no timezone. Return YYYY-MM-DD strings instead of Date objects so
+// JSON responses do not shift one day when serialised in non-UTC timezones.
+if (pg.types && typeof pg.types.setTypeParser === 'function') {
+  pg.types.setTypeParser(1082, (value) => value);
+}
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) {
