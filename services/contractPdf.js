@@ -143,6 +143,10 @@ const DEFAULT_CLAUSES = Object.freeze([
 /**
  * Substitute {{key}} placeholders against `vars`. Missing keys render as
  * an em-dash so a partially-filled contract still prints sensibly.
+ *
+ * Custom variables (template.variables) are merged on top of the built-in
+ * context, so an admin who defines {{wifi_password}} in their template can
+ * reference it from any clause without editing the renderer.
  */
 function interpolate(template, vars) {
   return String(template || '').replace(/\{\{(\w+)\}\}/g, (_, k) => {
@@ -192,6 +196,28 @@ function resolveClauses(template) {
  */
 async function renderContractPdf(contract, tenant, room, building, options, stream) {
   const opts = options || {};
+  // Section visibility flags from the template (with sane defaults). Admin
+  // can hide witnesses, hide the property-details table, or override the
+  // acknowledgment text without touching code. Unknown keys are ignored.
+  const tmplSections = (opts.termsTemplate && typeof opts.termsTemplate.sections === 'object')
+    ? opts.termsTemplate.sections : {};
+  const sections = {
+    showWitnesses:        tmplSections.showWitnesses        !== false,
+    showEmergencyContact: tmplSections.showEmergencyContact !== false,
+    showPropertyDetails:  tmplSections.showPropertyDetails  !== false,
+    showFinancialTable:   tmplSections.showFinancialTable   !== false,
+    showRoomAmenities:    tmplSections.showRoomAmenities    !== false,
+    acknowledgmentText:   typeof tmplSections.acknowledgmentText === 'string'
+      ? tmplSections.acknowledgmentText
+      : 'คู่สัญญาทั้งสองฝ่ายได้อ่านและเข้าใจข้อความในสัญญานี้โดยตลอดแล้ว '
+        + 'จึงได้ลงลายมือชื่อไว้เป็นหลักฐานต่อหน้าพยาน',
+    headerNote: typeof tmplSections.headerNote === 'string' ? tmplSections.headerNote : null,
+  };
+  // Custom variables defined on the template are merged into the
+  // interpolation context below — admin can reference {{wifi_password}}
+  // etc. from any clause without touching the renderer.
+  const tmplVars = (opts.termsTemplate && typeof opts.termsTemplate.variables === 'object')
+    ? opts.termsTemplate.variables : {};
   const doc = new PDFDocument({
     size: 'A4',
     margins: { top: MARGIN, bottom: MARGIN, left: MARGIN, right: MARGIN },
@@ -248,6 +274,12 @@ async function renderContractPdf(contract, tenant, room, building, options, stre
   if (building?.address) doc.text(building.address, MARGIN, doc.y + 2, { width: CONTENT_W });
   if (building?.phone) doc.text(`โทร. ${building.phone}`, MARGIN, doc.y + 2, { width: CONTENT_W });
   if (building?.taxId) doc.text(`เลขประจำตัวผู้เสียภาษี ${building.taxId}`, MARGIN, doc.y + 2, { width: CONTENT_W });
+  // Optional header note from template — admin can add a tagline,
+  // promotional text, or compliance notice (e.g. "เลขทะเบียนหอพัก ...").
+  if (sections.headerNote) {
+    doc.font(FONT).fontSize(9).fillColor(C.accent)
+      .text(sections.headerNote, MARGIN, doc.y + 2, { width: CONTENT_W });
+  }
   hr(doc.y + 8);
   doc.y = doc.y + 16;
 
@@ -313,10 +345,11 @@ async function renderContractPdf(contract, tenant, room, building, options, stre
     doc.text(`ที่อยู่: ${tenant.address}`, MARGIN + partyColW + 16, ry, { width: partyColW });
     ry = doc.y + 2;
   }
-  if (tenant?.emergencyContactName) {
+  if (sections.showEmergencyContact && tenant?.emergencyContactName) {
     doc.text(
       `ติดต่อฉุกเฉิน: ${tenant.emergencyContactName}`
-        + (tenant.emergencyContactPhone ? ` · ${tenant.emergencyContactPhone}` : ''),
+        + (tenant.emergencyContactPhone ? ` · ${tenant.emergencyContactPhone}` : '')
+        + (tenant.emergencyContactRelation ? ` (${tenant.emergencyContactRelation})` : ''),
       MARGIN + partyColW + 16, ry, { width: partyColW }
     );
     ry = doc.y + 2;
@@ -327,41 +360,71 @@ async function renderContractPdf(contract, tenant, room, building, options, stre
   ensureRoom(120);
 
   // === Property + financial summary ===
-  const tableTop = doc.y;
-  doc.font(FONT_B).fontSize(11).fillColor(C.ink)
-    .text('รายละเอียดห้องพักและการเงิน', MARGIN, tableTop);
-  doc.y = tableTop + 18;
+  // Sections can be hidden via template — admin renting commercial space
+  // might want to skip the rich amenity list, e.g.
+  if (sections.showPropertyDetails || sections.showFinancialTable) {
+    const tableTop = doc.y;
+    doc.font(FONT_B).fontSize(11).fillColor(C.ink)
+      .text('รายละเอียดห้องพักและการเงิน', MARGIN, tableTop);
+    doc.y = tableTop + 18;
 
-  // Two-column key/value table
-  const rowH = 22;
-  const labelW = 160;
-  const valW = CONTENT_W - labelW;
-  const rows = [
-    ['ห้องเลขที่', room?.id || '—'],
-    ['ที่ตั้งห้อง', room?.address || building?.address || '—'],
-    ['ค่าเช่ารายเดือน', `${fmtCurrency(contract.monthlyRent)} บาท`
-      + (Number(contract.discountPct) > 0
-          ? ` (รวมส่วนลด ${Number(contract.discountPct).toFixed(2)}%)` : '')],
-    ['เงินมัดจำ', `${fmtCurrency(contract.deposit)} บาท`],
-    ['กำหนดชำระค่าเช่า', `วันที่ ${opts.dueDay || 15} ของทุกเดือน`],
-    ['ค่าปรับเมื่อชำระล่าช้า', `${(opts.lateFeeRate ?? 1.5)}% ต่อเดือน ของยอดค้างชำระ`],
-    ['วันเริ่มเช่า', fmtThaiDate(contract.startDate)],
-    ['วันสิ้นสุดสัญญา', contract.endDate ? fmtThaiDate(contract.endDate)
-      : 'ไม่กำหนดล่วงหน้า (ต่อสัญญาอัตโนมัติรายเดือน)'],
-    ['ระยะเวลาเช่า', contract.termMonths
-      ? `${contract.termMonths} เดือน` : 'ไม่กำหนดล่วงหน้า'],
-  ];
-  for (const [k, v] of rows) {
-    ensureRoom(rowH);
-    doc.font(FONT).fontSize(10).fillColor(C.muted)
-      .text(k, MARGIN, doc.y + 6, { width: labelW });
-    doc.font(FONT).fontSize(10).fillColor(C.ink)
-      .text(v, MARGIN + labelW, doc.y - doc.currentLineHeight(), { width: valW });
-    hr(doc.y + 4);
-    doc.y += 6;
+    const rowH = 22;
+    const labelW = 160;
+    const valW = CONTENT_W - labelW;
+    const rows = [];
+
+    if (sections.showPropertyDetails) {
+      // Build a friendly room-summary string from whatever the caller
+      // resolved (rooms_v2 or JSONB blob). All fields optional — missing
+      // values turn into em-dashes so partial data still prints well.
+      rows.push(['ห้องเลขที่', room?.id || '—']);
+      // Compose "ประเภท · ชั้น X · ขนาด Y ตร.ม." line.
+      const typeBits = [];
+      if (room?.type)     typeBits.push(`ประเภท ${room.type}`);
+      if (room?.floor != null) typeBits.push(`ชั้น ${room.floor}`);
+      if (room?.size != null) typeBits.push(`ขนาด ${room.size} ตร.ม.`);
+      if (room?.bedCount) typeBits.push(`${room.bedCount} เตียง`);
+      if (typeBits.length) rows.push(['รายละเอียดห้อง', typeBits.join(' · ')]);
+      // View / location
+      if (room?.view) rows.push(['วิวห้อง', room.view]);
+      // Amenities — only shown if the section flag is on AND there's data.
+      if (sections.showRoomAmenities && Array.isArray(room?.amenities) && room.amenities.length) {
+        rows.push(['สิ่งอำนวยความสะดวก', room.amenities.join(' · ')]);
+      }
+      rows.push(['ที่ตั้งห้อง', room?.address || building?.address || '—']);
+    }
+
+    if (sections.showFinancialTable) {
+      rows.push(['ค่าเช่ารายเดือน', `${fmtCurrency(contract.monthlyRent)} บาท`
+        + (Number(contract.discountPct) > 0
+            ? ` (รวมส่วนลด ${Number(contract.discountPct).toFixed(2)}%)` : '')]);
+      rows.push(['เงินมัดจำ', `${fmtCurrency(contract.deposit)} บาท`]);
+      // Wifi fee surfaced when room data carried one — printed contracts
+      // are easier to read when monthly cost is itemised.
+      if (room?.wifiFee && Number(room.wifiFee) > 0) {
+        rows.push(['ค่า WiFi รายเดือน', `${fmtCurrency(room.wifiFee)} บาท`]);
+      }
+      rows.push(['กำหนดชำระค่าเช่า', `วันที่ ${opts.dueDay || 15} ของทุกเดือน`]);
+      rows.push(['ค่าปรับเมื่อชำระล่าช้า',
+        `${(opts.lateFeeRate ?? 1.5)}% ต่อเดือน ของยอดค้างชำระ`]);
+      rows.push(['วันเริ่มเช่า', fmtThaiDate(contract.startDate)]);
+      rows.push(['วันสิ้นสุดสัญญา', contract.endDate ? fmtThaiDate(contract.endDate)
+        : 'ไม่กำหนดล่วงหน้า (ต่อสัญญาอัตโนมัติรายเดือน)']);
+      rows.push(['ระยะเวลาเช่า', contract.termMonths
+        ? `${contract.termMonths} เดือน` : 'ไม่กำหนดล่วงหน้า']);
+    }
+
+    for (const [k, v] of rows) {
+      ensureRoom(rowH);
+      doc.font(FONT).fontSize(10).fillColor(C.muted)
+        .text(k, MARGIN, doc.y + 6, { width: labelW });
+      doc.font(FONT).fontSize(10).fillColor(C.ink)
+        .text(v, MARGIN + labelW, doc.y - doc.currentLineHeight(), { width: valW });
+      hr(doc.y + 4);
+      doc.y += 6;
+    }
+    doc.y += 8;
   }
-
-  doc.y += 8;
 
   // =============== Clauses (numbered, auto page break) ==================
   ensureRoom(40);
@@ -371,15 +434,25 @@ async function renderContractPdf(contract, tenant, room, building, options, stre
 
   // Resolve clause list — defaults vs custom mode (admin choice).
   const clauses = resolveClauses(opts.termsTemplate);
-  // Interpolation context — mirror the keys used in DEFAULT_CLAUSES.
+  // Interpolation context — built-in keys plus any custom variables the
+  // template defined. Built-ins always win on key collisions so admin
+  // can't accidentally shadow {{monthlyRent}} with a stale literal.
   const ctx = {
+    // Custom variables first (so they're overridable by the built-ins).
+    ...tmplVars,
+    // Built-in context.
     roomId: room?.id || '—',
+    roomType: room?.type || '—',
+    roomFloor: room?.floor != null ? String(room.floor) : '—',
+    roomSize: room?.size != null ? String(room.size) : '—',
     lessorName,
+    tenantName,
     monthlyRent: fmtCurrency(contract.monthlyRent),
     depositAmount: fmtCurrency(contract.deposit),
     dueDay: String(opts.dueDay || 15),
     lateFeeRate: String(opts.lateFeeRate ?? 1.5),
     startDate: fmtThaiDate(contract.startDate),
+    endDate: contract.endDate ? fmtThaiDate(contract.endDate) : '—',
     endDateClause: contract.endDate
       ? `และมีกำหนดสิ้นสุดในวันที่ ${fmtThaiDate(contract.endDate)}`
       : 'และเป็นสัญญาต่อเนื่องรายเดือนจนกว่าจะมีการบอกเลิก',
@@ -410,14 +483,13 @@ async function renderContractPdf(contract, tenant, room, building, options, stre
   const SIG_BLOCK_H = 200;
   ensureRoom(SIG_BLOCK_H);
 
-  // Acknowledgement line above signatures
+  // Acknowledgement line above signatures — admin can override the wording
+  // via template.sections.acknowledgmentText (e.g. omit "ต่อหน้าพยาน" when
+  // not using witnesses).
   doc.y += 8;
   doc.font(FONT).fontSize(10).fillColor(C.ink2)
-    .text(
-      'คู่สัญญาทั้งสองฝ่ายได้อ่านและเข้าใจข้อความในสัญญานี้โดยตลอดแล้ว '
-      + 'จึงได้ลงลายมือชื่อไว้เป็นหลักฐานต่อหน้าพยาน',
-      MARGIN, doc.y, { width: CONTENT_W, align: 'center' }
-    );
+    .text(sections.acknowledgmentText, MARGIN, doc.y,
+      { width: CONTENT_W, align: 'center' });
   doc.y += 16;
 
   // Two signature columns — lessor on the left, lessee on the right.
@@ -467,26 +539,28 @@ async function renderContractPdf(contract, tenant, room, building, options, stre
       : 'วันที่ ............ / ............ / ............'
   );
 
-  // Witness lines — two blank lines beneath the parties so a paper-printed
-  // contract still has space for a witness signature when needed.
-  const witnessTopY = sigTopY + sigBoxH + 60;
-  doc.y = witnessTopY;
-  doc.font(FONT_B).fontSize(10).fillColor(C.ink)
-    .text('พยาน', MARGIN, doc.y, { width: CONTENT_W });
-  doc.y += 14;
-  for (let i = 0; i < 2; i++) {
-    doc.font(FONT).fontSize(9).fillColor(C.muted)
-      .text('ลงชื่อ ............................................................. พยาน',
-            MARGIN, doc.y, { width: sigColW });
-    doc.text('(...........................................................)',
-            MARGIN, doc.y + 12, { width: sigColW });
-    if (i === 0) {
-      doc.text('ลงชื่อ ............................................................. พยาน',
-            MARGIN + sigColW + 32, doc.y - 12, { width: sigColW });
+  // Witness lines — admin can hide via template.sections.showWitnesses=false
+  // (e.g. for short-stay contracts that don't need witnesses).
+  if (sections.showWitnesses) {
+    const witnessTopY = sigTopY + sigBoxH + 60;
+    doc.y = witnessTopY;
+    doc.font(FONT_B).fontSize(10).fillColor(C.ink)
+      .text('พยาน', MARGIN, doc.y, { width: CONTENT_W });
+    doc.y += 14;
+    for (let i = 0; i < 2; i++) {
+      doc.font(FONT).fontSize(9).fillColor(C.muted)
+        .text('ลงชื่อ ............................................................. พยาน',
+              MARGIN, doc.y, { width: sigColW });
       doc.text('(...........................................................)',
-            MARGIN + sigColW + 32, doc.y, { width: sigColW });
+              MARGIN, doc.y + 12, { width: sigColW });
+      if (i === 0) {
+        doc.text('ลงชื่อ ............................................................. พยาน',
+              MARGIN + sigColW + 32, doc.y - 12, { width: sigColW });
+        doc.text('(...........................................................)',
+              MARGIN + sigColW + 32, doc.y, { width: sigColW });
+      }
+      doc.y += 28;
     }
-    doc.y += 28;
   }
 
   // === Page footers (page numbers + contract no) ========================

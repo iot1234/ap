@@ -5571,33 +5571,395 @@ app.post('/api/contracts/:id/sign', sameOrigin, csrfGuard, requireAuth, requireR
     }
   });
 
-// === v2: Contract terms template (default + custom rules) ==================
-// Stored as a single JSONB row in system_settings under 'contract.terms_template'.
-// Schema: { mode: 'default'|'append'|'override', clauses: [{id?, title, body}] }
-//   - mode='default'  : ignore custom clauses → built-in DEFAULT_CLAUSES only
-//   - mode='append'   : built-in + admin custom clauses appended at the end
-//   - mode='override' : admin clauses ONLY (replaces built-in entirely)
-// Body interpolation supports {{roomId}}, {{monthlyRent}}, {{depositAmount}},
-// {{startDate}}, {{endDateClause}}, {{lessorName}}, {{dueDay}}, {{lateFeeRate}}.
+// === v2: Contract templates (multi-template CRUD) ==========================
+// Templates live in their own table now; the legacy single-row alias under
+// system_settings['contract.terms_template'] kept working until the boot
+// migration auto-imported it into a default row. Each template has:
+//   - mode: 'default'|'append'|'override' — how clauses combine with built-in
+//   - clauses: [{id?, title, body}] — admin's clauses (interpolated)
+//   - sections: { showWitnesses, showEmergencyContact, showPropertyDetails,
+//                 showFinancialTable, acknowledgmentText, headerNote } —
+//     optional visibility / wording overrides for the renderer
+//   - variables: { wifi_password, pet_policy, ... } — custom placeholders
+//     that interpolate into clause bodies via {{var_name}}
+//   - is_default: at most one row at a time (partial unique enforces)
+//   - enabled: deactivate a template without deleting it
+//
+// Default clauses (12 standard Thai dorm rules) live in services/contractPdf.js
+// as DEFAULT_CLAUSES — resolveClauses() composes them with each template.
+
+// Validate + normalise a template payload from req.body. Throws on invalid
+// input so the caller can return a 400 with a precise code.
+function _validateTemplatePayload(b) {
+  if (!b || typeof b !== 'object') {
+    throw Object.assign(new Error('payload required'), { code: 'INVALID' });
+  }
+  const name = String(b.name || '').slice(0, 200).trim();
+  if (!name) throw Object.assign(new Error('name required'), { code: 'NAME_REQUIRED' });
+  const description = b.description ? String(b.description).slice(0, 1000) : null;
+  const mode = ['default', 'append', 'override'].includes(b.mode) ? b.mode : 'default';
+  const rawClauses = Array.isArray(b.clauses) ? b.clauses : [];
+  if (rawClauses.length > 100) {
+    throw Object.assign(new Error('จำกัดข้อบังคับสูงสุด 100 ข้อ'),
+      { code: 'TOO_MANY_CLAUSES' });
+  }
+  const clauses = rawClauses.map((c, i) => {
+    if (!c || typeof c !== 'object') {
+      throw Object.assign(new Error(`ข้อ ${i + 1}: ต้องเป็น object`),
+        { code: 'INVALID_CLAUSE' });
+    }
+    const title = String(c.title || '').slice(0, 200).trim();
+    const body  = String(c.body  || '').slice(0, 4000).trim();
+    if (!title) throw Object.assign(new Error(`ข้อ ${i + 1}: หัวข้อห้ามว่าง`),
+      { code: 'INVALID_CLAUSE' });
+    if (!body)  throw Object.assign(new Error(`ข้อ ${i + 1}: เนื้อหาห้ามว่าง`),
+      { code: 'INVALID_CLAUSE' });
+    return { id: c.id ? String(c.id).slice(0, 64) : null, title, body };
+  });
+  if (mode === 'override' && clauses.length === 0) {
+    throw Object.assign(new Error('override mode ต้องมีข้อบังคับอย่างน้อย 1 ข้อ'),
+      { code: 'OVERRIDE_NEEDS_CLAUSES' });
+  }
+  // Sections: shallow-validate known flags. Unknown keys are dropped so a
+  // rogue admin UI can't smuggle arbitrary state into the PDF render.
+  const sectionsIn = (b.sections && typeof b.sections === 'object') ? b.sections : {};
+  const sections = {};
+  for (const k of [
+    'showWitnesses', 'showEmergencyContact', 'showPropertyDetails',
+    'showFinancialTable', 'showLogo', 'showRoomAmenities',
+  ]) {
+    if (typeof sectionsIn[k] === 'boolean') sections[k] = sectionsIn[k];
+  }
+  if (typeof sectionsIn.acknowledgmentText === 'string') {
+    sections.acknowledgmentText = sectionsIn.acknowledgmentText.slice(0, 1000);
+  }
+  if (typeof sectionsIn.headerNote === 'string') {
+    sections.headerNote = sectionsIn.headerNote.slice(0, 500);
+  }
+  // Variables: string-only key/value, capped lengths so PDF text doesn't
+  // overflow the page.
+  const variablesIn = (b.variables && typeof b.variables === 'object') ? b.variables : {};
+  const variables = {};
+  for (const [k, v] of Object.entries(variablesIn)) {
+    if (typeof k !== 'string' || !/^[a-z_][a-z0-9_]{0,30}$/i.test(k)) continue;
+    if (typeof v !== 'string') continue;
+    variables[k] = v.slice(0, 500);
+  }
+  return {
+    name, description, mode, clauses, sections, variables,
+    isDefault: b.isDefault === true,
+    enabled: b.enabled !== false,
+  };
+}
+
+// GET /api/admin/contract-templates
+// Lists all non-deleted templates. Defaults to enabled-only; ?includeDisabled=1
+// to also see disabled rows.
+app.get('/api/admin/contract-templates', requireAuth, requireRole('owner', 'manager'),
+  async (req, res) => {
+    const includeDisabled = req.query.includeDisabled === '1';
+    const where = ['deleted_at IS NULL'];
+    if (!includeDisabled) where.push('enabled = TRUE');
+    try {
+      const { rows } = await pool.query(
+        `SELECT id, name, description, mode, clauses, sections, variables,
+                is_default, enabled, created_by, created_at, updated_at,
+                jsonb_array_length(clauses) AS clause_count
+           FROM contract_templates
+          WHERE ${where.join(' AND ')}
+          ORDER BY is_default DESC, enabled DESC, updated_at DESC`
+      );
+      const contractPdf = require('./services/contractPdf');
+      res.json({
+        ok: true,
+        templates: rows,
+        defaults: contractPdf.DEFAULT_CLAUSES,
+      });
+    } catch (err) {
+      console.error('contract-templates list error:', err);
+      res.status(500).json({ error: 'internal error' });
+    }
+  });
+
+// GET /api/admin/contract-templates/:id — single template + resolved preview.
+app.get('/api/admin/contract-templates/:id', requireAuth, requireRole('owner', 'manager'),
+  async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+    try {
+      const { rows } = await pool.query(
+        `SELECT * FROM contract_templates WHERE id=$1 AND deleted_at IS NULL`,
+        [id]
+      );
+      if (!rows.length) return res.status(404).json({ error: 'template not found' });
+      const contractPdf = require('./services/contractPdf');
+      res.json({
+        ok: true,
+        template: rows[0],
+        defaults: contractPdf.DEFAULT_CLAUSES,
+        // Preview the final clause list the renderer will produce.
+        resolved: contractPdf.resolveClauses(rows[0]),
+      });
+    } catch (err) {
+      console.error('contract-templates GET error:', err);
+      res.status(500).json({ error: 'internal error' });
+    }
+  });
+
+// POST /api/admin/contract-templates — create a new template (owner only).
+app.post('/api/admin/contract-templates', sameOrigin, csrfGuard, requireAuth, requireRole('owner'),
+  async (req, res) => {
+    let p;
+    try { p = _validateTemplatePayload(req.body); }
+    catch (err) { return res.status(400).json({ error: err.message, code: err.code }); }
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      // If this template is being set as default, unset any existing default
+      // first so the partial unique index doesn't 23505 us.
+      if (p.isDefault) {
+        await client.query(
+          `UPDATE contract_templates SET is_default=FALSE
+            WHERE is_default=TRUE AND deleted_at IS NULL`
+        );
+      }
+      const { rows } = await client.query(
+        `INSERT INTO contract_templates
+            (name, description, mode, clauses, sections, variables,
+             is_default, enabled, created_by)
+         VALUES ($1,$2,$3,$4::jsonb,$5::jsonb,$6::jsonb,$7,$8,$9)
+         RETURNING *`,
+        [p.name, p.description, p.mode,
+         JSON.stringify(p.clauses), JSON.stringify(p.sections),
+         JSON.stringify(p.variables), p.isDefault, p.enabled,
+         req.session.user.username]
+      );
+      await client.query('COMMIT');
+      audit(req, 'contract.template_create', 'contract_template', String(rows[0].id),
+        { name: p.name, mode: p.mode, clauseCount: p.clauses.length, isDefault: p.isDefault });
+      res.json({ ok: true, template: rows[0] });
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      console.error('contract-templates POST error:', err);
+      res.status(500).json({ error: 'internal error' });
+    } finally {
+      client.release();
+    }
+  });
+
+// PUT /api/admin/contract-templates/:id — update (owner only).
+app.put('/api/admin/contract-templates/:id', sameOrigin, csrfGuard, requireAuth, requireRole('owner'),
+  async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+    let p;
+    try { p = _validateTemplatePayload(req.body); }
+    catch (err) { return res.status(400).json({ error: err.message, code: err.code }); }
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      // Same default-flip handling as POST.
+      if (p.isDefault) {
+        await client.query(
+          `UPDATE contract_templates SET is_default=FALSE
+            WHERE is_default=TRUE AND deleted_at IS NULL AND id<>$1`,
+          [id]
+        );
+      }
+      const { rows } = await client.query(
+        `UPDATE contract_templates SET
+            name=$1, description=$2, mode=$3,
+            clauses=$4::jsonb, sections=$5::jsonb, variables=$6::jsonb,
+            is_default=$7, enabled=$8, updated_at=NOW()
+          WHERE id=$9 AND deleted_at IS NULL
+          RETURNING *`,
+        [p.name, p.description, p.mode,
+         JSON.stringify(p.clauses), JSON.stringify(p.sections),
+         JSON.stringify(p.variables), p.isDefault, p.enabled, id]
+      );
+      if (!rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'template not found' });
+      }
+      await client.query('COMMIT');
+      audit(req, 'contract.template_update', 'contract_template', String(id),
+        { name: p.name, mode: p.mode, clauseCount: p.clauses.length, isDefault: p.isDefault });
+      res.json({ ok: true, template: rows[0] });
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      console.error('contract-templates PUT error:', err);
+      res.status(500).json({ error: 'internal error' });
+    } finally {
+      client.release();
+    }
+  });
+
+// DELETE /api/admin/contract-templates/:id — soft delete (owner only).
+// Refuses to delete the default template unless another row already has
+// is_default=TRUE — preventing the "no default exists" footgun.
+app.delete('/api/admin/contract-templates/:id', sameOrigin, csrfGuard, requireAuth, requireRole('owner'),
+  async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+    try {
+      const t = await pool.query(
+        `SELECT id, name, is_default FROM contract_templates
+           WHERE id=$1 AND deleted_at IS NULL`,
+        [id]
+      );
+      if (!t.rows.length) return res.status(404).json({ error: 'template not found' });
+      if (t.rows[0].is_default) {
+        // Refuse — admin must promote another template to default first.
+        return res.status(409).json({
+          error: 'ลบ template ที่เป็น default ไม่ได้ — โปรดตั้ง template อื่นเป็น default ก่อน',
+          code: 'CANNOT_DELETE_DEFAULT',
+        });
+      }
+      // Soft delete + null any contracts.template_id pointing here so
+      // re-prints fall back to whatever the current default is.
+      await pool.query(
+        `UPDATE contract_templates SET deleted_at=NOW(), enabled=FALSE WHERE id=$1`,
+        [id]
+      );
+      await pool.query(
+        `UPDATE contracts SET template_id=NULL WHERE template_id=$1`,
+        [id]
+      ).catch((err) => {
+        if (err.code !== '42703') throw err;
+      });
+      audit(req, 'contract.template_delete', 'contract_template', String(id),
+        { name: t.rows[0].name });
+      res.json({ ok: true, deletedId: id });
+    } catch (err) {
+      console.error('contract-templates DELETE error:', err);
+      res.status(500).json({ error: 'internal error' });
+    }
+  });
+
+// POST /api/admin/contract-templates/:id/set-default — atomic default flip.
+app.post('/api/admin/contract-templates/:id/set-default',
+  sameOrigin, csrfGuard, requireAuth, requireRole('owner'),
+  async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      // Verify the target exists + is enabled (can't promote a disabled row).
+      const t = await client.query(
+        `SELECT id, name, enabled FROM contract_templates
+           WHERE id=$1 AND deleted_at IS NULL`,
+        [id]
+      );
+      if (!t.rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'template not found' });
+      }
+      if (!t.rows[0].enabled) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'template ถูก disable อยู่ — เปิดใช้งานก่อนตั้งเป็น default',
+          code: 'TEMPLATE_DISABLED',
+        });
+      }
+      await client.query(
+        `UPDATE contract_templates SET is_default=FALSE
+          WHERE is_default=TRUE AND deleted_at IS NULL`
+      );
+      await client.query(
+        `UPDATE contract_templates SET is_default=TRUE, updated_at=NOW() WHERE id=$1`,
+        [id]
+      );
+      await client.query('COMMIT');
+      audit(req, 'contract.template_set_default', 'contract_template', String(id),
+        { name: t.rows[0].name });
+      res.json({ ok: true });
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      console.error('contract-templates set-default error:', err);
+      res.status(500).json({ error: 'internal error' });
+    } finally {
+      client.release();
+    }
+  });
+
+// POST /api/contracts/:id/template — assign a specific template to a
+// contract. The PDF endpoint reads contracts.template_id at print time;
+// when null, the current default template is used.
+app.post('/api/contracts/:id/template', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'),
+  async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+    const tid = req.body && req.body.templateId;
+    const templateId = tid == null ? null : Number(tid);
+    if (templateId != null && (!Number.isInteger(templateId) || templateId < 1)) {
+      return res.status(400).json({ error: 'invalid templateId' });
+    }
+    try {
+      // Verify the template exists (when set).
+      if (templateId != null) {
+        const t = await pool.query(
+          `SELECT id FROM contract_templates WHERE id=$1 AND deleted_at IS NULL`,
+          [templateId]
+        );
+        if (!t.rows.length) return res.status(404).json({ error: 'template not found' });
+      }
+      const { rows } = await pool.query(
+        `UPDATE contracts SET template_id=$1, updated_at=NOW()
+          WHERE id=$2 AND deleted_at IS NULL
+          RETURNING id, contract_no, template_id`,
+        [templateId, id]
+      );
+      if (!rows.length) return res.status(404).json({ error: 'contract not found' });
+      audit(req, 'contract.template_assign', 'contract', String(id), { templateId });
+      res.json({ ok: true, contract: rows[0] });
+    } catch (err) {
+      // Pre-migration: contracts.template_id might not exist yet.
+      if (err.code === '42703') {
+        return res.status(503).json({
+          error: 'feature pending migration — please redeploy',
+          code: 'PENDING_MIGRATION',
+        });
+      }
+      console.error('contract template assign error:', err);
+      res.status(500).json({ error: 'internal error' });
+    }
+  });
+
+// === Legacy single-template alias (backwards compat) =======================
+// /api/admin/contract-terms still works — it operates on the default
+// contract_templates row. New code should use /api/admin/contract-templates.
 const CONTRACT_TERMS_KEY = 'contract.terms_template';
 
 app.get('/api/admin/contract-terms', requireAuth, requireRole('owner', 'manager'), async (_req, res) => {
   try {
+    const contractPdf = require('./services/contractPdf');
+    // Prefer contract_templates default row; fall back to legacy system_settings.
+    const dr = await pool.query(
+      `SELECT mode, clauses, sections, variables, updated_by, updated_at
+         FROM contract_templates
+        WHERE is_default=TRUE AND deleted_at IS NULL LIMIT 1`
+    );
+    if (dr.rows.length) {
+      return res.json({
+        ok: true,
+        template: dr.rows[0],
+        defaults: contractPdf.DEFAULT_CLAUSES,
+        resolved: contractPdf.resolveClauses(dr.rows[0]),
+        updatedBy: dr.rows[0].updated_by,
+        updatedAt: dr.rows[0].updated_at,
+        source: 'contract_templates',
+      });
+    }
+    // Legacy fallback (pre-migration)
     const { rows } = await pool.query(
       'SELECT value, updated_by, updated_at FROM system_settings WHERE key=$1',
       [CONTRACT_TERMS_KEY]
     );
-    const contractPdf = require('./services/contractPdf');
     if (!rows.length) {
       return res.json({
-        ok: true,
-        template: null,
-        // Surface the built-in defaults so admin UI can show "what will be
-        // used" preview without a separate endpoint. Admin can copy them
-        // into custom mode if they want to edit individual lines.
+        ok: true, template: null,
         defaults: contractPdf.DEFAULT_CLAUSES,
-        // Resolved = what the PDF renderer will actually produce given the
-        // current template (here null → defaults).
         resolved: contractPdf.DEFAULT_CLAUSES,
       });
     }
@@ -5608,6 +5970,7 @@ app.get('/api/admin/contract-terms', requireAuth, requireRole('owner', 'manager'
       resolved: contractPdf.resolveClauses(rows[0].value),
       updatedBy: rows[0].updated_by,
       updatedAt: rows[0].updated_at,
+      source: 'system_settings',
     });
   } catch (err) {
     console.error('contract-terms GET error:', err);
@@ -5615,11 +5978,11 @@ app.get('/api/admin/contract-terms', requireAuth, requireRole('owner', 'manager'
   }
 });
 
+// PUT writes to BOTH the new default-template row AND the legacy alias
+// so older client code that polls system_settings still sees the change.
 app.put('/api/admin/contract-terms', sameOrigin, csrfGuard, requireAuth, requireRole('owner'),
   async (req, res) => {
     const b = req.body || {};
-    // Validate shape strictly so a buggy admin UI can't store nonsense
-    // that would crash the PDF renderer at print time.
     const mode = ['default', 'append', 'override'].includes(b.mode) ? b.mode : 'default';
     const rawClauses = Array.isArray(b.clauses) ? b.clauses : [];
     if (rawClauses.length > 100) {
@@ -5627,58 +5990,109 @@ app.put('/api/admin/contract-terms', sameOrigin, csrfGuard, requireAuth, require
         error: 'จำกัดข้อบังคับสูงสุด 100 ข้อ', code: 'TOO_MANY_CLAUSES',
       });
     }
-    const clauses = rawClauses.map((c, i) => {
-      if (!c || typeof c !== 'object') {
-        throw Object.assign(new Error(`ข้อ ${i + 1}: ต้องเป็น object`), { code: 'INVALID_CLAUSE' });
-      }
-      const title = String(c.title || '').slice(0, 200).trim();
-      const body  = String(c.body  || '').slice(0, 4000).trim();
-      if (!title) throw Object.assign(new Error(`ข้อ ${i + 1}: หัวข้อห้ามว่าง`), { code: 'INVALID_CLAUSE' });
-      if (!body)  throw Object.assign(new Error(`ข้อ ${i + 1}: เนื้อหาห้ามว่าง`), { code: 'INVALID_CLAUSE' });
-      return { id: c.id ? String(c.id).slice(0, 64) : null, title, body };
-    });
-    let template;
+    let clauses;
     try {
-      template = { mode, clauses };
-      // Override mode without ANY clauses would render an empty contract —
-      // surface that explicitly rather than letting it pass.
-      if (mode === 'override' && clauses.length === 0) {
-        return res.status(400).json({
-          error: 'override mode ต้องมีข้อบังคับอย่างน้อย 1 ข้อ',
-          code: 'OVERRIDE_NEEDS_CLAUSES',
-        });
-      }
+      clauses = rawClauses.map((c, i) => {
+        if (!c || typeof c !== 'object') {
+          throw Object.assign(new Error(`ข้อ ${i + 1}: ต้องเป็น object`), { code: 'INVALID_CLAUSE' });
+        }
+        const title = String(c.title || '').slice(0, 200).trim();
+        const body  = String(c.body  || '').slice(0, 4000).trim();
+        if (!title) throw Object.assign(new Error(`ข้อ ${i + 1}: หัวข้อห้ามว่าง`), { code: 'INVALID_CLAUSE' });
+        if (!body)  throw Object.assign(new Error(`ข้อ ${i + 1}: เนื้อหาห้ามว่าง`), { code: 'INVALID_CLAUSE' });
+        return { id: c.id ? String(c.id).slice(0, 64) : null, title, body };
+      });
     } catch (err) {
       return res.status(400).json({ error: err.message, code: err.code || 'INVALID' });
     }
+    if (mode === 'override' && clauses.length === 0) {
+      return res.status(400).json({
+        error: 'override mode ต้องมีข้อบังคับอย่างน้อย 1 ข้อ',
+        code: 'OVERRIDE_NEEDS_CLAUSES',
+      });
+    }
+    const template = { mode, clauses };
+    const client = await pool.connect();
     try {
-      await pool.query(
+      await client.query('BEGIN');
+      // Update or create the default contract_templates row.
+      const existing = await client.query(
+        `SELECT id FROM contract_templates WHERE is_default=TRUE AND deleted_at IS NULL`
+      ).catch((err) => {
+        if (err.code === '42P01') return { rows: [] };  // pre-migration
+        throw err;
+      });
+      if (existing.rows.length) {
+        await client.query(
+          `UPDATE contract_templates SET
+              mode=$1, clauses=$2::jsonb, updated_at=NOW()
+            WHERE id=$3`,
+          [mode, JSON.stringify(clauses), existing.rows[0].id]
+        );
+      } else {
+        await client.query(
+          `INSERT INTO contract_templates
+              (name, description, mode, clauses, is_default, enabled, created_by)
+           VALUES ($1, $2, $3, $4::jsonb, TRUE, TRUE, $5)`,
+          ['Default', 'auto-created from /contract-terms PUT', mode,
+           JSON.stringify(clauses), req.session.user.username]
+        ).catch((err) => {
+          if (err.code !== '42P01') throw err;
+          // Pre-migration: contract_templates table missing → fall through
+          // to the system_settings legacy alias only.
+        });
+      }
+      // Mirror to legacy alias for older clients still reading it.
+      await client.query(
         `INSERT INTO system_settings (key, value, description, updated_by, updated_at)
          VALUES ($1, $2, $3, $4, NOW())
          ON CONFLICT (key) DO UPDATE SET
            value=EXCLUDED.value, updated_by=EXCLUDED.updated_by, updated_at=NOW()`,
         [CONTRACT_TERMS_KEY, JSON.stringify(template),
-         'กฎข้อบังคับสัญญาเช่า — admin custom override', req.session.user.username]
+         'กฎข้อบังคับสัญญาเช่า (mirror)', req.session.user.username]
       );
-      audit(req, 'contract.terms_update', 'system_settings', CONTRACT_TERMS_KEY,
+      await client.query('COMMIT');
+      audit(req, 'contract.terms_update', 'contract_template', 'default',
         { mode, clauseCount: clauses.length });
       res.json({ ok: true, template });
     } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
       console.error('contract-terms PUT error:', err);
       res.status(500).json({ error: 'internal error' });
+    } finally {
+      client.release();
     }
   });
 
-// Reset to defaults — equivalent to deleting the template row. Owner only.
+// Reset to defaults — clears legacy alias + soft-deletes the default
+// template row (a fresh boot will recreate from DEFAULT_CLAUSES).
 app.delete('/api/admin/contract-terms', sameOrigin, csrfGuard, requireAuth, requireRole('owner'),
   async (req, res) => {
+    const client = await pool.connect();
     try {
-      await pool.query('DELETE FROM system_settings WHERE key=$1', [CONTRACT_TERMS_KEY]);
-      audit(req, 'contract.terms_reset', 'system_settings', CONTRACT_TERMS_KEY);
+      await client.query('BEGIN');
+      // Clear legacy alias.
+      await client.query('DELETE FROM system_settings WHERE key=$1', [CONTRACT_TERMS_KEY]);
+      // Reset the default contract_templates row to "default mode, no clauses"
+      // rather than soft-delete — that way contracts.template_id pointing
+      // here keeps working and just falls back to DEFAULT_CLAUSES.
+      await client.query(
+        `UPDATE contract_templates SET
+            mode='default', clauses='[]'::jsonb, sections='{}'::jsonb,
+            variables='{}'::jsonb, updated_at=NOW()
+          WHERE is_default=TRUE AND deleted_at IS NULL`
+      ).catch((err) => {
+        if (err.code !== '42P01') throw err;
+      });
+      await client.query('COMMIT');
+      audit(req, 'contract.terms_reset', 'contract_template', 'default');
       res.json({ ok: true });
     } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
       console.error('contract-terms DELETE error:', err);
       res.status(500).json({ error: 'internal error' });
+    } finally {
+      client.release();
     }
   });
 
@@ -5697,19 +6111,19 @@ app.get('/api/contracts/:id/pdf', requireAuth, requireRole('owner', 'manager', '
     const id = Number(req.params.id);
     if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
     try {
-      // Pull contract + tenant + room context in parallel where possible.
-      let contract, tenantRow;
+      // ============== 1. Contract + tenant ==============
+      // Single SELECT with all the joins admin needs at print time. Falls
+      // back to a smaller query on pre-migration deploys (without the
+      // identity / template_id columns).
+      let contract;
       try {
         const cQ = await pool.query(
           `SELECT c.*, t.full_name AS tenant_name, t.phone AS tenant_phone,
                   t.email AS tenant_email, t.citizen_id_tail, t.address AS tenant_address,
                   t.emergency_contact_name, t.emergency_contact_phone,
-                  ff.url AS lessor_sig_url, fc.url AS contract_sig_url
+                  t.emergency_contact_relation
              FROM contracts c
              LEFT JOIN tenants t ON t.id = c.tenant_id AND t.deleted_at IS NULL
-             LEFT JOIN file_uploads fc ON fc.id = c.signature_image_id
-             LEFT JOIN file_uploads ff ON ff.category='contract_signature'
-                                       AND ff.ref_id='lessor'
              WHERE c.id=$1 AND c.deleted_at IS NULL`,
           [id]
         );
@@ -5729,7 +6143,8 @@ app.get('/api/contracts/:id/pdf', requireAuth, requireRole('owner', 'manager', '
         contract = cQ.rows[0];
       }
 
-      // Building info from config blob (same source as bill PDF).
+      // ============== 2. Building info ==============
+      // Same source as bill PDF — single config blob in app_data.
       let building = { name: 'บ้านกาญจน์ เรสซิเดนซ์' };
       try {
         const cfgQ = await pool.query(
@@ -5739,18 +6154,122 @@ app.get('/api/contracts/:id/pdf', requireAuth, requireRole('owner', 'manager', '
         if (cfg.building) building = { ...building, ...cfg.building };
       } catch { /* keep default */ }
 
-      // Custom terms template (if admin set one).
-      let termsTemplate = null;
-      try {
-        const tQ = await pool.query(
-          'SELECT value FROM system_settings WHERE key=$1',
-          [CONTRACT_TERMS_KEY]
-        );
-        if (tQ.rows.length) termsTemplate = tQ.rows[0].value;
-      } catch { /* table missing or other → use defaults */ }
+      // ============== 3. Room details (auto-pull) ==============
+      // Try rooms_v2 first (richer schema with type/floor/amenities), fall
+      // back to the JSONB blob keyed by room_code. Either source enriches
+      // the contract with the unit-level details the renderer prints in
+      // the property-details section. Without this, the contract only
+      // knew the room id which is unhelpful on the printed copy.
+      let room = { id: contract.room_id };
+      if (contract.room_id) {
+        try {
+          const rv2 = await pool.query(
+            `SELECT room_code, room_type, floor, room_no, status,
+                    rent_price, deposit_price, wifi_fee, view_type,
+                    has_balcony, has_parking, has_kitchen, has_ac,
+                    size_sqm, bed_count, notes
+               FROM rooms_v2
+              WHERE room_code=$1 AND deleted_at IS NULL LIMIT 1`,
+            [contract.room_id]
+          );
+          if (rv2.rows.length) {
+            const r = rv2.rows[0];
+            const amenities = [];
+            if (r.has_ac)       amenities.push('แอร์');
+            if (r.has_balcony)  amenities.push('ระเบียง');
+            if (r.has_kitchen)  amenities.push('ห้องครัว');
+            if (r.has_parking)  amenities.push('ที่จอดรถ');
+            room = {
+              id: r.room_code,
+              type: r.room_type,
+              floor: r.floor,
+              roomNo: r.room_no,
+              size: r.size_sqm,
+              bedCount: r.bed_count,
+              view: r.view_type,
+              amenities,
+              wifiFee: Number(r.wifi_fee || 0),
+              source: 'rooms_v2',
+            };
+          }
+        } catch (err) {
+          if (err.code !== '42P01') console.warn('[contract pdf] rooms_v2 lookup:', err.message);
+        }
+        // Fallback / merge: if rooms_v2 didn't have the row, look up the
+        // legacy JSONB blob. We mirror as much detail as the blob has.
+        if (room.source !== 'rooms_v2') {
+          try {
+            const blob = await pool.query(
+              `SELECT value FROM app_data WHERE key='baankarn_rooms_v1' LIMIT 1`
+            );
+            const v = blob.rows[0]?.value;
+            const r = v && v[contract.room_id];
+            if (r && typeof r === 'object') {
+              const amenities = [];
+              if (r.hasAc !== false)  amenities.push('แอร์');
+              if (r.hasBalcony)       amenities.push('ระเบียง');
+              if (r.hasKitchen)       amenities.push('ห้องครัว');
+              if (r.hasParking)       amenities.push('ที่จอดรถ');
+              room = {
+                id: contract.room_id,
+                type: r.type || r.roomType || null,
+                floor: r.floor || null,
+                roomNo: r.no || r.roomNo || null,
+                size: r.size || r.sizeSqm || null,
+                bedCount: r.bedCount || null,
+                view: r.viewType || null,
+                amenities,
+                wifiFee: Number(r.wifi || 0),
+                source: 'jsonb_blob',
+              };
+            }
+          } catch { /* fall through with bare {id} */ }
+        }
+      }
 
-      // Embed online signature when present. We download the bytes via
-      // storage.readFile so it works regardless of local-vs-S3 backend.
+      // ============== 4. Template resolution ==============
+      // Priority: contracts.template_id (per-contract choice) → query
+      // override (?templateId=N) → default contract_templates row →
+      // legacy system_settings → null (renderer uses DEFAULT_CLAUSES).
+      let template = null;
+      const queryTemplateId = req.query.templateId ? Number(req.query.templateId) : null;
+      const explicitId = (Number.isInteger(queryTemplateId) && queryTemplateId > 0)
+        ? queryTemplateId
+        : (contract.template_id || null);
+      if (explicitId) {
+        try {
+          const t = await pool.query(
+            `SELECT mode, clauses, sections, variables FROM contract_templates
+              WHERE id=$1 AND deleted_at IS NULL LIMIT 1`,
+            [explicitId]
+          );
+          if (t.rows.length) template = t.rows[0];
+        } catch (err) {
+          if (err.code !== '42P01') console.warn('[contract pdf] template lookup:', err.message);
+        }
+      }
+      if (!template) {
+        // Fall back to default template row.
+        try {
+          const t = await pool.query(
+            `SELECT mode, clauses, sections, variables FROM contract_templates
+              WHERE is_default=TRUE AND deleted_at IS NULL LIMIT 1`
+          );
+          if (t.rows.length) template = t.rows[0];
+        } catch { /* pre-migration */ }
+      }
+      if (!template) {
+        // Legacy single-row fallback.
+        try {
+          const tQ = await pool.query(
+            `SELECT value FROM system_settings WHERE key=$1`,
+            [CONTRACT_TERMS_KEY]
+          );
+          if (tQ.rows.length) template = tQ.rows[0].value;
+        } catch { /* renderer falls back to DEFAULT_CLAUSES */ }
+      }
+
+      // ============== 5. Online signature embed ==============
       let tenantSigBuf = null;
       if (contract.signature_image_id) {
         try {
@@ -5766,7 +6285,7 @@ app.get('/api/contracts/:id/pdf', requireAuth, requireRole('owner', 'manager', '
         }
       }
 
-      // Late-fee rate from features for clause interpolation.
+      // ============== 6. Feature-derived constants ==============
       let lateFeeRate = 1.5;
       let dueDay = 15;
       try {
@@ -5779,7 +6298,7 @@ app.get('/api/contracts/:id/pdf', requireAuth, requireRole('owner', 'manager', '
         }
       } catch { /* keep defaults */ }
 
-      // PDF response headers
+      // ============== 7. Response headers + render ==============
       const filename = `contract-${contract.contract_no || id}.pdf`;
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('Cache-Control', 'no-store');
@@ -5788,10 +6307,8 @@ app.get('/api/contracts/:id/pdf', requireAuth, requireRole('owner', 'manager', '
         `${req.query.download === '1' ? 'attachment' : 'inline'}; filename="${filename}"`
       );
 
-      // Build the contract context object the renderer expects. Mask the
-      // citizen ID — the PDF can be shared with the tenant + reprinted, so
-      // showing the full number invites identity-theft incidents. Last 4
-      // digits + asterisks is the standard masking.
+      // Mask the citizen ID — the PDF can be shared / reprinted. Last 4 digits
+      // + asterisks matches the masking convention used elsewhere.
       const contractPdf = require('./services/contractPdf');
       const tenant = {
         fullName: contract.tenant_name,
@@ -5801,12 +6318,13 @@ app.get('/api/contracts/:id/pdf', requireAuth, requireRole('owner', 'manager', '
         address: contract.tenant_address || null,
         emergencyContactName: contract.emergency_contact_name || null,
         emergencyContactPhone: contract.emergency_contact_phone || null,
+        emergencyContactRelation: contract.emergency_contact_relation || null,
       };
-      const room = { id: contract.room_id };
 
       audit(req, 'contract.pdf_view', 'contract', String(id), {
         contractNo: contract.contract_no, hasSignature: !!tenantSigBuf,
         download: req.query.download === '1',
+        templateId: explicitId, roomSource: room.source || 'minimal',
       });
 
       await contractPdf.renderContractPdf(
@@ -5823,14 +6341,15 @@ app.get('/api/contracts/:id/pdf', requireAuth, requireRole('owner', 'manager', '
           status: contract.status,
         },
         tenant, room, building,
-        { termsTemplate, signatures: { tenantBuf: tenantSigBuf },
-          lateFeeRate, dueDay },
+        {
+          termsTemplate: template,
+          signatures: { tenantBuf: tenantSigBuf },
+          lateFeeRate, dueDay,
+        },
         res
       );
     } catch (err) {
       console.error('contract pdf error:', err);
-      // If headers haven't been sent yet, return JSON; otherwise the response
-      // is mid-stream and we have to abandon.
       if (!res.headersSent) res.status(500).json({ error: 'internal error', code: 'PDF_ERROR' });
       else res.end();
     }

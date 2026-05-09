@@ -640,11 +640,100 @@ async function migrate(pool, opts = {}) {
     ALTER TABLE contracts ADD COLUMN IF NOT EXISTS agreed_terms_at TIMESTAMPTZ;
     ALTER TABLE contracts ADD COLUMN IF NOT EXISTS agreed_terms_version TEXT;
 
+    -- === Contract templates (multi-template + CRUD) =======================
+    -- The single-row system_settings['contract.terms_template'] stayed in
+    -- place during the v1 rollout. Real operators want multiple templates
+    -- (long-term tenant vs student vs short-stay) with different clauses,
+    -- visible sections, and per-template variables. New table moves
+    -- templates to first-class records; the legacy single row is
+    -- migrated into a default 'auto-imported' template by the boot path
+    -- below so existing deployments don't lose their custom clauses.
+    CREATE TABLE IF NOT EXISTS contract_templates (
+      id            BIGSERIAL PRIMARY KEY,
+      name          TEXT NOT NULL,
+      description   TEXT,
+      mode          TEXT NOT NULL DEFAULT 'append',  -- default | append | override
+      clauses       JSONB NOT NULL DEFAULT '[]'::jsonb,
+      -- Section visibility / acknowledgment overrides — see contractPdf.js
+      sections      JSONB NOT NULL DEFAULT '{}'::jsonb,
+      -- Custom placeholders the renderer interpolates into clause bodies.
+      -- Useful for fields like wifi_password, pet_policy, parking_fee.
+      variables     JSONB NOT NULL DEFAULT '{}'::jsonb,
+      is_default    BOOLEAN NOT NULL DEFAULT FALSE,
+      enabled       BOOLEAN NOT NULL DEFAULT TRUE,
+      created_by    TEXT,
+      created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      deleted_at    TIMESTAMPTZ
+    );
+    -- At most one default template at a time (partial unique).
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_contract_templates_default
+      ON contract_templates(is_default) WHERE is_default = TRUE AND deleted_at IS NULL;
+    CREATE INDEX IF NOT EXISTS idx_contract_templates_enabled
+      ON contract_templates(enabled) WHERE deleted_at IS NULL;
+
+    -- Per-contract template choice. NULL means "use whatever is default".
+    -- ON DELETE SET NULL keeps the contract row even if the template is
+    -- removed — the rendered PDF will fall back to defaults at print time.
+    ALTER TABLE contracts ADD COLUMN IF NOT EXISTS template_id BIGINT REFERENCES contract_templates(id) ON DELETE SET NULL;
+
     -- === file_uploads: distinguish front vs back of citizen ID ============
     -- Without the side column, the admin UI has to dig into the URL or rely
     -- on upload order. Explicit column is cheap and lets queries filter cleanly.
     ALTER TABLE file_uploads ADD COLUMN IF NOT EXISTS side TEXT;  -- 'front' | 'back' | NULL
   `);
+
+  // === Migrate legacy system_settings['contract.terms_template'] ==========
+  // The v1 contract terms editor wrote to a single system_settings row.
+  // v2 introduces contract_templates (proper CRUD). Auto-import the legacy
+  // row as a default template so admin doesn't lose their custom clauses
+  // when redeploying. Idempotent: subsequent boots skip if the auto-import
+  // already happened (we mark it via a sentinel system_settings key).
+  try {
+    const sentinel = await pool.query(
+      `SELECT 1 FROM system_settings WHERE key='contract.terms_template_migrated_v1' LIMIT 1`
+    );
+    if (!sentinel.rows.length) {
+      const legacy = await pool.query(
+        `SELECT value, updated_by FROM system_settings WHERE key='contract.terms_template' LIMIT 1`
+      );
+      if (legacy.rows.length && legacy.rows[0].value) {
+        const v = legacy.rows[0].value;
+        const mode = ['default', 'append', 'override'].includes(v.mode) ? v.mode : 'default';
+        const clauses = Array.isArray(v.clauses) ? v.clauses : [];
+        // Only create a default template if none exists yet (so re-runs
+        // don't multiply rows).
+        const exists = await pool.query(
+          `SELECT id FROM contract_templates WHERE deleted_at IS NULL LIMIT 1`
+        );
+        if (!exists.rows.length) {
+          await pool.query(
+            `INSERT INTO contract_templates
+                (name, description, mode, clauses, sections, variables,
+                 is_default, enabled, created_by)
+             VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, TRUE, TRUE, $7)`,
+            [
+              'นำเข้าจากเวอร์ชันก่อน',
+              'auto-migrated from system_settings.contract.terms_template',
+              mode,
+              JSON.stringify(clauses),
+              '{}', '{}',
+              legacy.rows[0].updated_by || 'auto-migrate',
+            ]
+          );
+          console.log('[db] migrated legacy contract terms template into contract_templates');
+        }
+      }
+      // Stamp sentinel so this block doesn't fire on every boot.
+      await pool.query(
+        `INSERT INTO system_settings (key, value, description, updated_by, updated_at)
+         VALUES ('contract.terms_template_migrated_v1', '"done"'::jsonb, 'sentinel — do not delete', 'system', NOW())
+         ON CONFLICT (key) DO NOTHING`
+      );
+    }
+  } catch (err) {
+    console.warn('[db] contract template auto-migrate skipped:', err.message);
+  }
 
   // === One-time role backfill =============================================
   // The auth_users.role column was originally `TEXT DEFAULT 'admin'`. The

@@ -1486,6 +1486,136 @@ test('features.tenancyContract defaults are sane (require ID images + emergency)
     'deposit cap default = 3 months');
 });
 
+test('contract_templates table + auto-import sentinel migration', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'db', 'migrate.js'), 'utf8');
+  assert.match(src, /CREATE TABLE IF NOT EXISTS contract_templates/,
+    'contract_templates table must be created');
+  // Partial unique on default
+  assert.match(src,
+    /CREATE UNIQUE INDEX IF NOT EXISTS uq_contract_templates_default[\s\S]{0,200}is_default = TRUE/,
+    'partial unique index on is_default required');
+  // Per-contract template_id FK with SET NULL
+  assert.match(src,
+    /ALTER TABLE contracts ADD COLUMN IF NOT EXISTS template_id BIGINT REFERENCES contract_templates\(id\) ON DELETE SET NULL/,
+    'contracts.template_id FK must use ON DELETE SET NULL');
+  // Auto-import legacy system_settings → contract_templates default row
+  assert.match(src, /contract\.terms_template_migrated_v1/,
+    'sentinel must prevent re-import on every boot');
+  assert.match(src, /auto-migrated from system_settings/,
+    'description must record provenance');
+});
+
+test('contract-templates CRUD endpoints exist + validate input', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  // Five endpoints — list, get, create, update, soft-delete, set-default.
+  assert.match(src, /app\.get\('\/api\/admin\/contract-templates'/,
+    'GET list endpoint must exist');
+  assert.match(src, /app\.get\('\/api\/admin\/contract-templates\/:id'/,
+    'GET single endpoint must exist');
+  assert.match(src, /app\.post\('\/api\/admin\/contract-templates'/,
+    'POST create endpoint must exist');
+  assert.match(src, /app\.put\('\/api\/admin\/contract-templates\/:id'/,
+    'PUT update endpoint must exist');
+  assert.match(src, /app\.delete\('\/api\/admin\/contract-templates\/:id'/,
+    'DELETE soft-delete endpoint must exist');
+  assert.match(src, /app\.post\('\/api\/admin\/contract-templates\/:id\/set-default'/,
+    'set-default endpoint must exist');
+  // Per-contract assignment
+  assert.match(src, /app\.post\('\/api\/contracts\/:id\/template'/,
+    'per-contract template assignment endpoint must exist');
+  // Default protection — can't delete the default
+  assert.match(src, /CANNOT_DELETE_DEFAULT/,
+    'must refuse to delete the default template');
+  // Disabled-template promotion guard
+  assert.match(src, /TEMPLATE_DISABLED/,
+    'set-default must reject disabled templates');
+  // Validation helper
+  assert.match(src, /_validateTemplatePayload/,
+    'shared validation helper must exist');
+  assert.match(src, /OVERRIDE_NEEDS_CLAUSES/,
+    'override mode requires clauses');
+  assert.match(src, /TOO_MANY_CLAUSES/,
+    'must cap clause count');
+});
+
+test('contract template payload sanitises sections + variables', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  // Section flags allowlist — unknown keys must be dropped to prevent
+  // a buggy admin UI from smuggling state into the renderer.
+  for (const flag of ['showWitnesses', 'showEmergencyContact', 'showPropertyDetails',
+                      'showFinancialTable', 'showLogo', 'showRoomAmenities']) {
+    assert.match(src, new RegExp(`'${flag}'`),
+      `${flag} must be in the section allowlist`);
+  }
+  // Variables: regex restricts keys to identifier-like names + caps value length
+  assert.match(src, /\/\^\[a-z_\]\[a-z0-9_\]\{0,30\}\$\/i\.test\(k\)/,
+    'variable keys must match identifier regex');
+  assert.match(src, /v\.slice\(0, 500\)/,
+    'variable values must be capped at 500 chars');
+});
+
+test('PDF endpoint auto-pulls room details from rooms_v2 + JSONB fallback', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  // rooms_v2 query in PDF endpoint
+  assert.match(src,
+    /SELECT room_code, room_type, floor, room_no, status[\s\S]{0,400}FROM rooms_v2/,
+    'PDF endpoint must query rooms_v2');
+  // JSONB fallback when rooms_v2 has no row
+  assert.match(src, /room\.source !== 'rooms_v2'[\s\S]{0,800}'baankarn_rooms_v1'/,
+    'JSONB blob must be the fallback source');
+  // Amenities composition from boolean columns
+  assert.match(src, /if \(r\.has_ac\)\s+amenities\.push\('แอร์'\)/,
+    'amenities must include AC');
+  assert.match(src, /if \(r\.has_balcony\)\s+amenities\.push\('ระเบียง'\)/,
+    'amenities must include balcony');
+});
+
+test('PDF endpoint resolves template by priority: explicit → contract → default → legacy', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  // ?templateId query override beats contract.template_id
+  assert.match(src, /Number\(req\.query\.templateId\)/);
+  assert.match(src, /contract\.template_id \|\| null/);
+  // Default contract_templates row fallback
+  assert.match(src,
+    /WHERE is_default=TRUE AND deleted_at IS NULL LIMIT 1/,
+    'default-template fallback must exist');
+  // Legacy system_settings as last resort
+  assert.match(src, /CONTRACT_TERMS_KEY/);
+  // Audit trail records which template + room source were used
+  assert.match(src, /templateId: explicitId, roomSource: room\.source/);
+});
+
+test('renderer honors section visibility flags + custom variables', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'contractPdf.js'), 'utf8');
+  // Sections fall back to true (don't break existing flow when template is null)
+  assert.match(src, /showWitnesses:\s+tmplSections\.showWitnesses\s+!== false/);
+  assert.match(src, /showEmergencyContact:\s+tmplSections\.showEmergencyContact\s+!== false/);
+  // Witness block conditional
+  assert.match(src, /if \(sections\.showWitnesses\)/,
+    'witness block must check the flag');
+  // Property details + financial table conditional
+  assert.match(src, /if \(sections\.showPropertyDetails \|\| sections\.showFinancialTable\)/,
+    'property/financial block must be conditional');
+  // Header note section
+  assert.match(src, /if \(sections\.headerNote\)/,
+    'header note must be optional');
+  // Custom variables interpolation
+  assert.match(src, /tmplVars = \(opts\.termsTemplate && typeof opts\.termsTemplate\.variables === 'object'\)/,
+    'tmplVars must be pulled from template');
+});
+
 test('contract terms endpoints + PDF route exist + validate input', () => {
   const fs = require('node:fs');
   const path = require('node:path');
