@@ -900,15 +900,25 @@ test('access card revoke/restore notifies the affected tenant', () => {
   const sched = fs.readFileSync(
     path.join(__dirname, '..', 'services', 'scheduler.js'), 'utf8'
   );
-  const idx = sched.indexOf('async function tickAccessControlSync');
-  assert.ok(idx > 0);
-  const body = sched.slice(idx, idx + 8000);
+  const start = sched.indexOf('async function tickAccessControlSync');
+  const end = sched.indexOf('async function', start + 50);
+  assert.ok(start > 0 && end > start);
+  const body = sched.slice(start, end);
   assert.match(body, /notifier\.notifyTenant/,
     'access sync must notify tenants');
   assert.match(body, /บัตรเข้า-ออกถูกระงับ/,
     'revoked subject must explain status clearly');
   assert.match(body, /บัตรเข้า-ออกกลับมาใช้ได้แล้ว/,
     'restored subject must signal recovery');
+  // Earlier draft used a timestamp-based query (`ac.updated_at`) that
+  // would always fail — access_cards has no updated_at column. Pin the
+  // RETURNING clause so we can't regress to the broken approach.
+  assert.match(body, /UPDATE access_cards[\s\S]{0,400}status='revoked'[\s\S]{0,400}RETURNING tenant_id/,
+    'revoke UPDATE must capture affected tenant_id via RETURNING');
+  assert.match(body, /UPDATE access_cards[\s\S]{0,800}status='active'[\s\S]{0,800}RETURNING tenant_id/,
+    'restore UPDATE must capture affected tenant_id via RETURNING');
+  assert.ok(!/ac\.updated_at/.test(body),
+    'must not reference ac.updated_at — no such column on access_cards');
 });
 
 test('encryption module round-trips with versioned prefix', () => {

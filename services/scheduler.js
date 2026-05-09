@@ -465,14 +465,23 @@ async function tickAccessControlSync(pool, flags, now, state) {
     `, [threshold]);
     const overdueIds = overdue.rows.map((r) => Number(r.tenant_id));
     let revoked = 0, restored = 0;
+    // Capture which tenants were ACTUALLY affected (not just which ones MIGHT
+    // be) by using RETURNING tenant_id. Without this, the post-update notify
+    // step has to guess at the change set — and guessing via timestamps fails
+    // because access_cards has no updated_at column (only revoked_at, set on
+    // revoke but cleared on restore).
+    const revokedTenants = new Set();
+    const restoredTenants = new Set();
     if (overdueIds.length) {
       const r = await pool.query(
         `UPDATE access_cards
             SET status='revoked', revoked_at=NOW(), revoke_reason=$1
-          WHERE status='active' AND tenant_id = ANY($2::bigint[])`,
+          WHERE status='active' AND tenant_id = ANY($2::bigint[])
+          RETURNING tenant_id`,
         [REVOKE_REASON, overdueIds]
       );
       revoked = r.rowCount || 0;
+      for (const row of r.rows) revokedTenants.add(Number(row.tenant_id));
     }
     // Restore previously auto-revoked cards whose tenant no longer has any
     // overdue bill > threshold. Only undo our own auto-revokes (manual
@@ -489,7 +498,9 @@ async function tickAccessControlSync(pool, flags, now, state) {
                 AND b.paid_at IS NULL
                 AND b.deleted_at IS NULL
           )
+        RETURNING tenant_id
     `, [REVOKE_REASON, threshold]);
+    for (const row of restore.rows) restoredTenants.add(Number(row.tenant_id));
     restored = restore.rowCount || 0;
     state.lastAccessSync = todayKey;
     writeState(state);
@@ -497,39 +508,42 @@ async function tickAccessControlSync(pool, flags, now, state) {
       console.log(`[scheduler] access cards: revoked=${revoked} restored=${restored}`);
     }
     // Notify each affected tenant individually so they understand WHY
-    // their card stopped working (or that it's working again). Without
-    // this, a tenant just finds out their card doesn't work at the
-    // building entrance — frustrating + tickets the office. Fire-and-
-    // forget; failure to notify doesn't roll back the access change.
-    if (revoked || restored) {
+    // their card stopped working (or that it's working again). Use the
+    // tenant_id sets captured from the UPDATE...RETURNING above so we
+    // notify exactly the rows that changed in this run — a tenant who
+    // had multiple cards (some auto-revoked, some manual) might appear
+    // in BOTH sets if the auto-revoke pattern toggled them; that's rare
+    // enough that we don't dedupe explicitly.
+    const tenantsToNotify = new Map();
+    for (const tid of revokedTenants) tenantsToNotify.set(tid, 'revoked');
+    for (const tid of restoredTenants) tenantsToNotify.set(tid, 'restored');
+    if (tenantsToNotify.size > 0) {
       try {
+        const ids = Array.from(tenantsToNotify.keys());
         const affected = await pool.query(
-          `SELECT DISTINCT ac.tenant_id, ac.status, ac.revoke_reason,
-                  t.full_name, t.line_user_id, t.line_oa_id, t.email, t.status AS tstatus
-             FROM access_cards ac
-             JOIN tenants t ON t.id = ac.tenant_id AND t.deleted_at IS NULL
-            WHERE ac.tenant_id = ANY($1::bigint[])
-              AND (ac.revoked_at >= NOW() - INTERVAL '5 minutes'
-                   OR ac.updated_at >= NOW() - INTERVAL '5 minutes'
-                   OR (ac.status='active' AND ac.revoked_at IS NULL))`,
-          [overdueIds.length ? overdueIds : [0]]
+          `SELECT id, full_name, phone, email, line_user_id, line_oa_id, status
+             FROM tenants
+            WHERE id = ANY($1::bigint[])
+              AND deleted_at IS NULL
+              AND status='active'`,
+          [ids]
         );
-        for (const row of affected.rows) {
-          if (row.tstatus !== 'active') continue;  // moved-out: skip
-          const isRevoked = row.status === 'revoked' && row.revoke_reason === REVOKE_REASON;
+        for (const t of affected.rows) {
+          const action = tenantsToNotify.get(Number(t.id));
+          const isRevoked = action === 'revoked';
           const subject = isRevoked
             ? '🔒 บัตรเข้า-ออกถูกระงับ — ค้างชำระค่าเช่า'
             : '🔓 บัตรเข้า-ออกกลับมาใช้ได้แล้ว';
           const body = isRevoked
-            ? `เรียน คุณ${row.full_name}\n\n`
+            ? `เรียน คุณ${t.full_name}\n\n`
               + `ระบบได้ระงับบัตรเข้า-ออกของคุณชั่วคราวเนื่องจากมีบิลค้างชำระเกิน ${threshold} วัน\n\n`
               + `📋 วิธีแก้:\n`
               + `   1) ชำระบิลค้างผ่านพอร์ทัล /tenant\n`
               + `   2) เมื่อยืนยันการชำระเรียบร้อย ระบบจะเปิดใช้บัตรอัตโนมัติภายใน 24 ชม.\n\n`
               + `หากมีปัญหาติดต่อสำนักงาน`
-            : `เรียน คุณ${row.full_name}\n\n`
+            : `เรียน คุณ${t.full_name}\n\n`
               + `บัตรเข้า-ออกของคุณกลับมาใช้ได้แล้ว — ขอบคุณที่ชำระบิลตรงเวลา 🎉`;
-          notifier.notifyTenant({ pool, features: flags || {} }, row, {
+          notifier.notifyTenant({ pool, features: flags || {} }, t, {
             subject, text: body,
           }).catch((err) => {
             console.warn('[scheduler] access card notify failed:', err.message);
