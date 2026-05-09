@@ -10,6 +10,7 @@ const { schemas } = require('../schemas');
 const { validateBody } = require('../middleware/validate');
 const billing = require('../services/billing');
 const features = require('../services/features');
+const notifier = require('../services/notifier');
 const cryptoSvc = require('../services/crypto');
 
 // PIN trivial-reject — single source of truth.
@@ -146,6 +147,52 @@ module.exports = function buildTenantOpsRouter(ctx) {
         await client.query('COMMIT');
         audit(req, 'tenant.checkin', 'tenant', String(id),
           { roomId, depositAmount, monthlyRent, contractNo });
+
+        // Notify the new tenant about their welcome bill so they don't have
+        // to log in to discover they owe money. Without this, tenants miss
+        // the first-month due date because nobody told them a bill exists.
+        // Fire-and-forget — never block the checkin response on a stuck
+        // LINE/email server.
+        try {
+          const flags = await features.load(pool);
+          // Resolve the tenant's bound LINE channel + email so notifyTenant
+          // can pick the best channel. tenants returned by checkin only has
+          // id/name/phone/email; pull line_user_id + line_oa_id separately.
+          const tQ = await pool.query(
+            `SELECT id, full_name, phone, email, line_user_id, line_oa_id, status
+               FROM tenants WHERE id=$1 AND deleted_at IS NULL`,
+            [id]
+          );
+          if (tQ.rows.length) {
+            const amtStr = Number(welcomeRent).toLocaleString(
+              'th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 }
+            );
+            const discountNote = welcomeRent < Number(monthlyRent)
+              ? `\n💸 รวมส่วนลด — ปกติ ฿${Number(monthlyRent).toLocaleString('th-TH', { minimumFractionDigits: 2 })}`
+              : '';
+            notifier.notifyTenant({ pool, features: flags }, tQ.rows[0], {
+              subject: `🏠 ยินดีต้อนรับ — บิลรอบแรกของคุณ`,
+              text: [
+                `ยินดีต้อนรับสู่ห้อง ${roomId}`,
+                ``,
+                `เลขที่บิล: ${billNo}`,
+                `รอบบิล: ${period}`,
+                `ค่าเช่าเดือนแรก: ฿${amtStr}${discountNote}`,
+                `ครบกำหนดชำระ: ${dueDate}`,
+                ``,
+                `📋 ขั้นตอนถัดไป:`,
+                `   1) ตั้ง PIN ครั้งแรกที่พอร์ทัลผู้เช่า /tenant`,
+                `   2) ผูกบัญชี LINE OA (ถ้ายังไม่ผูก)`,
+                `   3) ดูบิลทั้งหมด + ชำระผ่าน QR ที่พอร์ทัล`,
+              ].join('\n'),
+            }).catch((err) => {
+              console.warn('[checkin] welcome notify failed:', err.message);
+            });
+          }
+        } catch (err) {
+          console.warn('[checkin] welcome notify outer error:', err.message);
+        }
+
         res.json({ ok: true, tenant, contractNo, billNo });
       } catch (err) {
         await client.query('ROLLBACK').catch(() => {});

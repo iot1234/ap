@@ -177,6 +177,10 @@ async function tickBillGen(pool, flags, now, state) {
     const dueDay = Number(flags.billAutoGenerate.dueDay || 15);
     const dueDate = new Date(now.getFullYear(), now.getMonth(), dueDay).toISOString().slice(0, 10);
     let made = 0;
+    // Track each successfully-inserted bill so we can fan out tenant
+    // notifications AFTER the loop completes (one queue enqueue per bill,
+    // not per attempt — failed inserts shouldn't notify anyone).
+    const billsCreated = [];
     for (const room of rooms) {
       if (!room.tenant || (room.status !== 'occupied' && room.status !== 'overdue')) continue;
       // Resolve the active tenant for this room so generated bills appear
@@ -290,6 +294,7 @@ async function tickBillGen(pool, flags, now, state) {
         // weren't billed this run).
         if (ins.rowCount > 0) {
           made++;
+          billsCreated.push({ id: ins.rows[0].id, tenantId, roomId: bill.roomId, billNo: bill.billNo, period, total: bill.total, dueDate: bill.dueDate });
           if (usedOneOffIds.length) {
             try {
               await pool.query(
@@ -315,6 +320,50 @@ async function tickBillGen(pool, flags, now, state) {
       notifier.notifyOwner({ pool, features: flags },
         { subject: 'ออกบิลอัตโนมัติ', text: `ออกบิลรอบ ${period} จำนวน ${made} ใบ` }
       ).catch(() => {});
+      // Notify each tenant about their newly-generated bill so they don't
+      // miss the due date. Without this, scheduler bills sit silently in
+      // the DB until admin runs bulk-send manually — many tenants only
+      // discover the bill when they get an overdue alert. Use the queue
+      // (notifQueue) so retries on transient LINE/email failures happen
+      // automatically.
+      try {
+        const notifQueue = require('./notificationQueue');
+        for (const b of billsCreated) {
+          if (!b.tenantId) continue;  // orphan bills: nobody to notify
+          const tQ = await pool.query(
+            `SELECT line_user_id, line_oa_id, email FROM tenants
+               WHERE id=$1 AND deleted_at IS NULL AND status='active'`,
+            [b.tenantId]
+          );
+          if (!tQ.rows.length) continue;
+          const t = tQ.rows[0];
+          const subject = `💰 บิลใหม่รอบ ${b.period} — ห้อง ${b.roomId}`;
+          const body = [
+            `บิลใหม่ออกแล้ว`,
+            `เลขที่: ${b.billNo}`,
+            `ห้อง: ${b.roomId}`,
+            `รอบบิล: ${b.period}`,
+            `ยอดรวม: ฿${Number(b.total).toLocaleString('th-TH', { minimumFractionDigits: 2 })}`,
+            `ครบกำหนด: ${b.dueDate}`,
+            ``,
+            `ดูรายละเอียด + ชำระผ่าน QR ที่พอร์ทัล /tenant`,
+          ].join('\n');
+          if (t.line_user_id) {
+            await notifQueue.enqueue(pool, {
+              channel: 'line', recipient: t.line_user_id, subject, body,
+              payload: { oaId: t.line_oa_id || null, billId: b.id },
+            }).catch(() => {});
+          }
+          if (t.email) {
+            await notifQueue.enqueue(pool, {
+              channel: 'email', recipient: t.email, subject, body,
+              payload: { billId: b.id },
+            }).catch(() => {});
+          }
+        }
+      } catch (err) {
+        console.warn('[scheduler] tenant notify enqueue failed:', err.message);
+      }
     }
   } catch (err) {
     console.error('[scheduler] bill gen failed:', err.message);
@@ -446,6 +495,49 @@ async function tickAccessControlSync(pool, flags, now, state) {
     writeState(state);
     if (revoked || restored) {
       console.log(`[scheduler] access cards: revoked=${revoked} restored=${restored}`);
+    }
+    // Notify each affected tenant individually so they understand WHY
+    // their card stopped working (or that it's working again). Without
+    // this, a tenant just finds out their card doesn't work at the
+    // building entrance — frustrating + tickets the office. Fire-and-
+    // forget; failure to notify doesn't roll back the access change.
+    if (revoked || restored) {
+      try {
+        const affected = await pool.query(
+          `SELECT DISTINCT ac.tenant_id, ac.status, ac.revoke_reason,
+                  t.full_name, t.line_user_id, t.line_oa_id, t.email, t.status AS tstatus
+             FROM access_cards ac
+             JOIN tenants t ON t.id = ac.tenant_id AND t.deleted_at IS NULL
+            WHERE ac.tenant_id = ANY($1::bigint[])
+              AND (ac.revoked_at >= NOW() - INTERVAL '5 minutes'
+                   OR ac.updated_at >= NOW() - INTERVAL '5 minutes'
+                   OR (ac.status='active' AND ac.revoked_at IS NULL))`,
+          [overdueIds.length ? overdueIds : [0]]
+        );
+        for (const row of affected.rows) {
+          if (row.tstatus !== 'active') continue;  // moved-out: skip
+          const isRevoked = row.status === 'revoked' && row.revoke_reason === REVOKE_REASON;
+          const subject = isRevoked
+            ? '🔒 บัตรเข้า-ออกถูกระงับ — ค้างชำระค่าเช่า'
+            : '🔓 บัตรเข้า-ออกกลับมาใช้ได้แล้ว';
+          const body = isRevoked
+            ? `เรียน คุณ${row.full_name}\n\n`
+              + `ระบบได้ระงับบัตรเข้า-ออกของคุณชั่วคราวเนื่องจากมีบิลค้างชำระเกิน ${threshold} วัน\n\n`
+              + `📋 วิธีแก้:\n`
+              + `   1) ชำระบิลค้างผ่านพอร์ทัล /tenant\n`
+              + `   2) เมื่อยืนยันการชำระเรียบร้อย ระบบจะเปิดใช้บัตรอัตโนมัติภายใน 24 ชม.\n\n`
+              + `หากมีปัญหาติดต่อสำนักงาน`
+            : `เรียน คุณ${row.full_name}\n\n`
+              + `บัตรเข้า-ออกของคุณกลับมาใช้ได้แล้ว — ขอบคุณที่ชำระบิลตรงเวลา 🎉`;
+          notifier.notifyTenant({ pool, features: flags || {} }, row, {
+            subject, text: body,
+          }).catch((err) => {
+            console.warn('[scheduler] access card notify failed:', err.message);
+          });
+        }
+      } catch (err) {
+        console.warn('[scheduler] access card notify lookup failed:', err.message);
+      }
     }
   } catch (err) {
     console.error('[scheduler] access sync failed:', err.message);

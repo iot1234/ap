@@ -736,6 +736,19 @@ test('end-to-end pipeline: discount + first-month + quarterly compose correctly'
   assert.ok(hasCleaning, 'quarterly recurring item must be on the bill');
 });
 
+test('migrate backfills recurring_charges start_at/end_at from legacy columns', () => {
+  // Some live DBs already had recurring_charges with start_date/end_date
+  // from an older build. CREATE TABLE IF NOT EXISTS does not add the new
+  // start_at/end_at columns, so migration must ALTER + copy values forward.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const migrate = fs.readFileSync(path.join(__dirname, '..', 'db', 'migrate.js'), 'utf8');
+  assert.match(migrate, /ALTER TABLE recurring_charges ADD COLUMN IF NOT EXISTS start_at DATE/);
+  assert.match(migrate, /ALTER TABLE recurring_charges ADD COLUMN IF NOT EXISTS end_at DATE/);
+  assert.match(migrate, /start_at = COALESCE\(start_at, start_date\)/);
+  assert.match(migrate, /end_at = COALESCE\(end_at, end_date\)/);
+});
+
 test('TabContract resolves tenant phone with the same normaliser the DB uses', () => {
   // mirrorRoomsToTenants normalises phones (strip dashes/spaces) before
   // INSERT but the rooms-blob copy may still carry separators if admin
@@ -818,6 +831,60 @@ test('static assets do not intercept /admin auth route with directory redirect',
   const path = require('node:path');
   const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   assert.match(server, /express\.static\(path\.join\(__dirname,\s*'project'\),\s*\{\s*redirect:\s*false\s*\}\)/);
+});
+
+test('checkin notifies the tenant about the welcome bill', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const ops = fs.readFileSync(
+    path.join(__dirname, '..', 'routes', 'tenant-ops.js'), 'utf8'
+  );
+  const idx = ops.indexOf("audit(req, 'tenant.checkin'");
+  assert.ok(idx > 0, 'checkin handler must exist');
+  const after = ops.slice(idx, idx + 3000);
+  assert.match(after, /notifier\.notifyTenant/,
+    'checkin must call notifyTenant after creating the welcome bill');
+  assert.match(after, /ยินดีต้อนรับ/,
+    'subject should welcome the tenant');
+  assert.match(after, /ครบกำหนดชำระ/,
+    'body must include due date so tenant doesn\'t miss it');
+});
+
+test('scheduler auto-bill-gen enqueues per-tenant notifications', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const sched = fs.readFileSync(
+    path.join(__dirname, '..', 'services', 'scheduler.js'), 'utf8'
+  );
+  // Use the next async-function header as the body terminator so the slice
+  // doesn't truncate before the notification block at the end of tickBillGen.
+  const start = sched.indexOf('async function tickBillGen');
+  const end = sched.indexOf('async function', start + 50);
+  assert.ok(start > 0 && end > start);
+  const body = sched.slice(start, end);
+  assert.match(body, /billsCreated\.push/,
+    'must collect inserted bills for fan-out notification');
+  assert.match(body, /notifQueue\.enqueue/,
+    'must enqueue per-tenant notifications');
+  assert.match(body, /channel: 'line'[\s\S]{0,400}billId/,
+    'LINE enqueue must reference the billId for queue forensics');
+});
+
+test('access card revoke/restore notifies the affected tenant', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const sched = fs.readFileSync(
+    path.join(__dirname, '..', 'services', 'scheduler.js'), 'utf8'
+  );
+  const idx = sched.indexOf('async function tickAccessControlSync');
+  assert.ok(idx > 0);
+  const body = sched.slice(idx, idx + 8000);
+  assert.match(body, /notifier\.notifyTenant/,
+    'access sync must notify tenants');
+  assert.match(body, /บัตรเข้า-ออกถูกระงับ/,
+    'revoked subject must explain status clearly');
+  assert.match(body, /บัตรเข้า-ออกกลับมาใช้ได้แล้ว/,
+    'restored subject must signal recovery');
 });
 
 test('encryption module round-trips with versioned prefix', () => {
