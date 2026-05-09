@@ -108,11 +108,20 @@ async function tick(pool, state) {
     const tag = a.recovered ? 'recovered' : `${a.prevStatus}→${a.check.status}`;
     return `${emoji} ${a.check.label} (${tag}): ${a.check.message}`;
   });
+  // "Fully recovered" only means every alert is back to OK. A partial
+  // recovery (error → warn) still leaves a warn condition active, so the
+  // headline must reflect that — otherwise admin reads "✅ ระบบกลับมาทำงาน
+  // ปกติ" and stops investigating while the warn is still firing.
+  const fullyRecovered = alerts.every(
+    (a) => a.recovered && a.check.status === 'ok'
+  );
   const subject = alerts.some((a) => a.check.status === 'error' && !a.recovered)
     ? '🚨 ระบบมีปัญหา (Health Alert)'
-    : alerts.every((a) => a.recovered)
+    : fullyRecovered
       ? '✅ ระบบกลับมาทำงานปกติ'
-      : '⚠️ ระบบมีบางส่วนผิดปกติ';
+      : alerts.every((a) => a.recovered)
+        ? '⚠️ ระบบดีขึ้นบางส่วน (ยังมี warn)'
+        : '⚠️ ระบบมีบางส่วนผิดปกติ';
   try {
     const flags = await features.load(pool);
     await notifier.notifyOwner({ pool, features: flags }, {

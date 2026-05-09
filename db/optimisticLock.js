@@ -64,9 +64,14 @@ async function updateWithVersion(pool, table, id, clientUpdatedAt, setClause, pa
     );
     return r.rows.length ? { row: r.rows[0] } : { conflict: null, notFound: true };
   }
+  // Compare at second-precision so a microsecond stored on the server side
+  // doesn't false-409 against the millisecond-precision ISO string the
+  // client round-trips through JSON. Matches checkVersion() semantics.
   const r = await pool.query(
     `UPDATE "${table}" SET ${setClause}, updated_at=NOW()
-       WHERE id=$1 AND updated_at=$2 RETURNING *`,
+       WHERE id=$1
+         AND date_trunc('second', updated_at) = date_trunc('second', $2::timestamptz)
+       RETURNING *`,
     [id, clientUpdatedAt, ...params]
   );
   if (r.rows.length) return { row: r.rows[0] };

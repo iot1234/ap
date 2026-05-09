@@ -587,6 +587,63 @@ async function migrate(pool, opts = {}) {
     -- having to derive contract length on every bill.
     ALTER TABLE contracts ADD COLUMN IF NOT EXISTS discount_pct NUMERIC(5,2) DEFAULT 0;
     ALTER TABLE contracts ADD COLUMN IF NOT EXISTS term_months INT;
+
+    -- Deposit refund tracking. Previously the checkout endpoint accepted a
+    -- finalDepositReturn amount and only wrote it to audit_logs — making
+    -- the refund record invisible to reports / hard to reconcile against
+    -- contracts.deposit. Storing it on the contract row gives a single
+    -- source of truth + lets reports compute "deposit retained" cleanly.
+    ALTER TABLE contracts ADD COLUMN IF NOT EXISTS deposit_returned NUMERIC(10,2);
+    ALTER TABLE contracts ADD COLUMN IF NOT EXISTS deposit_returned_at TIMESTAMPTZ;
+    ALTER TABLE contracts ADD COLUMN IF NOT EXISTS deposit_return_reason TEXT;
+
+    -- === Identity capture (citizen ID front+back, address, emergency) =====
+    -- Thailand law requires landlords to keep tenant identification on file
+    -- (พ.ร.บ. การเช่าอสังหาริมทรัพย์) — without these columns the existing
+    -- citizen_id_encrypted holds the digits but no scanned proof. file_uploads
+    -- already supports category='citizen_id_image'; the new FK columns + side
+    -- metadata link the upload row to the tenant atomically.
+    ALTER TABLE tenants ADD COLUMN IF NOT EXISTS address TEXT;
+    ALTER TABLE tenants ADD COLUMN IF NOT EXISTS emergency_contact_name TEXT;
+    ALTER TABLE tenants ADD COLUMN IF NOT EXISTS emergency_contact_phone TEXT;
+    ALTER TABLE tenants ADD COLUMN IF NOT EXISTS emergency_contact_relation TEXT;
+    ALTER TABLE tenants ADD COLUMN IF NOT EXISTS citizen_id_image_front_id BIGINT REFERENCES file_uploads(id) ON DELETE SET NULL;
+    ALTER TABLE tenants ADD COLUMN IF NOT EXISTS citizen_id_image_back_id  BIGINT REFERENCES file_uploads(id) ON DELETE SET NULL;
+    -- Searchable HMAC of the full 13-digit citizen ID. The encrypted
+    -- column can't be queried for dedup without decrypting every row;
+    -- the HMAC lets us catch "same person registered twice" cheaply.
+    -- Salt comes from CITIZEN_ID_KEY / SESSION_SECRET via services/crypto.
+    ALTER TABLE tenants ADD COLUMN IF NOT EXISTS citizen_id_hash TEXT;
+    -- Partial unique: when present, the HMAC must be unique. Soft-delete
+    -- (deleted_at) excluded so re-registering after move-out works. A
+    -- prior tenant who moved-out keeps deleted_at NULL though, so we ALSO
+    -- exclude moved_out + blacklist statuses from the uniqueness scope.
+    -- Result: at most ONE active tenant per citizen ID at any time.
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_tenants_citizen_id_hash_active
+      ON tenants(citizen_id_hash)
+      WHERE citizen_id_hash IS NOT NULL
+        AND deleted_at IS NULL
+        AND status = 'active';
+
+    -- === Bookings: optional pre-screening fields ==========================
+    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS citizen_id_tail TEXT;
+    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS citizen_id_image_front_id BIGINT REFERENCES file_uploads(id) ON DELETE SET NULL;
+    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS expected_deposit NUMERIC(10,2);
+    -- Legal trail: the timestamp at which the applicant clicked through the
+    -- terms-and-conditions checkbox + the version of those terms (so if the
+    -- terms text changes later we know which version they accepted).
+    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS agreed_terms_at TIMESTAMPTZ;
+    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS agreed_terms_version TEXT;
+
+    -- === Contracts: signature image link + agreed terms ===================
+    ALTER TABLE contracts ADD COLUMN IF NOT EXISTS signature_image_id BIGINT REFERENCES file_uploads(id) ON DELETE SET NULL;
+    ALTER TABLE contracts ADD COLUMN IF NOT EXISTS agreed_terms_at TIMESTAMPTZ;
+    ALTER TABLE contracts ADD COLUMN IF NOT EXISTS agreed_terms_version TEXT;
+
+    -- === file_uploads: distinguish front vs back of citizen ID ============
+    -- Without the side column, the admin UI has to dig into the URL or rely
+    -- on upload order. Explicit column is cheap and lets queries filter cleanly.
+    ALTER TABLE file_uploads ADD COLUMN IF NOT EXISTS side TEXT;  -- 'front' | 'back' | NULL
   `);
 
   // === One-time role backfill =============================================

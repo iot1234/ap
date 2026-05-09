@@ -81,9 +81,34 @@ schemas.checkIn = z.object({
   // Contract length in months — used to derive the rent discount tier
   // (config.discounts.{sixMonth,twelveMonth,twentyFourMonth}). Either
   // termMonths (we resolve % from config) or discountPct (explicit) wins.
-  termMonths: z.coerce.number().int().min(1).max(120).optional(),
+  // Cap at 60 months (5 years) — the previous 120-month cap let admins
+  // accidentally type "120 years" and get a contract ending in 2146.
+  termMonths: z.coerce.number().int().min(1).max(60).optional(),
   discountPct: z.coerce.number().nonnegative().max(50).optional(),
+  // Legal trail: client surfaces the terms-and-conditions text version so
+  // we can store WHICH wording the tenant agreed to. Optional in the
+  // schema (open contracts can predate the feature) but checked at
+  // server-level when features.contractTerms.enforce is on.
+  agreedTermsVersion: z.string().max(64).optional(),
+  // Bypass safety guards (existing tenant migration, retroactive checkins)
+  // — every set bypass is audit-logged.
+  force: z.boolean().optional(),
 });
+
+schemas.contractSign = z.object({
+  signatureDataUrl: z.string().min(20).max(3_000_000),
+  agreedTermsVersion: z.string().max(64).optional(),
+});
+
+schemas.uploadIdentity = z.object({
+  citizenId: citizenId.optional(),
+  frontDataUrl: z.string().min(20).max(3_000_000).optional(),
+  backDataUrl: z.string().min(20).max(3_000_000).optional(),
+  force: z.boolean().optional(),
+}).refine(
+  (v) => v.frontDataUrl || v.backDataUrl || v.citizenId,
+  { message: 'ต้องส่งภาพหน้า/หลังของบัตร หรือเลขบัตร 13 หลัก อย่างน้อยหนึ่งอย่าง' },
+);
 
 schemas.checkOut = z.object({
   reason: z.string().max(500).optional(),
@@ -153,6 +178,19 @@ schemas.publicBooking = z.object({
   floor: z.string().max(4).optional(),
   roomType: z.enum(['standard', 'deluxe', 'suite', 'studio']).optional(),
   message: z.string().max(500).optional(),
+  // Optional pre-screening so the booking already carries identity + the
+  // T&C acceptance audit trail. Only the citizen ID TAIL (last 4 digits)
+  // is persisted on the bookings row — the full number is uploaded later
+  // at admin tenant creation. The optional photo is stored under
+  // category='citizen_id_image' with side='front'.
+  citizenIdTail: z.string().regex(/^\d{4}$/, '4 ตัวท้ายของบัตร').optional(),
+  citizenIdImageFront: z.string().min(20).max(3_000_000).optional(),
+  expectedDeposit: z.coerce.number().nonnegative().max(1_000_000).optional(),
+  // Legal trail: when the applicant ticks the "I agree to terms" checkbox,
+  // the client sends the version string of the displayed T&C document.
+  // Version is just an opaque label — a future revision can still match
+  // historical bookings to the wording they actually saw.
+  agreedTermsVersion: z.string().max(64).optional(),
 });
 
 // --- tickets --------------------------------------------------------------

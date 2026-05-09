@@ -94,11 +94,15 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           });
         }
 
-        // Match scheduler.tickBillGen: build YYYY-MM-DD directly from local
-        // year/month/dueDay. Round-tripping via toISOString() shifts the
-        // date back 17h on Asia/Bangkok servers, producing dueDate=14 when
-        // operator picked 15.
-        const dueDate = billing.formatYMD(now.getFullYear(), now.getMonth() + 1, dueDay);
+        // Build YYYY-MM-DD from the operator-supplied PERIOD (not "now") so
+        // back-filled bills (admin generates April from May 5th) carry the
+        // intended month, not the wallclock month. Match scheduler.tickBillGen
+        // by using formatYMD directly so Asia/Bangkok timezone offset can't
+        // shift the day back via toISOString().
+        const periodMatch = /^(\d{4})-(\d{2})$/.exec(period);
+        const periodYear = periodMatch ? Number(periodMatch[1]) : now.getFullYear();
+        const periodMonth = periodMatch ? Number(periodMatch[2]) : (now.getMonth() + 1);
+        const dueDate = billing.formatYMD(periodYear, periodMonth, dueDay);
         let made = 0, skipped = 0;
         for (const room of rooms) {
           if (!room || !room.tenant) { skipped++; continue; }
@@ -130,13 +134,19 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             );
             if (tq.rows.length) tenantIdForRoom = tq.rows[0].id;
           } catch { /* ignore */ }
+          // Track one_off charges so we can flip active=FALSE after a
+          // successful insert. Without this, an admin running bulk-generate
+          // (instead of waiting for the scheduler) would re-bill the same
+          // one_off charge every month forever — same bug the scheduler
+          // already fixes; the manual path was missed.
+          let usedOneOffIds = [];
           try {
             const params = [];
             const ors = [];
             if (tenantIdForRoom) { params.push(tenantIdForRoom); ors.push(`tenant_id = $${params.length}`); }
             params.push(room.id); ors.push(`room_id = $${params.length}`);
             const rc = await pool.query(
-              `SELECT label, amount, frequency, start_at, end_at FROM recurring_charges
+              `SELECT id, label, amount, frequency, start_at, end_at FROM recurring_charges
                  WHERE active = TRUE AND (${ors.join(' OR ')})
                    AND (start_at IS NULL OR start_at <= CURRENT_DATE)
                    AND (end_at IS NULL OR end_at >= CURRENT_DATE)`,
@@ -145,9 +155,9 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             // Honor `frequency` — quarterly charges only fire every 3 months
             // anchored to start_at. Without this the bulk-generate path
             // re-billed quarterly fees every month.
-            recurring = rc.rows
-              .filter((x) => billing.isChargeApplicableForPeriod(x, period))
-              .map((x) => ({ label: x.label, amount: Number(x.amount) }));
+            const applicable = rc.rows.filter((x) => billing.isChargeApplicableForPeriod(x, period));
+            recurring = applicable.map((x) => ({ label: x.label, amount: Number(x.amount) }));
+            usedOneOffIds = applicable.filter((x) => x.frequency === 'one_off').map((x) => x.id);
           } catch { /* table may not exist on older deployments */ }
           // Match the manual + scheduler paths: pull discount_pct from the
           // active contract so bulk-generate honors the contract-length
@@ -188,7 +198,27 @@ module.exports = function buildBillsExtrasRouter(ctx) {
               ],
               { pool, attempts: 3 }
             );
-            if (rowCount) made++; else skipped++;
+            if (rowCount) {
+              made++;
+              // Deactivate one_off charges only when the INSERT actually
+              // wrote a row (rowCount > 0). ON CONFLICT DO NOTHING returns
+              // 0 when the bill_no collided — in that case the one_offs
+              // weren't billed this run, so we mustn't mark them inactive.
+              if (usedOneOffIds.length) {
+                try {
+                  await queryWithRetry(
+                    `UPDATE recurring_charges SET active=FALSE, updated_at=NOW()
+                       WHERE id = ANY($1::bigint[])`,
+                    [usedOneOffIds],
+                    { pool, attempts: 3 }
+                  );
+                } catch (e) {
+                  console.warn('[bulk-generate] one_off deactivate failed for room', room.id, ':', e.message);
+                }
+              }
+            } else {
+              skipped++;
+            }
           } catch (e) {
             // A7 — partial unique on (room_id, period) also blocks duplicates
             // when the two paths produce different bill_nos for same period.

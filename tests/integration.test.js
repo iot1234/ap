@@ -559,12 +559,19 @@ test('scheduler tickContractExpiry expires + alerts upcoming', () => {
   const sched = fs.readFileSync(path.join(__dirname, '..', 'services', 'scheduler.js'), 'utf8');
   assert.match(sched, /async function tickContractExpiry/,
     'tickContractExpiry must exist');
-  assert.match(sched, /UPDATE contracts SET status='expired'[\s\S]{0,300}end_date < CURRENT_DATE/,
+  // Allow optional table alias on the UPDATE so the join-with-tenants
+  // form (UPDATE contracts c FROM tenants t ...) is also accepted —
+  // the alias was added so tenant-side notifications can fire on the
+  // same statement that flips status='expired'.
+  assert.match(sched, /UPDATE contracts(?: c)? SET status='expired'[\s\S]{0,400}end_date < CURRENT_DATE/,
     'must auto-expire past-due contracts');
   assert.match(sched, /CURRENT_DATE \+ INTERVAL '30 days'/,
     'must scan 30 days ahead for upcoming expiries');
-  // Must be wired into the parallel tick array.
-  assert.match(sched, /tickContractExpiry\(pool, flags, now, state\)/,
+  // Must be wired into the tick pipeline. The advisory-lock wrapper
+  // means the call no longer reads "tickContractExpiry(pool, flags, now,
+  // state)" verbatim — match the wrapped form too.
+  assert.match(sched,
+    /tickContractExpiry\(pool, (?:_?flags|flags), now, state\)/,
     'tick() must call tickContractExpiry');
 });
 
@@ -954,9 +961,14 @@ test('scheduler + bulk-generate use formatYMD for dueDate', () => {
   const sched = fs.readFileSync(path.join(__dirname, '..', 'services', 'scheduler.js'), 'utf8');
   const bulk = fs.readFileSync(path.join(__dirname, '..', 'routes', 'bills-extras.js'), 'utf8');
   // Both paths must call formatYMD instead of constructing a Date.
+  // Bulk-generate now derives year/month from the operator-supplied
+  // `period` (so back-filled bills get a due date in the correct month
+  // rather than the wallclock month); scheduler still uses now.* because
+  // it always runs for the current month. Match either form so a future
+  // refactor that switches scheduler to period-derived too still passes.
   assert.match(sched, /billing\.formatYMD\(now\.getFullYear\(\), now\.getMonth\(\) \+ 1, dueDay\)/,
     'scheduler must use formatYMD for due date');
-  assert.match(bulk, /billing\.formatYMD\(now\.getFullYear\(\), now\.getMonth\(\) \+ 1, dueDay\)/,
+  assert.match(bulk, /billing\.formatYMD\((?:now\.getFullYear\(\), now\.getMonth\(\) \+ 1|periodYear, periodMonth), dueDay\)/,
     'bulk-generate must use formatYMD for due date');
 });
 
@@ -969,4 +981,691 @@ test('encryption module round-trips with versioned prefix', () => {
   const c = enc.encryptString('hi');
   assert.match(c, /^v\d+\$/);
   assert.equal(enc.decryptString(c), 'hi');
+});
+
+// =====================================================================
+// Regression locks for the May 2026 cross-feature audit fixes. Each test
+// pins a code path that previously had a real-world bug; the comment
+// explains the failure mode so a future maintainer doesn't "simplify"
+// the guard back into the bug.
+// =====================================================================
+
+test('healthCheck guards against rows[0] undefined (queue/failed_logins/lockouts)', () => {
+  // Production was emitting "Cannot read properties of undefined (reading 'stuck'/'n')"
+  // every hour — the catch-block returned errors that the anomaly detector
+  // then spammed to the owner. Rebuild defensiveness so a wrapped pool
+  // returning {rows: undefined} can't crash the probe.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'healthCheck.js'), 'utf8');
+  // All three probes must coerce to safe defaults rather than indexing rows[0] raw.
+  assert.match(src, /Number\(r\.stuck\) \|\| 0/, 'queue: stuck must default to 0');
+  assert.match(src, /Number\(r\.recent_failed\) \|\| 0/, 'queue: recent_failed must default to 0');
+  // failed_logins + lockouts use the same r=rows[0]||{} shape.
+  const arrayGuards = src.match(/Array\.isArray\(res\.rows\) && res\.rows\[0\]\) \|\| \{\}/g) || [];
+  assert.ok(arrayGuards.length >= 3, 'three rows[0]||{} guards expected (queue, failed_logins, lockouts)');
+});
+
+test('encryption.validateAtBoot exists and round-trips when keys configured', () => {
+  process.env.ENCRYPTION_KEY_V1 = Buffer.alloc(32, 1).toString('base64');
+  process.env.ENCRYPTION_KEY_CURRENT = '1';
+  delete require.cache[require.resolve('../services/encryption')];
+  const enc = require('../services/encryption');
+  assert.equal(typeof enc.validateAtBoot, 'function', 'validateAtBoot must be exported');
+  const status = enc.validateAtBoot();
+  assert.equal(status.ok, true);
+  assert.equal(status.mode, 'versioned');
+  assert.equal(status.current, 1);
+});
+
+test('encryption.validateAtBoot throws when CURRENT points at missing key', () => {
+  process.env.ENCRYPTION_KEY_V1 = Buffer.alloc(32, 1).toString('base64');
+  process.env.ENCRYPTION_KEY_CURRENT = '99';   // no V99 set
+  delete require.cache[require.resolve('../services/encryption')];
+  const enc = require('../services/encryption');
+  // After loadKeys runs, _current falls back to the highest valid key (1)
+  // so validateAtBoot should still pass — but the helpful warning fires.
+  // Test: when NO valid keys are loaded but CURRENT is set, throws.
+  delete process.env.ENCRYPTION_KEY_V1;
+  delete require.cache[require.resolve('../services/encryption')];
+  process.env.ENCRYPTION_KEY_V1 = Buffer.from('too-short').toString('base64');  // not 32 bytes
+  process.env.ENCRYPTION_KEY_CURRENT = '1';
+  delete require.cache[require.resolve('../services/encryption')];
+  const enc2 = require('../services/encryption');
+  assert.throws(() => enc2.validateAtBoot(), /no usable key/);
+  // Reset for downstream tests
+  delete process.env.ENCRYPTION_KEY_V1;
+  delete process.env.ENCRYPTION_KEY_CURRENT;
+});
+
+test('optimisticLock updateWithVersion compares at second precision', () => {
+  // Microsecond drift (DB stores µs, JSON drops them) used to false-409
+  // even when no concurrent edit happened. The UPDATE now uses
+  // date_trunc('second', ...) on both sides to match.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'db', 'optimisticLock.js'), 'utf8');
+  assert.match(src,
+    /date_trunc\('second', updated_at\) = date_trunc\('second', \$2::timestamptz\)/,
+    'updateWithVersion must compare at second precision');
+});
+
+test('scheduler wraps daily ticks in pg_advisory_lock', () => {
+  // Multi-instance Railway deploys without an advisory lock fan-out the
+  // same daily summary twice (state file is per-container, not shared).
+  // Pin the lock + the helper that does try-lock semantics.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'scheduler.js'), 'utf8');
+  assert.match(src, /pg_try_advisory_lock\(\$1::int, \$2::int\)/,
+    'scheduler must use try-advisory-lock');
+  assert.match(src, /pg_advisory_unlock\(\$1::int, \$2::int\)/,
+    'and unlock at end of tick');
+  assert.match(src, /_withAdvisoryLock\(pool, `billGen-/,
+    'billGen tick must run under the lock');
+  assert.match(src, /_withAdvisoryLock\(pool, `contractExpiry-/,
+    'contractExpiry tick must run under the lock');
+});
+
+test('scheduler runs late-fee before bill-gen (sequential)', () => {
+  // Parallel allSettled raced — bill-gen could read pending bills before
+  // late-fee marked them overdue, so late fees were skipped that cycle.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'scheduler.js'), 'utf8');
+  // Late-fee call must precede the Promise.allSettled([...]) array.
+  const lateFeeIdx = src.indexOf('await tickLateFee(');
+  const allSettledIdx = src.indexOf('Promise.allSettled([');
+  assert.ok(lateFeeIdx > 0, 'tickLateFee must be awaited explicitly');
+  assert.ok(allSettledIdx > lateFeeIdx,
+    'Promise.allSettled (the parallel block) must come AFTER late-fee');
+});
+
+test('notifier falls back to notification queue when all immediate channels fail', () => {
+  // LINE 401 for 30 minutes used to drop every checkin/maintenance/access
+  // notification on the floor. Now we enqueue for retry.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'notifier.js'), 'utf8');
+  assert.match(src, /getQueue\(\)/, 'notifier must lazy-require notificationQueue');
+  assert.match(src, /queue\.enqueue\(pool, \{\s*channel: 'line'/,
+    'must enqueue line as fallback');
+  assert.match(src, /'notifier-fallback'/,
+    'fallback enqueue carries source tag');
+});
+
+test('lineBinding tryBind catches 23505 → clean reason', () => {
+  // Race: two concurrent tryBinds for same (oa_id, line_user_id) both
+  // pass the dedup SELECT and both attempt UPDATE — second hits the
+  // partial unique. Map to line_user_already_bound instead of bubbling
+  // up as "ระบบขัดข้อง".
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'lineBinding.js'), 'utf8');
+  assert.match(src, /err\.code === '23505'/,
+    'tryBind must catch the unique-violation code');
+  assert.match(src, /reason: 'line_user_already_bound', raceLost: true/,
+    'and return the same reason as the dedup branch');
+});
+
+test('CSV escapes CR + neutralises formula leaders', () => {
+  // \r in a notes field used to split rows in Excel. =cmd|... in a cell
+  // turned into a clickable formula on import. Both fixed.
+  delete require.cache[require.resolve('../routes/reports')];
+  const reports = require('../routes/reports');
+  // The module is a function builder; we only need the in-file helpers.
+  // Re-read the source to assert the regex shape since helpers aren't exported.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'reports.js'), 'utf8');
+  assert.match(src, /\/\[",\\r\\n\]\//, 'CSV escape regex must include \\r');
+  assert.match(src, /FORMULA_INJECTION_RE = \/\^\[=\+\\-@\\t\\r\]\//,
+    'formula-injection regex must cover =, +, -, @, tab, CR');
+  assert.match(src, /typeof v === 'string'/,
+    'XLSX neutralises only string cells (numbers/dates pass through)');
+  // Helper sanity check via re-exec: build a row and serialise.
+  // (the helpers are file-private so we just trust the regex match)
+  void reports;
+});
+
+test('storage._safeLocalPath blocks traversal at read time', () => {
+  // Write-time sanitiser already blocks bad input but a tampered DB row
+  // used to bypass read-time. _safeLocalPath now rejects ../, /, \\.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'storage.js'), 'utf8');
+  assert.match(src, /storage: traversal in category\/filename/,
+    'must reject traversal in either segment');
+  assert.match(src, /storage: resolved path escapes upload root/,
+    'must reject resolved paths escaping UPLOAD_ROOT');
+  // Both readFile and remove must use the safe path.
+  const usages = src.match(/_safeLocalPath\(/g) || [];
+  assert.ok(usages.length >= 2, 'readFile + remove must both call _safeLocalPath');
+});
+
+test('storage notifies owner when R2 upload fails', () => {
+  // Silent local fallback used to lose slips on Railway redeploy. Now
+  // alerts the owner on every R2 failure (fire-and-forget).
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'storage.js'), 'utf8');
+  assert.match(src, /R2\/S3 upload failed — file saved locally/,
+    'R2 fail must alert owner with explicit subject');
+});
+
+test('checkout revokes access cards + records refund + pro-rates closing bill', () => {
+  // Three things the old checkout missed: cards stayed active (security),
+  // refund only landed in audit_logs (vanished from reports), no pro-rate
+  // (tenant didn't get a closing bill for partial-month).
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'tenant-ops.js'), 'utf8');
+  assert.match(src, /UPDATE access_cards[\s\S]{0,200}status='revoked'[\s\S]{0,200}auto:checkout/,
+    'must auto-revoke active cards on checkout');
+  assert.match(src, /deposit_returned = \$2/,
+    'refund must persist on contracts row, not just audit_logs');
+  assert.match(src, /pro-rate/i,
+    'closing-bill pro-rate path must exist');
+  assert.match(src, /generateClosingBill !== false/,
+    'admin can opt out of the closing bill (default true)');
+});
+
+test('contracts gain deposit_returned columns in migration', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'db', 'migrate.js'), 'utf8');
+  for (const col of ['deposit_returned', 'deposit_returned_at', 'deposit_return_reason']) {
+    assert.match(src, new RegExp(`ALTER TABLE contracts ADD COLUMN IF NOT EXISTS ${col}`),
+      `${col} column must be in migration`);
+  }
+});
+
+test('tenant checkin uses moveInDate not wallclock for welcome-bill period', () => {
+  // Jan 31 move-in processed at 00:05 Feb 1 used to stamp period 2026-02
+  // — wrong: tenant got a Feb-period welcome bill instead of Jan, and the
+  // Feb auto-bill duped (or was blocked by uq_bills_room_period_active).
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'tenant-ops.js'), 'utf8');
+  assert.match(src, /moveInMatch = \/\^\(\\d\{4\}\)-\(\\d\{2\}\)-\(\\d\{2\}\)\$\/\.exec\(moveInDate\)/,
+    'must parse moveInDate as YYYY-MM-DD components');
+  assert.match(src, /period = moveInMatch\s*\? `\$\{moveInMatch\[1\]\}-\$\{moveInMatch\[2\]\}`/,
+    'welcome bill period must derive from moveInDate');
+});
+
+test('tenant checkin endDate respects month-rollover (Jan31 + 1mo → Feb28/29)', () => {
+  // setMonth(getMonth()+1) overflows on EoM dates: Jan 31 + 1mo = Mar 3.
+  // Now we clamp the day-of-month to the last valid day of the target month.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'tenant-ops.js'), 'utf8');
+  // The clamp pattern: lastDom = new Date(Date.UTC(ey, em, 0)).getUTCDate()
+  // then Math.min(sd, lastDom).
+  assert.match(src, /new Date\(Date\.UTC\(ey, em, 0\)\)\.getUTCDate\(\)/,
+    'must compute last day of target month');
+  assert.match(src, /Math\.min\(sd, lastDom\)/,
+    'must clamp source day to last valid day');
+});
+
+test('booking-approve resolves vacant rooms from rooms_v2 too (not just JSONB blob)', () => {
+  // Rooms created via POST /api/rooms only land in rooms_v2. Without a
+  // dual-source query, NO_VACANT_ROOM_MATCH was returned even when v2
+  // had matching vacancies.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(src, /SELECT room_code, room_type, floor[\s\S]{0,300}FROM rooms_v2[\s\S]{0,200}status='vacant'/,
+    'approve-and-assign must consider rooms_v2 vacant rows');
+  assert.match(src, /UPDATE rooms_v2 SET status='reserved'/,
+    'and reserve via rooms_v2 when picked from there');
+});
+
+test('checkin/checkout dual-write rooms_v2 status', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'tenant-ops.js'), 'utf8');
+  // Both transitions must hit rooms_v2 too.
+  assert.match(src, /UPDATE rooms_v2 SET status='occupied', updated_at=NOW\(\)/,
+    'checkin must flip rooms_v2 to occupied');
+  assert.match(src, /UPDATE rooms_v2 SET status='vacant', updated_at=NOW\(\)/,
+    'checkout must flip rooms_v2 to vacant');
+});
+
+test('maintenance lookup filters tickets by current tenant_id (no IDOR)', () => {
+  // Old query OR'd phone match against tenant_id ANY — a new tenant who
+  // moved into the same room could see the prior tenant's ticket history.
+  // Now we resolve the CURRENT tenant of (phone, room) and filter strictly.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(src,
+    /SELECT id FROM tenants[\s\S]{0,200}WHERE phone = \$1 AND current_room_id = \$2[\s\S]{0,200}status='active'/,
+    'must resolve current resident before listing tickets');
+  assert.match(src,
+    /tenant_id = \$2 OR \(tenant_id IS NULL AND tenant_phone = \$3\)/,
+    'tickets must be filtered to that tenant_id (legacy fallback only when tenant_id NULL)');
+});
+
+test('tenant POST/PUT normalise phone (strip dashes/spaces)', () => {
+  // Three-way phone drift between admin-create / schemas.phoneStr /
+  // tenant-login was the root cause of "tenant typed 081-234-5678 and
+  // can't log in". Both admin endpoints now normalise.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  // POST normalisation
+  assert.match(src,
+    /const phone = rawPhone\.replace\(\/\[\\s-\]\/g, ''\)/,
+    'POST /api/tenants must strip dashes + spaces');
+  // PUT normalisation
+  assert.match(src,
+    /const normPhone = String\(b\.phone\)\.slice\(0, 32\)\.trim\(\)\.replace\(\/\[\\s-\]\/g, ''\)/,
+    'PUT /api/tenants/:id must also normalise on edit');
+});
+
+test('tenant login is wired through schemas.tenantLogin', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  // Allow a generous gap because the inline comment explaining the fix
+  // can grow over time without breaking the wiring.
+  assert.match(src, /\/api\/tenant\/login[\s\S]{0,1500}validateBody\(schemas\.tenantLogin\)/,
+    'tenant login must be guarded by the tenantLogin schema (phoneStr normalises dashes)');
+});
+
+test('booking-approve notify uses tenant matched to assigned room when possible', () => {
+  // Old flow took ORDER BY updated_at LIMIT 1 by phone alone — couples
+  // sharing a phone got each other's approval messages.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(src,
+    /WHERE phone=\$1 AND current_room_id=\$2 AND deleted_at IS NULL/,
+    'must prefer phone+room match before falling back to phone-only');
+});
+
+test('anomaly detector partial-recovery does not say "ระบบกลับมาทำงานปกติ"', () => {
+  // error→warn is BETTER but warn condition still active — old subject
+  // was misleading. Now reads "ระบบดีขึ้นบางส่วน (ยังมี warn)".
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'anomalyDetector.js'), 'utf8');
+  assert.match(src, /fullyRecovered = alerts\.every\(\s*\(a\) => a\.recovered && a\.check\.status === 'ok'\s*\)/,
+    'must distinguish full recovery (every check === ok) from partial');
+  assert.match(src, /ระบบดีขึ้นบางส่วน \(ยังมี warn\)/,
+    'partial-recovery subject must NOT claim full recovery');
+});
+
+test('/health admin endpoint walks the full scheduler-state candidate list', () => {
+  // /health used to hard-code ./.scheduler-state.json while admin/health
+  // walked SCHEDULER_STATE_FILE → UPLOAD_DIR → app dir → tmpdir. The two
+  // would diverge after a Railway volume mount change.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(src,
+    /process\.env\.SCHEDULER_STATE_FILE,[\s\S]{0,200}process\.env\.UPLOAD_DIR && path\.join\(process\.env\.UPLOAD_DIR/,
+    'admin /health must consider env-configured paths');
+  assert.match(src, /baankarn-scheduler-state\.json/,
+    'and the tmpdir fallback');
+});
+
+// =====================================================================
+// Identity capture / contract / booking safety guards (May 2026 round 2).
+// =====================================================================
+
+test('thaiId helper validates mod-11 checksum + hashes for lookup', () => {
+  delete require.cache[require.resolve('../services/thaiId')];
+  process.env.CITIZEN_ID_KEY = Buffer.alloc(32, 7).toString('base64');
+  const t = require('../services/thaiId');
+  // Spec: known good Thai citizen IDs from public test vectors.
+  // Construct a valid one synthetically: pick 12 digits, compute the
+  // expected check digit per the official mod-11 algorithm, append.
+  function makeValid(prefix12) {
+    let sum = 0;
+    for (let i = 0; i < 12; i++) sum += Number(prefix12[i]) * (13 - i);
+    const check = (11 - (sum % 11)) % 10;
+    return prefix12 + String(check);
+  }
+  const good = makeValid('111111111111');
+  assert.equal(t.validateChecksum(good), true, 'checksum-correct ID must validate');
+  // Flip any digit: should fail
+  const bad = good.slice(0, -1) + (Number(good.slice(-1)) === 9 ? '0' : '9');
+  assert.equal(t.validateChecksum(bad), false, 'tampered check digit must fail');
+  // normalize strips dashes/spaces
+  assert.equal(t.normalize('1-1111-11111-11-' + good.slice(-1)), good);
+  assert.equal(t.normalize('not 13 digits'), null);
+  // hashForLookup is deterministic + non-reversible-looking. Build a
+  // second valid ID from a DIFFERENT prefix (don't just substring `good`,
+  // since '111...' starts with '1' so prefixing '1' yields the same string).
+  const other = makeValid('222222222222');
+  const h1 = t.hashForLookup(good);
+  const h2 = t.hashForLookup(other);
+  assert.match(h1, /^[a-f0-9]{64}$/, 'HMAC-SHA256 produces 64 hex chars');
+  assert.notEqual(h1, h2, 'different IDs must hash differently');
+  // Same input → same hash (deterministic)
+  assert.equal(t.hashForLookup(good), h1, 'hash must be deterministic');
+  // tail returns last 4 only
+  assert.equal(t.tail(good), good.slice(-4));
+});
+
+test('migration adds tenants.address + emergency_contact_* + citizen_id_image_* + citizen_id_hash', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'db', 'migrate.js'), 'utf8');
+  for (const col of [
+    'address', 'emergency_contact_name', 'emergency_contact_phone', 'emergency_contact_relation',
+    'citizen_id_image_front_id', 'citizen_id_image_back_id', 'citizen_id_hash',
+  ]) {
+    assert.match(src, new RegExp(`ALTER TABLE tenants ADD COLUMN IF NOT EXISTS ${col}`),
+      `tenants.${col} must be in migration`);
+  }
+  // The partial unique index — at most ONE active tenant per citizen ID.
+  assert.match(src, /CREATE UNIQUE INDEX IF NOT EXISTS uq_tenants_citizen_id_hash_active/,
+    'partial unique index on citizen_id_hash must exist');
+  assert.match(src, /WHERE citizen_id_hash IS NOT NULL[\s\S]{0,200}AND status = 'active'/,
+    'unique index must scope to active+non-deleted');
+});
+
+test('migration adds bookings + contracts + file_uploads identity columns', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'db', 'migrate.js'), 'utf8');
+  for (const col of ['citizen_id_tail', 'citizen_id_image_front_id', 'expected_deposit',
+                     'agreed_terms_at', 'agreed_terms_version']) {
+    assert.match(src, new RegExp(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS ${col}`),
+      `bookings.${col} must be in migration`);
+  }
+  for (const col of ['signature_image_id', 'agreed_terms_at', 'agreed_terms_version']) {
+    assert.match(src, new RegExp(`ALTER TABLE contracts ADD COLUMN IF NOT EXISTS ${col}`),
+      `contracts.${col} must be in migration`);
+  }
+  assert.match(src, /ALTER TABLE file_uploads ADD COLUMN IF NOT EXISTS side TEXT/,
+    'file_uploads.side must distinguish front/back');
+});
+
+test('/api/tenants/:id/identity endpoint exists + validates checksum + dedups by hash', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(src, /app\.post\('\/api\/tenants\/:id\/identity'/,
+    'identity endpoint must be registered');
+  assert.match(src, /INVALID_CHECKSUM/, 'must reject invalid Thai checksum');
+  assert.match(src, /CITIZEN_ID_DUPLICATE/, 'must surface dedup as a clean code');
+  // Both front + back side tagging must reach storage.saveBase64.
+  assert.match(src, /side: 'front'/, 'front side must be tagged');
+  assert.match(src, /side: 'back'/, 'back side must be tagged');
+});
+
+test('/api/uploads requires side=front|back when category=citizen_id_image', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(src, /IDENTITY_SIDE_REQUIRED/,
+    'generic upload must reject citizen_id_image without side');
+});
+
+test('checkin enforces moveInDate window + deposit cap + double-occupancy', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'tenant-ops.js'), 'utf8');
+  assert.match(src, /MOVE_IN_OUT_OF_WINDOW/, 'past/future window guard must exist');
+  assert.match(src, /DEPOSIT_TOO_LARGE/, 'deposit-too-large guard must exist');
+  assert.match(src, /TENANT_ALREADY_ACTIVE/, 'tenant-already-active-elsewhere guard must exist');
+  assert.match(src, /ROOM_OCCUPIED/, 'room-occupied-by-other-tenant guard must exist');
+  assert.match(src, /IDENTITY_INCOMPLETE/, 'identity-completeness guard must exist');
+  // Force-bypass must record an audit + owner notify so abuses are visible.
+  assert.match(src, /forced: isForced/, 'force-bypass must be audit-logged');
+  assert.match(src, /'⚠️ checkin ใช้ force=true bypass safety guards'/,
+    'force-bypass must owner-notify');
+});
+
+test('checkin termsVersion stamped on contract row when supplied', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'tenant-ops.js'), 'utf8');
+  assert.match(src,
+    /agreed_terms_at, agreed_terms_version[\s\S]{0,400}CASE WHEN \$10::text IS NOT NULL THEN NOW\(\) ELSE NULL END/,
+    'agreed_terms_at must be stamped only when version is provided');
+});
+
+test('checkin schemas tighten termMonths to 1-60', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'schemas', 'index.js'), 'utf8');
+  // The new cap is 60 (was 120). Allow either via min().max() chain.
+  assert.match(src, /termMonths: z\.coerce\.number\(\)\.int\(\)\.min\(1\)\.max\(60\)/,
+    'termMonths cap must be ≤ 60');
+});
+
+test('contract sign endpoint exists + rejects already-signed without force', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(src, /app\.post\('\/api\/contracts\/:id\/sign'/,
+    'contract sign endpoint must exist');
+  assert.match(src, /ALREADY_SIGNED/, 'must guard against accidental re-sign');
+  assert.match(src, /CONTRACT_NOT_ACTIVE/, 'must reject signing on ended/expired contracts');
+  // Schema must require a non-trivially-empty signature data URL.
+  const sch = fs.readFileSync(path.join(__dirname, '..', 'schemas', 'index.js'), 'utf8');
+  assert.match(sch, /schemas\.contractSign = z\.object\([\s\S]{0,200}signatureDataUrl/,
+    'contractSign schema must validate signature data URL');
+});
+
+test('admin tenant create validates Thai checksum + dedup hash', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(src, /thaiId\.validateChecksum/, 'admin create must run checksum');
+  assert.match(src, /citizen_id_hash/, 'admin create must persist hash');
+  assert.match(src, /CITIZEN_ID_DUPLICATE/, 'admin create must surface dedup');
+  assert.match(src, /INVALID_EMERGENCY_PHONE/, 'admin create must validate emergency phone');
+});
+
+test('public booking accepts citizen ID front photo + agreed terms', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  // saveBase64 with category='citizen_id_image' fired from the public path.
+  assert.match(src,
+    /saveBase64\(\{[\s\S]{0,200}category: 'citizen_id_image'[\s\S]{0,200}refId: 'public-booking-pending'/,
+    'public booking must save the front photo with refId hint');
+  assert.match(src, /agreedTermsVersion/, 'public booking must accept terms version');
+  assert.match(src, /MOVE_IN_OUT_OF_WINDOW/, 'public booking must validate moveIn date window');
+});
+
+test('features.tenancyContract defaults are sane (require ID images + emergency)', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'features.js'), 'utf8');
+  assert.match(src, /tenancyContract:[\s\S]{0,500}requireIdentityImages: true/,
+    'requireIdentityImages must default to true');
+  assert.match(src, /requireEmergencyContact: true/,
+    'requireEmergencyContact must default to true');
+  assert.match(src, /depositMaxMonths: 3/,
+    'deposit cap default = 3 months');
+});
+
+test('contract terms endpoints + PDF route exist + validate input', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  // Endpoints
+  assert.match(src, /app\.get\('\/api\/admin\/contract-terms'/,
+    'GET /api/admin/contract-terms must exist');
+  assert.match(src, /app\.put\('\/api\/admin\/contract-terms'/,
+    'PUT /api/admin/contract-terms must exist');
+  assert.match(src, /app\.delete\('\/api\/admin\/contract-terms'/,
+    'DELETE (reset) /api/admin/contract-terms must exist');
+  assert.match(src, /app\.get\('\/api\/contracts\/:id\/pdf'/,
+    'GET /api/contracts/:id/pdf must exist');
+  // Storage key — single source of truth
+  assert.match(src, /CONTRACT_TERMS_KEY = 'contract\.terms_template'/,
+    'system_settings key must be canonicalised in a constant');
+  // Mode validation — must accept only the three known values
+  assert.match(src,
+    /\['default', 'append', 'override'\]\.includes\(b\.mode\)/,
+    'PUT must validate mode against the allowlist');
+  // Override-with-zero-clauses is a footgun — reject explicitly
+  assert.match(src, /OVERRIDE_NEEDS_CLAUSES/,
+    'override mode with 0 clauses must 400');
+  // Per-clause validation
+  assert.match(src, /TOO_MANY_CLAUSES/, 'must cap clause count');
+  assert.match(src, /'INVALID_CLAUSE'/, 'must reject bad clauses');
+  // PDF response headers — inline by default, attachment with ?download=1
+  assert.match(src, /req\.query\.download === '1' \? 'attachment' : 'inline'/,
+    'PDF endpoint must support inline preview + download');
+  assert.match(src, /Content-Type'?, 'application\/pdf'/,
+    'PDF endpoint must set application/pdf');
+  // Audit log captures terms updates + PDF views
+  assert.match(src, /'contract\.terms_update'/);
+  assert.match(src, /'contract\.pdf_view'/);
+});
+
+test('contract PDF masks the citizen ID (last 4 only)', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  // The endpoint masks via tail — the full citizen_id_encrypted must NOT
+  // be passed to renderContractPdf. We verify by checking the masking
+  // construction is present.
+  assert.match(src, /citizenIdMasked: contract\.citizen_id_tail \? `\*\*\*-\*\*\*-/,
+    'PDF must mask the citizen ID when rendering');
+});
+
+test('contract PDF embeds online signature when available', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(src, /storage\.readFile\(fQ\.rows\[0\]\)/,
+    'must read the signature image bytes via storage');
+  assert.match(src, /signatures: \{ tenantBuf: tenantSigBuf \}/,
+    'must hand the buffer to the renderer');
+});
+
+test('GET /api/tenants/:id/history returns combined view (works on moved_out)', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(src, /app\.get\('\/api\/tenants\/:id\/history'/,
+    'history endpoint must exist');
+  // Soft-deleted tenants are EXCLUDED but moved-out are INCLUDED. The
+  // tenant SELECT must NOT filter on deleted_at IS NULL (we want to allow
+  // audit lookups even on hard-deleted records).
+  assert.match(src, /SELECT \* FROM tenants WHERE id=\$1/,
+    'history must allow lookups on any tenant row, including soft-deleted');
+  // Aggregate totals so admin sees the bottom line at a glance.
+  assert.match(src, /billsOutstanding/, 'totals must include outstanding-bill amount');
+  assert.match(src, /paymentsTotal/, 'totals must include verified-payments sum');
+  assert.match(src, /accessCardsActive[\s\S]{0,200}accessCardsRevoked/,
+    'totals must include card-status counts');
+});
+
+test('GET /api/tenants/lookup-by-citizen-id finds active and moved_out records', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(src, /app\.get\('\/api\/tenants\/lookup-by-citizen-id'/,
+    'lookup endpoint must exist');
+  // Must be hash-first, fall back to tail (legacy data without hash).
+  assert.match(src, /matchedByHash/, 'must surface high-confidence hash matches');
+  assert.match(src, /matchedByTailOnly/, 'must surface lower-confidence tail-only matches');
+  assert.match(src, /WHERE citizen_id_hash=\$1/,
+    'hash query must use the indexed column');
+});
+
+test('checkout deactivates tenant-scoped recurring_charges', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'tenant-ops.js'), 'utf8');
+  assert.match(src,
+    /UPDATE recurring_charges[\s\S]{0,400}SET active=FALSE[\s\S]{0,400}WHERE tenant_id=\$1 AND active=TRUE/,
+    'checkout must deactivate tenant-scoped recurring charges');
+  // Audit log must capture which charges were deactivated.
+  assert.match(src, /recurringDeactivated/,
+    'checkout audit must record deactivated labels');
+});
+
+test('identity endpoint cleans up old file when admin replaces a side', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(src,
+    /existingFrontId && existingFrontId !== frontFile\.id[\s\S]{0,300}storage\.remove\(pool, existingFrontId\)/,
+    'old front file must be removed on replace');
+  assert.match(src,
+    /existingBackId && existingBackId !== backFile\.id[\s\S]{0,300}storage\.remove\(pool, existingBackId\)/,
+    'old back file must be removed on replace');
+});
+
+test('identity + contract sign owner-notify (legal trail)', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(src, /📇 บันทึกบัตรประชาชน[\s\S]{0,200}tenant id=/,
+    'identity upload must owner-notify');
+  assert.match(src, /✍️ ลงนามสัญญา /,
+    'contract sign must owner-notify');
+});
+
+test('GET /api/tenant/contract returns the active contract (read-only)', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(src, /app\.get\('\/api\/tenant\/contract', requireTenant/,
+    'tenant portal contract endpoint must exist');
+  assert.match(src, /WHERE tenant_id=\$1 AND deleted_at IS NULL[\s\S]{0,200}\(status='active'\) DESC/,
+    'must prefer the active contract');
+  // hasContract flag — UI knows when tenant has none yet.
+  assert.match(src, /hasContract: true/);
+});
+
+test('GET /api/bookings/:id surfaces the citizen-ID photo URL when present', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(src, /app\.get\('\/api\/bookings\/:id'/,
+    'booking detail endpoint must exist');
+  assert.match(src,
+    /LEFT JOIN file_uploads fu ON fu\.id = b\.citizen_id_image_front_id/,
+    'must join file_uploads to expose the photo URL');
+  assert.match(src, /hasPhoto/, 'response must indicate whether a photo is attached');
+});
+
+test('POST /api/tenants accepts bookingId to carry over the citizen-ID photo', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(src, /b\.bookingId/, 'tenant create must accept a bookingId');
+  assert.match(src,
+    /UPDATE tenants SET citizen_id_image_front_id=\$1[\s\S]{0,200}UPDATE file_uploads SET ref_id=\$1/,
+    'must link the booking photo to the new tenant + retarget ref_id');
+  assert.match(src, /linkedFromBooking/,
+    'audit log must capture which booking the photo came from');
+});
+
+test('storage.saveBase64 accepts side=front|back + falls back on missing column', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'storage.js'), 'utf8');
+  assert.match(src, /side = null/, 'side parameter must default to null');
+  assert.match(src, /side === 'front' \|\| side === 'back'/,
+    'side must be validated against the two known values');
+  // Pre-migration deploys without the column must not crash.
+  assert.match(src, /err\.code === '42703'/,
+    'must fall back to legacy INSERT when side column missing');
+});
+
+test('backup script paginates large tables to avoid OOM', () => {
+  // SELECT * FROM audit_logs/meter_readings on a long-lived deploy used
+  // to OOM Railway hobby (512MB). Now we page by id ASC in 5k chunks.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'backup.js'), 'utf8');
+  assert.match(src, /PAGINATABLE_BY_ID = new Set\(/,
+    'paginatable allowlist must exist');
+  assert.match(src, /SELECT \* FROM \$\{name\} WHERE id > \$1 ORDER BY id ASC LIMIT \$2/,
+    'must page by id, not load entire table at once');
+  assert.match(src, /'audit_logs',[\s\S]{0,80}'meter_readings'/,
+    'audit_logs + meter_readings must be in the paginatable set');
 });

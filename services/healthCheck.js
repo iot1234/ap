@@ -180,18 +180,24 @@ async function checkR2() {
 
 async function checkNotificationQueue(pool) {
   try {
-    const { rows } = await pool.query(`
+    const res = await pool.query(`
       SELECT
         COUNT(*) FILTER (WHERE status='pending')                        AS pending,
         COUNT(*) FILTER (WHERE status='pending' AND next_attempt_at < NOW() - INTERVAL '15 minutes') AS stuck,
         COUNT(*) FILTER (WHERE status='failed' AND created_at > NOW() - INTERVAL '1 hour') AS recent_failed
       FROM notifications_queue`);
-    const r = rows[0];
-    const stuck = Number(r.stuck);
-    const failed = Number(r.recent_failed);
-    if (stuck > 5)  return { status: 'error', message: `${stuck} notifications stuck > 15min — queue worker may be wedged`, detail: r };
-    if (failed > 20) return { status: 'warn', message: `${failed} notifications failed in the last hour`, detail: r };
-    return { status: 'ok', message: `Queue healthy (${r.pending} pending)`, detail: r };
+    // Defense-in-depth: a few wrapped pool implementations (or a partially
+    // initialised circuit-breaker shim) can return a result object whose
+    // `rows` array is missing/empty even when the SQL succeeded. Treat that
+    // as "no data" rather than crashing with TypeError on rows[0].stuck.
+    const r = (res && Array.isArray(res.rows) && res.rows[0]) || {};
+    const stuck = Number(r.stuck) || 0;
+    const failed = Number(r.recent_failed) || 0;
+    const pending = Number(r.pending) || 0;
+    const detail = { pending, stuck, recent_failed: failed };
+    if (stuck > 5)  return { status: 'error', message: `${stuck} notifications stuck > 15min — queue worker may be wedged`, detail };
+    if (failed > 20) return { status: 'warn', message: `${failed} notifications failed in the last hour`, detail };
+    return { status: 'ok', message: `Queue healthy (${pending} pending)`, detail };
   } catch (err) {
     return { status: 'error', message: err.message };
   }
@@ -199,11 +205,12 @@ async function checkNotificationQueue(pool) {
 
 async function checkRecentFailedLogins(pool) {
   try {
-    const { rows } = await pool.query(`
+    const res = await pool.query(`
       SELECT COUNT(*) AS n FROM audit_logs
       WHERE action IN ('auth.login_failed','tenant.login_failed','auth.login_locked')
         AND created_at > NOW() - INTERVAL '15 minutes'`);
-    const n = Number(rows[0].n);
+    const r = (res && Array.isArray(res.rows) && res.rows[0]) || {};
+    const n = Number(r.n) || 0;
     if (n > 30) return { status: 'error', message: `${n} failed login attempts in 15min — possible brute-force in progress`, detail: { n } };
     if (n > 10) return { status: 'warn',  message: `${n} failed login attempts in 15min`, detail: { n } };
     return { status: 'ok', message: `${n} failed logins (15min window)`, detail: { n } };
@@ -214,9 +221,10 @@ async function checkRecentFailedLogins(pool) {
 
 async function checkActiveLockouts(pool) {
   try {
-    const { rows } = await pool.query(`
+    const res = await pool.query(`
       SELECT COUNT(*) AS n FROM login_lockouts WHERE locked_until > NOW()`);
-    const n = Number(rows[0].n);
+    const r = (res && Array.isArray(res.rows) && res.rows[0]) || {};
+    const n = Number(r.n) || 0;
     if (n > 5)  return { status: 'warn', message: `${n} accounts currently locked out`, detail: { n } };
     return { status: 'ok', message: `${n} active lockouts`, detail: { n } };
   } catch (err) {

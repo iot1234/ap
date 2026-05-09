@@ -578,11 +578,18 @@ async function tickContractExpiry(pool, _flags, now, state) {
   const todayKey = now.toISOString().slice(0, 10);
   if (state.lastContractExpiryAt === todayKey) return;
   try {
-    // (1) auto-expire — single statement, idempotent.
+    // (1) auto-expire — single statement, idempotent. RETURNING the tenant
+    // info too so we can fire one notify per expired contract telling the
+    // tenant their contract has officially ended (without this they only
+    // learned indirectly when their card stopped working / next bill failed).
     const expired = await pool.query(
-      `UPDATE contracts SET status='expired'
-         WHERE status='active' AND end_date IS NOT NULL AND end_date < CURRENT_DATE
-       RETURNING id, contract_no, tenant_id`
+      `UPDATE contracts c SET status='expired'
+         FROM tenants t
+        WHERE c.tenant_id = t.id
+          AND c.status='active' AND c.end_date IS NOT NULL AND c.end_date < CURRENT_DATE
+       RETURNING c.id, c.contract_no, c.end_date, c.room_id,
+                 t.id AS tenant_id, t.full_name, t.phone, t.email,
+                 t.line_user_id, t.line_oa_id, t.status AS tenant_status, t.deleted_at`
     );
     if (expired.rowCount > 0) {
       console.log(`[scheduler] auto-expired ${expired.rowCount} contract(s) past end_date`);
@@ -593,7 +600,8 @@ async function tickContractExpiry(pool, _flags, now, state) {
     // spam them when 5 contracts end in the same week.
     const { rows: upcoming } = await pool.query(
       `SELECT c.id, c.contract_no, c.end_date, c.room_id,
-              t.full_name, t.phone, t.email, t.line_user_id, t.line_oa_id,
+              t.id AS tenant_id, t.full_name, t.phone, t.email, t.line_user_id, t.line_oa_id,
+              t.status AS tenant_status, t.deleted_at,
               (c.end_date - CURRENT_DATE) AS days_left
          FROM contracts c
          LEFT JOIN tenants t ON t.id = c.tenant_id
@@ -625,10 +633,124 @@ async function tickContractExpiry(pool, _flags, now, state) {
         console.warn('[scheduler] contract notify owner failed:', err.message);
       }
     }
+
+    // (3) Tenant-side notifications — admin-only alerts let active tenants
+    // walk into a "your contract just expired" surprise. Send each tenant
+    // (a) early warnings at fixed thresholds (30/14/7/1 days), deduped per
+    //     state.lastContractTenantNotify[<id>] = `<threshold>:<period>` so
+    //     we don't repeat the same threshold-message from yesterday/today.
+    // (b) a one-time "ended" notice when their contract just flipped expired.
+    //
+    // Skip inactive/deleted tenants — they shouldn't keep getting messages
+    // (notifier.notifyTenant already enforces this, but cheaper to short-
+    // circuit here than to fan out then bail).
+    if (!state.lastContractTenantNotify || typeof state.lastContractTenantNotify !== 'object') {
+      state.lastContractTenantNotify = {};
+    }
+
+    // Recently-expired: one final "ended" message per contract.
+    for (const c of expired.rows) {
+      if (!c.tenant_id) continue;
+      if (c.tenant_status !== 'active' || c.deleted_at) continue;
+      const key = `expired:${c.contract_no}`;
+      if (state.lastContractTenantNotify[c.tenant_id] === key) continue;
+      try {
+        await notifier.notifyTenant({ pool, features: _flags || {} }, {
+          id: c.tenant_id, full_name: c.full_name, phone: c.phone, email: c.email,
+          line_user_id: c.line_user_id, line_oa_id: c.line_oa_id, status: c.tenant_status,
+        }, {
+          subject: '📄 สัญญาเช่าสิ้นสุดแล้ว',
+          text: `เรียน คุณ${c.full_name}\n\n`
+            + `สัญญาเช่า ${c.contract_no} (ห้อง ${c.room_id || '-'}) สิ้นสุดเมื่อ ${c.end_date}\n\n`
+            + `กรุณาติดต่อสำนักงานเพื่อต่อสัญญาหรือคืนห้อง`,
+        });
+        state.lastContractTenantNotify[c.tenant_id] = key;
+      } catch (err) {
+        console.warn('[scheduler] contract tenant ended-notify failed:', err.message);
+      }
+    }
+
+    // Upcoming: warn tenants at 30 / 14 / 7 / 1 day thresholds.
+    const THRESHOLDS = [30, 14, 7, 1];
+    for (const c of upcoming) {
+      if (!c.tenant_id) continue;
+      if (c.tenant_status !== 'active' || c.deleted_at) continue;
+      const days = Number(c.days_left);
+      // Pick the smallest threshold the tenant has crossed today
+      // (e.g. days_left=6 → matches 7 first, but we want 1 once they hit it)
+      const matched = THRESHOLDS.filter((t) => days <= t).sort((a, b) => a - b)[0];
+      if (matched == null) continue;
+      const key = `upcoming:${c.contract_no}:${matched}`;
+      if (state.lastContractTenantNotify[c.tenant_id] === key) continue;
+      try {
+        await notifier.notifyTenant({ pool, features: _flags || {} }, {
+          id: c.tenant_id, full_name: c.full_name, phone: c.phone, email: c.email,
+          line_user_id: c.line_user_id, line_oa_id: c.line_oa_id, status: c.tenant_status,
+        }, {
+          subject: `⏰ สัญญาเช่าจะหมดอายุภายใน ${days} วัน`,
+          text: `เรียน คุณ${c.full_name}\n\n`
+            + `สัญญาเช่า ${c.contract_no} (ห้อง ${c.room_id || '-'}) `
+            + `จะสิ้นสุดวันที่ ${c.end_date} (เหลือ ${days} วัน)\n\n`
+            + `หากต้องการต่อสัญญา กรุณาติดต่อสำนักงานก่อนวันสิ้นสุด`,
+        });
+        state.lastContractTenantNotify[c.tenant_id] = key;
+      } catch (err) {
+        console.warn('[scheduler] contract tenant upcoming-notify failed:', err.message);
+      }
+    }
+
     state.lastContractExpiryAt = todayKey;
     writeState(state);
   } catch (err) {
     console.error('[scheduler] contract expiry tick failed:', err.message);
+  }
+}
+
+// Postgres advisory-lock helper. The 64-bit lock id is derived from a per-
+// scheduler salt + a fixed namespace so cross-feature lock ids never collide.
+// Hash takes any string and folds it to int64 — good enough for cooperative
+// scheduling between replicas (we don't need cryptographic strength here).
+const SCHED_LOCK_NAMESPACE = 0x42414e4b;  // ascii "BANK"
+function _lockKeyFor(name) {
+  // FNV-1a 32-bit, sign-clamped to int32 so pg_try_advisory_lock(int4,int4)
+  // accepts both args without throwing "out of range for int4".
+  let h = 0x811c9dc5;
+  for (let i = 0; i < name.length; i++) {
+    h ^= name.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  // Clamp to positive int32
+  return (h >>> 0) & 0x7fffffff;
+}
+async function _withAdvisoryLock(pool, name, fn) {
+  // Try-lock so a hung peer can never wedge us — scheduler ticks are idempotent
+  // anyway; missing one tick is preferable to blocking subsequent ticks.
+  let acquired = false;
+  let client;
+  try {
+    client = await pool.connect();
+    const r = await client.query(
+      'SELECT pg_try_advisory_lock($1::int, $2::int) AS got',
+      [SCHED_LOCK_NAMESPACE, _lockKeyFor(name)]
+    );
+    acquired = r.rows[0] && r.rows[0].got === true;
+    if (!acquired) return { skipped: true, reason: 'lock-held' };
+    return await fn(client);
+  } catch (err) {
+    console.error(`[scheduler] advisory-lock(${name}) error:`, err.message);
+    return { error: err.message };
+  } finally {
+    if (client) {
+      if (acquired) {
+        try {
+          await client.query(
+            'SELECT pg_advisory_unlock($1::int, $2::int)',
+            [SCHED_LOCK_NAMESPACE, _lockKeyFor(name)]
+          );
+        } catch { /* ignore */ }
+      }
+      client.release();
+    }
   }
 }
 
@@ -637,17 +759,30 @@ async function tick(pool) {
   try { flags = await features.load(pool); } catch { return; }
   const state = readState();
   const now = new Date();
-  // Run jobs in parallel with allSettled so a hung job (e.g. backup waiting
-  // on R2) doesn't block the others (late-fee, bill-gen). Each job catches
-  // its own errors internally; allSettled here is a safety net for ones we
-  // missed. Errors are logged, never propagated to the parent tick caller.
+
+  // Late-fee MUST run before bill-gen so today's auto-bills can include the
+  // late fee on the previous overdue bill. Running them in parallel races —
+  // bill-gen reads bills.status, and a previous bill stuck in 'pending' past
+  // its due_date doesn't pay a late fee that cycle.
+  try { await tickLateFee(pool, flags, now, state); }
+  catch (err) { console.error('[scheduler] late-fee:', err.message); }
+
+  // Wrap the daily ticks in an advisory lock so multi-replica deployments
+  // (Railway 2x replica common) don't fan out duplicate notifications. Each
+  // tick is internally idempotent (UPDATE with ON CONFLICT, state-file latch),
+  // but the `notifier.notifyOwner` calls inside the ticks ARE NOT — without
+  // the lock both replicas send the same daily summary to the owner.
+  //
+  // The advisory lock is held only for the duration of one tick cycle; the
+  // state-file latch still blocks repeats within the same instance.
+  const todayKey = now.toISOString().slice(0, 10);
   const results = await Promise.allSettled([
-    tickLateFee(pool, flags, now, state),
-    tickAutoBackup(pool, flags, now, state),
-    tickBillGen(pool, flags, now, state),
-    tickMeterSimulator(pool, flags, now, state),
-    tickAccessControlSync(pool, flags, now, state),
-    tickContractExpiry(pool, flags, now, state),
+    _withAdvisoryLock(pool, `autoBackup-${todayKey}`,    () => tickAutoBackup(pool, flags, now, state)),
+    _withAdvisoryLock(pool, `billGen-${todayKey}`,       () => tickBillGen(pool, flags, now, state)),
+    _withAdvisoryLock(pool, `meterSim-${now.toISOString().slice(0,13)}`,
+                                                          () => tickMeterSimulator(pool, flags, now, state)),
+    _withAdvisoryLock(pool, `accessSync-${todayKey}`,    () => tickAccessControlSync(pool, flags, now, state)),
+    _withAdvisoryLock(pool, `contractExpiry-${todayKey}`,() => tickContractExpiry(pool, flags, now, state)),
   ]);
   for (const r of results) {
     if (r.status === 'rejected') {

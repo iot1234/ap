@@ -115,6 +115,10 @@ async function saveBase64({
   maxBytes = 1_500_000,
   allowedMimes = ['image/jpeg', 'image/png', 'image/webp'],
   declaredMime = null,
+  // Optional 'front'/'back' tag — only used for citizen_id_image today,
+  // but generic enough that future categories (e.g. utility-meter photo
+  // before/after) can reuse it without a schema change.
+  side = null,
 }) {
   const parsed = parseBase64(dataUrl);
   const declared = (parsed.mime || declaredMime || '').toLowerCase();
@@ -143,6 +147,7 @@ async function saveBase64({
   // and citizen-ID images would vanish on the next push.
   let storageMode = 'local';
   let s3Key = null;
+  let s3FailureMsg = null;
   if (s3Configured()) {
     const client = getS3Client();
     const bucket = secrets.get('R2_BUCKET');
@@ -157,6 +162,7 @@ async function saveBase64({
         }));
         storageMode = 's3';
       } catch (err) {
+        s3FailureMsg = err.message;
         console.error('[storage] R2 upload failed, falling back to local:', err.message);
         s3Key = null;
       }
@@ -167,22 +173,88 @@ async function saveBase64({
     ensureDir(dir);
     const fullPath = path.join(dir, filename);
     fs.writeFileSync(fullPath, parsed.buffer);
+    // R2 was configured + failed → alert the owner. Without this the slip
+    // ends up on Railway's ephemeral disk and is lost at next redeploy
+    // with no signal to anyone. Fire-and-forget so a notify outage can't
+    // wedge an upload.
+    if (s3FailureMsg) {
+      try {
+        const notifier = require('./notifier');
+        const features = require('./features');
+        const flags = await features.load(pool).catch(() => ({}));
+        notifier.notifyOwner({ pool, features: flags }, {
+          subject: '⚠️ R2/S3 upload failed — file saved locally (will be lost on redeploy)',
+          text: `R2 upload failed for ${safeCategory}/${filename}\n\n`
+            + `Error: ${s3FailureMsg}\n\n`
+            + `ไฟล์อยู่บน local disk ของ container — เมื่อ Railway redeploy จะหาย. ` +
+              `กรุณาตรวจสอบ R2 credentials ใน /admin#secrets`,
+        }).catch(() => {});
+      } catch { /* ignore */ }
+    }
   }
 
   // Insert first, then build the URL using the row id so admins get
   // /files/<id> (auth-gated). Two-step: insert with placeholder url, then
   // update — but a single INSERT ... RETURNING gives us the id we need to
   // build the url and we can patch it post-insert in one extra UPDATE.
-  const ins = await pool.query(
-    `INSERT INTO file_uploads (category, ref_id, filename, mime_type, size_bytes, storage, url, uploaded_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
-    [safeCategory, refId, filename, mime, parsed.buffer.length, storageMode, '', uploadedBy]
-  );
+  //
+  // `side` is only set when the caller explicitly passed it (citizen ID
+  // front/back) — older deployments without the column fall through via
+  // the partial-update path below.
+  const safeSide = (side === 'front' || side === 'back') ? side : null;
+  let ins;
+  try {
+    ins = await pool.query(
+      `INSERT INTO file_uploads (category, ref_id, filename, mime_type, size_bytes, storage, url, uploaded_by, side)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
+      [safeCategory, refId, filename, mime, parsed.buffer.length, storageMode, '', uploadedBy, safeSide]
+    );
+  } catch (err) {
+    // Older deploys may not have the `side` column yet (mid-migration).
+    // Fall back to the no-side INSERT so existing flows keep working.
+    if (err.code === '42703') {  // undefined_column
+      ins = await pool.query(
+        `INSERT INTO file_uploads (category, ref_id, filename, mime_type, size_bytes, storage, url, uploaded_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
+        [safeCategory, refId, filename, mime, parsed.buffer.length, storageMode, '', uploadedBy]
+      );
+    } else {
+      throw err;
+    }
+  }
   const id = ins.rows[0].id;
   const url = `/files/${id}`;
   await pool.query(`UPDATE file_uploads SET url=$1 WHERE id=$2`, [url, id]);
 
   return { id, url, filename, size: parsed.buffer.length, mime, buffer: parsed.buffer, storage: storageMode };
+}
+
+// Defense-in-depth: defend against a tampered DB row whose `category` or
+// `filename` contains "../" or backslashes that path.join would happily
+// resolve OUTSIDE UPLOAD_ROOT. The write-time sanitiser at saveBase64
+// already strips bad characters, but a manually-mutated row (DBA edit, SQL
+// injection elsewhere, restored backup with malicious data) could still
+// carry traversal segments. Resolve the joined path and require it to start
+// with UPLOAD_ROOT — refuse to read anything outside.
+function _safeLocalPath(category, filename) {
+  // Reject obvious traversal attempts before path.join even sees them so
+  // the error message is actionable rather than "Bucket is required" -ish.
+  if (typeof category !== 'string' || typeof filename !== 'string') {
+    throw new Error('storage: invalid category/filename');
+  }
+  if (category.includes('..') || filename.includes('..')
+      || category.includes('/') || category.includes('\\')
+      || filename.includes('/') || filename.includes('\\')) {
+    throw new Error('storage: traversal in category/filename');
+  }
+  const resolved = path.resolve(path.join(UPLOAD_ROOT, category, filename));
+  // Require the resolved path to be inside UPLOAD_ROOT. Trailing path.sep
+  // ensures `/uploads-evil` doesn't match `/uploads`.
+  const root = UPLOAD_ROOT.endsWith(path.sep) ? UPLOAD_ROOT : UPLOAD_ROOT + path.sep;
+  if (!resolved.startsWith(root) && resolved !== UPLOAD_ROOT) {
+    throw new Error('storage: resolved path escapes upload root');
+  }
+  return resolved;
 }
 
 // Read a stored file's bytes back. Used by the auth-gated /files/:id
@@ -205,7 +277,7 @@ async function readFile(rec) {
     return Buffer.concat(chunks);
   }
   // local
-  const fp = path.join(UPLOAD_ROOT, rec.category, rec.filename);
+  const fp = _safeLocalPath(rec.category, rec.filename);
   if (!fs.existsSync(fp)) return null;
   return fs.readFileSync(fp);
 }
@@ -228,8 +300,12 @@ async function remove(pool, id) {
       }
     } catch (err) { console.warn('[storage] R2 delete failed:', err.message); }
   } else {
-    const fp = path.join(UPLOAD_ROOT, r.category, r.filename);
-    try { fs.unlinkSync(fp); } catch { /* ignore */ }
+    // Same traversal guard as readFile — never let a malicious row delete
+    // outside the upload root (e.g. /etc/passwd via filename='../../etc/passwd').
+    try {
+      const fp = _safeLocalPath(r.category, r.filename);
+      fs.unlinkSync(fp);
+    } catch { /* ignore — guarded path or already gone */ }
   }
   await pool.query('DELETE FROM file_uploads WHERE id=$1', [id]);
   return true;

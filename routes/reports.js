@@ -5,17 +5,32 @@
 
 const express = require('express');
 
+// Spreadsheet formula injection: a cell beginning with =, +, -, @, or tab/CR
+// is interpreted by Excel/Sheets as a formula. Prefixing a single-quote (or
+// in CSV, an apostrophe) tells the spreadsheet to treat it as text.
+// Mitigates the "tenant submits =HYPERLINK(...) in a notes field, admin
+// exports CSV, opens in Excel, browser opens malicious URL" attack.
+const FORMULA_INJECTION_RE = /^[=+\-@\t\r]/;
+function neutraliseFormula(s) {
+  return FORMULA_INJECTION_RE.test(s) ? `'${s}` : s;
+}
+
 function rowsToCsv(rows) {
   if (!rows.length) return '';
   const header = Object.keys(rows[0]);
   const escape = (v) => {
     if (v == null) return '';
-    const s = String(v).replace(/"/g, '""');
-    return /[",\n]/.test(s) ? `"${s}"` : s;
+    let s = String(v).replace(/"/g, '""');
+    s = neutraliseFormula(s);
+    // Quote when the value contains a delimiter, quote, or any line break
+    // (\r, \n, or \r\n). Without \r in the regex, Notes fields with bare
+    // CR ended up split across multiple "rows" in Excel's CSV import.
+    return /[",\r\n]/.test(s) ? `"${s}"` : s;
   };
   const lines = [header.join(',')];
   for (const row of rows) lines.push(header.map((h) => escape(row[h])).join(','));
-  return lines.join('\n');
+  // CRLF for max-compat with Excel on Windows.
+  return lines.join('\r\n');
 }
 
 async function rowsToXlsx(rows, sheetName) {
@@ -26,7 +41,16 @@ async function rowsToXlsx(rows, sheetName) {
     ws.columns = Object.keys(rows[0]).map((k) => ({ header: k, key: k, width: 18 }));
     ws.getRow(1).font = { bold: true };
     ws.views = [{ state: 'frozen', ySplit: 1 }];
-    for (const r of rows) ws.addRow(r);
+    // Sanitise formula-leaders on string cells before adding the row. Numbers,
+    // dates, booleans pass through unchanged so summable columns remain numeric.
+    for (const r of rows) {
+      const safe = {};
+      for (const [k, v] of Object.entries(r)) {
+        if (typeof v === 'string') safe[k] = neutraliseFormula(v);
+        else safe[k] = v;
+      }
+      ws.addRow(safe);
+    }
   }
   return wb.xlsx.writeBuffer();
 }

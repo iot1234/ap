@@ -11,6 +11,16 @@ const lineOa = require('./lineOa');
 const email = require('./email');
 const sms = require('./sms');
 const secrets = require('./secrets');
+// Lazy-required to avoid a circular module-load cycle (notificationQueue
+// dispatches via line/email/sms — which never reach back into notifier,
+// but Node still evaluates the require eagerly at top-of-file).
+let _notifQueue = null;
+function getQueue() {
+  if (_notifQueue) return _notifQueue;
+  try { _notifQueue = require('./notificationQueue'); }
+  catch { _notifQueue = null; }
+  return _notifQueue;
+}
 
 // Per-tenant LINE dispatch: figure out which OA the tenant is bound on,
 // load that OA's credentials, push through it. Falls back to env-OA when
@@ -95,7 +105,42 @@ async function notifyOwner(ctx, msg) {
     if (ok) return { channel: 'email', ok: true };
   }
 
-  // 3. None worked → log skip
+  // 3. Queue fallback — if LINE attempted-but-failed or email transient-down,
+  // park the message for retry rather than dropping it. Owner alerts are
+  // the highest-priority class (anomaly detector, contract expiry, slip
+  // queue summary) so silent loss is unacceptable.
+  const queue = getQueue();
+  if (queue) {
+    if (oaForOwner && oaForOwner.channelAccessToken && lineOwner) {
+      try {
+        await queue.enqueue(pool, {
+          channel: 'line', recipient: lineOwner, subject, body: text,
+          payload: { oaId: oaForOwner.id, source: 'notifier-owner-fallback' },
+        });
+        await logResult(pool, {
+          channel: 'queue', recipient: lineOwner, subject, body: text,
+          status: 'queued', error: 'owner LINE push failed — enqueued',
+        });
+        return { channel: 'queue', ok: false, queued: true };
+      } catch { /* fall through */ }
+    }
+    if (email.isConfigured(features) && features?.email?.from) {
+      const to = secrets.get('OWNER_EMAIL') || features.email.from;
+      try {
+        await queue.enqueue(pool, {
+          channel: 'email', recipient: to, subject, body: text,
+          payload: { source: 'notifier-owner-fallback' },
+        });
+        await logResult(pool, {
+          channel: 'queue', recipient: to, subject, body: text,
+          status: 'queued', error: 'owner email failed — enqueued',
+        });
+        return { channel: 'queue', ok: false, queued: true };
+      } catch { /* fall through */ }
+    }
+  }
+
+  // 4. None worked → log skip
   await logResult(pool, {
     channel: 'none', recipient: '', subject, body: text,
     status: 'failed', error: 'no channel configured',
@@ -173,6 +218,56 @@ async function notifyTenant(ctx, tenant, msg) {
         channel: 'sms', recipient: phone, subject, body: text,
         status: 'failed', error: err.message,
       });
+    }
+  }
+
+  // Last-resort: enqueue for later retry instead of dropping the message
+  // on the floor. This catches the common "LINE token went 401 for 30
+  // minutes" failure mode where the immediate push fails but the channel
+  // recovers within the queue retry window. Without this fallback every
+  // checkin/maintenance/access-card notify fired during the outage was
+  // permanently lost.
+  //
+  // Queue is best-effort — if the table doesn't exist (legacy deploy) or
+  // the enqueue itself fails, we still log + return false so the caller
+  // sees the same shape as before.
+  const queue = getQueue();
+  if (queue) {
+    let enqueued = false;
+    if (lineId) {
+      try {
+        await queue.enqueue(pool, {
+          channel: 'line', recipient: lineId, subject, body: text,
+          payload: { oaId: tenant.line_oa_id || null, source: 'notifier-fallback' },
+        });
+        enqueued = true;
+      } catch { /* ignore — try next channel */ }
+    }
+    if (!enqueued && mail && email.isConfigured(features)) {
+      try {
+        await queue.enqueue(pool, {
+          channel: 'email', recipient: mail, subject, body: text,
+          payload: { source: 'notifier-fallback' },
+        });
+        enqueued = true;
+      } catch { /* ignore */ }
+    }
+    if (!enqueued && phone && sms.isConfigured(features)) {
+      try {
+        await queue.enqueue(pool, {
+          channel: 'sms', recipient: phone, subject, body: text,
+          payload: { source: 'notifier-fallback' },
+        });
+        enqueued = true;
+      } catch { /* ignore */ }
+    }
+    if (enqueued) {
+      await logResult(pool, {
+        channel: 'queue', recipient: lineId || mail || phone || '',
+        subject, body: text, status: 'queued',
+        error: 'all immediate channels failed — enqueued for retry',
+      });
+      return { channel: 'queue', ok: false, queued: true };
     }
   }
 

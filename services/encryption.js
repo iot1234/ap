@@ -34,8 +34,23 @@ function loadKeys() {
     }
     _keys.set(ver, buf);
   }
-  _current = Number(process.env.ENCRYPTION_KEY_CURRENT || 0)
-    || (_keys.size ? Math.max(...Array.from(_keys.keys())) : 0);
+  // Resolve _current carefully: an explicit ENCRYPTION_KEY_CURRENT that
+  // points at a version which failed the 32-byte check would otherwise
+  // make encryptString crash on first write (createCipheriv called with
+  // `undefined`). Fall back to the highest valid loaded version, or 0
+  // (legacy single-key path) if nothing valid is loaded.
+  const explicit = Number(process.env.ENCRYPTION_KEY_CURRENT || 0);
+  if (explicit && _keys.has(explicit)) {
+    _current = explicit;
+  } else {
+    if (explicit && !_keys.has(explicit)) {
+      console.warn(
+        `[encryption] ENCRYPTION_KEY_CURRENT=${explicit} but ENCRYPTION_KEY_V${explicit} is missing/invalid — ` +
+        `falling back to highest loaded key`
+      );
+    }
+    _current = _keys.size ? Math.max(...Array.from(_keys.keys())) : 0;
+  }
   return _keys;
 }
 
@@ -47,6 +62,13 @@ function encryptString(plain) {
     return legacyCrypto.encryptString(plain);
   }
   const key = _keys.get(_current);
+  if (!key) {
+    // Defensive: should be unreachable after loadKeys() validation, but the
+    // cost of being wrong is "silently corrupt encrypted column" so guard
+    // anyway. Fall through to legacy rather than throwing inside a write.
+    console.warn('[encryption] _current points at a missing key — falling through to legacy crypto');
+    return legacyCrypto.encryptString(plain);
+  }
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
   const ct = Buffer.concat([cipher.update(String(plain), 'utf8'), cipher.final()]);
@@ -80,11 +102,57 @@ function decryptString(stored) {
 function currentVersion() { loadKeys(); return _current; }
 function loadedVersions() { loadKeys(); return Array.from(_keys.keys()).sort(); }
 
+/**
+ * Boot-time self-test. Throws if encryption is configured but broken so a
+ * misconfigured deploy fails fast at startup instead of crashing the first
+ * write to `secrets` / `line_oas.channel_access_token_encrypted`.
+ *
+ * Returns a status object suitable for /api/admin/health.
+ */
+function validateAtBoot() {
+  loadKeys();
+  // Versioned-key mode is "selected" by the operator setting any
+  // ENCRYPTION_KEY_V* env var (even an invalid one) OR ENCRYPTION_KEY_CURRENT.
+  // We detect that intent across the env directly so we can distinguish
+  // "operator never set anything → fall through to legacy" from "operator
+  // tried to set keys but they're all invalid → fail boot loudly."
+  const versionedIntent = Object.keys(process.env).some(
+    (k) => /^ENCRYPTION_KEY_V\d+$/.test(k) || k === 'ENCRYPTION_KEY_CURRENT'
+  );
+  if (_keys.size === 0) {
+    if (versionedIntent) {
+      throw new Error(
+        '[encryption] no usable key for encrypting (loaded=none). ' +
+        'Operator set ENCRYPTION_KEY_V*/ENCRYPTION_KEY_CURRENT but every value failed the 32-byte check. ' +
+        'Provide a valid 32-byte base64-encoded key (generate with: ' +
+        'node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64\'))").'
+      );
+    }
+    return { ok: true, mode: 'legacy', message: 'No ENCRYPTION_KEY_V* set — using legacy single-key crypto.' };
+  }
+  if (!_current || !_keys.has(_current)) {
+    throw new Error(
+      `[encryption] no usable key for encrypting (_current=${_current}, loaded=${Array.from(_keys.keys()).join(',') || 'none'}). ` +
+      `Set ENCRYPTION_KEY_CURRENT to a version whose ENCRYPTION_KEY_V<N> env var is a valid 32-byte base64 string.`
+    );
+  }
+  // Round-trip a probe so misconfigured AES keys (corrupted base64 etc.)
+  // surface here, not on a user-visible write.
+  const probe = 'encryption-self-test-' + Math.random().toString(36).slice(2, 8);
+  const enc = encryptString(probe);
+  const dec = decryptString(enc);
+  if (dec !== probe) {
+    throw new Error('[encryption] self-test round-trip failed — encryption is misconfigured');
+  }
+  return { ok: true, mode: 'versioned', current: _current, loaded: Array.from(_keys.keys()) };
+}
+
 module.exports = {
   encryptString,
   decryptString,
   currentVersion,
   loadedVersions,
+  validateAtBoot,
   // Re-export helpers from legacy for callers that want masking/HMAC
   maskTail: legacyCrypto.maskTail,
   hmac: legacyCrypto.hmac,

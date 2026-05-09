@@ -122,6 +122,38 @@ const DEFAULTS = Object.freeze({
     dayOfMonth: 1,               // run on the 1st of each month
     dueDay: 15,                   // due on the 15th
   },
+  // Tenancy contract / identity capture defaults. These describe the
+  // safety guards admin can tune from the Features page — none of them
+  // require new code paths to function, they just adjust how strict the
+  // checkin endpoint is.
+  tenancyContract: {
+    enabled: true,
+    // Require citizen-ID front + back image to be uploaded BEFORE checkin
+    // succeeds. ON by default — Thai dormitory law requires landlords to
+    // keep tenant ID on file. Turn off only for migration / legacy rows.
+    requireIdentityImages: true,
+    // Require an emergency contact (name + phone) on the tenant row before
+    // checkin. ON because losing tenant contact in an emergency is the
+    // single most common operations failure for small dorms.
+    requireEmergencyContact: true,
+    // Require an address on the tenant row. ON because the contract PDF
+    // wouldn't have a "current address" field otherwise.
+    requireAddress: true,
+    // moveInDate sanity window — reject anything outside [today - past, today + future] days.
+    // Default: 30 days back / 90 days forward. Catches typos like "2026"
+    // when admin meant "2025" while still allowing back-fill of a missed
+    // checkin (last week) and a planned future move-in (next month).
+    moveInPastDays: 30,
+    moveInFutureDays: 90,
+    // Deposit must be ≤ depositMaxMonths × monthlyRent. Default = 3 months
+    // (typical Thai practice: 1-2 months deposit). admin.force bypasses.
+    depositMaxMonths: 3,
+    // Current terms-and-conditions version string. Stamped on tenants /
+    // contracts at the moment of checkin so a future T&C revision doesn't
+    // retroactively bind existing tenants. Operator updates this string
+    // each time the displayed T&C document changes.
+    termsVersion: 'v1.0-2026-01',
+  },
 });
 
 function deepMerge(base, over) {

@@ -353,6 +353,15 @@ async function tryBind(pool, { code, lineUserId, oaId } = {}) {
     };
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
+    // Race: two concurrent tryBinds for the same (oa_id, line_user_id) from
+    // different pending codes both pass the dedup SELECT and both attempt
+    // the UPDATE that flips status='bound'. The partial unique index
+    // uq_line_bindings_active_user_per_oa rejects the second with 23505.
+    // Map this to the same clean reason the dedup branch returns rather
+    // than letting the error bubble up as a generic 500 / "ระบบขัดข้อง".
+    if (err && err.code === '23505') {
+      return { ok: false, reason: 'line_user_already_bound', raceLost: true };
+    }
     throw err;
   } finally {
     client.release();

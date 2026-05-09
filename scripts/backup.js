@@ -50,12 +50,57 @@ const TABLES = [
   'system_settings', 'bookings',
 ];
 
-async function dumpTable(name) {
+// Validate table name against a strict allowlist regex before string-
+// interpolating into SQL — pg-node has no first-class identifier escape, so
+// we lean on the regex to prevent injection through a tampered TABLES list.
+function _validateTableName(name) {
+  if (!/^[a-z_][a-z0-9_]*$/.test(name)) {
+    throw new Error(`invalid table name: ${name}`);
+  }
+}
+
+// Tables we know carry an integer `id` PK we can paginate by. Anything not
+// in this set falls back to a single SELECT * (assumed small). audit_logs
+// + meter_readings + notifications_log can grow into millions on long-lived
+// deployments — without paging they OOM the Railway hobby tier (512MB)
+// during the in-process scheduler-driven backup.
+const PAGINATABLE_BY_ID = new Set([
+  'audit_logs', 'meter_readings', 'access_logs',
+  'notifications_log', 'notifications_queue',
+  'bills', 'payments', 'maintenance_tickets', 'file_uploads',
+]);
+
+const PAGE_SIZE = 5000;
+
+async function dumpTable(client, name) {
+  _validateTableName(name);
   // Skip tables that don't exist (e.g. older deploy without v2 migration).
   // Treats "relation does not exist" as a non-fatal warning rather than
   // failing the whole backup.
   try {
-    const { rows } = await pool.query(`SELECT * FROM ${name}`);
+    if (PAGINATABLE_BY_ID.has(name)) {
+      // Page by id ascending. Streams in PAGE_SIZE chunks so peak memory is
+      // bounded by ~PAGE_SIZE rows × row size (a few MB at most) regardless
+      // of how big the table grew. For dumps headed straight to disk this
+      // is preferable to loading everything via SELECT *.
+      const out = [];
+      let lastId = 0;
+      // Bail-out cap: 10M rows × small row size = ~OK, but anything larger
+      // should be archived/truncated, not dumped to a single JSON.
+      const HARD_LIMIT = 10_000_000;
+      while (out.length < HARD_LIMIT) {
+        const { rows } = await client.query(
+          `SELECT * FROM ${name} WHERE id > $1 ORDER BY id ASC LIMIT $2`,
+          [lastId, PAGE_SIZE]
+        );
+        if (!rows.length) break;
+        for (const r of rows) out.push(r);
+        lastId = rows[rows.length - 1].id;
+        if (rows.length < PAGE_SIZE) break;
+      }
+      return out;
+    }
+    const { rows } = await client.query(`SELECT * FROM ${name}`);
     return rows;
   } catch (err) {
     if (err.code === '42P01') {
@@ -76,9 +121,9 @@ async function main() {
   console.log(`[backup] starting dump @ ${stamp}`);
   for (const t of TABLES) {
     try {
-      const rows = await dumpTable(t);
+      const rows = await dumpTable(pool, t);
       backup.tables[t] = rows;
-      console.log(`[backup] ${t}: ${rows.length} rows`);
+      console.log(`[backup] ${t}: ${Array.isArray(rows) ? rows.length : '(skipped)'} rows`);
     } catch (err) {
       console.warn(`[backup] ${t} failed: ${err.message}`);
       backup.tables[t] = { __error: err.message };
@@ -159,9 +204,9 @@ async function run({ pool: externalPool, retainDays }) {
   const counts = {};
   for (const t of TABLES) {
     try {
-      const { rows } = await externalPool.query(`SELECT * FROM ${t}`);
+      const rows = await dumpTable(externalPool, t);
       backup.tables[t] = rows;
-      counts[t] = rows.length;
+      counts[t] = Array.isArray(rows) ? rows.length : 0;
     } catch (err) {
       if (err.code === '42P01') {
         backup.tables[t] = { __skipped: 'table does not exist' };

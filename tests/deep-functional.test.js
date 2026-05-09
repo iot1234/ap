@@ -374,11 +374,16 @@ test('/api/tenant/payments handler: rejects amount mismatch BEFORE saving slip',
   const fs = require('node:fs');
   const path = require('node:path');
   const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
-  // The guard must run BEFORE saveBase64. Find both, compare positions.
+  // The guard must run BEFORE the slip-upload saveBase64. The file now has
+  // multiple saveBase64 callers (public booking → citizen ID image, admin
+  // /api/uploads, /tenants/:id/identity, /contracts/:id/sign), so use the
+  // FIRST saveBase64 that appears AFTER AMOUNT_NOT_BILL_TOTAL — that's the
+  // slip-upload call we want to assert is downstream of the guard.
   const idxAmountGuard = server.indexOf('AMOUNT_NOT_BILL_TOTAL');
-  const idxSaveBase64 = server.indexOf('storage.saveBase64');
-  assert.ok(idxAmountGuard > 0 && idxSaveBase64 > 0);
-  assert.ok(idxAmountGuard < idxSaveBase64,
+  const idxSlipSave = server.indexOf('storage.saveBase64', idxAmountGuard);
+  assert.ok(idxAmountGuard > 0 && idxSlipSave > 0,
+    'both AMOUNT_NOT_BILL_TOTAL and a downstream storage.saveBase64 must exist');
+  assert.ok(idxAmountGuard < idxSlipSave,
     'AMOUNT_NOT_BILL_TOTAL guard must run BEFORE saveBase64 (else slip leaks on reject)');
 });
 
