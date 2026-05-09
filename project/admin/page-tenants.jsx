@@ -782,11 +782,16 @@ function TabContract({ t, setToast, addActivity }) {
       // Resolve tenants.id from phone (rooms blob has only the tenant snapshot).
       // /api/tenants supports `q=` (LIKE search across name/phone/email) but
       // not a direct `phone=` filter, so we filter client-side after the LIKE
-      // narrows the result set.
+      // narrows the result set. Phones in the DB are normalised by
+      // mirrorRoomsToTenants() — strip dashes/spaces — but the rooms-blob
+      // copy may still have separators if an admin typed them in. Compare
+      // both sides with the same normaliser so dashed/un-dashed pairs match.
+      const normalisePhone = (s) => String(s || '').replace(/[\s-]/g, '');
       let tid = null;
       try {
-        const tRes = await apiCall(`/api/tenants?q=${encodeURIComponent(t.phone || '')}`);
-        const match = (tRes.tenants || []).find((x) => x.phone === t.phone);
+        const phone = normalisePhone(t.phone);
+        const tRes = await apiCall(`/api/tenants?q=${encodeURIComponent(phone)}`);
+        const match = (tRes.tenants || []).find((x) => normalisePhone(x.phone) === phone);
         if (match) tid = match.id;
       } catch { /* fall through */ }
       setTenantDbId(tid);

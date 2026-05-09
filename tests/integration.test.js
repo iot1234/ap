@@ -736,6 +736,28 @@ test('end-to-end pipeline: discount + first-month + quarterly compose correctly'
   assert.ok(hasCleaning, 'quarterly recurring item must be on the bill');
 });
 
+test('TabContract resolves tenant phone with the same normaliser the DB uses', () => {
+  // mirrorRoomsToTenants normalises phones (strip dashes/spaces) before
+  // INSERT but the rooms-blob copy may still carry separators if admin
+  // typed them manually. The tenant-side lookup must apply the same
+  // normaliser to both sides — otherwise "080-123-4567" (rooms blob)
+  // never finds "0801234567" (DB) and the CheckInModal never appears
+  // for that tenant.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const tenants = fs.readFileSync(
+    path.join(__dirname, '..', 'project', 'admin', 'page-tenants.jsx'), 'utf8'
+  );
+  // The normaliser must be applied BOTH to t.phone (search input) and
+  // x.phone (DB result) so dashed/non-dashed match symmetrically.
+  assert.match(tenants,
+    /normalisePhone\(t\.phone\)[\s\S]{0,400}normalisePhone\(x\.phone\)/,
+    'TabContract must normalise both sides of the phone comparison');
+  assert.match(tenants,
+    /normalisePhone\s*=\s*\([^)]+\)\s*=>\s*[\s\S]{0,80}\.replace\(\s*\/\[\\s-\]\/g\s*,/,
+    'normaliser must strip whitespace + dashes (matches mirrorRoomsToTenants)');
+});
+
 test('encryption module round-trips with versioned prefix', () => {
   // Force a clean load with the current env + ENCRYPTION_KEY_V1 set
   process.env.ENCRYPTION_KEY_V1 = Buffer.alloc(32, 1).toString('base64');
