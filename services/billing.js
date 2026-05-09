@@ -172,9 +172,29 @@ function formatPeriodNow() {
 }
 
 function formatDueDate(dom = 15) {
+  // Build YYYY-MM-DD by reading LOCAL year/month — never round-trip through
+  // toISOString() because that converts to UTC and on Asia/Bangkok (UTC+7)
+  // it would shift the date back by ~17h, returning the wrong day-string
+  // for any moment between midnight and 7am local. The dom argument is a
+  // day-of-month, not a wall-clock instant; combining it with the current
+  // local year/month + zero-padding produces the operator's intent
+  // regardless of the server's timezone.
   const d = new Date();
-  d.setDate(dom);
-  return d.toISOString().slice(0, 10);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(Math.max(1, Math.min(28, Number(dom) || 15))).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+// Build a YYYY-MM-DD string for a specific (year, month, day) without going
+// through Date → toISOString. Same timezone-safety reasoning as
+// formatDueDate. Caller passes the human values they mean (year, 1-indexed
+// month, day-of-month). Used by the scheduler + bulk-generate paths.
+function formatYMD(year, monthOneIndexed, day) {
+  const y = String(Number(year) || new Date().getFullYear()).padStart(4, '0');
+  const m = String(Number(monthOneIndexed) || 1).padStart(2, '0');
+  const d = String(Number(day) || 1).padStart(2, '0');
+  return `${y}-${m}-${d}`;
 }
 
 /**
@@ -244,6 +264,6 @@ function isChargeApplicableForPeriod(charge, period) {
 
 module.exports = {
   buildBill, buildPaymentBlock, statusOf, makeBillNo,
-  formatPeriodNow, formatDueDate, round2,
+  formatPeriodNow, formatDueDate, formatYMD, round2,
   isChargeApplicableForPeriod,
 };

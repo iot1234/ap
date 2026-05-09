@@ -921,6 +921,45 @@ test('access card revoke/restore notifies the affected tenant', () => {
     'must not reference ac.updated_at — no such column on access_cards');
 });
 
+test('formatDueDate / formatYMD are timezone-safe (Asia/Bangkok regression)', () => {
+  // The old `new Date(y, m, d).toISOString().slice(0, 10)` pattern shifted
+  // back ~17h on Asia/Bangkok (UTC+7) — bills generated with dueDay=15
+  // landed in storage as "2026-05-14" instead of "2026-05-15", a real
+  // off-by-one that affects every bill issued by the scheduler or the
+  // bulk-generate route on a Thai-timezone server. Pin the source to the
+  // string-construction approach that is timezone-independent by design.
+  // Behavioural check — formatYMD has no Date dependency at all (just
+  // string concatenation + zero-padding) so it produces the same output
+  // regardless of server timezone. That's the property we want to pin.
+  const mod = require('../services/billing');
+  assert.equal(typeof mod.formatYMD, 'function', 'formatYMD must be exported');
+  assert.equal(mod.formatYMD(2026, 5, 15), '2026-05-15');
+  assert.equal(mod.formatYMD(2026, 1, 1), '2026-01-01');
+  // Padding: single-digit month/day must zero-pad
+  assert.equal(mod.formatYMD(2026, 9, 7), '2026-09-07');
+  // Defensive: dom outside reasonable range should clamp inside formatDueDate
+  // (operator typo'd 31 on a Feb generation would otherwise surface as
+  // "Feb 31" — billing.formatDueDate clamps to 1-28 for predictability).
+  for (const dom of [-5, 0, 100]) {
+    const out = mod.formatDueDate(dom);
+    assert.match(out, /^\d{4}-\d{2}-\d{2}$/, `dom=${dom} returns valid YYYY-MM-DD`);
+  }
+});
+
+test('scheduler + bulk-generate use formatYMD for dueDate', () => {
+  // Pin the call sites so a future refactor can't reintroduce the
+  // toISOString round-trip that broke Asia/Bangkok timezones.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const sched = fs.readFileSync(path.join(__dirname, '..', 'services', 'scheduler.js'), 'utf8');
+  const bulk = fs.readFileSync(path.join(__dirname, '..', 'routes', 'bills-extras.js'), 'utf8');
+  // Both paths must call formatYMD instead of constructing a Date.
+  assert.match(sched, /billing\.formatYMD\(now\.getFullYear\(\), now\.getMonth\(\) \+ 1, dueDay\)/,
+    'scheduler must use formatYMD for due date');
+  assert.match(bulk, /billing\.formatYMD\(now\.getFullYear\(\), now\.getMonth\(\) \+ 1, dueDay\)/,
+    'bulk-generate must use formatYMD for due date');
+});
+
 test('encryption module round-trips with versioned prefix', () => {
   // Force a clean load with the current env + ENCRYPTION_KEY_V1 set
   process.env.ENCRYPTION_KEY_V1 = Buffer.alloc(32, 1).toString('base64');

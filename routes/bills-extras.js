@@ -94,7 +94,11 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           });
         }
 
-        const dueDate = new Date(now.getFullYear(), now.getMonth(), dueDay).toISOString().slice(0, 10);
+        // Match scheduler.tickBillGen: build YYYY-MM-DD directly from local
+        // year/month/dueDay. Round-tripping via toISOString() shifts the
+        // date back 17h on Asia/Bangkok servers, producing dueDate=14 when
+        // operator picked 15.
+        const dueDate = billing.formatYMD(now.getFullYear(), now.getMonth() + 1, dueDay);
         let made = 0, skipped = 0;
         for (const room of rooms) {
           if (!room || !room.tenant) { skipped++; continue; }

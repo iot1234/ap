@@ -175,7 +175,11 @@ async function tickBillGen(pool, flags, now, state) {
     }
 
     const dueDay = Number(flags.billAutoGenerate.dueDay || 15);
-    const dueDate = new Date(now.getFullYear(), now.getMonth(), dueDay).toISOString().slice(0, 10);
+    // Build YYYY-MM-DD from local year/month + dueDay directly — Date()→
+    // toISOString() round-trip subtracts the timezone offset and on
+    // Asia/Bangkok (UTC+7) returns the previous day, so bills issued on
+    // the 1st with dueDay=15 would silently land on the 14th in storage.
+    const dueDate = billing.formatYMD(now.getFullYear(), now.getMonth() + 1, dueDay);
     let made = 0;
     // Track each successfully-inserted bill so we can fan out tenant
     // notifications AFTER the loop completes (one queue enqueue per bill,
