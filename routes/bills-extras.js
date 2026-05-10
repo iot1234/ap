@@ -325,6 +325,113 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       }
     });
 
+  // POST /api/bills/:id/pay - owner/manager records an offline payment.
+  // Inserts a verified payment row and marks the bill paid atomically.
+  r.post('/:id/pay', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'),
+    async (req, res) => {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+      const requestedAmount = req.body?.amount == null ? null : Number(req.body.amount);
+      if (requestedAmount != null && (!Number.isFinite(requestedAmount) || requestedAmount <= 0)) {
+        return res.status(400).json({ error: 'invalid amount', code: 'INVALID_AMOUNT' });
+      }
+      const methodRaw = String(req.body?.method || 'transfer').toLowerCase();
+      const method = ['cash', 'transfer', 'promptpay'].includes(methodRaw) ? methodRaw : 'transfer';
+      const ref = String(req.body?.ref || 'admin-manual').slice(0, 200);
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        const bill = await client.query(
+          `SELECT id, total, status, tenant_id
+             FROM bills
+            WHERE id=$1 AND deleted_at IS NULL
+            FOR UPDATE`,
+          [id]
+        );
+        if (!bill.rows.length) {
+          await client.query('ROLLBACK');
+          return res.status(404).json({ error: 'bill not found' });
+        }
+        const row = bill.rows[0];
+        if (row.status !== 'pending' && row.status !== 'overdue') {
+          await client.query('ROLLBACK');
+          return res.status(409).json({
+            error: 'bill is not payable',
+            code: 'BILL_NOT_PAYABLE',
+            billStatus: row.status,
+          });
+        }
+        const billTotal = Number(row.total);
+        if (!Number.isFinite(billTotal) || billTotal <= 0) {
+          await client.query('ROLLBACK');
+          return res.status(409).json({ error: 'bill total is invalid', code: 'INVALID_BILL_TOTAL' });
+        }
+        if (requestedAmount != null && Math.abs(requestedAmount - billTotal) > 1.0) {
+          await client.query('ROLLBACK');
+          return res.status(409).json({
+            error: 'payment amount does not match bill total',
+            code: 'PAYMENT_AMOUNT_MISMATCH',
+            billTotal,
+            paymentAmount: requestedAmount,
+          });
+        }
+        const existing = await client.query(
+          `SELECT id FROM payments WHERE bill_id=$1 AND status='verified' LIMIT 1`,
+          [id]
+        );
+        if (existing.rows.length) {
+          await client.query('ROLLBACK');
+          return res.status(409).json({
+            error: 'bill already has a verified payment',
+            code: 'BILL_ALREADY_PAID',
+            existingPaymentId: existing.rows[0].id,
+          });
+        }
+        const payment = await client.query(
+          `INSERT INTO payments
+             (bill_id, tenant_id, amount, method, ref, status,
+              verified_by, verified_at, verify_provider, verify_payload)
+           VALUES ($1,$2,$3,$4,$5,'verified',$6,NOW(),'manual',$7::jsonb)
+           RETURNING *`,
+          [
+            id,
+            row.tenant_id || null,
+            billTotal,
+            method,
+            ref,
+            req.session.user.username,
+            JSON.stringify({ source: 'admin-billing', requestedAmount }),
+          ]
+        );
+        const paid = await client.query(
+          `UPDATE bills SET status='paid', paid_at=NOW()
+             WHERE id=$1 AND status IN ('pending','overdue')
+             RETURNING *`,
+          [id]
+        );
+        if (paid.rowCount !== 1) {
+          await client.query('ROLLBACK');
+          return res.status(409).json({
+            error: 'bill was not marked paid',
+            code: 'BILL_MARK_PAID_FAILED',
+          });
+        }
+        await client.query('COMMIT');
+        audit(req, 'bill.manual_pay', 'bill', String(id), {
+          paymentId: payment.rows[0].id,
+          amount: billTotal,
+          method,
+        });
+        res.json({ ok: true, bill: paid.rows[0], payment: payment.rows[0] });
+      } catch (err) {
+        await client.query('ROLLBACK').catch(() => {});
+        console.error('bill manual pay error:', err);
+        res.status(500).json({ error: 'internal error', code: 'DB_ERROR' });
+      } finally {
+        client.release();
+      }
+    });
+
   // POST /api/bills/:id/verify-slip — admin marks the latest slip verified.
   // Equivalent to PUT /api/payments/:id/verify but takes a bill id instead.
   r.post('/:id/verify-slip', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'),
@@ -343,7 +450,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       try {
         await client.query('BEGIN');
         const bill = await client.query(
-          `SELECT id, status, deleted_at FROM bills WHERE id=$1 FOR UPDATE`,
+          `SELECT id, status, total, deleted_at FROM bills WHERE id=$1 FOR UPDATE`,
           [id]
         );
         if (!bill.rows.length || bill.rows[0].deleted_at) {
@@ -351,7 +458,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           return res.status(404).json({ error: 'bill not found' });
         }
         const pres = await client.query(
-          `SELECT id FROM payments
+          `SELECT id, amount FROM payments
              WHERE bill_id=$1 AND status='pending' ORDER BY created_at DESC LIMIT 1
              FOR UPDATE`,
           [id]
@@ -368,6 +475,18 @@ module.exports = function buildBillsExtrasRouter(ctx) {
               error: 'bill is not payable',
               code: 'BILL_NOT_PAYABLE',
               billStatus: bill.rows[0].status,
+            });
+          }
+          const billTotal = Number(bill.rows[0].total);
+          const paymentAmount = Number(pres.rows[0].amount);
+          if (!Number.isFinite(billTotal) || !Number.isFinite(paymentAmount)
+              || Math.abs(paymentAmount - billTotal) > 1.0) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({
+              error: 'payment amount does not match bill total',
+              code: 'PAYMENT_AMOUNT_MISMATCH',
+              billTotal,
+              paymentAmount,
             });
           }
           const upd = await client.query(

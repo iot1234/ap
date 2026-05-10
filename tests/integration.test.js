@@ -361,12 +361,29 @@ test('/api/payments/:id/verify refuses to verify against non-payable bills', () 
   const body = nextIdx > 0 ? tail.slice(0, 50 + nextIdx) : tail.slice(0, 5000);
   assert.match(body, /SELECT \* FROM payments WHERE id=\$1 AND status='pending' FOR UPDATE/,
     'admin verify must lock the pending payment row');
-  assert.match(body, /SELECT id, status, deleted_at FROM bills WHERE id=\$1 FOR UPDATE/,
-    'admin verify must lock and inspect the target bill');
+  assert.match(body, /SELECT id, status, total, deleted_at FROM bills WHERE id=\$1 FOR UPDATE/,
+    'admin verify must lock and inspect the target bill total');
   assert.match(body, /BILL_NOT_PAYABLE/,
     'admin verify must refuse paid, void, deleted, or missing bills');
   assert.match(body, /BILL_MARK_PAID_FAILED/,
     'admin verify must fail closed if the bill update affects no row');
+});
+
+test('/api/payments/:id/verify rejects amount mismatches before marking paid', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const idx = server.indexOf("app.put('/api/payments/:id/verify'");
+  assert.ok(idx > 0, 'should find admin verify handler');
+  const tail = server.slice(idx);
+  const nextIdx = tail.slice(50).search(/\napp\.(get|put|post|delete|use)\(/);
+  const body = nextIdx > 0 ? tail.slice(0, 50 + nextIdx) : tail.slice(0, 5000);
+  assert.match(body, /Number\(bill\.rows\[0\]\.total\)/,
+    'verify path must read the bill total under lock');
+  assert.match(body, /Math\.abs\(paymentAmount - billTotal\) > 1\.0/,
+    'verify path must compare payment amount to bill total');
+  assert.match(body, /PAYMENT_AMOUNT_MISMATCH/,
+    'verify path must fail closed on amount mismatch');
 });
 
 test('/api/payments/:id/verify requires reject reason server-side', () => {
@@ -395,6 +412,27 @@ test('/api/bills/:id/verify-slip matches owner-manager payment verification poli
     'staff must not verify or reject slips through the bill-id shortcut');
   assert.match(body, /BILL_NOT_PAYABLE|BILL_MARK_PAID_FAILED/,
     'bill-id verify path must fail closed when the bill is not payable');
+  assert.match(body, /PAYMENT_AMOUNT_MISMATCH/,
+    'bill-id verify path must reject amount mismatches');
+});
+
+test('/api/bills/:id/pay records offline payments in the payment ledger', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const route = fs.readFileSync(path.join(__dirname, '..', 'routes', 'bills-extras.js'), 'utf8');
+  const idx = route.indexOf("r.post('/:id/pay'");
+  assert.ok(idx > 0, 'should find bill manual-pay handler');
+  const body = route.slice(idx, idx + 5000);
+  assert.match(body, /requireRole\('owner', 'manager'\)/,
+    'manual pay must be owner/manager only');
+  assert.match(body, /SELECT id, total, status, tenant_id[\s\S]*FOR UPDATE/,
+    'manual pay must lock the bill and read total');
+  assert.match(body, /INSERT INTO payments[\s\S]*'verified'/,
+    'manual pay must create a verified payment row');
+  assert.match(body, /UPDATE bills SET status='paid', paid_at=NOW\(\)/,
+    'manual pay must mark the bill paid in the same handler');
+  assert.match(body, /PAYMENT_AMOUNT_MISMATCH|BILL_ALREADY_PAID/,
+    'manual pay must reject mismatches and duplicate verified payments');
 });
 
 test('/api/tenant/payments does not auto-approve unverified slips by default', () => {
@@ -409,6 +447,24 @@ test('/api/tenant/payments does not auto-approve unverified slips by default', (
     'legacy trust mode must require an explicit flag');
   assert.match(body, /initialStatus = allowUnverifiedAutoApprove \? 'verified' : 'pending'/,
     'uploads without a provider result must fall back to the admin queue');
+});
+
+test('/api/tenant/payments auto-verify checks the effective PromptPay target', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const idx = server.indexOf("app.post('/api/tenant/payments'");
+  assert.ok(idx > 0, 'should find tenant payment upload handler');
+  const end = server.indexOf('// Decide the payment row', idx);
+  const body = server.slice(idx, end > idx ? end : idx + 14000);
+  assert.match(body, /loadEffectivePaymentBlock\(\)/,
+    'auto-verify must use the same effective payment config as QR/PDF');
+  assert.match(body, /normaliseTarget\(paymentBlock\.promptpayTarget\)/,
+    'auto-verify must normalize and validate the configured receiver target');
+  assert.match(body, /promptpayTarget: ppTarget/,
+    'auto-verify must pass the verified receiver target to slipVerifier');
+  assert.doesNotMatch(body, /const ppTarget = require\('\.\/services\/secrets'\)\.get\('PROMPTPAY_TARGET'\)/,
+    'auto-verify must not ignore Settings payment config');
 });
 
 test('/api/tenant/payments refuses orphan bills (BILL_NOT_LINKED)', () => {
@@ -464,6 +520,40 @@ test('GET /api/tenant/bills/:id/qr uses DB bill total, not browser query amount'
     'tenant bill QR must render with DB amount');
   assert.doesNotMatch(body, /req\.query\.(?:amount|target)/,
     'tenant bill QR must not trust query amount or target');
+});
+
+test('/api/bills/render is owner-manager and rebuilds persisted bills server-side', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const idx = server.indexOf("app.post('/api/bills/render'");
+  assert.ok(idx > 0, 'should find admin bill PDF render handler');
+  const body = server.slice(idx, idx + 5000);
+  assert.match(body, /requireRole\('owner', 'manager'\)/,
+    'bill PDF render must not allow staff');
+  assert.match(body, /getRenderBillId\(req, bill\)/,
+    'bill PDF render must accept a persisted bill id');
+  assert.match(body, /SELECT b\.\*, t\.full_name AS tenant_name, t\.phone AS tenant_phone/,
+    'persisted bill PDF must load bill data from DB');
+  assert.match(body, /buildStoredBillPdfObject\(rows\[0\], config, paymentBlock\)/,
+    'persisted bill PDF must rebuild the PDF payload server-side');
+  assert.match(body, /promptpayTarget: paymentBlock\.promptpayTarget/,
+    'estimate PDF payment target must be overwritten from server config');
+});
+
+test('admin billing mark-paid uses the bill payment endpoint, not the rooms blob', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-billing.jsx'), 'utf8');
+  const idx = src.indexOf('const handleMarkPaid = async');
+  assert.ok(idx > 0, 'should find handleMarkPaid');
+  const body = src.slice(idx, src.indexOf('const handleUnmarkPaid', idx));
+  assert.match(body, /\/api\/bills\/\$\{bill\.dbBillId\}\/pay/,
+    'mark-paid must call the server ledger endpoint');
+  assert.match(body, /bill\._source !== 'db'/,
+    'mark-paid must require an issued DB bill');
+  assert.doesNotMatch(body, /setRooms\(/,
+    'mark-paid must not fake payment status by mutating rooms');
 });
 
 test('tenant bill modal uses bill-owned QR endpoint', () => {

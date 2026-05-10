@@ -157,39 +157,44 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
     else setSelected(new Set(filtered.map(b => b.id)));
   };
 
-  const handleMarkPaid = (id) => {
+  const handleMarkPaid = async (id, opts = {}) => {
     const bill = bills.find(b => b.id === id);
-    if (!bill) return;
-    // billPaidAt is the source of truth for status: 'paid'. Without it, the
-    // useMemo recomputes status: 'unpaid' on next config change.
-    setRooms(prev => ({
-      ...prev,
-      [bill.roomId]: {
-        ...prev[bill.roomId],
-        status: 'occupied',
-        overdueDays: 0,
-        billStatus: 'paid',
-        billPaidAt: new Date().toISOString(),
-      },
-    }));
-    addActivity && addActivity({ icon: '💳', text: `รับชำระบิล ${id} จำนวน ${fmtCurrency(bill.total)}`, type: 'payment' });
-    setToast && setToast({ kind: 'success', message: `บันทึกชำระห้อง ${bill.roomId} แล้ว` });
+    if (!bill) return false;
+    if (bill._source !== 'db' || !bill.dbBillId) {
+      setToast && setToast({ kind: 'warning', message: 'ต้องออกบิลเข้าระบบก่อน จึงจะบันทึกการชำระได้' });
+      return false;
+    }
+    if (opts.confirm !== false) {
+      const ok = window.confirm(
+        `ยืนยันบันทึกชำระบิล ${bill.dbBillNo || bill.dbBillId}\n` +
+        `ห้อง ${bill.roomId} · ${fmtCurrency(bill.total)}`
+      );
+      if (!ok) return false;
+    }
+    try {
+      await window.apiCall(`/api/bills/${bill.dbBillId}/pay`, {
+        method: 'POST',
+        body: JSON.stringify({
+          method: 'transfer',
+          amount: Number(bill.total) || 0,
+          ref: `admin-billing:${bill.id}`,
+        }),
+      });
+      addActivity && addActivity({ icon: '💳', text: `รับชำระบิล ${bill.dbBillNo || bill.dbBillId} จำนวน ${fmtCurrency(bill.total)}`, type: 'payment' });
+      setToast && setToast({ kind: 'success', message: `บันทึกชำระห้อง ${bill.roomId} แล้ว` });
+      if (opts.refresh !== false) fetchDbBills();
+      return true;
+    } catch (err) {
+      window.toastError ? window.toastError(setToast, err, { action: 'บันทึกชำระ' })
+        : setToast && setToast({ kind: 'error', message: err.message || 'บันทึกชำระไม่สำเร็จ' });
+      return false;
+    }
   };
 
-  // Undo a mark-paid. Clears billPaidAt + billStatus so the next bill recompute
-  // returns this room to the unpaid bucket. Use case: admin clicked the wrong
-  // row, or a payment turned out to bounce.
   const handleUnmarkPaid = (id) => {
     const bill = bills.find(b => b.id === id);
     if (!bill) return;
-    setRooms(prev => {
-      const r = prev[bill.roomId];
-      if (!r) return prev;
-      const { billPaidAt, billStatus, ...rest } = r;
-      return { ...prev, [bill.roomId]: rest };
-    });
-    addActivity && addActivity({ icon: '↺', text: `ยกเลิกการชำระบิล ${id}`, type: 'payment' });
-    setToast && setToast({ kind: 'info', message: `ยกเลิกการบันทึกชำระห้อง ${bill.roomId}` });
+    setToast && setToast({ kind: 'info', message: 'การยกเลิกชำระต้องทำผ่านการ void/reconcile เพื่อเก็บ audit trail' });
   };
 
   const handleSendReminder = async (id) => {
@@ -238,13 +243,20 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
 
     const apiCall = window.apiCall;
     try {
-      await apiCall('/api/notify/bill', {
-        method: 'POST',
-        body: JSON.stringify({
-          tenantName: b.tenant, roomId: b.roomId,
-          period: b.period, total: b.total, billNo: b.id,
-        }),
-      });
+      if (b._source === 'db' && b.dbBillId) {
+        await apiCall(`/api/bills/${b.dbBillId}/send`, {
+          method: 'POST',
+          body: JSON.stringify({}),
+        });
+      } else {
+        await apiCall('/api/notify/bill', {
+          method: 'POST',
+          body: JSON.stringify({
+            tenantName: b.tenant, roomId: b.roomId,
+            period: b.period, total: b.total, billNo: b.id,
+          }),
+        });
+      }
       setToast && setToast({ kind: 'success', message: `ส่งเตือนบิล ${id} ทาง LINE แล้ว` });
       addActivity && addActivity({ icon: '🔔', text: `ส่งเตือนชำระบิล ${id}`, type: 'system' });
     } catch (err) {
@@ -509,13 +521,13 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
       render: b => (
         <div style={{ display: 'inline-flex', gap: 4 }} onClick={(e) => e.stopPropagation()}>
           <IconBtn icon="👁" label="ดูบิล" onClick={() => setPreviewBill(b)} />
-          {b.status === 'unpaid' && (
+          {b.status === 'unpaid' && b._source === 'db' && (
             <>
               <IconBtn icon="🔔" label="ส่งเตือน" onClick={() => handleSendReminder(b.id)} />
               <IconBtn icon="✓" label="บันทึกชำระ" onClick={() => handleMarkPaid(b.id)} />
             </>
           )}
-          {b.status === 'paid' && (
+          {b.status === 'paid' && b._source === 'db' && (
             <IconBtn icon="↺" label="ยกเลิกการชำระ" onClick={() => handleUnmarkPaid(b.id)} />
           )}
         </div>
@@ -642,13 +654,20 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
               let okCount = 0, failCount = 0, skip = false;
               for (const b of targets) {
                 try {
-                  const r = await apiFetch('/api/notify/bill', {
-                    method: 'POST',
-                    body: JSON.stringify({
-                      billNo: b.id, roomId: b.roomId, tenantName: b.tenant,
-                      period: b.period, total: b.total,
-                    }),
-                  });
+                  const r = (b._source === 'db' && b.dbBillId)
+                    ? await apiFetch(`/api/bills/${b.dbBillId}/send`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({}),
+                      })
+                    : await apiFetch('/api/notify/bill', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                          billNo: b.id, roomId: b.roomId, tenantName: b.tenant,
+                          period: b.period, total: b.total,
+                        }),
+                      });
                   if (r.status === 503) { skip = true; break; }
                   if (r.ok) {
                     okCount++;
@@ -671,12 +690,15 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
                 setToast && setToast({ kind: 'success', message: `ดาวน์โหลด ${selectedBills.length} บิลเรียบร้อย` });
               }
             }}>ดาวน์โหลด CSV</Btn>
-            <Btn variant="soft" size="sm" icon="✓" onClick={() => {
+            <Btn variant="soft" size="sm" icon="✓" onClick={async () => {
               const ids = [...selected];
-              ids.forEach(id => {
+              for (const id of ids) {
                 const bill = bills.find(b => b.id === id);
-                if (bill && bill.status === 'unpaid') handleMarkPaid(id);
-              });
+                if (bill && bill.status === 'unpaid' && bill._source === 'db') {
+                  await handleMarkPaid(id, { confirm: false, refresh: false });
+                }
+              }
+              fetchDbBills();
               setSelected(new Set());
             }}>บันทึกชำระทั้งหมด</Btn>
             <Btn variant="ghost" size="sm" onClick={() => setSelected(new Set())} style={{ color: '#fff' }}>ยกเลิกเลือก</Btn>
@@ -758,7 +780,12 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
               try {
                 const res = await apiFetch('/api/bills/render', {
                   method: 'POST',
-                  body: JSON.stringify({ bill: payload, config }),
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify(
+                    b._source === 'db' && b.dbBillId
+                      ? { billId: b.dbBillId, bill: payload }
+                      : { bill: payload, config }
+                  ),
                 });
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
                 const blob = await res.blob();
@@ -781,16 +808,23 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
               const b = previewBill;
               const apiFetch = window.apiFetch || ((u, o) => fetch(u, { credentials: 'same-origin', ...o }));
               try {
-                const res = await apiFetch('/api/notify/bill', {
-                  method: 'POST',
-                  body: JSON.stringify({
-                    billNo: b.id,
-                    roomId: b.roomId,
-                    tenantName: b.tenant,
-                    period: b.period,
-                    total: b.total,
-                  }),
-                });
+                const res = (b._source === 'db' && b.dbBillId)
+                  ? await apiFetch(`/api/bills/${b.dbBillId}/send`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({}),
+                    })
+                  : await apiFetch('/api/notify/bill', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                        billNo: b.id,
+                        roomId: b.roomId,
+                        tenantName: b.tenant,
+                        period: b.period,
+                        total: b.total,
+                      }),
+                    });
                 const data = await res.json().catch(() => ({}));
                 if (res.status === 503) {
                   setToast && setToast({ kind: 'error', message: 'ระบบยังไม่ได้ตั้งค่า LINE' });

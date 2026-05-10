@@ -685,6 +685,16 @@ async function migrate(pool, opts = {}) {
     ALTER TABLE contracts ADD COLUMN IF NOT EXISTS locked_at TIMESTAMPTZ;
     ALTER TABLE contracts ADD COLUMN IF NOT EXISTS locked_by TEXT;
 
+    -- Row-level mutation timestamp. The original contracts CREATE TABLE
+    -- (line ~104) shipped without updated_at — every other relation in
+    -- this schema has one, and several server-side UPDATEs (approve,
+    -- assign template, future cancel) reference it. Without this column
+    -- the approve+lock endpoint failed in production with 42703
+    -- "column updated_at of relation contracts does not exist" the
+    -- moment admin clicked "✓ อนุมัติ + lock". DEFAULT NOW() so newly
+    -- ALTERed rows get sane initial values without a separate backfill.
+    ALTER TABLE contracts ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
     -- === Tenant self-fill invitations =====================================
     -- Admin generates a tokenised URL → tenant opens (no login) → fills
     -- personal info + ID photos + signature → submits → admin reviews →

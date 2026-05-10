@@ -2824,22 +2824,7 @@ app.put('/api/tenant/me', sameOrigin, csrfGuard, requireTenant, async (req, res)
 // — these are details we already print on every invoice.
 app.get('/api/tenant/payment-info', requireTenant, async (_req, res) => {
   try {
-    const { rows } = await pool.query(
-      `SELECT value FROM app_data WHERE key='baankarn_config_v1'`
-    );
-    const cfg = rows.length ? rows[0].value : {};
-    const block = require('./services/billing').buildPaymentBlock(cfg);
-    // Last-resort fallback to env var if the operator never filled in the
-    // form: matches the bill-render endpoint's behaviour at server.js:1196.
-    if (!block.promptpayTarget) {
-      const envPp = require('./services/secrets').get('PROMPTPAY_TARGET');
-      if (envPp) {
-        block.promptpayTarget = envPp;
-        if (!block.paymentMethods.find((m) => m.key === 'promptpay')) {
-          block.paymentMethods.unshift({ key: 'promptpay', label: 'PromptPay', enabled: true });
-        }
-      }
-    }
+    const { config: cfg, paymentBlock: block } = await loadEffectivePaymentBlock();
     res.json({ ok: true, payment: block, building: cfg.building || null });
   } catch (err) {
     console.error('tenant payment-info error:', err);
@@ -2882,19 +2867,19 @@ app.get('/api/tenant/bills/:id/qr', rateLimitQr, requireTenant, async (req, res)
       });
     }
 
-    const cfgQ = await pool.query(
-      `SELECT value FROM app_data WHERE key='baankarn_config_v1' LIMIT 1`
-    );
-    const config = cfgQ.rows[0]?.value || {};
-    const paymentBlock = billing.buildPaymentBlock(config);
-    if (!paymentBlock.promptpayTarget) {
-      const envPp = require('./services/secrets').get('PROMPTPAY_TARGET');
-      if (envPp) paymentBlock.promptpayTarget = envPp;
-    }
+    const { paymentBlock } = await loadEffectivePaymentBlock();
     if (!paymentBlock.promptpayTarget) {
       return res.status(503).json({
         error: 'PromptPay is not configured',
         code: 'PROMPTPAY_NOT_CONFIGURED',
+      });
+    }
+    try {
+      paymentBlock.promptpayTarget = normaliseTarget(paymentBlock.promptpayTarget);
+    } catch (err) {
+      return res.status(503).json({
+        error: 'PromptPay target is invalid',
+        code: 'PROMPTPAY_INVALID_CONFIG',
       });
     }
 
@@ -3722,8 +3707,29 @@ app.post('/api/tenant/payments', sameOrigin, csrfGuard, requireTenant, ensureSli
     let autoVerifyAttempted = false;
     if (slipVerifier.isConfigured(req.features)) {
       autoVerifyAttempted = true;
-      const ppTarget = require('./services/secrets').get('PROMPTPAY_TARGET');
       try {
+        const { paymentBlock } = await loadEffectivePaymentBlock();
+        let ppTarget = null;
+        if (paymentBlock.promptpayTarget) {
+          try {
+            ppTarget = normaliseTarget(paymentBlock.promptpayTarget);
+          } catch (err) {
+            verifyResult = {
+              ok: false,
+              error: 'PromptPay target is invalid, so receiver account cannot be verified',
+              code: 'NOT_CONFIGURED',
+              attempts: [],
+            };
+          }
+        }
+        if (!ppTarget && !verifyResult) {
+          verifyResult = {
+            ok: false,
+            error: 'PromptPay target is not configured, so receiver account cannot be verified',
+            code: 'NOT_CONFIGURED',
+            attempts: [],
+          };
+        }
         // Use the fallback chain — tries every configured provider until
         // one succeeds OR one issues a hard rejection (AMOUNT_MISMATCH,
         // RECEIVER_MISMATCH, SLIPOK_REJECT, etc.). If all providers
@@ -3736,11 +3742,13 @@ app.post('/api/tenant/payments', sameOrigin, csrfGuard, requireTenant, ensureSli
         // billTotal here closes the remaining ±1฿ drift between the two
         // tolerances and means slipVerifier's amount-mismatch reasoning is
         // pinned to the same number the bill is invoiced at.
-        verifyResult = await slipVerifier.verifyWithFallback(
-          rawBuf,
-          { amount: billTotal, billId, promptpayTarget: ppTarget },
-          req.features
-        );
+        if (ppTarget) {
+          verifyResult = await slipVerifier.verifyWithFallback(
+            rawBuf,
+            { amount: billTotal, billId, promptpayTarget: ppTarget },
+            req.features
+          );
+        }
       } catch (err) {
         // Catch-all in case the fallback wrapper itself threw — shouldn't
         // happen (each provider's catch is internal) but defensive.
@@ -4312,7 +4320,7 @@ app.put('/api/payments/:id/verify', sameOrigin, csrfGuard, requireAuth, requireR
         });
       }
       const bill = await client.query(
-        `SELECT id, status, deleted_at FROM bills WHERE id=$1 FOR UPDATE`,
+        `SELECT id, status, total, deleted_at FROM bills WHERE id=$1 FOR UPDATE`,
         [row.bill_id]
       );
       if (!bill.rows.length || bill.rows[0].deleted_at) {
@@ -4328,6 +4336,18 @@ app.put('/api/payments/:id/verify', sameOrigin, csrfGuard, requireAuth, requireR
           error: 'bill is not payable',
           code: 'BILL_NOT_PAYABLE',
           billStatus: bill.rows[0].status,
+        });
+      }
+      const billTotal = Number(bill.rows[0].total);
+      const paymentAmount = Number(row.amount);
+      if (!Number.isFinite(billTotal) || !Number.isFinite(paymentAmount)
+          || Math.abs(paymentAmount - billTotal) > 1.0) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'payment amount does not match bill total',
+          code: 'PAYMENT_AMOUNT_MISMATCH',
+          billTotal,
+          paymentAmount,
         });
       }
       const upd = await client.query(
@@ -5971,6 +5991,10 @@ app.put('/api/contracts/:id', sameOrigin, csrfGuard, requireAuth, requireRole('o
       fields.push(`status=$${i++}`); params.push(b.status);
     }
     if (!fields.length) return res.status(400).json({ error: 'nothing to update' });
+    // Always bump updated_at so audit history reflects the actual edit time
+    // (the new contracts.updated_at column has DEFAULT NOW() only on INSERT,
+    // so we have to push it on every UPDATE for the timestamp to be useful).
+    fields.push('updated_at=NOW()');
     params.push(id);
 
     // When admin manually flips status to 'ended' or 'expired', the

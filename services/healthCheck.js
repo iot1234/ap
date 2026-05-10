@@ -292,7 +292,7 @@ async function checkBootConfig() {
 // realising flag B (or some env/secret) is required — currently the symptom
 // is a silent feature failure: clicks happen, nothing breaks visibly, but
 // notifications never arrive / cards never revoke / slips can't upload.
-async function checkFeatureDependencies(features) {
+async function checkFeatureDependencies(features, pool) {
   const warnings = [];
 
   // slipUpload requires tenantPortal — tenants must have a session to upload.
@@ -461,11 +461,21 @@ async function checkFeatureDependencies(features) {
     // Receiver-account match needs PROMPTPAY_TARGET to be set — without it
     // we can't safely auto-accept (any slip paid to ANY account would pass
     // amount-only check).
-    if (ready.length > 0 && !secrets.get('PROMPTPAY_TARGET')) {
+    let promptpayTarget = secrets.get('PROMPTPAY_TARGET');
+    if (!promptpayTarget && pool) {
+      try {
+        const cfgQ = await pool.query(
+          `SELECT value FROM app_data WHERE key='baankarn_config_v1' LIMIT 1`
+        );
+        const cfg = cfgQ.rows[0]?.value || {};
+        promptpayTarget = cfg?.payment?.promptpay || cfg?.payment?.promptpayTarget || null;
+      } catch { /* keep env fallback result */ }
+    }
+    if (ready.length > 0 && !promptpayTarget) {
       warnings.push({
         flag: 'slipUpload.autoVerify',
         issue: 'autoVerify เปิด แต่ PROMPTPAY_TARGET ไม่ตั้ง — auto-verify ไม่สามารถตรวจสอบบัญชีปลายทาง',
-        fix: 'ตั้ง PROMPTPAY_TARGET ใน Secrets เพื่อให้ระบบยืนยันว่าโอนเข้าบัญชีหอพัก',
+        fix: 'ตั้ง PromptPay ใน Settings → การชำระเงิน หรือ PROMPTPAY_TARGET ใน Secrets เพื่อให้ระบบยืนยันว่าโอนเข้าบัญชีหอพัก',
       });
     }
   }
@@ -619,7 +629,7 @@ const CHECKS = [
   { id: 'lockouts',            label: 'Active lockouts',       fn: (p) => checkActiveLockouts(p) },
   { id: 'scheduler',           label: 'Scheduler heartbeat',   fn: () => checkSchedulerHeartbeat() },
   { id: 'config',              label: 'Boot configuration',    fn: () => checkBootConfig() },
-  { id: 'feature_deps',        label: 'Feature dependencies',  fn: (_p, f) => checkFeatureDependencies(f) },
+  { id: 'feature_deps',        label: 'Feature dependencies',  fn: (p, f) => checkFeatureDependencies(f, p) },
   { id: 'data_integrity',       label: 'Data integrity',        fn: (p) => checkDataIntegrity(p) },
 ];
 
