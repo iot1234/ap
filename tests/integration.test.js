@@ -1751,8 +1751,9 @@ test('PUT /api/contracts/:id status=ended cascades tenant + room state', () => {
     /UPDATE tenants SET status='moved_out', current_room_id=NULL/,
     'tenant must be moved out when contract closes');
   assert.match(block,
-    /\(value->\$1 - 'tenant'\) \|\| jsonb_build_object\('status', 'vacant'\)/,
-    'room.tenant must be dropped + status=vacant on cascade');
+    /\(\(value->\$1\) - 'tenant'\) \|\| jsonb_build_object\('status', 'vacant'\)/,
+    'room.tenant must be dropped + status=vacant on cascade; parens on (value->$1) '
+    + 'are required so PG evaluates the JSONB arrow before the minus operator');
   // Wrapped in transaction so the cascade is atomic with the contract update
   assert.match(block, /BEGIN/);
   assert.match(block, /COMMIT/);
@@ -1818,8 +1819,28 @@ test('checkout removes room.tenant from blob (no notification leak)', () => {
   const path = require('node:path');
   const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'tenant-ops.js'), 'utf8');
   assert.match(src,
-    /\(value->\$1 - 'tenant'\) \|\| jsonb_build_object\('status', 'vacant'\)/,
-    'checkout must drop the tenant key alongside flipping status');
+    /\(\(value->\$1\) - 'tenant'\) \|\| jsonb_build_object\('status', 'vacant'\)/,
+    'checkout must drop the tenant key alongside flipping status; (value->$1) '
+    + 'must be parenthesised so the JSONB arrow binds tighter than the - operator');
+});
+
+test('rooms-blob tenant-key drop never expands to "text - unknown" 42883', () => {
+  // Regression: PostgreSQL operator precedence parses `value->$1 - 'tenant'`
+  // as `value -> ($1 - 'tenant')` because the arithmetic `-` binds tighter
+  // than the user-defined `->` arrow. Result: PG tries `text - unknown`
+  // (subtract literal from $1::text) → 42883 "operator does not exist",
+  // which surfaced in production as "ยกเลิกสัญญาไม่ได้". Every site that
+  // drops a tenant key from the rooms blob must parenthesise the arrow.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  for (const rel of ['server.js', 'routes/tenant-ops.js']) {
+    const src = fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
+    // The bare unparenthesised form must NOT appear anywhere.
+    assert.ok(
+      !/\(value->\$1 - 'tenant'\)/.test(src),
+      `${rel}: bare "(value->$1 - 'tenant')" still present — would crash with 42883`
+    );
+  }
 });
 
 test('approve also notifies the tenant (closes the "send PDF to me" loop)', () => {

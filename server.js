@@ -6038,7 +6038,7 @@ app.put('/api/contracts/:id', sameOrigin, csrfGuard, requireAuth, requireRole('o
                 SET value = jsonb_set(
                               value,
                               ARRAY[$1::text],
-                              (value->$1 - 'tenant') || jsonb_build_object('status', 'vacant')
+                              ((value->$1) - 'tenant') || jsonb_build_object('status', 'vacant')
                             ),
                     updated_at=NOW()
               WHERE key='baankarn_rooms_v1' AND value ? $1`,
@@ -7159,7 +7159,7 @@ app.post('/api/admin/contract-invitations/:id/approve',
                   SET value = jsonb_set(
                                 value,
                                 ARRAY[$1::text],
-                                (value->$1 - 'tenant') || jsonb_build_object('status', 'vacant')
+                                ((value->$1) - 'tenant') || jsonb_build_object('status', 'vacant')
                               ),
                       updated_at=NOW()
                 WHERE key='baankarn_rooms_v1' AND value ? $1`,

@@ -537,7 +537,7 @@ module.exports = function buildTenantOpsRouter(ctx) {
                 SET value = jsonb_set(
                               value,
                               ARRAY[$1::text],
-                              (value->$1 - 'tenant') || jsonb_build_object('status', 'vacant')
+                              ((value->$1) - 'tenant') || jsonb_build_object('status', 'vacant')
                             ),
                     updated_at=NOW()
               WHERE key='baankarn_rooms_v1' AND value ? $1`,
