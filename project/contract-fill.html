@@ -230,10 +230,10 @@ function App() {
     <>
       <Header view={view} savedAt={savedAt} />
       <StepBar step={step} />
-      {view.rejection_reason ? (
+      {view.rejectionReason ? (
         <div className="alert alert-warn">
           <b>เจ้าของหอพักขอให้แก้ไข:</b><br/>
-          {view.rejection_reason}
+          {view.rejectionReason}
         </div>
       ) : null}
       {error ? <div className="alert alert-danger">{error}</div> : null}

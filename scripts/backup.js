@@ -48,6 +48,8 @@ const TABLES = [
   // v2 — files / sessions / lockouts / settings / bookings
   'file_uploads', 'tenant_sessions', 'login_lockouts',
   'system_settings', 'bookings',
+  // v3 — contract templates + tenant self-fill invitations
+  'contract_templates', 'contract_invitations',
 ];
 
 // Validate table name against a strict allowlist regex before string-

@@ -5403,24 +5403,59 @@ app.get('/api/contracts', requireAuth, async (req, res) => {
     }
   }
   try {
-    const { rows } = await pool.query(
-      `SELECT c.id, c.contract_no, c.tenant_id, c.room_id,
-              c.start_date, c.end_date, c.term_months,
-              c.monthly_rent, c.deposit, c.discount_pct,
-              c.status, c.signed_at, c.created_at,
-              t.full_name AS tenant_name, t.phone AS tenant_phone,
-              CASE WHEN c.end_date IS NULL THEN NULL
-                   ELSE (c.end_date - CURRENT_DATE)::int
-              END AS days_left
-         FROM contracts c
-         LEFT JOIN tenants t ON t.id = c.tenant_id AND t.deleted_at IS NULL
-        WHERE ${where.join(' AND ')}
-        ORDER BY
-          CASE c.status WHEN 'active' THEN 0 WHEN 'expired' THEN 1 ELSE 2 END,
-          c.end_date NULLS LAST, c.created_at DESC
-        LIMIT 1000`,
-      params
-    );
+    // Try the SELECT including the locked_at + template_id columns added
+    // in the contract-template + tenant-fill rounds. Falls back to the
+    // legacy column set on pre-migration deploys (42703) so the page
+    // keeps loading mid-migration.
+    let rows;
+    try {
+      ({ rows } = await pool.query(
+        `SELECT c.id, c.contract_no, c.tenant_id, c.room_id,
+                c.start_date, c.end_date, c.term_months,
+                c.monthly_rent, c.deposit, c.discount_pct,
+                c.status, c.signed_at, c.created_at,
+                c.locked_at, c.locked_by, c.template_id,
+                t.full_name AS tenant_name, t.phone AS tenant_phone,
+                CASE WHEN c.end_date IS NULL THEN NULL
+                     ELSE (c.end_date - CURRENT_DATE)::int
+                END AS days_left,
+                -- Surface the active invitation status (if any) so admin
+                -- sees at-a-glance whether the link is still pending or
+                -- the tenant has already submitted for review.
+                (SELECT i.status FROM contract_invitations i
+                   WHERE i.contract_id = c.id
+                     AND i.status IN ('pending','submitted')
+                   ORDER BY i.created_at DESC LIMIT 1) AS active_invitation_status
+           FROM contracts c
+           LEFT JOIN tenants t ON t.id = c.tenant_id AND t.deleted_at IS NULL
+          WHERE ${where.join(' AND ')}
+          ORDER BY
+            CASE c.status WHEN 'active' THEN 0 WHEN 'expired' THEN 1 ELSE 2 END,
+            c.end_date NULLS LAST, c.created_at DESC
+          LIMIT 1000`,
+        params
+      ));
+    } catch (err) {
+      if (err.code !== '42703' && err.code !== '42P01') throw err;
+      ({ rows } = await pool.query(
+        `SELECT c.id, c.contract_no, c.tenant_id, c.room_id,
+                c.start_date, c.end_date, c.term_months,
+                c.monthly_rent, c.deposit, c.discount_pct,
+                c.status, c.signed_at, c.created_at,
+                t.full_name AS tenant_name, t.phone AS tenant_phone,
+                CASE WHEN c.end_date IS NULL THEN NULL
+                     ELSE (c.end_date - CURRENT_DATE)::int
+                END AS days_left
+           FROM contracts c
+           LEFT JOIN tenants t ON t.id = c.tenant_id AND t.deleted_at IS NULL
+          WHERE ${where.join(' AND ')}
+          ORDER BY
+            CASE c.status WHEN 'active' THEN 0 WHEN 'expired' THEN 1 ELSE 2 END,
+            c.end_date NULLS LAST, c.created_at DESC
+          LIMIT 1000`,
+        params
+      ));
+    }
     res.json({ ok: true, contracts: rows });
   } catch (err) {
     console.error('contracts list error:', err);
@@ -7061,6 +7096,9 @@ app.post('/api/admin/restore', restoreBodyParser, sameOrigin, csrfGuard, require
       'line_oas',
       'tenants',
       'access_devices',
+      // contract_templates BEFORE contracts so the contracts.template_id
+      // FK is satisfied during a fresh restore.
+      'contract_templates',
       'contracts', 'bills', 'recurring_charges',
       'payments', 'access_cards', 'line_bindings',
       'meter_readings',
@@ -7070,6 +7108,8 @@ app.post('/api/admin/restore', restoreBodyParser, sameOrigin, csrfGuard, require
       'notifications_log',
       'file_uploads',
       'bookings',
+      // Restored last; FK on contracts means parent must be in place first.
+      'contract_invitations',
     ];
     const SKIP_NOTE = {
       tenant_sessions: 'transient — users will re-login',

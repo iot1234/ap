@@ -1486,6 +1486,69 @@ test('features.tenancyContract defaults are sane (require ID images + emergency)
     'deposit cap default = 3 months');
 });
 
+test('contract-fill HTML reads view.rejectionReason (camelCase, not snake_case)', () => {
+  // Server's buildPublicView returns rejectionReason; the HTML used to read
+  // view.rejection_reason → reject reason was invisible to the tenant.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const html = fs.readFileSync(path.join(__dirname, '..', 'project', 'contract-fill.html'), 'utf8');
+  assert.match(html, /view\.rejectionReason/,
+    'HTML must read view.rejectionReason (camelCase)');
+  assert.ok(!/view\.rejection_reason/.test(html),
+    'HTML must NOT read view.rejection_reason (snake_case mismatch)');
+});
+
+test('contracts list selects locked_at + active_invitation_status', () => {
+  // The contracts page row needs locked_at to hide the invite button on
+  // locked contracts and active_invitation_status to show "ลิงก์รอผู้เช่า"
+  // / "รอตรวจสอบ" badges. Without these the UI shows stale state.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(src, /c\.locked_at, c\.locked_by, c\.template_id/,
+    'contracts list must select lock + template columns');
+  assert.match(src, /active_invitation_status/,
+    'contracts list must surface active invitation status via subquery');
+  // Pre-migration fallback: legacy SELECT keeps working.
+  assert.match(src,
+    /err\.code !== '42703' && err\.code !== '42P01'\) throw err;\s+\(\{ rows \} = await pool\.query\(/,
+    'list endpoint must fall back on pre-migration deploys');
+});
+
+test('contracts page shows lock + invitation status badges', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-contracts.jsx'), 'utf8');
+  assert.match(src, /🔒 LOCKED/, 'lock badge must show on locked contracts');
+  assert.match(src, /📨 ลิงก์รอผู้เช่ากรอก/);
+  assert.match(src, /✓ รอตรวจสอบ/);
+  // Action button hidden on locked contracts (button onClick={() => setInviting(c)}
+  // is gated on !c.locked_at).
+  assert.match(src,
+    /c\.status === 'active' && !c\.locked_at[\s\S]{0,200}setInviting\(c\)/,
+    'invite button must hide when contract is locked');
+});
+
+test('backup TABLES include contract_templates + contract_invitations', () => {
+  // Without these in TABLES, restoring from a backup loses every template
+  // + every tenant-fill invitation history. The earlier sync test covers
+  // the symmetry (TABLES vs RESTORABLE_TABLES); this test pins the
+  // critical entries explicitly so a future refactor can't silently
+  // drop one of them.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const backup = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'backup.js'), 'utf8');
+  assert.match(backup, /'contract_templates'/, 'TABLES must include contract_templates');
+  assert.match(backup, /'contract_invitations'/, 'TABLES must include contract_invitations');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  // contract_templates restored BEFORE contracts (FK constraint)
+  const restoredBlock = server.match(/RESTORABLE_TABLES = \[[\s\S]*?\];/)[0];
+  const tplIdx = restoredBlock.indexOf("'contract_templates'");
+  const ctrIdx = restoredBlock.indexOf("'contracts'");
+  assert.ok(tplIdx > 0 && ctrIdx > 0 && tplIdx < ctrIdx,
+    'contract_templates must restore BEFORE contracts (FK)');
+});
+
 test('contract_invitations table + state machine columns', () => {
   const fs = require('node:fs');
   const path = require('node:path');

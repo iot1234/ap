@@ -186,6 +186,23 @@ function PageContracts({ setToast, addActivity }) {
                     </td>
                     <td style={td}>
                       <Pill color={STATUS_PILL[c.status] || 'gray'}>{STATUS_TH[c.status] || c.status}</Pill>
+                      {c.locked_at ? (
+                        <div style={{ marginTop: 4 }}>
+                          <Pill color="warning">🔒 LOCKED</Pill>
+                        </div>
+                      ) : null}
+                      {c.active_invitation_status === 'pending' ? (
+                        <div style={{ marginTop: 4 }}>
+                          <Pill color="info">📨 ลิงก์รอผู้เช่ากรอก</Pill>
+                        </div>
+                      ) : c.active_invitation_status === 'submitted' ? (
+                        <div style={{ marginTop: 4 }}>
+                          <a href="#contract-invitations"
+                            style={{ display: 'inline-block', textDecoration: 'none' }}>
+                            <Pill color="warning">✓ รอตรวจสอบ →</Pill>
+                          </a>
+                        </div>
+                      ) : null}
                     </td>
                     <td style={{ ...td, whiteSpace: 'nowrap' }}>
                       <Btn size="sm" variant="ghost" onClick={() => openPdf(c)}
