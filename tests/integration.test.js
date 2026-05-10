@@ -1547,6 +1547,75 @@ test('features.tenancyContract defaults are sane (require ID images + emergency)
     'deposit cap default = 3 months');
 });
 
+test('approve writes room.tenant into JSONB blob (so scheduler can auto-bill)', () => {
+  // scheduler.tickBillGen iterates the baankarn_rooms_v1 blob and skips
+  // any room where !room.tenant — so just flipping status='occupied'
+  // wasn't enough. Without this nested jsonb_set the auto-billing never
+  // fires for tenants approved via the invitation flow → admin discovers
+  // the bug only when the next month rolls around with zero bills.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const block = src.match(/\/approve'[\s\S]+?app\.post\('\/api\/admin\/contract-invitations\/:id\/reject'/)[0];
+  // Nested jsonb_set: outer sets room.tenant, inner sets room.status.
+  assert.match(block,
+    /jsonb_set\(\s*jsonb_set\(value, ARRAY\[\$1::text, 'status'\], to_jsonb\('occupied'::text\)\),\s*ARRAY\[\$1::text, 'tenant'\],\s*\$2::jsonb\s*\)/,
+    'approve must write {name, phone, email, since} into room.tenant');
+  // Also the data shape — pulled fresh from FOR-UPDATE-locked tenant row.
+  assert.match(block, /SELECT full_name, phone, email FROM tenants WHERE id=\$1/);
+  assert.match(block, /blobTenant = \{/);
+});
+
+test('checkin also writes room.tenant into JSONB blob', () => {
+  // Same scheduler-skip risk as approve. Pin the same fix for the
+  // checkin path so both onboarding flows stay consistent.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'tenant-ops.js'), 'utf8');
+  assert.match(src,
+    /jsonb_set\(\s*jsonb_set\(value, ARRAY\[\$1::text, 'status'\], to_jsonb\('occupied'::text\)\),\s*ARRAY\[\$1::text, 'tenant'\],\s*\$2::jsonb\s*\)/,
+    'checkin must write room.tenant alongside status');
+  assert.match(src, /blobTenant = \{[\s\S]{0,200}name: tenant\.full_name/);
+});
+
+test('quick-invite has moveInDate window + deposit cap (parity with checkin)', () => {
+  // Pre-fix: quick-invite accepted any future date (admin could pick
+  // 2030 by mistake) and any deposit amount (extra zero typos).
+  // Now mirrors checkin's tenancyContract guards — same defaults
+  // (30/90 day window, 3× rent cap), same { force: true } bypass.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const block = src.match(/quick-invite'[\s\S]+?app\.post\('\/api\/contracts\/:id\/invite-tenant'/)[0];
+  assert.match(block, /MOVE_IN_OUT_OF_WINDOW/,
+    'quick-invite must surface MOVE_IN_OUT_OF_WINDOW like checkin');
+  assert.match(block, /DEPOSIT_TOO_LARGE/,
+    'quick-invite must surface DEPOSIT_TOO_LARGE like checkin');
+  assert.match(block, /tenancy\.moveInPastDays \?\? 30/);
+  assert.match(block, /tenancy\.depositMaxMonths \?\? 3/);
+  // Force-bypass mirrors checkin
+  assert.match(block, /isForced = b\.force === true/);
+});
+
+test('quick-invite carries booking photo + marks booking completed', () => {
+  // When admin sends invite from an already-approved booking, the
+  // public form's citizen-ID front photo should auto-link instead of
+  // forcing the tenant to re-upload. The booking row is also marked
+  // completed so it disappears from the pending queue.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const block = src.match(/quick-invite'[\s\S]+?app\.post\('\/api\/contracts\/:id\/invite-tenant'/)[0];
+  // Booking lookup with pre-migration tolerance
+  assert.match(block,
+    /SELECT citizen_id_image_front_id FROM bookings WHERE external_id=\$1/);
+  // Category + ref_id verification before retargeting (defense in depth)
+  assert.match(block,
+    /WHERE id=\$1 AND category='citizen_id_image'[\s\S]{0,200}ref_id='public-booking-pending'/);
+  // Booking marked completed
+  assert.match(block, /UPDATE bookings SET status='completed'/);
+});
+
 test('approve invitation links tenant ↔ room (current_room_id + rooms_v2 + JSONB)', () => {
   // Without this integration, approve would mark the contract as signed
   // but bills wouldn't auto-generate (scheduler can't find the tenant in

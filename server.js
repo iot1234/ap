@@ -6139,6 +6139,50 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
       return res.status(400).json({ error: 'discountPct must be 0-50', code: 'INVALID_DISCOUNT' });
     }
 
+    // Validation parity with checkin (which has these guards under
+    // tenancyContract feature flags). Without these checks, admin could
+    // pick "2030-05-15" as moveInDate or 30,000 baht deposit on a 5,000
+    // baht/month room and the contract would go through silently.
+    // Bypass via { force: true } — same convention as checkin.
+    const isForced = b.force === true;
+    let flags = {};
+    try { flags = await features.load(pool); }
+    catch { /* keep defaults */ }
+    const tenancy = flags.tenancyContract || {};
+
+    // (1) moveInDate window — catches "typed wrong year" errors.
+    if (!isForced) {
+      const today = new Date(new Date().toISOString().slice(0, 10) + 'T00:00:00Z');
+      const target = new Date(moveInDate + 'T00:00:00Z');
+      if (Number.isFinite(target.getTime())) {
+        const diffDays = Math.round((target - today) / 86_400_000);
+        const past = Number(tenancy.moveInPastDays ?? 30);
+        const future = Number(tenancy.moveInFutureDays ?? 90);
+        if (diffDays < -Math.abs(past) || diffDays > Math.abs(future)) {
+          return res.status(400).json({
+            error: `วันเข้าพัก (${moveInDate}) อยู่นอกช่วงที่ตั้งไว้ (อดีต ≤ ${past} วัน / อนาคต ≤ ${future} วัน)`,
+            code: 'MOVE_IN_OUT_OF_WINDOW',
+            today: today.toISOString().slice(0, 10), requested: moveInDate, diffDays,
+            hint: 'ตรวจสอบอีกครั้งหรือส่ง { force: true } ถ้ายืนยัน',
+          });
+        }
+      }
+    }
+
+    // (2) Deposit cap — catches "typed extra zero" errors.
+    if (!isForced) {
+      const depositMaxMonths = Number(tenancy.depositMaxMonths ?? 3);
+      const maxDeposit = depositMaxMonths * monthlyRent;
+      if (deposit > maxDeposit) {
+        return res.status(400).json({
+          error: `เงินมัดจำ (${deposit}) มากกว่า ${depositMaxMonths} เท่าของค่าเช่ารายเดือน (สูงสุด ${maxDeposit})`,
+          code: 'DEPOSIT_TOO_LARGE',
+          monthlyRent, deposit, maxDeposit, depositMaxMonths,
+          hint: 'ตรวจค่าอีกครั้งหรือส่ง { force: true } ถ้าเป็น deposit พิเศษ',
+        });
+      }
+    }
+
     // Compute end_date if termMonths supplied (clamp last-day-of-month to
     // avoid Date.setMonth rollover bug). Same logic as tenant-ops checkin.
     let endDate = null;
@@ -6209,6 +6253,63 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
          monthlyRent, deposit, termMonths || null, discountPct]
       );
       const contract = cIns.rows[0];
+
+      // 2b. Optional booking carry-over. When admin sends an invite from
+      // an already-approved booking, the public form may have collected
+      // a citizen-ID front photo. Re-target that file_uploads row onto
+      // the new tenant so they don't have to re-upload via the link.
+      // Also link the booking row to the freshly-created tenant +
+      // contract for audit traceability.
+      if (b.bookingId) {
+        try {
+          const bookingId = String(b.bookingId).slice(0, 64);
+          let frontFileId = null;
+          try {
+            const bk = await client.query(
+              `SELECT citizen_id_image_front_id FROM bookings WHERE external_id=$1 LIMIT 1`,
+              [bookingId]
+            );
+            frontFileId = bk.rows[0] && bk.rows[0].citizen_id_image_front_id;
+          } catch (err) {
+            // Pre-migration deploy without the column — skip silently.
+            if (err.code !== '42703' && err.code !== '42P01') throw err;
+          }
+          if (frontFileId) {
+            // Verify the file is the expected citizen-ID image with the
+            // public-booking placeholder ref_id before retargeting.
+            const verify = await client.query(
+              `SELECT id FROM file_uploads
+                 WHERE id=$1 AND category='citizen_id_image'
+                   AND (ref_id='public-booking-pending' OR ref_id IS NULL)
+                 LIMIT 1`,
+              [frontFileId]
+            );
+            if (verify.rows.length) {
+              await client.query(
+                `UPDATE tenants SET citizen_id_image_front_id=$1, updated_at=NOW() WHERE id=$2`,
+                [frontFileId, tenantId]
+              );
+              await client.query(
+                `UPDATE file_uploads SET ref_id=$1 WHERE id=$2 AND category='citizen_id_image'`,
+                [String(tenantId), frontFileId]
+              );
+            }
+          }
+          // Mark booking as 'completed' so admin sees it isn't a pending
+          // backlog item anymore. Best-effort: pre-migration deploys
+          // without the column just skip.
+          try {
+            await client.query(
+              `UPDATE bookings SET status='completed', updated_at=NOW() WHERE external_id=$1`,
+              [bookingId]
+            );
+          } catch (err) {
+            if (err.code !== '42703' && err.code !== '42P01') throw err;
+          }
+        } catch (err) {
+          console.warn('[quick-invite] booking carry-over skipped:', err.message);
+        }
+      }
 
       // 3. Generate invitation token. We inline the helper's logic
       // here because we're already inside a transaction (the helper
@@ -6546,12 +6647,36 @@ app.post('/api/admin/contract-invitations/:id/approve',
 
           // Occupy the NEW room — both data sources so old + new admin
           // pages see the same state. Same dual-write pattern checkin uses.
+          //
+          // Critical: also write the tenant info INTO the room blob.
+          // scheduler.tickBillGen iterates the blob and skips rooms where
+          // !room.tenant — so without this nested jsonb_set, auto-billing
+          // never fires for tenants approved via the invitation flow.
+          // Pull the tenant's display info from the FOR-UPDATE-locked
+          // row above to avoid a second SELECT round-trip.
+          const tenantInfoQ = await client.query(
+            `SELECT full_name, phone, email FROM tenants WHERE id=$1`,
+            [inv.tenant_id]
+          );
+          const tInfo = tenantInfoQ.rows[0] || {};
+          const blobTenant = {
+            name: tInfo.full_name || '',
+            phone: tInfo.phone || '',
+            email: tInfo.email || '',
+            since: (contract.start_date instanceof Date)
+              ? contract.start_date.toISOString().slice(0, 10)
+              : (typeof contract.start_date === 'string' ? contract.start_date.slice(0, 10) : null),
+          };
           await client.query(
             `UPDATE app_data
-                SET value = jsonb_set(value, ARRAY[$1::text, 'status'], to_jsonb('occupied'::text)),
+                SET value = jsonb_set(
+                              jsonb_set(value, ARRAY[$1::text, 'status'], to_jsonb('occupied'::text)),
+                              ARRAY[$1::text, 'tenant'],
+                              $2::jsonb
+                            ),
                     updated_at=NOW()
               WHERE key='baankarn_rooms_v1' AND value ? $1`,
-            [contract.room_id]
+            [contract.room_id, JSON.stringify(blobTenant)]
           );
           await client.query(
             `UPDATE rooms_v2 SET status='occupied', updated_at=NOW()
