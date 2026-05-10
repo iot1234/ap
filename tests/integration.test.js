@@ -1547,6 +1547,63 @@ test('features.tenancyContract defaults are sane (require ID images + emergency)
     'deposit cap default = 3 months');
 });
 
+test('quick-invite refuses duplicate unsigned drafts for same tenant', () => {
+  // Two parallel quick-invites for the same tenant produce two ghost
+  // contracts. Once one is approved + locked, the other stays as orphan
+  // state forever. Now blocked with DRAFT_CONTRACT_EXISTS 409 unless
+  // admin explicitly forces.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const block = src.match(/quick-invite'[\s\S]+?app\.post\('\/api\/contracts\/:id\/invite-tenant'/)[0];
+  assert.match(block,
+    /SELECT id, contract_no, room_id FROM contracts[\s\S]{0,300}WHERE tenant_id=\$1 AND status='active' AND locked_at IS NULL/,
+    'duplicate-draft check must scope to unsigned active contracts');
+  assert.match(block, /DRAFT_CONTRACT_EXISTS/);
+  // Force-bypass remains available
+  assert.match(block, /if \(!isForced\) \{[\s\S]{0,200}dupContract/,
+    'duplicate-draft check is gated on !isForced');
+});
+
+test('PUT /api/contracts/:id status=ended cascades tenant + room state', () => {
+  // Pre-fix: admin manually flipped contracts.status='ended' via the
+  // contracts editor — but tenant.status stayed 'active', current_room_id
+  // stayed set, room.status stayed 'occupied'. Bills kept generating.
+  // Now: status='ended'/'expired' triggers the same cascade as checkout.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const block = src.match(/app\.put\('\/api\/contracts\/:id'[\s\S]+?app\.post\('\/api\/contracts\/:id\/sign'/)[0];
+  assert.match(block, /isClosingContract = b\.status === 'ended' \|\| b\.status === 'expired'/);
+  assert.match(block,
+    /UPDATE tenants SET status='moved_out', current_room_id=NULL/,
+    'tenant must be moved out when contract closes');
+  assert.match(block,
+    /\(value->\$1 - 'tenant'\) \|\| jsonb_build_object\('status', 'vacant'\)/,
+    'room.tenant must be dropped + status=vacant on cascade');
+  // Wrapped in transaction so the cascade is atomic with the contract update
+  assert.match(block, /BEGIN/);
+  assert.match(block, /COMMIT/);
+  assert.match(block, /ROLLBACK/);
+});
+
+test('approve ROOM_OCCUPIED + CITIZEN_ID_DUPLICATE return nextActions for self-recovery', () => {
+  // Pre-fix: admin saw "ห้องมีผู้เช่ารายอื่น" but no link to checkout.
+  // Now both errors include nextActions URLs admin can click.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const block = src.match(/\/approve'[\s\S]+?app\.post\('\/api\/admin\/contract-invitations\/:id\/reject'/)[0];
+  // ROOM_OCCUPIED nextActions
+  assert.match(block,
+    /ROOM_OCCUPIED[\s\S]{0,500}checkoutExistingTenantUrl: `\/admin#tenants\/\$\{roomConflict\.id\}`/,
+    'ROOM_OCCUPIED must surface a checkout URL for the existing occupant');
+  // CITIZEN_ID_DUPLICATE hint via lookup endpoint
+  assert.match(block,
+    /CITIZEN_ID_DUPLICATE[\s\S]{0,500}lookup-by-citizen-id/,
+    'CITIZEN_ID_DUPLICATE must point admin at the lookup endpoint');
+});
+
 test('BOOKING_STATUSES + BOOKING_TRANSITIONS include "completed" terminal state', () => {
   // Pre-fix: quick-invite UPDATE bookings SET status='completed' but
   // PUT /api/bookings/:id rejected it (BOOKING_STATUSES set didn't list

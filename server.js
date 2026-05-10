@@ -5584,17 +5584,73 @@ app.put('/api/contracts/:id', sameOrigin, csrfGuard, requireAuth, requireRole('o
     }
     if (!fields.length) return res.status(400).json({ error: 'nothing to update' });
     params.push(id);
+
+    // When admin manually flips status to 'ended' or 'expired', the
+    // tenant is effectively moving out — sync tenant.status='moved_out'
+    // + clear current_room_id + free the room state. Without this, the
+    // contract shows ended but bills keep auto-generating and
+    // /api/rooms still shows the room as occupied (drift #7 from audit).
+    const isClosingContract = b.status === 'ended' || b.status === 'expired';
+
+    const client = await pool.connect();
     try {
-      const { rows } = await pool.query(
+      await client.query('BEGIN');
+      const { rows } = await client.query(
         `UPDATE contracts SET ${fields.join(', ')} WHERE id=$${i} AND deleted_at IS NULL RETURNING *`,
         params
       );
-      if (!rows.length) return res.status(404).json({ error: 'not found' });
-      audit(req, 'contract.update', 'contract', String(id), { fields: Object.keys(b) });
-      res.json({ ok: true, contract: rows[0] });
+      if (!rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'not found' });
+      }
+      const contract = rows[0];
+
+      // Cascade: closing the contract → tenant moves out + room freed.
+      // Skip if tenant is already non-active (idempotent re-closure).
+      if (isClosingContract && contract.tenant_id && contract.room_id) {
+        const tQ = await client.query(
+          `SELECT id, status, current_room_id FROM tenants
+             WHERE id=$1 AND deleted_at IS NULL FOR UPDATE`,
+          [contract.tenant_id]
+        );
+        const t = tQ.rows[0];
+        if (t && t.status === 'active' && t.current_room_id === contract.room_id) {
+          await client.query(
+            `UPDATE tenants SET status='moved_out', current_room_id=NULL, updated_at=NOW()
+               WHERE id=$1`,
+            [contract.tenant_id]
+          );
+          // Free the room (drop tenant key + flip status).
+          await client.query(
+            `UPDATE app_data
+                SET value = jsonb_set(
+                              value,
+                              ARRAY[$1::text],
+                              (value->$1 - 'tenant') || jsonb_build_object('status', 'vacant')
+                            ),
+                    updated_at=NOW()
+              WHERE key='baankarn_rooms_v1' AND value ? $1`,
+            [contract.room_id]
+          );
+          await client.query(
+            `UPDATE rooms_v2 SET status='vacant', updated_at=NOW()
+               WHERE room_code=$1 AND deleted_at IS NULL`,
+            [contract.room_id]
+          ).catch((err) => {
+            if (err.code !== '42P01') throw err;
+          });
+        }
+      }
+      await client.query('COMMIT');
+      audit(req, 'contract.update', 'contract', String(id),
+        { fields: Object.keys(b), cascadedTenantMovedOut: isClosingContract });
+      res.json({ ok: true, contract });
     } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
       console.error('contract update error:', err);
       res.status(500).json({ error: 'internal error', code: 'DB_ERROR' });
+    } finally {
+      client.release();
     }
   });
 
@@ -6260,6 +6316,33 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
       // those via the invitation. Status='active' so the contracts page
       // shows it; locked_at stays NULL until admin approves the
       // tenant's submission.
+      //
+      // Duplicate-draft guard: refuse if this tenant already has an
+      // unsigned (locked_at IS NULL) active contract that hasn't been
+      // approved. Without this, two parallel quick-invites for the
+      // same tenant produce two ghost contracts — the second one stays
+      // forever as orphan state once the first is approved. Admin can
+      // bypass via { force: true } to deliberately create a second
+      // draft (e.g. tenant moving rooms with overlapping contracts).
+      if (!isForced) {
+        const dupContract = await client.query(
+          `SELECT id, contract_no, room_id FROM contracts
+             WHERE tenant_id=$1 AND status='active' AND locked_at IS NULL
+               AND deleted_at IS NULL
+             ORDER BY created_at DESC LIMIT 1`,
+          [tenantId]
+        );
+        if (dupContract.rows.length) {
+          await client.query('ROLLBACK');
+          return res.status(409).json({
+            error: `ผู้เช่ารายนี้มีสัญญารอลงนามอยู่แล้ว (${dupContract.rows[0].contract_no}, ห้อง ${dupContract.rows[0].room_id})`,
+            code: 'DRAFT_CONTRACT_EXISTS',
+            conflict: dupContract.rows[0],
+            hint: 'ส่งลิงก์ใหม่จากสัญญาเดิมที่ /admin#contracts หรือส่ง { force: true } เพื่อสร้างใหม่ (audit-logged)',
+          });
+        }
+      }
+
       const contractNo = `C-${new Date().getFullYear()}-${String(tenantId).padStart(4, '0')}-`
                        + Math.random().toString(36).slice(2, 6).toUpperCase();
       const cIns = await client.query(
@@ -6738,6 +6821,15 @@ app.post('/api/admin/contract-invitations/:id/approve',
                + `(${roomConflict.full_name}) — ให้ check-out คนก่อนค่อยอนุมัติ`,
           code: 'ROOM_OCCUPIED',
           occupant: roomConflict,
+          // Surface clear next-step URLs so the admin UI can render
+          // action buttons instead of a dead-end error message. The
+          // tenant page lets admin checkout the existing occupant; the
+          // contract template assignment page lets admin reassign room.
+          nextActions: {
+            checkoutExistingTenantUrl: `/admin#tenants/${roomConflict.id}`,
+            invitationUrl: `/admin#contract-invitations`,
+            hint: `1) ไปหน้าผู้เช่าคนเดิม กด check-out  2) กลับมาที่ใบเชิญนี้แล้ว approve ใหม่`,
+          },
         });
       }
 
@@ -6827,7 +6919,23 @@ app.post('/api/admin/contract-invitations/:id/approve',
       });
     } catch (err) {
       await client.query('ROLLBACK').catch(() => {});
-      if (err.http) return res.status(err.http).json({ error: err.message, code: err.code });
+      if (err.http) {
+        // Enrich CITIZEN_ID_DUPLICATE with admin-actionable next steps —
+        // they need to reconcile (find the existing tenant + decide if
+        // it's the same person or a real duplicate) before re-approving.
+        const body = { error: err.message, code: err.code };
+        if (err.code === 'CITIZEN_ID_DUPLICATE') {
+          body.error = 'เลขบัตรประชาชนนี้ถูกบันทึกในระบบแล้วกับผู้เช่ารายอื่น';
+          body.hint = 'ใช้ /api/tenants/lookup-by-citizen-id เพื่อหาผู้เช่าเดิม '
+            + 'แล้วตัดสินใจว่าเป็นคนเดียวกัน (ใช้ tenant เดิม) หรือคนละคน '
+            + '(ขอให้ผู้เช่าตรวจเลขบัตรอีกครั้ง)';
+          body.nextActions = {
+            tenantsListUrl: '/admin#tenants',
+            invitationUrl: '/admin#contract-invitations',
+          };
+        }
+        return res.status(err.http).json(body);
+      }
       console.error('invitation approve error:', err);
       res.status(500).json({ error: 'internal error' });
     } finally {
