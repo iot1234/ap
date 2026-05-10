@@ -12,6 +12,7 @@ const billing = require('../services/billing');
 const features = require('../services/features');
 const notifier = require('../services/notifier');
 const notifQueue = require('../services/notificationQueue');
+const promptpay = require('../services/promptpay');
 // queryWithRetry retries serialization/deadlock errors (40001, 40P01, 57P03,
 // 53300). bulk-generate inserts ~30+ bills in a tight loop — most likely
 // path to hit a deadlock against the scheduler's auto-gen running parallel.
@@ -57,6 +58,9 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         if (!ppTarget) {
           issues.push({ sev: 'high', code: 'NO_PROMPTPAY',
             msg: 'PROMPTPAY_TARGET ไม่ตั้ง — บิล PDF จะไม่มี QR' });
+        } else if (promptpay.isDemoTarget(ppTarget)) {
+          issues.push({ sev: 'high', code: 'DEMO_PROMPTPAY',
+            msg: 'PromptPay ยังเป็นค่า demo — เปลี่ยนเป็นบัญชีรับเงินจริงก่อนออกบิล' });
         }
         const wRate = Number(config?.utilities?.waterRate);
         const eRate = Number(config?.utilities?.elecRate);

@@ -1098,6 +1098,23 @@ test('scheduler + bulk-generate use formatYMD for dueDate', () => {
     'bulk-generate must use formatYMD for due date');
 });
 
+test('auto billing guards against demo PromptPay target', () => {
+  // The bundled default 0801234567 is useful for demos but dangerous in
+  // production: invoices would contain a real-looking QR for the wrong
+  // receiver. Bulk-generate and scheduler must flag it before bills go out.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const sched = fs.readFileSync(path.join(__dirname, '..', 'services', 'scheduler.js'), 'utf8');
+  const bulk = fs.readFileSync(path.join(__dirname, '..', 'routes', 'bills-extras.js'), 'utf8');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(sched, /isDemoTarget\(ppTarget\)/,
+    'scheduler must warn/block when PromptPay is still demo');
+  assert.match(bulk, /DEMO_PROMPTPAY/,
+    'bulk-generate must return a precondition issue for demo PromptPay');
+  assert.match(server, /isDemoTarget\(ppDb \|\| ppEnv\)/,
+    'production-readiness must fail demo PromptPay');
+});
+
 test('encryption module round-trips with versioned prefix', () => {
   // Force a clean load with the current env + ENCRYPTION_KEY_V1 set
   process.env.ENCRYPTION_KEY_V1 = Buffer.alloc(32, 1).toString('base64');

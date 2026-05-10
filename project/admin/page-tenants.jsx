@@ -205,7 +205,7 @@ function PageTenants({ rooms, setRooms, addActivity, setToast }) {
             />
             {drawerTab === 'profile'  && <TabProfile  t={active} />}
             {drawerTab === 'portal'   && <TabPortal   t={active} setToast={setToast} addActivity={addActivity} apiFetch={apiFetch} />}
-            {drawerTab === 'contract' && <TabContract t={active} setToast={setToast} addActivity={addActivity} />}
+            {drawerTab === 'contract' && <TabContract t={active} setToast={setToast} addActivity={addActivity} setRooms={setRooms} onClosed={() => setActiveId(null)} />}
             {drawerTab === 'bills'    && <TabBills    t={active} />}
             {drawerTab === 'notes'    && <TabNotes    t={active} setRooms={setRooms} setToast={setToast} addActivity={addActivity} />}
           </>
@@ -788,7 +788,7 @@ function TabPortal({ t, setToast, addActivity, apiFetch }) {
 // review / approve / sign — no jumping to /admin#contracts or
 // /admin#contract-invitations. Room + rent are auto-mapped from the tenant's
 // current room (`t.roomId`, `t.rent`) so admin doesn't re-pick the room.
-function TabContract({ t, setToast, addActivity }) {
+function TabContract({ t, setToast, addActivity, setRooms, onClosed }) {
   const C = window.ADMIN_C;
   const { fmtCurrency } = window;
   const { Card, DefList, Btn, Pill } = window;
@@ -805,6 +805,14 @@ function TabContract({ t, setToast, addActivity }) {
   const [copied, setCopied] = React.useState(false);
   // Submitted invitation detail loaded lazily for the inline review panel.
   const [reviewing, setReviewing] = React.useState(null);
+  // Error from the last approve attempt — surfaced inline in the panel so
+  // admin can see WHY the action failed (room conflict / citizen-ID dup /
+  // missing data) without the toast disappearing.
+  const [approveError, setApproveError] = React.useState(null);
+  // Cancel-contract modal state. Holds the reason text while the admin
+  // types it; cleared on close.
+  const [cancelling, setCancelling] = React.useState(false);
+  const [cancelReason, setCancelReason] = React.useState('');
 
   // Defensive: reset per-tenant transient state whenever the admin switches
   // to a different tenant in the drawer. Without this, a freshly-created
@@ -816,6 +824,9 @@ function TabContract({ t, setToast, addActivity }) {
     setShowCheckin(false);
     setShowEdit(false);
     setCopied(false);
+    setApproveError(null);
+    setCancelling(false);
+    setCancelReason('');
   }, [t.phone]);
 
   const reload = React.useCallback(async () => {
@@ -968,6 +979,7 @@ function TabContract({ t, setToast, addActivity }) {
     if (!reviewing) return;
     if (!confirm('อนุมัติ + lock สัญญา? (กลับมาแก้ไม่ได้)')) return;
     setBusy(true);
+    setApproveError(null);
     try {
       const result = await apiCall(`/api/admin/contract-invitations/${reviewing.id}/approve`,
         { method: 'POST' });
@@ -981,7 +993,77 @@ function TabContract({ t, setToast, addActivity }) {
       }
       reload();
     } catch (err) {
-      setToast && setToast({ kind: 'danger', message: 'อนุมัติล้มเหลว: ' + err.message });
+      // Server responses (CITIZEN_ID_DUPLICATE / ROOM_OCCUPIED / BAD_STATUS)
+      // carry both error + hint; surface them inline in the review panel
+      // so admin can act on the next-step guidance instead of guessing.
+      const body = (err && err.body) || {};
+      setApproveError({
+        error: err.message || 'เกิดข้อผิดพลาด',
+        hint: body.hint || null,
+        code: err.code || body.code || null,
+      });
+      setToast && setToast({ kind: 'danger', message: 'อนุมัติล้มเหลว: ' + (err.message || '') });
+    } finally { setBusy(false); }
+  };
+
+  // Cancel an active contract — sets status='ended' with today's endDate,
+  // and the server cascades: tenant.status → 'moved_out', current_room_id
+  // cleared, room.status → 'vacant' (both blob + rooms_v2). The reason is
+  // audit-logged via the {reason} metadata so we have a paper trail
+  // without adding a column to the contracts table.
+  const cancelContract = async () => {
+    if (!contract) return;
+    const reason = (cancelReason || '').trim();
+    if (!reason) {
+      setToast && setToast({ kind: 'danger', message: 'กรุณาระบุเหตุผลก่อนยกเลิกสัญญา' });
+      return;
+    }
+    setBusy(true);
+    try {
+      const today = new Date().toISOString().slice(0, 10);
+      await apiCall(`/api/contracts/${contract.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          status: 'ended',
+          endDate: today,
+          cancelReason: reason,  // captured by audit log on the server side
+        }),
+      });
+      setCancelling(false);
+      setCancelReason('');
+      setToast && setToast({
+        kind: 'success',
+        message: `ยกเลิกสัญญา ${contract.contract_no} แล้ว — ห้อง ${contract.room_id} ว่าง`,
+      });
+      addActivity && addActivity({
+        icon: '🚫',
+        text: `ยกเลิกสัญญา ${contract.contract_no} (${t.name}, ห้อง ${contract.room_id}) — ${reason.slice(0, 60)}`,
+        type: 'contract',
+      });
+      // Update parent rooms state so this tenant disappears from the
+      // tenants table immediately — the server already cascaded room
+      // status='vacant' + tenant removed, but the client-side `rooms`
+      // blob would stay stale until the next full refetch.
+      if (setRooms && contract.room_id) {
+        setRooms((prev) => {
+          if (!prev || !prev[contract.room_id]) return prev;
+          const next = { ...prev };
+          next[contract.room_id] = {
+            ...next[contract.room_id],
+            tenant: null,
+            status: 'vacant',
+            since: null,
+            contractEnd: null,
+          };
+          return next;
+        });
+      }
+      // Drawer becomes detached anyway once `tenants` recomputes (this row
+      // no longer has r.tenant). Close it explicitly so admin doesn't see
+      // an empty drawer hanging open.
+      if (onClosed) onClosed();
+    } catch (err) {
+      setToast && setToast({ kind: 'danger', message: 'ยกเลิกล้มเหลว: ' + err.message });
     } finally { setBusy(false); }
   };
 
@@ -1021,9 +1103,10 @@ function TabContract({ t, setToast, addActivity }) {
       <ContractReviewPanel
         detail={reviewing}
         busy={busy}
+        approveError={approveError}
         onApprove={approveSubmitted}
         onReject={rejectSubmitted}
-        onCancel={() => setReviewing(null)}
+        onCancel={() => { setReviewing(null); setApproveError(null); }}
         C={C}
       />
     );
@@ -1186,6 +1269,12 @@ function TabContract({ t, setToast, addActivity }) {
               แก้ไขส่วนลด/ระยะเวลา
             </Btn>
           ) : null}
+          {contract.status === 'active' ? (
+            <Btn variant="ghost" size="sm" icon="🚫"
+              onClick={() => setCancelling(true)} disabled={busy}>
+              ยกเลิกสัญญา
+            </Btn>
+          ) : null}
         </div>
       </Card>
 
@@ -1199,7 +1288,83 @@ function TabContract({ t, setToast, addActivity }) {
           onError={(msg) => setToast && setToast({ kind: 'danger', message: msg })}
         />
       ) : null}
+
+      {cancelling ? (
+        <CancelContractModal
+          contract={contract}
+          tenant={t}
+          reason={cancelReason}
+          setReason={setCancelReason}
+          busy={busy}
+          onClose={() => { setCancelling(false); setCancelReason(''); }}
+          onConfirm={cancelContract}
+          C={C}
+        />
+      ) : null}
     </div>
+  );
+}
+
+// Confirmation modal for ending a contract. We require a reason so the
+// audit log captures WHY the lease was terminated — admin support cases
+// later asking "who cancelled this and why?" should be answerable from
+// the audit_log entry without DB forensics.
+function CancelContractModal({ contract, tenant, reason, setReason, busy, onClose, onConfirm, C }) {
+  const { Modal, Btn, fmtCurrency } = window;
+  return (
+    <Modal
+      open={true}
+      onClose={busy ? undefined : onClose}
+      width={520}
+      title={`ยกเลิกสัญญา ${contract.contract_no}`}
+      footer={
+        <>
+          <Btn variant="ghost" onClick={onClose} disabled={busy}>ปิด</Btn>
+          <Btn variant="danger" onClick={onConfirm} disabled={busy || !reason.trim()}>
+            {busy ? 'กำลังยกเลิก…' : 'ยืนยันยกเลิก'}
+          </Btn>
+        </>
+      }
+    >
+      <div style={{
+        padding: 12, background: '#fff7e0', border: '1px solid #f1b32d',
+        borderRadius: 8, fontSize: 13, color: '#6b4d10', marginBottom: 16, lineHeight: 1.6,
+      }}>
+        ⚠️ การยกเลิกจะ:
+        <ul style={{ margin: '6px 0 0 0', paddingLeft: 20 }}>
+          <li>ตั้งสถานะสัญญาเป็น "สิ้นสุดแล้ว"</li>
+          <li>เปลี่ยนสถานะผู้เช่า <b>{tenant && tenant.name}</b> เป็น <b>moved_out</b></li>
+          <li>ปล่อยห้อง <b>{contract.room_id}</b> เป็น <b>vacant</b></li>
+          <li>หยุดการออกบิลอัตโนมัติ (รอบเดือนถัดไป)</li>
+        </ul>
+        บิลที่ค้างชำระอยู่แล้วยังคงค้างไว้ ต้องเก็บ/ปิดยอดเอง
+      </div>
+
+      <div style={{
+        padding: 10, background: '#faf6ee', borderRadius: 8, fontSize: 12,
+        color: C.muted, marginBottom: 12, lineHeight: 1.5,
+      }}>
+        ห้อง: <b style={{ color: C.ink }}>{contract.room_id}</b> ·
+        ค่าเช่า: <b style={{ color: C.ink }}>฿{fmtCurrency(contract.monthly_rent)}/เดือน</b> ·
+        มัดจำ: <b style={{ color: C.ink }}>฿{fmtCurrency(contract.deposit)}</b>
+      </div>
+
+      <label style={{ display: 'block', fontSize: 12, marginBottom: 4, color: '#5b4f40', fontWeight: 500 }}>
+        เหตุผลที่ยกเลิก (audit log)
+      </label>
+      <textarea rows={3} maxLength={500}
+        placeholder="เช่น ผู้เช่าขอย้ายออกก่อนกำหนด, ไม่สามารถจ่ายค่าเช่าได้, ฯลฯ"
+        value={reason}
+        onChange={(e) => setReason(e.target.value)}
+        autoFocus
+        style={{
+          width: '100%', padding: '8px 10px', border: '1px solid #ece4d4',
+          borderRadius: 6, fontSize: 13, fontFamily: 'inherit', boxSizing: 'border-box',
+        }} />
+      <div style={{ fontSize: 11, color: C.muted, marginTop: 6 }}>
+        เหตุผลจะถูกบันทึกใน audit log (ดูที่ /admin#activity)
+      </div>
+    </Modal>
   );
 }
 
@@ -1320,9 +1485,24 @@ function ContractActionTile({ icon, title, desc, onClick, busy, C }) {
   );
 }
 
+// Format citizen ID for display: X-XXXX-XXXXX-XX-X (standard Thai layout).
+// Admin needs the full number visible to cross-check against the photo —
+// the previous masked '***-***-XXXX' view forced them to open the photo
+// in a separate tab and squint, which defeated the point of the digital
+// flow. Falls back to raw value when it isn't 13 digits.
+function formatCitizenId(raw) {
+  if (!raw) return null;
+  const s = String(raw).replace(/\D/g, '');
+  if (s.length !== 13) return s || null;
+  return `${s[0]}-${s.slice(1, 5)}-${s.slice(5, 10)}-${s.slice(10, 12)}-${s[12]}`;
+}
+
 // Inline review panel — shows tenant's submitted draft + photos + signature
 // directly inside the tenant drawer so admin can approve without page hops.
-function ContractReviewPanel({ detail, busy, onApprove, onReject, onCancel, C }) {
+// `approveError` lets the parent surface server-side failures (room conflict,
+// citizen-ID dup, etc.) right next to the buttons instead of letting a
+// toast disappear after a few seconds.
+function ContractReviewPanel({ detail, busy, approveError, onApprove, onReject, onCancel, C }) {
   const { Card, Btn } = window;
   const draft = detail.draft || {};
   const [showRejectForm, setShowRejectForm] = React.useState(false);
@@ -1334,13 +1514,15 @@ function ContractReviewPanel({ detail, busy, onApprove, onReject, onCancel, C })
       {children}
     </div>
   );
-  const KV = ({ k, v }) => (
+  const KV = ({ k, v, mono }) => (
     <div style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0',
                   fontSize: 13, borderBottom: '1px solid #f0e9d8' }}>
       <span style={{ color: C.muted }}>{k}</span>
-      <span style={{ fontWeight: 500, textAlign: 'right' }}>{v || '—'}</span>
+      <span style={{ fontWeight: 500, textAlign: 'right',
+                     fontFamily: mono ? 'Sora, monospace' : 'inherit' }}>{v || '—'}</span>
     </div>
   );
+  const fullCitizenId = formatCitizenId(draft.citizenId);
   return (
     <Card style={{ padding: 14 }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
@@ -1363,8 +1545,12 @@ function ContractReviewPanel({ detail, busy, onApprove, onReject, onCancel, C })
       </Section>
 
       <Section title="เลขบัตร + รูป">
-        <KV k="เลขบัตร" v={draft.citizenId
-          ? '***-***-' + String(draft.citizenId).slice(-4) : '—'} />
+        <KV k="เลขบัตรประชาชน"
+          v={fullCitizenId || <span style={{ color: '#c0392b' }}>ยังไม่กรอก</span>}
+          mono={!!fullCitizenId} />
+        <div style={{ fontSize: 11, color: C.muted, marginTop: 4, marginBottom: 8 }}>
+          ตรวจให้ตรงกับเลขบนรูปบัตรก่อน lock
+        </div>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 8 }}>
           <ContractPhotoBox label="หน้าบัตร" url={detail.draft_front_url} C={C} />
           <ContractPhotoBox label="หลังบัตร" url={detail.draft_back_url} C={C} />
@@ -1380,6 +1566,22 @@ function ContractReviewPanel({ detail, busy, onApprove, onReject, onCancel, C })
           <div style={{ color: '#c0392b' }}>ยังไม่ได้เซ็น</div>
         )}
       </Section>
+
+      {approveError ? (
+        <div style={{
+          padding: 12, marginBottom: 10, borderRadius: 8,
+          background: '#ffe6e3', border: '1px solid #c0392b', color: '#7a1d10',
+          fontSize: 13, lineHeight: 1.6,
+        }}>
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>❌ อนุมัติไม่สำเร็จ</div>
+          <div>{approveError.error}</div>
+          {approveError.hint ? (
+            <div style={{ marginTop: 6, fontSize: 12, color: '#7a1d10', opacity: 0.85 }}>
+              💡 {approveError.hint}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
 
       {showRejectForm ? (
         <div>
@@ -1404,7 +1606,7 @@ function ContractReviewPanel({ detail, busy, onApprove, onReject, onCancel, C })
         <div style={{ display: 'flex', gap: 8, marginTop: 10, justifyContent: 'flex-end' }}>
           <Btn variant="ghost" onClick={() => setShowRejectForm(true)} disabled={busy}>ขอให้แก้</Btn>
           <Btn variant="primary" onClick={onApprove} disabled={busy}>
-            ✓ อนุมัติ + lock
+            {busy ? 'กำลังอนุมัติ…' : '✓ อนุมัติ + lock'}
           </Btn>
         </div>
       )}

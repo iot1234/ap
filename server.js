@@ -14,7 +14,7 @@ const PgSession = require('connect-pg-simple')(session);
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const { renderBillPdf } = require('./services/pdf');
-const { renderQrPng, renderQrDataUrl, MAX_AMOUNT } = require('./services/promptpay');
+const { renderQrPng, renderQrDataUrl, MAX_AMOUNT, isDemoTarget, normaliseTarget } = require('./services/promptpay');
 const lineNotify = require('./services/line');
 const features = require('./services/features');
 const cryptoSvc = require('./services/crypto');
@@ -1081,13 +1081,122 @@ function releasePdfSlot() {
     next();   // increments _pdfActive itself
   }
 }
-// POST /api/bills/render — admin-authenticated. Body is a bill object built
-// client-side from rooms+config; server renders Thai-language PDF with QR
-// embedded. We don't persist bills server-side (they're computed on demand
-// from rooms+config in the admin UI), so the body carries everything needed.
-app.post('/api/bills/render', sameOrigin, csrfGuard, requireAuth, async (req, res) => {
-  const bill = req.body && req.body.bill ? req.body.bill : req.body;
-  const config = req.body && req.body.config;
+
+async function loadBillingConfig() {
+  const { rows } = await pool.query(
+    `SELECT value FROM app_data WHERE key='baankarn_config_v1' LIMIT 1`
+  );
+  return rows[0]?.value || {};
+}
+
+function buildEffectivePaymentBlock(config) {
+  const block = billing.buildPaymentBlock(config || {});
+  if (!block.promptpayTarget) {
+    const envPp = require('./services/secrets').get('PROMPTPAY_TARGET');
+    if (envPp) {
+      block.promptpayTarget = envPp;
+      if (!Array.isArray(block.paymentMethods)) block.paymentMethods = [];
+      if (!block.paymentMethods.find((m) => m && m.key === 'promptpay')) {
+        block.paymentMethods.unshift({ key: 'promptpay', label: 'PromptPay', enabled: true });
+      }
+    }
+  }
+  return block;
+}
+
+async function loadEffectivePaymentBlock() {
+  const config = await loadBillingConfig();
+  return { config, paymentBlock: buildEffectivePaymentBlock(config) };
+}
+
+function getRenderBillId(req, bill) {
+  const candidates = [
+    req.body?.billId,
+    req.body?.dbBillId,
+    bill?.dbBillId,
+    bill?.billId,
+  ];
+  for (const value of candidates) {
+    const id = Number(value);
+    if (Number.isInteger(id) && id > 0) return id;
+  }
+  return null;
+}
+
+function buildStoredBillPdfObject(b, config, paymentBlock) {
+  const items = [
+    { label: 'ค่าเช่าห้องพัก', qty: '1 เดือน', amount: Number(b.rent) || 0 },
+    { label: 'ค่าน้ำ', qty: `${b.water_units || 0} หน่วย x ${b.water_rate || 0}`, amount: Number(b.water_amount) || 0 },
+    { label: 'ค่าไฟฟ้า', qty: `${b.elec_units || 0} หน่วย x ${b.elec_rate || 0}`, amount: Number(b.elec_amount) || 0 },
+  ];
+  if (Number(b.wifi) > 0) {
+    items.push({ label: 'ค่าอินเทอร์เน็ต', qty: '1 เดือน', amount: Number(b.wifi) });
+  }
+  let otherList = Array.isArray(b.other) ? b.other : [];
+  if (!Array.isArray(b.other) && typeof b.other === 'string') {
+    try {
+      const parsed = JSON.parse(b.other);
+      if (Array.isArray(parsed)) otherList = parsed;
+    } catch { /* keep empty */ }
+  }
+  for (const it of otherList) {
+    const amt = Number(it.amount) || 0;
+    if (amt > 0) items.push({ label: String(it.label || 'อื่นๆ'), qty: '', amount: amt });
+  }
+  if (Number(b.late_fee) > 0) {
+    items.push({ label: 'ค่าปรับชำระล่าช้า', qty: '', amount: Number(b.late_fee) });
+  }
+  if (Number(b.vat) > 0) {
+    items.push({ label: 'ภาษีมูลค่าเพิ่ม', qty: '', amount: Number(b.vat) });
+  }
+  return {
+    billNo: b.bill_no,
+    roomId: b.room_id,
+    tenantName: b.tenant_name || '',
+    tenantPhone: b.tenant_phone || '',
+    period: b.period,
+    dueDate: b.due_date,
+    items,
+    rent: Number(b.rent) || 0,
+    waterUnits: Number(b.water_units) || 0,
+    waterRate: Number(b.water_rate) || 0,
+    waterAmount: Number(b.water_amount) || 0,
+    elecUnits: Number(b.elec_units) || 0,
+    elecRate: Number(b.elec_rate) || 0,
+    elecAmount: Number(b.elec_amount) || 0,
+    wifi: Number(b.wifi) || 0,
+    subtotal: Number(b.subtotal) || 0,
+    vat: Number(b.vat) || 0,
+    lateFee: Number(b.late_fee) || 0,
+    total: Number(b.total) || 0,
+    status: b.status,
+    paidAt: b.paid_at,
+    building: (config && config.building) || {},
+    ...paymentBlock,
+  };
+}
+// POST /api/bills/render — owner/manager PDF rendering. Prefer a persisted
+// billId so amount and payment details come from DB + server config.
+app.post('/api/bills/render', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'), async (req, res) => {
+  let bill = req.body && req.body.bill ? req.body.bill : req.body;
+  const renderBillId = getRenderBillId(req, bill);
+  if (renderBillId) {
+    try {
+      const { rows } = await pool.query(
+        `SELECT b.*, t.full_name AS tenant_name, t.phone AS tenant_phone
+           FROM bills b
+           LEFT JOIN tenants t ON t.id = b.tenant_id
+          WHERE b.id=$1 AND b.deleted_at IS NULL`,
+        [renderBillId]
+      );
+      if (!rows.length) return res.status(404).json({ error: 'bill not found' });
+      const { config, paymentBlock } = await loadEffectivePaymentBlock();
+      bill = buildStoredBillPdfObject(rows[0], config, paymentBlock);
+    } catch (err) {
+      console.error(`[${req.id}] bill render load error:`, sanitizeError(err));
+      return res.status(500).json({ error: 'internal error', code: 'DB_ERROR' });
+    }
+  }
   if (!bill || !bill.tenantName || bill.total == null) {
     return res.status(400).json({ error: 'bill.tenantName and bill.total required' });
   }
@@ -1098,23 +1207,23 @@ app.post('/api/bills/render', sameOrigin, csrfGuard, requireAuth, async (req, re
       code: 'INVALID_BILL_TOTAL',
     });
   }
-  bill.total = Math.round(billTotal * 100) / 100;
-  // Single source of truth for payment block: services/billing.buildPaymentBlock
-  // derives promptpayTarget, bankInfo, paymentMethods from config.payment.
-  // If client sent { bill, config } we enrich here so the client doesn't need
-  // to duplicate the field-extraction logic. Pre-computed fields on `bill`
-  // win — old clients that don't send config still work.
-  if (config) {
-    const pb = billing.buildPaymentBlock(config);
-    if (!bill.promptpayTarget && pb.promptpayTarget) bill.promptpayTarget = pb.promptpayTarget;
-    if (!bill.promptpayName && pb.promptpayName) bill.promptpayName = pb.promptpayName;
-    if (!bill.bankInfo && pb.bankInfo) bill.bankInfo = pb.bankInfo;
-    if (!bill.paymentMethods && pb.paymentMethods) bill.paymentMethods = pb.paymentMethods;
+  if (!renderBillId) {
+    const storedConfig = await loadBillingConfig().catch(() => ({}));
+    const requestConfig = req.body && req.body.config ? req.body.config : {};
+    const config = Object.keys(storedConfig || {}).length ? storedConfig : requestConfig;
+    const paymentBlock = buildEffectivePaymentBlock(config);
+    bill = {
+      ...bill,
+      total: Math.round(billTotal * 100) / 100,
+      building: (config && config.building) || bill.building || {},
+      promptpayTarget: paymentBlock.promptpayTarget,
+      promptpayName: paymentBlock.promptpayName,
+      bankInfo: paymentBlock.bankInfo,
+      paymentMethods: paymentBlock.paymentMethods,
+    };
   }
-  if (!bill.promptpayTarget) {
-    const pp = require('./services/secrets').get('PROMPTPAY_TARGET');
-    if (pp) bill.promptpayTarget = pp;
-  }
+  // Client-supplied payment fields are never trusted. Estimates are rendered
+  // with server-side payment config, and persisted bills are rebuilt from DB.
   let acquired = false;
   try {
     await acquirePdfSlot();
@@ -5921,8 +6030,15 @@ app.put('/api/contracts/:id', sameOrigin, csrfGuard, requireAuth, requireRole('o
         }
       }
       await client.query('COMMIT');
-      audit(req, 'contract.update', 'contract', String(id),
-        { fields: Object.keys(b), cascadedTenantMovedOut: isClosingContract });
+      // Capture cancelReason (when admin terminates via the tenant page
+      // "ยกเลิกสัญญา" button) in the audit metadata so we have a paper
+      // trail of WHY the lease was ended without a dedicated column.
+      const auditMeta = { fields: Object.keys(b), cascadedTenantMovedOut: isClosingContract };
+      if (b.cancelReason && typeof b.cancelReason === 'string') {
+        auditMeta.cancelReason = String(b.cancelReason).slice(0, 500);
+      }
+      audit(req, isClosingContract ? 'contract.cancel' : 'contract.update',
+        'contract', String(id), auditMeta);
       res.json({ ok: true, contract });
     } catch (err) {
       await client.query('ROLLBACK').catch(() => {});
@@ -8456,6 +8572,10 @@ app.get('/api/admin/production-readiness', requireAuth, requireRole('owner'), as
       fail('promptpay', 'PromptPay',
         'ยังไม่ได้ตั้งค่า PromptPay target — บิล PDF จะไม่มี QR code',
         'แก้ที่ Settings → การชำระเงิน หรือใส่ PROMPTPAY_TARGET ใน Secrets');
+    } else if (isDemoTarget(ppDb || ppEnv)) {
+      fail('promptpay', 'PromptPay',
+        'PromptPay ยังเป็นค่า demo — ห้ามใช้รับเงินจริง',
+        'แก้ที่ Settings → การชำระเงิน หรือใส่ PROMPTPAY_TARGET ของบัญชีจริงใน Secrets');
     } else {
       ok('promptpay', 'PromptPay', 'ตั้งค่าเรียบร้อย');
     }
@@ -9026,8 +9146,11 @@ migrate()
         }
         const sec = require('./services/secrets');
         const ppDb = (cfg && cfg.payment) ? (cfg.payment.promptpay || cfg.payment.promptpayTarget) : null;
-        if (!ppDb && !sec.get('PROMPTPAY_TARGET')) {
+        const ppTarget = ppDb || sec.get('PROMPTPAY_TARGET');
+        if (!ppTarget) {
           issues.push('🔴 PROMPTPAY_TARGET ยังไม่ตั้ง — บิล PDF จะไม่มี QR');
+        } else if (isDemoTarget(ppTarget)) {
+          issues.push('🔴 PROMPTPAY_TARGET ยังเป็นค่า demo — ห้ามใช้รับเงินจริง');
         }
         const ownersQ = await pool.query(`SELECT COUNT(*)::int n, MIN(username) u FROM auth_users WHERE role='owner'`);
         const oc = ownersQ.rows[0];

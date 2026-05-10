@@ -329,9 +329,18 @@ function ReviewBody({ detail }) {
 
       <Section title="ผู้เช่ากรอก: เลขบัตร + รูป">
         <KV k="เลขบัตรประชาชน"
-            v={draft.citizenId
-                ? '***-***-' + String(draft.citizenId).slice(-4)
-                : '—'} />
+            v={(() => {
+              const raw = draft.citizenId ? String(draft.citizenId).replace(/\D/g, '') : '';
+              if (!raw) return '—';
+              if (raw.length !== 13) return raw;
+              // Standard Thai layout X-XXXX-XXXXX-XX-X. Showing the full
+              // number is required so admin can cross-check against the
+              // photo before locking the contract.
+              return `${raw[0]}-${raw.slice(1, 5)}-${raw.slice(5, 10)}-${raw.slice(10, 12)}-${raw[12]}`;
+            })()} />
+        <div style={{ fontSize: 11, color: C.muted, marginTop: 4 }}>
+          ตรวจเลขให้ตรงกับรูปบัตรด้านล่างก่อนอนุมัติ
+        </div>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 8 }}>
           <PhotoBox label="หน้าบัตร" url={detail.draft_front_url} />
           <PhotoBox label="หลังบัตร" url={detail.draft_back_url} />

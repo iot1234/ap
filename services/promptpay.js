@@ -7,6 +7,7 @@ const generatePayload = require('promptpay-qr');
 const QRCode = require('qrcode');
 
 const MAX_AMOUNT = 999999;
+const DEMO_TARGET = '0801234567';
 
 function normaliseTarget(target) {
   if (!target || typeof target !== 'string') {
@@ -26,6 +27,14 @@ function normaliseAmount(amount) {
     throw new Error(`PromptPay amount must be greater than 0 and <= ${MAX_AMOUNT}`);
   }
   return Math.round(n * 100) / 100;
+}
+
+function isDemoTarget(target) {
+  try {
+    return normaliseTarget(target) === DEMO_TARGET;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -81,5 +90,7 @@ module.exports = {
   renderQrDataUrl,
   normaliseTarget,
   normaliseAmount,
+  isDemoTarget,
   MAX_AMOUNT,
+  DEMO_TARGET,
 };

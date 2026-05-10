@@ -17,6 +17,7 @@ const fs = require('fs');
 const path = require('path');
 const features = require('./features');
 const billing = require('./billing');
+const promptpay = require('./promptpay');
 const notifier = require('./notifier');
 const meter = require('./meter');
 
@@ -139,6 +140,7 @@ async function tickBillGen(pool, flags, now, state) {
       || config?.payment?.promptpayTarget
       || require('./secrets').get('PROMPTPAY_TARGET');
     if (!ppTarget)                          issues.push('PROMPTPAY_TARGET ไม่ตั้ง');
+    else if (promptpay.isDemoTarget(ppTarget)) issues.push('PROMPTPAY_TARGET ยังเป็นค่า demo');
     const wRate = Number(config?.utilities?.waterRate);
     const eRate = Number(config?.utilities?.elecRate);
     if (!Number.isFinite(wRate) || wRate <= 0) issues.push('waterRate ไม่ตั้ง / ≤ 0');

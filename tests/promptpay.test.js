@@ -7,7 +7,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { buildPayload, renderQrPng, renderQrDataUrl } = require('../services/promptpay');
+const { buildPayload, renderQrPng, renderQrDataUrl, isDemoTarget } = require('../services/promptpay');
 
 test('buildPayload requires a target', () => {
   assert.throws(() => buildPayload(), /target required/);
@@ -42,6 +42,13 @@ test('buildPayload strips dashes and spaces', () => {
   // Same target → identical payload (no amount, so no rounding noise)
   assert.equal(a, c);
   assert.equal(b, c);
+});
+
+test('isDemoTarget detects bundled demo PromptPay only', () => {
+  assert.equal(isDemoTarget('0801234567'), true);
+  assert.equal(isDemoTarget('080-123-4567'), true);
+  assert.equal(isDemoTarget('0812345678'), false);
+  assert.equal(isDemoTarget('bad'), false);
 });
 
 test('buildPayload includes amount when provided', () => {
