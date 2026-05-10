@@ -6476,11 +6476,102 @@ app.post('/api/admin/contract-invitations/:id/approve',
                         `agreed_terms_at = COALESCE(agreed_terms_at, NOW())`);
         updateParams.push(String(draft.agreedTermsVersion).slice(0, 64));
       }
-      await client.query(
+      // Pull contract.room_id back so we can sync room state below.
+      const cUpdate = await client.query(
         `UPDATE contracts SET ${updateSets.join(', ')}
-          WHERE id=$1 AND deleted_at IS NULL`,
+          WHERE id=$1 AND deleted_at IS NULL
+          RETURNING id, contract_no, room_id, tenant_id, monthly_rent, deposit, start_date`,
         updateParams
       );
+      const contract = cUpdate.rows[0];
+
+      // ============== INTEGRATION: link tenant ↔ room ==============
+      // Without this block the contract is approved but the room shows
+      // 'vacant' and the tenant has no current_room_id → bills don't
+      // auto-generate, booking-approve double-assigns, /api/rooms?
+      // status=vacant lies. The block below mirrors what tenant-ops's
+      // checkin does on a successful flow, but applied at approve time.
+      let roomConflict = null;
+      if (inv.tenant_id && contract.room_id) {
+        // Lock the tenant + read current_room_id so we can detect a
+        // "moving rooms" scenario (tenant was in 102; new contract is
+        // for 201 — the old room must be freed first).
+        const tQ = await client.query(
+          `SELECT id, current_room_id FROM tenants
+             WHERE id=$1 AND deleted_at IS NULL FOR UPDATE`,
+          [inv.tenant_id]
+        );
+        const oldRoomId = tQ.rows.length ? tQ.rows[0].current_room_id : null;
+
+        // Refuse if the target room is already occupied by a DIFFERENT
+        // active tenant. Two parallel approvals on the same room would
+        // otherwise both succeed with last-write-wins on the room blob.
+        const occupants = await client.query(
+          `SELECT id, full_name FROM tenants
+             WHERE current_room_id=$1 AND status='active' AND deleted_at IS NULL
+               AND id <> $2 LIMIT 1
+             FOR UPDATE`,
+          [contract.room_id, inv.tenant_id]
+        );
+        if (occupants.rows.length) {
+          // Don't throw — return a clean 409 outside the catch path.
+          roomConflict = occupants.rows[0];
+        } else {
+          // Set tenant → room link. Active status is set here for
+          // moved_out tenants who are reactivating via this contract.
+          await client.query(
+            `UPDATE tenants
+                SET current_room_id=$1, status='active', updated_at=NOW()
+              WHERE id=$2`,
+            [contract.room_id, inv.tenant_id]
+          );
+
+          // Free the OLD room (if tenant was in a different room).
+          if (oldRoomId && oldRoomId !== contract.room_id) {
+            await client.query(
+              `UPDATE app_data
+                  SET value = jsonb_set(value, ARRAY[$1::text, 'status'], to_jsonb('vacant'::text)),
+                      updated_at=NOW()
+                WHERE key='baankarn_rooms_v1' AND value ? $1`,
+              [oldRoomId]
+            );
+            await client.query(
+              `UPDATE rooms_v2 SET status='vacant', updated_at=NOW()
+                 WHERE room_code=$1 AND deleted_at IS NULL`,
+              [oldRoomId]
+            ).catch((err) => {
+              if (err.code !== '42P01') throw err;  // table missing on legacy
+            });
+          }
+
+          // Occupy the NEW room — both data sources so old + new admin
+          // pages see the same state. Same dual-write pattern checkin uses.
+          await client.query(
+            `UPDATE app_data
+                SET value = jsonb_set(value, ARRAY[$1::text, 'status'], to_jsonb('occupied'::text)),
+                    updated_at=NOW()
+              WHERE key='baankarn_rooms_v1' AND value ? $1`,
+            [contract.room_id]
+          );
+          await client.query(
+            `UPDATE rooms_v2 SET status='occupied', updated_at=NOW()
+               WHERE room_code=$1 AND deleted_at IS NULL`,
+            [contract.room_id]
+          ).catch((err) => {
+            if (err.code !== '42P01') throw err;
+          });
+        }
+      }
+
+      if (roomConflict) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: `ห้อง ${contract.room_id} มีผู้เช่ารายอื่นอยู่แล้ว `
+               + `(${roomConflict.full_name}) — ให้ check-out คนก่อนค่อยอนุมัติ`,
+          code: 'ROOM_OCCUPIED',
+          occupant: roomConflict,
+        });
+      }
 
       await client.query(
         `UPDATE contract_invitations
@@ -6490,19 +6581,44 @@ app.post('/api/admin/contract-invitations/:id/approve',
       );
       await client.query('COMMIT');
       audit(req, 'contract.invitation_approve', 'contract', String(inv.contract_id),
-        { invitationId: id, draftKeys: Object.keys(draft) });
+        { invitationId: id, draftKeys: Object.keys(draft),
+          roomId: contract.room_id, tenantId: inv.tenant_id });
 
-      // Owner notify so a third party sees the approval activity. Same
-      // legal-trail rationale as identity capture / contract sign.
+      // Owner notify with full context — admin can act immediately rather
+      // than going hunting through 3 pages to see what was approved.
       try {
         const flags = await features.load(pool);
+        const proto = req.headers['x-forwarded-proto'] || req.protocol || 'https';
+        const host = req.headers['x-forwarded-host'] || req.headers.host || 'localhost';
+        const lines = [
+          `admin ${req.session.user.username} อนุมัติสัญญาที่ผู้เช่ากรอกเอง`,
+          `เลขที่: ${contract.contract_no || '-'}`,
+          `ห้อง: ${contract.room_id || '-'}`,
+          contract.monthly_rent
+            ? `ค่าเช่า: ฿${Number(contract.monthly_rent).toLocaleString('th-TH', { minimumFractionDigits: 2 })}/เดือน`
+            : null,
+          `🔒 สัญญาถูก lock + ห้องเปลี่ยนเป็น occupied`,
+          ``,
+          `📄 ดู PDF: ${proto}://${host}/api/contracts/${contract.id}/pdf`,
+        ].filter(Boolean);
         notifier.notifyOwner({ pool, features: flags }, {
-          subject: `✅ อนุมัติสัญญาที่ผู้เช่ากรอกเอง`,
-          text: `admin ${req.session.user.username} อนุมัติ invitation #${id} `
-            + `(contract ${inv.contract_id})\nสัญญาถูก lock เรียบร้อย`,
+          subject: `✅ อนุมัติสัญญา ${contract.contract_no || ''} — ห้อง ${contract.room_id || ''}`,
+          text: lines.join('\n'),
         }).catch(() => {});
-      } catch { /* ignore */ }
-      res.json({ ok: true, invitationId: id, contractId: inv.contract_id, locked: true });
+      } catch { /* notify failures don't break the response */ }
+      res.json({
+        ok: true,
+        invitationId: id,
+        contractId: inv.contract_id,
+        contract,
+        locked: true,
+        // Surface the integration so admin UI can show "ดู PDF" / "สร้างบิลแรก"
+        // CTAs without round-tripping back to the server.
+        nextActions: {
+          pdfUrl: `/api/contracts/${contract.id}/pdf`,
+          billingUrl: `/admin#billing`,
+        },
+      });
     } catch (err) {
       await client.query('ROLLBACK').catch(() => {});
       if (err.http) return res.status(err.http).json({ error: err.message, code: err.code });

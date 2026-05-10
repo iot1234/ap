@@ -193,9 +193,18 @@ function ReviewModal({ invitation, onClose, onAction, onError }) {
     if (!confirm('อนุมัติ + ลงข้อมูลให้ผู้เช่า + lock สัญญา? (กลับมาแก้ไม่ได้)')) return;
     setBusy(true);
     try {
-      await apiCall(`/api/admin/contract-invitations/${invitation.id}/approve`, { method: 'POST' });
+      const result = await apiCall(`/api/admin/contract-invitations/${invitation.id}/approve`, { method: 'POST' });
+      // After approval the server returns nextActions URLs — open the
+      // freshly-locked PDF in a new tab so admin can verify the result
+      // without an extra click. UX shortcut: most admins want to see
+      // the contract immediately after approving.
+      if (result && result.nextActions && result.nextActions.pdfUrl) {
+        window.open(result.nextActions.pdfUrl, '_blank', 'noopener');
+      }
       onAction('approve');
     } catch (err) {
+      // Server may return ROOM_OCCUPIED 409 — surface clearly so admin
+      // knows to checkout the previous tenant first.
       onError('อนุมัติล้มเหลว: ' + err.message);
     } finally { setBusy(false); }
   };

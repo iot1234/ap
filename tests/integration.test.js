@@ -1547,6 +1547,67 @@ test('features.tenancyContract defaults are sane (require ID images + emergency)
     'deposit cap default = 3 months');
 });
 
+test('approve invitation links tenant ↔ room (current_room_id + rooms_v2 + JSONB)', () => {
+  // Without this integration, approve would mark the contract as signed
+  // but bills wouldn't auto-generate (scheduler can't find the tenant in
+  // a room) and /api/rooms?status=vacant would still show the room as
+  // available — letting another admin double-assign it. Pin the four
+  // critical writes that close the loop.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const block = src.match(/\/approve'[\s\S]+?app\.post\('\/api\/admin\/contract-invitations\/:id\/reject'/)[0];
+  // 1. SET tenant.current_room_id (so scheduler.tickBillGen can find them)
+  assert.match(block,
+    /UPDATE tenants[\s\S]{0,400}SET current_room_id=\$1[\s\S]{0,200}status='active'/,
+    'approve must set tenant.current_room_id + reactivate');
+  // 2. Free old room if tenant is moving from a different room
+  assert.match(block,
+    /if \(oldRoomId && oldRoomId !== contract\.room_id\)[\s\S]{0,300}'vacant'/,
+    'approve must free the old room when tenant is moving');
+  // 3. Occupy the new room — both rooms_v2 + the JSONB blob (dual-write)
+  assert.match(block,
+    /to_jsonb\('occupied'::text\)[\s\S]{0,400}'baankarn_rooms_v1'/,
+    'approve must update JSONB blob to occupied');
+  assert.match(block,
+    /UPDATE rooms_v2 SET status='occupied'[\s\S]{0,200}WHERE room_code=\$1/,
+    'approve must update rooms_v2 to occupied');
+  // 4. Refuse if room already occupied by ANOTHER active tenant (prevents
+  // race when two admins approve into the same room).
+  assert.match(block,
+    /SELECT id, full_name FROM tenants[\s\S]{0,300}current_room_id=\$1[\s\S]{0,200}id <> \$2[\s\S]{0,200}FOR UPDATE/,
+    'approve must check for room conflict before flipping');
+  assert.match(block, /code: 'ROOM_OCCUPIED'/,
+    'room conflict must surface as ROOM_OCCUPIED 409');
+});
+
+test('approve owner notify includes contract details + PDF link', () => {
+  // Old notification was generic "อนุมัติ invitation #N" — owner had to
+  // dig through 3 pages to verify. Now message includes contract no,
+  // room id, rent, lock confirmation, and a direct PDF URL.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const block = src.match(/\/approve'[\s\S]+?app\.post\('\/api\/admin\/contract-invitations\/:id\/reject'/)[0];
+  // Subject mentions contract_no + room
+  assert.match(block, /อนุมัติสัญญา.*\$\{contract\.contract_no/);
+  assert.match(block, /ห้อง.*\$\{contract\.room_id/);
+  // Body has rent + PDF URL
+  assert.match(block, /\$\{Number\(contract\.monthly_rent\)/);
+  assert.match(block, /\/api\/contracts\/\$\{contract\.id\}\/pdf/);
+});
+
+test('approve response includes nextActions for admin UI to follow', () => {
+  // After approval, admin needs an immediate "what next?" prompt — see PDF
+  // or generate first bill. The response carries the URLs so the UI can
+  // show buttons without a separate fetch.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const block = src.match(/\/approve'[\s\S]+?app\.post\('\/api\/admin\/contract-invitations\/:id\/reject'/)[0];
+  assert.match(block, /nextActions: \{[\s\S]{0,200}pdfUrl[\s\S]{0,200}billingUrl/);
+});
+
 test('quick-invite endpoint exists + creates tenant + contract + invitation atomically', () => {
   // The "+ สร้างสัญญา · ส่งลิงก์ให้ผู้เช่ากรอก" entry point — without it,
   // admin had no way to start the self-fill flow from scratch (existing
