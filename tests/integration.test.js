@@ -1486,6 +1486,60 @@ test('features.tenancyContract defaults are sane (require ID images + emergency)
     'deposit cap default = 3 months');
 });
 
+test('quick-invite endpoint exists + creates tenant + contract + invitation atomically', () => {
+  // The "+ สร้างสัญญา · ส่งลิงก์ให้ผู้เช่ากรอก" entry point — without it,
+  // admin had no way to start the self-fill flow from scratch (existing
+  // checkin requires identity images already on file). This endpoint
+  // bypasses the identity guards because the WHOLE POINT is to delegate
+  // those fields to the tenant via the link.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(src,
+    /app\.post\('\/api\/contracts\/quick-invite'[\s\S]{0,200}requireRole\('owner', 'manager'\)/,
+    'quick-invite endpoint must be registered + role-gated');
+  // The endpoint must work in a single transaction so a partial failure
+  // doesn't leave orphan tenants/contracts/invitations.
+  const block = src.match(/quick-invite'[\s\S]+?app\.post\('\/api\/contracts\/:id\/invite-tenant'/)[0];
+  assert.match(block, /BEGIN/, 'quick-invite must wrap creates in a transaction');
+  assert.match(block, /COMMIT/);
+  assert.match(block, /ROLLBACK/);
+  // Must look up tenant by phone first to avoid duplicating rows for the
+  // same person across multiple contracts.
+  assert.match(block, /SELECT id, full_name, status FROM tenants[\s\S]{0,200}WHERE phone=\$1/);
+  // Must reactivate moved_out tenants instead of creating new rows.
+  assert.match(block, /SET status='active'/);
+  // Must skip the heavy checkin guards (no IDENTITY_INCOMPLETE here).
+  assert.ok(!/IDENTITY_INCOMPLETE/.test(block),
+    'quick-invite must NOT enforce identity guards');
+  // Token + invitation must be inlined in the same transaction (no
+  // nested BEGIN — the helper would crash inside an open tx).
+  assert.match(block, /INSERT INTO contract_invitations/);
+  assert.match(block, /audit\(req, 'contract\.quick_invite'/);
+});
+
+test('contracts page has "+ สร้างสัญญา" entry button + QuickInviteModal', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-contracts.jsx'), 'utf8');
+  // Header has the primary "+ create" CTA so admin can start the flow
+  // even when no contracts exist yet (empty-state usability fix).
+  assert.match(src, /\+ สร้างสัญญา · ส่งลิงก์ให้ผู้เช่ากรอก/);
+  assert.match(src, /setQuickCreating\(true\)/);
+  // Modal component
+  assert.match(src, /function QuickInviteModal/);
+  assert.match(src, /\/api\/contracts\/quick-invite/);
+  // Form fields the modal collects
+  for (const field of ['tenantName', 'tenantPhone', 'roomId', 'monthlyRent', 'deposit', 'moveInDate']) {
+    assert.match(src, new RegExp(field), `quick-invite modal must collect ${field}`);
+  }
+  // Auto-fill deposit = 2 × rent (Thai dorm standard)
+  assert.match(src, /Number\(v\) \* 2/);
+  // Result panel shows the URL with copy
+  assert.match(src, /result\.invitation\.url/);
+  assert.match(src, /navigator\.clipboard\.writeText/);
+});
+
 test('contract-fill HTML reads view.rejectionReason (camelCase, not snake_case)', () => {
   // Server's buildPublicView returns rejectionReason; the HTML used to read
   // view.rejection_reason → reject reason was invisible to the tenant.

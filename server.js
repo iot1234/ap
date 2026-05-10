@@ -3405,7 +3405,15 @@ app.post('/api/tenant/payments', sameOrigin, csrfGuard, requireTenant, ensureSli
         initialReason = (verifyResult && verifyResult.error) || 'การตรวจสอบไม่ผ่าน';
       }
     } else {
-      initialStatus = req.features.slipUpload.requireVerification ? 'pending' : 'verified';
+      // Safe fallback: if no provider actually verified the slip, keep it in
+      // the admin queue. Turning off requireVerification alone must not mark a
+      // tenant-uploaded image as paid. Legacy trust mode needs an explicit
+      // opt-in flag.
+      const allowUnverifiedAutoApprove =
+        req.features.slipUpload.allowUnverifiedAutoApprove === true
+        && req.features.slipUpload.requireVerification === false
+        && req.features.slipUpload.autoVerify !== true;
+      initialStatus = allowUnverifiedAutoApprove ? 'verified' : 'pending';
     }
 
     // Atomic: payment INSERT + (optional) bill mark-paid run in one tx so
@@ -3428,7 +3436,7 @@ app.post('/api/tenant/payments', sameOrigin, csrfGuard, requireTenant, ensureSli
     // — not just the 23505 case the inner catch handles. Without that, a
     // pool timeout or a bill-status race leaks the file silently.
     let row;
-    let paymentInserted = false;
+    let committed = false;
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
@@ -3536,7 +3544,6 @@ app.post('/api/tenant/payments', sameOrigin, csrfGuard, requireTenant, ensureSli
           ]
         );
         row = ins.rows[0];
-        paymentInserted = true;
       } catch (err) {
         await client.query('ROLLBACK').catch(() => {});
         if (err.code === '23505') {
@@ -3568,12 +3575,20 @@ app.post('/api/tenant/payments', sameOrigin, csrfGuard, requireTenant, ensureSli
         throw err;
       }
       if (initialStatus === 'verified') {
-        await client.query(
-          `UPDATE bills SET status='paid', paid_at=NOW() WHERE id=$1 AND status IN ('pending','overdue')`,
+        const paid = await client.query(
+          `UPDATE bills SET status='paid', paid_at=NOW()
+             WHERE id=$1 AND status IN ('pending','overdue')
+             RETURNING id`,
           [billId]
         );
+        if (paid.rowCount !== 1) {
+          throw Object.assign(new Error('bill mark-paid update did not affect exactly one row'), {
+            code: 'BILL_MARK_PAID_FAILED',
+          });
+        }
       }
       await client.query('COMMIT');
+      committed = true;
     } catch (err) {
       await client.query('ROLLBACK').catch(() => {});
       // Catch-all orphan-file cleanup. The 23505 path already cleans up
@@ -3582,7 +3597,7 @@ app.post('/api/tenant/payments', sameOrigin, csrfGuard, requireTenant, ensureSli
       // but before the INSERT committed) used to leave the file on disk
       // forever. Belt-and-braces: if the row never got inserted, the file
       // has nothing pointing to it and must go.
-      if (!paymentInserted && slip && slip.id) {
+      if (!committed && slip && slip.id) {
         require('./services/storage').remove(pool, slip.id).catch((e) => {
           console.warn('[slip-upload] orphan file cleanup (outer) failed for id=' + slip.id + ':', e.message);
         });
@@ -3873,7 +3888,13 @@ app.put('/api/payments/:id/verify', sameOrigin, csrfGuard, requireAuth, requireR
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
   const accept = req.body?.accept !== false;
-  const reason = String(req.body?.reason || '').slice(0, 500);
+  const reason = String(req.body?.reason || '').trim().slice(0, 500);
+  if (!accept && reason.length < 3) {
+    return res.status(400).json({
+      error: 'reject reason is required',
+      code: 'REJECT_REASON_REQUIRED',
+    });
+  }
   // Both branches of this endpoint mutate two tables (payments + bills) so
   // they MUST run in one transaction — the previous version issued the
   // payment UPDATE first, then the bill UPDATE as a separate query. If the
@@ -3887,6 +3908,41 @@ app.put('/api/payments/:id/verify', sameOrigin, csrfGuard, requireAuth, requireR
   try {
     await client.query('BEGIN');
     if (accept) {
+      const pres = await client.query(
+        `SELECT * FROM payments WHERE id=$1 AND status='pending' FOR UPDATE`,
+        [id]
+      );
+      if (!pres.rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'not found or already decided' });
+      }
+      row = pres.rows[0];
+      if (!row.bill_id) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'payment is not linked to a bill',
+          code: 'PAYMENT_WITHOUT_BILL',
+        });
+      }
+      const bill = await client.query(
+        `SELECT id, status, deleted_at FROM bills WHERE id=$1 FOR UPDATE`,
+        [row.bill_id]
+      );
+      if (!bill.rows.length || bill.rows[0].deleted_at) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'bill is missing or deleted',
+          code: 'BILL_NOT_PAYABLE',
+        });
+      }
+      if (bill.rows[0].status !== 'pending' && bill.rows[0].status !== 'overdue') {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'bill is not payable',
+          code: 'BILL_NOT_PAYABLE',
+          billStatus: bill.rows[0].status,
+        });
+      }
       const upd = await client.query(
         `UPDATE payments SET status='verified', verified_by=$1, verified_at=NOW()
            WHERE id=$2 AND status='pending' RETURNING *`,
@@ -3897,12 +3953,18 @@ app.put('/api/payments/:id/verify', sameOrigin, csrfGuard, requireAuth, requireR
         return res.status(404).json({ error: 'not found or already decided' });
       }
       row = upd.rows[0];
-      if (row.bill_id) {
-        await client.query(
-          `UPDATE bills SET status='paid', paid_at=NOW()
-             WHERE id=$1 AND status IN ('pending','overdue')`,
-          [row.bill_id]
-        );
+      const paid = await client.query(
+        `UPDATE bills SET status='paid', paid_at=NOW()
+           WHERE id=$1 AND status IN ('pending','overdue')
+           RETURNING id`,
+        [row.bill_id]
+      );
+      if (paid.rowCount !== 1) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'bill was not marked paid',
+          code: 'BILL_MARK_PAID_FAILED',
+        });
       }
       await client.query('COMMIT');
       audit(req, 'payment.verify', 'payment', String(id), { billId: row.bill_id, amount: row.amount });
@@ -6035,6 +6097,173 @@ const rateLimitContractFill = makeIpLimiter({
 // revokes any prior active invitation for the same contract (so admin
 // can't accidentally have two valid links floating around), returns the
 // tenant URL exactly ONCE in the response.
+// POST /api/contracts/quick-invite
+// One-shot: create tenant (if new) + create contract draft + create
+// invitation. The "draft" path skips the identity guards from checkin
+// because the whole point is to delegate gathering identity data to
+// the tenant via the invite link. Returns the URL admin sends.
+//
+// This is the entry point admin uses when they want the tenant to fill
+// the contract themselves from scratch — no need to manually upload ID
+// photos, address, emergency contact first.
+app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'),
+  async (req, res) => {
+    const b = req.body || {};
+    // Required fields
+    const tenantName = String(b.tenantName || '').slice(0, 200).trim();
+    const rawPhone = String(b.tenantPhone || '').slice(0, 32).trim();
+    const tenantPhone = rawPhone.replace(/[\s-]/g, '');
+    const roomId = String(b.roomId || '').slice(0, 32).trim();
+    const monthlyRent = Number(b.monthlyRent);
+    const deposit = Number(b.deposit) || 0;
+    const moveInDate = String(b.moveInDate || '').slice(0, 16).trim();
+    if (!tenantName) return res.status(400).json({ error: 'tenantName required', code: 'NAME_REQUIRED' });
+    if (!tenantPhone || !/^[\d+]{8,20}$/.test(tenantPhone)) {
+      return res.status(400).json({ error: 'เบอร์โทรไม่ถูกต้อง', code: 'INVALID_PHONE' });
+    }
+    if (!roomId) return res.status(400).json({ error: 'roomId required', code: 'ROOM_REQUIRED' });
+    if (!Number.isFinite(monthlyRent) || monthlyRent <= 0) {
+      return res.status(400).json({ error: 'monthlyRent ต้อง > 0', code: 'INVALID_RENT' });
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(moveInDate)) {
+      return res.status(400).json({ error: 'moveInDate ต้องเป็น YYYY-MM-DD', code: 'INVALID_DATE' });
+    }
+    // Optional
+    const tenantEmail = b.tenantEmail ? String(b.tenantEmail).slice(0, 200).trim() : null;
+    const termMonths = b.termMonths != null ? Number(b.termMonths) : null;
+    const discountPct = b.discountPct != null ? Number(b.discountPct) : 0;
+    const expiresInHours = Number(b.expiresInHours) || 168;
+    if (termMonths != null && (!Number.isInteger(termMonths) || termMonths < 1 || termMonths > 60)) {
+      return res.status(400).json({ error: 'termMonths must be 1-60', code: 'INVALID_TERM' });
+    }
+    if (!Number.isFinite(discountPct) || discountPct < 0 || discountPct > 50) {
+      return res.status(400).json({ error: 'discountPct must be 0-50', code: 'INVALID_DISCOUNT' });
+    }
+
+    // Compute end_date if termMonths supplied (clamp last-day-of-month to
+    // avoid Date.setMonth rollover bug). Same logic as tenant-ops checkin.
+    let endDate = null;
+    if (termMonths) {
+      const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(moveInDate);
+      if (m) {
+        const sy = Number(m[1]); const sm = Number(m[2]); const sd = Number(m[3]);
+        const totalMonths = (sy * 12 + (sm - 1)) + termMonths;
+        const ey = Math.floor(totalMonths / 12);
+        const em = (totalMonths % 12) + 1;
+        const lastDom = new Date(Date.UTC(ey, em, 0)).getUTCDate();
+        const ed = Math.min(sd, lastDom);
+        endDate = `${ey}-${String(em).padStart(2, '0')}-${String(ed).padStart(2, '0')}`;
+      }
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // 1. Find existing tenant by phone — most-recent active match wins.
+      // Active tenants ranked first so we re-use rather than creating
+      // another row for the same person across multiple contracts.
+      let tenantId = null;
+      const tQ = await client.query(
+        `SELECT id, full_name, status FROM tenants
+           WHERE phone=$1 AND deleted_at IS NULL
+           ORDER BY (status='active') DESC, updated_at DESC LIMIT 1`,
+        [tenantPhone]
+      );
+      if (tQ.rows.length) {
+        tenantId = tQ.rows[0].id;
+        // If the existing tenant is moved_out / blacklist, reactivate to
+        // 'active' so the new contract reflects current intent.
+        if (tQ.rows[0].status !== 'active') {
+          await client.query(
+            `UPDATE tenants SET status='active', updated_at=NOW() WHERE id=$1`,
+            [tenantId]
+          );
+        }
+      } else {
+        // Create a fresh tenant row with just the basics — the rest
+        // (address, emergency contact, citizen ID + photos) will arrive
+        // when the tenant fills the invitation form.
+        const ins = await client.query(
+          `INSERT INTO tenants
+              (full_name, phone, email, status, locale)
+           VALUES ($1, $2, $3, 'active', 'th') RETURNING id`,
+          [tenantName, tenantPhone, tenantEmail]
+        );
+        tenantId = ins.rows[0].id;
+      }
+
+      // 2. Create the contract row. We skip the heavy checkin guards
+      // (identity images, address, emergency contact) — the tenant fills
+      // those via the invitation. Status='active' so the contracts page
+      // shows it; locked_at stays NULL until admin approves the
+      // tenant's submission.
+      const contractNo = `C-${new Date().getFullYear()}-${String(tenantId).padStart(4, '0')}-`
+                       + Math.random().toString(36).slice(2, 6).toUpperCase();
+      const cIns = await client.query(
+        `INSERT INTO contracts (contract_no, tenant_id, room_id, start_date, end_date,
+                                monthly_rent, deposit, status, term_months, discount_pct)
+         VALUES ($1, $2, $3, $4::date, $5::date, $6, $7, 'active', $8, $9)
+         RETURNING id, contract_no, tenant_id, room_id, start_date, end_date,
+                   monthly_rent, deposit, status`,
+        [contractNo, tenantId, roomId, moveInDate, endDate,
+         monthlyRent, deposit, termMonths || null, discountPct]
+      );
+      const contract = cIns.rows[0];
+
+      // 3. Generate invitation token. We inline the helper's logic
+      // here because we're already inside a transaction (the helper
+      // would start a nested BEGIN which crashes on pg). Brand-new
+      // contract means no prior invitations exist — partial unique
+      // index is satisfied without the revoke step.
+      const contractInvitation = require('./services/contractInvitation');
+      const tk = contractInvitation.generateToken();
+      const expiresAt = new Date(Date.now() + Math.max(1, Math.min(720, expiresInHours)) * 3600_000);
+      const invIns = await client.query(
+        `INSERT INTO contract_invitations
+            (contract_id, tenant_id, token_hash, expires_at, created_by)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING id`,
+        [contract.id, tenantId, tk.hash, expiresAt, req.session.user.username]
+      );
+      const invitation = {
+        id: invIns.rows[0].id,
+        token: tk.token,
+        expiresAt,
+      };
+      await client.query('COMMIT');
+
+      const proto = req.headers['x-forwarded-proto'] || req.protocol || 'https';
+      const host = req.headers['x-forwarded-host'] || req.headers.host || 'localhost';
+      const url = `${proto}://${host}/contract/fill/${invitation.token}`;
+
+      audit(req, 'contract.quick_invite', 'contract', String(contract.id),
+        { contractNo: contract.contract_no, tenantId, invitationId: invitation.id });
+
+      res.json({
+        ok: true,
+        tenant: { id: tenantId, fullName: tenantName, phone: tenantPhone },
+        contract,
+        invitation: {
+          id: invitation.id,
+          token: invitation.token,
+          url,
+          expiresAt: invitation.expiresAt,
+        },
+      });
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      console.error('quick-invite error:', err);
+      // Friendlier 409 on common race / constraint errors.
+      if (err.code === '23505') {
+        return res.status(409).json({ error: 'duplicate constraint', code: 'DUPLICATE' });
+      }
+      res.status(500).json({ error: 'internal error', code: 'DB_ERROR' });
+    } finally {
+      client.release();
+    }
+  });
+
 app.post('/api/contracts/:id/invite-tenant',
   sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'),
   async (req, res) => {

@@ -21,6 +21,7 @@ function PageContracts({ setToast, addActivity }) {
   const [signing, setSigning] = useState(null);     // contract being signed online
   const [assigning, setAssigning] = useState(null); // contract for template assignment
   const [inviting, setInviting] = useState(null);   // contract for self-fill invite
+  const [quickCreating, setQuickCreating] = useState(false);  // "+ สร้างสัญญา + ส่งลิงก์"
   const [templates, setTemplates] = useState([]);   // for assignment dropdown
 
   // Pre-load templates list for the assign-template modal. Cheap call,
@@ -100,7 +101,13 @@ function PageContracts({ setToast, addActivity }) {
 
   return (
     <PageContainer>
-      <PageHeader title="สัญญา" subtitle={`${counts.all} ฉบับในระบบ`} />
+      <PageHeader title="สัญญา" subtitle={`${counts.all} ฉบับในระบบ`}
+        actions={
+          <Btn variant="primary" onClick={() => setQuickCreating(true)}>
+            + สร้างสัญญา · ส่งลิงก์ให้ผู้เช่ากรอก
+          </Btn>
+        }
+      />
       <Card>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
           {[
@@ -272,6 +279,22 @@ function PageContracts({ setToast, addActivity }) {
           }}
           onError={(msg) => setToast && setToast({ kind: 'danger', message: msg })}
           onPreview={(tid) => openPdf(assigning, { templateId: tid })}
+        />
+      ) : null}
+
+      {quickCreating ? (
+        <QuickInviteModal
+          onClose={() => setQuickCreating(false)}
+          onSaved={(payload) => {
+            setQuickCreating(false);
+            setToast && setToast({ kind: 'success',
+              message: `สร้างสัญญา ${payload.contract.contract_no} + ส่งลิงก์เรียบร้อย` });
+            addActivity && addActivity({ icon: '✨',
+              text: `สร้างสัญญา + ส่งลิงก์ให้ ${payload.tenant.fullName}`,
+              type: 'system' });
+            refresh();
+          }}
+          onError={(msg) => setToast && setToast({ kind: 'danger', message: msg })}
         />
       ) : null}
 
@@ -800,15 +823,250 @@ function ContractEditModal({ contract, onClose, onSaved, onError }) {
   );
 }
 
+// === Quick-create modal: build a contract draft + invitation in one shot =
+// This is the entry point admin uses when they want the tenant to fill
+// the contract themselves from scratch. The form collects ONLY what admin
+// must know up-front (room, rent, deposit, dates) plus the tenant's name
+// + phone so the link can be addressed correctly. Everything else (address,
+// emergency contact, ID photos, signature) the TENANT fills via the link.
+function QuickInviteModal({ onClose, onSaved, onError }) {
+  const C = window.ADMIN_C;
+  const { Modal, Btn } = window;
+  const apiCall = window.apiCall;
+  const [form, setForm] = useState({
+    tenantName: '',
+    tenantPhone: '',
+    tenantEmail: '',
+    roomId: '',
+    monthlyRent: '',
+    deposit: '',
+    moveInDate: new Date().toISOString().slice(0, 10),
+    termMonths: '12',
+    discountPct: '0',
+    expiresInHours: 168,
+  });
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState(null);
+  const [copied, setCopied] = useState(false);
+
+  // Auto-set deposit = 2 × monthlyRent when admin types rent (Thai dorm
+  // standard) — admin can override after.
+  const setRent = (v) => {
+    setForm((f) => ({
+      ...f,
+      monthlyRent: v,
+      // Only auto-fill deposit when it's still empty or matches a prior auto-fill.
+      deposit: f.deposit === '' || Number(f.deposit) === Number(f.monthlyRent) * 2
+        ? String(Number(v) * 2)
+        : f.deposit,
+    }));
+  };
+
+  const submit = async () => {
+    setBusy(true);
+    try {
+      const d = await apiCall('/api/contracts/quick-invite', {
+        method: 'POST',
+        body: JSON.stringify({
+          tenantName: form.tenantName.trim(),
+          tenantPhone: form.tenantPhone.trim(),
+          tenantEmail: form.tenantEmail.trim() || null,
+          roomId: form.roomId.trim(),
+          monthlyRent: Number(form.monthlyRent),
+          deposit: Number(form.deposit) || 0,
+          moveInDate: form.moveInDate,
+          termMonths: form.termMonths ? Number(form.termMonths) : null,
+          discountPct: Number(form.discountPct) || 0,
+          expiresInHours: Number(form.expiresInHours) || 168,
+        }),
+      });
+      setResult(d);
+    } catch (err) {
+      onError && onError('สร้างสัญญาล้มเหลว: ' + err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const copy = async () => {
+    if (!result || !result.invitation) return;
+    try {
+      await navigator.clipboard.writeText(result.invitation.url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      const t = document.createElement('input');
+      t.value = result.invitation.url;
+      document.body.appendChild(t);
+      t.select();
+      document.execCommand('copy');
+      document.body.removeChild(t);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+  };
+
+  const valid = form.tenantName.trim()
+    && /^[\d+\s-]{8,20}$/.test(form.tenantPhone.trim())
+    && form.roomId.trim()
+    && Number(form.monthlyRent) > 0
+    && /^\d{4}-\d{2}-\d{2}$/.test(form.moveInDate);
+
+  return (
+    <Modal
+      open={true}
+      onClose={() => { if (result) onSaved(result); else onClose(); }}
+      width={620}
+      title="สร้างสัญญา + ส่งลิงก์ให้ผู้เช่ากรอกเอง"
+      footer={
+        result ? (
+          <Btn variant="primary" onClick={() => onSaved(result)}>เสร็จสิ้น</Btn>
+        ) : (
+          <>
+            <Btn variant="ghost" onClick={onClose} disabled={busy}>ยกเลิก</Btn>
+            <Btn variant="primary" onClick={submit} disabled={busy || !valid}>
+              {busy ? 'กำลังสร้าง…' : 'สร้างสัญญา + รับลิงก์'}
+            </Btn>
+          </>
+        )
+      }
+    >
+      {!result ? (
+        <div>
+          <div style={{ fontSize: 13, color: C.muted, lineHeight: 1.6, marginBottom: 16 }}>
+            กรอกแค่ข้อมูลสัญญา (ห้อง/ค่าเช่า/มัดจำ/วันเริ่ม) — ส่วนที่เหลือ (ที่อยู่
+            ผู้ติดต่อฉุกเฉิน บัตรประชาชน ลายเซ็น) ผู้เช่าจะกรอกเองผ่านลิงก์ที่ระบบ
+            สร้างให้
+          </div>
+
+          <div style={{
+            padding: 12, background: '#faf6ee', borderRadius: 8,
+            marginBottom: 16, fontSize: 13, fontWeight: 600, color: C.accent,
+          }}>👤 ข้อมูลผู้เช่า (สำหรับส่งลิงก์)</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+            <div>
+              <label style={lbl}>ชื่อ-นามสกุล *</label>
+              <input style={inp} maxLength={200}
+                value={form.tenantName}
+                onChange={(e) => setForm({ ...form, tenantName: e.target.value })} />
+            </div>
+            <div>
+              <label style={lbl}>เบอร์โทร *</label>
+              <input style={inp} maxLength={20} placeholder="0812345678"
+                value={form.tenantPhone}
+                onChange={(e) => setForm({ ...form, tenantPhone: e.target.value })} />
+            </div>
+          </div>
+          <div style={{ marginTop: 8 }}>
+            <label style={lbl}>อีเมล (ทางเลือก)</label>
+            <input style={inp} type="email" maxLength={200}
+              value={form.tenantEmail}
+              onChange={(e) => setForm({ ...form, tenantEmail: e.target.value })} />
+          </div>
+
+          <div style={{
+            padding: 12, background: '#faf6ee', borderRadius: 8,
+            marginTop: 20, marginBottom: 16, fontSize: 13, fontWeight: 600, color: C.accent,
+          }}>📋 ข้อมูลสัญญา</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
+            <div>
+              <label style={lbl}>ห้องเลขที่ *</label>
+              <input style={inp} maxLength={32}
+                value={form.roomId}
+                onChange={(e) => setForm({ ...form, roomId: e.target.value })} />
+            </div>
+            <div>
+              <label style={lbl}>ค่าเช่า/เดือน *</label>
+              <input style={inp} type="number" step="0.01" min="0"
+                value={form.monthlyRent}
+                onChange={(e) => setRent(e.target.value)} />
+            </div>
+            <div>
+              <label style={lbl}>มัดจำ</label>
+              <input style={inp} type="number" step="0.01" min="0"
+                value={form.deposit}
+                onChange={(e) => setForm({ ...form, deposit: e.target.value })} />
+            </div>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12, marginTop: 8 }}>
+            <div>
+              <label style={lbl}>วันเริ่มเช่า *</label>
+              <input style={inp} type="date"
+                value={form.moveInDate}
+                onChange={(e) => setForm({ ...form, moveInDate: e.target.value })} />
+            </div>
+            <div>
+              <label style={lbl}>ระยะเวลา (เดือน)</label>
+              <input style={inp} type="number" step="1" min="1" max="60"
+                placeholder="เปิด-ไม่จำกัด"
+                value={form.termMonths}
+                onChange={(e) => setForm({ ...form, termMonths: e.target.value })} />
+            </div>
+            <div>
+              <label style={lbl}>ส่วนลด (%)</label>
+              <input style={inp} type="number" step="0.1" min="0" max="50"
+                value={form.discountPct}
+                onChange={(e) => setForm({ ...form, discountPct: e.target.value })} />
+            </div>
+          </div>
+
+          <div style={{ marginTop: 16 }}>
+            <label style={lbl}>อายุของลิงก์</label>
+            <select style={inp} value={form.expiresInHours}
+              onChange={(e) => setForm({ ...form, expiresInHours: Number(e.target.value) })}>
+              <option value={24}>24 ชั่วโมง (1 วัน)</option>
+              <option value={72}>72 ชั่วโมง (3 วัน)</option>
+              <option value={168}>168 ชั่วโมง (7 วัน) — แนะนำ</option>
+              <option value={336}>336 ชั่วโมง (14 วัน)</option>
+              <option value={720}>720 ชั่วโมง (30 วัน)</option>
+            </select>
+          </div>
+        </div>
+      ) : (
+        <div>
+          <div style={{
+            padding: 12, background: '#e8f5e8', border: '1px solid #4a8b4a',
+            borderRadius: 8, fontSize: 13, color: '#2d5a2c', marginBottom: 16,
+          }}>
+            ✅ สร้างสัญญา <b>{result.contract.contract_no}</b> เรียบร้อย —
+            ส่งลิงก์ด้านล่างให้ <b>{result.tenant.fullName}</b> กรอกได้เลย
+          </div>
+          <label style={lbl}>ลิงก์สำหรับผู้เช่า</label>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <input readOnly value={result.invitation.url}
+              style={{ ...inp, fontFamily: 'monospace', fontSize: 11 }}
+              onFocus={(e) => e.target.select()} />
+            <Btn variant="primary" onClick={copy}>{copied ? '✓ ก็อปแล้ว' : 'ก็อป'}</Btn>
+          </div>
+          <div style={{ marginTop: 12, fontSize: 12, color: C.muted }}>
+            อายุลิงก์: หมดอายุ {new Date(result.invitation.expiresAt).toLocaleString('th-TH', {
+              year: 'numeric', month: 'short', day: 'numeric',
+              hour: '2-digit', minute: '2-digit',
+            })}
+          </div>
+          <div style={{
+            marginTop: 16, padding: 12, background: '#fff7e0',
+            border: '1px solid #f1b32d', borderRadius: 8,
+            fontSize: 12, color: '#6b4d10', lineHeight: 1.6,
+          }}>
+            🔒 <b>ลิงก์นี้แสดงครั้งเดียว</b> — ก๊อปแล้วส่งให้ผู้เช่าทาง LINE/SMS<br/>
+            หลังผู้เช่ากรอกเสร็จ คุณจะเห็นในเมนู "ใบเชิญผู้เช่ากรอก" สำหรับตรวจสอบ
+          </div>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
 const th = {
   textAlign: 'left', padding: '10px 14px', fontWeight: 600, fontSize: 12,
   color: '#5b4f40', borderBottom: '1px solid #ece4d4',
 };
 const td = { padding: '10px 14px', verticalAlign: 'top' };
-const lbl = { display: 'block', fontSize: 12, color: '#5b4f40', marginBottom: 4 };
+const lbl = { display: 'block', fontSize: 12, color: '#5b4f40', marginBottom: 4, fontWeight: 500 };
 const inp = {
   width: '100%', padding: '8px 10px', border: '1px solid #ece4d4',
-  borderRadius: 6, fontSize: 13, fontFamily: 'inherit',
+  borderRadius: 6, fontSize: 13, fontFamily: 'inherit', boxSizing: 'border-box',
 };
 
 window.PageContracts = PageContracts;

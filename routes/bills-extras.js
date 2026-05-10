@@ -323,18 +323,33 @@ module.exports = function buildBillsExtrasRouter(ctx) {
 
   // POST /api/bills/:id/verify-slip — admin marks the latest slip verified.
   // Equivalent to PUT /api/payments/:id/verify but takes a bill id instead.
-  r.post('/:id/verify-slip', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager', 'staff'),
+  r.post('/:id/verify-slip', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'),
     async (req, res) => {
       const id = Number(req.params.id);
       if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
       const accept = req.body?.accept !== false;
-      const reason = String(req.body?.reason || '').slice(0, 500);
+      const reason = String(req.body?.reason || '').trim().slice(0, 500);
+      if (!accept && reason.length < 3) {
+        return res.status(400).json({
+          error: 'reject reason is required',
+          code: 'REJECT_REASON_REQUIRED',
+        });
+      }
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
+        const bill = await client.query(
+          `SELECT id, status, deleted_at FROM bills WHERE id=$1 FOR UPDATE`,
+          [id]
+        );
+        if (!bill.rows.length || bill.rows[0].deleted_at) {
+          await client.query('ROLLBACK');
+          return res.status(404).json({ error: 'bill not found' });
+        }
         const pres = await client.query(
           `SELECT id FROM payments
-             WHERE bill_id=$1 AND status='pending' ORDER BY created_at DESC LIMIT 1`,
+             WHERE bill_id=$1 AND status='pending' ORDER BY created_at DESC LIMIT 1
+             FOR UPDATE`,
           [id]
         );
         if (!pres.rows.length) {
@@ -343,22 +358,48 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         }
         const pid = pres.rows[0].id;
         if (accept) {
-          await client.query(
-            `UPDATE payments SET status='verified', verified_by=$1, verified_at=NOW() WHERE id=$2`,
+          if (bill.rows[0].status !== 'pending' && bill.rows[0].status !== 'overdue') {
+            await client.query('ROLLBACK');
+            return res.status(409).json({
+              error: 'bill is not payable',
+              code: 'BILL_NOT_PAYABLE',
+              billStatus: bill.rows[0].status,
+            });
+          }
+          const upd = await client.query(
+            `UPDATE payments SET status='verified', verified_by=$1, verified_at=NOW()
+               WHERE id=$2 AND status='pending' RETURNING *`,
             [req.session.user.username, pid]
           );
-          await client.query(
+          if (!upd.rows.length) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ error: 'no pending slip for this bill' });
+          }
+          const paid = await client.query(
             // Only flip pending/overdue → paid. status<>'paid' would also
             // match 'void', re-animating a bill the admin already cancelled.
-            `UPDATE bills SET status='paid', paid_at=NOW() WHERE id=$1 AND status IN ('pending','overdue')`,
+            `UPDATE bills SET status='paid', paid_at=NOW()
+               WHERE id=$1 AND status IN ('pending','overdue')
+               RETURNING id`,
             [id]
           );
+          if (paid.rowCount !== 1) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({
+              error: 'bill was not marked paid',
+              code: 'BILL_MARK_PAID_FAILED',
+            });
+          }
         } else {
-          await client.query(
+          const rejected = await client.query(
             `UPDATE payments SET status='rejected', verified_by=$1, verified_at=NOW(), rejected_reason=$2
-               WHERE id=$3`,
+               WHERE id=$3 AND status='pending' RETURNING id`,
             [req.session.user.username, reason, pid]
           );
+          if (!rejected.rows.length) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ error: 'no pending slip for this bill' });
+          }
         }
         await client.query('COMMIT');
         audit(req, accept ? 'slip.verify' : 'slip.reject', 'bill', String(id), { paymentId: pid, reason });
