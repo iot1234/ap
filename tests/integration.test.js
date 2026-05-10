@@ -1809,6 +1809,24 @@ test('approve invitation links tenant ↔ room (current_room_id + rooms_v2 + JSO
     'room conflict must surface as ROOM_OCCUPIED 409');
 });
 
+test('approve invitation welcome bill cannot poison approve transaction', () => {
+  // Welcome-bill creation is best-effort inside the approve transaction.
+  // If INSERT hits a unique/schema error, Postgres marks the transaction
+  // aborted unless the code rolls back to a savepoint. Without this guard,
+  // admin can see a successful approve response while COMMIT actually rolls
+  // back the tenant/room/contract writes.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const block = src.match(/\/approve'[\s\S]+?app\.post\('\/api\/admin\/contract-invitations\/:id\/reject'/)[0];
+  assert.match(block, /SAVEPOINT welcome_bill/,
+    'welcome-bill block must use a transaction savepoint');
+  assert.match(block, /ROLLBACK TO SAVEPOINT welcome_bill/,
+    'welcome-bill failure must clear the aborted transaction state');
+  assert.match(block, /ON CONFLICT DO NOTHING/,
+    'welcome-bill insert must tolerate both bill_no and room-period uniqueness');
+});
+
 test('approve owner notify includes contract details + PDF link', () => {
   // Old notification was generic "อนุมัติ invitation #N" — owner had to
   // dig through 3 pages to verify. Now message includes contract no,

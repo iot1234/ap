@@ -160,6 +160,16 @@ function PageTenants({ rooms, setRooms, addActivity, setToast }) {
         addActivity={addActivity}
         setToast={setToast}
         apiFetch={apiFetch}
+        onTenantCreated={(roomId) => {
+          // Auto-open the new tenant's drawer on the contract tab so admin
+          // can send the link immediately — all fields auto-pulled from
+          // the row they just created. Closes the "ข้ามไปมา" gap on the
+          // tenant-onboarding flow.
+          if (roomId) {
+            setActiveId(roomId);
+            setDrawerTab('contract');
+          }
+        }}
       />
 
       <Drawer
@@ -209,7 +219,7 @@ function PageTenants({ rooms, setRooms, addActivity, setToast }) {
 // table, used by tenant portal + LINE binding) AND optionally writes the
 // tenant into the legacy rooms blob if a room was picked, so the table on
 // this page (which reads from rooms) shows the new tenant immediately.
-function AddTenantModal({ open, onClose, rooms, setRooms, busy, setBusy, addActivity, setToast, apiFetch }) {
+function AddTenantModal({ open, onClose, rooms, setRooms, busy, setBusy, addActivity, setToast, apiFetch, onTenantCreated }) {
   const C = window.ADMIN_C;
   const { Btn, Input, Select, Textarea, Modal } = window;
   const [form, setForm] = React.useState({
@@ -355,7 +365,16 @@ function AddTenantModal({ open, onClose, rooms, setRooms, busy, setBusy, addActi
         text: `เพิ่มผู้เช่า ${fullName}${form.roomId ? ` (ห้อง ${form.roomId})` : ''}`,
         type: 'tenant',
       });
-      setToast && setToast({ kind: 'success', message: `เพิ่มผู้เช่า ${fullName} เรียบร้อย` });
+      setToast && setToast({
+        kind: 'success',
+        message: form.roomId
+          ? `เพิ่มผู้เช่า ${fullName} แล้ว — เปิดหน้าสัญญาให้อัตโนมัติ`
+          : `เพิ่มผู้เช่า ${fullName} เรียบร้อย`,
+      });
+      // Bubble the assigned roomId back to PageTenants so it can open the
+      // drawer on the contract tab. Tenant data is already in the rooms
+      // blob (via setRooms above) so TabContract will resolve it on render.
+      if (form.roomId && onTenantCreated) onTenantCreated(form.roomId);
       onClose && onClose();
     } catch (err) {
       window.toastError
@@ -765,6 +784,10 @@ function TabPortal({ t, setToast, addActivity, apiFetch }) {
 // Without this entry point, the contracts table stayed empty, the
 // contract-expiry alert had nothing to fire on, and the contract-length
 // discount was uncon­figurable from the UI.
+// Single hub for everything contract-related on a tenant: create / send link /
+// review / approve / sign — no jumping to /admin#contracts or
+// /admin#contract-invitations. Room + rent are auto-mapped from the tenant's
+// current room (`t.roomId`, `t.rent`) so admin doesn't re-pick the room.
 function TabContract({ t, setToast, addActivity }) {
   const C = window.ADMIN_C;
   const { fmtCurrency } = window;
@@ -775,17 +798,29 @@ function TabContract({ t, setToast, addActivity }) {
   const [tenantDbId, setTenantDbId] = React.useState(null);
   const [showCheckin, setShowCheckin] = React.useState(false);
   const [showEdit, setShowEdit] = React.useState(false);
+  const [busy, setBusy] = React.useState(false);
+  // Just-created invitation URL — token is only revealed once on creation
+  // (security feature), so we keep it in component state until tab close.
+  const [liveLink, setLiveLink] = React.useState(null);
+  const [copied, setCopied] = React.useState(false);
+  // Submitted invitation detail loaded lazily for the inline review panel.
+  const [reviewing, setReviewing] = React.useState(null);
+
+  // Defensive: reset per-tenant transient state whenever the admin switches
+  // to a different tenant in the drawer. Without this, a freshly-created
+  // liveLink for tenant A would briefly leak into tenant B's view if React
+  // reuses the component instance.
+  React.useEffect(() => {
+    setLiveLink(null);
+    setReviewing(null);
+    setShowCheckin(false);
+    setShowEdit(false);
+    setCopied(false);
+  }, [t.phone]);
 
   const reload = React.useCallback(async () => {
     setLoading(true);
     try {
-      // Resolve tenants.id from phone (rooms blob has only the tenant snapshot).
-      // /api/tenants supports `q=` (LIKE search across name/phone/email) but
-      // not a direct `phone=` filter, so we filter client-side after the LIKE
-      // narrows the result set. Phones in the DB are normalised by
-      // mirrorRoomsToTenants() — strip dashes/spaces — but the rooms-blob
-      // copy may still have separators if an admin typed them in. Compare
-      // both sides with the same normaliser so dashed/un-dashed pairs match.
       const normalisePhone = (s) => String(s || '').replace(/[\s-]/g, '');
       let tid = null;
       try {
@@ -804,6 +839,168 @@ function TabContract({ t, setToast, addActivity }) {
 
   const fmtDate = (s) => s ? new Date(s).toLocaleDateString('th-TH') : '-';
 
+  const copyLink = async (text) => {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const el = document.createElement('input');
+      el.value = text;
+      document.body.appendChild(el);
+      el.select();
+      document.execCommand('copy');
+      document.body.removeChild(el);
+    }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  // Send link for an existing draft contract — the contract row already
+  // carries room/rent, server just needs to mint the token.
+  const sendInviteForExistingContract = async () => {
+    if (!contract) return;
+    setBusy(true);
+    try {
+      const d = await apiCall(`/api/contracts/${contract.id}/invite-tenant`, {
+        method: 'POST',
+        body: JSON.stringify({ expiresInHours: 168 }),
+      });
+      setLiveLink({
+        url: d.invitation.url,
+        expiresAt: d.invitation.expiresAt,
+        invitationId: d.invitation.id,
+      });
+      addActivity && addActivity({ icon: '📨',
+        text: `ส่งลิงก์สัญญาให้ ${t.name} (ห้อง ${t.roomId})`, type: 'contract' });
+      reload();
+    } catch (err) {
+      setToast && setToast({ kind: 'danger', message: 'สร้างลิงก์ล้มเหลว: ' + err.message });
+    } finally { setBusy(false); }
+  };
+
+  // Create contract + send link in one shot, room/rent/deposit/move-in pulled
+  // straight from the tenant's room context — no re-typing anything.
+  const sendInviteForNewContract = async () => {
+    if (!t.roomId) {
+      setToast && setToast({ kind: 'danger', message: 'ผู้เช่ายังไม่มีห้อง — กำหนดห้องก่อน' });
+      return;
+    }
+    // Rent comes from the rooms blob — should never be 0 for a real room,
+    // but guard anyway so admin gets a clear "go fix the room" message
+    // instead of an opaque server 400.
+    const rent = Number(t.rent);
+    if (!Number.isFinite(rent) || rent <= 0) {
+      setToast && setToast({ kind: 'danger', message: {
+        title: `ห้อง ${t.roomId} ยังไม่กำหนดค่าเช่า`,
+        description: 'ไปหน้า "ห้องพัก" กำหนดค่าเช่าก่อน แล้วกลับมาส่งลิงก์',
+      }});
+      return;
+    }
+    setBusy(true);
+    try {
+      const d = await apiCall('/api/contracts/quick-invite', {
+        method: 'POST',
+        body: JSON.stringify({
+          tenantName: t.name,
+          tenantPhone: String(t.phone || '').replace(/[\s-]/g, ''),
+          tenantEmail: t.email || null,
+          roomId: t.roomId,
+          monthlyRent: rent,
+          deposit: rent * 2,
+          moveInDate: new Date().toISOString().slice(0, 10),
+          termMonths: 12,
+          expiresInHours: 168,
+        }),
+      });
+      setLiveLink({
+        url: d.invitation.url,
+        expiresAt: d.invitation.expiresAt,
+        invitationId: d.invitation.id,
+      });
+      addActivity && addActivity({ icon: '✨',
+        text: `สร้างสัญญา + ส่งลิงก์ให้ ${t.name} (ห้อง ${t.roomId})`, type: 'contract' });
+      reload();
+    } catch (err) {
+      setToast && setToast({ kind: 'danger', message: 'สร้างสัญญาล้มเหลว: ' + err.message });
+    } finally { setBusy(false); }
+  };
+
+  const revokeInvite = async () => {
+    let invId = liveLink ? liveLink.invitationId : null;
+    if (!invId && contract) {
+      try {
+        const d = await apiCall(`/api/admin/contract-invitations?status=active`);
+        const found = (d.invitations || []).find((i) => i.contract_id === contract.id);
+        if (found) invId = found.id;
+      } catch { /* ignore */ }
+    }
+    if (!invId) return;
+    if (!confirm('ยกเลิกลิงก์? ผู้เช่าจะใช้ลิงก์นี้ต่อไม่ได้')) return;
+    setBusy(true);
+    try {
+      await apiCall(`/api/admin/contract-invitations/${invId}/revoke`, { method: 'POST' });
+      setLiveLink(null);
+      setToast && setToast({ kind: 'success', message: 'ยกเลิกลิงก์เรียบร้อย' });
+      reload();
+    } catch (err) {
+      setToast && setToast({ kind: 'danger', message: 'ยกเลิกล้มเหลว: ' + err.message });
+    } finally { setBusy(false); }
+  };
+
+  const openReview = async () => {
+    if (!contract) return;
+    setBusy(true);
+    try {
+      const list = await apiCall(`/api/admin/contract-invitations?status=submitted`);
+      const found = (list.invitations || []).find((i) => i.contract_id === contract.id);
+      if (!found) {
+        setToast && setToast({ kind: 'danger', message: 'ไม่พบใบที่รอตรวจสอบ — refresh แล้วลองอีกครั้ง' });
+        reload();
+        return;
+      }
+      const d = await apiCall(`/api/admin/contract-invitations/${found.id}`);
+      setReviewing(d.invitation);
+    } catch (err) {
+      setToast && setToast({ kind: 'danger', message: 'โหลดล้มเหลว: ' + err.message });
+    } finally { setBusy(false); }
+  };
+
+  const approveSubmitted = async () => {
+    if (!reviewing) return;
+    if (!confirm('อนุมัติ + lock สัญญา? (กลับมาแก้ไม่ได้)')) return;
+    setBusy(true);
+    try {
+      const result = await apiCall(`/api/admin/contract-invitations/${reviewing.id}/approve`,
+        { method: 'POST' });
+      setReviewing(null);
+      setLiveLink(null);
+      setToast && setToast({ kind: 'success', message: 'อนุมัติเรียบร้อย — สัญญาถูก lock' });
+      addActivity && addActivity({ icon: '✓',
+        text: `อนุมัติสัญญา ${contract && contract.contract_no} ของ ${t.name}`, type: 'contract' });
+      if (result && result.nextActions && result.nextActions.pdfUrl) {
+        window.open(result.nextActions.pdfUrl, '_blank', 'noopener');
+      }
+      reload();
+    } catch (err) {
+      setToast && setToast({ kind: 'danger', message: 'อนุมัติล้มเหลว: ' + err.message });
+    } finally { setBusy(false); }
+  };
+
+  const rejectSubmitted = async (reason) => {
+    if (!reviewing || !reason || !reason.trim()) return;
+    setBusy(true);
+    try {
+      await apiCall(`/api/admin/contract-invitations/${reviewing.id}/reject`, {
+        method: 'POST',
+        body: JSON.stringify({ reason: reason.trim() }),
+      });
+      setReviewing(null);
+      setToast && setToast({ kind: 'success', message: 'ส่งกลับให้ผู้เช่าแก้ไขแล้ว' });
+      reload();
+    } catch (err) {
+      setToast && setToast({ kind: 'danger', message: 'ส่งกลับล้มเหลว: ' + err.message });
+    } finally { setBusy(false); }
+  };
+
   if (loading) {
     return <div style={{ padding: 20, color: C.muted }}>กำลังโหลด…</div>;
   }
@@ -818,22 +1015,80 @@ function TabContract({ t, setToast, addActivity }) {
     );
   }
 
+  // Submitted-invitation review panel — replaces a separate page hop.
+  if (reviewing) {
+    return (
+      <ContractReviewPanel
+        detail={reviewing}
+        busy={busy}
+        onApprove={approveSubmitted}
+        onReject={rejectSubmitted}
+        onCancel={() => setReviewing(null)}
+        C={C}
+      />
+    );
+  }
+
+  const liveLinkCard = liveLink ? (
+    <Card style={{ padding: 14, background: '#e8f5e8', border: '1px solid #4a8b4a' }}>
+      <div style={{ fontSize: 14, fontWeight: 600, color: '#2d5a2c', marginBottom: 8 }}>
+        ✅ ลิงก์พร้อมส่งให้ผู้เช่าแล้ว
+      </div>
+      <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
+        <input readOnly value={liveLink.url}
+          onFocus={(e) => e.target.select()}
+          style={{ flex: 1, padding: '8px 10px', fontFamily: 'monospace',
+                   fontSize: 11, border: '1px solid #ece4d4', borderRadius: 6,
+                   background: '#fff', color: C.ink, minWidth: 0 }} />
+        <Btn variant="primary" size="sm" onClick={() => copyLink(liveLink.url)}>
+          {copied ? '✓ ก็อปแล้ว' : 'ก็อปลิงก์'}
+        </Btn>
+      </div>
+      <div style={{ fontSize: 11, color: C.muted, marginBottom: 10, lineHeight: 1.5 }}>
+        หมดอายุ {new Date(liveLink.expiresAt).toLocaleString('th-TH', {
+          year: 'numeric', month: 'short', day: 'numeric',
+          hour: '2-digit', minute: '2-digit',
+        })}<br/>
+        🔒 ลิงก์นี้แสดงครั้งเดียว — ปิด drawer แล้วดูซ้ำไม่ได้ (สร้างใหม่จะ revoke ลิงก์เก่าอัตโนมัติ)
+      </div>
+      <Btn variant="ghost" size="sm" onClick={revokeInvite} disabled={busy}>
+        ยกเลิกลิงก์นี้
+      </Btn>
+    </Card>
+  ) : null;
+
+  // No contract — give admin a clear 2-way fork. Show the room + tenant
+  // details that the contract will inherit so admin sees the full picture
+  // before sending (the user's "เเสดงรายละเอียดทั้งหมด" request).
   if (!contract) {
     return (
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        {liveLinkCard}
         <Card style={{ padding: 16 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-            <span style={{ fontSize: 18 }}>📜</span>
-            <div style={{ fontSize: 14, fontWeight: 600 }}>ยังไม่มีสัญญาที่ active</div>
+          <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 12 }}>
+            📜 ยังไม่มีสัญญาเช่า — ตรวจรายละเอียดก่อนส่งลิงก์
           </div>
-          <p style={{ fontSize: 13, color: C.muted, lineHeight: 1.6, marginTop: 4 }}>
-            กดปุ่ม "เช็คอิน" เพื่อบันทึกสัญญา (รวมระยะเวลา + ส่วนลดตามอายุสัญญา)
-            ระบบจะตั้งสถานะห้องเป็น <b>occupied</b>, สร้าง contract row
-            และเริ่มออกบิลแบบมีส่วนลดตั้งแต่บิลถัดไป
-          </p>
-          <Btn variant="primary" icon="🔑" onClick={() => setShowCheckin(true)}>
-            เช็คอินผู้เช่า
-          </Btn>
+          <ContractPreFlightSummary t={t} C={C} fmtCurrency={fmtCurrency} />
+          <div style={{ fontSize: 12, color: C.muted, margin: '10px 0 14px', lineHeight: 1.5 }}>
+            ค่าเช่า ห้อง และข้อมูลผู้เช่าทั้งหมดดึงจากระบบให้แล้ว — แอดมินไม่ต้องกรอกซ้ำ
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+            <ContractActionTile
+              icon="🔑"
+              title="เช็คอินทันที"
+              desc="แอดมินกรอกข้อมูลครบเอง — ใช้เมื่อมีบัตร/ที่อยู่ผู้เช่าอยู่แล้ว"
+              onClick={() => setShowCheckin(true)}
+              C={C}
+            />
+            <ContractActionTile
+              icon="📨"
+              title="ส่งลิงก์ให้ผู้เช่ากรอกเอง"
+              desc="ผู้เช่าถ่ายบัตร เซ็น กรอกที่อยู่ผ่านมือถือเอง ไม่ต้องมาที่หอ"
+              onClick={sendInviteForNewContract}
+              busy={busy}
+              C={C}
+            />
+          </div>
         </Card>
         {showCheckin ? (
           <CheckInModal
@@ -851,38 +1106,89 @@ function TabContract({ t, setToast, addActivity }) {
     );
   }
 
-  // Contract exists — show real fields from DB.
+  // Contract exists — show details + state-aware actions.
+  const isLocked = !!contract.locked_at;
+  const invStatus = contract.active_invitation_status;
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      {liveLinkCard}
+
+      {invStatus === 'submitted' ? (
+        <Card style={{ padding: 14, background: '#fff7e0', border: '1px solid #f1b32d' }}>
+          <div style={{ fontSize: 14, fontWeight: 600, color: '#6b4d10', marginBottom: 6 }}>
+            ✓ ผู้เช่าส่งสัญญาให้ตรวจสอบแล้ว
+          </div>
+          <div style={{ fontSize: 13, color: '#6b4d10', marginBottom: 10, lineHeight: 1.5 }}>
+            ตรวจสอบและอนุมัติได้ที่นี่เลย — ไม่ต้องไปหน้า "ใบเชิญ"
+          </div>
+          <Btn variant="primary" size="sm" onClick={openReview} disabled={busy}>
+            ตรวจสอบ + อนุมัติ →
+          </Btn>
+        </Card>
+      ) : (invStatus === 'pending' && !liveLink) ? (
+        <Card style={{ padding: 14, background: '#e8f1f8', border: '1px solid #b6d2e6' }}>
+          <div style={{ fontSize: 14, fontWeight: 600, color: '#234c66', marginBottom: 6 }}>
+            📨 ลิงก์ส่งให้ผู้เช่าแล้ว — รอผู้เช่ากรอก
+          </div>
+          <div style={{ fontSize: 12, color: C.muted, marginBottom: 10, lineHeight: 1.5 }}>
+            ลิงก์ active ในระบบ — แต่ admin ดู URL เดิมไม่ได้แล้ว (เหตุผลความปลอดภัย)<br/>
+            ถ้าผู้เช่าหาลิงก์ไม่เจอ ให้กด "สร้างลิงก์ใหม่" (ลิงก์เก่าจะถูกยกเลิกอัตโนมัติ)
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <Btn variant="primary" size="sm" onClick={sendInviteForExistingContract} disabled={busy}>
+              สร้างลิงก์ใหม่
+            </Btn>
+            <Btn variant="ghost" size="sm" onClick={revokeInvite} disabled={busy}>
+              ยกเลิกลิงก์
+            </Btn>
+          </div>
+        </Card>
+      ) : null}
+
       <Card style={{ padding: 16 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
           <span style={{ fontSize: 18 }}>📄</span>
-          <div style={{ fontSize: 14, fontWeight: 600, color: C.ink }}>สัญญาเช่าฉบับปัจจุบัน</div>
-          <Pill color="success" size="sm">มีผลบังคับใช้</Pill>
+          <div style={{ fontSize: 14, fontWeight: 600, color: C.ink }}>
+            สัญญาเช่าฉบับปัจจุบัน
+          </div>
+          <Pill color={isLocked ? 'success' : 'warning'} size="sm">
+            {isLocked ? '🔒 มีผลบังคับใช้' : 'ยังไม่ lock'}
+          </Pill>
         </div>
         <DefList
           columns={2}
           items={[
             { label: 'หมายเลขสัญญา', value: contract.contract_no },
+            { label: 'ห้อง',           value: contract.room_id },
             { label: 'ระยะเวลาสัญญา', value: contract.term_months ? `${contract.term_months} เดือน` : 'เปิด-ไม่จำกัด' },
-            { label: 'วันที่เริ่มต้น',    value: fmtDate(contract.start_date) },
-            { label: 'วันที่สิ้นสุด',     value: fmtDate(contract.end_date) },
-            { label: 'ค่าเช่า/เดือน',     value: '฿' + fmtCurrency(contract.monthly_rent), bold: true },
-            { label: 'ส่วนลด',           value: Number(contract.discount_pct) > 0
-                                                ? `${Number(contract.discount_pct).toFixed(1)}%`
-                                                : 'ไม่มี' },
-            { label: 'เงินมัดจำ',         value: '฿' + fmtCurrency(contract.deposit) },
+            { label: 'วันที่เริ่มต้น', value: fmtDate(contract.start_date) },
+            { label: 'วันที่สิ้นสุด',  value: fmtDate(contract.end_date) },
+            { label: 'ค่าเช่า/เดือน', value: '฿' + fmtCurrency(contract.monthly_rent), bold: true },
+            { label: 'ส่วนลด',        value: Number(contract.discount_pct) > 0
+                                              ? `${Number(contract.discount_pct).toFixed(1)}%` : 'ไม่มี' },
+            { label: 'เงินมัดจำ',     value: '฿' + fmtCurrency(contract.deposit) },
           ]}
         />
         <div style={{ marginTop: 14, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          <Btn variant="secondary" size="sm" icon="✎" onClick={() => setShowEdit(true)}>
-            แก้ไขส่วนลด/ระยะเวลา
+          <Btn variant="secondary" size="sm" icon="📄"
+            onClick={() => window.open(`/api/contracts/${contract.id}/pdf`, '_blank', 'noopener')}>
+            ดู PDF
           </Btn>
-          <Btn variant="ghost" size="sm" onClick={() => { window.location.hash = '#contracts'; }}>
-            ไปหน้ารายงานสัญญา
-          </Btn>
+          {!isLocked && !invStatus ? (
+            <Btn variant="primary" size="sm" icon="📨"
+              onClick={sendInviteForExistingContract} disabled={busy}>
+              ส่งลิงก์ให้ผู้เช่ากรอก
+            </Btn>
+          ) : null}
+          {!isLocked ? (
+            <Btn variant="ghost" size="sm" icon="✎" onClick={() => setShowEdit(true)}>
+              แก้ไขส่วนลด/ระยะเวลา
+            </Btn>
+          ) : null}
         </div>
       </Card>
+
       {showEdit ? (
         <ContractQuickEditModal
           contract={contract}
@@ -893,6 +1199,236 @@ function TabContract({ t, setToast, addActivity }) {
           onError={(msg) => setToast && setToast({ kind: 'danger', message: msg })}
         />
       ) : null}
+    </div>
+  );
+}
+
+// Pre-flight summary shown before admin sends the contract link. Mirrors
+// every field the system will lock into the contract — room (type/floor/
+// size/amenities), rent (auto-calculated deposit), tenant (name/phone/
+// email). Everything sourced from the tenant's room context (rooms blob),
+// so admin sees exactly what the tenant will receive without re-typing.
+function ContractPreFlightSummary({ t, C, fmtCurrency }) {
+  const ADMIN_ROOM_TYPES = window.ADMIN_ROOM_TYPES || {};
+  const r = t.room || {};
+  const typeInfo = ADMIN_ROOM_TYPES[t.type] || {};
+  const rent = Number(t.rent) || 0;
+  const deposit = rent * 2;
+
+  // Amenity badges — show only what the room actually has.
+  const amenities = [];
+  if (typeInfo.ac !== false || r.ac) amenities.push('แอร์');
+  if (r.balcony) amenities.push('ระเบียง');
+  if (r.kitchen) amenities.push('ครัว');
+  if (r.parking) amenities.push('ที่จอดรถ');
+  if (r.view)    amenities.push(r.view);
+
+  const Row = ({ icon, label, children }) => (
+    <div style={{
+      display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start',
+      padding: '8px 0', borderBottom: '1px solid #f0e9d8', gap: 12,
+    }}>
+      <span style={{ color: C.muted, fontSize: 12.5, display: 'flex',
+                     alignItems: 'center', gap: 6, minWidth: 0 }}>
+        <span>{icon}</span>{label}
+      </span>
+      <span style={{ fontSize: 13, fontWeight: 500, textAlign: 'right',
+                     color: C.ink, minWidth: 0 }}>
+        {children}
+      </span>
+    </div>
+  );
+
+  return (
+    <div style={{ background: '#faf6ee', borderRadius: 10, padding: '4px 14px' }}>
+      <Row icon="🏠" label="ห้อง">
+        <b>{t.roomId || '—'}</b>
+        {t.floor ? <span style={{ color: C.muted, marginLeft: 6, fontWeight: 400 }}>
+          · ชั้น {t.floor}</span> : null}
+        {typeInfo.th ? <span style={{ color: C.muted, marginLeft: 6, fontWeight: 400 }}>
+          · {typeInfo.th}</span> : null}
+      </Row>
+      {typeInfo.size ? (
+        <Row icon="📐" label="ขนาด">
+          {typeInfo.size} ตร.ม.{typeInfo.beds ? ` · ${typeInfo.beds} เตียง` : ''}
+        </Row>
+      ) : null}
+      {amenities.length ? (
+        <Row icon="✨" label="สิ่งอำนวยความสะดวก">
+          <span style={{ display: 'inline-flex', gap: 4, flexWrap: 'wrap',
+                          justifyContent: 'flex-end' }}>
+            {amenities.map((a, i) => (
+              <span key={i} style={{
+                padding: '2px 8px', borderRadius: 999, background: '#fff',
+                fontSize: 11, color: C.ink2, border: `1px solid ${C.border}`,
+              }}>{a}</span>
+            ))}
+          </span>
+        </Row>
+      ) : null}
+      <Row icon="💰" label="ค่าเช่า/เดือน">
+        <b style={{ fontFamily: 'Sora, monospace', fontSize: 14 }}>
+          ฿{fmtCurrency(rent)}
+        </b>
+      </Row>
+      <Row icon="🏦" label="เงินมัดจำ">
+        <span style={{ fontFamily: 'Sora, monospace' }}>
+          ฿{fmtCurrency(deposit)}
+        </span>
+        <span style={{ color: C.muted, marginLeft: 6, fontSize: 11, fontWeight: 400 }}>
+          (ค่าเช่า × 2)
+        </span>
+      </Row>
+      <Row icon="👤" label="ผู้เช่า">
+        <b>{t.name || '—'}</b>
+      </Row>
+      {t.phone ? <Row icon="📱" label="เบอร์">{t.phone}</Row> : null}
+      {t.email ? <Row icon="✉️" label="อีเมล">
+        <span style={{ wordBreak: 'break-all' }}>{t.email}</span>
+      </Row> : null}
+    </div>
+  );
+}
+
+// Big-tile button for the "no contract yet" 2-way fork. Hover lifts the
+// border so admin can see this is a primary action.
+function ContractActionTile({ icon, title, desc, onClick, busy, C }) {
+  return (
+    <button onClick={onClick} disabled={busy}
+      style={{
+        textAlign: 'left', padding: 14, borderRadius: 10,
+        border: `1px solid ${C.border}`, background: C.surface,
+        cursor: busy ? 'wait' : 'pointer', fontFamily: 'inherit',
+        opacity: busy ? 0.6 : 1, transition: 'all 0.15s',
+      }}
+      onMouseOver={(e) => {
+        if (busy) return;
+        e.currentTarget.style.borderColor = C.accent;
+        e.currentTarget.style.background = '#faf6ee';
+      }}
+      onMouseOut={(e) => {
+        e.currentTarget.style.borderColor = C.border;
+        e.currentTarget.style.background = C.surface;
+      }}
+    >
+      <div style={{ fontSize: 22, marginBottom: 4 }}>{icon}</div>
+      <div style={{ fontSize: 13, fontWeight: 600, color: C.ink, marginBottom: 4 }}>
+        {title}
+      </div>
+      <div style={{ fontSize: 11, color: C.muted, lineHeight: 1.5 }}>{desc}</div>
+    </button>
+  );
+}
+
+// Inline review panel — shows tenant's submitted draft + photos + signature
+// directly inside the tenant drawer so admin can approve without page hops.
+function ContractReviewPanel({ detail, busy, onApprove, onReject, onCancel, C }) {
+  const { Card, Btn } = window;
+  const draft = detail.draft || {};
+  const [showRejectForm, setShowRejectForm] = React.useState(false);
+  const [rejectReason, setRejectReason] = React.useState('');
+
+  const Section = ({ title, children }) => (
+    <div style={{ marginBottom: 12, padding: 12, background: '#faf6ee', borderRadius: 8 }}>
+      <div style={{ fontWeight: 600, marginBottom: 6, color: C.accent, fontSize: 12 }}>{title}</div>
+      {children}
+    </div>
+  );
+  const KV = ({ k, v }) => (
+    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0',
+                  fontSize: 13, borderBottom: '1px solid #f0e9d8' }}>
+      <span style={{ color: C.muted }}>{k}</span>
+      <span style={{ fontWeight: 500, textAlign: 'right' }}>{v || '—'}</span>
+    </div>
+  );
+  return (
+    <Card style={{ padding: 14 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+        <div style={{ fontSize: 14, fontWeight: 600 }}>ตรวจสอบสัญญาที่ผู้เช่ากรอก</div>
+        <Btn variant="ghost" size="sm" onClick={onCancel} disabled={busy}>← ย้อน</Btn>
+      </div>
+
+      <Section title="ที่อยู่">
+        <div style={{ fontSize: 13, lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>
+          {draft.address || <span style={{ color: '#c0392b' }}>ยังไม่กรอก</span>}
+        </div>
+      </Section>
+
+      <Section title="ผู้ติดต่อฉุกเฉิน">
+        <KV k="ชื่อ" v={draft.emergencyContactName} />
+        <KV k="เบอร์" v={draft.emergencyContactPhone} />
+        {draft.emergencyContactRelation ? (
+          <KV k="ความสัมพันธ์" v={draft.emergencyContactRelation} />
+        ) : null}
+      </Section>
+
+      <Section title="เลขบัตร + รูป">
+        <KV k="เลขบัตร" v={draft.citizenId
+          ? '***-***-' + String(draft.citizenId).slice(-4) : '—'} />
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 8 }}>
+          <ContractPhotoBox label="หน้าบัตร" url={detail.draft_front_url} C={C} />
+          <ContractPhotoBox label="หลังบัตร" url={detail.draft_back_url} C={C} />
+        </div>
+      </Section>
+
+      <Section title="ลายเซ็น">
+        {detail.draft_signature_url ? (
+          <img src={detail.draft_signature_url} alt="signature"
+            style={{ maxWidth: '100%', maxHeight: 160, background: '#fff',
+                     border: `1px solid ${C.border}`, borderRadius: 6 }} />
+        ) : (
+          <div style={{ color: '#c0392b' }}>ยังไม่ได้เซ็น</div>
+        )}
+      </Section>
+
+      {showRejectForm ? (
+        <div>
+          <label style={{ display: 'block', fontSize: 12, marginBottom: 4, color: '#5b4f40' }}>
+            เหตุผลที่ขอให้แก้ (ผู้เช่าจะเห็นข้อความนี้)
+          </label>
+          <textarea rows={3} maxLength={500}
+            placeholder="เช่น รูปบัตรไม่ชัด — ถ่ายในที่สว่างกว่านี้"
+            value={rejectReason}
+            onChange={(e) => setRejectReason(e.target.value)}
+            style={{ width: '100%', padding: '8px 10px', border: '1px solid #ece4d4',
+                     borderRadius: 6, fontSize: 13, fontFamily: 'inherit', boxSizing: 'border-box' }} />
+          <div style={{ display: 'flex', gap: 8, marginTop: 10, justifyContent: 'flex-end' }}>
+            <Btn variant="ghost" onClick={() => setShowRejectForm(false)} disabled={busy}>← ย้อน</Btn>
+            <Btn variant="danger" onClick={() => onReject(rejectReason)}
+              disabled={busy || !rejectReason.trim()}>
+              ส่งกลับให้ผู้เช่าแก้
+            </Btn>
+          </div>
+        </div>
+      ) : (
+        <div style={{ display: 'flex', gap: 8, marginTop: 10, justifyContent: 'flex-end' }}>
+          <Btn variant="ghost" onClick={() => setShowRejectForm(true)} disabled={busy}>ขอให้แก้</Btn>
+          <Btn variant="primary" onClick={onApprove} disabled={busy}>
+            ✓ อนุมัติ + lock
+          </Btn>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function ContractPhotoBox({ label, url, C }) {
+  return (
+    <div style={{ textAlign: 'center' }}>
+      <div style={{ fontSize: 11, color: C.muted, marginBottom: 4 }}>{label}</div>
+      {url ? (
+        <a href={url} target="_blank" rel="noopener noreferrer">
+          <img src={url} alt={label} style={{
+            maxWidth: '100%', maxHeight: 140, borderRadius: 6,
+            border: `1px solid ${C.border}`, cursor: 'zoom-in',
+          }} />
+        </a>
+      ) : (
+        <div style={{ padding: 24, background: '#fff', border: `1px dashed ${C.border}`,
+                      borderRadius: 6, color: '#c0392b', fontSize: 12 }}>
+          ยังไม่อัปโหลด
+        </div>
+      )}
     </div>
   );
 }

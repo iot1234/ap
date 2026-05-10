@@ -2744,6 +2744,7 @@ app.get('/api/tenant/contract', requireTenant, async (req, res) => {
                 monthly_rent, deposit, deposit_returned, deposit_returned_at,
                 discount_pct, status, signed_at, agreed_terms_at,
                 agreed_terms_version, created_at,
+                locked_at,
                 CASE WHEN end_date IS NULL THEN NULL
                      ELSE (end_date - CURRENT_DATE)::int
                 END AS days_left
@@ -2770,6 +2771,196 @@ app.get('/api/tenant/contract', requireTenant, async (req, res) => {
   } catch (err) {
     console.error('tenant contract error:', err);
     res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// GET /api/tenant/contract/:id/pdf — tenant downloads their OWN signed
+// contract PDF. Replaces the "ติดต่อสำนักงานเพื่อรับ PDF" friction:
+// tenant can now self-serve from the portal. Ownership is enforced via
+// tenant_id match (a guessed contract id can't fetch someone else's PDF),
+// and we require locked_at (signed) so unfinished drafts don't leak.
+app.get('/api/tenant/contract/:id/pdf', requireTenant, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+  try {
+    // Same SELECT shape the admin /api/contracts/:id/pdf uses so the
+    // renderer below gets the fields it expects (tenant_address, emergency
+    // contacts, citizen_id_tail). Falls back to legacy columns on
+    // pre-migration deploys (42703).
+    let contract;
+    try {
+      const cQ = await pool.query(
+        `SELECT c.*, t.full_name AS tenant_name, t.phone AS tenant_phone,
+                t.email AS tenant_email, t.citizen_id_tail, t.address AS tenant_address,
+                t.emergency_contact_name, t.emergency_contact_phone,
+                t.emergency_contact_relation
+           FROM contracts c
+           LEFT JOIN tenants t ON t.id = c.tenant_id AND t.deleted_at IS NULL
+           WHERE c.id=$1 AND c.deleted_at IS NULL`,
+        [id]
+      );
+      if (!cQ.rows.length) return res.status(404).json({ error: 'contract not found' });
+      contract = cQ.rows[0];
+    } catch (err) {
+      if (err.code !== '42703') throw err;
+      const cQ = await pool.query(
+        `SELECT c.*, t.full_name AS tenant_name, t.phone AS tenant_phone,
+                t.email AS tenant_email, t.citizen_id_tail
+           FROM contracts c
+           LEFT JOIN tenants t ON t.id = c.tenant_id AND t.deleted_at IS NULL
+           WHERE c.id=$1 AND c.deleted_at IS NULL`,
+        [id]
+      );
+      if (!cQ.rows.length) return res.status(404).json({ error: 'contract not found' });
+      contract = cQ.rows[0];
+    }
+    // Ownership check — must match the logged-in tenant.
+    if (Number(contract.tenant_id) !== Number(req.tenant.tenant_id)) {
+      return res.status(403).json({ error: 'not your contract' });
+    }
+    // Require locked_at so tenants can't download a draft (un-approved)
+    // PDF that doesn't yet reflect final terms.
+    if (!contract.locked_at) {
+      return res.status(409).json({
+        error: 'สัญญายังไม่ได้รับการอนุมัติ — รอเจ้าของหอพักตรวจสอบ',
+        code: 'NOT_LOCKED',
+      });
+    }
+
+    // Building info
+    let building = { name: 'บ้านกาญจน์ เรสซิเดนซ์' };
+    try {
+      const cfgQ = await pool.query(
+        `SELECT value FROM app_data WHERE key='baankarn_config_v1' LIMIT 1`
+      );
+      const cfg = cfgQ.rows[0]?.value || {};
+      if (cfg.building) building = { ...building, ...cfg.building };
+    } catch { /* keep default */ }
+
+    // Room enrichment (rooms_v2 → blob fallback) — same logic as admin path
+    // but simplified: tenant doesn't need template override or raw room source.
+    let room = { id: contract.room_id };
+    if (contract.room_id) {
+      try {
+        const rv2 = await pool.query(
+          `SELECT room_code, room_type, floor, room_no,
+                  wifi_fee, view_type, has_balcony, has_parking, has_kitchen, has_ac,
+                  size_sqm, bed_count
+             FROM rooms_v2 WHERE room_code=$1 AND deleted_at IS NULL LIMIT 1`,
+          [contract.room_id]
+        );
+        if (rv2.rows.length) {
+          const r = rv2.rows[0];
+          const amenities = [];
+          if (r.has_ac)      amenities.push('แอร์');
+          if (r.has_balcony) amenities.push('ระเบียง');
+          if (r.has_kitchen) amenities.push('ห้องครัว');
+          if (r.has_parking) amenities.push('ที่จอดรถ');
+          room = {
+            id: r.room_code, type: r.room_type, floor: r.floor, roomNo: r.room_no,
+            size: r.size_sqm, bedCount: r.bed_count, view: r.view_type,
+            amenities, wifiFee: Number(r.wifi_fee || 0),
+          };
+        }
+      } catch (err) {
+        if (err.code !== '42P01') console.warn('[tenant contract pdf] rooms_v2:', err.message);
+      }
+    }
+
+    // Template — use the contract's bound template, or the system default.
+    let template = null;
+    if (contract.template_id) {
+      try {
+        const t = await pool.query(
+          `SELECT mode, clauses, sections, variables FROM contract_templates
+            WHERE id=$1 AND deleted_at IS NULL LIMIT 1`,
+          [contract.template_id]
+        );
+        if (t.rows.length) template = t.rows[0];
+      } catch { /* fall through */ }
+    }
+    if (!template) {
+      try {
+        const t = await pool.query(
+          `SELECT mode, clauses, sections, variables FROM contract_templates
+            WHERE is_default=TRUE AND deleted_at IS NULL LIMIT 1`
+        );
+        if (t.rows.length) template = t.rows[0];
+      } catch { /* pre-migration */ }
+    }
+
+    // Online signature embed
+    let tenantSigBuf = null;
+    if (contract.signature_image_id) {
+      try {
+        const fQ = await pool.query(
+          'SELECT * FROM file_uploads WHERE id=$1 LIMIT 1',
+          [contract.signature_image_id]
+        );
+        if (fQ.rows.length) tenantSigBuf = await storage.readFile(fQ.rows[0]);
+      } catch (err) {
+        console.warn('[tenant contract pdf] sig load failed:', err.message);
+      }
+    }
+
+    // Feature-derived constants
+    let lateFeeRate = 1.5;
+    let dueDay = 15;
+    try {
+      const flags = await features.load(pool);
+      if (Number.isFinite(Number(flags?.lateFee?.ratePctPerMonth))) {
+        lateFeeRate = Number(flags.lateFee.ratePctPerMonth);
+      }
+      if (Number.isFinite(Number(flags?.billAutoGenerate?.dueDay))) {
+        dueDay = Number(flags.billAutoGenerate.dueDay);
+      }
+    } catch { /* keep defaults */ }
+
+    const filename = `contract-${contract.contract_no || id}.pdf`;
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader(
+      'Content-Disposition',
+      `${req.query.download === '1' ? 'attachment' : 'inline'}; filename="${filename}"`
+    );
+
+    const contractPdf = require('./services/contractPdf');
+    const tenant = {
+      fullName: contract.tenant_name,
+      phone: contract.tenant_phone,
+      email: contract.tenant_email,
+      citizenIdMasked: contract.citizen_id_tail ? `***-***-${contract.citizen_id_tail}` : null,
+      address: contract.tenant_address || null,
+      emergencyContactName: contract.emergency_contact_name || null,
+      emergencyContactPhone: contract.emergency_contact_phone || null,
+      emergencyContactRelation: contract.emergency_contact_relation || null,
+    };
+
+    await contractPdf.renderContractPdf(
+      {
+        contractNo: contract.contract_no,
+        startDate: contract.start_date,
+        endDate: contract.end_date,
+        monthlyRent: contract.monthly_rent,
+        deposit: contract.deposit,
+        discountPct: contract.discount_pct,
+        termMonths: contract.term_months,
+        signedAt: contract.signed_at,
+        agreedTermsVersion: contract.agreed_terms_version,
+        status: contract.status,
+      },
+      tenant, room, building,
+      {
+        termsTemplate: template,
+        signatures: { tenantBuf: tenantSigBuf },
+        lateFeeRate, dueDay,
+      },
+      res
+    );
+  } catch (err) {
+    console.error('tenant contract pdf error:', err);
+    if (!res.headersSent) res.status(500).json({ error: 'internal error', code: 'PDF_ERROR' });
+    else res.end();
   }
 });
 
@@ -6850,10 +7041,73 @@ app.post('/api/admin/contract-invitations/:id/approve',
           WHERE id=$1`,
         [id, req.session.user.username]
       );
+
+      // ============== Welcome bill ==============
+      // The legacy /tenants/:id/checkin path creates a welcome bill for the
+      // move-in period (see routes/tenant-ops.js). Without an equivalent
+      // here, tenants approved via the invitation flow have NO first-month
+      // bill until the scheduler's next monthly tick — i.e. an Apr-3 move-in
+      // approved Apr-5 gets billed in May, not Apr. Mirror the checkin
+      // logic so both onboarding paths produce the same outcome.
+      //
+      // Period derived from contract.start_date (NOT wallclock) so back-
+      // dated approvals stamp the bill in the right month. ON CONFLICT
+      // DO NOTHING handles the (rare) race where a manual bill was already
+      // created for this room+period.
+      let welcomeBillCreated = null;
+      if (inv.tenant_id && contract.room_id && Number(contract.monthly_rent) > 0) {
+        await client.query('SAVEPOINT welcome_bill');
+        try {
+          const startStr = (contract.start_date instanceof Date)
+            ? contract.start_date.toISOString().slice(0, 10)
+            : String(contract.start_date || '').slice(0, 10);
+          const moveInMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(startStr);
+          const period = moveInMatch
+            ? `${moveInMatch[1]}-${moveInMatch[2]}`
+            : billing.formatPeriodNow();
+          const dueDay = 15;
+          const dueDate = moveInMatch
+            ? billing.formatYMD(Number(moveInMatch[1]), Number(moveInMatch[2]), dueDay)
+            : billing.formatDueDate(dueDay);
+          // Stack contract discount + config.discounts.firstMonth promo
+          // multiplicatively (same formula as checkin) so first-month
+          // promotions still apply on the invitation path.
+          let welcomeRent = Number(contract.monthly_rent) || 0;
+          const contractPct = Math.max(0, Math.min(50,
+            Number(contract.discount_pct ?? 0)));
+          const { rows: cfgR } = await client.query(
+            `SELECT value FROM app_data WHERE key='baankarn_config_v1' LIMIT 1`
+          );
+          const firstMonthPct = Math.max(0, Math.min(50,
+            Number(cfgR[0]?.value?.discounts?.firstMonth) || 0));
+          const combinedPct = Math.min(50,
+            100 * (1 - (1 - contractPct / 100) * (1 - firstMonthPct / 100)));
+          welcomeRent = Math.round(welcomeRent * (1 - combinedPct / 100) * 100) / 100;
+          const billNo = billing.makeBillNo(contract.room_id, period);
+          const billIns = await client.query(
+            `INSERT INTO bills
+               (bill_no, tenant_id, room_id, period, rent, subtotal, total, due_date, status)
+             VALUES ($1, $2, $3, $4, $5, $5, $5, $6, 'pending')
+             ON CONFLICT DO NOTHING
+             RETURNING id, bill_no, period, total, due_date`,
+            [billNo, inv.tenant_id, contract.room_id, period, welcomeRent, dueDate]
+          );
+          if (billIns.rows.length) welcomeBillCreated = billIns.rows[0];
+          await client.query('RELEASE SAVEPOINT welcome_bill');
+        } catch (err) {
+          // Welcome bill is best-effort — admin can manually create one
+          // from /admin#billing if this fails. Roll back only this block so
+          // a unique/schema error cannot poison the main approve transaction.
+          await client.query('ROLLBACK TO SAVEPOINT welcome_bill').catch(() => {});
+          await client.query('RELEASE SAVEPOINT welcome_bill').catch(() => {});
+          console.warn('[approve] welcome bill skipped:', err.message);
+        }
+      }
       await client.query('COMMIT');
       audit(req, 'contract.invitation_approve', 'contract', String(inv.contract_id),
         { invitationId: id, draftKeys: Object.keys(draft),
-          roomId: contract.room_id, tenantId: inv.tenant_id });
+          roomId: contract.room_id, tenantId: inv.tenant_id,
+          welcomeBill: welcomeBillCreated ? welcomeBillCreated.bill_no : null });
 
       // Owner notify with full context — admin can act immediately rather
       // than going hunting through 3 pages to see what was approved.
@@ -6877,12 +7131,10 @@ app.post('/api/admin/contract-invitations/:id/approve',
           text: lines.join('\n'),
         }).catch(() => {});
 
-        // Tenant notify — closes the loop on the user's complaint that
-        // tenant never gets the signed PDF after approval. The link goes
-        // to the public PDF endpoint — but PDF requires admin auth, so
-        // the message guides the tenant to ask admin if they need a copy.
-        // (A future enhancement: a public token-based PDF download for
-        // the signed contract; out of scope for this fix.)
+        // Tenant notify — points at the tenant portal where they can
+        // download their own signed PDF (see GET /api/tenant/contract/:id/pdf
+        // below). The welcome-bill block above stamps the first-month bill
+        // inside the same transaction so the "ดูบิลรอบแรก" CTA is honest.
         if (inv.tenant_id) {
           try {
             const tNotify = await pool.query(
@@ -6902,12 +7154,17 @@ app.post('/api/admin/contract-invitations/:id/approve',
                   `วันเริ่มสัญญา: ${(contract.start_date instanceof Date)
                     ? contract.start_date.toISOString().slice(0, 10)
                     : (typeof contract.start_date === 'string' ? contract.start_date.slice(0, 10) : '-')}`,
+                  welcomeBillCreated
+                    ? `บิลรอบแรก: ${welcomeBillCreated.bill_no} (กำหนด ${welcomeBillCreated.due_date})`
+                    : null,
                   ``,
                   `📋 ขั้นตอนต่อไป:`,
-                  `   • เก็บสำเนาสัญญา — ติดต่อสำนักงานเพื่อรับ PDF`,
-                  `   • ตั้ง PIN เข้าพอร์ทัลผู้เช่าที่ /tenant`,
-                  `   • บิลรอบแรกจะออกอัตโนมัติตามรอบเดือน`,
-                ].join('\n'),
+                  `   • ดูสัญญา + ดาวน์โหลด PDF ที่พอร์ทัลผู้เช่า`,
+                  `   • ตั้ง PIN เข้าพอร์ทัลผู้เช่าที่ ${proto}://${host}/tenant`,
+                  welcomeBillCreated
+                    ? `   • บิลรอบแรกพร้อมชำระแล้ว — เข้าพอร์ทัลเพื่อดูรายละเอียด`
+                    : `   • บิลรอบแรกจะออกในรอบบิลเดือนถัดไป`,
+                ].filter(Boolean).join('\n'),
               }).catch((err) => {
                 console.warn('[approve] tenant notify failed:', err.message);
               });
@@ -6965,12 +7222,15 @@ app.post('/api/admin/contract-invitations/:id/reject',
     const reason = String((req.body && req.body.reason) || '').slice(0, 500);
     if (!reason) return res.status(400).json({ error: 'reason required', code: 'REASON_REQUIRED' });
     try {
+      // Pull tenant_id back in the RETURNING so we can LINE-notify them
+      // about the rejection — without it the tenant has to guess the
+      // link is back open and re-visit it manually.
       const { rows } = await pool.query(
         `UPDATE contract_invitations
             SET status='pending', rejected_at=NOW(), rejected_by=$2,
                 rejection_reason=$3, updated_at=NOW()
           WHERE id=$1 AND status='submitted'
-          RETURNING id, contract_id`,
+          RETURNING id, contract_id, tenant_id`,
         [id, req.session.user.username, reason]
       );
       if (!rows.length) return res.status(409).json({
@@ -6978,6 +7238,39 @@ app.post('/api/admin/contract-invitations/:id/reject',
       });
       audit(req, 'contract.invitation_reject', 'contract', String(rows[0].contract_id),
         { invitationId: id, reason });
+
+      // Tenant notify — they need to know admin sent it back AND why,
+      // otherwise they'll wait forever wondering what happened. Best-effort:
+      // a notifier failure doesn't undo the reject.
+      const tenantId = rows[0].tenant_id;
+      if (tenantId) {
+        try {
+          const flags = await features.load(pool);
+          const tQ = await pool.query(
+            `SELECT id, full_name, phone, email, line_user_id, line_oa_id, status
+               FROM tenants WHERE id=$1 AND deleted_at IS NULL`,
+            [tenantId]
+          );
+          if (tQ.rows.length) {
+            notifier.notifyTenant({ pool, features: flags }, tQ.rows[0], {
+              subject: '📋 กรุณาแก้ไขข้อมูลสัญญา',
+              text: [
+                `เรียน คุณ${tQ.rows[0].full_name || ''}`,
+                ``,
+                `เจ้าของหอพักขอให้แก้ไขข้อมูลสัญญาบางจุด:`,
+                ``,
+                `📝 เหตุผล: ${reason}`,
+                ``,
+                `กรุณาเปิดลิงก์เดิมที่เคยส่งให้ — แก้ไขแล้วกด "ส่งให้ตรวจสอบ" อีกครั้ง`,
+                `(ลิงก์เดิมยังใช้ได้ ไม่ต้องขอลิงก์ใหม่)`,
+              ].join('\n'),
+            }).catch((err) => {
+              console.warn('[reject] tenant notify failed:', err.message);
+            });
+          }
+        } catch { /* notify failures don't break the response */ }
+      }
+
       res.json({ ok: true, invitationId: id });
     } catch (err) {
       console.error('invitation reject error:', err);

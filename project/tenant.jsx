@@ -65,6 +65,26 @@ const TR = {
     rejectedReason: 'เหตุผลที่ปฏิเสธ',
     transRef: 'เลขที่อ้างอิง',
     viewSlip: 'ดูสลิป',
+    // Contract view
+    contract: 'สัญญา',
+    myContract: 'สัญญาเช่าของฉัน',
+    noContract: 'ยังไม่มีสัญญาเช่าที่มีผลบังคับใช้',
+    contractNo: 'เลขที่สัญญา',
+    contractRoom: 'ห้อง',
+    contractStart: 'วันเริ่มสัญญา',
+    contractEnd: 'วันสิ้นสุด',
+    contractTerm: 'ระยะเวลา',
+    contractRent: 'ค่าเช่ารายเดือน',
+    contractDeposit: 'เงินมัดจำ',
+    contractDiscount: 'ส่วนลด',
+    contractSigned: 'ลงนามเมื่อ',
+    contractDownload: 'ดาวน์โหลดสัญญา (PDF)',
+    contractDaysLeft: 'เหลืออีก',
+    contractDays: 'วัน',
+    contractMonths: 'เดือน',
+    contractPending: 'สัญญายังไม่ได้รับอนุมัติ — รอเจ้าของหอพักตรวจสอบ',
+    contractOpenEnded: 'เปิด-ไม่จำกัด',
+    contractActive: 'มีผลบังคับใช้',
   },
   en: {
     portal: 'Tenant Portal', login: 'Sign in', phone: 'Phone number',
@@ -115,6 +135,26 @@ const TR = {
     rejectedReason: 'Rejected reason',
     transRef: 'Reference',
     viewSlip: 'View slip',
+    // Contract view
+    contract: 'Contract',
+    myContract: 'My lease contract',
+    noContract: 'No active lease contract yet',
+    contractNo: 'Contract no.',
+    contractRoom: 'Room',
+    contractStart: 'Start date',
+    contractEnd: 'End date',
+    contractTerm: 'Term',
+    contractRent: 'Monthly rent',
+    contractDeposit: 'Deposit',
+    contractDiscount: 'Discount',
+    contractSigned: 'Signed at',
+    contractDownload: 'Download contract (PDF)',
+    contractDaysLeft: 'Remaining',
+    contractDays: 'days',
+    contractMonths: 'months',
+    contractPending: 'Contract not yet approved — awaiting building owner review',
+    contractOpenEnded: 'Open-ended',
+    contractActive: 'Active',
   },
 };
 function tr(locale, k) { return (TR[locale] || TR.th)[k] || k; }
@@ -917,6 +957,146 @@ const modal = {
 };
 
 // --------------------------------------------------------- App ----------
+// Tenant-side contract view. Read-only: tenant verifies their own terms
+// (rent, deposit, end date) without calling the office. Downloads PDF
+// from /api/tenant/contract/:id/pdf — requires locked_at on the server
+// side, so drafts won't leak. Returns a "not approved yet" notice if
+// there's an invitation in pending/submitted but no locked contract.
+function ContractView({ locale }) {
+  const tt = (k) => tr(locale, k);
+  const [state, setState] = useState({ loading: true, contract: null, error: null });
+
+  useEffect(() => {
+    let cancel = false;
+    api('/api/tenant/contract')
+      .then((d) => {
+        if (cancel) return;
+        setState({ loading: false, contract: d.contract, error: null });
+      })
+      .catch((err) => {
+        if (cancel) return;
+        setState({ loading: false, contract: null, error: err.message || 'load failed' });
+      });
+    return () => { cancel = true; };
+  }, []);
+
+  const fmtDate = (s) => {
+    if (!s) return '—';
+    try {
+      return new Date(s).toLocaleDateString(locale === 'en' ? 'en-US' : 'th-TH',
+        { year: 'numeric', month: 'short', day: 'numeric' });
+    } catch { return String(s).slice(0, 10); }
+  };
+
+  if (state.loading) {
+    return <div style={{ padding: 40, textAlign: 'center', color: 'var(--muted)' }}>{tt('loading')}</div>;
+  }
+
+  const c = state.contract;
+  if (!c) {
+    return (
+      <div style={{ padding: 20 }}>
+        <h2 style={h2}>{tt('myContract')}</h2>
+        <div style={{ ...card, marginTop: 12, color: 'var(--muted)', textAlign: 'center', padding: 28 }}>
+          <div style={{ fontSize: 32, marginBottom: 8 }}>📜</div>
+          {tt('noContract')}
+        </div>
+      </div>
+    );
+  }
+
+  // The contract row carries locked_at via the /api/tenant/contract view.
+  // PDF endpoint server-side requires locked_at — show a pending notice
+  // instead of a dead "download" button when the contract is still draft.
+  const isLocked = !!c.locked_at;
+
+  return (
+    <div style={{ padding: 20 }}>
+      <h2 style={h2}>{tt('myContract')}</h2>
+      <div style={{ ...card, marginTop: 12 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
+          <span style={{ fontSize: 22 }}>📄</span>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontFamily: 'Sora', fontSize: 16, fontWeight: 600 }}>
+              {c.contract_no || '—'}
+            </div>
+            <div style={{ color: 'var(--muted)', fontSize: 13 }}>
+              {tt('contractRoom')} {c.room_id || '—'}
+            </div>
+          </div>
+          {isLocked
+            ? <Pill color="var(--green)">🔒 {tt('contractActive')}</Pill>
+            : <Pill color="var(--amber)">{tt('contractPending')}</Pill>
+          }
+        </div>
+
+        <ContractKV label={tt('contractStart')} value={fmtDate(c.start_date)} />
+        <ContractKV label={tt('contractEnd')} value={fmtDate(c.end_date)} />
+        <ContractKV
+          label={tt('contractTerm')}
+          value={c.term_months ? `${c.term_months} ${tt('contractMonths')}` : tt('contractOpenEnded')}
+        />
+        {c.days_left != null && c.days_left >= 0 ? (
+          <ContractKV
+            label={tt('contractDaysLeft')}
+            value={`${c.days_left} ${tt('contractDays')}`}
+            highlight={c.days_left <= 30}
+          />
+        ) : null}
+        <ContractKV
+          label={tt('contractRent')}
+          value={`฿ ${fmtCurrency(c.monthly_rent)} / ${tt('contractMonths')}`}
+          bold
+        />
+        {Number(c.discount_pct) > 0 ? (
+          <ContractKV
+            label={tt('contractDiscount')}
+            value={`${Number(c.discount_pct).toFixed(1)}%`}
+          />
+        ) : null}
+        <ContractKV label={tt('contractDeposit')} value={`฿ ${fmtCurrency(c.deposit)}`} />
+        {c.signed_at ? (
+          <ContractKV label={tt('contractSigned')} value={fmtDate(c.signed_at)} />
+        ) : null}
+      </div>
+
+      {isLocked ? (
+        <a
+          href={`/api/tenant/contract/${c.id}/pdf?download=1`}
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{
+            display: 'block', textAlign: 'center', textDecoration: 'none',
+            padding: '14px 18px', borderRadius: 12,
+            background: 'var(--accent)', color: '#fff',
+            fontFamily: 'Sora', fontWeight: 600, fontSize: 15,
+            marginTop: 16,
+          }}
+        >
+          📥 {tt('contractDownload')}
+        </a>
+      ) : null}
+    </div>
+  );
+}
+
+function ContractKV({ label, value, bold, highlight }) {
+  return (
+    <div style={{
+      display: 'flex', justifyContent: 'space-between',
+      padding: '8px 0', borderBottom: '1px solid var(--border)',
+      fontSize: 14,
+    }}>
+      <span style={{ color: 'var(--muted)' }}>{label}</span>
+      <span style={{
+        fontWeight: bold ? 600 : 500,
+        color: highlight ? 'var(--amber)' : 'var(--ink)',
+        fontFamily: bold ? 'Sora' : 'inherit',
+      }}>{value}</span>
+    </div>
+  );
+}
+
 function App() {
   const [tenant, setTenant] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -1029,6 +1209,7 @@ function App() {
         {page === 'bills' && <BillsView locale={locale} bills={bills}
           refresh={() => refresh(tenant)} slipFeature={features?.slipUpload} />}
         {page === 'payments' && <PaymentsView locale={locale} />}
+        {page === 'contract' && <ContractView locale={locale} />}
         {page === 'maintenance' && <MaintenanceView locale={locale} tenant={tenant}
           tickets={tickets} refresh={() => refresh(tenant)} />}
         {page === 'profile' && <ProfileView tenant={tenant} locale={locale} setLocale={setLocale}
@@ -1041,6 +1222,7 @@ function App() {
         <Tab id="home" page={page} setPage={setPage}>{tr(locale, 'home')}</Tab>
         <Tab id="bills" page={page} setPage={setPage}>{tr(locale, 'bills')}</Tab>
         <Tab id="payments" page={page} setPage={setPage}>{tr(locale, 'payments')}</Tab>
+        <Tab id="contract" page={page} setPage={setPage}>{tr(locale, 'contract')}</Tab>
         <Tab id="maintenance" page={page} setPage={setPage}>{tr(locale, 'maintenance')}</Tab>
         <Tab id="profile" page={page} setPage={setPage}>{tr(locale, 'profile')}</Tab>
       </nav>
