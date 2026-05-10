@@ -303,6 +303,22 @@ async function checkFeatureDependencies(features) {
     });
   }
 
+  if (features?.slipUpload?.enabled) {
+    if (features.slipUpload.allowUnverifiedAutoApprove === true) {
+      warnings.push({
+        flag: 'slipUpload.allowUnverifiedAutoApprove',
+        issue: 'tenant uploads can mark bills paid without provider/admin verification',
+        fix: 'turn this off unless this is an intentional legacy trust mode',
+      });
+    } else if (features.slipUpload.requireVerification === false && !features.slipUpload.autoVerify) {
+      warnings.push({
+        flag: 'slipUpload.requireVerification',
+        issue: 'requireVerification is off but autoVerify is off too; slips will still wait for admin review',
+        fix: 'turn on autoVerify with provider keys, or turn requireVerification back on',
+      });
+    }
+  }
+
   // accessControl auto-revoke needs bills with tenant_id. If admin only uses
   // the legacy rooms blob (no tenant rows), bills will have NULL tenant_id
   // and the scheduler's revoke query never matches anyone.

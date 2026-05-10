@@ -3431,10 +3431,9 @@ app.post('/api/tenant/payments', sameOrigin, csrfGuard, requireTenant, ensureSli
     //   3) Refuse if a verified payment ALREADY exists for this bill —
     //      defensive against same-bill double-uploads and admin-side races.
     //
-    // `paymentInserted` tracks whether we wrote a payments row, so the
-    // outer `finally` can scrub the orphan slip file on EVERY failure path
-    // — not just the 23505 case the inner catch handles. Without that, a
-    // pool timeout or a bill-status race leaks the file silently.
+    // `committed` tracks whether the DB transaction made the payment durable.
+    // If anything fails after saveBase64 but before COMMIT, rollback removes
+    // the payment row and the uploaded file must be scrubbed too.
     let row;
     let committed = false;
     const client = await pool.connect();
@@ -3804,7 +3803,7 @@ async function loadBuildingName(pool) {
   } catch { return 'บ้านกาญจน์ เรสซิเดนซ์'; }
 }
 
-app.get('/api/payments', requireAuth, async (req, res) => {
+app.get('/api/payments', requireAuth, requireRole('owner', 'manager', 'staff'), async (req, res) => {
   const status = req.query.status;
   const params = [];
   const where = [];
@@ -3846,7 +3845,7 @@ app.get('/api/payments', requireAuth, async (req, res) => {
 // GET /api/payments/:id — full row including slip_url, used by the admin
 // modal when opening a payment from the queue. Split from the list endpoint
 // so the list response stays small (see comment on the list query above).
-app.get('/api/payments/:id', requireAuth, async (req, res) => {
+app.get('/api/payments/:id', requireAuth, requireRole('owner', 'manager', 'staff'), async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
   try {

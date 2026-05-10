@@ -30,6 +30,11 @@ test('withDefaults preserves nested config', () => {
   assert.equal(f.lateFee.gracePeriodDays, 7);
 });
 
+test('slipUpload does not trust tenant uploads by default', () => {
+  const f = features.withDefaults({ slipUpload: { enabled: true, requireVerification: false } });
+  assert.equal(f.slipUpload.allowUnverifiedAutoApprove, false);
+});
+
 test('DEFAULTS keys are stable (regression guard)', () => {
   const expected = ['tenantPortal','slipUpload','photoUpload','meterIot','accessControl',
     'recurringCharges','lateFee','vat','email','sms','i18n','darkMode','softDelete',

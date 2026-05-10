@@ -335,6 +335,67 @@ test('/api/payments/:id/verify wraps both UPDATEs in one transaction', () => {
     'must not issue the bill UPDATE outside the transaction');
 });
 
+test('/api/payments/:id/verify refuses to verify against non-payable bills', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const idx = server.indexOf("app.put('/api/payments/:id/verify'");
+  assert.ok(idx > 0, 'should find admin verify handler');
+  const tail = server.slice(idx);
+  const nextIdx = tail.slice(50).search(/\napp\.(get|put|post|delete|use)\(/);
+  const body = nextIdx > 0 ? tail.slice(0, 50 + nextIdx) : tail.slice(0, 5000);
+  assert.match(body, /SELECT \* FROM payments WHERE id=\$1 AND status='pending' FOR UPDATE/,
+    'admin verify must lock the pending payment row');
+  assert.match(body, /SELECT id, status, deleted_at FROM bills WHERE id=\$1 FOR UPDATE/,
+    'admin verify must lock and inspect the target bill');
+  assert.match(body, /BILL_NOT_PAYABLE/,
+    'admin verify must refuse paid, void, deleted, or missing bills');
+  assert.match(body, /BILL_MARK_PAID_FAILED/,
+    'admin verify must fail closed if the bill update affects no row');
+});
+
+test('/api/payments/:id/verify requires reject reason server-side', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const idx = server.indexOf("app.put('/api/payments/:id/verify'");
+  assert.ok(idx > 0, 'should find admin verify handler');
+  const body = server.slice(idx, idx + 2500);
+  assert.match(body, /reason\.length < 3/,
+    'server must not rely only on the admin UI to require reject reasons');
+  assert.match(body, /REJECT_REASON_REQUIRED/,
+    'server should return a machine-readable reason-required code');
+});
+
+test('/api/bills/:id/verify-slip matches owner-manager payment verification policy', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const route = fs.readFileSync(path.join(__dirname, '..', 'routes', 'bills-extras.js'), 'utf8');
+  const idx = route.indexOf("r.post('/:id/verify-slip'");
+  assert.ok(idx > 0, 'should find bill verify-slip handler');
+  const body = route.slice(idx, idx + 2500);
+  assert.match(body, /requireRole\('owner', 'manager'\)/,
+    'bill-id verify path must use the same owner/manager policy as payment-id verify');
+  assert.doesNotMatch(body, /requireRole\('owner', 'manager', 'staff'\)/,
+    'staff must not verify or reject slips through the bill-id shortcut');
+  assert.match(body, /BILL_NOT_PAYABLE|BILL_MARK_PAID_FAILED/,
+    'bill-id verify path must fail closed when the bill is not payable');
+});
+
+test('/api/tenant/payments does not auto-approve unverified slips by default', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const idx = server.indexOf("app.post('/api/tenant/payments'");
+  assert.ok(idx > 0, 'should find tenant payment upload handler');
+  const end = server.indexOf('// Atomic:', idx);
+  const body = server.slice(idx, end > idx ? end : idx + 12000);
+  assert.match(body, /allowUnverifiedAutoApprove/,
+    'legacy trust mode must require an explicit flag');
+  assert.match(body, /initialStatus = allowUnverifiedAutoApprove \? 'verified' : 'pending'/,
+    'uploads without a provider result must fall back to the admin queue');
+});
+
 test('/api/tenant/payments refuses orphan bills (BILL_NOT_LINKED)', () => {
   // Without this guard a tenant could pay any bill where tenant_id IS NULL
   // by guessing the (sequential, BIGSERIAL) bill_id. The endpoint must

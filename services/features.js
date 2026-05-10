@@ -41,6 +41,9 @@ const DEFAULTS = Object.freeze({
     //     advisory; admin still confirms (paranoid mode)
     autoVerify: false,
     provider: 'slipok',          // 'slipok' | 'easyslip' (operator choice)
+    // Emergency/legacy escape hatch only. When false, uploaded slips stay in
+    // the admin queue unless a configured provider actually verifies them.
+    allowUnverifiedAutoApprove: false,
   },
   photoUpload: {
     enabled: true,

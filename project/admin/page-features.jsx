@@ -117,6 +117,22 @@ function PageFeatures({ setToast }) {
         fix: 'เปิด tenantPortal ด้านบน',
       });
     }
+    if (features.slipUpload?.enabled && features.slipUpload.requireVerification === false
+        && !features.slipUpload.autoVerify
+        && features.slipUpload.allowUnverifiedAutoApprove !== true) {
+      w.push({
+        flag: 'slipUpload.requireVerification',
+        msg: 'ปิดการตรวจสอบก่อน แต่ยังไม่ได้เปิด autoVerify; ระบบจะยังส่งสลิปเข้าคิวตรวจแทนการ mark paid อัตโนมัติ',
+        fix: 'เปิด autoVerify และตั้ง provider key หรือเปิด "ต้องตรวจสอบก่อน" กลับ',
+      });
+    }
+    if (features.slipUpload?.allowUnverifiedAutoApprove === true) {
+      w.push({
+        flag: 'slipUpload.allowUnverifiedAutoApprove',
+        msg: 'โหมด legacy นี้ให้สลิปที่ผู้เช่าอัปโหลด mark paid ได้โดยไม่มี provider/admin ตรวจ',
+        fix: 'ปิดค่านี้ถ้าไม่ตั้งใจรับความเสี่ยง',
+      });
+    }
     if (features.accessControl?.enabled && features.accessControl?.requirePaymentForCard
         && !features.tenantPortal?.enabled) {
       w.push({
@@ -259,6 +275,9 @@ function PageFeatures({ setToast }) {
           title="อัปโหลดสลิปชำระเงิน"
           desc="ผู้เช่าแนบสลิปแทนการโอนเงินสด แอดมินตรวจสอบก่อนอนุมัติ">
           <ToggleField id="slipUpload" field="requireVerification" label="ต้องตรวจสอบก่อน" features={features} setField={setField} />
+          <ToggleField id="slipUpload" field="autoVerify" label="ตรวจสลิปอัตโนมัติ" features={features} setField={setField} />
+          <SelectField id="slipUpload" field="provider" label="ผู้ให้บริการตรวจสลิป"
+            options={[['slipok', 'SlipOK'], ['easyslip', 'EasySlip']]} features={features} setField={setField} />
           <Field id="slipUpload" field="maxBytes" label="ขนาดสูงสุด (bytes)" type="number" />
         </Row>
         <Row id="photoUpload"
