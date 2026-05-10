@@ -14,7 +14,7 @@ const PgSession = require('connect-pg-simple')(session);
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const { renderBillPdf } = require('./services/pdf');
-const { renderQrPng, renderQrDataUrl } = require('./services/promptpay');
+const { renderQrPng, renderQrDataUrl, MAX_AMOUNT } = require('./services/promptpay');
 const lineNotify = require('./services/line');
 const features = require('./services/features');
 const cryptoSvc = require('./services/crypto');
@@ -1088,9 +1088,17 @@ function releasePdfSlot() {
 app.post('/api/bills/render', sameOrigin, csrfGuard, requireAuth, async (req, res) => {
   const bill = req.body && req.body.bill ? req.body.bill : req.body;
   const config = req.body && req.body.config;
-  if (!bill || !bill.tenantName || !bill.total) {
+  if (!bill || !bill.tenantName || bill.total == null) {
     return res.status(400).json({ error: 'bill.tenantName and bill.total required' });
   }
+  const billTotal = Number(bill.total);
+  if (!Number.isFinite(billTotal) || billTotal <= 0 || billTotal > MAX_AMOUNT) {
+    return res.status(400).json({
+      error: 'bill.total must be greater than 0 and within PromptPay limit',
+      code: 'INVALID_BILL_TOTAL',
+    });
+  }
+  bill.total = Math.round(billTotal * 100) / 100;
   // Single source of truth for payment block: services/billing.buildPaymentBlock
   // derives promptpayTarget, bankInfo, paymentMethods from config.payment.
   // If client sent { bill, config } we enrich here so the client doesn't need
@@ -1139,7 +1147,7 @@ app.get('/api/promptpay/qr', rateLimitQr, async (req, res) => {
   if (!target) return res.status(400).json({ error: 'target required' });
   // Cap amount: realistic monthly bills are <100k THB. 999,999 is the upper
   // sanity bound — bigger values are likely attempts to abuse the QR.
-  if (amount != null && (!Number.isFinite(amount) || amount < 0 || amount > 999999)) {
+  if (amount != null && (!Number.isFinite(amount) || amount <= 0 || amount > MAX_AMOUNT)) {
     return res.status(400).json({ error: 'invalid amount' });
   }
   // C13 — strict shape: Thai phone (10 digits, leading 0) OR citizen ID (13).
@@ -2727,6 +2735,75 @@ app.get('/api/tenant/payment-info', requireTenant, async (_req, res) => {
   } catch (err) {
     console.error('tenant payment-info error:', err);
     res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// GET /api/tenant/bills/:id/qr — tenant-owned PromptPay QR generated from
+// the stored bill row. This avoids trusting a browser-side `amount=` query:
+// the amount encoded into the QR is always bills.total for that bill.
+app.get('/api/tenant/bills/:id/qr', rateLimitQr, requireTenant, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id < 1) {
+    return res.status(400).json({ error: 'invalid id' });
+  }
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, total, status, tenant_id
+         FROM bills
+        WHERE id=$1 AND deleted_at IS NULL`,
+      [id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'bill not found' });
+    const bill = rows[0];
+    if (Number(bill.tenant_id) !== Number(req.tenant.tenant_id)) {
+      return res.status(403).json({ error: 'not your bill' });
+    }
+    if (bill.status !== 'pending' && bill.status !== 'overdue') {
+      return res.status(409).json({
+        error: 'bill is not payable',
+        code: 'BILL_NOT_PAYABLE',
+        status: bill.status,
+      });
+    }
+    const amount = Number(bill.total);
+    if (!Number.isFinite(amount) || amount <= 0 || amount > MAX_AMOUNT) {
+      return res.status(409).json({
+        error: 'bill amount cannot be encoded as PromptPay QR',
+        code: 'INVALID_BILL_TOTAL',
+      });
+    }
+
+    const cfgQ = await pool.query(
+      `SELECT value FROM app_data WHERE key='baankarn_config_v1' LIMIT 1`
+    );
+    const config = cfgQ.rows[0]?.value || {};
+    const paymentBlock = billing.buildPaymentBlock(config);
+    if (!paymentBlock.promptpayTarget) {
+      const envPp = require('./services/secrets').get('PROMPTPAY_TARGET');
+      if (envPp) paymentBlock.promptpayTarget = envPp;
+    }
+    if (!paymentBlock.promptpayTarget) {
+      return res.status(503).json({
+        error: 'PromptPay is not configured',
+        code: 'PROMPTPAY_NOT_CONFIGURED',
+      });
+    }
+
+    const png = await renderQrPng(paymentBlock.promptpayTarget, amount);
+    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    return res.end(png);
+  } catch (err) {
+    console.error('tenant bill qr error:', err);
+    const msg = String(err.message || '');
+    if (msg.startsWith('PromptPay target')) {
+      return res.status(503).json({
+        error: 'PromptPay configuration is invalid',
+        code: 'PROMPTPAY_INVALID_CONFIG',
+      });
+    }
+    return res.status(500).json({ error: 'qr render failed', code: 'QR_ERROR' });
   }
 });
 
@@ -7225,10 +7302,16 @@ app.post('/api/admin/contract-invitations/:id/reject',
       // Pull tenant_id back in the RETURNING so we can LINE-notify them
       // about the rejection — without it the tenant has to guess the
       // link is back open and re-visit it manually.
+      // Extend expires_at by 7 days from now: if the original 7-day window
+      // already lapsed by the time admin got around to reviewing, the
+      // tenant would otherwise hit a lazy-expire on their next visit and
+      // never get a chance to fix the issue.
       const { rows } = await pool.query(
         `UPDATE contract_invitations
             SET status='pending', rejected_at=NOW(), rejected_by=$2,
-                rejection_reason=$3, updated_at=NOW()
+                rejection_reason=$3,
+                expires_at = GREATEST(expires_at, NOW() + INTERVAL '7 days'),
+                updated_at=NOW()
           WHERE id=$1 AND status='submitted'
           RETURNING id, contract_id, tenant_id`,
         [id, req.session.user.username, reason]
@@ -7315,10 +7398,30 @@ app.get('/api/contract-fill/:token', rateLimitContractFill, async (req, res) => 
   const contractInvitation = require('./services/contractInvitation');
   try {
     const inv = await contractInvitation.resolveActiveByToken(pool, token);
-    if (!inv) return res.status(404).json({
-      error: 'ลิงก์นี้ใช้ไม่ได้แล้ว (อาจหมดอายุ ถูกอนุมัติ หรือถูกยกเลิก)',
-      code: 'TOKEN_INVALID',
-    });
+    if (!inv) {
+      // Drill into raw state for actionable error messages. This is what
+      // distinguishes "you already submitted, just wait" from "admin
+      // revoked, you need a new link" — both look like 404 otherwise.
+      const raw = await contractInvitation.inspectByToken(pool, token);
+      if (raw) {
+        if (raw.status === 'approved') return res.status(410).json({
+          error: 'สัญญาได้รับการอนุมัติแล้ว — ติดต่อเจ้าของหอพักเพื่อรับ PDF',
+          code: 'ALREADY_APPROVED',
+        });
+        if (raw.status === 'revoked') return res.status(410).json({
+          error: 'ลิงก์นี้ถูกยกเลิกโดยเจ้าของหอพัก — ติดต่อขอลิงก์ใหม่',
+          code: 'REVOKED',
+        });
+        if (raw.status === 'expired') return res.status(410).json({
+          error: 'ลิงก์หมดอายุแล้ว — ติดต่อเจ้าของหอพักเพื่อขอลิงก์ใหม่',
+          code: 'EXPIRED',
+        });
+      }
+      return res.status(404).json({
+        error: 'ลิงก์นี้ใช้ไม่ได้ — ติดต่อเจ้าของหอพัก',
+        code: 'TOKEN_INVALID',
+      });
+    }
     let building = { name: 'บ้านกาญจน์ เรสซิเดนซ์' };
     try {
       const cfgQ = await pool.query(
@@ -7334,13 +7437,35 @@ app.get('/api/contract-fill/:token', rateLimitContractFill, async (req, res) => 
   }
 });
 
+// Shared helper: build a friendly error response based on the raw row
+// state. Both PUT and Upload need the same "distinguish terminal states"
+// behavior — collapsing every failure to TOKEN_INVALID was the bug that
+// made the tenant page show "ลิงก์ใช้ไม่ได้" with no actionable next step.
+async function _contractFillFriendlyError(pool, contractInvitation, token, res) {
+  const raw = await contractInvitation.inspectByToken(pool, token);
+  if (raw) {
+    if (raw.status === 'approved') return res.status(410).json({
+      error: 'สัญญาได้รับการอนุมัติแล้ว', code: 'ALREADY_APPROVED',
+    });
+    if (raw.status === 'revoked') return res.status(410).json({
+      error: 'ลิงก์ถูกยกเลิกโดยเจ้าของหอพัก', code: 'REVOKED',
+    });
+    if (raw.status === 'expired') return res.status(410).json({
+      error: 'ลิงก์หมดอายุแล้ว', code: 'EXPIRED',
+    });
+  }
+  return res.status(404).json({
+    error: 'ลิงก์นี้ใช้ไม่ได้', code: 'TOKEN_INVALID',
+  });
+}
+
 // PUT /api/contract-fill/:token — save draft (intermediate state)
 app.put('/api/contract-fill/:token', rateLimitContractFill, async (req, res) => {
   const token = String(req.params.token).slice(0, 80);
   const contractInvitation = require('./services/contractInvitation');
   try {
     const inv = await contractInvitation.resolveActiveByToken(pool, token);
-    if (!inv) return res.status(404).json({ error: 'TOKEN_INVALID', code: 'TOKEN_INVALID' });
+    if (!inv) return _contractFillFriendlyError(pool, contractInvitation, token, res);
     if (inv.status !== 'pending') {
       return res.status(409).json({
         error: 'ส่งให้ตรวจสอบแล้ว — แก้ไขไม่ได้จนกว่า admin จะ reject',
@@ -7350,8 +7475,16 @@ app.put('/api/contract-fill/:token', rateLimitContractFill, async (req, res) => 
     const draft = contractInvitation.sanitiseDraft(req.body);
     // Merge over existing — tenant might be saving partial fields.
     const merged = Object.assign({}, inv.draft || {}, draft);
+    // Slide expires_at forward on every save: a tenant actively filling
+    // shouldn't have their link expire underneath them. We bump it to
+    // 7 days from now if the current expires_at is closer than that.
+    // Idle invitations still expire on the original schedule.
     await pool.query(
-      `UPDATE contract_invitations SET draft=$1::jsonb, updated_at=NOW() WHERE id=$2`,
+      `UPDATE contract_invitations
+          SET draft=$1::jsonb,
+              expires_at = GREATEST(expires_at, NOW() + INTERVAL '7 days'),
+              updated_at=NOW()
+        WHERE id=$2`,
       [JSON.stringify(merged), inv.id]
     );
     res.json({ ok: true, draft: merged });
@@ -7367,9 +7500,12 @@ app.post('/api/contract-fill/:token/upload', rateLimitContractFill, async (req, 
   const contractInvitation = require('./services/contractInvitation');
   try {
     const inv = await contractInvitation.resolveActiveByToken(pool, token);
-    if (!inv) return res.status(404).json({ error: 'TOKEN_INVALID', code: 'TOKEN_INVALID' });
+    if (!inv) return _contractFillFriendlyError(pool, contractInvitation, token, res);
     if (inv.status !== 'pending') {
-      return res.status(409).json({ error: 'NOT_EDITABLE', code: 'NOT_EDITABLE' });
+      return res.status(409).json({
+        error: 'ส่งให้ตรวจสอบแล้ว — แก้ไขไม่ได้',
+        code: 'NOT_EDITABLE',
+      });
     }
     const b = req.body || {};
     const kind = String(b.kind || '');
@@ -7389,6 +7525,16 @@ app.post('/api/contract-fill/:token/upload', rateLimitContractFill, async (req, 
       maxBytes: 1_500_000,
       side,
     });
+    // Engagement signal — extend expiry the same way PUT does so the
+    // tenant doesn't lose their session mid-photo-upload after a long
+    // pause to find their citizen card.
+    await pool.query(
+      `UPDATE contract_invitations
+          SET expires_at = GREATEST(expires_at, NOW() + INTERVAL '7 days'),
+              updated_at=NOW()
+        WHERE id=$1`,
+      [inv.id]
+    ).catch(() => { /* best-effort, don't fail the upload on this */ });
     res.json({ ok: true, file: { id: out.id, url: out.url, kind } });
   } catch (err) {
     console.error('contract-fill upload error:', err.message);
@@ -7397,14 +7543,60 @@ app.post('/api/contract-fill/:token/upload', rateLimitContractFill, async (req, 
 });
 
 // POST /api/contract-fill/:token/submit — tenant flips to status='submitted'
+//
+// Idempotent on already-submitted (double-click safe). When the token is
+// invalid we drill into the raw row state so the response distinguishes
+// expired / revoked / approved / never-existed — without this the tenant
+// sees a generic "ลิงก์ใช้ไม่ได้" with no actionable next step.
 app.post('/api/contract-fill/:token/submit', rateLimitContractFill, async (req, res) => {
   const token = String(req.params.token).slice(0, 80);
   const contractInvitation = require('./services/contractInvitation');
   try {
     const inv = await contractInvitation.resolveActiveByToken(pool, token);
-    if (!inv) return res.status(404).json({ error: 'TOKEN_INVALID', code: 'TOKEN_INVALID' });
+    if (!inv) {
+      // Drill into the raw row so we can return a useful error code.
+      // resolveActiveByToken collapses many distinct states into null:
+      // expired / revoked / approved / rejected / bad-format / no-row.
+      const raw = await contractInvitation.inspectByToken(pool, token);
+      if (raw) {
+        if (raw.status === 'approved') {
+          return res.status(409).json({
+            error: 'สัญญานี้ได้รับการอนุมัติแล้ว — ไม่ต้องส่งซ้ำ',
+            code: 'ALREADY_APPROVED',
+          });
+        }
+        if (raw.status === 'revoked') {
+          return res.status(409).json({
+            error: 'ลิงก์นี้ถูกยกเลิกโดยเจ้าของหอพัก — ติดต่อขอลิงก์ใหม่',
+            code: 'REVOKED',
+          });
+        }
+        if (raw.status === 'expired') {
+          return res.status(409).json({
+            error: 'ลิงก์หมดอายุแล้ว — ติดต่อเจ้าของหอพักเพื่อขอต่ออายุ',
+            code: 'EXPIRED',
+          });
+        }
+      }
+      return res.status(404).json({
+        error: 'ลิงก์นี้ใช้ไม่ได้ — ติดต่อเจ้าของหอพัก',
+        code: 'TOKEN_INVALID',
+      });
+    }
+    // Idempotent re-submit: if the row is already 'submitted', a second
+    // click (double-tap, network retry) should NOT error out. Just confirm
+    // success — the tenant's data is already captured.
+    if (inv.status === 'submitted') {
+      return res.json({
+        ok: true, invitationId: inv.id, status: 'submitted',
+        alreadySubmitted: true,
+      });
+    }
     if (inv.status !== 'pending') {
-      return res.status(409).json({ error: 'NOT_EDITABLE', code: 'NOT_EDITABLE' });
+      return res.status(409).json({
+        error: 'ลิงก์นี้แก้ไขไม่ได้แล้ว',
+        code: 'NOT_EDITABLE', status: inv.status,
+      });
     }
     // Optional final-edit payload sent with the submit click — merge as one
     // last save before flipping status.
@@ -7428,9 +7620,16 @@ app.post('/api/contract-fill/:token/submit', rateLimitContractFill, async (req, 
         code: 'INCOMPLETE', missing,
       });
     }
+    // Extend expires_at to give admin a generous review window. Without
+    // this, a tenant who barely beat the 7-day expiry would have their
+    // submitted row lazy-expired before admin gets to review it (now
+    // prevented by the resolveActiveByToken change too, but defense in
+    // depth is cheap).
     await pool.query(
       `UPDATE contract_invitations
-          SET status='submitted', draft=$1::jsonb, submitted_at=NOW(), updated_at=NOW()
+          SET status='submitted', draft=$1::jsonb, submitted_at=NOW(),
+              expires_at = GREATEST(expires_at, NOW() + INTERVAL '60 days'),
+              updated_at=NOW()
         WHERE id=$2 AND status='pending'`,
       [JSON.stringify(draft), inv.id]
     );

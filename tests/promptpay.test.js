@@ -29,6 +29,12 @@ test('buildPayload accepts 13-digit citizen id', () => {
   assert.ok(out.startsWith('00020101'));
 });
 
+test('buildPayload rejects invalid PromptPay target shape', () => {
+  assert.throws(() => buildPayload('1234567890'), /PromptPay target/);
+  assert.throws(() => buildPayload('12345'), /PromptPay target/);
+  assert.throws(() => buildPayload('abc0801234567'), /PromptPay target/);
+});
+
 test('buildPayload strips dashes and spaces', () => {
   const a = buildPayload('080-123-4567');
   const b = buildPayload('080 123 4567');
@@ -46,14 +52,16 @@ test('buildPayload includes amount when provided', () => {
   assert.ok(/540[0-9]/.test(withAmount), 'amount-tagged field present');
 });
 
-test('buildPayload ignores invalid amounts', () => {
+test('buildPayload rejects invalid amounts instead of silently making any-amount QR', () => {
   const base = buildPayload('0801234567');
-  // 0, negative, NaN, Infinity, non-number → no amount tag
-  assert.equal(buildPayload('0801234567', 0), base);
-  assert.equal(buildPayload('0801234567', -10), base);
-  assert.equal(buildPayload('0801234567', NaN), base);
-  assert.equal(buildPayload('0801234567', Infinity), base);
-  assert.equal(buildPayload('0801234567', 'not-a-number'), base);
+  assert.ok(!/540[0-9]/.test(base), 'omitted amount remains an any-amount QR');
+  for (const bad of [0, -10, NaN, Infinity, 'not-a-number', 1000000]) {
+    assert.throws(
+      () => buildPayload('0801234567', bad),
+      /PromptPay amount/,
+      `amount ${String(bad)} must be rejected`
+    );
+  }
 });
 
 test('renderQrPng returns a PNG buffer', async () => {

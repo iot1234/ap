@@ -135,8 +135,12 @@ function fmtThaiDate(s) {
   } catch { return s; }
 }
 
-// Debounced auto-save (typing → save 800ms after last edit)
-function useDebouncedSave(token, draft, status, onSaved) {
+// Debounced auto-save (typing → save 800ms after last edit). On terminal
+// failure (link revoked / expired / approved while filling), surface
+// a banner via onFatal — without it the tenant fills the whole form, hits
+// submit, and only THEN learns the link is dead. The auto-save failing
+// is the earliest signal we have that something changed server-side.
+function useDebouncedSave(token, draft, status, onSaved, onFatal) {
   const lastJSONRef = useRef('');
   useEffect(() => {
     if (status !== 'pending') return;
@@ -148,12 +152,33 @@ function useDebouncedSave(token, draft, status, onSaved) {
         lastJSONRef.current = json;
         onSaved && onSaved();
       } catch (err) {
-        // Silent on auto-save — UI shows error only on explicit submit.
         console.warn('auto-save failed:', err.message);
+        // Terminal codes mean the link is dead. Surface to the parent so
+        // it can show a banner and stop the tenant wasting time.
+        if (err.code === 'REVOKED' || err.code === 'EXPIRED'
+            || err.code === 'ALREADY_APPROVED' || err.code === 'TOKEN_INVALID') {
+          onFatal && onFatal(err);
+        }
       }
     }, 800);
     return () => clearTimeout(t);
   }, [token, draft, status]);
+}
+
+// Map server error codes → friendly Thai messages with the right "what
+// can the tenant do next" copy. Falls back to the raw message for codes
+// we haven't mapped yet so dev tooling still surfaces the underlying
+// reason instead of hiding it.
+function friendlyErrorText(err) {
+  const code = err && err.code;
+  const map = {
+    REVOKED: 'ลิงก์นี้ถูกยกเลิกโดยเจ้าของหอพัก — กรุณาติดต่อเจ้าของหอพักเพื่อขอลิงก์ใหม่',
+    EXPIRED: 'ลิงก์หมดอายุแล้ว — กรุณาติดต่อเจ้าของหอพักเพื่อขอลิงก์ใหม่',
+    ALREADY_APPROVED: 'สัญญาได้รับการอนุมัติแล้ว — คุณไม่ต้องดำเนินการต่อ',
+    TOKEN_INVALID: 'ลิงก์นี้ใช้ไม่ได้ — กรุณาติดต่อเจ้าของหอพัก',
+    NOT_EDITABLE: 'ส่งสัญญาให้ตรวจสอบแล้ว — รอเจ้าของหอพักรีวิว',
+  };
+  return map[code] || (err && err.message) || 'เกิดข้อผิดพลาด';
 }
 
 // ============== Main app ==============
@@ -163,6 +188,7 @@ function App() {
   const [step, setStep] = useState(1);        // 1..4
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
+  const [errorCode, setErrorCode] = useState(null);
   const [savedAt, setSavedAt] = useState(null);
   const [submitted, setSubmitted] = useState(false);
 
@@ -170,6 +196,7 @@ function App() {
   useEffect(() => {
     if (!tokenFromUrl) {
       setError('ลิงก์ไม่ถูกต้อง');
+      setErrorCode('TOKEN_INVALID');
       return;
     }
     api(`/api/contract-fill/${tokenFromUrl}`)
@@ -178,21 +205,49 @@ function App() {
         setDraft(d.view.draft || {});
         if (d.view.status === 'submitted') setSubmitted(true);
       })
-      .catch((err) => setError(err.message || 'โหลดข้อมูลไม่ได้'));
+      .catch((err) => {
+        setError(friendlyErrorText(err));
+        setErrorCode(err.code || null);
+      });
   }, []);
+
+  // When the auto-save discovers the link is dead, abort the form.
+  const handleFatalAutoSave = (err) => {
+    setError(friendlyErrorText(err));
+    setErrorCode(err.code || null);
+  };
 
   useDebouncedSave(tokenFromUrl, draft,
     view ? view.status : 'pending',
-    () => setSavedAt(new Date()));
+    () => setSavedAt(new Date()),
+    handleFatalAutoSave);
 
   if (error) {
+    // Tailor the alert text by error code — generic "หมดอายุ/ถูกอนุมัติ/
+    // ถูกยกเลิก" was the original bug that hid which one actually happened.
+    const alertText = (() => {
+      switch (errorCode) {
+        case 'ALREADY_APPROVED':
+          return <>✅ สัญญาของคุณได้รับการอนุมัติเรียบร้อยแล้ว<br/>
+            กรุณาติดต่อเจ้าของหอพักเพื่อรับสำเนา PDF</>;
+        case 'REVOKED':
+          return <>เจ้าของหอพักได้ยกเลิกลิงก์นี้แล้ว<br/>
+            กรุณาติดต่อเจ้าของหอพักเพื่อขอลิงก์ใหม่</>;
+        case 'EXPIRED':
+          return <>ลิงก์นี้หมดอายุแล้ว<br/>
+            กรุณาติดต่อเจ้าของหอพักเพื่อขอต่ออายุหรือลิงก์ใหม่</>;
+        default:
+          return <>ลิงก์อาจหมดอายุ ถูกอนุมัติแล้ว หรือถูกยกเลิก<br/>
+            กรุณาติดต่อเจ้าของหอพักเพื่อขอลิงก์ใหม่</>;
+      }
+    })();
+    const isApproved = errorCode === 'ALREADY_APPROVED';
     return (
       <div className="card">
-        <h1>⚠ ลิงก์นี้ใช้ไม่ได้</h1>
+        <h1>{isApproved ? '✅ ' : '⚠ '}{isApproved ? 'สัญญาเสร็จสมบูรณ์แล้ว' : 'ลิงก์นี้ใช้ไม่ได้'}</h1>
         <div className="muted" style={{ marginTop: 8 }}>{error}</div>
-        <div className="alert alert-info" style={{ marginTop: 16 }}>
-          ลิงก์อาจหมดอายุ ถูกอนุมัติแล้ว หรือถูกยกเลิก<br/>
-          กรุณาติดต่อเจ้าของหอพักเพื่อขอลิงก์ใหม่
+        <div className={`alert ${isApproved ? 'alert-success' : 'alert-info'}`} style={{ marginTop: 16 }}>
+          {alertText}
         </div>
       </div>
     );
@@ -212,15 +267,26 @@ function App() {
   const submit = async () => {
     setBusy(true);
     setError(null);
+    setErrorCode(null);
     try {
-      await api(`/api/contract-fill/${tokenFromUrl}/submit`, {
+      const result = await api(`/api/contract-fill/${tokenFromUrl}/submit`, {
         method: 'POST', body: draft,
       });
+      // Idempotent: server returns ok:true even on already-submitted.
+      // Either way the data is captured — show SubmittedView.
       setSubmitted(true);
       window.scrollTo(0, 0);
     } catch (err) {
-      setError(err.message + (err.body && err.body.missing
-        ? ` (ขาด: ${err.body.missing.join(', ')})` : ''));
+      // INCOMPLETE has its own structure — keep the field-specific hint.
+      // Terminal codes (REVOKED/EXPIRED/ALREADY_APPROVED) take over the
+      // whole page via the error block; setting errorCode triggers the
+      // tailored copy above.
+      if (err.code === 'INCOMPLETE' && err.body && err.body.missing) {
+        setError(err.message + ` (ขาด: ${err.body.missing.join(', ')})`);
+      } else {
+        setError(friendlyErrorText(err));
+        setErrorCode(err.code || null);
+      }
     } finally {
       setBusy(false);
     }

@@ -60,7 +60,13 @@ function hashToken(token) {
  *   - token format invalid
  *   - no matching row
  *   - row is in a terminal status (approved / rejected / revoked / expired)
- *   - row past expires_at (also flips status to 'expired' on the way out)
+ *   - row is PENDING past expires_at (lazy-flips status to 'expired')
+ *
+ * Submitted invitations are NEVER lazy-expired — the tenant has done their
+ * part and admin needs unlimited time to review. Without this exemption,
+ * a tenant who took >7 days to fill (or one returning to verify their
+ * submission) would hit a confusing 404 even though their data is safe
+ * in the system.
  *
  * Successful return shape: full row with `status` ∈ ACTIVE_STATUSES.
  */
@@ -81,9 +87,11 @@ async function resolveActiveByToken(pool, token) {
   );
   if (!rows.length) return null;
   const row = rows[0];
-  // Lazy expire — flip status on the way out so admin's "active" list
-  // stays accurate without a separate sweep job.
-  if (ACTIVE_STATUSES.has(row.status) && new Date(row.expires_at) < new Date()) {
+  // Lazy expire — pending only. Submitted rows stay accessible so admin
+  // can approve and tenant can revisit. The cleanup of stale pending rows
+  // keeps admin's "active" list accurate without a sweep job.
+  if (row.status === 'pending' && row.expires_at
+      && new Date(row.expires_at) < new Date()) {
     try {
       await pool.query(
         `UPDATE contract_invitations SET status='expired', updated_at=NOW() WHERE id=$1`,
@@ -94,6 +102,25 @@ async function resolveActiveByToken(pool, token) {
   }
   if (!ACTIVE_STATUSES.has(row.status)) return null;
   return row;
+}
+
+/**
+ * Inspect the raw row state for a token regardless of expiry / status.
+ * Used by handlers that need to distinguish causes (revoked vs expired
+ * vs already-submitted vs approved) for friendly error messages — the
+ * resolveActiveByToken null return collapses all of these into "404".
+ *
+ * Returns { status, rejection_reason } or null on bad-format / no row.
+ */
+async function inspectByToken(pool, token) {
+  const hash = hashToken(token);
+  if (!hash) return null;
+  const { rows } = await pool.query(
+    `SELECT id, status, rejection_reason, expires_at
+       FROM contract_invitations WHERE token_hash = $1 LIMIT 1`,
+    [hash]
+  );
+  return rows[0] || null;
 }
 
 /**
@@ -224,6 +251,7 @@ module.exports = {
   generateToken,
   hashToken,
   resolveActiveByToken,
+  inspectByToken,
   createInvitation,
   sanitiseDraft,
   buildPublicView,

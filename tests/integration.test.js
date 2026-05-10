@@ -440,6 +440,42 @@ test('GET /api/tenant/bills/:id/pdf is wired (tenant PDF download)', () => {
     'tenant PDF must stream through renderBillPdf');
 });
 
+test('GET /api/tenant/bills/:id/qr uses DB bill total, not browser query amount', () => {
+  // Tenant-side QR must be generated from the stored bill row. If the UI
+  // passes target+amount through /api/promptpay/qr, a stale React state or
+  // hand-edited query string can show a QR for the wrong amount even though
+  // slip upload later rejects it. Pin the source of truth to bills.total.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const idx = server.indexOf("app.get('/api/tenant/bills/:id/qr'");
+  assert.ok(idx > 0, 'tenant bill QR endpoint must exist');
+  const tail = server.slice(idx);
+  const nextIdx = tail.slice(50).search(/\napp\.(get|put|post|delete|use)\(/);
+  const body = nextIdx > 0 ? tail.slice(0, 50 + nextIdx) : tail.slice(0, 5000);
+  assert.match(body, /requireTenant/, 'tenant bill QR must require tenant auth');
+  assert.match(body, /SELECT id, total, status, tenant_id[\s\S]*FROM bills/,
+    'tenant bill QR must read total/status/tenant_id from bills');
+  assert.match(body, /not your bill/,
+    'tenant bill QR must enforce bill ownership');
+  assert.match(body, /const amount = Number\(bill\.total\)/,
+    'tenant bill QR amount must come from bills.total');
+  assert.match(body, /renderQrPng\(paymentBlock\.promptpayTarget, amount\)/,
+    'tenant bill QR must render with DB amount');
+  assert.doesNotMatch(body, /req\.query\.(?:amount|target)/,
+    'tenant bill QR must not trust query amount or target');
+});
+
+test('tenant bill modal uses bill-owned QR endpoint', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const tenant = fs.readFileSync(path.join(__dirname, '..', 'project', 'tenant.jsx'), 'utf8');
+  assert.match(tenant, /\/api\/tenant\/bills\/\$\{encodeURIComponent\(bill\.id\)\}\/qr/,
+    'tenant UI must request server-owned bill QR');
+  assert.doesNotMatch(tenant, /\/api\/promptpay\/qr\?target=\$\{encodeURIComponent\(pay\.promptpayTarget\)\}&amount=\$\{encodeURIComponent\(bill\.total\)\}/,
+    'tenant UI must not build payment QR from browser-side target+amount');
+});
+
 test('access_cards CRUD endpoints exist', () => {
   // The scheduler revokes/restores cards but until now there was no way
   // for admin to issue them. Pin the three new endpoints.
@@ -2067,8 +2103,13 @@ test('public fill: PUT rejects when status is not pending (NOT_EDITABLE)', () =>
   const fs = require('node:fs');
   const path = require('node:path');
   const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
-  assert.match(src, /'NOT_EDITABLE'[\s\S]{0,200}'NOT_EDITABLE'/,
-    'NOT_EDITABLE must guard PUT and upload + submit when status is submitted');
+  // PUT + upload + submit must each guard with NOT_EDITABLE when the
+  // invitation status has progressed past 'pending'. Count occurrences
+  // rather than requiring textual adjacency — the error messages diverged
+  // when we hardened friendly Thai copy per endpoint.
+  const count = (src.match(/'NOT_EDITABLE'/g) || []).length;
+  assert.ok(count >= 3,
+    `NOT_EDITABLE must guard PUT + upload + submit (found ${count}, need ≥ 3)`);
 });
 
 test('public fill: submit requires all critical fields before flipping status', () => {

@@ -6,6 +6,28 @@
 const generatePayload = require('promptpay-qr');
 const QRCode = require('qrcode');
 
+const MAX_AMOUNT = 999999;
+
+function normaliseTarget(target) {
+  if (!target || typeof target !== 'string') {
+    throw new Error('PromptPay target required');
+  }
+  const clean = target.replace(/[-\s]/g, '');
+  if (!/^0\d{9}$/.test(clean) && !/^\d{13}$/.test(clean)) {
+    throw new Error('PromptPay target must be a 10-digit Thai phone (0XXXXXXXXX) or 13-digit citizen ID');
+  }
+  return clean;
+}
+
+function normaliseAmount(amount) {
+  if (amount == null || amount === '') return undefined;
+  const n = Number(amount);
+  if (!Number.isFinite(n) || n <= 0 || n > MAX_AMOUNT) {
+    throw new Error(`PromptPay amount must be greater than 0 and <= ${MAX_AMOUNT}`);
+  }
+  return Math.round(n * 100) / 100;
+}
+
 /**
  * Build the EMV-compliant PromptPay payload string.
  * @param {string} target - Phone number (10 digits) or citizen ID (13 digits).
@@ -13,15 +35,11 @@ const QRCode = require('qrcode');
  * @returns {string} EMV payload that any Thai bank app can scan.
  */
 function buildPayload(target, amount) {
-  if (!target || typeof target !== 'string') {
-    throw new Error('PromptPay target required');
-  }
-  // promptpay-qr accepts phone numbers (10-digit) and citizen IDs (13-digit)
-  // automatically. Normalize: strip dashes/spaces.
-  const clean = target.replace(/[-\s]/g, '');
+  const clean = normaliseTarget(target);
   const opts = {};
-  if (typeof amount === 'number' && amount > 0 && Number.isFinite(amount)) {
-    opts.amount = amount;
+  const safeAmount = normaliseAmount(amount);
+  if (safeAmount != null) {
+    opts.amount = safeAmount;
   }
   return generatePayload(clean, opts);
 }
@@ -57,4 +75,11 @@ async function renderQrDataUrl(target, amount, opts = {}) {
   });
 }
 
-module.exports = { buildPayload, renderQrPng, renderQrDataUrl };
+module.exports = {
+  buildPayload,
+  renderQrPng,
+  renderQrDataUrl,
+  normaliseTarget,
+  normaliseAmount,
+  MAX_AMOUNT,
+};

@@ -168,9 +168,10 @@ async function renderBillPdf(bill, stream) {
   const payW = 220;
   let payY = y + 24;
 
-  if (bill.promptpayTarget) {
+  const qrAmount = Number(bill.total);
+  if (bill.promptpayTarget && Number.isFinite(qrAmount) && qrAmount > 0) {
     try {
-      const qrPng = await renderQrPng(bill.promptpayTarget, bill.total, { width: 360 });
+      const qrPng = await renderQrPng(bill.promptpayTarget, qrAmount, { width: 360 });
       const qrSize = 130;
       doc.roundedRect(payX, payY - 12, payW, qrSize + 70, 10).fill(C.bg);
       doc.fillColor(C.ink2).font('th-bold').fontSize(10)
@@ -186,6 +187,8 @@ async function renderBillPdf(bill, stream) {
     } catch (err) {
       console.error('[pdf] QR render failed:', err.message);
     }
+  } else if (bill.promptpayTarget) {
+    console.warn('[pdf] QR skipped: bill total must be greater than 0');
   }
 
   // Bank transfer card

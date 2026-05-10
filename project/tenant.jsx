@@ -491,7 +491,7 @@ function BillDetail({ bill, locale, onClose, slipFeature, refresh }) {
     return () => { cancelled = true; };
   }, []);
   const qrUrl = pay && pay.promptpayTarget
-    ? `/api/promptpay/qr?target=${encodeURIComponent(pay.promptpayTarget)}&amount=${encodeURIComponent(bill.total)}&format=png`
+    ? `/api/tenant/bills/${encodeURIComponent(bill.id)}/qr`
     : null;
   async function upload() {
     if (!file) { setMsg(t('chooseFile')); return; }
