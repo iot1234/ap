@@ -4126,7 +4126,7 @@ app.get('/api/bookings/:id', requireAuth, async (req, res) => {
   }
 });
 
-const BOOKING_STATUSES = new Set(['pending', 'reviewing', 'approved', 'rejected', 'cancelled']);
+const BOOKING_STATUSES = new Set(['pending', 'reviewing', 'approved', 'rejected', 'cancelled', 'completed']);
 const BOOKING_TRANSITIONS = {
   // pending → approved is allowed since 5534b48 introduced the new
   // POST /api/bookings/:id/approve-and-assign endpoint that runs the
@@ -4139,7 +4139,11 @@ const BOOKING_TRANSITIONS = {
   // separately from "I've decided to approve".
   pending:   ['reviewing', 'approved', 'rejected', 'cancelled'],
   reviewing: ['approved', 'rejected', 'cancelled'],
-  approved:  ['cancelled'],          // can revoke an approval if tenant backs out
+  // 'completed' is set by /api/contracts/quick-invite when admin converts
+  // an approved booking into a contract+invitation. Admin can still cancel
+  // after that (tenant backs out) so the exit edge stays open.
+  approved:  ['completed', 'cancelled'],
+  completed: ['cancelled'],          // contract handed off but admin can still cancel
   rejected:  ['reviewing'],          // re-open if admin reconsidered
   cancelled: [],                     // terminal
 };
@@ -6215,8 +6219,23 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
       );
       if (tQ.rows.length) {
         tenantId = tQ.rows[0].id;
-        // If the existing tenant is moved_out / blacklist, reactivate to
-        // 'active' so the new contract reflects current intent.
+        // Blacklist guard — refuse silent reactivation of blacklisted
+        // tenants. Admin can still force the override but it's
+        // audit-logged + owner-notified so a hijacked admin session
+        // can't quietly re-onboard a banned tenant.
+        if (tQ.rows[0].status === 'blacklist' && !isForced) {
+          await client.query('ROLLBACK');
+          return res.status(409).json({
+            error: `ผู้เช่ารายนี้อยู่ในรายชื่อ blacklist — ใช้ { force: true } ถ้ายืนยัน`,
+            code: 'TENANT_BLACKLISTED',
+            conflict: { id: tenantId, fullName: tQ.rows[0].full_name },
+            hint: 'ตรวจประวัติที่ /admin#tenants ก่อนตัดสินใจ',
+          });
+        }
+        // If the existing tenant is moved_out, reactivate to 'active'
+        // (returning tenant — common case). Blacklist override paths
+        // also reach here when force=true is set; the audit log captures
+        // the override above.
         if (tQ.rows[0].status !== 'active') {
           await client.query(
             `UPDATE tenants SET status='active', updated_at=NOW() WHERE id=$1`,
@@ -6628,10 +6647,18 @@ app.post('/api/admin/contract-invitations/:id/approve',
           );
 
           // Free the OLD room (if tenant was in a different room).
+          // Status → 'vacant' AND tenant → removed so notifications can't
+          // leak to the previous occupant. 'AND value ? $1' is the
+          // intentional guard — if the room isn't in the blob, there's
+          // nothing to free, no-op is correct.
           if (oldRoomId && oldRoomId !== contract.room_id) {
             await client.query(
               `UPDATE app_data
-                  SET value = jsonb_set(value, ARRAY[$1::text, 'status'], to_jsonb('vacant'::text)),
+                  SET value = jsonb_set(
+                                value,
+                                ARRAY[$1::text],
+                                (value->$1 - 'tenant') || jsonb_build_object('status', 'vacant')
+                              ),
                       updated_at=NOW()
                 WHERE key='baankarn_rooms_v1' AND value ? $1`,
               [oldRoomId]
@@ -6667,15 +6694,31 @@ app.post('/api/admin/contract-invitations/:id/approve',
               ? contract.start_date.toISOString().slice(0, 10)
               : (typeof contract.start_date === 'string' ? contract.start_date.slice(0, 10) : null),
           };
+          // UPSERT pattern: when the room exists ONLY in rooms_v2 (created
+          // via POST /api/rooms), the JSONB blob doesn't have an entry yet.
+          // The old `WHERE value ? $1` clause made the UPDATE a no-op for
+          // those rooms — scheduler.tickBillGen would then skip the room
+          // because the blob has no `room.tenant` to match. Now we ensure
+          // the blob row itself exists, then INSERT-or-merge the room key
+          // with both status='occupied' and the tenant info in one step.
+          await client.query(
+            `INSERT INTO app_data (key, value, updated_by)
+             VALUES ('baankarn_rooms_v1', '{}'::jsonb, 'system')
+             ON CONFLICT (key) DO NOTHING`
+          );
           await client.query(
             `UPDATE app_data
-                SET value = jsonb_set(
-                              jsonb_set(value, ARRAY[$1::text, 'status'], to_jsonb('occupied'::text)),
-                              ARRAY[$1::text, 'tenant'],
-                              $2::jsonb
+                SET value = value || jsonb_build_object(
+                              $1::text,
+                              COALESCE(value->$1, '{}'::jsonb)
+                                || jsonb_build_object(
+                                     'id', $1,
+                                     'status', 'occupied',
+                                     'tenant', $2::jsonb
+                                   )
                             ),
                     updated_at=NOW()
-              WHERE key='baankarn_rooms_v1' AND value ? $1`,
+              WHERE key='baankarn_rooms_v1'`,
             [contract.room_id, JSON.stringify(blobTenant)]
           );
           await client.query(
@@ -6730,6 +6773,44 @@ app.post('/api/admin/contract-invitations/:id/approve',
           subject: `✅ อนุมัติสัญญา ${contract.contract_no || ''} — ห้อง ${contract.room_id || ''}`,
           text: lines.join('\n'),
         }).catch(() => {});
+
+        // Tenant notify — closes the loop on the user's complaint that
+        // tenant never gets the signed PDF after approval. The link goes
+        // to the public PDF endpoint — but PDF requires admin auth, so
+        // the message guides the tenant to ask admin if they need a copy.
+        // (A future enhancement: a public token-based PDF download for
+        // the signed contract; out of scope for this fix.)
+        if (inv.tenant_id) {
+          try {
+            const tNotify = await pool.query(
+              `SELECT id, full_name, phone, email, line_user_id, line_oa_id, status
+                 FROM tenants WHERE id=$1 AND deleted_at IS NULL`,
+              [inv.tenant_id]
+            );
+            if (tNotify.rows.length) {
+              notifier.notifyTenant({ pool, features: flags }, tNotify.rows[0], {
+                subject: '✅ สัญญาเช่าได้รับการอนุมัติแล้ว',
+                text: [
+                  `เรียน คุณ${tNotify.rows[0].full_name || ''}`,
+                  ``,
+                  `🎉 สัญญาเช่าห้อง ${contract.room_id || '-'} ของคุณได้รับการอนุมัติแล้ว`,
+                  ``,
+                  `เลขที่สัญญา: ${contract.contract_no || '-'}`,
+                  `วันเริ่มสัญญา: ${(contract.start_date instanceof Date)
+                    ? contract.start_date.toISOString().slice(0, 10)
+                    : (typeof contract.start_date === 'string' ? contract.start_date.slice(0, 10) : '-')}`,
+                  ``,
+                  `📋 ขั้นตอนต่อไป:`,
+                  `   • เก็บสำเนาสัญญา — ติดต่อสำนักงานเพื่อรับ PDF`,
+                  `   • ตั้ง PIN เข้าพอร์ทัลผู้เช่าที่ /tenant`,
+                  `   • บิลรอบแรกจะออกอัตโนมัติตามรอบเดือน`,
+                ].join('\n'),
+              }).catch((err) => {
+                console.warn('[approve] tenant notify failed:', err.message);
+              });
+            }
+          } catch { /* notify failures don't break the response */ }
+        }
       } catch { /* notify failures don't break the response */ }
       res.json({
         ok: true,

@@ -283,9 +283,10 @@ module.exports = function buildTenantOpsRouter(ctx) {
         // GET /api/rooms?status=occupied and the booking-approve flow's
         // "find a vacant room matching the request" logic.
         // Write tenant info INTO the blob's room.tenant alongside flipping
-        // status. scheduler.tickBillGen iterates the blob and skips rooms
-        // where !room.tenant — without this nested jsonb_set, auto-billing
-        // never fires for tenants checked in via this endpoint either.
+        // status. UPSERT pattern: the room may exist only in rooms_v2
+        // (created via POST /api/rooms) and not in the JSONB blob — the
+        // old `WHERE value ? $1` clause made the UPDATE a no-op in that
+        // case, breaking scheduler.tickBillGen which iterates the blob.
         const blobTenant = {
           name: tenant.full_name || '',
           phone: tenant.phone || '',
@@ -293,14 +294,23 @@ module.exports = function buildTenantOpsRouter(ctx) {
           since: moveInDate,
         };
         await client.query(
+          `INSERT INTO app_data (key, value, updated_by)
+           VALUES ('baankarn_rooms_v1', '{}'::jsonb, 'system')
+           ON CONFLICT (key) DO NOTHING`
+        );
+        await client.query(
           `UPDATE app_data
-              SET value = jsonb_set(
-                            jsonb_set(value, ARRAY[$1::text, 'status'], to_jsonb('occupied'::text)),
-                            ARRAY[$1::text, 'tenant'],
-                            $2::jsonb
+              SET value = value || jsonb_build_object(
+                            $1::text,
+                            COALESCE(value->$1, '{}'::jsonb)
+                              || jsonb_build_object(
+                                   'id', $1,
+                                   'status', 'occupied',
+                                   'tenant', $2::jsonb
+                                 )
                           ),
                   updated_at=NOW()
-            WHERE key='baankarn_rooms_v1' AND value ? $1`,
+            WHERE key='baankarn_rooms_v1'`,
           [roomId, JSON.stringify(blobTenant)]
         );
         try {
@@ -518,9 +528,17 @@ module.exports = function buildTenantOpsRouter(ctx) {
 
         // Flip room status to vacant in BOTH JSONB blob and rooms_v2.
         if (oldRoom) {
+          // Status='vacant' AND remove room.tenant so notifications can't
+          // leak to the moved-out tenant on the next bill cycle (e.g.
+          // bulk-send pulled from blob → SMS to old tenant). The `-`
+          // operator drops the 'tenant' top-level key from the room object.
           await client.query(
             `UPDATE app_data
-                SET value = jsonb_set(value, ARRAY[$1::text, 'status'], to_jsonb('vacant'::text)),
+                SET value = jsonb_set(
+                              value,
+                              ARRAY[$1::text],
+                              (value->$1 - 'tenant') || jsonb_build_object('status', 'vacant')
+                            ),
                     updated_at=NOW()
               WHERE key='baankarn_rooms_v1' AND value ? $1`,
             [oldRoom]

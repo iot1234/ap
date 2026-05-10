@@ -1547,6 +1547,66 @@ test('features.tenancyContract defaults are sane (require ID images + emergency)
     'deposit cap default = 3 months');
 });
 
+test('BOOKING_STATUSES + BOOKING_TRANSITIONS include "completed" terminal state', () => {
+  // Pre-fix: quick-invite UPDATE bookings SET status='completed' but
+  // PUT /api/bookings/:id rejected it (BOOKING_STATUSES set didn't list
+  // 'completed'). Admin couldn't edit completed bookings.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(src,
+    /BOOKING_STATUSES = new Set\(\[[\s\S]{0,200}'completed'\]\)/,
+    'BOOKING_STATUSES must include completed');
+  // Transitions: approved → completed allowed (quick-invite path);
+  // completed → cancelled allowed (admin lets tenant back out).
+  assert.match(src, /approved:\s*\['completed', 'cancelled'\]/,
+    'approved must allow → completed (quick-invite handoff)');
+  assert.match(src, /completed: \['cancelled'\]/,
+    'completed must still allow → cancelled (tenant backs out)');
+});
+
+test('quick-invite refuses blacklisted tenant without force=true', () => {
+  // Pre-fix: quick-invite silently flipped a blacklist tenant back to
+  // 'active'. A hijacked admin session could re-onboard banned tenants
+  // without a paper trail. Now refuses with TENANT_BLACKLISTED + 409;
+  // explicit force=true required to override (audit-logged).
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const block = src.match(/quick-invite'[\s\S]+?app\.post\('\/api\/contracts\/:id\/invite-tenant'/)[0];
+  assert.match(block,
+    /tQ\.rows\[0\]\.status === 'blacklist' && !isForced/,
+    'must explicitly check blacklist before reactivating');
+  assert.match(block, /TENANT_BLACKLISTED/,
+    'must surface a clean error code');
+});
+
+test('checkout removes room.tenant from blob (no notification leak)', () => {
+  // Pre-fix: checkout flipped status='vacant' but left the moved-out
+  // tenant's name/phone/email in the blob's room.tenant. The next bulk-
+  // send pulled those stale values and SMS'd the previous occupant.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'tenant-ops.js'), 'utf8');
+  assert.match(src,
+    /\(value->\$1 - 'tenant'\) \|\| jsonb_build_object\('status', 'vacant'\)/,
+    'checkout must drop the tenant key alongside flipping status');
+});
+
+test('approve also notifies the tenant (closes the "send PDF to me" loop)', () => {
+  // Pre-fix: only owner got notified after approve. Tenant heard nothing
+  // until they checked the portal. Now they get a "✅ สัญญาเช่าได้รับ
+  // การอนุมัติแล้ว" message with next-steps.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const block = src.match(/\/approve'[\s\S]+?app\.post\('\/api\/admin\/contract-invitations\/:id\/reject'/)[0];
+  assert.match(block, /notifyTenant\(\{ pool, features: flags \}/,
+    'approve must call notifyTenant');
+  assert.match(block, /สัญญาเช่าได้รับการอนุมัติแล้ว/,
+    'tenant message must announce approval');
+});
+
 test('approve writes room.tenant into JSONB blob (so scheduler can auto-bill)', () => {
   // scheduler.tickBillGen iterates the baankarn_rooms_v1 blob and skips
   // any room where !room.tenant — so just flipping status='occupied'
@@ -1557,25 +1617,36 @@ test('approve writes room.tenant into JSONB blob (so scheduler can auto-bill)', 
   const path = require('node:path');
   const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   const block = src.match(/\/approve'[\s\S]+?app\.post\('\/api\/admin\/contract-invitations\/:id\/reject'/)[0];
-  // Nested jsonb_set: outer sets room.tenant, inner sets room.status.
+  // UPSERT pattern (jsonb_build_object) merges status + tenant into the
+  // room object. Matches the room-only-in-rooms_v2 case where the blob
+  // didn't have the room key yet.
   assert.match(block,
-    /jsonb_set\(\s*jsonb_set\(value, ARRAY\[\$1::text, 'status'\], to_jsonb\('occupied'::text\)\),\s*ARRAY\[\$1::text, 'tenant'\],\s*\$2::jsonb\s*\)/,
-    'approve must write {name, phone, email, since} into room.tenant');
+    /value \|\| jsonb_build_object\([\s\S]{0,400}'status', 'occupied'[\s\S]{0,200}'tenant', \$2::jsonb/,
+    'approve must UPSERT {status, tenant} into the blob room');
   // Also the data shape — pulled fresh from FOR-UPDATE-locked tenant row.
   assert.match(block, /SELECT full_name, phone, email FROM tenants WHERE id=\$1/);
   assert.match(block, /blobTenant = \{/);
+  // INSERT...ON CONFLICT bootstrap so brand-new deployments without the
+  // app_data row still work.
+  assert.match(block,
+    /INSERT INTO app_data \(key, value, updated_by\)\s*VALUES \('baankarn_rooms_v1'/,
+    'must bootstrap the app_data row before UPSERT');
 });
 
 test('checkin also writes room.tenant into JSONB blob', () => {
-  // Same scheduler-skip risk as approve. Pin the same fix for the
-  // checkin path so both onboarding flows stay consistent.
+  // Same scheduler-skip risk as approve. Pin the same UPSERT pattern for
+  // the checkin path so both onboarding flows stay consistent — and the
+  // INSERT...ON CONFLICT bootstrap covers brand-new deployments.
   const fs = require('node:fs');
   const path = require('node:path');
   const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'tenant-ops.js'), 'utf8');
   assert.match(src,
-    /jsonb_set\(\s*jsonb_set\(value, ARRAY\[\$1::text, 'status'\], to_jsonb\('occupied'::text\)\),\s*ARRAY\[\$1::text, 'tenant'\],\s*\$2::jsonb\s*\)/,
-    'checkin must write room.tenant alongside status');
+    /value \|\| jsonb_build_object\([\s\S]{0,400}'status', 'occupied'[\s\S]{0,200}'tenant', \$2::jsonb/,
+    'checkin must UPSERT {status, tenant} into the blob room');
   assert.match(src, /blobTenant = \{[\s\S]{0,200}name: tenant\.full_name/);
+  assert.match(src,
+    /INSERT INTO app_data \(key, value, updated_by\)\s*VALUES \('baankarn_rooms_v1'/,
+    'checkin must bootstrap the app_data row before UPSERT');
 });
 
 test('quick-invite has moveInDate window + deposit cap (parity with checkin)', () => {
@@ -1635,9 +1706,11 @@ test('approve invitation links tenant ↔ room (current_room_id + rooms_v2 + JSO
     /if \(oldRoomId && oldRoomId !== contract\.room_id\)[\s\S]{0,300}'vacant'/,
     'approve must free the old room when tenant is moving');
   // 3. Occupy the new room — both rooms_v2 + the JSONB blob (dual-write)
+  // The blob update went UPSERT (jsonb_build_object so rooms-only-in-rooms_v2
+  // also get the entry). 'occupied' is now a literal value in the merged object.
   assert.match(block,
-    /to_jsonb\('occupied'::text\)[\s\S]{0,400}'baankarn_rooms_v1'/,
-    'approve must update JSONB blob to occupied');
+    /'status', 'occupied'[\s\S]{0,400}'baankarn_rooms_v1'/,
+    'approve must UPSERT room into JSONB blob with status=occupied');
   assert.match(block,
     /UPDATE rooms_v2 SET status='occupied'[\s\S]{0,200}WHERE room_code=\$1/,
     'approve must update rooms_v2 to occupied');
