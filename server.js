@@ -24,6 +24,7 @@ const notifier = require('./services/notifier');
 const meter = require('./services/meter');
 const sentry = require('./services/sentry');
 const scheduler = require('./services/scheduler');
+const roomSync = require('./services/roomSync');
 const { schemas } = require('./schemas');
 const { validateBody } = require('./middleware/validate');
 
@@ -642,16 +643,26 @@ app.put('/api/data/:key', sameOrigin, csrfGuard, requireAuth, requireRole('owner
       [key, serialised, req.session.user.username]
     );
     audit(req, 'data.put', 'app_data', key);
+    let roomSyncResult = null;
     // Bridge: when admin saves the rooms blob, mirror tenant info into
     // the tenants table so the tenant portal + bills + LINE binding all
-    // see the same identities. Best-effort: silent on failure so admin
-    // saves never error out.
+    // see the same identities. Also upsert the same room inventory into
+    // rooms_v2 so newer API paths do not drift from the legacy UI blob.
     if (key === 'baankarn_rooms_v1' && value && typeof value === 'object') {
+      try {
+        roomSyncResult = await roomSync.upsertRoomsV2FromJsonb(pool, {
+          roomsObj: value,
+          updatedBy: req.session.user.username,
+        });
+      } catch (err) {
+        console.error('[bridge] rooms→rooms_v2 sync failed:', err.message);
+        roomSyncResult = { ok: false, error: err.message };
+      }
       mirrorRoomsToTenants(value, req.session.user.username).catch((err) => {
         console.error('[bridge] rooms→tenants mirror failed:', err.message);
       });
     }
-    res.json({ ok: true, key });
+    res.json({ ok: true, key, roomSync: roomSyncResult });
   } catch (err) {
     console.error('data PUT error:', err);
     res.status(500).json({ error: 'internal error' });
@@ -8066,6 +8077,52 @@ app.get('/api/admin/production-readiness', requireAuth, requireRole('owner'), as
     }
   } catch (err) {
     warn('data_volume_read', 'อ่านปริมาณข้อมูล', err.message);
+  }
+
+  // 8. Cross-store / payment data integrity. These are real-use blockers:
+  // rooms_v2 empty makes /api/rooms lie, and payable bills without tenant_id
+  // cannot be paid from the tenant portal by design.
+  try {
+    const d = await pool.query(`
+      SELECT
+        COALESCE((
+          SELECT COUNT(*)::int
+            FROM app_data ad
+            CROSS JOIN LATERAL jsonb_object_keys(
+              CASE WHEN jsonb_typeof(ad.value)='object' THEN ad.value ELSE '{}'::jsonb END
+            ) AS k(room_code)
+           WHERE ad.key='baankarn_rooms_v1'
+        ), 0)::int AS legacy_rooms,
+        (SELECT COUNT(*)::int FROM rooms_v2 WHERE deleted_at IS NULL) AS rooms_v2,
+        (SELECT COUNT(*)::int FROM bills
+          WHERE deleted_at IS NULL
+            AND status IN ('pending','overdue')
+            AND tenant_id IS NULL) AS orphan_payable_bills,
+        (SELECT COUNT(*)::int FROM notifications_queue WHERE status='failed') AS failed_notifications`);
+    const x = d.rows[0] || {};
+    if (Number(x.legacy_rooms) > 0 && Number(x.rooms_v2) === 0) {
+      fail('rooms_sync', 'Rooms sync',
+        `${x.legacy_rooms} legacy rooms exist but rooms_v2 is empty`,
+        'Run scripts/sync-rooms-v2-from-jsonb.js --apply, or POST /api/rooms/migrate-from-jsonb as owner');
+    } else {
+      ok('rooms_sync', 'Rooms sync', `${x.legacy_rooms || 0} legacy rooms · ${x.rooms_v2 || 0} rooms_v2`);
+    }
+    if (Number(x.orphan_payable_bills) > 0) {
+      warn('orphan_bills', 'Bill ownership',
+        `${x.orphan_payable_bills} payable bills have tenant_id=NULL; tenant payments are blocked for them`,
+        'Reconcile tenant.current_room_id / rooms blob first, then link only unambiguous bills');
+    } else {
+      ok('orphan_bills', 'Bill ownership', 'No payable orphan bills');
+    }
+    if (Number(x.failed_notifications) > 50) {
+      warn('notification_backlog', 'Notification backlog',
+        `${x.failed_notifications} failed notifications in queue`,
+        'Check LINE/Email/SMS secrets, then retry or let the pruner remove old failures');
+    } else {
+      ok('notification_backlog', 'Notification backlog', `${x.failed_notifications || 0} failed notifications`);
+    }
+  } catch (err) {
+    warn('data_integrity_read', 'Data integrity', err.message);
   }
 
   // Summarise — count fail / warn for badge

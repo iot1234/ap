@@ -184,7 +184,8 @@ async function checkNotificationQueue(pool) {
       SELECT
         COUNT(*) FILTER (WHERE status='pending')                        AS pending,
         COUNT(*) FILTER (WHERE status='pending' AND next_attempt_at < NOW() - INTERVAL '15 minutes') AS stuck,
-        COUNT(*) FILTER (WHERE status='failed' AND created_at > NOW() - INTERVAL '1 hour') AS recent_failed
+        COUNT(*) FILTER (WHERE status='failed' AND created_at > NOW() - INTERVAL '1 hour') AS recent_failed,
+        COUNT(*) FILTER (WHERE status='failed') AS failed_total
       FROM notifications_queue`);
     // Defense-in-depth: a few wrapped pool implementations (or a partially
     // initialised circuit-breaker shim) can return a result object whose
@@ -193,10 +194,12 @@ async function checkNotificationQueue(pool) {
     const r = (res && Array.isArray(res.rows) && res.rows[0]) || {};
     const stuck = Number(r.stuck) || 0;
     const failed = Number(r.recent_failed) || 0;
+    const failedTotal = Number(r.failed_total) || 0;
     const pending = Number(r.pending) || 0;
-    const detail = { pending, stuck, recent_failed: failed };
+    const detail = { pending, stuck, recent_failed: failed, failed_total: failedTotal };
     if (stuck > 5)  return { status: 'error', message: `${stuck} notifications stuck > 15min — queue worker may be wedged`, detail };
     if (failed > 20) return { status: 'warn', message: `${failed} notifications failed in the last hour`, detail };
+    if (failedTotal > 50) return { status: 'warn', message: `${failedTotal} failed notifications in backlog — review provider/secrets before relying on alerts`, detail };
     return { status: 'ok', message: `Queue healthy (${pending} pending)`, detail };
   } catch (err) {
     return { status: 'error', message: err.message };
@@ -477,6 +480,118 @@ async function checkFeatureDependencies(features) {
   };
 }
 
+async function checkDataIntegrity(pool) {
+  try {
+    const countsQ = await pool.query(`
+      SELECT
+        COALESCE((
+          SELECT COUNT(*)::int
+            FROM app_data ad
+            CROSS JOIN LATERAL jsonb_object_keys(
+              CASE WHEN jsonb_typeof(ad.value)='object' THEN ad.value ELSE '{}'::jsonb END
+            ) AS k(room_code)
+           WHERE ad.key='baankarn_rooms_v1'
+        ), 0)::int AS legacy_rooms,
+        (SELECT COUNT(*)::int FROM rooms_v2 WHERE deleted_at IS NULL) AS rooms_v2,
+        (SELECT COUNT(*)::int FROM bills
+          WHERE deleted_at IS NULL
+            AND status IN ('pending','overdue')
+            AND tenant_id IS NULL) AS orphan_payable_bills,
+        (SELECT COUNT(*)::int FROM payments p
+          JOIN bills b ON b.id=p.bill_id
+          WHERE p.status='verified'
+            AND b.deleted_at IS NULL
+            AND (b.status <> 'paid' OR b.paid_at IS NULL)) AS verified_payment_unpaid_bills,
+        (SELECT COUNT(*)::int FROM payments p
+          JOIN bills b ON b.id=p.bill_id
+          WHERE p.status IN ('pending','verified')
+            AND b.deleted_at IS NULL
+            AND ABS(p.amount - b.total) > 0.009) AS payment_amount_mismatch`);
+    const counts = countsQ.rows[0] || {};
+
+    const dupRoomsQ = await pool.query(`
+      SELECT current_room_id AS room_id, COUNT(*)::int AS tenants
+        FROM tenants
+       WHERE deleted_at IS NULL
+         AND status='active'
+         AND current_room_id IS NOT NULL
+         AND current_room_id <> ''
+       GROUP BY current_room_id
+      HAVING COUNT(*) > 1
+       ORDER BY tenants DESC, current_room_id ASC
+       LIMIT 10`);
+
+    const missingRoomsQ = await pool.query(`
+      WITH blob AS (
+        SELECT COALESCE((
+          SELECT value FROM app_data WHERE key='baankarn_rooms_v1' LIMIT 1
+        ), '{}'::jsonb) AS rooms
+      )
+      SELECT t.id, t.full_name, t.current_room_id
+        FROM tenants t
+        CROSS JOIN blob
+        LEFT JOIN rooms_v2 rv
+          ON rv.room_code=t.current_room_id AND rv.deleted_at IS NULL
+       WHERE t.deleted_at IS NULL
+         AND t.status='active'
+         AND t.current_room_id IS NOT NULL
+         AND t.current_room_id <> ''
+         AND rv.room_code IS NULL
+         AND NOT (blob.rooms ? t.current_room_id)
+       ORDER BY t.id ASC
+       LIMIT 10`);
+
+    const orphanBillsQ = await pool.query(`
+      SELECT id, bill_no, room_id, total, status
+        FROM bills
+       WHERE deleted_at IS NULL
+         AND status IN ('pending','overdue')
+         AND tenant_id IS NULL
+       ORDER BY due_date ASC, id ASC
+       LIMIT 10`);
+
+    const detail = {
+      counts: {
+        legacy_rooms: Number(counts.legacy_rooms) || 0,
+        rooms_v2: Number(counts.rooms_v2) || 0,
+        orphan_payable_bills: Number(counts.orphan_payable_bills) || 0,
+        verified_payment_unpaid_bills: Number(counts.verified_payment_unpaid_bills) || 0,
+        payment_amount_mismatch: Number(counts.payment_amount_mismatch) || 0,
+      },
+      duplicate_active_room_assignments: dupRoomsQ.rows,
+      active_tenants_missing_room: missingRoomsQ.rows,
+      orphan_payable_bill_samples: orphanBillsQ.rows,
+    };
+
+    const errors = [];
+    const warnings = [];
+    if (detail.counts.verified_payment_unpaid_bills > 0) {
+      errors.push('verified payments exist while their bill is not marked paid');
+    }
+    if (detail.counts.payment_amount_mismatch > 0) {
+      errors.push('pending/verified payment amount differs from bill total');
+    }
+    if (dupRoomsQ.rows.length > 0) {
+      errors.push('more than one active tenant assigned to the same room');
+    }
+    if (detail.counts.legacy_rooms > 0 && detail.counts.rooms_v2 === 0) {
+      warnings.push('legacy rooms exist but rooms_v2 is empty; run scripts/sync-rooms-v2-from-jsonb.js --apply');
+    }
+    if (detail.counts.orphan_payable_bills > 0) {
+      warnings.push('payable bills without tenant_id are blocked from tenant payments until reconciled');
+    }
+    if (missingRoomsQ.rows.length > 0) {
+      warnings.push('active tenants reference rooms missing from both legacy JSONB and rooms_v2');
+    }
+
+    if (errors.length) return { status: 'error', message: `${errors.length} data integrity error(s)`, detail: { ...detail, errors, warnings } };
+    if (warnings.length) return { status: 'warn', message: `${warnings.length} data integrity warning(s)`, detail: { ...detail, warnings } };
+    return { status: 'ok', message: 'Core data relationships look consistent', detail };
+  } catch (err) {
+    return { status: 'warn', message: `Data integrity check skipped: ${err.message}` };
+  }
+}
+
 async function checkPoolStats(pool) {
   try {
     const total = pool.totalCount ?? 0;
@@ -505,6 +620,7 @@ const CHECKS = [
   { id: 'scheduler',           label: 'Scheduler heartbeat',   fn: () => checkSchedulerHeartbeat() },
   { id: 'config',              label: 'Boot configuration',    fn: () => checkBootConfig() },
   { id: 'feature_deps',        label: 'Feature dependencies',  fn: (_p, f) => checkFeatureDependencies(f) },
+  { id: 'data_integrity',       label: 'Data integrity',        fn: (p) => checkDataIntegrity(p) },
 ];
 
 /**

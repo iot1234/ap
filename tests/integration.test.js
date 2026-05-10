@@ -158,6 +158,21 @@ test('rooms_v2 schema lives in db/migrate.js (single source of truth)', async ()
   await r.bootstrap();   // must not throw — no-op
 });
 
+test('room sync bridges legacy JSONB rooms and rooms_v2 both directions', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const roomsRoute = fs.readFileSync(path.join(__dirname, '..', 'routes', 'rooms.js'), 'utf8');
+  assert.match(server, /roomSync\.upsertRoomsV2FromJsonb/,
+    'PUT /api/data/baankarn_rooms_v1 must backfill rooms_v2');
+  assert.match(roomsRoute, /\/migrate-from-jsonb/,
+    'rooms router must expose the documented bulk migration endpoint');
+  assert.match(roomsRoute, /upsertJsonbRoomFromV2/,
+    'rooms_v2 create/update/restore must mirror back into the legacy room blob');
+  assert.match(roomsRoute, /ROOM_HAS_REFS/,
+    'room delete/rename must refuse active references instead of orphaning rows');
+});
+
 test('billing.buildBill respects feature flags', () => {
   const billing = require('../services/billing');
   const room = { id: '101', rent: 5000, waterUnits: 5, elecUnits: 100, tenant: { name: 'T' } };
@@ -450,6 +465,20 @@ test('healthCheck flags meterIot.mode = "mqtt" as unimplemented', () => {
   const hc = fs.readFileSync(path.join(__dirname, '..', 'services', 'healthCheck.js'), 'utf8');
   assert.match(hc, /meterIot.*mqtt[\s\S]{0,200}implement/i,
     'healthCheck must warn about unimplemented mqtt mode');
+});
+
+test('healthCheck surfaces data integrity and failed notification backlog', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const hc = fs.readFileSync(path.join(__dirname, '..', 'services', 'healthCheck.js'), 'utf8');
+  assert.match(hc, /failed_total/,
+    'notification queue check must count old failed backlog, not only recent failures');
+  assert.match(hc, /id: 'data_integrity'/,
+    'health checks must include core data integrity probe');
+  assert.match(hc, /orphan_payable_bills/,
+    'data integrity probe must flag payable bills with tenant_id=NULL');
+  assert.match(hc, /legacy rooms exist but rooms_v2 is empty/,
+    'data integrity probe must flag unsynced legacy room inventory');
 });
 
 test('public booking dual-writes to bookings table', () => {

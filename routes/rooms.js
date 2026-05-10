@@ -7,6 +7,7 @@
 const express = require('express');
 const { schemas } = require('../schemas');
 const { validateBody } = require('../middleware/validate');
+const roomSync = require('../services/roomSync');
 
 module.exports = function buildRoomsRouter(ctx) {
   const { pool, requireAuth, requireRole, sameOrigin, csrfGuard, audit } = ctx;
@@ -53,6 +54,26 @@ module.exports = function buildRoomsRouter(ctx) {
     }
   });
 
+  // POST /api/rooms/migrate-from-jsonb — backfill rooms_v2 from the legacy
+  // app_data['baankarn_rooms_v1'] blob. Safe to re-run; it upserts by
+  // room_code and does not touch tenants, bills, or contracts.
+  r.post('/migrate-from-jsonb', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'), async (req, res) => {
+    const dryRun = req.body?.dryRun === true || req.query.dryRun === '1' || req.query.dryRun === 'true';
+    try {
+      const result = await roomSync.upsertRoomsV2FromJsonb(pool, {
+        dryRun,
+        updatedBy: req.session?.user?.username || 'admin',
+      });
+      if (!dryRun) {
+        audit(req, 'room.migrate_from_jsonb', 'rooms_v2', 'bulk', result);
+      }
+      res.json({ ok: true, result });
+    } catch (err) {
+      console.error('rooms migrate-from-jsonb error:', err);
+      res.status(500).json({ error: 'internal error', code: 'DB_ERROR' });
+    }
+  });
+
   // GET /api/rooms/:id — single
   r.get('/:id', requireAuth, async (req, res) => {
     const id = Number(req.params.id);
@@ -72,8 +93,10 @@ module.exports = function buildRoomsRouter(ctx) {
     async (req, res) => {
       const b = req.body;
       const code = b.roomCode || makeRoomCode(b.floor, b.roomNo);
+      const client = await pool.connect();
       try {
-        const { rows } = await pool.query(
+        await client.query('BEGIN');
+        const { rows } = await client.query(
           `INSERT INTO rooms_v2
              (room_code, floor, room_no, room_type, rent_price, deposit_price,
               wifi_fee, view_type, has_balcony, has_parking, has_kitchen, has_ac,
@@ -89,14 +112,19 @@ module.exports = function buildRoomsRouter(ctx) {
             b.notes || null,
           ]
         );
+        await roomSync.upsertJsonbRoomFromV2(client, rows[0], req.session.user.username);
+        await client.query('COMMIT');
         audit(req, 'room.create', 'room', String(rows[0].id), { code });
         res.json({ ok: true, room: rows[0] });
       } catch (err) {
+        try { await client.query('ROLLBACK'); } catch {}
         if (err.code === '23505') {
           return res.status(409).json({ error: 'room_code already exists', code: 'CONFLICT' });
         }
         console.error('rooms create error:', err);
         res.status(500).json({ error: 'internal error', code: 'DB_ERROR' });
+      } finally {
+        client.release();
       }
     }
   );
@@ -124,20 +152,54 @@ module.exports = function buildRoomsRouter(ctx) {
       if (!fields.length) return res.status(400).json({ error: 'nothing to update' });
       fields.push('updated_at = NOW()');
       params.push(id);
+      const client = await pool.connect();
       try {
-        const { rows: prev } = await pool.query(`SELECT * FROM rooms_v2 WHERE id=$1`, [id]);
-        const { rows } = await pool.query(
+        await client.query('BEGIN');
+        const { rows: prev } = await client.query(
+          `SELECT * FROM rooms_v2 WHERE id=$1 AND deleted_at IS NULL FOR UPDATE`,
+          [id]
+        );
+        if (!prev.length) {
+          await client.query('ROLLBACK');
+          return res.status(404).json({ error: 'not found' });
+        }
+        if (b.roomCode && b.roomCode !== prev[0].room_code) {
+          const refs = await roomSync.roomDeleteRefs(client, prev[0].room_code);
+          if (refs.total > 0) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({
+              error: 'เปลี่ยนเลขห้องไม่ได้ — ยังมีผู้เช่า/บิล/สัญญา/งานซ่อม/จองอ้างถึงห้องนี้',
+              code: 'ROOM_HAS_REFS',
+              refs: refs.refs,
+            });
+          }
+        }
+        const { rows } = await client.query(
           `UPDATE rooms_v2 SET ${fields.join(', ')}
              WHERE id=$${i} AND deleted_at IS NULL RETURNING *`,
           params
         );
-        if (!rows.length) return res.status(404).json({ error: 'not found' });
+        if (!rows.length) {
+          await client.query('ROLLBACK');
+          return res.status(404).json({ error: 'not found' });
+        }
+        if (prev[0].room_code !== rows[0].room_code) {
+          await roomSync.removeJsonbRoom(client, prev[0].room_code, req.session.user.username);
+        }
+        await roomSync.upsertJsonbRoomFromV2(client, rows[0], req.session.user.username);
+        await client.query('COMMIT');
         audit(req, 'room.update', 'room', String(id),
           { before: prev[0], after: rows[0], changed: Object.keys(b) });
         res.json({ ok: true, room: rows[0] });
       } catch (err) {
+        try { await client.query('ROLLBACK'); } catch {}
+        if (err.code === '23505') {
+          return res.status(409).json({ error: 'room_code already exists', code: 'CONFLICT' });
+        }
         console.error('rooms update error:', err);
         res.status(500).json({ error: 'internal error', code: 'DB_ERROR' });
+      } finally {
+        client.release();
       }
     }
   );
@@ -146,16 +208,57 @@ module.exports = function buildRoomsRouter(ctx) {
   r.delete('/:id', sameOrigin, csrfGuard, requireAuth, requireRole('owner'), async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+    const client = await pool.connect();
     try {
-      const { rows } = await pool.query(
-        `UPDATE rooms_v2 SET deleted_at=NOW() WHERE id=$1 AND deleted_at IS NULL RETURNING id`,
+      await client.query('BEGIN');
+      const room = await client.query(
+        `SELECT * FROM rooms_v2 WHERE id=$1 AND deleted_at IS NULL FOR UPDATE`,
         [id]
       );
-      if (!rows.length) return res.status(404).json({ error: 'not found' });
-      audit(req, 'room.delete', 'room', String(id));
+      if (!room.rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'not found' });
+      }
+      const code = room.rows[0].room_code;
+      const refs = await roomSync.roomDeleteRefs(client, code);
+      if (refs.total > 0) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'ลบห้องไม่ได้ — ยังมีผู้เช่า/บิล/สัญญา/งานซ่อม/จองอ้างถึงห้องนี้',
+          code: 'ROOM_HAS_REFS',
+          refs: refs.refs,
+        });
+      }
+      const blob = await client.query(
+        `SELECT value->$1 AS room FROM app_data WHERE key='baankarn_rooms_v1' LIMIT 1`,
+        [code]
+      );
+      const blobRoom = blob.rows[0]?.room;
+      if (blobRoom && typeof blobRoom === 'object') {
+        const blockedByBlob = !!blobRoom.tenant
+          || (blobRoom.status && !['vacant', 'maintenance'].includes(String(blobRoom.status)));
+        if (blockedByBlob) {
+          await client.query('ROLLBACK');
+          return res.status(409).json({
+            error: 'ลบห้องไม่ได้ — ข้อมูลห้องในระบบเดิมยังมีผู้เช่าหรือสถานะไม่ว่าง',
+            code: 'ROOM_BLOB_OCCUPIED',
+          });
+        }
+      }
+      const { rows } = await client.query(
+        `UPDATE rooms_v2 SET deleted_at=NOW(), updated_at=NOW()
+          WHERE id=$1 AND deleted_at IS NULL RETURNING id`,
+        [id]
+      );
+      await roomSync.removeJsonbRoom(client, code, req.session.user.username);
+      await client.query('COMMIT');
+      audit(req, 'room.delete', 'room', String(id), { code });
       res.json({ ok: true });
     } catch (err) {
+      try { await client.query('ROLLBACK'); } catch {}
       res.status(500).json({ error: 'internal error', code: 'DB_ERROR' });
+    } finally {
+      client.release();
     }
   });
 
@@ -163,16 +266,26 @@ module.exports = function buildRoomsRouter(ctx) {
   r.post('/:id/restore', sameOrigin, csrfGuard, requireAuth, requireRole('owner'), async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+    const client = await pool.connect();
     try {
-      const { rows } = await pool.query(
-        `UPDATE rooms_v2 SET deleted_at=NULL, updated_at=NOW() WHERE id=$1 RETURNING id`,
+      await client.query('BEGIN');
+      const { rows } = await client.query(
+        `UPDATE rooms_v2 SET deleted_at=NULL, updated_at=NOW() WHERE id=$1 RETURNING *`,
         [id]
       );
-      if (!rows.length) return res.status(404).json({ error: 'not found' });
-      audit(req, 'room.restore', 'room', String(id));
-      res.json({ ok: true });
+      if (!rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'not found' });
+      }
+      await roomSync.upsertJsonbRoomFromV2(client, rows[0], req.session.user.username);
+      await client.query('COMMIT');
+      audit(req, 'room.restore', 'room', String(id), { code: rows[0].room_code });
+      res.json({ ok: true, room: rows[0] });
     } catch (err) {
+      try { await client.query('ROLLBACK'); } catch {}
       res.status(500).json({ error: 'internal error', code: 'DB_ERROR' });
+    } finally {
+      client.release();
     }
   });
 
