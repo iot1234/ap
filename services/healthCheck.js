@@ -632,36 +632,66 @@ async function checkDataIntegrity(pool) {
   }
 }
 
-// Probe the PromptPay QR rendering pipeline. We render a 1-baht QR against
-// a known-good test target (the bundled demo PromptPay) so a renderer crash
-// (qrcode/promptpay-qr package broken, OOM, or some unexpected exception)
-// surfaces on the health dashboard BEFORE a tenant tries to pay and gets a
-// 500. The probe doesn't touch the operator's real PROMPTPAY_TARGET or any
-// network — it's purely local module integrity.
+// Probe BOTH PromptPay QR rendering engines (primary qrcode → PNG, backup
+// qrcode-svg → SVG). The tenant endpoint falls through to SVG when PNG
+// fails, so the system stays up as long as ONE engine works — but we still
+// want to surface PARTIAL degradation (PNG broken, SVG working) as a
+// warning so the operator notices the primary failing before SVG also
+// breaks. Test against the bundled demo target with 1฿ — no real account
+// touched and no network call.
 async function checkPromptpayRender() {
+  const promptpay = require('./promptpay');
+  const results = { primary: null, fallback: null };
+  // --- Primary: qrcode → PNG buffer
   try {
-    const promptpay = require('./promptpay');
-    // Use the bundled demo target — guaranteed-valid shape, no real account
-    // touched. 1฿ is well under MAX_AMOUNT so the encoder doesn't reject.
     const png = await promptpay.renderQrPng(promptpay.DEMO_TARGET, 1, { width: 64 });
     if (!Buffer.isBuffer(png) || png.length < 100) {
-      return {
-        status: 'error',
-        message: 'QR renderer returned an empty / suspiciously small buffer',
-        detail: { bytes: png?.length || 0 },
-      };
+      results.primary = { ok: false, error: `empty/suspect buffer (${png?.length || 0} bytes)` };
+    } else {
+      results.primary = { ok: true, bytes: png.length };
     }
-    return { status: 'ok', message: `QR renderer OK (${png.length} bytes)` };
   } catch (err) {
-    // A throw here means either the promptpay-qr package or the qrcode
-    // package is broken — tenant /qr endpoints will 500. Surface as
-    // 'error' so it pages the operator before users notice.
+    results.primary = { ok: false, error: err.message };
+  }
+  // --- Fallback: qrcode-svg → SVG string
+  try {
+    const svg = promptpay.renderQrSvg(promptpay.DEMO_TARGET, 1, { width: 64 });
+    if (typeof svg !== 'string' || !svg.startsWith('<') || svg.length < 100) {
+      results.fallback = { ok: false, error: `empty/suspect SVG (${svg?.length || 0} chars)` };
+    } else {
+      results.fallback = { ok: true, bytes: svg.length };
+    }
+  } catch (err) {
+    results.fallback = { ok: false, error: err.message };
+  }
+  // --- Roll up to a single severity
+  const both = results.primary?.ok && results.fallback?.ok;
+  const either = results.primary?.ok || results.fallback?.ok;
+  if (both) {
     return {
-      status: 'error',
-      message: `QR renderer broken: ${err.message}`,
-      detail: { stack: String(err.stack || '').split('\n').slice(0, 3).join('\n') },
+      status: 'ok',
+      message: `QR renderers OK (PNG ${results.primary.bytes}b, SVG ${results.fallback.bytes}b)`,
+      detail: results,
     };
   }
+  if (!either) {
+    // Both engines down — tenant /qr endpoint will 500 + payload text
+    // fallback only. This is paging-worthy.
+    return {
+      status: 'error',
+      message: `QR renderers BOTH broken — primary: ${results.primary?.error}; fallback: ${results.fallback?.error}`,
+      detail: results,
+    };
+  }
+  // One engine still works — system is up but degraded. Warn so the
+  // operator fixes the primary before the fallback also dies.
+  return {
+    status: 'warn',
+    message: results.primary?.ok
+      ? `Primary QR renderer OK; fallback SVG broken: ${results.fallback?.error}`
+      : `Primary QR renderer broken (${results.primary?.error}); SVG fallback still serves`,
+    detail: results,
+  };
 }
 
 async function checkPoolStats(pool) {

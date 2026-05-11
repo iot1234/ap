@@ -2,9 +2,19 @@
 // Wrap promptpay-qr + qrcode to produce PNG / data-URL / EMV string for a
 // PromptPay payment. Target can be a Thai phone number (10 digits) or a
 // 13-digit citizen ID. Amount is in THB, optional.
+//
+// Renderer redundancy: the primary renderer is the `qrcode` package (PNG
+// buffer output). A backup renderer using `qrcode-svg` (pure-JS, no native
+// deps) sits behind a try/catch so a primary failure (package corrupted,
+// PNG encoder threw OOM, surprise upstream regression) silently falls
+// through to the SVG path — browsers render SVG in <img> tags fine and
+// Thai bank apps scan SVG QR identically to PNG (it's a vector, often
+// cleaner). The caller's Content-Type is set to whichever renderer
+// answered, so HTTP semantics remain correct.
 
 const generatePayload = require('promptpay-qr');
 const QRCode = require('qrcode');
+const QRCodeSvg = require('qrcode-svg');
 
 const MAX_AMOUNT = 999999;
 const DEMO_TARGET = '0801234567';
@@ -84,10 +94,75 @@ async function renderQrDataUrl(target, amount, opts = {}) {
   });
 }
 
+/**
+ * Render a PromptPay QR as SVG (string). Pure-JS encoder — no native bindings,
+ * no PNG canvas — so it survives the most common qrcode-package failure mode
+ * (PNG encoder regression or environment without canvas support). Output is
+ * scannable by every Thai banking app we've tested.
+ */
+function renderQrSvg(target, amount, opts = {}) {
+  const payload = buildPayload(target, amount);
+  // qrcode-svg's defaults pick a default ECC and quiet zone that match what
+  // PromptPay slips publish, so we don't have to tune it. The size matches
+  // our PNG path so client layouts don't shift on fallback.
+  const qr = new QRCodeSvg({
+    content: payload,
+    padding: 2,
+    width: opts.width || 480,
+    height: opts.width || 480,
+    color: '#2c241b',
+    background: '#ffffff',
+    ecl: 'M',
+    join: true,                 // optimise path commands, smaller SVG
+  });
+  return qr.svg();
+}
+
+/**
+ * Render a QR with renderer fallback. Try the primary qrcode → PNG buffer
+ * path first; if anything throws (package broken, OOM, native binding
+ * trouble), fall back to qrcode-svg → SVG string. Returns:
+ *   { body: Buffer|string, contentType: 'image/png'|'image/svg+xml',
+ *     renderer: 'qrcode'|'qrcode-svg', primaryError?: string }
+ * Throws only when BOTH renderers fail — at that point the caller should
+ * surface the EMV payload text fallback (paste-to-pay) instead.
+ */
+async function renderQrWithFallback(target, amount, opts = {}) {
+  try {
+    const buffer = await renderQrPng(target, amount, opts);
+    return { body: buffer, contentType: 'image/png', renderer: 'qrcode' };
+  } catch (primaryErr) {
+    // Log primary failure so health checks + Sentry pick it up — without
+    // this the fallback silently masks a deteriorating primary renderer
+    // (it might keep failing every request while SVG covers each time).
+    console.warn('[promptpay] primary renderer failed, falling back to SVG:', primaryErr.message);
+    try {
+      const svg = renderQrSvg(target, amount, opts);
+      return {
+        body: svg, contentType: 'image/svg+xml',
+        renderer: 'qrcode-svg', primaryError: primaryErr.message,
+      };
+    } catch (fallbackErr) {
+      // Both renderers down — re-throw so caller can return 500 + payload
+      // text fallback. Wrap so the caller sees both error messages.
+      const err = new Error(
+        `QR render failed on both engines — primary: ${primaryErr.message}; ` +
+        `fallback: ${fallbackErr.message}`
+      );
+      err.code = 'QR_BOTH_RENDERERS_FAILED';
+      err.primaryError = primaryErr.message;
+      err.fallbackError = fallbackErr.message;
+      throw err;
+    }
+  }
+}
+
 module.exports = {
   buildPayload,
   renderQrPng,
   renderQrDataUrl,
+  renderQrSvg,
+  renderQrWithFallback,
   normaliseTarget,
   normaliseAmount,
   isDemoTarget,

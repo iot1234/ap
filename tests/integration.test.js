@@ -627,7 +627,7 @@ test('GET /api/tenant/bills/:id/qr uses DB bill total, not browser query amount'
     'tenant bill QR must enforce bill ownership');
   assert.match(body, /const amount = Number\(bill\.total\)/,
     'tenant bill QR amount must come from bills.total');
-  assert.match(body, /renderQrPng\(paymentBlock\.promptpayTarget, amount\)/,
+  assert.match(body, /renderQrWithFallback\(paymentBlock\.promptpayTarget, amount\)/,
     'tenant bill QR must render with DB amount');
   assert.doesNotMatch(body, /req\.query\.(?:amount|target)/,
     'tenant bill QR must not trust query amount or target');
@@ -3320,4 +3320,21 @@ test('backup script paginates large tables to avoid OOM', () => {
     'must page by id, not load entire table at once');
   assert.match(src, /'audit_logs',[\s\S]{0,80}'meter_readings'/,
     'audit_logs + meter_readings must be in the paginatable set');
+});
+
+test('LINE notifications validate userId shape before push or queue retry', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const line = fs.readFileSync(path.join(__dirname, '..', 'services', 'line.js'), 'utf8');
+  const notifier = fs.readFileSync(path.join(__dirname, '..', 'services', 'notifier.js'), 'utf8');
+  const queue = fs.readFileSync(path.join(__dirname, '..', 'services', 'notificationQueue.js'), 'utf8');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const scheduler = fs.readFileSync(path.join(__dirname, '..', 'services', 'scheduler.js'), 'utf8');
+  assert.match(line, /function isLikelyUserId/);
+  assert.match(line, /if \(!isLikelyUserId\(userId\)\) return false/);
+  assert.match(notifier, /invalid owner LINE userId shape/);
+  assert.match(notifier, /invalid LINE userId shape/);
+  assert.match(queue, /invalid LINE recipient/);
+  assert.match(server, /INVALID_LINE_USER_ID/);
+  assert.match(scheduler, /lineNotify\.isLikelyUserId\(t\.line_user_id\)/);
 });

@@ -14,7 +14,7 @@ const PgSession = require('connect-pg-simple')(session);
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const { renderBillPdf } = require('./services/pdf');
-const { renderQrPng, renderQrDataUrl, buildPayload: buildPromptPayPayload, MAX_AMOUNT, isDemoTarget, normaliseTarget } = require('./services/promptpay');
+const { renderQrPng, renderQrDataUrl, renderQrSvg, renderQrWithFallback, buildPayload: buildPromptPayPayload, MAX_AMOUNT, isDemoTarget, normaliseTarget } = require('./services/promptpay');
 const lineNotify = require('./services/line');
 const features = require('./services/features');
 const cryptoSvc = require('./services/crypto');
@@ -2448,6 +2448,13 @@ app.post('/api/tenants', sameOrigin, csrfGuard, requireAuth, requireRole('owner'
       code: 'INVALID_EMERGENCY_PHONE',
     });
   }
+  const lineUserId = str(b.lineUserId, 64).trim() || null;
+  if (lineUserId && !lineNotify.isLikelyUserId(lineUserId)) {
+    return res.status(400).json({
+      error: 'invalid LINE userId',
+      code: 'INVALID_LINE_USER_ID',
+    });
+  }
   const requestedRoomId = str(b.roomId, 32).trim() || null;
   const tenantStatus = requestedRoomId
     ? 'active'
@@ -2479,7 +2486,7 @@ app.post('/api/tenants', sameOrigin, csrfGuard, requireAuth, requireRole('owner'
         [
           fullName, phone, citizenEnc, citizenTail, citizenHash,
           str(b.email, 200) || null,
-          str(b.lineUserId, 64) || null,
+          lineUserId,
           pinHash,
           requestedRoomId,
           tenantStatus,
@@ -2511,7 +2518,7 @@ app.post('/api/tenants', sameOrigin, csrfGuard, requireAuth, requireRole('owner'
           [
             fullName, phone, citizenEnc, citizenTail,
             str(b.email, 200) || null,
-            str(b.lineUserId, 64) || null,
+            lineUserId,
             pinHash,
             requestedRoomId,
             tenantStatus,
@@ -2737,7 +2744,13 @@ app.put('/api/tenants/:id', sameOrigin, csrfGuard, requireAuth, requireRole('own
     set('phone', normPhone);
   }
   if (b.email !== undefined) set('email', b.email ? String(b.email).slice(0, 200) : null);
-  if (b.lineUserId !== undefined) set('line_user_id', b.lineUserId ? String(b.lineUserId).slice(0, 64) : null);
+  if (b.lineUserId !== undefined) {
+    const lineUserId = b.lineUserId ? String(b.lineUserId).slice(0, 64).trim() : null;
+    if (lineUserId && !lineNotify.isLikelyUserId(lineUserId)) {
+      return res.status(400).json({ error: 'invalid LINE userId', code: 'INVALID_LINE_USER_ID' });
+    }
+    set('line_user_id', lineUserId);
+  }
   if (b.roomId !== undefined) set('current_room_id', b.roomId ? String(b.roomId).slice(0, 32) : null);
   if (b.status !== undefined) {
     if (!VALID_TENANT_STATUS.has(String(b.status))) return res.status(400).json({ error: 'invalid status' });
@@ -3245,7 +3258,7 @@ app.get('/api/tenant/pay-readiness/:billId', requireTenant, async (req, res) => 
         [req.tenant.tenant_id]
       );
       const t = trows[0] || {};
-      if (!t.line_user_id && !t.email) {
+      if (!lineNotify.isLikelyUserId(t.line_user_id) && !t.email) {
         issues.push({
           sev: 'low', code: 'NO_NOTIFY_CHANNEL',
           msg: 'คุณยังไม่ได้ผูก LINE หรือใส่อีเมล — จะไม่ได้รับแจ้งเตือนเมื่อสลิปถูกตรวจสอบ',
@@ -3574,23 +3587,37 @@ app.get('/api/tenant/bills/:id/qr', rateLimitQr, requireTenant, async (req, res)
       // below for a clean 500.
       const payload = buildPromptPayPayload(paymentBlock.promptpayTarget, amount);
       let dataUrl = null;
+      let svg = null;
       let renderError = null;
+      let renderer = null;
       try {
         dataUrl = await renderQrDataUrl(paymentBlock.promptpayTarget, amount);
+        renderer = 'qrcode';
       } catch (renderErr) {
-        // QR rendering pipeline broke (qrcode package crash / OOM /
-        // unexpected). The payload is still usable — surface the error
-        // code so the client knows to display the text-paste fallback
-        // instead of a broken image placeholder.
+        // Primary renderer (qrcode → PNG/dataURL) broke. Try the SVG
+        // fallback so the JSON response still carries a renderable image
+        // for the client to paint without resorting to copy-paste text.
         renderError = renderErr.message || 'render failed';
-        console.error('[qr] dataUrl render failed (payload still served):', renderError);
+        console.error('[qr] dataUrl render failed, attempting SVG fallback:', renderError);
+        try {
+          svg = renderQrSvg(paymentBlock.promptpayTarget, amount);
+          renderer = 'qrcode-svg';
+        } catch (svgErr) {
+          // Both renderers down — the payload field below is the last
+          // resort (paste-to-pay). Surface a richer renderError so the
+          // health check / Sentry can correlate.
+          renderError += ' | svg fallback: ' + (svgErr.message || 'failed');
+          console.error('[qr] svg fallback also failed:', svgErr.message);
+        }
       }
       res.setHeader('Cache-Control', 'no-store');
       return res.json({
         ok: true,
         payload,
         dataUrl,                            // null when rendering failed
-        renderError,                        // null on success; debug aid
+        svg,                                // populated when SVG fallback ran
+        renderer,                           // 'qrcode' | 'qrcode-svg' | null
+        renderError,                        // null on primary success
         target: paymentBlock.promptpayTarget,
         amount,
         billId: bill.id,
@@ -3602,11 +3629,19 @@ app.get('/api/tenant/bills/:id/qr', rateLimitQr, requireTenant, async (req, res)
       });
     }
 
-    const png = await renderQrPng(paymentBlock.promptpayTarget, amount);
-    res.setHeader('Content-Type', 'image/png');
+    // Default PNG path uses the dual-engine wrapper. If the primary qrcode
+    // package fails (PNG encoder broke, OOM, native binding issue), the
+    // wrapper transparently falls through to qrcode-svg and returns an SVG
+    // body with `image/svg+xml` Content-Type. Browsers render either format
+    // in <img> tags, so the tenant UI doesn't have to branch on the type.
+    const rendered = await renderQrWithFallback(paymentBlock.promptpayTarget, amount);
+    res.setHeader('Content-Type', rendered.contentType);
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('X-Content-Type-Options', 'nosniff');
-    return res.end(png);
+    // Expose which renderer answered so admins debugging "why is the QR an
+    // SVG today?" can grep response headers to see the primary failure.
+    res.setHeader('X-QR-Renderer', rendered.renderer);
+    return res.end(rendered.body);
   } catch (err) {
     console.error('tenant bill qr error:', err);
     const msg = String(err.message || '');

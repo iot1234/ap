@@ -7,7 +7,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { buildPayload, renderQrPng, renderQrDataUrl, isDemoTarget } = require('../services/promptpay');
+const { buildPayload, renderQrPng, renderQrDataUrl, renderQrSvg, renderQrWithFallback, isDemoTarget } = require('../services/promptpay');
 
 test('buildPayload requires a target', () => {
   assert.throws(() => buildPayload(), /target required/);
@@ -92,4 +92,74 @@ test('renderQrPng + custom width', async () => {
   const large = await renderQrPng('0801234567', 100, { width: 800 });
   // Larger width → bigger buffer (rough heuristic — same data, more pixels).
   assert.ok(large.length > small.length, 'wider QR is larger PNG');
+});
+
+test('renderQrSvg returns a valid SVG string', () => {
+  // Backup renderer for when the primary qrcode (PNG) path crashes.
+  // Banking apps scan SVG QR identically to PNG, so this is a true
+  // failover not just a placeholder.
+  const svg = renderQrSvg('0801234567', 100);
+  assert.equal(typeof svg, 'string');
+  assert.ok(svg.startsWith('<'), 'SVG must start with <');
+  assert.ok(svg.includes('<svg'), 'must contain root <svg> element');
+  assert.ok(svg.length > 500, 'SVG body should be non-trivial');
+});
+
+test('renderQrSvg respects custom width', () => {
+  const small = renderQrSvg('0801234567', 100, { width: 200 });
+  const large = renderQrSvg('0801234567', 100, { width: 800 });
+  // Width attribute is encoded into the SVG header — width=800 should
+  // appear literally, confirming the renderer honoured our opts.
+  assert.ok(small.includes('width="200"') || small.includes("width='200'"));
+  assert.ok(large.includes('width="800"') || large.includes("width='800'"));
+});
+
+test('renderQrWithFallback uses primary qrcode by default', async () => {
+  const out = await renderQrWithFallback('0801234567', 100);
+  assert.equal(out.renderer, 'qrcode');
+  assert.equal(out.contentType, 'image/png');
+  assert.ok(Buffer.isBuffer(out.body));
+  assert.ok(out.body.length > 100);
+});
+
+test('renderQrWithFallback falls through to SVG when primary throws', async () => {
+  // Force the primary renderer to throw by monkey-patching qrcode.toBuffer
+  // for this test only. The wrapper should catch it and return an SVG body
+  // with the correct content type — that's the entire point of redundancy.
+  const QRCode = require('qrcode');
+  const original = QRCode.toBuffer;
+  QRCode.toBuffer = async () => { throw new Error('simulated PNG failure'); };
+  try {
+    const out = await renderQrWithFallback('0801234567', 100);
+    assert.equal(out.renderer, 'qrcode-svg');
+    assert.equal(out.contentType, 'image/svg+xml');
+    assert.equal(typeof out.body, 'string');
+    assert.ok(out.body.includes('<svg'), 'body must be SVG when primary fails');
+    assert.equal(out.primaryError, 'simulated PNG failure');
+  } finally {
+    QRCode.toBuffer = original;
+  }
+});
+
+test('renderQrWithFallback throws QR_BOTH_RENDERERS_FAILED when both engines down', async () => {
+  // Both primary and fallback down — wrapper rethrows a labelled error
+  // so the caller can surface a meaningful 500 + steer the client UI
+  // toward the EMV payload text fallback.
+  const QRCode = require('qrcode');
+  const QRCodeSvg = require('qrcode-svg');
+  const origToBuffer = QRCode.toBuffer;
+  const origSvgPrototype = QRCodeSvg.prototype.svg;
+  QRCode.toBuffer = async () => { throw new Error('png down'); };
+  QRCodeSvg.prototype.svg = function () { throw new Error('svg down'); };
+  try {
+    await assert.rejects(
+      renderQrWithFallback('0801234567', 100),
+      (err) => err.code === 'QR_BOTH_RENDERERS_FAILED'
+        && err.primaryError === 'png down'
+        && err.fallbackError === 'svg down'
+    );
+  } finally {
+    QRCode.toBuffer = origToBuffer;
+    QRCodeSvg.prototype.svg = origSvgPrototype;
+  }
 });
