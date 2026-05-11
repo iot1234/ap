@@ -514,6 +514,14 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           method,
         });
         notifyManualPayment(payment.rows[0], paid.rows[0] || row, verifier).catch(() => {});
+        // Auto-recompute room status — if this was the last overdue bill,
+        // the room flips overdue → occupied without admin clicking.
+        // paid.rows[0].room_id comes from the RETURNING * above.
+        const billRoomId = paid.rows[0]?.room_id;
+        if (billRoomId) {
+          require('../services/roomStatus').syncRoom(pool, billRoomId, { reason: 'manual-pay' })
+            .catch((err) => console.warn(`[bills.pay] room sync failed:`, err.message));
+        }
         res.json({ ok: true, bill: paid.rows[0], payment: payment.rows[0] });
       } catch (err) {
         await client.query('ROLLBACK').catch(() => {});
@@ -635,6 +643,23 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         }
         await client.query('COMMIT');
         audit(req, accept ? 'slip.verify' : 'slip.reject', 'bill', String(id), { paymentId: pid, reason });
+        // Auto-cascade room status when a bill was accepted/paid. The
+        // verify-slip endpoint's bill id maps to the room via bills.room_id;
+        // we already have the bill row in scope (status='paid' after the
+        // UPDATE), so look up the room and sync. Reject path doesn't change
+        // the bill state so room status doesn't move.
+        if (accept) {
+          try {
+            const rQ = await pool.query(`SELECT room_id FROM bills WHERE id=$1 LIMIT 1`, [id]);
+            const rid = rQ.rows[0]?.room_id;
+            if (rid) {
+              require('../services/roomStatus').syncRoom(pool, rid, { reason: 'slip-verify' })
+                .catch((err) => console.warn(`[bills.verify-slip] room sync failed:`, err.message));
+            }
+          } catch (err) {
+            console.warn(`[bills.verify-slip] room lookup failed:`, err.message);
+          }
+        }
         // Fire-and-forget tenant notification with the verdict
         try {
           // Filter t.deleted_at IS NULL so we don't push "slip verified"

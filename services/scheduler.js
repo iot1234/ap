@@ -105,15 +105,74 @@ async function tickLateFee(pool, flags, now, state) {
   const todayKey = now.toISOString().slice(0, 10);
   if (state.lastLateFeeMark === todayKey) return;
   try {
-    const { rowCount } = await pool.query(
+    // Capture the rooms whose bills just flipped so we can sync ONLY those
+    // rooms' status downstream instead of scanning every room nightly.
+    // RETURNING room_id lets us batch the room-status update without a
+    // second SELECT pass.
+    const { rows } = await pool.query(
       `UPDATE bills SET status='overdue'
-         WHERE status='pending' AND due_date < CURRENT_DATE`
+         WHERE status='pending' AND due_date < CURRENT_DATE
+       RETURNING DISTINCT room_id`
     );
-    if (rowCount) console.log(`[scheduler] marked ${rowCount} bills overdue`);
+    if (rows.length) console.log(`[scheduler] marked ${rows.length} bill(s) overdue`);
+    // Cascade: any room with a freshly-overdue bill should flip to
+    // 'overdue' status. Imported lazily so a missing module on legacy
+    // deploys doesn't break the late-fee tick itself.
+    if (rows.length) {
+      try {
+        const roomStatus = require('./roomStatus');
+        for (const r of rows) {
+          if (r.room_id) {
+            await roomStatus.syncRoom(pool, r.room_id, { reason: 'bill-overdue-cron' })
+              .catch((err) => console.warn(`[scheduler] room-status sync ${r.room_id} failed:`, err.message));
+          }
+        }
+      } catch (err) {
+        console.warn('[scheduler] room-status cascade unavailable:', err.message);
+      }
+    }
     state.lastLateFeeMark = todayKey;
     writeState(state);
   } catch (err) {
     console.error('[scheduler] late-fee mark failed:', err.message);
+  }
+}
+
+// Daily safety-net for room-status drift. Every room gets re-derived from
+// its contracts + bills + reservation pointer. Catches drift introduced by
+// any path that mutated room state without calling syncRoom (e.g. a manual
+// SQL fix by ops, an older migration, or a future refactor that forgets to
+// cascade). The targeted per-event syncRoom calls keep latency low; this
+// tick is the eventual-consistency layer.
+async function tickRoomStatusSync(pool, _flags, now, state) {
+  const todayKey = now.toISOString().slice(0, 10);
+  if (state.lastRoomStatusSyncAt === todayKey) return;
+  try {
+    const roomStatus = require('./roomStatus');
+    const summary = await roomStatus.syncAllRooms(pool, { reason: 'daily-sync' });
+    if (summary.changed > 0) {
+      console.log(`[scheduler] roomStatus sync changed ${summary.changed}/${summary.scanned} rooms (errors: ${summary.errors})`);
+      // Notify owner only when the daily drift was substantial (>= 3 rooms
+      // changed in one tick is unusual — suggests a process touched rooms
+      // outside the normal cascade and ops want to know).
+      if (summary.changed >= 3) {
+        try {
+          await notifier.notifyOwner({ pool, features: _flags || {} }, {
+            subject: `🔄 ปรับสถานะห้องอัตโนมัติ ${summary.changed} ห้อง`,
+            text: `Daily roomStatus sync ปรับ ${summary.changed} ห้อง (จาก ${summary.scanned}):\n\n`
+              + summary.changes.slice(0, 20).map((c) =>
+                  `  • ห้อง ${c.roomId}: ${c.before || '(empty)'} → ${c.after}`
+                ).join('\n')
+              + (summary.changes.length > 20 ? `\n  …และอีก ${summary.changes.length - 20} ห้อง` : '')
+              + `\n\nถ้าจำนวนนี้สูงผิดปกติ ตรวจสอบที่ /admin#health`,
+          });
+        } catch { /* ignore */ }
+      }
+    }
+    state.lastRoomStatusSyncAt = todayKey;
+    writeState(state);
+  } catch (err) {
+    console.error('[scheduler] roomStatus sync failed:', err.message);
   }
 }
 
@@ -943,6 +1002,7 @@ async function tick(pool) {
     _withAdvisoryLock(pool, `accessSync-${todayKey}`,    () => tickAccessControlSync(pool, flags, now, state)),
     _withAdvisoryLock(pool, `contractExpiry-${todayKey}`,() => tickContractExpiry(pool, flags, now, state)),
     _withAdvisoryLock(pool, `autoReconcile-${todayKey}`, () => tickAutoReconcileRooms(pool, flags, now, state)),
+    _withAdvisoryLock(pool, `roomStatusSync-${todayKey}`, () => tickRoomStatusSync(pool, flags, now, state)),
   ]);
   for (const r of results) {
     if (r.status === 'rejected') {

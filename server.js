@@ -4982,6 +4982,7 @@ app.post('/api/tenant/payments', sameOrigin, csrfGuard, requireTenant, ensureSli
     // the payment row and the uploaded file must be scrubbed too.
     let row;
     let committed = false;
+    let committedRoomId = null;
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
@@ -5123,7 +5124,7 @@ app.post('/api/tenant/payments', sameOrigin, csrfGuard, requireTenant, ensureSli
         const paid = await client.query(
           `UPDATE bills SET status='paid', paid_at=NOW()
              WHERE id=$1 AND status IN ('pending','overdue')
-             RETURNING id`,
+             RETURNING id, room_id`,
           [billId]
         );
         if (paid.rowCount !== 1) {
@@ -5131,6 +5132,8 @@ app.post('/api/tenant/payments', sameOrigin, csrfGuard, requireTenant, ensureSli
             code: 'BILL_MARK_PAID_FAILED',
           });
         }
+        // Stash the room_id for the post-commit roomStatus sync below.
+        committedRoomId = paid.rows[0]?.room_id || null;
       }
       await client.query('COMMIT');
       committed = true;
@@ -5150,6 +5153,15 @@ app.post('/api/tenant/payments', sameOrigin, csrfGuard, requireTenant, ensureSli
       throw err;
     } finally {
       client.release();
+    }
+    // Auto-cascade room status after a successful slip auto-verify. The
+    // billRoom_id was captured under the tx; calling syncRoom here (post-
+    // commit, fire-and-forget) flips the room from 'overdue' → 'occupied'
+    // when the tenant just paid their last overdue bill. Failure to sync
+    // is non-fatal — the daily safety-net tick will reconcile.
+    if (committedRoomId) {
+      require('./services/roomStatus').syncRoom(pool, committedRoomId, { reason: 'slip-auto-verify' })
+        .catch((err) => console.warn(`[slip-upload] room sync failed:`, err.message));
     }
     audit(req, 'tenant.slip_upload', 'payment', String(row.id),
       {
@@ -5609,6 +5621,20 @@ app.put('/api/payments/:id/verify', sameOrigin, csrfGuard, requireAuth, requireR
       await client.query('COMMIT');
       audit(req, 'payment.verify', 'payment', String(id), { billId: row.bill_id, amount: row.amount });
       notifyTenantOnPayment(row, 'verified').catch(() => {});
+      // Recompute the room's status now that the bill is paid — covers the
+      // common "paying the last overdue bill flips room overdue → occupied"
+      // case so admin doesn't have to click anything. Fire-and-forget
+      // since the payment is already durable + audited; a sync failure
+      // won't undo the payment, it just leaves the room status to the
+      // nightly safety-net.
+      try {
+        const billRoom = await pool.query(`SELECT room_id FROM bills WHERE id=$1 LIMIT 1`, [row.bill_id]);
+        const rid = billRoom.rows[0]?.room_id;
+        if (rid) {
+          require('./services/roomStatus').syncRoom(pool, rid, { reason: 'payment-verify' })
+            .catch((err) => console.warn(`[payment.verify] room sync failed:`, err.message));
+        }
+      } catch (err) { console.warn(`[payment.verify] room lookup failed:`, err.message); }
       return res.json({ ok: true, payment: row });
     }
     // accept === false — reject path. No bill UPDATE needed because a
