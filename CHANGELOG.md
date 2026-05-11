@@ -13,7 +13,7 @@ Versions track GitHub commits.
 **One unifying primitive: `services/features.js`.** Every new capability is gated by a flag stored in `app_data['baankarn_features_v1']` (JSONB). Admin toggles flags from the new `Features` admin page; routes that depend on a flag are blocked at the server (`503`) when the flag is off.
 
 #### New schema (idempotent CREATE TABLE IF NOT EXISTS)
-- `tenants` — full tenant record with phone, encrypted citizen ID, PIN hash for portal login, locale, line_user_id
+- `tenants` — full tenant record with phone, encrypted citizen ID, locale, line_user_id
 - `contracts` — contracts linked to tenants
 - `bills` — persistent bills (replaces on-demand calc); supports VAT, late fee, recurring charges, void
 - `payments` — slip-based payments with admin verification queue, dedup via slip_hash
@@ -38,7 +38,7 @@ Versions track GitHub commits.
 - `GET /api/features` (public, enabled-only) — clients use this to hide UI for off features
 - `GET /api/admin/features`, `PUT /api/admin/features` — admin read/write of full flag config
 - `GET/POST/PUT/DELETE /api/tenants[/:id]` — tenant CRUD with soft delete
-- `POST /api/tenant/login`, `POST /api/tenant/logout`, `GET /api/tenant/me` — tenant portal auth (phone + bcrypt PIN, separate session table)
+- `POST /api/tenant/login`, `POST /api/tenant/logout`, `GET /api/tenant/me` — tenant portal auth (phone bound to an active current room, separate session table)
 - `GET /api/tenant/bills`, `GET /api/tenant/maintenance` — tenant's own data
 - `POST /api/tenant/payments` — tenant uploads slip; gated by `slipUpload`
 - `GET /api/payments`, `PUT /api/payments/:id/verify` — admin slip queue
@@ -72,7 +72,7 @@ Versions track GitHub commits.
 
 #### Security additions
 - AES-256-GCM encryption of citizen IDs (admin must `?includeCitizen=1` to decrypt)
-- bcrypt-hashed tenant PIN (4–8 digits)
+- Tenant portal access limited to the phone bound to the active current room
 - Separate `tenant_sessions` table — admin and tenant cookies don't collide
 - Slip dedup via HMAC-SHA256 on URL+size — same slip can't be uploaded twice
 - Soft-delete switch — admin can choose hard vs. soft delete per deployment

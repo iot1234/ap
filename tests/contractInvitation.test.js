@@ -65,7 +65,6 @@ test('sanitiseDraft caps strings + drops unknown keys', () => {
     signatureFileId: 7,
     notes: 'x'.repeat(2000),
     // Unknown keys must be dropped
-    pinHash: 'should-not-pass-through',
     secretKey: 'attacker',
     __proto__: { evil: true },
   });
@@ -81,7 +80,6 @@ test('sanitiseDraft caps strings + drops unknown keys', () => {
   assert.equal(out.signatureFileId, 7);
   assert.equal(out.notes.length, 1000);
   // Unknown keys dropped
-  assert.equal(out.pinHash, undefined);
   assert.equal(out.secretKey, undefined);
 });
 

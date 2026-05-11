@@ -88,7 +88,6 @@ async function migrate(pool, opts = {}) {
       citizen_id_key_ver    SMALLINT DEFAULT 1,
       email                 TEXT,
       line_user_id          TEXT,
-      pin_hash              TEXT,
       current_room_id       TEXT,
       status                TEXT NOT NULL DEFAULT 'active',
       blacklist_reason      TEXT,

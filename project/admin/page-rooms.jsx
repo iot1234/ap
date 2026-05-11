@@ -791,12 +791,12 @@ function TenantSection({ room, onUpdate }) {
               ● บิลที่ยังไม่ชำระ — ยังเปิดอยู่ในชื่อผู้เช่าเดิม (ดูได้ที่ <b>บิล/ใบแจ้งหนี้</b>)<br/>
               ● สัญญาเช่า — สถานะใน DB ยังคงเดิม (ปิดสัญญาเองที่หน้า <b>ผู้เช่า</b>)<br/>
               ● ตั๋วแจ้งซ่อม — ยังเชื่อมกับ tenant_id เดิม<br/>
-              ● PIN portal + LINE binding — ยังใช้ login/รับแจ้งเตือนได้
+              ● Portal login + LINE binding — ยังใช้ login/รับแจ้งเตือนได้
             </div>
             <div style={{ marginTop: 8, fontWeight: 600, color: C.warningInk || '#5a3a0d' }}>
               💡 แนะนำขั้นตอนที่ถูก: <br/>
               &nbsp;&nbsp; 1) เคลียร์บิลค้างที่หน้า "บิล/ใบแจ้งหนี้"<br/>
-              &nbsp;&nbsp; 2) ปิด PIN/binding ที่ "ผู้เช่า → Portal Access" (เพื่อความปลอดภัย)<br/>
+              &nbsp;&nbsp; 2) ปิด session/binding ที่ "ผู้เช่า → Portal Access" (เพื่อความปลอดภัย)<br/>
               &nbsp;&nbsp; 3) ตั้งสถานะ tenant เป็น "moved_out" หรือ "blacklist"<br/>
               &nbsp;&nbsp; 4) ค่อยกด "ย้ายออก" ที่นี่
             </div>

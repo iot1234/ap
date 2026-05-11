@@ -214,8 +214,8 @@ function sanitiseDraft(input) {
 
 /**
  * Public form view payload — what the tenant sees when they open the URL.
- * Excludes anything sensitive (no PIN hash, no full citizen ID even if
- * already stored on the tenant row from a prior submission).
+ * Excludes anything sensitive (no full citizen ID even if already stored on
+ * the tenant row from a prior submission).
  */
 function buildPublicView(invitation, building) {
   return {

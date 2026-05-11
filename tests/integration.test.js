@@ -1034,10 +1034,10 @@ test('startAuditPruner ages out meter_readings + orphan slip files', () => {
     'orphan cleanup must call storage.remove so disk/R2 file is unlinked');
 });
 
-test('tenantPortal.requirePin flag removed (was misleading no-op)', () => {
-  // The flag had no behavioural effect — login always required PIN. We
-  // dropped it from DEFAULTS and the public /api/features `safe` allowlist
-  // so the Features page can't surface a toggle that does nothing.
+test('tenantPortal.requirePin flag stays removed for phone-only login', () => {
+  // Tenant portal login is phone-only now. Keep requirePin out of DEFAULTS
+  // and the public /api/features `safe` allowlist so the Features page
+  // cannot surface a stale toggle.
   const fs = require('node:fs');
   const path = require('node:path');
   const features = fs.readFileSync(path.join(__dirname, '..', 'services', 'features.js'), 'utf8');
@@ -1979,16 +1979,18 @@ test('tenant portal access is limited to active tenants with a current room', ()
     'tenant sessions must require active status and current room');
   assert.match(server, /if \(!tenantCanUsePortal\(session\)\) \{[\s\S]{0,180}DELETE FROM tenant_sessions WHERE sid_hash=\$1/,
     'stale sessions for moved-out tenants must be invalidated on lookup');
-  assert.match(server, /SELECT id, full_name, pin_hash, status, current_room_id[\s\S]{0,350}WHERE phone=\$1 AND deleted_at IS NULL/,
-    'tenant login must inspect the matching registered phone rows with status and room');
+  assert.match(server, /SELECT id, full_name, status, current_room_id[\s\S]{0,350}WHERE phone=\$1[\s\S]{0,200}status='active'[\s\S]{0,200}current_room_id IS NOT NULL/,
+    'tenant login must load only active current tenants for the registered phone');
+  assert.match(server, /PHONE_LINKED_TO_MULTIPLE_ACTIVE_ROOMS/,
+    'phone-only login must refuse ambiguous shared-phone active-room matches');
   assert.match(server, /if \(!tenantCanUsePortal\(matched\)\) \{[\s\S]{0,500}TENANT_NOT_ACTIVE/,
-    'tenant login must reject a correct PIN when the tenant already moved out or has no room');
+    'tenant login must reject a tenant that already moved out or has no room');
 
   const ops = fs.readFileSync(path.join(__dirname, '..', 'routes', 'tenant-ops.js'), 'utf8');
   assert.match(ops, /DELETE FROM tenant_sessions WHERE tenant_id=\$1/,
     'checkout must revoke active tenant portal sessions immediately');
-  assert.match(ops, /WHERE phone=\$1[\s\S]{0,220}AND status='active'[\s\S]{0,220}current_room_id IS NOT NULL/,
-    'first-time PIN setup must only target current active residents');
+  assert.equal(ops.includes('/_tenant/pin/'), false,
+    'tenant PIN management endpoints must not remain mounted');
 });
 
 test('booking-approve notify uses tenant matched to assigned room when possible', () => {

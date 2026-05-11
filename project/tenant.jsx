@@ -1,5 +1,5 @@
 // === project/tenant.jsx ====================================================
-// Tenant portal SPA. Logs in with phone + 6-digit PIN, then shows:
+// Tenant portal SPA. Logs in with the phone number bound to the active room, then shows:
 //   - Dashboard (current room, latest bill, ticket count)
 //   - Bills (list + detail + slip upload)
 //   - Maintenance (submit + own ticket history)
@@ -15,7 +15,7 @@ const PAYMENT_TOLERANCE_THB = 1;
 const TR = {
   th: {
     portal: 'พอร์ทัลผู้เช่า', login: 'เข้าสู่ระบบ', phone: 'เบอร์โทรศัพท์',
-    pin: 'รหัส PIN', signIn: 'เข้าสู่ระบบ', logOut: 'ออกจากระบบ',
+    signIn: 'เข้าสู่ระบบ', logOut: 'ออกจากระบบ',
     bills: 'บิล', maintenance: 'แจ้งซ่อม', profile: 'โปรไฟล์',
     home: 'หน้าหลัก', welcome: 'สวัสดี', noBills: 'ยังไม่มีบิล',
     bill: 'บิล', period: 'รอบบิล', total: 'ยอดรวม', dueDate: 'กำหนดชำระ',
@@ -28,7 +28,7 @@ const TR = {
     assigned: 'มอบหมายแล้ว', awaiting_parts: 'รออะไหล่', cancelled: 'ยกเลิก',
     darkMode: 'โหมดมืด', language: 'ภาษา', close: 'ปิด',
     portalDisabled: 'พอร์ทัลผู้เช่ายังปิดอยู่ — กรุณาติดต่อเจ้าหน้าที่',
-    invalidLogin: 'เบอร์หรือ PIN ไม่ถูกต้อง',
+    invalidLogin: 'เบอร์นี้ไม่ได้ผูกกับผู้เช่าปัจจุบัน',
     chooseFile: 'เลือกไฟล์สลิป', amount: 'จำนวนเงิน', uploadOk: 'อัปโหลดสลิปสำเร็จ',
     nothingHere: 'ไม่มีรายการ', loading: 'กำลังโหลด…', save: 'บันทึก',
     // Maintenance categories
@@ -40,18 +40,6 @@ const TR = {
     // Rate ticket
     ratePrompt: 'ให้คะแนนการซ่อม', ratePicked: 'เลือกดาว 1-5',
     ratePlaceholder: 'ความคิดเห็น (ไม่บังคับ)', submitRating: 'ส่งคะแนน',
-    // PIN flows
-    pinMismatch: 'PIN ใหม่ไม่ตรงกัน', pinDigitsOnly: 'PIN ต้องเป็นตัวเลข 4-8 หลัก',
-    pinIdTailFormat: 'ใส่เลขบัตรประชาชน 4 ตัวท้าย',
-    pinInitTitle: 'ตั้ง PIN ครั้งแรก',
-    pinInitHint: 'ใช้เบอร์โทร + 4 ตัวท้ายของเลขบัตรประชาชน (จากที่ลงทะเบียนไว้)',
-    pinInitOk: '✅ ตั้ง PIN สำเร็จ — กรุณา login',
-    pinInitFail: 'ข้อมูลไม่ตรงกัน',
-    idTailLabel: '4 ตัวท้ายเลขบัตรประชาชน',
-    pinNew: 'PIN ใหม่', pinConfirm: 'ยืนยัน PIN', pinSet: 'ตั้ง PIN',
-    pinChangeOk: '✅ เปลี่ยน PIN สำเร็จ', pinChange: 'เปลี่ยน PIN',
-    pinOldLabel: 'PIN เดิม', pinNewLabel: 'PIN ใหม่ (4-8 หลัก)',
-    pinConfirmLabel: 'ยืนยัน PIN ใหม่',
     backLink: 'ย้อนกลับ',
     amountMismatchWarn: '⚠ จำนวนไม่ตรงยอดบิล',
     downloadPdf: 'ดาวน์โหลด PDF',
@@ -89,7 +77,7 @@ const TR = {
   },
   en: {
     portal: 'Tenant Portal', login: 'Sign in', phone: 'Phone number',
-    pin: 'PIN', signIn: 'Sign in', logOut: 'Log out',
+    signIn: 'Sign in', logOut: 'Log out',
     bills: 'Bills', maintenance: 'Maintenance', profile: 'Profile',
     home: 'Home', welcome: 'Hello', noBills: 'No bills yet',
     bill: 'Bill', period: 'Period', total: 'Total', dueDate: 'Due date',
@@ -102,7 +90,7 @@ const TR = {
     assigned: 'assigned', awaiting_parts: 'awaiting parts', cancelled: 'cancelled',
     darkMode: 'Dark mode', language: 'Language', close: 'Close',
     portalDisabled: 'Tenant portal is currently disabled — please contact admin',
-    invalidLogin: 'Invalid phone or PIN',
+    invalidLogin: 'This phone is not linked to a current tenant',
     chooseFile: 'Choose slip image', amount: 'Amount', uploadOk: 'Slip uploaded',
     nothingHere: 'Nothing here', loading: 'Loading…', save: 'Save',
     cat_electrical: 'Electrical', cat_plumbing: 'Plumbing', cat_aircon: 'A/C',
@@ -111,17 +99,6 @@ const TR = {
     prio_critical: 'Critical', prio_high: 'High', prio_medium: 'Medium', prio_low: 'Low',
     ratePrompt: 'Rate the service', ratePicked: 'Pick 1-5 stars',
     ratePlaceholder: 'Optional comment', submitRating: 'Submit rating',
-    pinMismatch: 'New PINs do not match', pinDigitsOnly: 'PIN must be 4-8 digits',
-    pinIdTailFormat: 'Enter the last 4 digits of your citizen ID',
-    pinInitTitle: 'Set up your PIN',
-    pinInitHint: 'Use your phone number + last 4 digits of your citizen ID (from registration)',
-    pinInitOk: '✅ PIN set — please log in',
-    pinInitFail: 'Information did not match',
-    idTailLabel: 'Last 4 digits of citizen ID',
-    pinNew: 'New PIN', pinConfirm: 'Confirm PIN', pinSet: 'Set PIN',
-    pinChangeOk: '✅ PIN changed', pinChange: 'Change PIN',
-    pinOldLabel: 'Old PIN', pinNewLabel: 'New PIN (4-8 digits)',
-    pinConfirmLabel: 'Confirm new PIN',
     backLink: 'Back',
     amountMismatchWarn: '⚠ Amount does not match the bill',
     downloadPdf: 'Download PDF',
@@ -251,63 +228,10 @@ const STATUS_COLOR = {
 
 // ------------------------------------------------------------- views ------
 
-function FirstTimePinSetup({ locale, onCancel, onDone }) {
-  const t = (k) => tr(locale, k);
-  const [phone, setPhone] = useState('');
-  const [tail, setTail] = useState('');
-  const [newPin, setNewPin] = useState('');
-  const [confirm, setConfirm] = useState('');
-  const [msg, setMsg] = useState('');
-  const [busy, setBusy] = useState(false);
-  async function submit(e) {
-    e.preventDefault();
-    setMsg('');
-    if (newPin !== confirm) { setMsg(t('pinMismatch')); return; }
-    if (!/^\d{4,8}$/.test(newPin)) { setMsg(t('pinDigitsOnly')); return; }
-    if (!/^\d{4}$/.test(tail)) { setMsg(t('pinIdTailFormat')); return; }
-    setBusy(true);
-    try {
-      await api('/api/tenants/_tenant/pin/init', {
-        method: 'POST',
-        body: JSON.stringify({ phone, citizenIdTail: tail, newPin }),
-      });
-      setMsg(t('pinInitOk'));
-      setTimeout(onDone, 1200);
-    } catch (e2) {
-      setMsg('❌ ' + (e2.message || t('pinInitFail')));
-    } finally { setBusy(false); }
-  }
-  return (
-    <form onSubmit={submit}>
-      <h1 style={{ margin: 0, fontFamily: 'Sora', fontWeight: 600, fontSize: 20 }}>{t('pinInitTitle')}</h1>
-      <p style={{ color: 'var(--muted)', fontSize: 13, marginBottom: 18 }}>
-        {t('pinInitHint')}
-      </p>
-      <label style={lbl}>{t('phone')}</label>
-      <input type="tel" maxLength={32} value={phone}
-        onChange={(e) => setPhone(e.target.value)} required style={inp} />
-      <label style={lbl}>{t('idTailLabel')}</label>
-      <input inputMode="numeric" pattern="[0-9]*" maxLength={4} value={tail}
-        onChange={(e) => setTail(e.target.value)} required style={inp} />
-      <label style={lbl}>{t('pinNew')}</label>
-      <input type="password" inputMode="numeric" pattern="[0-9]*" maxLength={8}
-        value={newPin} onChange={(e) => setNewPin(e.target.value)} required style={inp} />
-      <label style={lbl}>{t('pinConfirm')}</label>
-      <input type="password" inputMode="numeric" pattern="[0-9]*" maxLength={8}
-        value={confirm} onChange={(e) => setConfirm(e.target.value)} required style={inp} />
-      {msg ? <div style={{ marginTop: 8, fontSize: 13, color: msg.startsWith('✅') ? 'var(--green)' : 'var(--red)' }}>{msg}</div> : null}
-      <button type="submit" disabled={busy} style={btnPrimary}>{busy ? '…' : t('pinSet')}</button>
-      <button type="button" onClick={onCancel} style={btnLink}>{t('backLink')}</button>
-    </form>
-  );
-}
-
 function LoginView({ locale, setLocale, onLoggedIn, portalEnabled }) {
   const [phone, setPhone] = useState('');
-  const [pin, setPin] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
-  const [showInit, setShowInit] = useState(false);
   const t = (k) => tr(locale, k);
 
   async function submit(e) {
@@ -315,28 +239,12 @@ function LoginView({ locale, setLocale, onLoggedIn, portalEnabled }) {
     setErr(''); setBusy(true);
     try {
       const out = await api('/api/tenant/login', {
-        method: 'POST', body: JSON.stringify({ phone, pin }),
+        method: 'POST', body: JSON.stringify({ phone }),
       });
       onLoggedIn(out.tenant);
     } catch (e2) {
       setErr(e2.status === 503 ? t('portalDisabled') : t('invalidLogin'));
     } finally { setBusy(false); }
-  }
-
-  if (showInit) {
-    return (
-      <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', padding: 16 }}>
-        <div style={{
-          background: 'var(--card)', color: 'var(--ink)', borderRadius: 16,
-          padding: '36px 28px', width: '100%', maxWidth: 380,
-          boxShadow: '0 20px 60px -20px rgba(0,0,0,0.25)',
-        }}>
-          <FirstTimePinSetup locale={locale}
-            onCancel={() => setShowInit(false)}
-            onDone={() => setShowInit(false)} />
-        </div>
-      </div>
-    );
   }
 
   return (
@@ -359,16 +267,8 @@ function LoginView({ locale, setLocale, onLoggedIn, portalEnabled }) {
           <label style={lbl}>{t('phone')}</label>
           <input value={phone} onChange={(e) => setPhone(e.target.value)} required
             type="tel" maxLength={32} style={inp} placeholder="081-234-5678" />
-          <label style={lbl}>{t('pin')}</label>
-          <input value={pin} onChange={(e) => setPin(e.target.value)} required
-            type="password" inputMode="numeric" pattern="[0-9]*" maxLength={8} style={inp}
-            placeholder="•••••" />
           {err ? <div style={{ color: 'var(--red)', fontSize: 13, marginTop: 8 }}>{err}</div> : null}
           <button type="submit" style={btnPrimary}>{busy ? '…' : t('signIn')}</button>
-          <button type="button" onClick={() => setShowInit(true)}
-            style={{ ...btnLink, marginTop: 12 }}>
-            ครั้งแรก? ตั้ง PIN ใหม่
-          </button>
         </fieldset>
         <div style={{ marginTop: 18, display: 'flex', justifyContent: 'space-between', fontSize: 12.5 }}>
           <a href="/" style={{ color: 'var(--muted)' }}>← กลับหน้าหลัก</a>
@@ -1058,62 +958,6 @@ function RateTicket({ ticketId, locale, onDone }) {
   );
 }
 
-function ChangePinForm({ locale }) {
-  const t = (k) => tr(locale, k);
-  const [oldPin, setOldPin] = useState('');
-  const [newPin, setNewPin] = useState('');
-  const [confirm, setConfirm] = useState('');
-  const [msg, setMsg] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [open, setOpen] = useState(false);
-
-  async function submit(e) {
-    e.preventDefault();
-    setMsg('');
-    if (newPin !== confirm) { setMsg(t('pinMismatch')); return; }
-    if (!/^\d{4,8}$/.test(newPin)) { setMsg(t('pinDigitsOnly')); return; }
-    setBusy(true);
-    try {
-      await api('/api/tenants/_tenant/pin/change', {
-        method: 'POST',
-        body: JSON.stringify({ oldPin, newPin }),
-      });
-      setMsg(t('pinChangeOk'));
-      setOldPin(''); setNewPin(''); setConfirm('');
-      setTimeout(() => { setOpen(false); setMsg(''); }, 1500);
-    } catch (e2) {
-      setMsg('❌ ' + (e2.message || 'failed'));
-    } finally { setBusy(false); }
-  }
-
-  if (!open) {
-    return (
-      <button onClick={() => setOpen(true)} style={btnLink}>{t('pinChange')}</button>
-    );
-  }
-  return (
-    <form onSubmit={submit} style={{ marginTop: 8 }}>
-      <input type="password" inputMode="numeric" pattern="[0-9]*"
-        placeholder={t('pinOldLabel')} maxLength={8} value={oldPin}
-        onChange={(e) => setOldPin(e.target.value)} required style={inp}
-        aria-label={t('pinOldLabel')} />
-      <input type="password" inputMode="numeric" pattern="[0-9]*"
-        placeholder={t('pinNewLabel')} maxLength={8} value={newPin}
-        onChange={(e) => setNewPin(e.target.value)} required style={inp}
-        aria-label={t('pinNewLabel')} />
-      <input type="password" inputMode="numeric" pattern="[0-9]*"
-        placeholder={t('pinConfirmLabel')} maxLength={8} value={confirm}
-        onChange={(e) => setConfirm(e.target.value)} required style={inp}
-        aria-label={t('pinConfirmLabel')} />
-      {msg ? <div style={{ marginTop: 6, fontSize: 13, color: msg.startsWith('✅') ? 'var(--green)' : 'var(--red)' }}>{msg}</div> : null}
-      <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-        <button type="submit" disabled={busy} style={{ ...btnPrimary, marginTop: 0, flex: 1 }}>{busy ? '…' : t('save')}</button>
-        <button type="button" onClick={() => { setOpen(false); setMsg(''); }} style={btnLink}>{t('cancel')}</button>
-      </div>
-    </form>
-  );
-}
-
 function ProfileView({ tenant, locale, setLocale, theme, setTheme, onLogout, features }) {
   const t = (k) => tr(locale, k);
   return (
@@ -1124,10 +968,6 @@ function ProfileView({ tenant, locale, setLocale, theme, setTheme, onLogout, fea
         <div style={{ color: 'var(--muted)', fontSize: 13 }}>{tenant.phone}</div>
         {tenant.email ? <div style={{ color: 'var(--muted)', fontSize: 13 }}>{tenant.email}</div> : null}
         {tenant.roomId ? <div style={{ marginTop: 6 }}>ห้อง {tenant.roomId}</div> : null}
-        <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--border)' }}>
-          <div style={{ fontSize: 13, color: 'var(--ink2)', marginBottom: 4 }}>🔐 PIN</div>
-          <ChangePinForm locale={locale} />
-        </div>
       </div>
       <div style={{ ...card, marginTop: 12 }}>
         {features?.i18n?.enabled ? (

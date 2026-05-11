@@ -55,9 +55,13 @@ test('rateTicket: 1-5 inclusive', () => {
 });
 
 test('tenantLogin: phone normalised (strip dashes/spaces)', () => {
-  const r = schemas.tenantLogin.safeParse({ phone: '081-234-5678', pin: '4729' });
+  const r = schemas.tenantLogin.safeParse({ phone: '081-234-5678' });
   assert.equal(r.success, true);
   assert.equal(r.data.phone, '0812345678');
+});
+test('tenantLogin: PIN field is rejected after phone-only login change', () => {
+  const r = schemas.tenantLogin.safeParse({ phone: '081-234-5678', pin: '4729' });
+  assert.equal(r.success, false);
 });
 
 test('adminCreateUser: weak password rejected', () => {

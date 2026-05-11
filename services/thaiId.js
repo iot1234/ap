@@ -57,8 +57,8 @@ function hashForLookup(input) {
 }
 
 /**
- * Last four digits, used for the no-PIN-yet first-login flow + display
- * masking. Shorter helper around String#slice with explicit normalisation.
+ * Last four digits, used for display masking and legacy data comparisons.
+ * Shorter helper around String#slice with explicit normalisation.
  */
 function tail(input, n = 4) {
   const s = normalize(input);

@@ -21,9 +21,6 @@ const promptpayTarget = z.string().trim()
   .refine((s) => /^0\d{9}$/.test(s) || /^\d{13}$/.test(s),
     'PromptPay ต้องเป็นเบอร์โทร 10 หลัก หรือ เลขบัตร 13 หลัก');
 
-const pin = z.string().trim()
-  .regex(/^\d{4,8}$/, 'PIN ต้องเป็นตัวเลข 4-8 หลัก');
-
 const idParam = z.coerce.number().int().positive();
 
 // --- auth -----------------------------------------------------------------
@@ -41,19 +38,7 @@ schemas.changePassword = z.object({
 
 schemas.tenantLogin = z.object({
   phone: phoneStr,
-  pin: pin,
-});
-
-schemas.tenantSetPin = z.object({
-  phone: phoneStr,
-  citizenIdTail: z.string().regex(/^\d{4}$/, '4 ตัวท้ายของเลขบัตร'),
-  newPin: pin,
-});
-
-schemas.tenantChangePin = z.object({
-  oldPin: pin,
-  newPin: pin,
-});
+}).strict();
 
 // --- tenants --------------------------------------------------------------
 schemas.createTenant = z.object({
@@ -62,7 +47,6 @@ schemas.createTenant = z.object({
   citizenId: citizenId.optional(),
   email: z.string().email('อีเมลไม่ถูกต้อง').max(200).optional().or(z.literal('').transform(() => undefined)),
   lineUserId: z.string().max(64).optional(),
-  pin: pin.optional(),
   roomId: z.string().max(32).optional(),
   status: z.enum(['active', 'moved_out', 'blacklist']).optional(),
   notes: z.string().max(1000).optional(),

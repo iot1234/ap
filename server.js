@@ -408,11 +408,6 @@ const lockout = makeLockout(pool);
 // enumeration of valid usernames.
 const DUMMY_HASH = '$2a$10$' + 'X'.repeat(53);
 
-// === Trivial-PIN reject (A6) =============================================
-// Single source of truth in services/pinPolicy.js — also used by
-// routes/tenant-ops.js so the two paths can't drift.
-const { TRIVIAL_PINS_4, isTrivialPin } = require('./services/pinPolicy');
-
 // --- Auth endpoints -------------------------------------------------------
 app.post('/api/auth/login', sameOrigin, loginLimiter, validateBody(schemas.login), async (req, res) => {
   const { username, password } = req.body;
@@ -755,8 +750,8 @@ async function mirrorRoomsToTenants(roomsObj, updatedBy) {
     seen.add(dedupKey);
     // Match on phone + case-insensitive full_name. lower(full_name) avoids
     // the trivial-typo "John Smith" vs "john smith" creating duplicates.
-    // We never touch pin_hash or citizen_id_encrypted — those come from
-    // /api/tenants endpoints with explicit input.
+    // We never touch citizen_id_encrypted — that comes from /api/tenants
+    // endpoints with explicit identity input.
     try {
       const existing = await pool.query(
         `SELECT id FROM tenants
@@ -2004,8 +1999,8 @@ app.put('/api/admin/features', sameOrigin, csrfGuard, requireAuth, requireRole('
 
 // === v2: Tenants (table-backed) ===========================================
 // Coexists with rooms[].tenant blob. Use this when the tenantPortal flag is
-// enabled — gives us a stable id for contracts/bills/payments and a real
-// PIN-based login.
+// enabled — gives us a stable id for contracts/bills/payments and phone-only
+// tenant portal access.
 
 const VALID_TENANT_STATUS = new Set(['active', 'moved_out', 'blacklist']);
 
@@ -2179,7 +2174,8 @@ app.get('/api/tenants/:id/history', requireAuth, requireRole('owner', 'manager')
     if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
     try {
       // Allow even soft-deleted tenants here so admin can audit a deleted
-      // record. The masking still hides citizen_id_encrypted + pin_hash.
+      // record. The masking still hides citizen_id_encrypted and any legacy
+      // credential hash columns that may exist on older deployments.
       const tQ = await pool.query(
         `SELECT * FROM tenants WHERE id=$1`,
         [id]
@@ -2382,16 +2378,6 @@ app.post('/api/tenants', sameOrigin, csrfGuard, requireAuth, requireRole('owner'
       citizenEnc = citizenIdNorm; // plaintext — not recommended
     }
   }
-  let pinHash = null;
-  if (b.pin) {
-    if (!/^\d{4,8}$/.test(String(b.pin))) {
-      return res.status(400).json({ error: 'PIN ต้องเป็นตัวเลข 4-8 หลัก' });
-    }
-    if (isTrivialPin(b.pin)) {
-      return res.status(400).json({ error: 'PIN ไม่ปลอดภัย — เลี่ยงรูปแบบที่คาดเดาง่าย เช่น 1234, 0000, 1111' });
-    }
-    pinHash = await bcrypt.hash(String(b.pin), 10);
-  }
   // Pre-flight dedup check. Two cohorts to look at:
   //   1. citizen_id_hash matches (high confidence) — the partial unique
   //      index catches this at INSERT time too, but a 409 with the prior
@@ -2479,15 +2465,14 @@ app.post('/api/tenants', sameOrigin, csrfGuard, requireAuth, requireRole('owner'
       const { rows } = await db.query(
         `INSERT INTO tenants
           (full_name, phone, citizen_id_encrypted, citizen_id_tail, citizen_id_hash,
-           email, line_user_id, pin_hash, current_room_id, status, notes, locale,
+           email, line_user_id, current_room_id, status, notes, locale,
            address, emergency_contact_name, emergency_contact_phone, emergency_contact_relation)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
          RETURNING id, full_name, phone, email, current_room_id, status, created_at`,
         [
           fullName, phone, citizenEnc, citizenTail, citizenHash,
           str(b.email, 200) || null,
           lineUserId,
-          pinHash,
           requestedRoomId,
           tenantStatus,
           str(b.notes, 1000) || null,
@@ -2512,14 +2497,13 @@ app.post('/api/tenants', sameOrigin, csrfGuard, requireAuth, requireRole('owner'
         const { rows } = await db.query(
           `INSERT INTO tenants
             (full_name, phone, citizen_id_encrypted, citizen_id_tail, email, line_user_id,
-             pin_hash, current_room_id, status, notes, locale)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+             current_room_id, status, notes, locale)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
            RETURNING id, full_name, phone, email, current_room_id, status, created_at`,
           [
             fullName, phone, citizenEnc, citizenTail,
             str(b.email, 200) || null,
             lineUserId,
-            pinHash,
             requestedRoomId,
             tenantStatus,
             str(b.notes, 1000) || null,
@@ -2808,12 +2792,6 @@ app.put('/api/tenants/:id', sameOrigin, csrfGuard, requireAuth, requireRole('own
   }
   if (b.notes !== undefined) set('notes', b.notes ? String(b.notes).slice(0, 1000) : null);
   if (b.locale !== undefined && ['th', 'en'].includes(b.locale)) set('locale', b.locale);
-  if (b.pin !== undefined && b.pin) {
-    if (!/^\d{4,8}$/.test(String(b.pin))) return res.status(400).json({ error: 'PIN ต้องเป็นตัวเลข 4-8 หลัก' });
-    if (isTrivialPin(b.pin)) return res.status(400).json({ error: 'PIN ไม่ปลอดภัย — เลี่ยงรูปแบบที่คาดเดาง่าย' });
-    const hash = await bcrypt.hash(String(b.pin), 10);
-    set('pin_hash', hash);
-  }
   if (b.citizenId !== undefined) {
     const thaiId = require('./services/thaiId');
     const norm = thaiId.normalize(b.citizenId || '');
@@ -3059,7 +3037,6 @@ app.post('/api/tenant/login', sameOrigin, rateLimitTenantLogin, features.require
   validateBody(schemas.tenantLogin),
   async (req, res) => {
   const phone = req.body.phone;
-  const pin = req.body.pin;
   const principal = `tenant:${phone}`;
   try {
     try {
@@ -3075,33 +3052,32 @@ app.post('/api/tenant/login', sameOrigin, rateLimitTenantLogin, features.require
       throw err;
     }
     const { rows } = await pool.query(
-      `SELECT id, full_name, pin_hash, status, current_room_id
+      `SELECT id, full_name, status, current_room_id
          FROM tenants
-        WHERE phone=$1 AND deleted_at IS NULL
-        ORDER BY (status='active' AND current_room_id IS NOT NULL AND current_room_id <> '') DESC,
-                 updated_at DESC NULLS LAST, id DESC
-        LIMIT 10`,
+        WHERE phone=$1
+          AND deleted_at IS NULL
+          AND status='active'
+          AND current_room_id IS NOT NULL
+          AND current_room_id <> ''
+        ORDER BY updated_at DESC NULLS LAST, id DESC
+        LIMIT 2`,
       [phone]
     );
-    let matched = null;
-    let compared = false;
-    for (const candidate of rows) {
-      const ok = await bcrypt.compare(pin, candidate.pin_hash || DUMMY_HASH);
-      compared = true;
-      if (ok && candidate.pin_hash && !matched) matched = candidate;
-    }
-    if (!compared) await bcrypt.compare(pin, DUMMY_HASH);
-    if (!matched) {
+    if (!rows.length) {
       lockout.recordFailure(principal, 'tenant').catch(() => {});
-      audit(req, 'tenant.login_failed', 'tenant', phone, null, phone).catch(() => {});
+      audit(req, 'tenant.login_failed', 'tenant', phone, { reason: 'no_active_current_tenant' }, phone).catch(() => {});
       return res.status(401).json({ error: 'invalid credentials' });
     }
-    // Only AFTER credentials check do we surface blacklist as a different
-    // status — so attackers can't enumerate suspended accounts without
-    // already knowing the PIN.
-    if (matched.status === 'blacklist') {
-      return res.status(403).json({ error: 'account suspended' });
+    if (rows.length > 1) {
+      lockout.recordFailure(principal, 'tenant').catch(() => {});
+      audit(req, 'tenant.login_blocked_ambiguous_phone', 'tenant', phone,
+        { tenantIds: rows.map((r) => r.id), roomIds: rows.map((r) => r.current_room_id) }, phone).catch(() => {});
+      return res.status(409).json({
+        error: 'phone is linked to multiple active rooms',
+        code: 'PHONE_LINKED_TO_MULTIPLE_ACTIVE_ROOMS',
+      });
     }
+    const matched = rows[0];
     if (!tenantCanUsePortal(matched)) {
       audit(req, 'tenant.login_blocked_inactive', 'tenant', String(matched.id),
         { status: matched.status, currentRoomId: matched.current_room_id }, phone).catch(() => {});
@@ -5963,8 +5939,8 @@ const BOOKING_TRANSITIONS = {
   // pending → approved is allowed since 5534b48 introduced the new
   // POST /api/bookings/:id/approve-and-assign endpoint that runs the
   // verification checklist via a context-rich confirm modal showing
-  // applicant details + tells admin about the follow-up steps (PIN
-  // setup, LINE binding) — the "force admin to first click reviewing"
+  // applicant details + tells admin about the follow-up steps (portal phone
+  // access, LINE binding) — the "force admin to first click reviewing"
   // gate became redundant once the approve action itself surfaced the
   // applicant data. Keeping reviewing as an optional intermediate
   // state for cases where admin wants to mark "I've started looking"
@@ -9293,7 +9269,7 @@ app.post('/api/admin/contract-invitations/:id/approve',
                   ``,
                   `📋 ขั้นตอนต่อไป:`,
                   `   • ดูสัญญา + ดาวน์โหลด PDF ที่พอร์ทัลผู้เช่า`,
-                  `   • ตั้ง PIN เข้าพอร์ทัลผู้เช่าที่ ${proto}://${host}/tenant`,
+                  `   • เข้าพอร์ทัลผู้เช่าที่ ${proto}://${host}/tenant ด้วยเบอร์โทรที่ผูกกับห้อง`,
                   welcomeBillCreated
                     ? `   • บิลรอบแรกพร้อมชำระแล้ว — เข้าพอร์ทัลเพื่อดูรายละเอียด`
                     : `   • บิลรอบแรกจะออกในรอบบิลเดือนถัดไป`,

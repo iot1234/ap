@@ -275,7 +275,7 @@ function PageFeatures({ setToast }) {
         <SectionHeading>ฝั่งผู้เช่า</SectionHeading>
         <Row id="tenantPortal"
           title="พอร์ทัลผู้เช่า (/tenant)"
-          desc="ผู้เช่า login ด้วยเบอร์ + PIN เพื่อดูบิล แจ้งซ่อม อัปโหลดสลิป">
+          desc="ผู้เช่า login ด้วยเบอร์โทรที่ผูกกับห้อง เพื่อดูบิล แจ้งซ่อม อัปโหลดสลิป">
           <Field id="tenantPortal" field="sessionDays" label="อายุ session (วัน)" type="number" />
         </Row>
         <Row id="slipUpload"

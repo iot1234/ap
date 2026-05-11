@@ -2,30 +2,16 @@
 // Multi-step tenant operations that need a DB transaction:
 //   - checkIn:  create tenant (or use existing) + flip room to occupied + draft welcome bill
 //   - checkOut: close tenant + flip room to vacant + finalize bill (pro-rate)
-//   - PIN management: change PIN (current PIN required) + first-time set (phone + id_card4)
 
 const express = require('express');
-const bcrypt = require('bcryptjs');
 const { schemas } = require('../schemas');
 const { validateBody } = require('../middleware/validate');
 const billing = require('../services/billing');
 const features = require('../services/features');
 const notifier = require('../services/notifier');
-const cryptoSvc = require('../services/crypto');
-
-// PIN trivial-reject — single source of truth.
-const { TRIVIAL_PINS_4, isTrivialPin } = require('../services/pinPolicy');
 
 module.exports = function buildTenantOpsRouter(ctx) {
-  const { pool, requireAuth, requireRole, sameOrigin, csrfGuard, audit, requireTenant,
-          lockout, makeIpLimiter } = ctx;
-  // Brute-force defenses for the unauthenticated PIN init endpoint. Without
-  // these an attacker who knows a phone number can try all 10,000 possible
-  // 4-digit citizen-id tails freely. IP-level limiter caps scripted attempts;
-  // per-phone lockout makes rotating IPs ineffective too.
-  const pinInitIpLimiter = makeIpLimiter
-    ? makeIpLimiter({ windowMs: 15 * 60_000, max: 8, message: 'too many PIN init attempts' })
-    : (_req, _res, next) => next();
+  const { pool, requireAuth, requireRole, sameOrigin, csrfGuard, audit } = ctx;
   const r = express.Router();
 
   // === checkIn ============================================================
@@ -445,7 +431,7 @@ module.exports = function buildTenantOpsRouter(ctx) {
                 `ครบกำหนดชำระ: ${dueDate}`,
                 ``,
                 `📋 ขั้นตอนถัดไป:`,
-                `   1) ตั้ง PIN ครั้งแรกที่พอร์ทัลผู้เช่า /tenant`,
+                `   1) เข้าพอร์ทัลผู้เช่าที่ /tenant ด้วยเบอร์โทรที่ผูกกับห้อง`,
                 `   2) ผูกบัญชี LINE OA (ถ้ายังไม่ผูก)`,
                 `   3) ดูบิลทั้งหมด + ชำระผ่าน QR ที่พอร์ทัล`,
               ].join('\n'),
@@ -694,138 +680,6 @@ module.exports = function buildTenantOpsRouter(ctx) {
         res.status(500).json({ error: 'internal error', code: 'DB_ERROR' });
       } finally {
         client.release();
-      }
-    }
-  );
-
-  // === Tenant portal — change PIN ========================================
-  r.post('/_tenant/pin/change', sameOrigin, csrfGuard, requireTenant,
-    validateBody(schemas.tenantChangePin),
-    async (req, res) => {
-      const { oldPin, newPin } = req.body;
-      if (isTrivialPin(newPin)) {
-        return res.status(400).json({ error: 'PIN ใหม่ไม่ปลอดภัย — เลี่ยงรูปแบบที่คาดเดาง่าย', code: 'WEAK_PIN' });
-      }
-      try {
-        const { rows } = await pool.query(
-          `SELECT pin_hash FROM tenants WHERE id=$1 AND deleted_at IS NULL`,
-          [req.tenant.tenant_id]
-        );
-        if (!rows.length || !rows[0].pin_hash) {
-          return res.status(401).json({ error: 'invalid credentials' });
-        }
-        const ok = await bcrypt.compare(oldPin, rows[0].pin_hash);
-        if (!ok) return res.status(401).json({ error: 'รหัส PIN เดิมไม่ถูกต้อง' });
-        const newHash = await bcrypt.hash(newPin, 10);
-        await pool.query(`UPDATE tenants SET pin_hash=$1, updated_at=NOW() WHERE id=$2`,
-          [newHash, req.tenant.tenant_id]);
-        // Invalidate all other sessions for this tenant. tenant_sessions.sid
-        // now stores sha256(raw cookie), so hash before comparing.
-        const sid = (req.headers.cookie || '').match(/(?:^|;\s*)tenant_sid=([^;]+)/)?.[1];
-        if (sid) {
-          const sidHash = require('crypto').createHash('sha256').update(sid).digest('hex');
-          await pool.query(
-            `DELETE FROM tenant_sessions WHERE tenant_id=$1 AND sid_hash<>$2`,
-            [req.tenant.tenant_id, sidHash]
-          );
-        }
-        audit(req, 'tenant.pin_change', 'tenant', String(req.tenant.tenant_id));
-        res.json({ ok: true });
-      } catch (err) {
-        console.error('change pin error:', err);
-        res.status(500).json({ error: 'internal error', code: 'DB_ERROR' });
-      }
-    }
-  );
-
-  // === Tenant portal — first-time set PIN with phone + last4(id_card) =====
-  // Used when tenant has never logged in (pin_hash is NULL). The id_card
-  // tail is used as a one-time secret — admin entered it during checkin.
-  // Hardened: IP rate limiter (~8/15min) + per-phone lockout (5 wrong
-  // tails → 30min lockout) so brute-forcing 10,000 tails isn't feasible.
-  r.post('/_tenant/pin/init', sameOrigin, csrfGuard, pinInitIpLimiter,
-    validateBody(schemas.tenantSetPin),
-    async (req, res) => {
-      const { phone, citizenIdTail, newPin } = req.body;
-      if (isTrivialPin(newPin)) {
-        return res.status(400).json({ error: 'PIN ไม่ปลอดภัย — เลี่ยงรูปแบบที่คาดเดาง่าย', code: 'WEAK_PIN' });
-      }
-      const principal = `pin_init:${String(phone).slice(0, 32)}`;
-      try {
-        // Per-phone lockout check first so a locked attacker can't even
-        // see DB lookup timing.
-        if (lockout) {
-          try { await lockout.check(principal); }
-          catch (err) {
-            if (err.code === 'LOCKED_OUT') {
-              const minutes = Math.ceil((err.retryAfterMs || 0) / 60_000);
-              audit(req, 'tenant.pin_init_locked', 'tenant', phone, null, phone).catch(() => {});
-              return res.status(429).json({
-                error: `ลองใหม่ใน ${minutes} นาที`, code: 'LOCKED_OUT',
-              });
-            }
-            throw err;
-          }
-        }
-
-        const { rows } = await pool.query(
-          `SELECT id, pin_hash, citizen_id_encrypted, citizen_id_tail, current_room_id, status
-             FROM tenants
-            WHERE phone=$1
-              AND deleted_at IS NULL
-              AND status='active'
-              AND current_room_id IS NOT NULL
-              AND current_room_id <> ''
-            ORDER BY updated_at DESC NULLS LAST, id DESC
-            LIMIT 10`,
-          [phone]
-        );
-        // Always run dummy bcrypt to keep timing constant
-        const fakeHash = '$2a$10$' + 'X'.repeat(53);
-        await bcrypt.compare(citizenIdTail, fakeHash).catch(() => {});
-
-        if (!rows.length) {
-          if (lockout) lockout.recordFailure(principal, 'tenant').catch(() => {});
-          audit(req, 'tenant.pin_init_failed', 'tenant', phone,
-            { reason: 'no_active_tenant' }, phone).catch(() => {});
-          return res.status(401).json({ error: 'ข้อมูลไม่ตรงกัน' });
-        }
-        let t = null;
-        let alreadySet = false;
-        for (const candidate of rows) {
-          // Verify last 4 of citizen ID. Prefer comparing against tail field;
-          // fall back to decrypting if tail was not stored.
-          let storedTail = candidate.citizen_id_tail;
-          if (!storedTail && candidate.citizen_id_encrypted) {
-            try {
-              storedTail = (cryptoSvc.decryptString(candidate.citizen_id_encrypted) || '').slice(-4);
-            } catch { /* ignore */ }
-          }
-          if (storedTail && storedTail === citizenIdTail) {
-            if (candidate.pin_hash) {
-              alreadySet = true;
-              break;
-            }
-            t = candidate;
-            break;
-          }
-        }
-        if (!t) {
-          if (lockout) lockout.recordFailure(principal, 'tenant').catch(() => {});
-          audit(req, 'tenant.pin_init_failed', 'tenant', alreadySet ? phone : String(rows[0].id),
-            { reason: alreadySet ? 'already_set' : 'bad_tail' }, phone).catch(() => {});
-          return res.status(401).json({ error: 'ข้อมูลไม่ตรงกัน' });
-        }
-        const hash = await bcrypt.hash(newPin, 10);
-        await pool.query(`UPDATE tenants SET pin_hash=$1, updated_at=NOW() WHERE id=$2`,
-          [hash, t.id]);
-        // Successful init → clear failure counter for this phone.
-        if (lockout) lockout.reset(principal).catch(() => {});
-        audit(req, 'tenant.pin_init', 'tenant', String(t.id));
-        res.json({ ok: true });
-      } catch (err) {
-        console.error('init pin error:', err);
-        res.status(500).json({ error: 'internal error', code: 'DB_ERROR' });
       }
     }
   );

@@ -12,7 +12,7 @@
 - **`/`** — Dashboard แสดงสถานะห้องทั้ง 5 ชั้น คลิกเลือกชั้น/ห้อง ดูรายละเอียด
 - **`/book`** — ฟอร์มจองห้อง สาธารณะ ไม่ต้อง login
 - **`/maintenance`** — แจ้งซ่อม + ดูประวัติของตัวเอง
-- **`/tenant`** — พอร์ทัลผู้เช่า (login เบอร์ + PIN): ดูบิล อัปโหลดสลิป แจ้งซ่อม โปรไฟล์ + dark mode + i18n th/en (เปิดผ่าน `tenantPortal` flag)
+- **`/tenant`** — พอร์ทัลผู้เช่า (login ด้วยเบอร์โทรที่ผูกกับห้อง): ดูบิล อัปโหลดสลิป แจ้งซ่อม โปรไฟล์ + dark mode + i18n th/en (เปิดผ่าน `tenantPortal` flag)
 
 ### ฝั่งผู้ดูแล (Admin — login required)
 - **`/login`** — เข้าสู่ระบบ
@@ -133,7 +133,7 @@ admin user with `ADMIN_USERNAME` / `ADMIN_PASSWORD`.
 
 | flag | default | คำอธิบาย |
 |------|---------|----------|
-| `tenantPortal` | off | พอร์ทัลผู้เช่าที่ `/tenant` (login เบอร์ + PIN) |
+| `tenantPortal` | off | พอร์ทัลผู้เช่าที่ `/tenant` (login ด้วยเบอร์โทรที่ผูกกับห้อง) |
 | `slipUpload` | off | อัปโหลดสลิปชำระเงิน + คิวตรวจสอบ |
 | `photoUpload` | **on** | อัปโหลดรูปห้อง / ลายเซ็น / สำเนาบัตร |
 | `meterIot` | off | บันทึกค่ามิเตอร์ + ตรวจค่าผิดปกติ |
@@ -174,7 +174,7 @@ Auto-created in `migrate()` on boot:
 - `auth_users`, `user_sessions`, `maintenance_tickets`, `audit_logs`
 
 **v2 (created by same idempotent migration block):**
-- `tenants` — phone, encrypted citizen ID + tail, PIN hash, line_user_id, locale, soft-delete
+- `tenants` — phone, encrypted citizen ID + tail, line_user_id, locale, soft-delete
 - `contracts` — contract_no, tenant_id, room_id, dates, monthly_rent, deposit
 - `bills` — persistent bills with VAT, late_fee, status (pending/paid/overdue/void)
 - `payments` — bill_id, amount, slip_url, slip_hash (HMAC dedup), verified_by

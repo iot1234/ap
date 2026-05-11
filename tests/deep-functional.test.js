@@ -403,33 +403,23 @@ test('/api/tenant/payments handler: rejects amount mismatch BEFORE saving slip',
 });
 
 // =====================================================================
-// 8. TENANT PORTAL — first-time PIN init security
+// 8. TENANT PORTAL — phone-only access
 // =====================================================================
 
-test('tenant pin/init: refuses already-set tenants without revealing why', () => {
-  // The endpoint must return generic "ข้อมูลไม่ตรงกัน" for both:
-  //   - phone not found
-  //   - phone found BUT pin_hash already set
-  // Otherwise an attacker could enumerate which phones are tenants.
+test('tenant portal PIN init/change endpoints are removed', () => {
   const fs = require('node:fs');
   const path = require('node:path');
   const ops = fs.readFileSync(
     path.join(__dirname, '..', 'routes', 'tenant-ops.js'), 'utf8'
   );
-  const idx = ops.indexOf('/_tenant/pin/init');
-  assert.ok(idx > 0);
-  const body = ops.slice(idx, idx + 4000);
-  // Must collapse no-tenant, moved-out/non-current tenant, bad-tail, and
-  // already-set into the same tenant-facing message.
-  assert.match(body, /reason: 'no_active_tenant'/,
-    'must not allow moved-out or roomless tenants to initialise portal PINs');
-  assert.match(body, /alreadySet \? 'already_set' : 'bad_tail'/,
-    'must handle already-set and bad-tail cases without exposing a different response');
-  assert.match(body, /'ข้อมูลไม่ตรงกัน'/,
-    'must use generic error message');
-  // Must run dummy bcrypt for timing constancy.
-  assert.match(body, /bcrypt\.compare\(citizenIdTail, fakeHash\)/,
-    'must run dummy bcrypt to keep timing constant');
+  assert.equal(ops.includes('/_tenant/pin/init'), false,
+    'first-time PIN setup route must not exist');
+  assert.equal(ops.includes('/_tenant/pin/change'), false,
+    'tenant PIN change route must not exist');
+  assert.equal(ops.includes('tenantSetPin'), false,
+    'router must not validate removed PIN setup schema');
+  assert.equal(ops.includes('tenantChangePin'), false,
+    'router must not validate removed PIN change schema');
 });
 
 // =====================================================================
