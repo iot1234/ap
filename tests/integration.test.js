@@ -552,7 +552,10 @@ test('/api/bills/:id/send fails closed when tenant has no reachable channel', ()
   const route = fs.readFileSync(path.join(__dirname, '..', 'routes', 'bills-extras.js'), 'utf8');
   const idx = route.indexOf('async function enqueueBillNotifications');
   assert.ok(idx > 0, 'should find bill send helper');
-  const body = route.slice(idx, idx + 6500);
+  // Window enlarged after the BILL_NOT_LINKED / TENANT_NOT_ACTIVE /
+  // TENANT_MOVED_ROOM precheck branches + the /:id/send-readiness
+  // endpoint landed between the helper and the route handler.
+  const body = route.slice(idx, idx + 14000);
   assert.match(body, /NO_TENANT_CHANNEL/,
     'bill send helper must return a no-channel code');
   assert.match(body, /Bill send skipped: no tenant channel/,

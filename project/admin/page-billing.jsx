@@ -15,6 +15,11 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
   const [selected, setSelected] = useState(new Set());
   const [confirmGenerate, setConfirmGenerate] = useState(false);
   const [previewBill, setPreviewBill] = useState(null);
+  // sendConfirm: holds the pre-flight payload + the bill ID we're about
+  // to send, so the modal can render structured per-issue cards instead
+  // of falling back to ugly window.confirm() native dialogs. null = closed.
+  const [sendConfirm, setSendConfirm] = useState(null);
+  const [sendingNow, setSendingNow] = useState(false);
 
   // Real bills from DB for the current period. Falls back to client estimate
   // (computed from rooms blob below) when no bills have been issued yet, so
@@ -243,56 +248,19 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
     setToast && setToast({ kind: 'info', message: 'การยกเลิกชำระต้องทำผ่านการ void/reconcile เพื่อเก็บ audit trail' });
   };
 
-  const handleSendReminder = async (id) => {
+  // Actual send — called after the confirm modal accepts. Splits into
+  // two paths: db-backed bills go through the server's readiness-aware
+  // /:id/send; client-estimate "bills" that aren't persisted yet use the
+  // legacy /api/notify/bill (no readiness path because there's no row).
+  const doSendReminder = async (id) => {
     const b = bills.find((x) => x.id === id);
     if (!b) return;
-    // Pre-flight reachability: see if THIS specific tenant can actually
-    // receive a notification. Without the check, admin clicks "ส่งเตือน"
-    // on a tenant with no LINE binding and no email — the notifier
-    // logs a "skipped" row and the admin thinks it was sent.
-    try {
-      const room = Object.values(rooms || {}).find((r) => r.id === b.roomId);
-      const phone = room?.tenant?.phone ? String(room.tenant.phone).replace(/[\s-]/g, '') : null;
-      let tenantRow = null;
-      if (phone) {
-        const r = await fetch(`/api/tenants?q=${encodeURIComponent(phone)}`, { credentials: 'same-origin' });
-        if (r.ok) {
-          const j = await r.json();
-          tenantRow = (j.tenants || []).find((t) =>
-            String(t.phone || '').replace(/[\s-]/g, '') === phone
-          );
-        }
-      }
-      const hasLine = !!tenantRow?.line_user_id;
-      const hasEmail = !!(tenantRow?.email || room?.tenant?.email);
-      if (!hasLine && !hasEmail) {
-        // Hard block — sending will silently drop. Suggest the fix path.
-        const ok = window.confirm(
-          `⚠ ผู้เช่าห้อง ${b.roomId} (${b.tenant}) ยังไม่มีช่องทางส่ง\n\n` +
-          `   ❌ ไม่ได้ผูก LINE\n` +
-          `   ❌ ไม่ใส่อีเมล\n\n` +
-          `กดยืนยันก็ส่งได้ — แต่ระบบจะ log "skipped: no channel" และข้อความจะไม่ถึงผู้เช่า\n\n` +
-          `📌 แนะนำ: ยกเลิก แล้วไป /admin#tenants → tab "Portal Access" ผูก LINE ก่อน\n\n` +
-          `ดำเนินการต่อ?`
-        );
-        if (!ok) return;
-      } else if (!hasLine && hasEmail) {
-        // Soft warn — email works but takes longer + spam folder risk
-        const ok = window.confirm(
-          `📧 ผู้เช่าห้อง ${b.roomId} ยังไม่ได้ผูก LINE — จะส่งทางอีเมลแทน\n\n` +
-          `อีเมลอาจไปอยู่ในกล่อง spam ได้ — แนะนำให้ผูก LINE เพื่อความเร็ว\n\n` +
-          `ส่งอีเมลต่อ?`
-        );
-        if (!ok) return;
-      }
-    } catch { /* fail-soft — pre-flight can't block on network error */ }
-
+    setSendingNow(true);
     const apiCall = window.apiCall;
     try {
       if (b._source === 'db' && b.dbBillId) {
         await apiCall(`/api/bills/${b.dbBillId}/send`, {
-          method: 'POST',
-          body: JSON.stringify({}),
+          method: 'POST', body: JSON.stringify({}),
         });
       } else {
         await apiCall('/api/notify/bill', {
@@ -303,10 +271,50 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
           }),
         });
       }
-      setToast && setToast({ kind: 'success', message: `ส่งเตือนบิล ${id} ทาง LINE แล้ว` });
+      setToast && setToast({ kind: 'success', message: `ส่งเตือนบิล ${id} แล้ว` });
       addActivity && addActivity({ icon: '🔔', text: `ส่งเตือนชำระบิล ${id}`, type: 'system' });
+      setSendConfirm(null);
     } catch (err) {
       window.toastError(setToast, err, { action: `ส่งเตือนบิล ${id}` });
+    } finally { setSendingNow(false); }
+  };
+
+  const handleSendReminder = async (id) => {
+    const b = bills.find((x) => x.id === id);
+    if (!b) return;
+    // For client-estimate bills (no DB row yet), there's no readiness
+    // endpoint to consult — show a minimal confirm modal explaining
+    // this and let admin proceed at their own risk.
+    if (b._source !== 'db' || !b.dbBillId) {
+      setSendConfirm({
+        bill: b, billId: id,
+        readiness: {
+          summary: { canSend: true, blocked: false, issueCount: 1 },
+          tenant: null,
+          issues: [{
+            sev: 'low', code: 'ESTIMATE_NOT_PERSISTED',
+            msg: 'บิลนี้ยังไม่ได้บันทึกลง DB — เป็น estimate จาก rooms blob',
+            fix: 'ออกบิลจริงก่อนเพื่อให้ระบบเก็บ tenant_id และ track สถานะส่งได้',
+          }],
+        },
+      });
+      return;
+    }
+    // Server-side readiness check — returns structured issues so the modal
+    // can render them as cards instead of cramming everything into a single
+    // window.confirm() string. Opens the modal even on ok:true so admin
+    // sees what's about to happen + which channels will fire.
+    try {
+      const r = await fetch(`/api/bills/${b.dbBillId}/send-readiness`, { credentials: 'same-origin' });
+      const d = await r.json();
+      if (!r.ok) {
+        setToast && setToast({ kind: 'error', message: d.error || 'ตรวจสอบความพร้อมไม่สำเร็จ' });
+        return;
+      }
+      setSendConfirm({ bill: b, billId: id, readiness: d });
+    } catch (err) {
+      window.toastError ? window.toastError(setToast, err, { action: 'ตรวจสอบความพร้อมส่ง' })
+        : setToast && setToast({ kind: 'error', message: err.message || 'network error' });
     }
   };
 
@@ -901,7 +909,164 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
       >
         {previewBill && <BillPreview b={previewBill} />}
       </Modal>
+
+      {/* Pretty send-reminder confirm. Replaces the old window.confirm()
+          chain with a Modal that lists every readiness issue as a card
+          (sev colour-coded), surfaces the recipient channels (LINE/email
+          state), and only enables the green "ส่ง" button when canSend
+          is true. Cancel and "ส่งต่อ" pathways both close the modal. */}
+      <Modal
+        open={!!sendConfirm}
+        onClose={() => !sendingNow && setSendConfirm(null)}
+        title={sendConfirm ? `ส่งเตือนบิล ${sendConfirm.bill.dbBillNo || sendConfirm.billId}` : ''}
+        width={520}
+        footer={sendConfirm && (
+          <>
+            <Btn variant="ghost" onClick={() => setSendConfirm(null)} disabled={sendingNow}>
+              ยกเลิก
+            </Btn>
+            {sendConfirm.readiness?.summary?.canSend ? (
+              <Btn variant="primary" icon="🔔"
+                onClick={() => doSendReminder(sendConfirm.billId)}
+                disabled={sendingNow}>
+                {sendingNow ? 'กำลังส่ง…' : 'ยืนยันส่ง'}
+              </Btn>
+            ) : (
+              <Btn variant="primary"
+                onClick={() => setSendConfirm(null)}
+                style={{ background: C.muted }}>
+                เข้าใจแล้ว
+              </Btn>
+            )}
+          </>
+        )}
+      >
+        {sendConfirm && <SendReminderConfirmBody confirm={sendConfirm} C={C} fmtCurrency={fmtCurrency} />}
+      </Modal>
     </PageContainer>
+  );
+}
+
+// SendReminderConfirmBody — the modal contents. Renders bill summary,
+// recipient info, channel availability, and a card per readiness issue.
+// Pure component (no hooks beyond what the parent provides) so it can be
+// reasoned about independently.
+function SendReminderConfirmBody({ confirm, C, fmtCurrency }) {
+  const { bill, readiness } = confirm;
+  const r = readiness || {};
+  const summary = r.summary || {};
+  const t = r.tenant;
+  const channels = summary.channels || {};
+  const blocked = summary.blocked === true;
+  const issues = Array.isArray(r.issues) ? r.issues : [];
+
+  const sevPalette = {
+    high: { bg: '#fff5f4', border: '#f5c0b4', accent: '#b94a48', icon: '🔴' },
+    med:  { bg: '#fff7e0', border: '#f0e3a7', accent: '#8a6b1a', icon: '🟡' },
+    low:  { bg: '#f4f8fc', border: '#cfdde9', accent: '#3a5a78', icon: '⚪' },
+    info: { bg: '#f4f8fc', border: '#cfdde9', accent: '#3a5a78', icon: 'ℹ️' },
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      {/* Top banner — ready / blocked summary */}
+      <div style={{
+        padding: 12, borderRadius: 8,
+        background: blocked ? '#fff5f4' : (issues.length > 0 ? '#fff7e0' : '#f0f9f0'),
+        border: `1px solid ${blocked ? '#f5c0b4' : (issues.length > 0 ? '#f0e3a7' : '#bce0bc')}`,
+      }}>
+        <div style={{ fontFamily: 'Sora', fontWeight: 600, fontSize: 14.5 }}>
+          {blocked
+            ? `🚫 ส่งไม่ได้ — พบ ${summary.highCount || issues.length} ปัญหาสำคัญ`
+            : issues.length > 0
+              ? `⚠️ ส่งได้ — แต่มี ${issues.length} ข้อควรทราบ`
+              : `✅ พร้อมส่ง`}
+        </div>
+        <div style={{ fontSize: 12.5, color: C.muted, marginTop: 4, lineHeight: 1.5 }}>
+          {blocked
+            ? 'แก้ปัญหาด้านล่างให้ครบก่อนถึงจะส่งได้'
+            : issues.length > 0
+              ? 'ตรวจประเด็นด้านล่าง — กดยืนยันส่งถ้า OK กับ tradeoff'
+              : 'ผู้เช่ามีช่องทางรับ + บิลพร้อม — กดยืนยันได้เลย'}
+        </div>
+      </div>
+
+      {/* Bill summary card */}
+      <div style={{
+        padding: 12, borderRadius: 8, background: C.surfaceAlt || C.bg,
+        border: `1px solid ${C.borderSoft || C.border}`,
+      }}>
+        <div style={{ fontSize: 12, color: C.muted, marginBottom: 4 }}>บิลที่จะส่ง</div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontFamily: 'Sora', fontWeight: 600 }}>
+              ห้อง {bill.roomId} · รอบ {bill.period || '-'}
+            </div>
+            <div style={{ fontSize: 12.5, color: C.muted, marginTop: 2 }}>
+              เลขที่ {bill.dbBillNo || bill.id} · กำหนด {bill.dueDate || '-'}
+            </div>
+          </div>
+          <div style={{ fontFamily: 'Sora', fontWeight: 700, fontSize: 18 }}>
+            ฿{fmtCurrency(bill.total)}
+          </div>
+        </div>
+      </div>
+
+      {/* Recipient card — only when readiness gave us a tenant */}
+      {t ? (
+        <div style={{
+          padding: 12, borderRadius: 8, background: C.surfaceAlt || C.bg,
+          border: `1px solid ${C.borderSoft || C.border}`,
+        }}>
+          <div style={{ fontSize: 12, color: C.muted, marginBottom: 4 }}>จะส่งให้</div>
+          <div style={{ fontFamily: 'Sora', fontWeight: 600 }}>{t.name || '-'}</div>
+          <div style={{ fontSize: 12.5, color: C.muted, marginTop: 2 }}>
+            {t.phone || '-'}{t.email ? ` · ${t.email}` : ''}
+          </div>
+          <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
+            <span style={{
+              fontSize: 11.5, padding: '3px 9px', borderRadius: 999,
+              background: channels.line ? '#e6f4ec' : '#fbeae7',
+              color: channels.line ? '#1f5f3a' : '#7a2920',
+            }}>
+              {channels.line ? '✓ LINE' : '✗ ไม่มี LINE'}
+            </span>
+            <span style={{
+              fontSize: 11.5, padding: '3px 9px', borderRadius: 999,
+              background: channels.email ? '#e6f4ec' : '#fbeae7',
+              color: channels.email ? '#1f5f3a' : '#7a2920',
+            }}>
+              {channels.email ? '✓ Email' : '✗ ไม่มี Email'}
+            </span>
+          </div>
+        </div>
+      ) : null}
+
+      {/* Issue cards — one per issue with sev colour + fix link */}
+      {issues.length > 0 ? (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {issues.map((it, idx) => {
+            const p = sevPalette[it.sev] || sevPalette.low;
+            return (
+              <div key={idx} style={{
+                padding: 10, borderRadius: 6,
+                background: p.bg, border: `1px solid ${p.border}`,
+                borderLeft: `3px solid ${p.accent}`,
+              }}>
+                <div style={{ fontWeight: 500, fontSize: 13.5, lineHeight: 1.5 }}>
+                  {p.icon} {it.msg}
+                </div>
+                {it.fix ? (
+                  <div style={{ fontSize: 12, color: C.muted, marginTop: 4 }}>
+                    → {it.fix}
+                  </div>
+                ) : null}
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+    </div>
   );
 }
 

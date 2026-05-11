@@ -243,16 +243,70 @@ module.exports = function buildBillsExtrasRouter(ctx) {
   // round-trips through HTTP. Previously bulk-send self-fetched localhost
   // without admin session/CSRF, so it always enqueued 0.
   async function enqueueBillNotifications(billId) {
+    // Filter the tenant join on deleted_at AND status — without these we
+    // happily pushed bill reminders to soft-deleted tenants (whose
+    // line_user_id was still in the row) and to ex-tenants who had
+    // moved_out months ago. Verify the tenant's current room too, so an
+    // admin clicking "ส่งเตือน" on a 6-month-old bill doesn't ping the
+    // person now living in a different unit.
     const billQ = await pool.query(
-      `SELECT b.*, t.full_name AS tenant_name, t.phone AS tenant_phone,
-              t.line_user_id, t.line_oa_id, t.email
-         FROM bills b LEFT JOIN tenants t ON t.id = b.tenant_id
+      `SELECT b.*, t.id AS tenant_row_id, t.full_name AS tenant_name, t.phone AS tenant_phone,
+              t.line_user_id, t.line_oa_id, t.email,
+              t.status AS tenant_status, t.current_room_id AS tenant_current_room
+         FROM bills b
+         LEFT JOIN tenants t
+           ON t.id = b.tenant_id
+          AND t.deleted_at IS NULL
          WHERE b.id=$1 AND b.deleted_at IS NULL`,
       [billId]
     );
     if (!billQ.rows.length) return { ok: false, error: 'not found' };
     if (billQ.rows[0].status === 'void') return { ok: false, error: 'bill is void' };
     const b = billQ.rows[0];
+    // Refuse to send when the bill isn't linked to a live tenant. The
+    // earlier code reached this state via several silent paths (orphan
+    // bill with tenant_id NULL, tenant soft-deleted after bill creation,
+    // tenant moved_out without checkout closing the contract). Surface
+    // each one with a distinct code so the admin UI can explain it.
+    if (b.tenant_id == null) {
+      return {
+        ok: false,
+        error: 'บิลนี้ไม่ได้ผูกกับผู้เช่า (tenant_id IS NULL)',
+        code: 'BILL_NOT_LINKED',
+        hint: 'ผูกผู้เช่าให้บิลก่อน หรือ void บิลถ้าตัดสินใจไม่เก็บ',
+      };
+    }
+    if (!b.tenant_row_id) {
+      return {
+        ok: false,
+        error: 'ผู้เช่าที่ผูกกับบิลนี้ถูกลบไปแล้ว',
+        code: 'TENANT_DELETED',
+        hint: 'void บิลนี้ แล้วออกบิลใหม่ให้ผู้เช่าปัจจุบัน',
+      };
+    }
+    if (b.tenant_status && b.tenant_status !== 'active') {
+      return {
+        ok: false,
+        error: `ผู้เช่าสถานะ "${b.tenant_status}" — ไม่ใช่ผู้เช่าปัจจุบันของห้อง`,
+        code: 'TENANT_NOT_ACTIVE',
+        tenantStatus: b.tenant_status,
+        hint: 'ส่งบิลให้ผู้เช่าปัจจุบันแทน หรือติดต่อผู้เช่าเก่าโดยตรง',
+      };
+    }
+    if (b.tenant_current_room && String(b.tenant_current_room) !== String(b.room_id)) {
+      // The tenant the bill points at has since moved to a different room
+      // (admin re-assigned them mid-period). Sending the bill notification
+      // would reach the right person but reference the wrong room, which
+      // confuses tenants and triggers "นี่ไม่ใช่ห้องของผม" complaints.
+      return {
+        ok: false,
+        error: `ผู้เช่าย้ายห้องไปแล้ว (ปัจจุบันอยู่ห้อง ${b.tenant_current_room}, บิลเป็นของห้อง ${b.room_id})`,
+        code: 'TENANT_MOVED_ROOM',
+        currentRoom: b.tenant_current_room,
+        billRoom: b.room_id,
+        hint: 'ตรวจสอบว่าบิลห้องเก่าควรส่งให้ผู้เช่าคนใหม่ของห้อง — ไม่ใช่ผู้เช่าเก่าที่ย้าย',
+      };
+    }
     const subject = `บิลรอบ ${b.period} — ห้อง ${b.room_id}`;
     // Deep link to the bill detail in the tenant portal. With this, tapping
     // the LINE/email notification opens the bill modal directly — no need
@@ -363,6 +417,110 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       force: true,
     });
   }
+
+  // GET /api/bills/:id/send-readiness — preflight that returns structured
+  // issues so the admin UI can render a confirm modal BEFORE firing
+  // /:id/send. Without this the UI either silently failed (bill sent to a
+  // moved-out tenant) or relied on window.confirm with rough hints.
+  // Returns { ok, summary: { canSend, blocked, channels }, issues[] }.
+  r.get('/:id/send-readiness', requireAuth, requireRole('owner', 'manager'),
+    async (req, res) => {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+      try {
+        const billQ = await pool.query(
+          `SELECT b.id, b.bill_no, b.room_id, b.period, b.total, b.status, b.due_date,
+                  b.tenant_id,
+                  t.id AS tenant_row_id, t.full_name AS tenant_name, t.phone AS tenant_phone,
+                  t.line_user_id, t.line_oa_id, t.email, t.status AS tenant_status,
+                  t.current_room_id AS tenant_current_room
+             FROM bills b
+             LEFT JOIN tenants t
+               ON t.id = b.tenant_id
+              AND t.deleted_at IS NULL
+            WHERE b.id=$1 AND b.deleted_at IS NULL`,
+          [id]
+        );
+        if (!billQ.rows.length) return res.status(404).json({ error: 'bill not found' });
+        const b = billQ.rows[0];
+        const issues = [];
+        const channels = { line: false, email: false, lineOa: null };
+
+        // Bill state
+        if (b.status === 'void') {
+          issues.push({ sev: 'high', code: 'BILL_VOID',
+            msg: 'บิลนี้ถูก void แล้ว — ไม่ควรส่งให้ผู้เช่า',
+            fix: 'ออกบิลใหม่แทน' });
+        } else if (b.status === 'paid') {
+          issues.push({ sev: 'med', code: 'BILL_ALREADY_PAID',
+            msg: 'บิลนี้ชำระแล้ว — ส่งซ้ำอาจทำให้ผู้เช่าสับสน',
+            fix: 'หากต้องการส่งใบเสร็จ ใช้ปุ่ม PDF แทน' });
+        }
+
+        // Tenant validity
+        if (b.tenant_id == null) {
+          issues.push({ sev: 'high', code: 'BILL_NOT_LINKED',
+            msg: 'บิลนี้ไม่มีผู้เช่าผูกอยู่ (tenant_id IS NULL)',
+            fix: 'ผูกผู้เช่าที่หน้า /admin#billing ก่อน หรือ void บิล' });
+        } else if (!b.tenant_row_id) {
+          issues.push({ sev: 'high', code: 'TENANT_DELETED',
+            msg: 'ผู้เช่าที่ผูกกับบิลถูกลบ (soft-deleted) ไปแล้ว',
+            fix: 'void บิลแล้วออกใหม่ให้ผู้เช่าปัจจุบัน' });
+        } else if (b.tenant_status !== 'active') {
+          issues.push({ sev: 'high', code: 'TENANT_NOT_ACTIVE',
+            msg: `ผู้เช่า "${b.tenant_name}" สถานะ "${b.tenant_status}" — ไม่ใช่ผู้เช่าปัจจุบัน`,
+            fix: 'ผู้เช่าออกไปแล้ว — ติดต่อโดยตรง หรือออกบิลให้ผู้เช่าใหม่' });
+        } else if (b.tenant_current_room && String(b.tenant_current_room) !== String(b.room_id)) {
+          issues.push({ sev: 'high', code: 'TENANT_MOVED_ROOM',
+            msg: `ผู้เช่าย้ายห้องไปแล้ว — ปัจจุบันอยู่ห้อง ${b.tenant_current_room} แต่บิลเป็นของห้อง ${b.room_id}`,
+            fix: 'ผู้เช่าใหม่ของห้อง ' + b.room_id + ' ควรเป็นคนรับบิลนี้' });
+        }
+
+        // Channel availability — only when tenant is otherwise valid
+        if (b.tenant_row_id && b.tenant_status === 'active'
+            && (!b.tenant_current_room || String(b.tenant_current_room) === String(b.room_id))) {
+          const hasLine = lineNotify.isLikelyUserId(b.line_user_id);
+          channels.line = !!hasLine;
+          channels.email = !!b.email;
+          channels.lineOa = b.line_oa_id || null;
+          if (!hasLine && !b.email) {
+            issues.push({ sev: 'high', code: 'NO_TENANT_CHANNEL',
+              msg: `ผู้เช่า "${b.tenant_name}" ยังไม่ผูก LINE และไม่ใส่อีเมล`,
+              fix: '/admin#tenants → tab "Portal Access" ผูก LINE หรือใส่อีเมล' });
+          } else if (!hasLine && b.email) {
+            issues.push({ sev: 'med', code: 'EMAIL_ONLY',
+              msg: 'ผู้เช่าไม่ผูก LINE — จะส่งทางอีเมลอย่างเดียว (อาจไปกล่อง spam)',
+              fix: 'แนะนำผูก LINE ที่ /admin#tenants → Portal Access' });
+          }
+        }
+
+        const blockingHigh = issues.filter((i) => i.sev === 'high');
+        const canSend = blockingHigh.length === 0;
+        res.json({
+          ok: true,
+          summary: {
+            canSend,
+            blocked: !canSend,
+            issueCount: issues.length,
+            highCount: blockingHigh.length,
+            channels,
+          },
+          bill: {
+            id: b.id, billNo: b.bill_no, roomId: b.room_id, period: b.period,
+            total: Number(b.total), status: b.status, dueDate: b.due_date,
+          },
+          tenant: b.tenant_row_id ? {
+            id: b.tenant_row_id, name: b.tenant_name, phone: b.tenant_phone,
+            email: b.email, hasLine: !!b.line_user_id, status: b.tenant_status,
+            currentRoom: b.tenant_current_room,
+          } : null,
+          issues,
+        });
+      } catch (err) {
+        console.error('send-readiness error:', err);
+        res.status(500).json({ error: 'internal error', code: 'DB_ERROR' });
+      }
+    });
 
   r.post('/:id/send', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'),
     async (req, res) => {
