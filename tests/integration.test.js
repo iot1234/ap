@@ -923,6 +923,23 @@ test('tenant bill modal blocks bad payment steps before slip upload', () => {
     'tenant upload button must use the combined step gate');
 });
 
+test('tenant API does not send tenants back to login on CSRF retryable 403', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const tenant = fs.readFileSync(path.join(__dirname, '..', 'project', 'tenant.jsx'), 'utf8');
+
+  assert.match(tenant, /!path\.includes\('\/api\/tenant\/login'\)/,
+    'tenant login must not pre-cache an anonymous CSRF token before tenant_sid is set');
+  assert.match(tenant, /data\.code === 'CSRF_INVALID'/,
+    'tenant API must recognize CSRF_INVALID responses');
+  assert.match(tenant, /getCsrf\(true\)/,
+    'tenant API must retry state-changing requests once with a fresh CSRF token');
+  assert.match(tenant, /if \(r\.status === 401/,
+    'tenant UI should only force login on real unauthorized responses');
+  assert.doesNotMatch(tenant, /r\.status === 401\s*\|\|\s*r\.status === 403/,
+    'tenant UI must not treat every 403 as session expiry');
+});
+
 test('tenant payment readiness reports orphan bills with BILL_NOT_LINKED', () => {
   const fs = require('node:fs');
   const path = require('node:path');

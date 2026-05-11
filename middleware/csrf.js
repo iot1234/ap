@@ -56,7 +56,12 @@ function makeCsrf({ secret, secure }) {
   }
 
   function csrfErrorHandler(err, req, res, next) {
-    if (err === invalidCsrfTokenError) {
+    const msg = String((err && err.message) || err || '').toLowerCase();
+    const invalidByShape = err
+      && (err.code === 'EBADCSRFTOKEN'
+          || err.code === 'CSRF_INVALID'
+          || msg.includes('invalid csrf'));
+    if (err === invalidCsrfTokenError || invalidByShape) {
       return res.status(403).json({ error: 'invalid CSRF token', code: 'CSRF_INVALID' });
     }
     next(err);

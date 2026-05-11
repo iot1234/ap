@@ -169,9 +169,11 @@
 
   // CSRF token helper for state-changing fetch calls.
   let _csrfToken = null;
+  let _csrfTokenPromise = null;
   async function getCsrfToken(forceRefresh) {
     if (_csrfToken && !forceRefresh) return _csrfToken;
-    try {
+    if (_csrfTokenPromise && !forceRefresh) return _csrfTokenPromise;
+    _csrfTokenPromise = (async () => {
       const r = await fetch('/api/csrf-token', { credentials: 'same-origin' });
       if (!r.ok) {
         console.warn('[apiFetch] csrf-token endpoint returned', r.status);
@@ -184,9 +186,14 @@
       }
       _csrfToken = j.csrfToken;
       return _csrfToken;
+    })();
+    try {
+      return await _csrfTokenPromise;
     } catch (err) {
       console.warn('[apiFetch] csrf-token fetch failed:', err && err.message);
       return null;
+    } finally {
+      _csrfTokenPromise = null;
     }
   }
   async function apiFetch(url, opts = {}) {

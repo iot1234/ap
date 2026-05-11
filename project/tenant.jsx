@@ -141,14 +141,21 @@ function tr(locale, k) { return (TR[locale] || TR.th)[k] || k; }
 // CSRF: tenant routes that go through csrfGuard need X-CSRF-Token. We
 // fetch it once and reuse — the cookie+token pair is bound to the session.
 let _csrf = null;
-async function getCsrf() {
-  if (_csrf) return _csrf;
-  try {
+let _csrfPromise = null;
+async function getCsrf(forceRefresh = false) {
+  if (_csrf && !forceRefresh) return _csrf;
+  if (_csrfPromise && !forceRefresh) return _csrfPromise;
+  _csrfPromise = (async () => {
     const r = await fetch('/api/csrf-token', { credentials: 'same-origin' });
-    const j = await r.json();
-    _csrf = j.csrfToken;
+    if (!r.ok) return null;
+    const j = await r.json().catch(() => ({}));
+    _csrf = j.csrfToken || null;
     return _csrf;
+  })();
+  try {
+    return await _csrfPromise;
   } catch { return null; }
+  finally { _csrfPromise = null; }
 }
 
 // Subscribers notified when a 401 / 403 lands — typically the App resets
@@ -161,7 +168,8 @@ function fireAuthExpired() { for (const fn of _authListeners) try { fn(); } catc
 async function api(path, opts = {}) {
   const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
   const method = (opts.method || 'GET').toUpperCase();
-  if (method !== 'GET' && method !== 'HEAD') {
+  const csrfProtected = method !== 'GET' && method !== 'HEAD' && !path.includes('/api/tenant/login');
+  if (csrfProtected) {
     const t = await getCsrf();
     if (t) headers['X-CSRF-Token'] = t;
   }
@@ -189,10 +197,28 @@ async function api(path, opts = {}) {
   } finally {
     if (timer) clearTimeout(timer);
   }
+  if (r.status === 403 && csrfProtected && !opts._csrfRetried) {
+    const data = await r.clone().json().catch(() => ({}));
+    if (data && (data.code === 'CSRF_INVALID' || /csrf/i.test(String(data.error || '')))) {
+      _csrf = null;
+      const fresh = await getCsrf(true);
+      if (fresh) {
+        r = await fetch(path, {
+          credentials: 'same-origin',
+          ...opts,
+          headers: { ...headers, 'X-CSRF-Token': fresh },
+          _csrfRetried: true,
+        });
+      }
+    }
+  }
+  if (r.ok && path.includes('/api/tenant/login')) {
+    _csrf = null;
+  }
   // Session expiry: clear local CSRF token + tell the App to re-login.
   // We exclude the login + me endpoints — 401 there is a normal "wrong
   // credentials" response, not a session expiry.
-  if ((r.status === 401 || r.status === 403)
+  if (r.status === 401
       && !path.includes('/login') && !path.includes('/csrf-token') && !path.endsWith('/me')) {
     _csrf = null;
     fireAuthExpired();
