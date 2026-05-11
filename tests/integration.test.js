@@ -425,7 +425,7 @@ test('/api/bills/:id/pay records offline payments in the payment ledger', () => 
   const body = route.slice(idx, idx + 5000);
   assert.match(body, /requireRole\('owner', 'manager'\)/,
     'manual pay must be owner/manager only');
-  assert.match(body, /SELECT id, total, status, tenant_id[\s\S]*FOR UPDATE/,
+  assert.match(body, /SELECT id, bill_no, period, total, status, tenant_id[\s\S]*FOR UPDATE/,
     'manual pay must lock the bill and read total');
   assert.match(body, /INSERT INTO payments[\s\S]*'verified'/,
     'manual pay must create a verified payment row');
@@ -433,6 +433,69 @@ test('/api/bills/:id/pay records offline payments in the payment ledger', () => 
     'manual pay must mark the bill paid in the same handler');
   assert.match(body, /PAYMENT_AMOUNT_MISMATCH|BILL_ALREADY_PAID/,
     'manual pay must reject mismatches and duplicate verified payments');
+  assert.match(body, /notifyManualPayment/,
+    'manual pay must notify tenant after recording an offline payment');
+});
+
+test('/api/bills create validates input and refuses to mutate paid/verified ledger rows', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const idx = server.indexOf("app.post('/api/bills',");
+  assert.ok(idx > 0, 'should find bill create handler');
+  const body = server.slice(idx, idx + 12000);
+  assert.match(body, /validateBody\(schemas\.generateBill\)/,
+    'bill create must use request schema validation');
+  assert.match(body, /WHERE bills\.status IN \('pending','overdue'\)/,
+    'bill update-on-conflict must only edit pending/overdue bills');
+  assert.match(body, /NOT EXISTS[\s\S]*payments p[\s\S]*p\.status='verified'/,
+    'bill update-on-conflict must refuse bills with verified payments');
+  assert.match(body, /BILL_LOCKED_FOR_LEDGER/,
+    'locked ledger rows should return a machine-readable conflict');
+  assert.match(body, /JSON\.stringify\(otherForStorage/,
+    'computed recurring line items must be persisted in bills.other');
+});
+
+test('/api/notify/bill resolves the tenant instead of notifying only the owner', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const idx = server.indexOf("app.post('/api/notify/bill'");
+  assert.ok(idx > 0, 'should find legacy bill notify handler');
+  const body = server.slice(idx, idx + 2500);
+  assert.match(body, /FROM tenants[\s\S]*current_room_id=\$1/,
+    'legacy bill notify must look up the active tenant by room');
+  assert.match(body, /notifier\.notifyTenant/,
+    'legacy bill notify must send to tenant channels');
+  assert.match(body, /NO_TENANT_CHANNEL/,
+    'legacy bill notify must fail clearly when no tenant channel exists');
+});
+
+test('/api/bills/:id/send fails closed when tenant has no reachable channel', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const route = fs.readFileSync(path.join(__dirname, '..', 'routes', 'bills-extras.js'), 'utf8');
+  const idx = route.indexOf('async function enqueueBillNotifications');
+  assert.ok(idx > 0, 'should find bill send helper');
+  const body = route.slice(idx, idx + 6500);
+  assert.match(body, /NO_TENANT_CHANNEL/,
+    'bill send helper must return a no-channel code');
+  assert.match(body, /Bill send skipped: no tenant channel/,
+    'bill send helper must alert owner/admin when tenant cannot be reached');
+  assert.match(body, /out\.code === 'NO_TENANT_CHANNEL' \? 409 : 404/,
+    'single-send route must surface no-channel as a conflict, not success');
+});
+
+test('healthCheck flags duplicate verified payments and invalid ledger rows', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'healthCheck.js'), 'utf8');
+  assert.match(src, /duplicate_verified_payments_per_bill/,
+    'health check must count bills with multiple verified payments');
+  assert.match(src, /invalid_bill_rows/,
+    'health check must count invalid bill status/amount rows');
+  assert.match(src, /invalid_payment_rows/,
+    'health check must count invalid payment status/amount rows');
 });
 
 test('/api/tenant/payments does not auto-approve unverified slips by default', () => {

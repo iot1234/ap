@@ -157,6 +157,53 @@ schemas.generateBill = z.object({
   })).optional(),
 });
 
+const billMoney = z.coerce.number().nonnegative().max(10_000_000);
+const billUnits = z.coerce.number().nonnegative().max(9_999_999);
+const billLineItems = z.array(z.object({
+  label: z.string().trim().min(1).max(80),
+  amount: billMoney,
+})).max(100);
+
+schemas.generateBill = schemas.generateBill.extend({
+  period: z.string().regex(/^\d{4}-\d{2}$/, 'รอบบิลต้องเป็น YYYY-MM').optional(),
+  tenantId: z.coerce.number().int().positive().optional().nullable(),
+  billNo: z.string().trim().min(1).max(80).optional(),
+  rent: billMoney.optional(),
+  waterUnits: billUnits.optional(),
+  waterRate: billMoney.optional(),
+  waterAmount: billMoney.optional(),
+  elecUnits: billUnits.optional(),
+  elecRate: billMoney.optional(),
+  elecAmount: billMoney.optional(),
+  wifi: billMoney.optional(),
+  subtotal: billMoney.optional(),
+  vat: billMoney.optional(),
+  lateFee: billMoney.optional(),
+  total: billMoney.optional(),
+  recurring: billLineItems.optional(),
+  other: billLineItems.optional(),
+}).superRefine((v, ctx) => {
+  // Computed bills derive these fields from room/config. Fully-formed
+  // manual bills must provide the fields the ledger cannot infer safely.
+  if (v.compute) return;
+  for (const key of ['billNo', 'period', 'dueDate', 'total']) {
+    if (v[key] == null || v[key] === '') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [key],
+        message: `${key} is required when compute=false`,
+      });
+    }
+  }
+  if (v.total != null && Number(v.total) <= 0) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['total'],
+      message: 'total must be greater than 0',
+    });
+  }
+});
+
 schemas.recordPayment = z.object({
   billId: z.coerce.number().int().positive(),
   amount: z.coerce.number().positive().max(10_000_000),

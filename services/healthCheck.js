@@ -516,7 +516,21 @@ async function checkDataIntegrity(pool) {
           JOIN bills b ON b.id=p.bill_id
           WHERE p.status IN ('pending','verified')
             AND b.deleted_at IS NULL
-            AND ABS(p.amount - b.total) > 0.009) AS payment_amount_mismatch`);
+            AND ABS(p.amount - b.total) > 0.009) AS payment_amount_mismatch,
+        (SELECT COUNT(*)::int FROM (
+          SELECT bill_id
+            FROM payments
+           WHERE bill_id IS NOT NULL AND status='verified'
+           GROUP BY bill_id
+          HAVING COUNT(*) > 1
+        ) d) AS duplicate_verified_payments_per_bill,
+        (SELECT COUNT(*)::int FROM bills
+          WHERE deleted_at IS NULL
+            AND (status NOT IN ('pending','paid','overdue','void')
+                 OR total <= 0 OR subtotal < 0)) AS invalid_bill_rows,
+        (SELECT COUNT(*)::int FROM payments
+          WHERE status NOT IN ('pending','verified','rejected')
+             OR amount <= 0) AS invalid_payment_rows`);
     const counts = countsQ.rows[0] || {};
 
     const dupRoomsQ = await pool.query(`
@@ -567,6 +581,9 @@ async function checkDataIntegrity(pool) {
         orphan_payable_bills: Number(counts.orphan_payable_bills) || 0,
         verified_payment_unpaid_bills: Number(counts.verified_payment_unpaid_bills) || 0,
         payment_amount_mismatch: Number(counts.payment_amount_mismatch) || 0,
+        duplicate_verified_payments_per_bill: Number(counts.duplicate_verified_payments_per_bill) || 0,
+        invalid_bill_rows: Number(counts.invalid_bill_rows) || 0,
+        invalid_payment_rows: Number(counts.invalid_payment_rows) || 0,
       },
       duplicate_active_room_assignments: dupRoomsQ.rows,
       active_tenants_missing_room: missingRoomsQ.rows,
@@ -580,6 +597,15 @@ async function checkDataIntegrity(pool) {
     }
     if (detail.counts.payment_amount_mismatch > 0) {
       errors.push('pending/verified payment amount differs from bill total');
+    }
+    if (detail.counts.duplicate_verified_payments_per_bill > 0) {
+      errors.push('more than one verified payment exists for the same bill');
+    }
+    if (detail.counts.invalid_bill_rows > 0) {
+      errors.push('bill rows contain invalid statuses or non-positive/nonnegative amount fields');
+    }
+    if (detail.counts.invalid_payment_rows > 0) {
+      errors.push('payment rows contain invalid statuses or non-positive amounts');
     }
     if (dupRoomsQ.rows.length > 0) {
       errors.push('more than one active tenant assigned to the same room');

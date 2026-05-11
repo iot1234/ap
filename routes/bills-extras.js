@@ -255,6 +255,26 @@ module.exports = function buildBillsExtrasRouter(ctx) {
     const subject = `บิลรอบ ${b.period} — ห้อง ${b.room_id}`;
     const body = `บิลใหม่\nผู้เช่า: ${b.tenant_name || '-'}\nห้อง: ${b.room_id}\nรอบ: ${b.period}\nยอด: ฿${Number(b.total).toLocaleString('th-TH', { minimumFractionDigits: 2 })}\nกำหนดชำระ: ${b.due_date}`;
     const enqueued = [];
+    if (!b.line_user_id && !b.email) {
+      const flags = await features.load(pool);
+      const owner = await notifier.notifyOwner({ pool, features: flags }, {
+        subject: 'Bill send skipped: no tenant channel',
+        text: [
+          `Bill was not sent because the tenant has no LINE or email.`,
+          `Bill: ${b.bill_no || b.id}`,
+          `Room: ${b.room_id}`,
+          b.tenant_name ? `Tenant: ${b.tenant_name}` : null,
+          `Amount: THB ${Number(b.total).toLocaleString('th-TH', { minimumFractionDigits: 2 })}`,
+        ].filter(Boolean).join('\n'),
+      });
+      return {
+        ok: false,
+        error: 'tenant has no reachable channel',
+        code: 'NO_TENANT_CHANNEL',
+        enqueued,
+        ownerNotified: !!(owner.ok || owner.queued),
+      };
+    }
     if (b.line_user_id) {
       // Carry the tenant's bound OA in the payload so the queue worker
       // pushes through the right channel (multi-OA tenants see different
@@ -264,7 +284,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         payload: { oaId: b.line_oa_id || null, billId },
       });
       enqueued.push({ channel: 'line', id: qid });
-    } else {
+    } else if (!b.email) {
       const lineOwner = require('../services/secrets').get('LINE_OWNER_USER_ID');
       if (lineOwner) {
         // Owner channel — falls back to default OA via getDefault().
@@ -286,13 +306,51 @@ module.exports = function buildBillsExtrasRouter(ctx) {
   }
 
   // POST /api/bills/:id/send — enqueue LINE/email
+  async function notifyManualPayment(payment, bill, actor) {
+    if (!payment || !payment.tenant_id) return;
+    const { rows } = await pool.query(
+      `SELECT id, full_name, phone, email, line_user_id, line_oa_id, status
+         FROM tenants
+        WHERE id=$1 AND deleted_at IS NULL
+        LIMIT 1`,
+      [payment.tenant_id]
+    );
+    if (!rows.length) return;
+    const flags = await features.load(pool);
+    const amount = Number(payment.amount);
+    const amountText = Number.isFinite(amount)
+      ? amount.toLocaleString('th-TH', { minimumFractionDigits: 2 })
+      : '-';
+    await notifier.notifyTenant({ pool, features: flags }, rows[0], {
+      subject: 'Payment received',
+      text: [
+        `Payment received`,
+        `Bill: ${bill?.bill_no || payment.bill_id || '-'}`,
+        bill?.period ? `Period: ${bill.period}` : null,
+        `Amount: THB ${amountText}`,
+        `Method: ${payment.method || 'manual'}`,
+        payment.ref ? `Reference: ${payment.ref}` : null,
+        actor ? `Recorded by: ${actor}` : null,
+      ].filter(Boolean).join('\n'),
+      force: true,
+    });
+  }
+
   r.post('/:id/send', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'),
     async (req, res) => {
       const id = Number(req.params.id);
       if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
       try {
         const out = await enqueueBillNotifications(id);
-        if (!out.ok) return res.status(404).json({ error: out.error });
+        if (!out.ok) {
+          const status = out.code === 'NO_TENANT_CHANNEL' ? 409 : 404;
+          return res.status(status).json({
+            error: out.error,
+            code: out.code,
+            ownerNotified: out.ownerNotified,
+            enqueued: out.enqueued || [],
+          });
+        }
         audit(req, 'bill.send', 'bill', String(id), { enqueued: out.enqueued });
         res.json({ ok: true, enqueued: out.enqueued });
       } catch (err) {
@@ -342,7 +400,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       try {
         await client.query('BEGIN');
         const bill = await client.query(
-          `SELECT id, total, status, tenant_id
+          `SELECT id, bill_no, period, total, status, tenant_id
              FROM bills
             WHERE id=$1 AND deleted_at IS NULL
             FOR UPDATE`,
@@ -422,6 +480,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           amount: billTotal,
           method,
         });
+        notifyManualPayment(payment.rows[0], paid.rows[0] || row, req.session.user.username).catch(() => {});
         res.json({ ok: true, bill: paid.rows[0], payment: payment.rows[0] });
       } catch (err) {
         await client.query('ROLLBACK').catch(() => {});

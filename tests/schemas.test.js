@@ -113,3 +113,30 @@ test('backupImport: valid PromptPay accepted', () => {
   });
   assert.equal(r.success, true);
 });
+
+test('generateBill: computed bill can omit period/total because server derives them', () => {
+  const r = schemas.generateBill.safeParse({ roomId: '101', compute: true });
+  assert.equal(r.success, true);
+});
+
+test('generateBill: manual bill requires positive total and ledger fields', () => {
+  const missing = schemas.generateBill.safeParse({ roomId: '101' });
+  assert.equal(missing.success, false);
+  const zero = schemas.generateBill.safeParse({
+    roomId: '101',
+    billNo: 'INV-1',
+    period: '2026-05',
+    dueDate: '2026-05-15',
+    total: 0,
+  });
+  assert.equal(zero.success, false);
+  const bad = schemas.generateBill.safeParse({
+    roomId: '101',
+    billNo: 'INV-1',
+    period: '2026-05',
+    dueDate: '2026-05-15',
+    total: 100,
+    rent: -1,
+  });
+  assert.equal(bad.success, false);
+});

@@ -1016,36 +1016,55 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBooking, validateBody(sche
   }
 });
 
-// POST /api/notify/bill — admin-auth. Trigger a LINE notification for a bill
-// the admin just sent. Body: { tenantName, roomId, period, total, billNo }.
-// Routes through notifier.notifyOwner so multi-OA tenants get the message
-// via the correct OA + email fallback fires when LINE isn't configured.
+// POST /api/notify/bill - legacy estimate reminder. Resolve the active
+// tenant from roomId and send through tenant channels. Persisted bills
+// should use POST /api/bills/:id/send instead.
 app.post('/api/notify/bill', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager', 'staff'), async (req, res) => {
   const b = req.body || {};
-  if (!b.tenantName || !b.total) {
-    return res.status(400).json({ error: 'tenantName and total required' });
+  const notifyTotal = Number(b.total);
+  if (!b.roomId || !Number.isFinite(notifyTotal) || notifyTotal <= 0) {
+    return res.status(400).json({ error: 'roomId and positive total required', code: 'INVALID_BILL_NOTIFY' });
   }
-  const text = [
-    `💰 ออกบิลใหม่`,
-    `ผู้เช่า: ${b.tenantName}`,
-    b.roomId ? `ห้อง: ${b.roomId}` : null,
-    b.period ? `รอบบิล: ${b.period}` : null,
-    `จำนวน: ฿${Number(b.total).toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
-    b.billNo ? `เลขที่: ${b.billNo}` : null,
-  ].filter(Boolean).join('\n');
   try {
+    const { rows } = await pool.query(
+      `SELECT id, full_name, phone, email, line_user_id, line_oa_id, status
+         FROM tenants
+        WHERE current_room_id=$1 AND status='active' AND deleted_at IS NULL
+        ORDER BY updated_at DESC
+        LIMIT 1`,
+      [String(b.roomId).slice(0, 32)]
+    );
+    if (!rows.length) {
+      return res.status(404).json({
+        error: 'no active tenant is linked to this room',
+        code: 'TENANT_NOT_FOUND_FOR_BILL_NOTIFY',
+      });
+    }
+    const tenant = rows[0];
+    const text = [
+      `New bill`,
+      `Tenant: ${tenant.full_name || b.tenantName || '-'}`,
+      `Room: ${b.roomId}`,
+      b.period ? `Period: ${b.period}` : null,
+      `Amount: THB ${notifyTotal.toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+      b.billNo ? `Bill no: ${b.billNo}` : null,
+    ].filter(Boolean).join('\n');
     const flags = await features.load(pool);
-    const out = await notifier.notifyOwner({ pool, features: flags }, {
-      subject: '💰 ออกบิลใหม่',
+    const out = await notifier.notifyTenant({ pool, features: flags }, tenant, {
+      subject: 'New bill',
       text,
     });
     if (!out.ok) {
-      return res.status(503).json({ error: 'no notification channel reached the owner', channel: out.channel });
+      return res.status(503).json({
+        error: 'tenant has no reachable notification channel',
+        code: 'NO_TENANT_CHANNEL',
+        channel: out.channel,
+      });
     }
-    res.json({ ok: true, channel: out.channel });
+    return res.json({ ok: true, channel: out.channel, tenantId: tenant.id });
   } catch (err) {
-    console.error('notify/bill error:', err.message);
-    res.status(500).json({ error: 'internal error' });
+    console.error('notify/bill tenant error:', err.message);
+    return res.status(500).json({ error: 'internal error' });
   }
 });
 
@@ -3402,7 +3421,7 @@ app.get('/api/bills', requireAuth, async (req, res) => {
   }
 });
 
-app.post('/api/bills', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'), async (req, res) => {
+app.post('/api/bills', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'), validateBody(schemas.generateBill), async (req, res) => {
   const b = req.body || {};
   const flags = await features.load(pool);
   // Admin sends either a fully-formed bill, or roomId+period and we compute it.
@@ -3410,6 +3429,7 @@ app.post('/api/bills', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 
   // Track which one_off recurring rows we used so we can deactivate them
   // after a successful insert (so they don't appear on next month's bill).
   let usedOneOffIds = [];
+  let otherForStorage = Array.isArray(b.other) ? b.other : [];
   if (b.compute && b.roomId) {
     const [roomsRow, configRow] = await Promise.all([
       pool.query(`SELECT value FROM app_data WHERE key='baankarn_rooms_v1'`),
@@ -3433,6 +3453,9 @@ app.post('/api/bills', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 
     // caller didn't explicitly pass `recurring`. Resolve the active tenant
     // first so per-tenant charges (parking, cleaning) match the right person.
     let recurringList = Array.isArray(b.recurring) ? b.recurring : [];
+    if (Array.isArray(b.recurring) && !Array.isArray(b.other)) {
+      otherForStorage = recurringList;
+    }
     if (flags.recurringCharges?.enabled && !b.recurring) {
       let tid = b.tenantId || null;
       if (!tid) {
@@ -3453,6 +3476,7 @@ app.post('/api/bills', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 
       const periodForFilter = b.period || billing.formatPeriodNow();
       const applicable = dbRecurring.filter((r) => billing.isChargeApplicableForPeriod(r, periodForFilter));
       recurringList = applicable.map((r) => ({ label: r.label, amount: Number(r.amount) }));
+      otherForStorage = recurringList;
       // Only deactivate one_off charges that actually got billed this period.
       usedOneOffIds = applicable.filter((r) => r.frequency === 'one_off').map((r) => r.id);
     }
@@ -3477,8 +3501,29 @@ app.post('/api/bills', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 
       discountPct,
     });
   }
-  if (!computed.billNo || !computed.total || !computed.roomId) {
-    return res.status(400).json({ error: 'billNo, roomId and total required' });
+  const totalAmount = Number(computed.total);
+  const subtotalAmount = computed.subtotal == null ? totalAmount : Number(computed.subtotal);
+  if (!computed.billNo || !computed.roomId || !computed.period || !computed.dueDate
+      || !Number.isFinite(totalAmount) || totalAmount <= 0 || totalAmount > MAX_AMOUNT
+      || !Number.isFinite(subtotalAmount) || subtotalAmount < 0) {
+    return res.status(400).json({
+      error: 'billNo, roomId, period, dueDate and a positive total are required',
+      code: 'INVALID_BILL_TOTAL',
+    });
+  }
+  const amountFields = [
+    'rent', 'waterUnits', 'waterRate', 'waterAmount',
+    'elecUnits', 'elecRate', 'elecAmount', 'wifi',
+    'vat', 'lateFee',
+  ];
+  for (const field of amountFields) {
+    const n = Number(computed[field] || 0);
+    if (!Number.isFinite(n) || n < 0) {
+      return res.status(400).json({
+        error: `invalid nonnegative bill field: ${field}`,
+        code: 'INVALID_BILL_AMOUNT',
+      });
+    }
   }
   // Auto-link to tenant: if caller didn't pass tenantId explicitly, look up
   // the active tenant currently in this room. This is what makes bills
@@ -3513,6 +3558,12 @@ app.post('/api/bills', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 
          wifi=EXCLUDED.wifi, other=EXCLUDED.other,
          subtotal=EXCLUDED.subtotal, vat=EXCLUDED.vat, late_fee=EXCLUDED.late_fee,
          total=EXCLUDED.total, due_date=EXCLUDED.due_date
+       WHERE bills.status IN ('pending','overdue')
+         AND bills.deleted_at IS NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM payments p
+            WHERE p.bill_id=bills.id AND p.status='verified'
+         )
        RETURNING *`,
       [
         computed.billNo, tenantId, computed.roomId, computed.period,
@@ -3520,11 +3571,33 @@ app.post('/api/bills', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 
         computed.waterUnits || 0, computed.waterRate || 0, computed.waterAmount || 0,
         computed.elecUnits || 0, computed.elecRate || 0, computed.elecAmount || 0,
         computed.wifi || 0,
-        JSON.stringify(Array.isArray(b.other) ? b.other : []),
-        computed.subtotal || computed.total, computed.vat || 0, computed.lateFee || 0,
-        computed.total, computed.dueDate,
+        JSON.stringify(otherForStorage || []),
+        subtotalAmount, computed.vat || 0, computed.lateFee || 0,
+        totalAmount, computed.dueDate,
       ]
     );
+    if (!rows.length) {
+      const locked = await pool.query(
+        `SELECT b.id, b.status,
+                EXISTS (
+                  SELECT 1 FROM payments p
+                   WHERE p.bill_id=b.id AND p.status='verified'
+                   LIMIT 1
+                ) AS has_verified_payment
+           FROM bills b
+          WHERE b.bill_no=$1
+          LIMIT 1`,
+        [computed.billNo]
+      );
+      const current = locked.rows[0] || {};
+      return res.status(409).json({
+        error: 'existing bill is locked because it is paid, void, deleted, or has a verified payment',
+        code: 'BILL_LOCKED_FOR_LEDGER',
+        billId: current.id,
+        billStatus: current.status,
+        hasVerifiedPayment: !!current.has_verified_payment,
+      });
+    }
     audit(req, 'bill.create', 'bill', String(rows[0].id), { tenantId, autoLinked: !b.tenantId && tenantId });
     // B1 — mark consumed one_off recurring charges inactive so they don't
     // appear on next month's bill. Best-effort; failure here doesn't unwind
@@ -3590,6 +3663,7 @@ app.put('/api/bills/:id/void', sameOrigin, csrfGuard, requireAuth, requireRole('
       force: !!force,
       hadVerifiedPayment: verified.rows.length > 0,
     });
+    notifyBillVoided(rows[0], reason, req.session.user.username).catch(() => {});
     res.json({ ok: true, bill: rows[0] });
   } catch (err) {
     console.error('bill void error:', err);
@@ -3672,7 +3746,12 @@ app.post('/api/tenant/payments', sameOrigin, csrfGuard, requireTenant, ensureSli
     // triggered).
     const rawBuf = Buffer.from(String(b.slip || '').replace(/^data:[^;]+;base64,/, ''), 'base64');
     const slipHash = cryptoSvc.hmac(rawBuf);
-    const dup = await pool.query('SELECT id FROM payments WHERE slip_hash=$1 LIMIT 1', [slipHash]);
+    const dup = await pool.query(
+      `SELECT id FROM payments
+        WHERE slip_hash=$1 AND status IN ('pending','verified')
+        LIMIT 1`,
+      [slipHash]
+    );
     if (dup.rows.length) {
       return res.status(409).json({
         error: 'สลิปนี้ถูกใช้ไปแล้ว — ไม่สามารถส่งซ้ำ',
@@ -4197,6 +4276,51 @@ async function loadBuildingName(pool) {
     return (cfg && cfg.building && cfg.building.name)
       || 'บ้านกาญจน์ เรสซิเดนซ์';
   } catch { return 'บ้านกาญจน์ เรสซิเดนซ์'; }
+}
+
+async function notifyBillVoided(bill, reason, actor) {
+  if (!bill) return;
+  const flags = await features.load(pool);
+  const amount = Number(bill.total);
+  const amountText = Number.isFinite(amount)
+    ? amount.toLocaleString('th-TH', { minimumFractionDigits: 2 })
+    : '-';
+  const lines = [
+    `Bill voided: ${bill.bill_no || bill.id}`,
+    `Room: ${bill.room_id || '-'}`,
+    bill.period ? `Period: ${bill.period}` : null,
+    `Amount: THB ${amountText}`,
+    reason ? `Reason: ${reason}` : null,
+    actor ? `By: ${actor}` : null,
+  ].filter(Boolean);
+
+  if (bill.tenant_id) {
+    const { rows } = await pool.query(
+      `SELECT id, full_name, phone, email, line_user_id, line_oa_id, status
+         FROM tenants
+        WHERE id=$1 AND deleted_at IS NULL
+        LIMIT 1`,
+      [bill.tenant_id]
+    );
+    if (rows.length) {
+      await notifier.notifyTenant({ pool, features: flags }, rows[0], {
+        subject: 'Bill cancelled',
+        text: [
+          `Dear ${rows[0].full_name || 'tenant'},`,
+          '',
+          ...lines,
+          '',
+          'Please ignore the cancelled bill. Contact the office if you already paid or have questions.',
+        ].join('\n'),
+        force: true,
+      });
+    }
+  }
+
+  await notifier.notifyOwner({ pool, features: flags }, {
+    subject: 'Bill voided',
+    text: lines.join('\n'),
+  });
 }
 
 app.get('/api/payments', requireAuth, requireRole('owner', 'manager', 'staff'), async (req, res) => {

@@ -190,8 +190,24 @@ async function migrate(pool, opts = {}) {
     ALTER TABLE payments ADD COLUMN IF NOT EXISTS transaction_ref TEXT;
     ALTER TABLE payments ADD COLUMN IF NOT EXISTS verify_provider TEXT;
     ALTER TABLE payments ADD COLUMN IF NOT EXISTS verify_payload  JSONB;
-    CREATE UNIQUE INDEX IF NOT EXISTS uq_payments_tx_ref
-      ON payments(transaction_ref) WHERE transaction_ref IS NOT NULL;
+    -- Rejected slips should not permanently consume a bank ref/hash: if a
+    -- tenant uploaded a valid slip against the wrong bill and admin rejected
+    -- it, the same real payment may be re-submitted for the correct bill.
+    -- Pending/verified rows still block replay/double-credit.
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_indexes
+         WHERE schemaname='public'
+           AND indexname='uq_payments_tx_ref'
+           AND indexdef LIKE '%status%pending%'
+           AND indexdef LIKE '%verified%'
+      ) THEN
+        DROP INDEX IF EXISTS uq_payments_tx_ref;
+        CREATE UNIQUE INDEX uq_payments_tx_ref
+          ON payments(transaction_ref) WHERE transaction_ref IS NOT NULL AND status IN ('pending','verified');
+      END IF;
+    END $$;
     CREATE INDEX IF NOT EXISTS idx_payments_provider
       ON payments(verify_provider) WHERE verify_provider IS NOT NULL;
     -- The slip queue listing query (GET /api/payments?status=pending)
@@ -202,7 +218,66 @@ async function migrate(pool, opts = {}) {
     -- planner satisfy WHERE+ORDER BY in a single index scan.
     CREATE INDEX IF NOT EXISTS idx_payments_status_created
       ON payments(status, created_at DESC);
-    CREATE UNIQUE INDEX IF NOT EXISTS uq_payments_slip_hash ON payments(slip_hash) WHERE slip_hash IS NOT NULL;
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_indexes
+         WHERE schemaname='public'
+           AND indexname='uq_payments_slip_hash'
+           AND indexdef LIKE '%status%pending%'
+           AND indexdef LIKE '%verified%'
+      ) THEN
+        DROP INDEX IF EXISTS uq_payments_slip_hash;
+        CREATE UNIQUE INDEX uq_payments_slip_hash
+          ON payments(slip_hash) WHERE slip_hash IS NOT NULL AND status IN ('pending','verified');
+      END IF;
+    END $$;
+
+    DO $$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_bills_status_valid') THEN
+        ALTER TABLE bills ADD CONSTRAINT chk_bills_status_valid
+          CHECK (status IN ('pending','paid','overdue','void')) NOT VALID;
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_bills_amounts_nonnegative') THEN
+        ALTER TABLE bills ADD CONSTRAINT chk_bills_amounts_nonnegative
+          CHECK (
+            rent >= 0 AND COALESCE(water_units,0) >= 0 AND COALESCE(water_rate,0) >= 0
+            AND COALESCE(water_amount,0) >= 0 AND COALESCE(elec_units,0) >= 0
+            AND COALESCE(elec_rate,0) >= 0 AND COALESCE(elec_amount,0) >= 0
+            AND COALESCE(wifi,0) >= 0 AND subtotal >= 0 AND COALESCE(vat,0) >= 0
+            AND COALESCE(late_fee,0) >= 0 AND total > 0
+          ) NOT VALID;
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_payments_status_valid') THEN
+        ALTER TABLE payments ADD CONSTRAINT chk_payments_status_valid
+          CHECK (status IN ('pending','verified','rejected')) NOT VALID;
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_payments_amount_positive') THEN
+        ALTER TABLE payments ADD CONSTRAINT chk_payments_amount_positive
+          CHECK (amount > 0) NOT VALID;
+      END IF;
+    END $$;
+
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_indexes WHERE schemaname='public' AND indexname='uq_payments_one_verified_per_bill'
+      ) THEN
+        IF NOT EXISTS (
+          SELECT 1
+            FROM payments
+           WHERE bill_id IS NOT NULL AND status='verified'
+           GROUP BY bill_id
+          HAVING COUNT(*) > 1
+        ) THEN
+          CREATE UNIQUE INDEX uq_payments_one_verified_per_bill
+            ON payments(bill_id) WHERE bill_id IS NOT NULL AND status='verified';
+        ELSE
+          RAISE WARNING 'Skipping uq_payments_one_verified_per_bill because duplicate verified payments already exist';
+        END IF;
+      END IF;
+    END $$;
 
     CREATE TABLE IF NOT EXISTS meter_readings (
       id          BIGSERIAL PRIMARY KEY,
