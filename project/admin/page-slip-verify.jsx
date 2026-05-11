@@ -1,5 +1,5 @@
 // === admin/page-slip-verify.jsx ===========================================
-// Dedicated end-to-end setup for slip auto-verification (SlipOK / EasySlip).
+// Dedicated end-to-end setup for slip auto-verification (SlipOK / EasySlip / Slip2Go).
 //
 // What this page does — in one place:
 //   1. Toggle the slipUpload feature on/off                  (calls /api/admin/features)
@@ -17,6 +17,14 @@
 // ===========================================================================
 
 const { useState, useEffect, useCallback, useMemo } = React;
+
+const SLIP_PROVIDERS = [
+  { id: 'slipok', label: 'SlipOK', key: 'SLIPOK_API_KEY' },
+  { id: 'easyslip', label: 'EasySlip', key: 'EASYSLIP_API_KEY' },
+  { id: 'slip2go', label: 'Slip2Go', key: 'SLIP2GO_API_KEY', urlKey: 'SLIP2GO_API_URL' },
+];
+const SLIP_PROVIDER_LABEL = Object.fromEntries(SLIP_PROVIDERS.map((p) => [p.id, p.label]));
+const slipProviderLabel = (id) => SLIP_PROVIDER_LABEL[id] || id || 'Provider';
 
 function PageSlipVerify({ setToast }) {
   const C = window.ADMIN_C;
@@ -82,10 +90,16 @@ function PageSlipVerify({ setToast }) {
   }, [apiFetch]);
   useEffect(() => {
     refreshProviderStatus();
-    // Track BOTH keys' isSet flags so a save of either re-probes the
+    // Track provider key/url isSet flags so saves re-probe the
     // connection. tag-prop chains: saveSecret → reload → setSecrets →
     // dep change here → refresh.
-  }, [refreshProviderStatus, secrets.SLIPOK_API_KEY?.isSet, secrets.EASYSLIP_API_KEY?.isSet]);
+  }, [
+    refreshProviderStatus,
+    secrets.SLIPOK_API_KEY?.isSet,
+    secrets.EASYSLIP_API_KEY?.isSet,
+    secrets.SLIP2GO_API_KEY?.isSet,
+    secrets.SLIP2GO_API_URL?.isSet,
+  ]);
 
   async function saveFeature(partial) {
     setBusy(true); setErr('');
@@ -98,7 +112,7 @@ function PageSlipVerify({ setToast }) {
       if (!r.ok) throw new Error(d.error || 'save failed');
       setFeatures(d.features);
       // Invalidate the cached test result whenever a feature change could
-      // affect what the test would prove. Switching SlipOK ↔ EasySlip,
+      // affect what the test would prove. Switching providers,
       // toggling autoVerify, or disabling slipUpload all make the
       // previously-green "✓ ผ่าน" misleading — admin would see it next
       // to a config that hasn't actually been tested.
@@ -184,34 +198,46 @@ function PageSlipVerify({ setToast }) {
       ? slip.providers
       : (slip.provider ? [slip.provider] : ['slipok']);
     const primary = providersArr[0];
-    // Per-provider key entries — both are surfaced in step 4 regardless of
+    // Per-provider credential entries — all are surfaced in step 4 regardless of
     // which is primary, so admin can save EITHER without first switching the
     // dropdown. Fixes the bug where saving EasySlip's key hid SlipOK's input.
     const slipokKey = secrets.SLIPOK_API_KEY;
     const easyslipKey = secrets.EASYSLIP_API_KEY;
+    const slip2goKey = secrets.SLIP2GO_API_KEY;
+    const slip2goUrl = secrets.SLIP2GO_API_URL;
     const branchEntry = secrets.SLIPOK_BRANCH_ID;
     const slipokKeySet = !!(slipokKey && slipokKey.isSet);
     const easyslipKeySet = !!(easyslipKey && easyslipKey.isSet);
-    // Failover is "live" when BOTH keys are set AND both providers appear in
-    // the providers array. We auto-promote to providers=[primary, other]
-    // when both keys are detected — keeps the operator from having to know
-    // the JSON-array shape exists.
-    const failoverReady = slipokKeySet && easyslipKeySet
-      && providersArr.length >= 2
-      && providersArr.includes('slipok') && providersArr.includes('easyslip');
+    const slip2goKeySet = !!(slip2goKey && slip2goKey.isSet && slip2goUrl && slip2goUrl.isSet);
+    const providerReadyById = {
+      slipok: slipokKeySet,
+      easyslip: easyslipKeySet,
+      slip2go: slip2goKeySet,
+    };
+    const readyProviders = SLIP_PROVIDERS
+      .map((p) => p.id)
+      .filter((id) => providerReadyById[id]);
+    // Failover is "live" when two or more providers are ready AND appear in
+    // the providers array. We auto-promote to providers=[primary, ...ready]
+    // when enough providers are detected — keeps the operator from having to
+    // know the JSON-array shape exists.
+    const failoverReady = providersArr.filter((id) => providerReadyById[id]).length >= 2;
     return {
       primary,
       providersArr,
       slipokKey, slipokKeySet,
       easyslipKey, easyslipKeySet,
+      slip2goKey, slip2goUrl, slip2goKeySet,
       branchEntry,
       branchSet: !!(branchEntry && branchEntry.isSet),
+      providerReadyById,
+      readyProviders,
       failoverReady,
-      // step4 done when AT LEAST one provider's key is configured.
+      // step4 done when AT LEAST one provider is configured and ready.
       step1Done: slip.enabled === true,
       step2Done: slip.autoVerify === true,
       step3Done: !!primary,
-      step4Done: slipokKeySet || easyslipKeySet,
+      step4Done: readyProviders.length > 0,
       step5Done: testResult && testResult.ok === true,
       tenantPortalOff: features.tenantPortal && features.tenantPortal.enabled === false,
       // PromptPay target is needed for receiver-account verification — the
@@ -225,26 +251,28 @@ function PageSlipVerify({ setToast }) {
     };
   }, [features, secrets, testResult, readiness]);
 
-  // When BOTH keys are set but features.slipUpload.providers doesn't yet
+  // When multiple providers are ready but features.slipUpload.providers doesn't yet
   // reflect the failover chain (legacy single-provider config), auto-upgrade
   // it once so verifyWithFallback iterates both. The setField fires only when
   // the upgrade is actually needed — no-op on each subsequent render.
   React.useEffect(() => {
     if (!status) return;
-    if (status.slipokKeySet && status.easyslipKeySet) {
+    if (status.readyProviders.length >= 2) {
       const currentProviders = features?.slipUpload?.providers;
-      const wantProviders = [status.primary, status.primary === 'slipok' ? 'easyslip' : 'slipok'];
+      const wantProviders = [
+        status.primary,
+        ...status.readyProviders.filter((p) => p !== status.primary),
+      ];
       const match = Array.isArray(currentProviders)
-        && currentProviders.length === 2
-        && currentProviders[0] === wantProviders[0]
-        && currentProviders[1] === wantProviders[1];
+        && currentProviders.length === wantProviders.length
+        && currentProviders.every((p, i) => p === wantProviders[i]);
       if (!match) {
         // Fire once via saveFeature; the reload() inside will refresh the
         // useMemo on the next render so this effect doesn't re-fire.
         saveFeature({ slipUpload: { providers: wantProviders } });
       }
     }
-  }, [status?.slipokKeySet, status?.easyslipKeySet, status?.primary]);
+  }, [status?.readyProviders.join('|'), status?.primary]);
 
   // Subset of billing-readiness issues that are RELEVANT to slip verification.
   // Filtering by code keeps the panel focused — admin shouldn't see
@@ -264,7 +292,7 @@ function PageSlipVerify({ setToast }) {
     return React.createElement(PageContainer, null,
       React.createElement(PageHeader, {
         title: 'ตรวจสลิปอัตโนมัติ',
-        subtitle: 'ตั้งค่าระบบยืนยันสลิปด้วย API (SlipOK / EasySlip)',
+        subtitle: 'ตั้งค่าระบบยืนยันสลิปด้วย API (SlipOK / EasySlip / Slip2Go)',
       }),
       React.createElement(Card, null,
         React.createElement('div', { style: { color: C.muted, textAlign: 'center', padding: 20 } },
@@ -309,7 +337,7 @@ function PageSlipVerify({ setToast }) {
   return React.createElement(PageContainer, null,
     React.createElement(PageHeader, {
       title: 'ตรวจสลิปอัตโนมัติ',
-      subtitle: 'ตั้งค่า SlipOK / EasySlip ทีเดียวจบ — สลิปที่ผู้เช่าส่งจะถูกยืนยันและบิลถูก mark paid อัตโนมัติภายใน 3-5 วินาที',
+      subtitle: 'ตั้งค่า SlipOK / EasySlip / Slip2Go ทีเดียวจบ — สลิปที่ผู้เช่าส่งจะถูกยืนยันและบิลถูก mark paid อัตโนมัติภายใน 3-5 วินาที',
     }),
 
     // Intro / explainer card
@@ -320,7 +348,7 @@ function PageSlipVerify({ setToast }) {
         React.createElement('div', { style: { fontWeight: 600, marginBottom: 6, fontFamily: 'Sora' } },
           '🧾 หลักการทำงาน'),
         React.createElement('div', null,
-          '1) ผู้เช่าอัปโหลดสลิป → ', '2) ระบบส่งภาพไปยัง provider (SlipOK/EasySlip) → ',
+          '1) ผู้เช่าอัปโหลดสลิป → ', '2) ระบบส่งภาพไปยัง provider (SlipOK/EasySlip/Slip2Go) → ',
           '3) provider ถอด QR + เช็คกับธนาคารว่าเงินถึงจริง → ',
           '4) ระบบเช็คซ้ำ: ยอด ±1฿ ตรงบิล + บัญชีปลายทางตรง PromptPay + transRef ไม่ซ้ำ → ',
           '5) ผ่านทั้งสาม → บิล mark paid + แจ้ง LINE ทันที'),
@@ -391,6 +419,8 @@ function PageSlipVerify({ setToast }) {
                 p.ready
                   ? (p.detail?.branchId
                       ? `พร้อมใช้งาน · branch: ${p.detail.branchId}`
+                      : p.detail?.apiUrl
+                        ? `พร้อมใช้งาน · url: ${p.detail.apiUrl}`
                       : 'พร้อมใช้งาน — key ถูกตั้งแล้ว')
                   : (p.detail?.hint || 'key ยังไม่ตั้ง')
               ),
@@ -410,7 +440,7 @@ function PageSlipVerify({ setToast }) {
           },
         },
           providerStatus.info?.failoverReady
-            ? `🔁 Auto-failover พร้อม — ทั้ง 2 provider เชื่อมต่อได้ ระบบจะใช้ ${status.primary === 'easyslip' ? 'EasySlip' : 'SlipOK'} ก่อน แล้ว fall through อีกอันถ้าล่ม`
+            ? `🔁 Auto-failover พร้อม — ${status.providersArr.filter((id) => status.providerReadyById[id]).length} provider เชื่อมต่อได้ ระบบจะใช้ ${slipProviderLabel(status.primary)} ก่อน แล้ว fall through ถ้าล่ม`
             : providerStatus.readyCount === 1
               ? `⚠️ มีแค่ provider เดียวที่พร้อม — ถ้า provider นี้ล่ม สลิปจะตกเข้าคิว admin (ตั้ง key อีกอันเพื่อ enable auto-failover)`
               : `🔴 ระบบยังเชื่อมต่อไม่ได้ — ต้องตั้ง key อย่างน้อย 1 provider ที่ Step 4 ด้านล่าง`,
@@ -465,19 +495,19 @@ function PageSlipVerify({ setToast }) {
       ),
 
       // Step 3: choose PRIMARY provider (system tries this first; falls
-      // through to the other when both keys are set)
+      // through to ready fallback providers on transient failures)
       React.createElement(StepHeader, {
         n: 3,
         done: status.step3Done && status.step2Done,
-        title: `Provider หลัก — ตอนนี้: ${status.primary === 'easyslip' ? 'EasySlip' : 'SlipOK'}`,
+        title: `Provider หลัก — ตอนนี้: ${slipProviderLabel(status.primary)}`,
         hint: status.failoverReady
           ? '✓ Auto-failover พร้อม: ระบบจะเรียก provider หลักก่อน ถ้าตอบ transient error (timeout, 5xx, parse fail) จะลอง provider สำรองให้อัตโนมัติ'
-          : 'เลือก provider ที่จะถูกเรียกก่อน — เมื่อตั้ง key ทั้ง 2 ตัวด้านล่าง ระบบจะ enable auto-failover อัตโนมัติ',
+          : 'เลือก provider ที่จะถูกเรียกก่อน — เมื่อตั้งค่า provider อย่างน้อย 2 ตัวด้านล่าง ระบบจะ enable auto-failover อัตโนมัติ',
       },
         React.createElement('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
-          ['slipok', 'easyslip'].map((p) => {
+          SLIP_PROVIDERS.map((meta) => meta.id).map((p) => {
             const isActive = status.primary === p;
-            const targetKeySet = p === 'slipok' ? status.slipokKeySet : status.easyslipKeySet;
+            const targetKeySet = !!status.providerReadyById[p];
             return React.createElement('button', {
               key: p,
               onClick: () => {
@@ -489,23 +519,19 @@ function PageSlipVerify({ setToast }) {
                 // know what they're doing.
                 if (!isActive && !targetKeySet) {
                   const ok = window.confirm(
-                    `⚠ ${p === 'slipok' ? 'SlipOK' : 'EasySlip'} ยังไม่ได้ตั้ง API key\n\n` +
+                    `⚠ ${slipProviderLabel(p)} ยังไม่ได้ตั้ง API key\n\n` +
                     `ถ้าสลับเป็น primary ตอนนี้ ระบบจะ:\n` +
-                    `  • ใช้ ${p === 'slipok' ? 'SlipOK' : 'EasySlip'} เป็น primary (ตามที่เลือก)\n` +
+                    `  • ใช้ ${slipProviderLabel(p)} เป็น primary (ตามที่เลือก)\n` +
                     `  • แต่ verify จะใช้งานไม่ได้ทันที — สลิปจะตกเข้าคิว admin\n\n` +
-                    `📌 แนะนำ: ตั้ง API key ของ ${p === 'slipok' ? 'SlipOK' : 'EasySlip'} ที่ Step 4 ก่อน แล้วค่อยสลับ primary\n\n` +
+                    `📌 แนะนำ: ตั้ง API key ของ ${slipProviderLabel(p)} ที่ Step 4 ก่อน แล้วค่อยสลับ primary\n\n` +
                     `ดำเนินการสลับต่อหรือไม่?`
                   );
                   if (!ok) return;
                 }
-                if (status.slipokKeySet && status.easyslipKeySet) {
-                  saveFeature({ slipUpload: {
-                    provider: p,
-                    providers: [p, p === 'slipok' ? 'easyslip' : 'slipok'],
-                  }});
-                } else {
-                  saveFeature({ slipUpload: { provider: p, providers: [p] } });
-                }
+                saveFeature({ slipUpload: {
+                  provider: p,
+                  providers: [p, ...status.readyProviders.filter((id) => id !== p)],
+                }});
               },
               disabled: busy || isActive || !status.step2Done,
               style: {
@@ -517,7 +543,7 @@ function PageSlipVerify({ setToast }) {
                 fontFamily: 'inherit', fontSize: 13.5, fontWeight: 500,
                 opacity: !targetKeySet && !isActive ? 0.85 : 1,
               },
-            }, `${p === 'easyslip' ? 'EasySlip' : 'SlipOK'}${targetKeySet ? '' : ' ⚠ key ยังไม่ตั้ง'}`);
+            }, `${slipProviderLabel(p)}${targetKeySet ? '' : ' ⚠ key ยังไม่ตั้ง'}`);
           }),
         ),
         status.failoverReady ? React.createElement('div', {
@@ -526,11 +552,11 @@ function PageSlipVerify({ setToast }) {
             background: '#f0f9f0', border: '1px solid #bce0bc',
             borderRadius: 6, fontSize: 12.5, color: '#1f5f3a',
           },
-        }, `🔁 Auto-failover: ${status.primary === 'easyslip' ? 'EasySlip → SlipOK' : 'SlipOK → EasySlip'} `
-          + `(ถ้า ${status.primary === 'easyslip' ? 'EasySlip' : 'SlipOK'} ล่ม จะลอง ${status.primary === 'easyslip' ? 'SlipOK' : 'EasySlip'} ให้ทันที)`) : null,
+        }, `🔁 Auto-failover: ${status.providersArr.filter((id) => status.providerReadyById[id]).map(slipProviderLabel).join(' → ')} `
+          + `(ถ้า ${slipProviderLabel(status.primary)} ล่ม จะลอง provider สำรองให้ทันที)`) : null,
       ),
 
-      // Step 4: API keys — BOTH providers shown side-by-side so admin can
+      // Step 4: API keys — all providers shown side-by-side so admin can
       // configure either without first switching the primary selector.
       // The previous version only rendered the selected provider's key,
       // which made it impossible to save EasySlip then later set SlipOK
@@ -538,8 +564,8 @@ function PageSlipVerify({ setToast }) {
       React.createElement(StepHeader, {
         n: 4,
         done: status.step4Done,
-        title: 'API keys (ตั้งทั้ง 2 → auto-failover พร้อม)',
-        hint: 'ตั้ง key อย่างน้อย 1 ใน 2 ก็เริ่มใช้งานได้ — ตั้งครบทั้ง 2 ระบบจะสลับมาใช้อันสำรองอัตโนมัติเมื่ออันหลักล่ม',
+        title: 'API keys (ตั้งหลาย provider → auto-failover พร้อม)',
+        hint: 'ตั้ง provider อย่างน้อย 1 ตัวก็เริ่มใช้งานได้ — ตั้งพร้อมใช้ตั้งแต่ 2 ตัวขึ้นไป ระบบจะสลับมาใช้อันสำรองอัตโนมัติเมื่ออันหลักล่ม',
       },
         React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 12 } },
           // SlipOK key — always shown, regardless of primary selection
@@ -609,6 +635,48 @@ function PageSlipVerify({ setToast }) {
               onClear: () => saveSecret('EASYSLIP_API_KEY', ''),
             }) : React.createElement('div', { style: { color: C.muted, fontSize: 12.5 } },
               'กำลังโหลด…'),
+          ),
+          // Slip2Go key + API URL — both are required by Slip2Go's docs.
+          React.createElement('div', null,
+            React.createElement('div', {
+              style: {
+                fontSize: 12.5, fontWeight: 600, marginBottom: 6,
+                color: status.primary === 'slip2go' ? C.accent : C.muted,
+              },
+            }, `🧾 Slip2Go${status.primary === 'slip2go' ? ' (primary)' : ' (fallback)'}`),
+            status.slip2goKey ? React.createElement(SecretInput, {
+              spec: status.slip2goKey,
+              editing: !!editing.SLIP2GO_API_KEY,
+              draft: drafts.SLIP2GO_API_KEY || '',
+              busy,
+              C,
+              onEdit: () => setEditing((e) => ({ ...e, SLIP2GO_API_KEY: true })),
+              onCancel: () => {
+                setEditing((e) => ({ ...e, SLIP2GO_API_KEY: false }));
+                setDrafts((d) => ({ ...d, SLIP2GO_API_KEY: '' }));
+              },
+              onDraft: (v) => setDrafts((d) => ({ ...d, SLIP2GO_API_KEY: v })),
+              onSave: () => saveSecret('SLIP2GO_API_KEY', drafts.SLIP2GO_API_KEY || ''),
+              onClear: () => saveSecret('SLIP2GO_API_KEY', ''),
+            }) : React.createElement('div', { style: { color: C.muted, fontSize: 12.5 } },
+              'กำลังโหลด…'),
+            status.slip2goUrl ? React.createElement('div', { style: { marginTop: 8 } },
+              React.createElement(SecretInput, {
+                spec: status.slip2goUrl,
+                editing: !!editing.SLIP2GO_API_URL,
+                draft: drafts.SLIP2GO_API_URL || '',
+                busy,
+                C,
+                onEdit: () => setEditing((e) => ({ ...e, SLIP2GO_API_URL: true })),
+                onCancel: () => {
+                  setEditing((e) => ({ ...e, SLIP2GO_API_URL: false }));
+                  setDrafts((d) => ({ ...d, SLIP2GO_API_URL: '' }));
+                },
+                onDraft: (v) => setDrafts((d) => ({ ...d, SLIP2GO_API_URL: v })),
+                onSave: () => saveSecret('SLIP2GO_API_URL', drafts.SLIP2GO_API_URL || ''),
+                onClear: () => saveSecret('SLIP2GO_API_URL', ''),
+              })
+            ) : null,
           ),
         ),
       ),

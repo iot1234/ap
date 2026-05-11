@@ -65,10 +65,16 @@ const CATALOG = Object.freeze([
     description: 'จำเป็นเฉพาะแผนที่มีหลาย branch (เว้นว่างได้สำหรับแผน single-branch)',
     kind: 'text' },
   // EasySlip (https://easyslip.com/) — alternative aggregator with
-  // different pricing model. Pick ONE provider in features.slipUpload.provider.
+  // different pricing model. Providers can be chained in features.slipUpload.providers.
   { key: 'EASYSLIP_API_KEY', group: 'slipverify', label: 'EasySlip API Key',
     description: 'จาก EasySlip API → ใช้แทน SlipOK ก็ได้ (เลือก provider ที่หน้า Features)',
     kind: 'password' },
+  { key: 'SLIP2GO_API_KEY', group: 'slipverify', label: 'Slip2Go API Secret',
+    description: 'Secret Key จาก Slip2Go API Connect → ใช้กับ Authorization: Bearer',
+    kind: 'password' },
+  { key: 'SLIP2GO_API_URL', group: 'slipverify', label: 'Slip2Go API URL',
+    description: 'Base URL จากหน้า Slip2Go API Connect เช่น https://... (ไม่ต้องใส่ /api/verify-slip)',
+    kind: 'text' },
 ]);
 const CATALOG_BY_KEY = Object.fromEntries(CATALOG.map((c) => [c.key, c]));
 
@@ -213,6 +219,17 @@ function maskValue(v, kind) {
   return '••••' + s.slice(-4);
 }
 
+function isHttpUrl(value) {
+  try {
+    const raw = String(value || '').trim();
+    if (!raw) return false;
+    const u = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
+    return u.protocol === 'http:' || u.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Actively probe whether a secret group is reachable. Used by the UI's
  * "Test connection" button so admins know their config works without
@@ -309,6 +326,9 @@ async function testGroup(group) {
     // on the first real tenant upload.
     const slipokKey = get('SLIPOK_API_KEY');
     const easyslipKey = get('EASYSLIP_API_KEY');
+    const slip2goKey = get('SLIP2GO_API_KEY');
+    const slip2goUrl = get('SLIP2GO_API_URL');
+    const slip2goUrlOk = isHttpUrl(slip2goUrl);
     const branchId = get('SLIPOK_BRANCH_ID');
     const providers = [
       {
@@ -327,27 +347,38 @@ async function testGroup(group) {
         ready: !!easyslipKey,
         detail: easyslipKey ? {} : { hint: 'ตั้งค่า EASYSLIP_API_KEY ก่อน' },
       },
+      {
+        id: 'slip2go',
+        label: 'Slip2Go',
+        keySet: !!slip2goKey,
+        ready: !!slip2goKey && slip2goUrlOk,
+        detail: slip2goKey && slip2goUrlOk
+          ? { apiUrl: slip2goUrl }
+          : { hint: slip2goUrl && !slip2goUrlOk
+              ? 'SLIP2GO_API_URL ไม่ถูกต้อง — ใช้ URL จาก Slip2Go API Connect'
+              : 'ตั้งค่า SLIP2GO_API_KEY และ SLIP2GO_API_URL ก่อน' },
+      },
     ];
     const readyCount = providers.filter((p) => p.ready).length;
     if (readyCount === 0) {
       return {
         ok: false,
-        error: 'ทั้ง SLIPOK_API_KEY และ EASYSLIP_API_KEY ยังไม่ตั้ง — ตั้งอย่างน้อย 1 ตัวก่อน',
+        error: 'ยังไม่มี slip verification provider พร้อมใช้ — ตั้ง SlipOK, EasySlip หรือ Slip2Go อย่างน้อย 1 ตัวก่อน',
         providers,
       };
     }
     // Pick the primary for legacy callers that read `info.provider`.
-    const primaryId = slipokKey ? 'slipok' : 'easyslip';
+    const primaryId = providers.find((p) => p.ready)?.id || 'slipok';
     return {
       ok: true,
       info: {
         provider: primaryId,
         branchId: primaryId === 'slipok' ? (branchId || '(single-branch plan)') : null,
         ready: true,
-        // Failover is "active" when both have keys AND verifyWithFallback
-        // can iterate them. The features layer decides chain order; this
-        // probe just confirms both creds are present.
-        failoverReady: readyCount === 2,
+        // Failover is "active" when at least two providers are ready AND
+        // verifyWithFallback can iterate them. The features layer decides
+        // chain order; this probe just confirms credentials are present.
+        failoverReady: readyCount >= 2,
       },
       providers,
       readyCount,

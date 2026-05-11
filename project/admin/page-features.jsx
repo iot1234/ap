@@ -284,7 +284,7 @@ function PageFeatures({ setToast }) {
           <ToggleField id="slipUpload" field="requireVerification" label="ต้องตรวจสอบก่อน" features={features} setField={setField} />
           <ToggleField id="slipUpload" field="autoVerify" label="ตรวจสลิปอัตโนมัติ" features={features} setField={setField} />
           <SelectField id="slipUpload" field="provider" label="ผู้ให้บริการตรวจสลิป"
-            options={[['slipok', 'SlipOK'], ['easyslip', 'EasySlip']]} features={features} setField={setField} />
+            options={[['slipok', 'SlipOK'], ['easyslip', 'EasySlip'], ['slip2go', 'Slip2Go']]} features={features} setField={setField} />
           <Field id="slipUpload" field="maxBytes" label="ขนาดสูงสุด (bytes)" type="number" />
           {/* Surface the provider-key requirement inline so the operator
               doesn't enable autoVerify and silently wait for verifications
@@ -299,7 +299,7 @@ function PageFeatures({ setToast }) {
               background: '#fff7e0', border: '1px solid #f0e3a7',
               borderRadius: 6, fontSize: 12.5, lineHeight: 1.6, color: '#6b5b1a',
             }}>
-              🔑 <b>autoVerify เปิดอยู่</b> — ต้องตั้ง API key ของ {features?.slipUpload?.provider === 'easyslip' ? 'EasySlip' : 'SlipOK'} ที่{' '}
+              🔑 <b>autoVerify เปิดอยู่</b> — ต้องตั้ง API key ของ {features?.slipUpload?.provider === 'easyslip' ? 'EasySlip' : (features?.slipUpload?.provider === 'slip2go' ? 'Slip2Go' : 'SlipOK')} ที่{' '}
               <a href="/admin#secrets" style={{ color: '#8a6b1a', fontWeight: 600 }}>
                 /admin#secrets → ตรวจสลิปอัตโนมัติ
               </a>{' '}แล้วกด "🔌 ทดสอบ" ก่อนใช้งานจริง — ถ้า key หาย สลิปจะตกเข้าคิว admin เหมือนเดิม (ไม่ auto-verify)

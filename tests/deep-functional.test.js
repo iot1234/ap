@@ -201,6 +201,8 @@ const slipVerifier = require('../services/slipVerifier');
 test('slipVerifier.isConfigured: false when no provider keys', () => {
   delete process.env.SLIPOK_API_KEY;
   delete process.env.EASYSLIP_API_KEY;
+  delete process.env.SLIP2GO_API_KEY;
+  delete process.env.SLIP2GO_API_URL;
   delete require.cache[require.resolve('../services/secrets')];
   delete require.cache[require.resolve('../services/slipVerifier')];
   const sv = require('../services/slipVerifier');
@@ -212,20 +214,26 @@ test('slipVerifier.isConfigured: false when no provider keys', () => {
 test('slipVerifier.getConfiguredProviders: filters by key presence + dedupes', () => {
   process.env.SLIPOK_API_KEY = 'k1';
   delete process.env.EASYSLIP_API_KEY;
+  delete process.env.SLIP2GO_API_KEY;
+  delete process.env.SLIP2GO_API_URL;
   delete require.cache[require.resolve('../services/secrets')];
   delete require.cache[require.resolve('../services/slipVerifier')];
   const sv = require('../services/slipVerifier');
   const cfg = sv.getConfiguredProviders({
-    slipUpload: { autoVerify: true, providers: ['slipok', 'easyslip', 'slipok', 'unknown'] },
+    slipUpload: { autoVerify: true, providers: ['slipok', 'easyslip', 'slip2go', 'slipok', 'unknown'] },
   });
   assert.equal(cfg.length, 1, 'only slipok ready');
   assert.equal(cfg[0].id, 'slipok');
   delete process.env.SLIPOK_API_KEY;
+  delete process.env.SLIP2GO_API_KEY;
+  delete process.env.SLIP2GO_API_URL;
 });
 
 test('slipVerifier.verifyWithFallback: returns NOT_CONFIGURED when no provider ready', async () => {
   delete process.env.SLIPOK_API_KEY;
   delete process.env.EASYSLIP_API_KEY;
+  delete process.env.SLIP2GO_API_KEY;
+  delete process.env.SLIP2GO_API_URL;
   delete require.cache[require.resolve('../services/secrets')];
   delete require.cache[require.resolve('../services/slipVerifier')];
   const sv = require('../services/slipVerifier');

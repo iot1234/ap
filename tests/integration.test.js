@@ -263,12 +263,35 @@ test('slipVerifier exports verifyWithFallback (regression: silent auto-verify fa
   // The codes server.js pins-down as transient must all be in the set —
   // a hard rejection of one of these would falsely block a legit slip.
   for (const code of ['VERIFIER_THREW', 'PROVIDER_ERROR',
-                      'SLIPOK_PARSE', 'EASYSLIP_PARSE',
+                      'SLIPOK_PARSE', 'EASYSLIP_PARSE', 'SLIP2GO_PARSE',
                       'SLIP_PENDING', 'NOT_CONFIGURED',
                       'UNKNOWN_PROVIDER']) {
     assert.ok(sv.TRANSIENT_CODES.has(code),
       `TRANSIENT_CODES must include ${code} (server-side fallback contract)`);
   }
+});
+
+test('slipVerifier Slip2Go integration uses multipart image endpoint', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'slipVerifier.js'), 'utf8');
+
+  assert.match(src, /slip2go:\s*\{\s*keys:\s*\['SLIP2GO_API_KEY', 'SLIP2GO_API_URL'\]/,
+    'Slip2Go must require both API key and base URL');
+  assert.match(src, /endpointFromBase\(secrets\.get\('SLIP2GO_API_URL'\), '\/api\/verify-slip\/qr-image\/info'\)/,
+    'Slip2Go must call the documented qr-image endpoint');
+  assert.match(src, /name:\s*'file'/,
+    'Slip2Go multipart image field must be named file');
+  assert.match(src, /fields:\s*\{\s*payload:\s*JSON\.stringify\(payload\)/,
+    'Slip2Go multipart payload field must be a JSON string');
+  assert.match(src, /checkDuplicate:\s*true/,
+    'Slip2Go should ask provider to flag duplicate/reused slips');
+  assert.match(src, /checkAmount\s*=\s*\{\s*type:\s*'eq'/,
+    'Slip2Go should pass expected amount to provider-side matching');
+  assert.match(src, /\['200000', '200200'\]\.includes\(responseCode\)/,
+    'Slip2Go must accept both Slip Found and Slip is Valid success codes');
+  assert.match(src, /c === '200501'.*DUPLICATE_SLIP/s,
+    'Slip2Go duplicate response must be a hard rejection');
 });
 
 test('slipVerifier EasySlip integration uses v2 bank image multipart API', () => {
@@ -325,6 +348,42 @@ test('slipVerifier.getConfiguredProviders gates by API-key presence', () => {
   });
   assert.equal(got.length, 0, 'no provider should be ready without API key');
   if (oldKey != null) process.env.SLIPOK_API_KEY = oldKey;
+});
+
+test('slipVerifier.getConfiguredProviders requires Slip2Go key and API URL', () => {
+  const oldKey = process.env.SLIP2GO_API_KEY;
+  const oldUrl = process.env.SLIP2GO_API_URL;
+  process.env.SLIP2GO_API_KEY = 'k1';
+  delete process.env.SLIP2GO_API_URL;
+  delete require.cache[require.resolve('../services/secrets')];
+  delete require.cache[require.resolve('../services/slipVerifier')];
+  let sv = require('../services/slipVerifier');
+  let got = sv.getConfiguredProviders({
+    slipUpload: { autoVerify: true, providers: ['slip2go'] },
+  });
+  assert.equal(got.length, 0, 'Slip2Go should not be ready without SLIP2GO_API_URL');
+
+  process.env.SLIP2GO_API_URL = '::::';
+  delete require.cache[require.resolve('../services/secrets')];
+  delete require.cache[require.resolve('../services/slipVerifier')];
+  sv = require('../services/slipVerifier');
+  got = sv.getConfiguredProviders({
+    slipUpload: { autoVerify: true, providers: ['slip2go'] },
+  });
+  assert.equal(got.length, 0, 'Slip2Go should not be ready with an invalid SLIP2GO_API_URL');
+
+  process.env.SLIP2GO_API_URL = 'https://example.slip2go.test';
+  delete require.cache[require.resolve('../services/secrets')];
+  delete require.cache[require.resolve('../services/slipVerifier')];
+  sv = require('../services/slipVerifier');
+  got = sv.getConfiguredProviders({
+    slipUpload: { autoVerify: true, providers: ['slip2go'] },
+  });
+  assert.equal(got.length, 1);
+  assert.equal(got[0].id, 'slip2go');
+
+  if (oldKey != null) process.env.SLIP2GO_API_KEY = oldKey; else delete process.env.SLIP2GO_API_KEY;
+  if (oldUrl != null) process.env.SLIP2GO_API_URL = oldUrl; else delete process.env.SLIP2GO_API_URL;
 });
 
 test('/api/tenant/payments rejects amount that does not match bill.total', () => {

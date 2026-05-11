@@ -3,7 +3,7 @@
 // confirmed bank-transaction record so the system can mark a bill paid
 // WITHOUT admin manual review. Architecture mirrors services/sms.js:
 // the abstraction is bundled, but each concrete provider (SlipOK, EasySlip,
-// future bank webhooks) is opt-in by installing creds + flipping the
+// Slip2Go, future bank webhooks) is opt-in by installing creds + flipping the
 // feature flag.
 //
 // HOW IT WORKS
@@ -13,7 +13,7 @@
 //    the slip image bytes already saved by services/storage.js.
 // 3. The configured provider does ONE of:
 //    a) Decode the QR client-side and call the bank's read-only API to
-//       resolve the transRef → real transaction details (SlipOK, EasySlip)
+//       resolve the transRef → real transaction details (SlipOK, EasySlip, Slip2Go)
 //    b) Match against an inbound webhook log of bank push notifications
 //       (Phase 2 — needs bank business agreement)
 // 4. Returns { ok, transRef, amount, sender, receiver, transDate, raw }
@@ -28,15 +28,17 @@
 // CURRENT PROVIDERS
 //   - 'slipok'   : https://slipok.com/   (Thai aggregator — most common)
 //   - 'easyslip' : https://easyslip.com/  (alternative aggregator)
+//   - 'slip2go'  : https://slip2go.com/   (alternative aggregator)
 //   - null/off   : no auto-verify; falls back to admin queue
 //
 // SETUP CHECKLIST (operator)
 //   1) Subscribe to a provider, get an API key.
 //   2) Set feature flag slipUpload.autoVerify = true and slipUpload.provider
-//      = 'slipok' | 'easyslip' in /admin#features.
+//      = 'slipok' | 'easyslip' | 'slip2go' in /admin#features.
 //   3) Save the provider's API key in /admin#secrets:
 //        SLIPOK_API_KEY (+ SLIPOK_BRANCH_ID for some plans)
 //        EASYSLIP_API_KEY
+//        SLIP2GO_API_KEY + SLIP2GO_API_URL
 //   4) Test via "🔌 ทดสอบ" — first call must return ok before going live.
 //
 // SECURITY GUARANTEES
@@ -48,6 +50,7 @@
 //     even when the image bytes differ (re-screenshot, crop, recompress).
 //   - HMAC dedup (existing slip_hash) still active as a fallback.
 
+const http = require('http');
 const https = require('https');
 const crypto = require('crypto');
 const secrets = require('./secrets');
@@ -60,6 +63,7 @@ const TIMEOUT_MS = 10_000;
 const PROVIDERS = {
   slipok:   { keys: ['SLIPOK_API_KEY'],   label: 'SlipOK',   call: 'verifyViaSlipOK' },
   easyslip: { keys: ['EASYSLIP_API_KEY'], label: 'EasySlip', call: 'verifyViaEasySlip' },
+  slip2go:  { keys: ['SLIP2GO_API_KEY', 'SLIP2GO_API_URL'], label: 'Slip2Go', call: 'verifyViaSlip2Go' },
 };
 
 // Reasons that mean "the verifier could not get a clean answer" — caller
@@ -71,6 +75,7 @@ const TRANSIENT_CODES = new Set([
   'PROVIDER_ERROR',     // generic non-2xx from provider
   'SLIPOK_PARSE',       // SlipOK returned non-JSON
   'EASYSLIP_PARSE',     // EasySlip returned non-JSON
+  'SLIP2GO_PARSE',      // Slip2Go returned non-JSON
   'SLIP_PENDING',       // provider accepted the image but bank data is not ready yet
   'NOT_CONFIGURED',     // provider key missing (caller already gates, defensive)
   'UNKNOWN_PROVIDER',   // typo in features.slipUpload.providers
@@ -117,7 +122,7 @@ function multipartFile(boundary, name, filename, mime, buffer) {
 }
 
 function buildMultipartForm({ fields, file }) {
-  const boundary = '----ap-easyslip-' + crypto.randomBytes(12).toString('hex');
+  const boundary = '----ap-slipverify-' + crypto.randomBytes(12).toString('hex');
   const parts = [];
   for (const [name, value] of Object.entries(fields || {})) {
     if (value === undefined || value === null || value === '') continue;
@@ -161,13 +166,55 @@ function pickAccountValue(value) {
     || null;
 }
 
-function mapEasySlipParty(party, matchedAccount) {
+function mapProviderParty(party, matchedAccount) {
   const account = party?.account || null;
   return {
     name: pickLocalizedName(account) || pickLocalizedName(party) || pickLocalizedName(matchedAccount),
     bank: pickBankShort(party?.bank) || pickBankShort(matchedAccount?.bank),
     account: pickAccountValue(account) || pickAccountValue(party) || pickAccountValue(matchedAccount),
   };
+}
+
+function normalizeHttpBaseUrl(raw) {
+  const value = String(raw || '').trim();
+  if (!value) return null;
+  const withScheme = /^https?:\/\//i.test(value) ? value : `https://${value}`;
+  const parsed = new URL(withScheme);
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    throw new Error('base URL must use http or https');
+  }
+  parsed.pathname = parsed.pathname.replace(/\/+$/, '');
+  parsed.search = '';
+  parsed.hash = '';
+  return parsed.toString().replace(/\/$/, '');
+}
+
+function endpointFromBase(baseUrl, path) {
+  const normalized = normalizeHttpBaseUrl(baseUrl);
+  if (!normalized) throw new Error('SLIP2GO_API_URL not configured');
+  return new URL(path, normalized + '/');
+}
+
+function requestModuleFor(endpoint) {
+  return endpoint.protocol === 'http:' ? http : https;
+}
+
+function providerConfigProblems(id, meta) {
+  const missing = meta.keys.filter((k) => !secrets.get(k));
+  const invalid = [];
+  if (missing.length === 0 && id === 'slip2go') {
+    try {
+      normalizeHttpBaseUrl(secrets.get('SLIP2GO_API_URL'));
+    } catch {
+      invalid.push('SLIP2GO_API_URL');
+    }
+  }
+  return { missing, invalid };
+}
+
+function isProviderReady(id, meta) {
+  const problems = providerConfigProblems(id, meta);
+  return problems.missing.length === 0 && problems.invalid.length === 0;
 }
 
 /**
@@ -192,8 +239,7 @@ function getConfiguredProviders(features) {
     seen.add(id);
     const meta = PROVIDERS[id];
     if (!meta) continue;
-    const ready = meta.keys.every((k) => !!secrets.get(k));
-    if (!ready) continue;
+    if (!isProviderReady(id, meta)) continue;
     out.push({ id, label: meta.label });
   }
   return out;
@@ -226,7 +272,11 @@ function auditProviders(features) {
       unknown.push(id);
       continue;
     }
-    const missing = meta.keys.filter((k) => !secrets.get(k));
+    const problems = providerConfigProblems(id, meta);
+    const missing = [
+      ...problems.missing,
+      ...problems.invalid.map((k) => `${k} (invalid URL)`),
+    ];
     if (missing.length) {
       missingKeys.push({ id, label: meta.label, keys: missing });
     } else {
@@ -268,7 +318,7 @@ function isConfigured(features) {
  * Single-provider verify. Internal — callers should use verifyWithFallback
  * which tries the configured provider chain in order.
  *
- * @param {string}  providerId - 'slipok' | 'easyslip'
+ * @param {string}  providerId - 'slipok' | 'easyslip' | 'slip2go'
  * @param {Buffer}  buffer     - slip image bytes (jpg/png/webp/pdf)
  * @param {Object}  expected   - { amount, promptpayTarget, billId }
  * @returns {Promise<VerifyResult>}
@@ -282,6 +332,7 @@ async function verifyOne(providerId, buffer, expected) {
   try {
     if (providerId === 'slipok')   result = await verifyViaSlipOK(buffer, expected);
     else if (providerId === 'easyslip') result = await verifyViaEasySlip(buffer, expected);
+    else if (providerId === 'slip2go') result = await verifyViaSlip2Go(buffer, expected);
     else return { ok: false, error: `provider "${providerId}" call not implemented`, code: 'UNKNOWN_PROVIDER' };
   } catch (err) {
     return { ok: false, error: err.message || String(err), code: 'PROVIDER_ERROR', provider: providerId };
@@ -623,8 +674,8 @@ async function verifyViaEasySlip(buffer, expected) {
             ok: true,
             transRef,
             amount,
-            sender: mapEasySlipParty(rawSlip.sender),
-            receiver: mapEasySlipParty(rawSlip.receiver, d.matchedAccount),
+            sender: mapProviderParty(rawSlip.sender),
+            receiver: mapProviderParty(rawSlip.receiver, d.matchedAccount),
             transDate: rawSlip.date || d.date,
             raw: j,
           });
@@ -635,6 +686,117 @@ async function verifyViaEasySlip(buffer, expected) {
     });
     req.on('error', (e) => reject(e));
     req.on('timeout', () => { req.destroy(new Error('EasySlip timeout (10s)')); });
+    req.write(body);
+    req.end();
+  });
+}
+
+function buildSlip2GoReceiver(expected) {
+  const digits = String(expected?.promptpayTarget || '').replace(/[^0-9]/g, '');
+  if (!digits) return null;
+  const out = { accountNumber: digits };
+  if (/^0\d{9}$/.test(digits)) out.accountType = '02001';      // PromptPay phone
+  else if (/^\d{13}$/.test(digits)) out.accountType = '02003'; // PromptPay citizen ID
+  return out;
+}
+
+function mapSlip2GoRejectCode(code, httpStatus) {
+  const c = String(code || '');
+  if (httpStatus === 429 || httpStatus >= 500) return 'PROVIDER_ERROR';
+  if (c === '200401') return 'RECEIVER_MISMATCH';
+  if (c === '200402') return 'AMOUNT_MISMATCH';
+  if (c === '200403') return 'DATE_MISMATCH';
+  if (c === '200501') return 'DUPLICATE_SLIP';
+  if (c === '200404' || c === '200500') return 'SLIP2GO_REJECT';
+  return c || 'SLIP2GO_REJECT';
+}
+
+// === Provider: Slip2Go ===================================================
+// API: POST {SLIP2GO_API_URL}/api/verify-slip/qr-image/info
+// Headers: Authorization: Bearer <secretKey>
+// Body: multipart/form-data with "file" image and "payload" JSON string.
+async function verifyViaSlip2Go(buffer, expected) {
+  const apiKey = secrets.get('SLIP2GO_API_KEY');
+  if (!apiKey) throw new Error('SLIP2GO_API_KEY not configured');
+  const endpoint = endpointFromBase(secrets.get('SLIP2GO_API_URL'), '/api/verify-slip/qr-image/info');
+  const expectedAmount = Number(expected?.amount);
+  const payload = { checkDuplicate: true };
+  if (Number.isFinite(expectedAmount) && expectedAmount > 0) {
+    payload.checkAmount = { type: 'eq', amount: Number(expectedAmount.toFixed(2)) };
+  }
+  if (expected?.slip2goCheckReceiver === true) {
+    const receiver = buildSlip2GoReceiver(expected);
+    if (receiver) payload.checkReceiver = [receiver];
+  }
+  const mime = detectImageMime(buffer);
+  const { body, contentType } = buildMultipartForm({
+    fields: { payload: JSON.stringify(payload) },
+    file: {
+      name: 'file',
+      filename: `slip.${imageExtFromMime(mime)}`,
+      mime,
+      buffer,
+    },
+  });
+
+  return new Promise((resolve, reject) => {
+    const req = requestModuleFor(endpoint).request({
+      hostname: endpoint.hostname,
+      port: endpoint.port || undefined,
+      path: endpoint.pathname + endpoint.search,
+      method: 'POST',
+      headers: {
+        'Content-Type': contentType,
+        'Content-Length': body.length,
+        'Authorization': 'Bearer ' + apiKey,
+      },
+      timeout: TIMEOUT_MS,
+    }, (res) => {
+      let buf = '';
+      res.on('data', (c) => { buf += c; });
+      res.on('end', () => {
+        try {
+          const j = JSON.parse(buf);
+          const responseCode = String(j.code || '');
+          const d = j.data || {};
+          if (res.statusCode !== 200 || !['200000', '200200'].includes(responseCode) || !j.data) {
+            resolve({
+              ok: false,
+              error: j.message || `Slip2Go HTTP ${res.statusCode}`,
+              code: mapSlip2GoRejectCode(responseCode, res.statusCode || 0),
+              transRef: d.transRef || d.referenceId,
+              amount: Number.isFinite(Number(d.amount)) ? Number(d.amount) : undefined,
+              raw: j,
+            });
+            return;
+          }
+          const transRef = d.transRef || d.referenceId || d.decode;
+          const amount = Number(d.amount);
+          if (!transRef || !Number.isFinite(amount)) {
+            resolve({
+              ok: false,
+              error: 'Slip2Go response missing transaction reference or amount',
+              code: 'SLIP2GO_REJECT',
+              raw: j,
+            });
+            return;
+          }
+          resolve({
+            ok: true,
+            transRef,
+            amount,
+            sender: mapProviderParty(d.sender),
+            receiver: mapProviderParty(d.receiver),
+            transDate: d.dateTime || d.transDate || d.verifyDate,
+            raw: j,
+          });
+        } catch (e) {
+          resolve({ ok: false, error: 'Slip2Go response parse failed: ' + e.message, code: 'SLIP2GO_PARSE', raw: buf.slice(0, 500) });
+        }
+      });
+    });
+    req.on('error', (e) => reject(e));
+    req.on('timeout', () => { req.destroy(new Error('Slip2Go timeout (10s)')); });
     req.write(body);
     req.end();
   });

@@ -182,7 +182,7 @@ async function migrate(pool, opts = {}) {
     -- the partial-unique index below blocks that replay attack.
     --
     -- verify_provider records WHICH service confirmed the slip (slipok,
-    -- easyslip, manual) so admin can audit the auto-verify pipeline +
+    -- easyslip, slip2go, manual) so admin can audit the auto-verify pipeline +
     -- spot which slips bypassed it.
     --
     -- verify_payload stores the raw provider response for forensics —

@@ -422,7 +422,7 @@ async function checkFeatureDependencies(features, pool) {
   // verifies anything (every slip falls back to admin queue). Operator
   // expects "instant payment" but actually nothing changed. Surface this.
   // Use the verifier's own getConfiguredProviders so multi-provider config
-  // (features.slipUpload.providers = ['slipok','easyslip']) is checked too —
+  // (features.slipUpload.providers = ['slipok','easyslip','slip2go']) is checked too —
   // not just the legacy single provider field.
   if (features?.slipUpload?.enabled && features?.slipUpload?.autoVerify) {
     let slipVerifier;
@@ -435,17 +435,42 @@ async function checkFeatureDependencies(features, pool) {
     const intended = Array.isArray(features.slipUpload.providers)
       ? features.slipUpload.providers
       : (features.slipUpload.provider ? [features.slipUpload.provider] : ['slipok']);
-    const KEY_BY_PROVIDER = { slipok: 'SLIPOK_API_KEY', easyslip: 'EASYSLIP_API_KEY' };
+    const KEYS_BY_PROVIDER = {
+      slipok: ['SLIPOK_API_KEY'],
+      easyslip: ['EASYSLIP_API_KEY'],
+      slip2go: ['SLIP2GO_API_KEY', 'SLIP2GO_API_URL'],
+    };
+    const isHttpUrl = (value) => {
+      try {
+        const raw = String(value || '').trim();
+        if (!raw) return false;
+        const u = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
+        return u.protocol === 'http:' || u.protocol === 'https:';
+      } catch {
+        return false;
+      }
+    };
     const missing = intended.filter((p) => {
-      const k = KEY_BY_PROVIDER[p];
-      return k ? !secrets.get(k) : true;     // unknown provider name → "missing"
+      const keys = KEYS_BY_PROVIDER[p];
+      if (!keys) return true;     // unknown provider name → "missing"
+      if (keys.some((k) => !secrets.get(k))) return true;
+      if (p === 'slip2go') return !isHttpUrl(secrets.get('SLIP2GO_API_URL'));
+      return false;
     });
+    const labelKeys = (p) => {
+      if (p === 'slip2go'
+        && secrets.get('SLIP2GO_API_URL')
+        && !isHttpUrl(secrets.get('SLIP2GO_API_URL'))) {
+        return 'SLIP2GO_API_URL (URL ไม่ถูกต้อง)';
+      }
+      return (KEYS_BY_PROVIDER[p] || [`provider:${p}`]).join(' + ');
+    };
     if (ready.length === 0) {
       warnings.push({
         flag: 'slipUpload.autoVerify',
         issue: `autoVerify เปิด แต่ไม่มี provider พร้อมใช้ (${intended.join(', ') || 'none'}) — สลิปจะตกเข้าคิว admin เหมือนเดิม`,
         fix: missing.length
-          ? `ตั้งค่า key สำหรับ ${missing.map((p) => KEY_BY_PROVIDER[p] || `provider:${p}`).join(', ')} ใน Settings → Secrets`
+          ? `ตั้งค่า key สำหรับ ${missing.map(labelKeys).join(', ')} ใน Settings → Secrets`
           : 'ตรวจรายชื่อ provider ใน features.slipUpload.providers',
       });
     } else if (missing.length > 0) {
@@ -455,7 +480,7 @@ async function checkFeatureDependencies(features, pool) {
       warnings.push({
         flag: 'slipUpload.autoVerify',
         issue: `provider ${missing.join(', ')} ตั้งชื่อไว้แต่ key ยังไม่มา — ใช้ได้แค่ ${ready.map((p) => p.id).join(', ')}`,
-        fix: `ตั้ง ${missing.map((p) => KEY_BY_PROVIDER[p] || `key:${p}`).join(', ')} ใน Settings → Secrets หรือเอาชื่อนี้ออกจาก providers`,
+        fix: `ตั้ง ${missing.map(labelKeys).join(', ')} ใน Settings → Secrets หรือเอาชื่อนี้ออกจาก providers`,
       });
     }
     // Receiver-account match needs PROMPTPAY_TARGET to be set — without it

@@ -3532,7 +3532,7 @@ app.get('/api/admin/billing-readiness',
             issues.push({
               sev: 'med', code: 'AUTOVERIFY_NO_PROVIDER', area: ['payment'],
               msg: 'autoVerify เปิด แต่ยังไม่ระบุ provider — สลิปจะตกเข้าคิว admin เหมือนเดิม',
-              fix: '/admin#features → กรอก providers: ["slipok"], ["easyslip"] หรือ ["slip2go"]',
+              fix: '/admin#features → กรอก providers เช่น ["slipok"], ["slip2go"] หรือ ["slipok","easyslip","slip2go"]',
             });
           }
         } else if (flags.slipUpload.requireVerification === false) {
