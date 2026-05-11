@@ -512,6 +512,7 @@ module.exports = function buildTenantOpsRouter(ctx) {
            WHERE id=$1`,
           [id, reason]
         );
+        await client.query(`DELETE FROM tenant_sessions WHERE tenant_id=$1`, [id]);
 
         // Close active contract + persist refund amount on the row so it
         // appears in reports / aged-receivable views without joining audit_logs.
@@ -768,34 +769,51 @@ module.exports = function buildTenantOpsRouter(ctx) {
         }
 
         const { rows } = await pool.query(
-          `SELECT id, pin_hash, citizen_id_encrypted, citizen_id_tail
-             FROM tenants WHERE phone=$1 AND deleted_at IS NULL AND status<>'blacklist' LIMIT 1`,
+          `SELECT id, pin_hash, citizen_id_encrypted, citizen_id_tail, current_room_id, status
+             FROM tenants
+            WHERE phone=$1
+              AND deleted_at IS NULL
+              AND status='active'
+              AND current_room_id IS NOT NULL
+              AND current_room_id <> ''
+            ORDER BY updated_at DESC NULLS LAST, id DESC
+            LIMIT 10`,
           [phone]
         );
         // Always run dummy bcrypt to keep timing constant
         const fakeHash = '$2a$10$' + 'X'.repeat(53);
         await bcrypt.compare(citizenIdTail, fakeHash).catch(() => {});
 
-        if (!rows.length || rows[0].pin_hash) {
-          // No tenant OR PIN already set — refuse without leaking which case.
+        if (!rows.length) {
           if (lockout) lockout.recordFailure(principal, 'tenant').catch(() => {});
           audit(req, 'tenant.pin_init_failed', 'tenant', phone,
-            { reason: !rows.length ? 'no_tenant' : 'already_set' }, phone).catch(() => {});
+            { reason: 'no_active_tenant' }, phone).catch(() => {});
           return res.status(401).json({ error: 'ข้อมูลไม่ตรงกัน' });
         }
-        const t = rows[0];
-        // Verify last 4 of citizen ID. Prefer comparing against tail field;
-        // fall back to decrypting if tail was not stored.
-        let storedTail = t.citizen_id_tail;
-        if (!storedTail && t.citizen_id_encrypted) {
-          try {
-            storedTail = (cryptoSvc.decryptString(t.citizen_id_encrypted) || '').slice(-4);
-          } catch { /* ignore */ }
+        let t = null;
+        let alreadySet = false;
+        for (const candidate of rows) {
+          // Verify last 4 of citizen ID. Prefer comparing against tail field;
+          // fall back to decrypting if tail was not stored.
+          let storedTail = candidate.citizen_id_tail;
+          if (!storedTail && candidate.citizen_id_encrypted) {
+            try {
+              storedTail = (cryptoSvc.decryptString(candidate.citizen_id_encrypted) || '').slice(-4);
+            } catch { /* ignore */ }
+          }
+          if (storedTail && storedTail === citizenIdTail) {
+            if (candidate.pin_hash) {
+              alreadySet = true;
+              break;
+            }
+            t = candidate;
+            break;
+          }
         }
-        if (!storedTail || storedTail !== citizenIdTail) {
+        if (!t) {
           if (lockout) lockout.recordFailure(principal, 'tenant').catch(() => {});
-          audit(req, 'tenant.pin_init_failed', 'tenant', String(t.id),
-            { reason: 'bad_tail' }, phone).catch(() => {});
+          audit(req, 'tenant.pin_init_failed', 'tenant', alreadySet ? phone : String(rows[0].id),
+            { reason: alreadySet ? 'already_set' : 'bad_tail' }, phone).catch(() => {});
           return res.status(401).json({ error: 'ข้อมูลไม่ตรงกัน' });
         }
         const hash = await bcrypt.hash(newPin, 10);

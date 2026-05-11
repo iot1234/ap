@@ -419,9 +419,12 @@ test('tenant pin/init: refuses already-set tenants without revealing why', () =>
   const idx = ops.indexOf('/_tenant/pin/init');
   assert.ok(idx > 0);
   const body = ops.slice(idx, idx + 4000);
-  // Must collapse both branches into the same message.
-  assert.match(body, /!rows\.length \|\| rows\[0\]\.pin_hash/,
-    'must combine no-tenant + already-set into one branch');
+  // Must collapse no-tenant, moved-out/non-current tenant, bad-tail, and
+  // already-set into the same tenant-facing message.
+  assert.match(body, /reason: 'no_active_tenant'/,
+    'must not allow moved-out or roomless tenants to initialise portal PINs');
+  assert.match(body, /alreadySet \? 'already_set' : 'bad_tail'/,
+    'must handle already-set and bad-tail cases without exposing a different response');
   assert.match(body, /'ข้อมูลไม่ตรงกัน'/,
     'must use generic error message');
   // Must run dummy bcrypt for timing constancy.

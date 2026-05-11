@@ -611,15 +611,16 @@ test('/api/bills/:id/send fails closed when tenant has no reachable channel', ()
   const route = fs.readFileSync(path.join(__dirname, '..', 'routes', 'bills-extras.js'), 'utf8');
   const idx = route.indexOf('async function enqueueBillNotifications');
   assert.ok(idx > 0, 'should find bill send helper');
-  // Window enlarged after the BILL_NOT_LINKED / TENANT_NOT_ACTIVE /
-  // TENANT_MOVED_ROOM precheck branches + the /:id/send-readiness
-  // endpoint landed between the helper and the route handler.
-  const body = route.slice(idx, idx + 14000);
-  assert.match(body, /NO_TENANT_CHANNEL/,
+  const helperEnd = route.indexOf('  // POST /api/bills/:id/send', idx);
+  const helperBody = route.slice(idx, helperEnd > idx ? helperEnd : idx + 14000);
+  assert.match(helperBody, /NO_TENANT_CHANNEL/,
     'bill send helper must return a no-channel code');
-  assert.match(body, /Bill send skipped: no tenant channel/,
+  assert.match(helperBody, /Bill send skipped: no tenant channel/,
     'bill send helper must alert owner/admin when tenant cannot be reached');
-  assert.match(body, /out\.code === 'NO_TENANT_CHANNEL' \? 409 : 404/,
+  const postIdx = route.indexOf("r.post('/:id/send'", helperEnd > idx ? helperEnd : idx);
+  assert.ok(postIdx > 0, 'should find single bill send route');
+  const postBody = route.slice(postIdx, postIdx + 2000);
+  assert.match(postBody, /out\.code === 'NO_TENANT_CHANNEL' \? 409 : 404/,
     'single-send route must surface no-channel as a conflict, not success');
 });
 
@@ -1749,6 +1750,20 @@ test('lineBinding tryBind catches 23505 → clean reason', () => {
     'and return the same reason as the dedup branch');
 });
 
+test('LINE binding only works for active current tenants', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'lineBinding.js'), 'utf8');
+  assert.match(src, /SELECT id, full_name, line_binding_blocked, status, current_room_id/,
+    'issue() must load tenant status and room before issuing a bind code');
+  assert.match(src, /status !== 'active' \|\| !t\.rows\[0\]\.current_room_id/,
+    'issue() must refuse moved-out or roomless tenants');
+  assert.match(src, /t\.status AS tenant_status/,
+    'tryBind() must load tenant status at bind time too');
+  assert.match(src, /reason: 'tenant_not_active'/,
+    'tryBind() must fail cleanly if the tenant moved out after code issue');
+});
+
 test('CSV escapes CR + neutralises formula leaders', () => {
   // \r in a notes field used to split rows in Excel. =cmd|... in a cell
   // turned into a clickable formula on import. Both fixed.
@@ -1954,6 +1969,26 @@ test('tenant login is wired through schemas.tenantLogin', () => {
   // can grow over time without breaking the wiring.
   assert.match(src, /\/api\/tenant\/login[\s\S]{0,1500}validateBody\(schemas\.tenantLogin\)/,
     'tenant login must be guarded by the tenantLogin schema (phoneStr normalises dashes)');
+});
+
+test('tenant portal access is limited to active tenants with a current room', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(server, /function tenantCanUsePortal\(t\)[\s\S]{0,180}t\.status === 'active'[\s\S]{0,180}current_room_id/,
+    'tenant sessions must require active status and current room');
+  assert.match(server, /if \(!tenantCanUsePortal\(session\)\) \{[\s\S]{0,180}DELETE FROM tenant_sessions WHERE sid_hash=\$1/,
+    'stale sessions for moved-out tenants must be invalidated on lookup');
+  assert.match(server, /SELECT id, full_name, pin_hash, status, current_room_id[\s\S]{0,350}WHERE phone=\$1 AND deleted_at IS NULL/,
+    'tenant login must inspect the matching registered phone rows with status and room');
+  assert.match(server, /if \(!tenantCanUsePortal\(matched\)\) \{[\s\S]{0,500}TENANT_NOT_ACTIVE/,
+    'tenant login must reject a correct PIN when the tenant already moved out or has no room');
+
+  const ops = fs.readFileSync(path.join(__dirname, '..', 'routes', 'tenant-ops.js'), 'utf8');
+  assert.match(ops, /DELETE FROM tenant_sessions WHERE tenant_id=\$1/,
+    'checkout must revoke active tenant portal sessions immediately');
+  assert.match(ops, /WHERE phone=\$1[\s\S]{0,220}AND status='active'[\s\S]{0,220}current_room_id IS NOT NULL/,
+    'first-time PIN setup must only target current active residents');
 });
 
 test('booking-approve notify uses tenant matched to assigned room when possible', () => {

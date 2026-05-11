@@ -44,7 +44,8 @@ async function issue(pool, { tenantId, ttlDays, createdBy, targetOaId } = {}) {
     await client.query('BEGIN');
     // Refuse if tenant is blocked
     const t = await client.query(
-      `SELECT id, full_name, line_binding_blocked FROM tenants
+      `SELECT id, full_name, line_binding_blocked, status, current_room_id
+         FROM tenants
          WHERE id=$1 AND deleted_at IS NULL`,
       [tenantId]
     );
@@ -55,6 +56,10 @@ async function issue(pool, { tenantId, ttlDays, createdBy, targetOaId } = {}) {
     if (t.rows[0].line_binding_blocked) {
       await client.query('ROLLBACK');
       throw new Error('tenant is blocked from LINE binding');
+    }
+    if (t.rows[0].status !== 'active' || !t.rows[0].current_room_id) {
+      await client.query('ROLLBACK');
+      throw new Error('tenant is not active for LINE binding');
     }
     // If a target OA was specified, verify it exists and is enabled.
     if (target != null) {
@@ -253,9 +258,10 @@ async function tryBind(pool, { code, lineUserId, oaId } = {}) {
     await client.query('BEGIN');
     const lookup = await client.query(
       `SELECT b.id, b.tenant_id, b.status, b.expires_at, b.target_oa_id,
-              t.full_name, t.current_room_id, t.line_binding_blocked
+              t.full_name, t.current_room_id, t.status AS tenant_status,
+              t.line_binding_blocked
          FROM line_bindings b JOIN tenants t ON t.id = b.tenant_id
-         WHERE b.code = $1 LIMIT 1`,
+         WHERE b.code = $1 AND t.deleted_at IS NULL LIMIT 1`,
       [cleaned]
     );
     if (!lookup.rows.length) {
@@ -266,6 +272,10 @@ async function tryBind(pool, { code, lineUserId, oaId } = {}) {
     if (row.line_binding_blocked) {
       await client.query('ROLLBACK');
       return { ok: false, reason: 'tenant_blocked' };
+    }
+    if (row.tenant_status !== 'active' || !row.current_room_id) {
+      await client.query('ROLLBACK');
+      return { ok: false, reason: 'tenant_not_active' };
     }
     if (row.status === 'blocked' || row.status === 'revoked') {
       await client.query('ROLLBACK');

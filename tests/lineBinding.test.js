@@ -61,7 +61,9 @@ test('issue: ttl validation rejects out-of-range', async () => {
 
 test('issue: revokes prior pending then creates new', async () => {
   const pool = buildFakePool({
-    'SELECT id, full_name': () => ({ rows: [{ id: 1, full_name: 'X', line_binding_blocked: false }] }),
+    'SELECT id, full_name': () => ({
+      rows: [{ id: 1, full_name: 'X', line_binding_blocked: false, status: 'active', current_room_id: '101' }],
+    }),
     'INSERT INTO line_bindings': () => ({ rows: [{ id: 42, code: 'BIND-AAAAAAAA', expires_at: new Date() }] }),
   });
   const out = await lb.issue(pool, { tenantId: 1, ttlDays: 7, createdBy: 'admin' });
@@ -112,7 +114,7 @@ test('tryBind: expired code returns expired', async () => {
       rows: [{
         id: 1, tenant_id: 5, status: 'pending',
         expires_at: new Date(Date.now() - 86400000), // yesterday
-        full_name: 'X', current_room_id: '101',
+        full_name: 'X', current_room_id: '101', tenant_status: 'active',
         line_binding_blocked: false,
       }],
     }),
@@ -128,7 +130,7 @@ test('tryBind: already-bound code returns already_bound', async () => {
       rows: [{
         id: 1, tenant_id: 5, status: 'bound',
         expires_at: new Date(Date.now() + 86400000),
-        full_name: 'X', current_room_id: '101',
+        full_name: 'X', current_room_id: '101', tenant_status: 'active',
         line_binding_blocked: false,
       }],
     }),
@@ -144,7 +146,7 @@ test('tryBind: detects LINE userId already bound to other tenant', async () => {
       rows: [{
         id: 1, tenant_id: 5, status: 'pending',
         expires_at: new Date(Date.now() + 86400000),
-        full_name: 'X', current_room_id: '101',
+        full_name: 'X', current_room_id: '101', tenant_status: 'active',
         line_binding_blocked: false,
       }],
     }),
@@ -164,7 +166,7 @@ test('tryBind: success — updates binding + tenant', async () => {
       rows: [{
         id: 1, tenant_id: 5, status: 'pending',
         expires_at: new Date(Date.now() + 86400000),
-        full_name: 'Mr. T', current_room_id: '305',
+        full_name: 'Mr. T', current_room_id: '305', tenant_status: 'active',
         line_binding_blocked: false,
       }],
     }),
@@ -192,7 +194,9 @@ test('CODE_PREFIX is BIND-', () => {
 
 test('issue: rejects targetOaId pointing to non-existent OA', async () => {
   const pool = buildFakePool({
-    'SELECT id, full_name': () => ({ rows: [{ id: 1, full_name: 'X', line_binding_blocked: false }] }),
+    'SELECT id, full_name': () => ({
+      rows: [{ id: 1, full_name: 'X', line_binding_blocked: false, status: 'active', current_room_id: '101' }],
+    }),
     'SELECT id, enabled FROM line_oas': () => ({ rows: [] }),
   });
   await assert.rejects(
@@ -203,7 +207,9 @@ test('issue: rejects targetOaId pointing to non-existent OA', async () => {
 
 test('issue: targetOaId=0 is treated as "any OA" (legacy env)', async () => {
   const pool = buildFakePool({
-    'SELECT id, full_name': () => ({ rows: [{ id: 1, full_name: 'X', line_binding_blocked: false }] }),
+    'SELECT id, full_name': () => ({
+      rows: [{ id: 1, full_name: 'X', line_binding_blocked: false, status: 'active', current_room_id: '101' }],
+    }),
     'INSERT INTO line_bindings': () => ({ rows: [{ id: 1, code: 'BIND-AAAA0000', expires_at: new Date(), target_oa_id: null }] }),
   });
   // Should not call SELECT line_oas because 0 = any-OA
@@ -220,7 +226,7 @@ test('tryBind: enforces target_oa_id when set on the binding', async () => {
         id: 1, tenant_id: 5, status: 'pending',
         target_oa_id: 7,    // code was issued for OA #7
         expires_at: new Date(Date.now() + 86400000),
-        full_name: 'X', current_room_id: '101',
+        full_name: 'X', current_room_id: '101', tenant_status: 'active',
         line_binding_blocked: false,
       }],
     }),
@@ -242,7 +248,7 @@ test('tryBind: dedup is per-OA (same userId on different OAs is OK)', async () =
         id: 1, tenant_id: 5, status: 'pending',
         target_oa_id: null,
         expires_at: new Date(Date.now() + 86400000),
-        full_name: 'X', current_room_id: '101',
+        full_name: 'X', current_room_id: '101', tenant_status: 'active',
         line_binding_blocked: false,
       }],
     }),
@@ -260,7 +266,8 @@ test('tryBind: records oa_id on success', async () => {
       rows: [{
         id: 1, tenant_id: 5, status: 'pending', target_oa_id: null,
         expires_at: new Date(Date.now() + 86400000),
-        full_name: 'A', current_room_id: '201', line_binding_blocked: false,
+        full_name: 'A', current_room_id: '201', tenant_status: 'active',
+        line_binding_blocked: false,
       }],
     }),
     "WHERE line_user_id=$1": () => ({ rows: [] }),
