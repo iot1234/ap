@@ -56,6 +56,73 @@ module.exports = function buildAdminLineOasRouter(ctx) {
     }
   });
 
+  // GET /api/admin/line-oas/:id/webhook-status — diagnostic panel data.
+  // Returns:
+  //   - The exact webhook URL the operator should paste into LINE Developer
+  //     Console (so they can't typo the slug).
+  //   - The last 20 inbound webhook events (success + failure) for this OA
+  //     so the operator can see in real-time whether LINE is actually
+  //     reaching us, and why their 403 happened.
+  // Used by page-line-oas.jsx to render the webhook health card.
+  r.get('/:id/webhook-status', requireAuth, requireRole('owner', 'manager'),
+    async (req, res) => {
+      const id = Number(req.params.id);
+      if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: 'invalid id' });
+      try {
+        const oa = await lineOa.getById(pool, id);
+        if (!oa) return res.status(404).json({ error: 'not found' });
+        // Compute the public webhook URL. PUBLIC_URL > RAILWAY_PUBLIC_DOMAIN
+        // > req-derived (host + protocol). Strip trailing slashes.
+        const publicUrl = (process.env.PUBLIC_URL
+          || (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : '')
+          || `${req.protocol}://${req.get('host') || 'localhost'}`).replace(/\/+$/, '');
+        const webhookUrl = `${publicUrl}/webhook/line/${encodeURIComponent(oa.slug)}`;
+
+        // Recent events: pull success and failure rows that mention this OA.
+        // Successes were tagged with `oa:${slug}` in handleEvent (line-in
+        // channel); failures are line-webhook-fail rows from the makeHandler
+        // diagnostic logger. Match on body LIKE so we don't need a JOIN.
+        const recent = await pool.query(
+          `SELECT channel, recipient, subject, body, status, created_at
+             FROM notifications_log
+            WHERE (channel='line-in' AND subject LIKE $1)
+               OR (channel='line-webhook-fail' AND (subject LIKE $1 OR subject LIKE $2))
+            ORDER BY created_at DESC
+            LIMIT 20`,
+          [`%oa:${oa.slug}%`, `%oa-slug:${oa.slug}%`]
+        );
+        const events = recent.rows.map((row) => {
+          let parsed = null;
+          if (row.channel === 'line-webhook-fail') {
+            try { parsed = JSON.parse(row.body); } catch { /* keep raw */ }
+          }
+          return {
+            kind: row.channel === 'line-in' ? 'inbound' : 'failure',
+            status: row.status,
+            subject: row.subject,
+            createdAt: row.created_at,
+            failureKind: parsed?.kind || null,
+            failureHint: parsed?.detail?.hint || null,
+          };
+        });
+        const lastSuccess = events.find((e) => e.kind === 'inbound');
+        const lastFailure = events.find((e) => e.kind === 'failure');
+        res.json({
+          ok: true,
+          oa: { id: oa.id, slug: oa.slug, name: oa.name, enabled: oa.enabled,
+                hasSecret: !!oa.channelSecret, hasToken: !!oa.channelAccessToken },
+          webhookUrl,
+          legacyWebhookUrl: `${publicUrl}/webhook/line`,
+          lastSuccessAt: lastSuccess?.createdAt || null,
+          lastFailureAt: lastFailure?.createdAt || null,
+          events,
+        });
+      } catch (err) {
+        console.error('admin line-oas webhook-status error:', err);
+        res.status(500).json({ error: 'internal error' });
+      }
+    });
+
   r.post('/', sameOrigin, csrfGuard, requireAuth, requireRole('owner'), async (req, res) => {
     const body = req.body || {};
     try {

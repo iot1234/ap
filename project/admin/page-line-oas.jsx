@@ -18,6 +18,22 @@ function PageLineOas({ setToast }) {
   const [editing, setEditing] = useState(null);
   const [confirmDel, setConfirmDel] = useState(null);
   const [busy, setBusy] = useState(false);
+  // diagnostics modal: holds the loaded payload from webhook-status endpoint.
+  // null = closed, { loading: true } = fetching, full payload = ready.
+  const [diag, setDiag] = useState(null);
+
+  async function openDiagnostics(oa) {
+    setDiag({ oa, loading: true });
+    try {
+      const r = await fetch(`/api/admin/line-oas/${oa.id}/webhook-status`,
+        { credentials: 'same-origin' });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'load failed');
+      setDiag({ oa, ...d });
+    } catch (e) {
+      setDiag({ oa, error: e.message });
+    }
+  }
 
   async function load() {
     setLoading(true); setError(null);
@@ -264,6 +280,11 @@ function PageLineOas({ setToast }) {
                     🔌 ทดสอบ
                   </Btn>
                   {!o.isEnvOa && (
+                    <Btn variant="ghost" size="sm" onClick={() => openDiagnostics(o)}>
+                      🩺 ตรวจ webhook
+                    </Btn>
+                  )}
+                  {!o.isEnvOa && (
                     <>
                       <Btn variant="ghost" size="sm" onClick={() => openEdit(o)}>แก้ไข</Btn>
                       <Btn variant="danger" size="sm" disabled={busy}
@@ -380,7 +401,163 @@ function PageLineOas({ setToast }) {
           </div>
         )}
       </Modal>
+
+      {/* Webhook diagnostics modal — shows the exact URL + recent events
+          (success + failure with reasons) so admin can debug 403 / 404
+          without leaving the page. */}
+      <Modal
+        open={!!diag}
+        onClose={() => setDiag(null)}
+        title={diag ? `🩺 Webhook Diagnostics — ${diag.oa?.name || 'OA'}` : ''}
+        width={620}
+        footer={(
+          <>
+            <Btn variant="ghost" onClick={() => diag && openDiagnostics(diag.oa)}>
+              🔄 รีเฟรช
+            </Btn>
+            <Btn variant="primary" onClick={() => setDiag(null)}>
+              ปิด
+            </Btn>
+          </>
+        )}
+      >
+        {diag && <DiagnosticsBody diag={diag} C={C} />}
+      </Modal>
     </PageContainer>
+  );
+}
+
+// DiagnosticsBody — webhook URL banner + status pill + event list. Pure.
+function DiagnosticsBody({ diag, C }) {
+  const { Pill } = window;
+  if (diag.loading) {
+    return <div style={{ padding: 20, color: C.muted, textAlign: 'center' }}>กำลังโหลด…</div>;
+  }
+  if (diag.error) {
+    return (
+      <div style={{ padding: 12, background: '#fff5f4', border: '1px solid #f5c0b4',
+                    borderRadius: 8, color: '#7a2920' }}>
+        ❌ โหลดสถานะไม่ได้: {diag.error}
+      </div>
+    );
+  }
+  const ev = diag.events || [];
+  const hasRecentFail = !!diag.lastFailureAt && (!diag.lastSuccessAt
+    || new Date(diag.lastFailureAt) > new Date(diag.lastSuccessAt));
+  const overall = ev.length === 0
+    ? { icon: '⏳', label: 'ยังไม่เคยมี webhook เข้ามาเลย', bg: '#fff7e0', border: '#f0e3a7', color: '#8a6b1a' }
+    : hasRecentFail
+      ? { icon: '🔴', label: 'webhook ล่าสุดล้มเหลว — ดู event ด้านล่าง', bg: '#fff5f4', border: '#f5c0b4', color: '#7a2920' }
+      : { icon: '✅', label: 'webhook ทำงานปกติ — มี event เข้ามาล่าสุด', bg: '#f0f9f0', border: '#bce0bc', color: '#1f5f3a' };
+
+  const copyUrl = (u) => {
+    try { navigator.clipboard.writeText(u); window.toast && window.toast({ kind: 'success', message: 'คัดลอกแล้ว' }); }
+    catch { /* manual select */ }
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      {/* Overall status banner */}
+      <div style={{
+        padding: 12, borderRadius: 8,
+        background: overall.bg, border: `1px solid ${overall.border}`,
+      }}>
+        <div style={{ fontWeight: 600, fontSize: 14, color: overall.color }}>
+          {overall.icon} {overall.label}
+        </div>
+        {diag.lastSuccessAt && (
+          <div style={{ fontSize: 12, color: C.muted, marginTop: 4 }}>
+            event ล่าสุดที่ผ่าน: {new Date(diag.lastSuccessAt).toLocaleString('th-TH')}
+          </div>
+        )}
+      </div>
+
+      {/* Webhook URL panel */}
+      <div style={{ padding: 12, borderRadius: 8, background: C.surfaceAlt,
+                    border: `1px solid ${C.borderSoft || C.border}` }}>
+        <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 6 }}>
+          📋 Webhook URL ที่ต้องใส่ใน LINE Developer Console
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+          <code style={{ flex: 1, padding: 8, background: '#fff',
+                         border: `1px solid ${C.border}`, borderRadius: 6,
+                         fontSize: 12, wordBreak: 'break-all',
+                         fontFamily: 'JetBrains Mono, monospace' }}>
+            {diag.webhookUrl}
+          </code>
+          <Btn size="sm" variant="ghost" onClick={() => copyUrl(diag.webhookUrl)}>📋</Btn>
+        </div>
+        <div style={{ fontSize: 12, color: C.muted, lineHeight: 1.5 }}>
+          กลับไปที่ Console → Messaging API → Webhook settings → ใส่ URL นี้ →
+          กด "Verify"
+        </div>
+      </div>
+
+      {/* Pre-flight config check */}
+      <div style={{ padding: 12, borderRadius: 8, background: C.surfaceAlt,
+                    border: `1px solid ${C.borderSoft || C.border}` }}>
+        <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 6 }}>
+          ⚙️ ความพร้อมก่อนตั้งใน LINE Console
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12.5 }}>
+          <div>
+            {diag.oa?.enabled ? '✅' : '❌'} OA enabled
+            {!diag.oa?.enabled && <span style={{ color: C.muted }}> — เปิด OA ที่หน้านี้ก่อน</span>}
+          </div>
+          <div>
+            {diag.oa?.hasSecret ? '✅' : '❌'} Channel Secret
+            {!diag.oa?.hasSecret && <span style={{ color: C.muted }}> — เพิ่มที่ "แก้ไข OA" ก่อน</span>}
+          </div>
+          <div>
+            {diag.oa?.hasToken ? '✅' : '❌'} Channel Access Token
+            {!diag.oa?.hasToken && <span style={{ color: C.muted }}> — เพิ่มที่ "แก้ไข OA" ก่อน</span>}
+          </div>
+        </div>
+      </div>
+
+      {/* Recent events */}
+      <div>
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>
+          📜 Webhook events ล่าสุด (สูงสุด 20)
+        </div>
+        {ev.length === 0 ? (
+          <div style={{ padding: 12, color: C.muted, fontSize: 12.5, fontStyle: 'italic',
+                        background: C.surfaceAlt, borderRadius: 6 }}>
+            ยังไม่มี event — LINE ยังไม่เคยส่ง webhook ถึงเรา
+            หรือเหตุการณ์เกิดเกินช่วงที่เก็บ
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 320, overflowY: 'auto' }}>
+            {ev.map((e, idx) => {
+              const isFail = e.kind === 'failure';
+              return (
+                <div key={idx} style={{
+                  padding: '8px 10px', borderRadius: 6,
+                  background: isFail ? '#fff5f4' : '#f0f9f0',
+                  border: `1px solid ${isFail ? '#f5c0b4' : '#bce0bc'}`,
+                  borderLeft: `3px solid ${isFail ? '#b94a48' : '#2f8f5b'}`,
+                  fontSize: 12.5,
+                }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                    <strong style={{ color: isFail ? '#7a2920' : '#1f5f3a' }}>
+                      {isFail ? `🔴 ${e.failureKind || 'failure'}` : `✅ ${e.subject?.split(' ')[0] || 'inbound'}`}
+                    </strong>
+                    <span style={{ color: C.muted, fontSize: 11.5 }}>
+                      {new Date(e.createdAt).toLocaleString('th-TH', { hour12: false })}
+                    </span>
+                  </div>
+                  {isFail && e.failureHint && (
+                    <div style={{ fontSize: 12, color: '#7a2920', marginTop: 4 }}>
+                      → {e.failureHint}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 

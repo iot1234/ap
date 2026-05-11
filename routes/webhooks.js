@@ -25,6 +25,31 @@ module.exports = function buildWebhooksRouter(ctx) {
   // Returns an Express handler bound to a specific OA-resolution strategy.
   // For the legacy /line route, oaResolver is a no-op that yields the default
   // OA (via env or DB). For /line/:slug, the resolver loads by slug.
+  // Log a failed webhook attempt to notifications_log with channel='line-webhook-fail'.
+  // The /admin#line-oas diagnostics panel reads this so the operator can see WHY
+  // LINE keeps reporting 403/404 instead of staring at the LINE Console with no
+  // breadcrumb on our side. Fail-soft — never let a logging error mask the real
+  // response we owe to LINE's retry loop.
+  async function logWebhookFailure(req, kind, detail) {
+    try {
+      const slug = req.params?.slug || '(default)';
+      const sigHead = String(req.headers['x-line-signature'] || '').slice(0, 16);
+      const ua = String(req.headers['user-agent'] || '').slice(0, 100);
+      const ip = req.ip || req.headers['x-forwarded-for'] || '';
+      await pool.query(
+        `INSERT INTO notifications_log (channel, recipient, subject, body, status)
+         VALUES ('line-webhook-fail', $1, $2, $3, 'failed')`,
+        [
+          String(ip).slice(0, 64),
+          `${kind} oa-slug:${slug}`,
+          JSON.stringify({ kind, slug, detail, sigHead, ua }).slice(0, 4000),
+        ]
+      );
+    } catch (err) {
+      console.warn('[line webhook] failure log skipped:', err.message);
+    }
+  }
+
   function makeHandler(oaResolver) {
     return async (req, res) => {
       let oa;
@@ -32,19 +57,55 @@ module.exports = function buildWebhooksRouter(ctx) {
         oa = await oaResolver(req);
       } catch (err) {
         console.error('[line webhook] OA resolve failed:', err.message);
+        await logWebhookFailure(req, 'oa_resolve_error', { error: err.message });
         return res.status(500).json({ error: 'internal' });
       }
       if (!oa) {
-        // Slug not found, or no OA configured at all
-        return res.status(404).json({ error: 'oa not found' });
+        // Slug not found, or no OA configured at all. Operators frequently hit
+        // this when they register a fresh OA in /admin#line-oas but the slug
+        // they put into LINE Developer Console doesn't match. The response now
+        // includes a hint so a future support ticket has a one-line answer.
+        await logWebhookFailure(req, 'oa_not_found', {
+          path: req.path,
+          hint: 'slug must match an enabled OA in /admin#line-oas',
+        });
+        return res.status(404).json({
+          error: 'oa not found',
+          code: 'OA_NOT_FOUND',
+          hint: 'URL slug ใน LINE Developer Console ต้องตรงกับ slug ใน /admin#line-oas — หรือใช้ /webhook/line (ไม่มี slug) สำหรับ default OA',
+        });
       }
       if (oa.enabled === false) {
-        return res.status(503).json({ error: 'oa disabled' });
+        await logWebhookFailure(req, 'oa_disabled', { oaId: oa.id, slug: oa.slug });
+        return res.status(503).json({
+          error: 'oa disabled',
+          code: 'OA_DISABLED',
+          hint: `OA "${oa.name || oa.slug}" ถูกปิดอยู่ — เปิดที่ /admin#line-oas ก่อน`,
+        });
       }
       const raw = req.rawBody || JSON.stringify(req.body || {});
       const sig = req.headers['x-line-signature'];
       if (!lineSvc.verifyWebhookSignature(oa, raw, sig)) {
-        return res.status(403).json({ error: 'invalid signature' });
+        // Distinguish "no signature header" from "bad signature" so the
+        // diagnostic panel can hint at the right fix. LINE always sends
+        // x-line-signature on webhook POSTs; a missing header usually means
+        // someone hit the URL with curl or a test tool.
+        const noSig = !sig;
+        const hasSecret = !!(oa && oa.channelSecret);
+        await logWebhookFailure(req, noSig ? 'no_signature' : 'invalid_signature', {
+          oaId: oa.id, slug: oa.slug,
+          hasSecret,
+          hint: hasSecret
+            ? 'channel_secret ใน /admin#line-oas อาจไม่ตรงกับ "Channel secret" ที่ LINE Developer Console — copy ใหม่จาก Console แล้ว save'
+            : 'OA ยังไม่ได้ตั้ง channel_secret — ไปที่ /admin#line-oas แก้ค่า',
+        });
+        return res.status(403).json({
+          error: noSig ? 'missing signature' : 'invalid signature',
+          code: noSig ? 'NO_SIGNATURE' : 'INVALID_SIGNATURE',
+          hint: hasSecret
+            ? 'ตรวจสอบ channel_secret ที่ /admin#line-oas ให้ตรงกับ LINE Developer Console'
+            : 'OA ยังไม่ได้ตั้ง channel_secret — ตั้งค่าที่ /admin#line-oas',
+        });
       }
       // Always 200 quickly so LINE doesn't retry. Process async.
       res.json({ ok: true });
