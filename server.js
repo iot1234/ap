@@ -3959,6 +3959,78 @@ function verifyBillPayToken(billId, token) {
 // is HMAC-signed so it can't be enumerated to access bills you don't
 // know about. Returns 404 for unknown bill, 403 for invalid token,
 // otherwise the same PNG/SVG fallback chain as the tenant-auth path.
+const PUBLIC_SLIP_UPLOAD_MAX_ATTEMPTS = 3;
+
+async function loadBillPaymentAttemptSummary(db, billId, tenantId) {
+  const id = Number(billId);
+  const tid = Number(tenantId);
+  if (!Number.isInteger(id) || id < 1 || !Number.isInteger(tid) || tid < 1) {
+    return {
+      used: 0,
+      remaining: PUBLIC_SLIP_UPLOAD_MAX_ATTEMPTS,
+      max: PUBLIC_SLIP_UPLOAD_MAX_ATTEMPTS,
+      hasPending: false,
+      pendingCount: 0,
+      rejectedCount: 0,
+      verifiedCount: 0,
+      latest: null,
+    };
+  }
+  const params = [id, tid];
+  const counts = await db.query(
+    `SELECT
+        COUNT(*)::int AS used,
+        COUNT(*) FILTER (WHERE status='pending')::int AS pending_count,
+        COUNT(*) FILTER (WHERE status='rejected')::int AS rejected_count,
+        COUNT(*) FILTER (WHERE status='verified')::int AS verified_count
+       FROM payments
+      WHERE bill_id=$1 AND tenant_id=$2`,
+    params
+  );
+  const latest = await db.query(
+    `SELECT id, status, amount, rejected_reason, verified_by, verified_at,
+            verify_provider, verify_payload, transaction_ref, created_at
+       FROM payments
+      WHERE bill_id=$1 AND tenant_id=$2
+      ORDER BY created_at DESC, id DESC
+      LIMIT 1`,
+    params
+  );
+  const c = counts.rows[0] || {};
+  const used = Number(c.used) || 0;
+  return {
+    used,
+    remaining: Math.max(PUBLIC_SLIP_UPLOAD_MAX_ATTEMPTS - used, 0),
+    max: PUBLIC_SLIP_UPLOAD_MAX_ATTEMPTS,
+    hasPending: (Number(c.pending_count) || 0) > 0,
+    pendingCount: Number(c.pending_count) || 0,
+    rejectedCount: Number(c.rejected_count) || 0,
+    verifiedCount: Number(c.verified_count) || 0,
+    latest: latest.rows[0] || null,
+  };
+}
+
+function publicSlipBlockReason({ flags, payable, paid, attempts }) {
+  if (paid) return { code: 'PAID', message: 'bill is already paid' };
+  if (!flags.slipUpload || !flags.slipUpload.enabled) {
+    return { code: 'SLIP_UPLOAD_DISABLED', message: 'slip upload is disabled' };
+  }
+  if (!payable) return { code: 'BILL_NOT_PAYABLE', message: 'bill is not payable' };
+  if (attempts && attempts.hasPending) {
+    return {
+      code: 'PAYMENT_UNDER_REVIEW',
+      message: 'a slip is already waiting for admin review',
+    };
+  }
+  if (attempts && attempts.remaining <= 0) {
+    return {
+      code: 'SLIP_UPLOAD_LIMIT_REACHED',
+      message: 'slip upload limit reached; contact admin',
+    };
+  }
+  return null;
+}
+
 app.get('/p/bill-qr/:billId', rateLimitQr, async (req, res) => {
   const id = Number(req.params.billId);
   if (!Number.isInteger(id) || id < 1) return res.status(400).end();
@@ -4032,6 +4104,13 @@ app.get('/api/public/bills/:billId/payment', rateLimitPublicPayment, async (req,
     const { paymentBlock } = await loadEffectivePaymentBlock();
     const billTotal = Number(bill.total);
     const payable = bill.status === 'pending' || bill.status === 'overdue';
+    const attempts = await loadBillPaymentAttemptSummary(pool, id, bill.tenant_id);
+    const slipBlock = publicSlipBlockReason({
+      flags,
+      payable,
+      paid: bill.status === 'paid',
+      attempts,
+    });
     const qrUsable = payable
       && Number.isFinite(billTotal) && billTotal > 0 && billTotal <= MAX_AMOUNT
       && !!paymentBlock.promptpayTarget
@@ -4058,8 +4137,13 @@ app.get('/api/public/bills/:billId/payment', rateLimitPublicPayment, async (req,
       },
       payment: paymentBlock,
       channels: {
-        slip: !!(flags.slipUpload && flags.slipUpload.enabled && payable),
+        slip: !slipBlock,
         qr: !!qrUrl,
+      },
+      upload: {
+        ...attempts,
+        canUpload: !slipBlock,
+        blocked: slipBlock,
       },
       paid: bill.status === 'paid',
       qrUrl,
@@ -4100,6 +4184,26 @@ app.post('/api/public/bills/:billId/payments', rateLimitPublicPayment, sameOrigi
     if (!flags.slipUpload || !flags.slipUpload.enabled) {
       return res.status(503).json({ error: 'slipUpload disabled' });
     }
+    const payable = row.status === 'pending' || row.status === 'overdue';
+    const attempts = await loadBillPaymentAttemptSummary(pool, id, row.tenant_id);
+    const slipBlock = publicSlipBlockReason({
+      flags,
+      payable,
+      paid: row.status === 'paid',
+      attempts,
+    });
+    if (slipBlock) {
+      const status = slipBlock.code === 'SLIP_UPLOAD_LIMIT_REACHED' ? 429 : 409;
+      return res.status(status).json({
+        error: slipBlock.message,
+        code: slipBlock.code,
+        upload: {
+          ...attempts,
+          canUpload: false,
+          blocked: slipBlock,
+        },
+      });
+    }
     req.features = flags;
     req.tenant = {
       tenant_id: row.tenant_id,
@@ -4111,6 +4215,12 @@ app.post('/api/public/bills/:billId/payments', rateLimitPublicPayment, sameOrigi
       current_room_id: row.current_room_id,
       status: row.tenant_status,
       locale: row.locale,
+    };
+    req.publicPayment = {
+      source: 'public_pay_link',
+      maxAttempts: PUBLIC_SLIP_UPLOAD_MAX_ATTEMPTS,
+      attemptNo: attempts.used + 1,
+      previousAttempts: attempts,
     };
     req.body = {
       ...(req.body || {}),
@@ -5111,6 +5221,29 @@ async function tenantPaymentUploadHandler(req, res) {
         status: billStatus,
       });
     }
+    if (req.publicPayment) {
+      const attempts = await loadBillPaymentAttemptSummary(pool, billId, req.tenant.tenant_id);
+      const slipBlock = publicSlipBlockReason({
+        flags: req.features,
+        payable: true,
+        paid: false,
+        attempts,
+      });
+      if (slipBlock) {
+        const status = slipBlock.code === 'SLIP_UPLOAD_LIMIT_REACHED' ? 429 : 409;
+        return res.status(status).json({
+          error: slipBlock.message,
+          code: slipBlock.code,
+          upload: {
+            ...attempts,
+            canUpload: false,
+            blocked: slipBlock,
+          },
+        });
+      }
+      req.publicPayment.attemptNo = attempts.used + 1;
+      req.publicPayment.previousAttempts = attempts;
+    }
     // Hash the actual slip bytes BEFORE saving so dedup works (prior version
     // hashed the URL+size which were always unique → unique index never
     // triggered).
@@ -5134,7 +5267,9 @@ async function tenantPaymentUploadHandler(req, res) {
       category: 'slip',
       dataUrl: b.slip,
       refId: String(billId),
-      uploadedBy: `tenant:${req.tenant.tenant_id}`,
+      uploadedBy: req.publicPayment
+        ? `public-pay:${req.tenant.tenant_id}`
+        : `tenant:${req.tenant.tenant_id}`,
       maxBytes: req.features.slipUpload.maxBytes || 1_500_000,
       allowedMimes: req.features.slipUpload.allowedMimes || ['image/jpeg', 'image/png', 'image/webp'],
     });
@@ -5357,6 +5492,24 @@ async function tenantPaymentUploadHandler(req, res) {
         // when auto-verify ran. The unique index on transaction_ref catches
         // a replay attempt (same bank tx, different image bytes) — comes
         // back as 23505 and we surface a clear 409 below.
+        const uploadMeta = req.publicPayment ? {
+          source: req.publicPayment.source || 'public_pay_link',
+          attemptNo: req.publicPayment.attemptNo || null,
+          maxAttempts: req.publicPayment.maxAttempts || PUBLIC_SLIP_UPLOAD_MAX_ATTEMPTS,
+        } : null;
+        const verifyPayload = (verifyResult || uploadMeta) ? JSON.stringify({
+          ...(verifyResult ? {
+            ok: verifyResult.ok,
+            code: verifyResult.code,
+            amount: verifyResult.amount,
+            sender: verifyResult.sender,
+            receiver: verifyResult.receiver,
+            transDate: verifyResult.transDate,
+            error: verifyResult.error,
+            attempts: verifyResult.attempts || [],
+          } : {}),
+          ...(uploadMeta ? { upload: uploadMeta } : {}),
+        }) : null;
         const ins = await client.query(
           `INSERT INTO payments (bill_id, tenant_id, amount, method, slip_url, slip_hash,
                                  status, rejected_reason, transaction_ref, verify_provider, verify_payload, verified_by, verified_at)
@@ -5367,7 +5520,7 @@ async function tenantPaymentUploadHandler(req, res) {
             initialStatus, initialReason,
             verifyResult?.transRef || null,
             verifyResult?.provider || null,
-            verifyResult ? JSON.stringify({
+            verifyPayload || (verifyResult ? JSON.stringify({
               ok: verifyResult.ok,
               code: verifyResult.code,
               amount: verifyResult.amount,
@@ -5380,7 +5533,7 @@ async function tenantPaymentUploadHandler(req, res) {
               // or "Both providers rejected — fake slip suspected" in
               // /admin#payments forensics.
               attempts: verifyResult.attempts || [],
-            }) : null,
+            }) : null),
             // For auto-verified rows we credit the provider as verifier so
             // admin can audit which slips were auto-approved vs hand-checked.
             (initialStatus === 'verified' && verifyResult?.ok)
@@ -5486,12 +5639,56 @@ async function tenantPaymentUploadHandler(req, res) {
         : 'รอตรวจสอบ';
       const reasonLine = initialReason ? `\nเหตุผล: ${initialReason}` : '';
       const refLine = verifyResult?.transRef ? `\ntransRef: ${verifyResult.transRef}` : '';
+      let adminBill = null;
+      let adminAttempts = null;
+      try {
+        const [billInfo, attemptInfo] = await Promise.all([
+          pool.query(`SELECT bill_no, period, room_id, status, total FROM bills WHERE id=$1 LIMIT 1`, [billId]),
+          loadBillPaymentAttemptSummary(pool, billId, req.tenant.tenant_id),
+        ]);
+        adminBill = billInfo.rows[0] || null;
+        adminAttempts = attemptInfo || null;
+      } catch { /* notification detail is best-effort */ }
+      const roomLine = adminBill?.room_id ? `\nà¸«à¹‰à¸­à¸‡: ${adminBill.room_id}` : '';
+      const billNoLine = adminBill?.bill_no ? `\nà¹€à¸¥à¸‚à¸šà¸´à¸¥: ${adminBill.bill_no}` : '';
+      const billStatusLine = adminBill?.status ? `\nà¸ªà¸–à¸²à¸™à¸°à¸šà¸´à¸¥à¸›à¸±à¸ˆà¸ˆà¸¸à¸šà¸±à¸™: ${adminBill.status}` : '';
+      const attemptLine = adminAttempts
+        ? `\nà¸ˆà¸³à¸™à¸§à¸™à¸„à¸£à¸±à¹‰à¸‡à¸—à¸µà¹ˆà¸­à¸±à¸›à¹‚à¸«à¸¥à¸”: ${adminAttempts.used}/${adminAttempts.max} (à¹€à¸«à¸¥à¸·à¸­ ${adminAttempts.remaining})`
+        : '';
+      const actionLine = initialStatus === 'verified'
+        ? '\nà¸œà¸¥à¸¥à¸±à¸žà¸˜à¹Œ: à¸£à¸°à¸šà¸š mark paid à¹à¸¥à¹‰à¸§'
+        : initialStatus === 'pending'
+          ? '\nà¸ªà¸´à¹ˆà¸‡à¸—à¸µà¹ˆà¸•à¹‰à¸­à¸‡à¸—à¸³: à¹€à¸‚à¹‰à¸² /admin#payments à¹€à¸žà¸·à¹ˆà¸­à¸•à¸£à¸§à¸ˆà¸ªà¸¥à¸´à¸› à¸šà¸´à¸¥à¸¢à¸±à¸‡à¹„à¸¡à¹ˆà¸–à¸¹à¸ mark paid'
+          : '\nà¸ªà¸´à¹ˆà¸‡à¸—à¸µà¹ˆà¸•à¹‰à¸­à¸‡à¸—à¸³: à¸•à¸£à¸§à¸ˆà¹€à¸«à¸•à¸¸à¸œà¸¥à¹ƒà¸™ /admin#payments à¹à¸¥à¸°à¸•à¸´à¸”à¸•à¹ˆà¸­à¸œà¸¹à¹‰à¹€à¸Šà¹ˆà¸² à¸šà¸´à¸¥à¸¢à¸±à¸‡à¹„à¸¡à¹่à¸Šà¸³à¸£à¸°';
+      const adminDetailText = [
+        adminBill?.room_id ? `Room: ${adminBill.room_id}` : null,
+        adminBill?.bill_no ? `Bill no: ${adminBill.bill_no}` : null,
+        adminBill?.period ? `Period: ${adminBill.period}` : null,
+        adminBill?.status ? `Current bill status: ${adminBill.status}` : null,
+        adminBill?.total != null
+          ? `Bill total: THB ${Number(adminBill.total).toLocaleString('th-TH', { minimumFractionDigits: 2 })}`
+          : null,
+        adminAttempts
+          ? `Slip upload attempts: ${adminAttempts.used}/${adminAttempts.max} (remaining ${adminAttempts.remaining})`
+          : null,
+        adminAttempts?.pendingCount ? `Pending slips: ${adminAttempts.pendingCount}` : null,
+        adminAttempts?.rejectedCount ? `Rejected slips: ${adminAttempts.rejectedCount}` : null,
+        adminAttempts?.latest
+          ? `Latest slip: ${adminAttempts.latest.status}${adminAttempts.latest.rejected_reason ? ` - ${adminAttempts.latest.rejected_reason}` : ''}`
+          : null,
+        initialStatus === 'verified'
+          ? 'Action: system marked the bill as paid.'
+          : initialStatus === 'pending'
+            ? 'Action: review this slip in /admin#payments. Bill is still unpaid until approved.'
+            : 'Action: slip was rejected. Bill is still unpaid; contact tenant if needed.',
+      ].filter(Boolean).join('\n');
+      const ownerDetailLine = adminDetailText ? `\n${adminDetailText}` : '';
       notifier.notifyOwner(
         { pool, features: req.features },
         { subject: `${statusEmoji} สลิปใหม่ (${statusTh}) — บิล #${billId}`,
           text: `บิล #${billId} จำนวน ฿${amount.toLocaleString('th-TH', { minimumFractionDigits: 2 })} `
                 + `จาก ${req.tenant.full_name} (${req.tenant.phone})\n`
-                + `สถานะเริ่มต้น: ${statusTh}${reasonLine}${refLine}` }
+                + `สถานะเริ่มต้น: ${statusTh}${reasonLine}${refLine}${ownerDetailLine}` }
       ).catch(() => {});
     }
 
@@ -5616,7 +5813,21 @@ async function tenantPaymentUploadHandler(req, res) {
       console.warn('[slip-upload] tenant ack failed:', err.message);
     }
 
-    res.json({ ok: true, payment: row });
+    const attemptSummary = await loadBillPaymentAttemptSummary(pool, billId, req.tenant.tenant_id)
+      .catch(() => null);
+    res.json({
+      ok: true,
+      payment: row,
+      upload: attemptSummary ? {
+        ...attemptSummary,
+        canUpload: attemptSummary.remaining > 0 && !attemptSummary.hasPending && row.status !== 'verified',
+        blocked: attemptSummary.remaining <= 0
+          ? { code: 'SLIP_UPLOAD_LIMIT_REACHED', message: 'slip upload limit reached; contact admin' }
+          : (attemptSummary.hasPending
+              ? { code: 'PAYMENT_UNDER_REVIEW', message: 'a slip is already waiting for admin review' }
+              : null),
+      } : null,
+    });
   } catch (err) {
     console.error('tenant payment error:', err);
     // The previous version forwarded `err.message` straight to the tenant —
@@ -5763,9 +5974,10 @@ app.get('/api/payments', requireAuth, requireRole('owner', 'manager', 'staff'), 
     const { rows } = await pool.query(
       `SELECT p.id, p.bill_id, p.tenant_id, p.amount, p.method, p.ref,
               p.status, p.verified_by, p.verified_at, p.rejected_reason,
-              p.created_at,
+              p.verify_provider, p.transaction_ref, p.created_at,
+              COUNT(*) OVER (PARTITION BY p.bill_id, p.tenant_id)::int AS upload_attempts,
               CASE WHEN p.slip_url IS NOT NULL THEN true ELSE false END AS has_slip,
-              b.bill_no, b.period,
+              b.bill_no, b.period, b.room_id, b.status AS bill_status, b.total AS bill_total,
               t.full_name AS tenant_name, t.phone AS tenant_phone
          FROM payments p
          LEFT JOIN bills b ON b.id = p.bill_id
@@ -5789,7 +6001,8 @@ app.get('/api/payments/:id', requireAuth, requireRole('owner', 'manager', 'staff
   if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
   try {
     const { rows } = await pool.query(
-      `SELECT p.*, b.bill_no, b.period,
+      `SELECT p.*, b.bill_no, b.period, b.room_id, b.status AS bill_status, b.total AS bill_total,
+              COUNT(*) OVER (PARTITION BY p.bill_id, p.tenant_id)::int AS upload_attempts,
               t.full_name AS tenant_name, t.phone AS tenant_phone
          FROM payments p
          LEFT JOIN bills b ON b.id = p.bill_id

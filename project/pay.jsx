@@ -17,6 +17,19 @@ function fileToDataUrl(file) {
 }
 
 async function readJson(res) {
+  const contentType = (res.headers && res.headers.get && res.headers.get('content-type')) || '';
+  if ((res.status >= 300 && res.status < 400) || res.type === 'opaqueredirect') {
+    const err = new Error('ลิงก์ชำระเงินถูกเปลี่ยนหน้า กรุณาเปิดลิงก์ใหม่หรือติดต่อแอดมิน');
+    err.status = res.status || 0;
+    err.data = { code: 'REDIRECTED' };
+    throw err;
+  }
+  if (contentType.includes('text/html')) {
+    const err = new Error('ระบบชำระเงินส่งหน้าจอแทนข้อมูล กรุณาเปิดลิงก์ใหม่หรือติดต่อแอดมิน');
+    err.status = res.status || 0;
+    err.data = { code: 'HTML_RESPONSE' };
+    throw err;
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     const err = new Error(data.error || `HTTP ${res.status}`);
@@ -45,6 +58,21 @@ function statusColor(status) {
   })[status] || 'var(--muted)';
 }
 
+function contactAdminMessage(upload) {
+  if (upload && upload.remaining > 0) {
+    return `หากโอนถูกต้องแล้วกรุณาติดต่อแอดมิน หรือรีเฟรช/เปิดลิงก์นี้ใหม่เพื่ออัปโหลดอีกครั้ง เหลือ ${upload.remaining}/${upload.max} ครั้ง`;
+  }
+  return 'บิลนี้ไม่สามารถอัปโหลดสลิปเพิ่มได้แล้ว กรุณาติดต่อแอดมิน';
+}
+
+function blockMessage(upload) {
+  const code = upload && upload.blocked && upload.blocked.code;
+  if (code === 'PAYMENT_UNDER_REVIEW') return 'มีสลิปรอแอดมินตรวจสอบอยู่ กรุณารอผลการตรวจสอบ';
+  if (code === 'SLIP_UPLOAD_LIMIT_REACHED') return 'อัปโหลดครบ 3 ครั้งแล้ว กรุณาติดต่อแอดมิน';
+  if (code === 'PAID') return 'บิลนี้ชำระเรียบร้อยแล้ว';
+  return 'ไม่สามารถอัปโหลดสลิปออนไลน์ได้ กรุณาติดต่อแอดมิน';
+}
+
 function App() {
   const match = window.location.pathname.match(/\/pay\/(\d+)/);
   const billId = match ? Number(match[1]) : 0;
@@ -57,27 +85,32 @@ function App() {
     () => `/api/public/bills/${encodeURIComponent(billId)}/payments?t=${encodeURIComponent(token)}`,
     [billId, token]
   );
+
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState('');
   const [amount, setAmount] = useState('');
   const [file, setFile] = useState(null);
   const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState('');
+  const [message, setMessage] = useState('');
+  const [messageKind, setMessageKind] = useState('');
 
   async function load(silent = false) {
     if (!billId || !token) {
-      setErr('ลิงก์ไม่ถูกต้องหรือหมดอายุ');
+      setErr('ลิงก์ไม่ถูกต้องหรือหมดอายุ กรุณาติดต่อแอดมิน');
       setLoading(false);
       return;
     }
     try {
-      const next = await fetch(apiBase, { credentials: 'same-origin' }).then(readJson);
+      const next = await fetch(apiBase, {
+        credentials: 'same-origin',
+        redirect: 'manual',
+      }).then(readJson);
       setData(next);
       setErr('');
-      if (!amount && next.bill) setAmount(String(next.bill.total || ''));
+      if (next.bill) setAmount(String(next.bill.total || ''));
     } catch (e) {
-      if (!silent) setErr(e.message || 'โหลดข้อมูลไม่สำเร็จ');
+      if (!silent) setErr(e.message || 'โหลดข้อมูลชำระเงินไม่สำเร็จ กรุณาติดต่อแอดมิน');
     } finally {
       if (!silent) setLoading(false);
     }
@@ -96,35 +129,45 @@ function App() {
   async function upload() {
     const n = Number(amount);
     if (!Number.isFinite(n) || n <= 0) {
-      setMsg('กรุณาระบุจำนวนเงินให้ถูกต้อง');
+      setMessageKind('error');
+      setMessage('จำนวนเงินไม่ถูกต้อง กรุณาติดต่อแอดมิน');
       return;
     }
     if (!file) {
-      setMsg('กรุณาแนบรูปสลิป');
+      setMessageKind('error');
+      setMessage('กรุณาแนบรูปสลิป');
       return;
     }
+
     setBusy(true);
-    setMsg('');
+    setMessageKind('processing');
+    setMessage('กำลังประมวลผลสลิป กรุณารอสักครู่...');
     try {
       const slip = await fileToDataUrl(file);
       const out = await fetch(uploadUrl, {
         method: 'POST',
         credentials: 'same-origin',
+        redirect: 'manual',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ amount: n, slip }),
       }).then(readJson);
+
       const st = out.payment && out.payment.status;
       if (st === 'verified') {
-        setMsg('ชำระเงินสำเร็จ ระบบอัปเดตสถานะเรียบร้อยแล้ว');
+        setMessageKind('success');
+        setMessage('ชำระเงินสำเร็จ ระบบอัปเดตสถานะบิลแล้ว');
       } else if (st === 'rejected') {
-        setMsg(out.payment.rejected_reason || 'สลิปไม่ผ่านการตรวจสอบ กรุณาตรวจสอบและส่งใหม่');
+        setMessageKind('error');
+        setMessage(`${out.payment.rejected_reason || 'สลิปไม่ผ่านการตรวจสอบ'}\n${contactAdminMessage(out.upload || (data && data.upload))}`);
       } else {
-        setMsg('ได้รับสลิปแล้ว กำลังรอเจ้าหน้าที่ตรวจสอบ');
+        setMessageKind('pending');
+        setMessage('อัปโหลดสลิปสำเร็จ รอแอดมินตรวจสอบ');
       }
       setFile(null);
       await load(true);
     } catch (e) {
-      setMsg(e.message || 'อัปโหลดไม่สำเร็จ');
+      setMessageKind('error');
+      setMessage(`${e.message || 'อัปโหลดไม่สำเร็จ'}\n${contactAdminMessage(e.data && e.data.upload)}`);
       await load(true);
     } finally {
       setBusy(false);
@@ -133,7 +176,16 @@ function App() {
 
   const bill = data && data.bill;
   const paid = !!(data && data.paid);
-  const canUpload = !!(data && data.channels && data.channels.slip && !paid);
+  const uploadState = data && data.upload;
+  const canUpload = !!(data && data.channels && data.channels.slip && !paid && (!uploadState || uploadState.canUpload !== false));
+
+  const messageStyle = messageKind === 'success'
+    ? successBox
+    : messageKind === 'error'
+      ? errorBox
+      : messageKind === 'processing'
+        ? processingBox
+        : infoBox;
 
   return (
     <main style={wrap}>
@@ -141,9 +193,10 @@ function App() {
         <div style={topline}>ชำระบิล</div>
         {loading ? <p style={muted}>กำลังโหลดข้อมูลบิล...</p> : null}
         {err ? <div style={errorBox}>{err}</div> : null}
+
         {bill ? (
           <>
-            <header style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start' }}>
+            <header style={header}>
               <div>
                 <h1 style={h1}>{bill.billNo || `บิล #${bill.id}`}</h1>
                 <div style={muted}>ห้อง {bill.roomId || '-'} · รอบ {bill.period || '-'}</div>
@@ -156,13 +209,22 @@ function App() {
 
             <div style={amountBox}>
               <div style={muted}>ยอดชำระ</div>
-              <div style={{ fontFamily: 'Sora, sans-serif', fontSize: 34, fontWeight: 700 }}>฿{fmt(bill.total)}</div>
+              <div style={amountText}>฿{fmt(bill.total)}</div>
             </div>
 
-            {paid ? (
-              <div style={successBox}>
-                บิลนี้ชำระสำเร็จแล้ว ไม่ต้องแนบสลิปเพิ่มเติม
+            {uploadState ? (
+              <div style={uploadState.blocked ? errorBox : infoBox}>
+                <div style={{ fontWeight: 700 }}>อัปโหลดสลิปแล้ว: {uploadState.used}/{uploadState.max} ครั้ง</div>
+                <div>เหลือ: {uploadState.remaining} ครั้ง</div>
+                {uploadState.latest ? (
+                  <div>สถานะล่าสุด: {uploadState.latest.status}{uploadState.latest.rejected_reason ? ` · ${uploadState.latest.rejected_reason}` : ''}</div>
+                ) : null}
+                {uploadState.blocked ? <div style={{ marginTop: 4 }}>{blockMessage(uploadState)}</div> : null}
               </div>
+            ) : null}
+
+            {paid ? (
+              <div style={successBox}>บิลนี้ชำระสำเร็จแล้ว ไม่ต้องแนบสลิปเพิ่มเติม</div>
             ) : null}
 
             {!paid && data.qrUrl ? (
@@ -185,20 +247,18 @@ function App() {
             {canUpload ? (
               <div style={card}>
                 <label style={label}>จำนวนเงิน</label>
-                <input style={input} type="number" step="0.01" value={amount} onChange={(e) => setAmount(e.target.value)} />
-                <label style={label}>แนบรูปสลิป</label>
-                <input type="file" accept="image/jpeg,image/png,image/webp" onChange={(e) => setFile(e.target.files[0] || null)} />
+                <input style={input} type="number" step="0.01" value={amount} readOnly />
+                <label style={label}>รูปสลิป</label>
+                <input type="file" accept="image/jpeg,image/png,image/webp" disabled={busy} onChange={(e) => setFile(e.target.files[0] || null)} />
                 <button style={button} disabled={busy} onClick={upload}>
-                  {busy ? 'กำลังอัปโหลด...' : 'อัปโหลดสลิป'}
+                  {busy ? 'กำลังประมวลผล...' : 'อัปโหลดสลิป'}
                 </button>
-                {msg ? <div style={note}>{msg}</div> : null}
+                {message ? <div style={messageStyle}>{message}</div> : null}
               </div>
             ) : null}
 
             {!paid && !canUpload ? (
-              <div style={errorBox}>
-                ระบบรับสลิปออนไลน์ยังไม่พร้อมใช้งาน กรุณาติดต่อสำนักงานหรือส่งสลิปผ่าน LINE ของหอพัก
-              </div>
+              <div style={errorBox}>{blockMessage(uploadState)}</div>
             ) : null}
           </>
         ) : null}
@@ -222,18 +282,21 @@ const panel = {
   padding: 20,
   boxShadow: '0 14px 36px -24px rgba(0,0,0,.35)',
 };
+const header = { display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start' };
 const topline = { color: 'var(--accent)', fontWeight: 700, fontSize: 13, marginBottom: 8 };
 const h1 = { margin: 0, fontSize: 24, fontFamily: 'Sora, sans-serif', letterSpacing: 0 };
 const muted = { color: 'var(--muted)', fontSize: 13 };
 const pill = { display: 'inline-block', padding: '3px 10px', borderRadius: 999, fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap' };
 const amountBox = { marginTop: 18, padding: 16, border: '1px solid var(--border)', borderRadius: 8, background: '#fffaf2' };
+const amountText = { fontFamily: 'Sora, sans-serif', fontSize: 34, fontWeight: 700 };
 const card = { marginTop: 14, padding: 14, border: '1px solid var(--border)', borderRadius: 8 };
 const qr = { display: 'block', margin: '0 auto 8px', background: '#fff', border: '1px solid var(--border)', borderRadius: 8, padding: 6 };
 const label = { display: 'block', fontSize: 13, fontWeight: 600, margin: '10px 0 6px' };
 const input = { width: '100%', height: 42, padding: '0 12px', borderRadius: 6, border: '1px solid var(--border)', font: 'inherit' };
 const button = { marginTop: 14, width: '100%', height: 44, border: 0, borderRadius: 6, background: 'var(--accent)', color: '#fff', font: 'inherit', fontWeight: 700, cursor: 'pointer' };
-const note = { marginTop: 10, fontSize: 13, color: 'var(--muted)', lineHeight: 1.5 };
-const successBox = { marginTop: 14, padding: 12, background: '#eef8f1', border: '1px solid #bee4ca', borderRadius: 8, color: 'var(--green)', fontWeight: 600 };
-const errorBox = { marginTop: 12, padding: 12, background: '#fff4f1', border: '1px solid #f3c2b8', borderRadius: 8, color: 'var(--red)', lineHeight: 1.5 };
+const infoBox = { marginTop: 12, padding: 12, background: '#f3f7ff', border: '1px solid #c7d8f5', borderRadius: 8, color: '#315a9c', lineHeight: 1.5, whiteSpace: 'pre-line' };
+const processingBox = { marginTop: 12, padding: 12, background: '#fff8e6', border: '1px solid #ead49a', borderRadius: 8, color: 'var(--amber)', lineHeight: 1.5, whiteSpace: 'pre-line' };
+const successBox = { marginTop: 14, padding: 12, background: '#eef8f1', border: '1px solid #bee4ca', borderRadius: 8, color: 'var(--green)', fontWeight: 600, whiteSpace: 'pre-line' };
+const errorBox = { marginTop: 12, padding: 12, background: '#fff4f1', border: '1px solid #f3c2b8', borderRadius: 8, color: 'var(--red)', lineHeight: 1.5, whiteSpace: 'pre-line' };
 
 ReactDOM.createRoot(document.getElementById('root')).render(<App />);

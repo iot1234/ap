@@ -165,7 +165,12 @@ function PagePayments({ setToast }) {
                   </div>
                 </div>
                 <div style={{ fontFamily: 'Sora', fontWeight: 600 }}>฿{Number(p.amount).toLocaleString('th-TH', { minimumFractionDigits: 2 })}</div>
-                <Pill color={stColor[p.status]}>{p.status}</Pill>
+                <div style={{ textAlign: 'right' }}>
+                  <Pill color={stColor[p.status]}>{p.status}</Pill>
+                  <div style={{ marginTop: 4, color: p.status === 'rejected' ? C.danger : C.muted, fontSize: 11.5 }}>
+                    ห้อง {p.room_id || '-'} · {p.bill_status || '-'} · อัปโหลด {p.upload_attempts || 1}/3
+                  </div>
+                </div>
               </div>
             ))}
           </div>
@@ -213,6 +218,14 @@ function SlipModal({ payment, busy, onClose, onDecide }) {
         <div style={{ marginTop: 12 }}>
           <div>จำนวนเงิน: <strong>฿{Number(payment.amount).toLocaleString('th-TH', { minimumFractionDigits: 2 })}</strong></div>
           <div>วันที่: {new Date(payment.created_at).toLocaleString('th-TH')}</div>
+        </div>
+        <div style={{ marginTop: 10, padding: 10, borderRadius: 8, background: C.bgSoft || '#fbf6ec', color: C.ink2, fontSize: 12.5, lineHeight: 1.6 }}>
+          <div>ห้อง: {payment.room_id || '-'} · สถานะบิล: {payment.bill_status || '-'}</div>
+          <div>อัปโหลดสลิป: {payment.upload_attempts || 1}/3</div>
+          {payment.rejected_reason ? <div>เหตุผลปฏิเสธ: {payment.rejected_reason}</div> : null}
+          {payment.verify_provider ? <div>ผู้ตรวจ: {payment.verify_provider}</div> : null}
+          {payment.transaction_ref ? <div>เลขอ้างอิง: {payment.transaction_ref}</div> : null}
+          {payment.verify_payload && payment.verify_payload.code ? <div>รหัสตรวจสลิป: {payment.verify_payload.code}</div> : null}
         </div>
         {payment.status === 'pending' ? (
           <>

@@ -707,6 +707,37 @@ test('public bill payment link is tokenized and does not require tenant login', 
     'public token page must not leak the full token URL as cross-origin referer');
 });
 
+test('public bill payment upload has retry limit + admin-visible diagnostics', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const pay = fs.readFileSync(path.join(__dirname, '..', 'project', 'pay.jsx'), 'utf8');
+  const adminPayments = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-payments.jsx'), 'utf8');
+
+  assert.match(server, /PUBLIC_SLIP_UPLOAD_MAX_ATTEMPTS\s*=\s*3/,
+    'public payment link must cap slip uploads at 3 attempts');
+  assert.match(server, /loadBillPaymentAttemptSummary/,
+    'server must expose persisted upload attempt state from payments rows');
+  assert.match(server, /PAYMENT_UNDER_REVIEW/,
+    'server must block another upload while a slip is pending admin review');
+  assert.match(server, /SLIP_UPLOAD_LIMIT_REACHED/,
+    'server must block uploads after the retry limit is reached');
+  assert.match(server, /upload:\s*\{/,
+    'public payment APIs must return upload attempt details to the page');
+  assert.match(pay, /redirect:\s*'manual'/,
+    'public pay page must not silently follow an auth/login redirect during upload');
+  assert.match(pay, /กำลังประมวลผลสลิป/,
+    'public pay page must show a processing state while the slip is uploading');
+  assert.match(pay, /contactAdminMessage/,
+    'public pay page must show contact-admin guidance on failed uploads');
+  assert.match(adminPayments, /อัปโหลดสลิป:/,
+    'admin slip modal must show upload attempts');
+  assert.match(adminPayments, /สถานะบิล:/,
+    'admin slip modal must show whether the bill is still unpaid/paid');
+  assert.match(adminPayments, /รหัสตรวจสลิป:/,
+    'admin slip modal must surface verifier failure codes for detailed review');
+});
+
 test('LINE image messages can submit slips through the shared payment handler', () => {
   const fs = require('node:fs');
   const path = require('node:path');
@@ -737,7 +768,7 @@ test('bill upload UIs refresh status and hide upload controls after paid', () =>
     'tenant bill modal must poll for payment status changes while open');
   assert.match(pay, /const paid = !!\(data && data\.paid\)/,
     'public pay page must derive a paid state');
-  assert.match(pay, /const canUpload = !!\(data && data\.channels && data\.channels\.slip && !paid\)/,
+  assert.match(pay, /const canUpload = !!\(data && data\.channels && data\.channels\.slip && !paid && \(!uploadState \|\| uploadState\.canUpload !== false\)\)/,
     'public pay page must disable upload controls once paid');
   assert.match(pay, /setInterval\(\(\) => load\(true\), 5000\)/,
     'public pay page must poll for near-real-time status updates');
