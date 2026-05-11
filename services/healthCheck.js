@@ -403,7 +403,7 @@ async function checkFeatureDependencies(features, pool) {
     warnings.push({
       flag: 'meterIot',
       issue: 'meterIot.mode = "mqtt" — MQTT subscriber ยังไม่ implement ในระบบนี้ จะไม่มี reading เข้ามาอัตโนมัติ',
-      fix: 'เปลี่ยนเป็น "manual" และให้ผู้ดูแลกรอกค่ามิเตอร์เอง หรือรอ MQTT integration',
+      fix: 'เปลี่ยนเป็น "manual" และให้ผู้ดูแลกรอกค่ามิเตอร์เอง',
     });
   }
 

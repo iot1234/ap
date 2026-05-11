@@ -396,6 +396,11 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       const methodRaw = String(req.body?.method || 'transfer').toLowerCase();
       const method = ['cash', 'transfer', 'promptpay'].includes(methodRaw) ? methodRaw : 'transfer';
       const ref = String(req.body?.ref || 'admin-manual').slice(0, 200);
+      // Defensive: requireAuth already gates this, but if session was reaped
+      // between the middleware and here, req.session.user could be falsy.
+      // Audit trail demands a non-null verifier name — fall back to a
+      // sentinel so the INSERT doesn't violate NOT NULL on verified_by.
+      const verifier = req.session?.user?.username || 'admin:unknown';
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
@@ -457,7 +462,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             billTotal,
             method,
             ref,
-            req.session.user.username,
+            verifier,
             JSON.stringify({ source: 'admin-billing', requestedAmount }),
           ]
         );
@@ -480,7 +485,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           amount: billTotal,
           method,
         });
-        notifyManualPayment(payment.rows[0], paid.rows[0] || row, req.session.user.username).catch(() => {});
+        notifyManualPayment(payment.rows[0], paid.rows[0] || row, verifier).catch(() => {});
         res.json({ ok: true, bill: paid.rows[0], payment: payment.rows[0] });
       } catch (err) {
         await client.query('ROLLBACK').catch(() => {});
@@ -505,6 +510,10 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           code: 'REJECT_REASON_REQUIRED',
         });
       }
+      // Same defensive guard as /:id/pay — session could be reaped between
+      // requireAuth and here. Audit columns are NOT NULL so a null username
+      // would crash the UPDATE with 500.
+      const verifier = req.session?.user?.username || 'admin:unknown';
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
@@ -551,7 +560,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           const upd = await client.query(
             `UPDATE payments SET status='verified', verified_by=$1, verified_at=NOW()
                WHERE id=$2 AND status='pending' RETURNING *`,
-            [req.session.user.username, pid]
+            [verifier, pid]
           );
           if (!upd.rows.length) {
             await client.query('ROLLBACK');
@@ -576,7 +585,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           const rejected = await client.query(
             `UPDATE payments SET status='rejected', verified_by=$1, verified_at=NOW(), rejected_reason=$2
                WHERE id=$3 AND status='pending' RETURNING id`,
-            [req.session.user.username, reason, pid]
+            [verifier, reason, pid]
           );
           if (!rejected.rows.length) {
             await client.query('ROLLBACK');

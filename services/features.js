@@ -52,7 +52,7 @@ const DEFAULTS = Object.freeze({
   },
   meterIot: {
     enabled: false,
-    mode: 'manual',              // manual | simulator | mqtt
+    mode: 'manual',              // manual | simulator; mqtt is reserved until integration exists
     anomalySigmas: 3,            // alert when reading > 3σ from rolling avg
   },
   accessControl: {

@@ -655,6 +655,19 @@ test('tenant payment readiness controls QR and slip upload state', () => {
     'tenant UI must not fall back to browser payment-info for QR visibility');
 });
 
+test('tenant payment readiness reports orphan bills with BILL_NOT_LINKED', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const idx = server.indexOf("app.get('/api/tenant/pay-readiness/:billId'");
+  assert.ok(idx > 0, 'tenant pay-readiness endpoint must exist');
+  const body = server.slice(idx, server.indexOf('// GET /api/admin/billing-readiness', idx));
+  assert.match(body, /if \(!bill\.tenant_id\)[\s\S]{0,250}code: 'BILL_NOT_LINKED'/,
+    'pay-readiness must mirror tenant payment upload and report orphan bills explicitly');
+  assert.ok(body.indexOf('BILL_NOT_LINKED') < body.indexOf('not your bill'),
+    'orphan bills must be handled before ownership mismatch');
+});
+
 test('admin billing readiness backs bill issue and payment preflights', () => {
   const fs = require('node:fs');
   const path = require('node:path');
@@ -688,6 +701,41 @@ test('admin billing readiness backs bill issue and payment preflights', () => {
     'bill generation must explicitly force only after the admin accepts warnings');
 });
 
+test('payment verification uses canonical bill-before-payment lock order', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const idx = server.indexOf("app.put('/api/payments/:id/verify'");
+  assert.ok(idx > 0, 'payment verify endpoint must exist');
+  const body = server.slice(idx, server.indexOf('// Helper for both verify endpoints', idx));
+  assert.match(body, /SELECT bill_id FROM payments WHERE id=\$1 AND status='pending'/,
+    'verify flow must peek payment bill_id before taking locks');
+  assert.match(body, /SELECT id, status, total, deleted_at FROM bills WHERE id=\$1 FOR UPDATE/,
+    'verify flow must lock the bill before locking the payment row');
+  assert.match(body, /SELECT \* FROM payments WHERE id=\$1 AND status='pending' FOR UPDATE/,
+    'verify flow must re-lock/re-check the payment after locking bill');
+  assert.ok(
+    body.indexOf('SELECT id, status, total, deleted_at FROM bills WHERE id=$1 FOR UPDATE')
+      < body.indexOf("SELECT * FROM payments WHERE id=$1 AND status='pending' FOR UPDATE"),
+    'bill lock must appear before payment row lock to avoid deadlocks with bill verify-slip');
+  assert.match(body, /code: 'PAYMENT_BILL_CHANGED'/,
+    'verify flow must fail closed if the payment bill link changes mid-flight');
+});
+
+test('bill payment helpers keep non-null verifier audit values', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'bills-extras.js'), 'utf8');
+  assert.match(src, /const verifier = req\.session\?\.user\?\.username \|\| 'admin:unknown'/,
+    'bill helpers must fall back to a non-null verifier sentinel');
+  assert.match(src, /verified_by, verified_at[\s\S]{0,600}ref,\s*verifier,\s*JSON\.stringify/,
+    'manual pay insert must use the verifier variable');
+  assert.match(src, /UPDATE payments SET status='verified', verified_by=\$1[\s\S]{0,160}\[verifier, pid\]/,
+    'verify-slip accept path must use the verifier variable');
+  assert.match(src, /UPDATE payments SET status='rejected', verified_by=\$1[\s\S]{0,180}\[verifier, reason, pid\]/,
+    'verify-slip reject path must use the verifier variable');
+});
+
 test('access_cards CRUD endpoints exist', () => {
   // The scheduler revokes/restores cards but until now there was no way
   // for admin to issue them. Pin the three new endpoints.
@@ -713,6 +761,27 @@ test('healthCheck flags meterIot.mode = "mqtt" as unimplemented', () => {
   const hc = fs.readFileSync(path.join(__dirname, '..', 'services', 'healthCheck.js'), 'utf8');
   assert.match(hc, /meterIot.*mqtt[\s\S]{0,200}implement/i,
     'healthCheck must warn about unimplemented mqtt mode');
+});
+
+test('admin feature settings block unsupported meter MQTT mode', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const idx = server.indexOf("app.put('/api/admin/features'");
+  assert.ok(idx > 0, 'admin features save endpoint must exist');
+  const body = server.slice(idx, server.indexOf('// === v2: Tenants', idx));
+  assert.match(body, /partial\.meterIot && partial\.meterIot\.mode === 'mqtt'/,
+    'server must reject mqtt mode until an MQTT subscriber exists');
+  assert.match(body, /code: 'METER_MQTT_UNAVAILABLE'/,
+    'server must return a stable mqtt-unavailable code');
+  assert.match(body, /PRODUCTION_SIMULATOR_BLOCKED/,
+    'production simulator guard must remain in place');
+
+  const page = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-features.jsx'), 'utf8');
+  assert.match(page, /\['mqtt', 'MQTT \(ยังไม่รองรับ\)', true\]/,
+    'features UI must show mqtt as unsupported/disabled');
+  assert.match(page, /disabled=\{!!disabled\}/,
+    'SelectField must honor disabled options');
 });
 
 test('healthCheck surfaces data integrity and failed notification backlog', () => {

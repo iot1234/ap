@@ -1862,12 +1862,23 @@ app.put('/api/admin/features', sameOrigin, csrfGuard, requireAuth, requireRole('
   if (!partial || typeof partial !== 'object') {
     return res.status(400).json({ error: 'features object required' });
   }
+  // MQTT is not wired in this build. Refuse it at save-time instead of
+  // advertising a mode that silently receives no readings.
+  if (partial.meterIot && partial.meterIot.mode === 'mqtt') {
+    audit(req, 'features.mqtt_blocked', 'config', 'features',
+      { attemptedBy: req.session.user.username });
+    return res.status(400).json({
+      error: 'meterIot.mode=mqtt ยังไม่รองรับในระบบนี้ — ใช้ manual จนกว่าจะติดตั้ง MQTT integration',
+      code: 'METER_MQTT_UNAVAILABLE',
+      hint: 'ตั้ง mode = "manual"',
+    });
+  }
   // Production safety: refuse to set the meter simulator mode in production.
   // The simulator generates fake hourly readings — running it on a live
   // building would silently overwrite real meter data with random walks and
   // poison every bill computed from `rooms.elecUnits`/`waterUnits`. Demo /
   // staging deploys can still flip it, but production must stay 'manual' or
-  // 'mqtt'. The check honors NODE_ENV explicitly so a developer running
+  // another implemented mode. The check honors NODE_ENV explicitly so a developer running
   // dev locally with NODE_ENV unset can still toggle the simulator.
   if (NODE_ENV === 'production' && partial.meterIot && partial.meterIot.mode === 'simulator') {
     audit(req, 'features.simulator_blocked', 'config', 'features',
@@ -1875,7 +1886,7 @@ app.put('/api/admin/features', sameOrigin, csrfGuard, requireAuth, requireRole('
     return res.status(403).json({
       error: 'ห้ามเปิด meter simulator ใน production — จะสร้างค่าเทียมทับข้อมูลมิเตอร์จริง',
       code: 'PRODUCTION_SIMULATOR_BLOCKED',
-      hint: 'ตั้ง mode = "manual" หรือ "mqtt" แทน',
+      hint: 'ตั้ง mode = "manual" แทน',
     });
   }
   try {
@@ -2871,6 +2882,18 @@ app.get('/api/tenant/pay-readiness/:billId', requireTenant, async (req, res) => 
     );
     if (!billQ.rows.length) return res.status(404).json({ error: 'bill not found' });
     const bill = billQ.rows[0];
+    // Orphan bill (tenant_id IS NULL — legacy bills created before tenant
+    // auto-linking, or admin forgot to attach a tenant). Surface a clear
+    // BILL_NOT_LINKED so the tenant sees the real reason ("ติดต่อสำนักงาน
+    // ให้ผูกบิล") instead of the misleading "not your bill". Matches the
+    // upload endpoint /api/tenant/payments behaviour (line 4048) so the
+    // preflight stays consistent with the action endpoint.
+    if (!bill.tenant_id) {
+      return res.status(403).json({
+        error: 'บิลนี้ยังไม่ได้ผูกกับผู้เช่า — กรุณาติดต่อเจ้าหน้าที่',
+        code: 'BILL_NOT_LINKED',
+      });
+    }
     if (Number(bill.tenant_id) !== Number(req.tenant.tenant_id)) {
       return res.status(403).json({ error: 'not your bill' });
     }
@@ -4768,6 +4791,36 @@ app.put('/api/payments/:id/verify', sameOrigin, csrfGuard, requireAuth, requireR
   try {
     await client.query('BEGIN');
     if (accept) {
+      // Lock-order discipline: bills BEFORE payments, matching
+      // /api/bills/:id/verify-slip (routes/bills-extras.js). If we locked
+      // payments first here, two admins clicking different UIs on the same
+      // bill+payment pair would deadlock (each waiting on the other's lock)
+      // and one transaction would die with Postgres 40P01. We do a
+      // non-locking read of the payment first to discover its bill_id,
+      // then lock in the canonical bill → payment order.
+      const peek = await client.query(
+        `SELECT bill_id FROM payments WHERE id=$1 AND status='pending'`,
+        [id]
+      );
+      if (!peek.rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'not found or already decided' });
+      }
+      const billId = peek.rows[0].bill_id;
+      if (!billId) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'payment is not linked to a bill',
+          code: 'PAYMENT_WITHOUT_BILL',
+        });
+      }
+      const bill = await client.query(
+        `SELECT id, status, total, deleted_at FROM bills WHERE id=$1 FOR UPDATE`,
+        [billId]
+      );
+      // Now lock the payment row in the canonical order. Re-check status
+      // because the window between the peek above and this lock could have
+      // let another verifier change the row to verified/rejected.
       const pres = await client.query(
         `SELECT * FROM payments WHERE id=$1 AND status='pending' FOR UPDATE`,
         [id]
@@ -4777,17 +4830,16 @@ app.put('/api/payments/:id/verify', sameOrigin, csrfGuard, requireAuth, requireR
         return res.status(404).json({ error: 'not found or already decided' });
       }
       row = pres.rows[0];
-      if (!row.bill_id) {
+      if (Number(row.bill_id) !== Number(billId)) {
+        // The payment's bill_id changed between peek and lock (admin
+        // re-linked it). Fail closed — operator must restart with the
+        // updated context.
         await client.query('ROLLBACK');
         return res.status(409).json({
-          error: 'payment is not linked to a bill',
-          code: 'PAYMENT_WITHOUT_BILL',
+          error: 'payment changed mid-flight, refresh and try again',
+          code: 'PAYMENT_BILL_CHANGED',
         });
       }
-      const bill = await client.query(
-        `SELECT id, status, total, deleted_at FROM bills WHERE id=$1 FOR UPDATE`,
-        [row.bill_id]
-      );
       if (!bill.rows.length || bill.rows[0].deleted_at) {
         await client.query('ROLLBACK');
         return res.status(409).json({

@@ -145,7 +145,14 @@ function PageFeatures({ setToast }) {
       w.push({
         flag: 'meterIot',
         msg: 'mode = simulator — กำลังสร้างค่ามิเตอร์เทียม (block ใน NODE_ENV=production)',
-        fix: 'เปลี่ยนเป็น manual หรือ mqtt ก่อน deploy production',
+        fix: 'เปลี่ยนเป็น manual ก่อน deploy production',
+      });
+    }
+    if (features.meterIot?.enabled && features.meterIot?.mode === 'mqtt') {
+      w.push({
+        flag: 'meterIot',
+        msg: 'mode = mqtt ยังไม่รองรับใน build นี้ — จะไม่มี reading เข้ามาอัตโนมัติ',
+        fix: 'เปลี่ยนเป็น manual และกรอกค่ามิเตอร์จากหน้า "มิเตอร์"',
       });
     }
     if (features.recurringCharges?.enabled && !features.billAutoGenerate?.enabled) {
@@ -322,7 +329,7 @@ function PageFeatures({ setToast }) {
           desc="บันทึกค่าน้ำ/ไฟ + ตรวจจับความผิดปกติ (3σ)">
           <SelectField id="meterIot" field="mode" label="โหมด"
             features={features} setField={setField}
-            options={[['manual', 'กรอกเอง'], ['simulator', 'จำลอง'], ['mqtt', 'MQTT (ต้อง broker)']]} />
+            options={[['manual', 'กรอกเอง'], ['simulator', 'จำลอง'], ['mqtt', 'MQTT (ยังไม่รองรับ)', true]]} />
           <Field id="meterIot" field="anomalySigmas" label="เกณฑ์ σ" type="number" step="0.5" />
         </Row>
         <Row id="accessControl"
@@ -435,7 +442,7 @@ function SelectField({ id, field, label, options, features, setField }) {
           marginTop: 4, padding: '6px 10px', borderRadius: 6,
           border: '1px solid ' + C.border, background: C.bg, color: C.ink, fontSize: 13,
         }}>
-        {options.map(([val, lab]) => <option key={val} value={val}>{lab}</option>)}
+        {options.map(([val, lab, disabled]) => <option key={val} value={val} disabled={!!disabled}>{lab}</option>)}
       </select>
     </label>
   );
