@@ -751,6 +751,11 @@ async function migrate(pool, opts = {}) {
     -- ON DELETE SET NULL keeps the contract row even if the template is
     -- removed — the rendered PDF will fall back to defaults at print time.
     ALTER TABLE contracts ADD COLUMN IF NOT EXISTS template_id BIGINT REFERENCES contract_templates(id) ON DELETE SET NULL;
+    -- Immutable terms snapshot captured when the tenant-filled contract is
+    -- approved. PDF rendering for locked contracts reads this JSONB copy so
+    -- later edits to template rows or the default template do not rewrite the
+    -- legal text of an already accepted contract.
+    ALTER TABLE contracts ADD COLUMN IF NOT EXISTS terms_template_snapshot JSONB;
 
     -- Contract immutability flag. Set when admin approves the tenant's
     -- self-fill submission OR explicitly locks via the contract editor.

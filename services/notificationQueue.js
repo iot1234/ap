@@ -57,6 +57,7 @@ async function dispatch(pool, features, row) {
   const channel = row.channel;
   if (channel === 'line') {
     if (!row.recipient) throw new Error('LINE recipient missing');
+    if (!lineNotify.isLikelyUserId(row.recipient)) throw new Error('invalid LINE recipient');
     // Multi-OA aware: payload.oaId picks which OA to push through.
     // Falls back to the default OA when payload doesn't carry one (e.g.
     // owner-channel notifications) or when no DB OA is registered yet

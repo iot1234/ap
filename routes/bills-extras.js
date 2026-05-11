@@ -13,6 +13,7 @@ const features = require('../services/features');
 const notifier = require('../services/notifier');
 const notifQueue = require('../services/notificationQueue');
 const promptpay = require('../services/promptpay');
+const lineNotify = require('../services/line');
 // queryWithRetry retries serialization/deadlock errors (40001, 40P01, 57P03,
 // 53300). bulk-generate inserts ~30+ bills in a tight loop — most likely
 // path to hit a deadlock against the scheduler's auto-gen running parallel.
@@ -255,7 +256,8 @@ module.exports = function buildBillsExtrasRouter(ctx) {
     const subject = `บิลรอบ ${b.period} — ห้อง ${b.room_id}`;
     const body = `บิลใหม่\nผู้เช่า: ${b.tenant_name || '-'}\nห้อง: ${b.room_id}\nรอบ: ${b.period}\nยอด: ฿${Number(b.total).toLocaleString('th-TH', { minimumFractionDigits: 2 })}\nกำหนดชำระ: ${b.due_date}`;
     const enqueued = [];
-    if (!b.line_user_id && !b.email) {
+    const hasLine = lineNotify.isLikelyUserId(b.line_user_id);
+    if (!hasLine && !b.email) {
       const flags = await features.load(pool);
       const owner = await notifier.notifyOwner({ pool, features: flags }, {
         subject: 'Bill send skipped: no tenant channel',
@@ -275,7 +277,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         ownerNotified: !!(owner.ok || owner.queued),
       };
     }
-    if (b.line_user_id) {
+    if (hasLine) {
       // Carry the tenant's bound OA in the payload so the queue worker
       // pushes through the right channel (multi-OA tenants see different
       // userIds per OA).
@@ -286,7 +288,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       enqueued.push({ channel: 'line', id: qid });
     } else if (!b.email) {
       const lineOwner = require('../services/secrets').get('LINE_OWNER_USER_ID');
-      if (lineOwner) {
+      if (lineNotify.isLikelyUserId(lineOwner)) {
         // Owner channel — falls back to default OA via getDefault().
         const qid = await notifQueue.enqueue(pool, {
           channel: 'line', recipient: lineOwner, subject, body,

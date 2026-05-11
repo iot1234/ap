@@ -28,6 +28,7 @@ function getQueue() {
 async function pushLineToTenant(pool, tenant, text) {
   const lineId = tenant.line_user_id || tenant.lineUserId || null;
   if (!lineId) return { ok: false, reason: 'no_line_id' };
+  if (!lineNotify.isLikelyUserId(lineId)) return { ok: false, reason: 'invalid_line_id' };
   const oaId = tenant.line_oa_id != null ? tenant.line_oa_id : null;
   let oa;
   try {
@@ -78,7 +79,18 @@ async function notifyOwner(ctx, msg) {
   let oaForOwner = null;
   try { oaForOwner = await lineOa.getDefault(pool, { withSecrets: true }); }
   catch { /* env OA still works below */ }
-  const lineOwner = (oaForOwner && oaForOwner.ownerUserId) || secrets.get('LINE_OWNER_USER_ID');
+  const rawLineOwner = (oaForOwner && oaForOwner.ownerUserId) || secrets.get('LINE_OWNER_USER_ID');
+  const lineOwner = lineNotify.isLikelyUserId(rawLineOwner) ? String(rawLineOwner).trim() : null;
+  if (rawLineOwner && !lineOwner) {
+    await logResult(pool, {
+      channel: 'line',
+      recipient: String(rawLineOwner).slice(0, 200),
+      subject,
+      body: text,
+      status: 'skipped',
+      error: 'invalid owner LINE userId shape',
+    });
+  }
   if (oaForOwner && oaForOwner.channelAccessToken && lineOwner) {
     const ok = await lineNotify.pushText(oaForOwner, lineOwner, text);
     await logResult(pool, {
@@ -160,9 +172,17 @@ async function notifyTenant(ctx, tenant, msg) {
   // Accept both DB shape (snake_case from `tenants` table) and the legacy
   // rooms.tenant blob shape (camelCase). Earlier versions only matched
   // snake_case, so callers reading from rooms.tenant got nothing dispatched.
-  const lineId = tenant.line_user_id || tenant.lineUserId || null;
+  const rawLineId = tenant.line_user_id || tenant.lineUserId || null;
+  const lineId = lineNotify.isLikelyUserId(rawLineId) ? String(rawLineId).trim() : null;
   const phone = tenant.phone || null;
   const mail = tenant.email || null;
+  if (rawLineId && !lineId) {
+    await logResult(pool, {
+      channel: 'line', recipient: String(rawLineId).slice(0, 200),
+      subject, body: text, status: 'skipped',
+      error: 'invalid LINE userId shape',
+    });
+  }
 
   // Don't push to ex-tenants. The "moved_out" / "blacklist" / soft-deleted
   // states all silence delivery. This is the user-facing safety mentioned in

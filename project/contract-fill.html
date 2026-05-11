@@ -264,13 +264,13 @@ function App() {
   const goNext = () => setStep((s) => Math.min(4, s + 1));
   const goBack = () => setStep((s) => Math.max(1, s - 1));
 
-  const submit = async () => {
+  const submit = async (draftOverride = null) => {
     setBusy(true);
     setError(null);
     setErrorCode(null);
     try {
       const result = await api(`/api/contract-fill/${tokenFromUrl}/submit`, {
-        method: 'POST', body: draft,
+        method: 'POST', body: draftOverride || draft,
       });
       // Idempotent: server returns ok:true even on already-submitted.
       // Either way the data is captured — show SubmittedView.
@@ -604,7 +604,7 @@ function Step4Sign({ draft, setField, token, view, busy, onBack, onSubmit, onErr
 
   const submitWithSignature = async () => {
     let sigId = draft.signatureFileId;
-    if (hasInk && !sigId) {
+    if (hasInk) {
       sigId = await saveSignature();
       if (!sigId) return;
     }
@@ -616,7 +616,11 @@ function Step4Sign({ draft, setField, token, view, busy, onBack, onSubmit, onErr
       onError('กรุณาเซ็นชื่อก่อน');
       return;
     }
-    onSubmit();
+    onSubmit({
+      ...draft,
+      signatureFileId: sigId,
+      agreedTermsVersion: draft.agreedTermsVersion || 'tenant-fill-v1',
+    });
   };
 
   return (
@@ -656,7 +660,7 @@ function Step4Sign({ draft, setField, token, view, busy, onBack, onSubmit, onErr
       <div style={{ display: 'flex', gap: 8, marginTop: 20 }}>
         <button className="btn btn-ghost" onClick={onBack} disabled={busy}>← ย้อนกลับ</button>
         <button className="btn btn-primary" style={{ flex: 1 }}
-          disabled={busy || !hasInk || !agreed}
+          disabled={busy || (!hasInk && !draft.signatureFileId) || !agreed}
           onClick={submitWithSignature}>
           {busy ? 'กำลังส่ง...' : 'ส่งให้ตรวจสอบ ✓'}
         </button>

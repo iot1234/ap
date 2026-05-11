@@ -56,6 +56,11 @@ function sanitiseToken(raw) {
   return cleaned;
 }
 
+function isLikelyUserId(value) {
+  const v = String(value || '').trim();
+  return /^U[0-9A-Za-z_-]{20,80}$/.test(v);
+}
+
 // --- HTTP helpers ---------------------------------------------------------
 function postJson(oa, pathname, body) {
   return new Promise((resolve, reject) => {
@@ -112,6 +117,7 @@ async function pushText(...args) {
   const [userId, text] = rest;
   const resolved = _resolveOa(oa);
   if (!resolved || !userId || !text) return false;
+  if (!isLikelyUserId(userId)) return false;
   try {
     await postJson(resolved, '/v2/bot/message/push', {
       to: userId,
@@ -170,6 +176,6 @@ function verifyWebhookSignature(...args) {
 }
 
 module.exports = {
-  isConfigured, pushText, replyText, verifyWebhookSignature,
+  isConfigured, pushText, replyText, verifyWebhookSignature, isLikelyUserId,
   _resolveOa, // exported for tests
 };

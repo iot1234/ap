@@ -19,6 +19,7 @@ const features = require('./features');
 const billing = require('./billing');
 const promptpay = require('./promptpay');
 const notifier = require('./notifier');
+const lineNotify = require('./line');
 const meter = require('./meter');
 
 const TICK_MS = 60 * 60 * 1000;          // hourly
@@ -354,7 +355,7 @@ async function tickBillGen(pool, flags, now, state) {
             ``,
             `ดูรายละเอียด + ชำระผ่าน QR ที่พอร์ทัล /tenant`,
           ].join('\n');
-          if (t.line_user_id) {
+          if (lineNotify.isLikelyUserId(t.line_user_id)) {
             await notifQueue.enqueue(pool, {
               channel: 'line', recipient: t.line_user_id, subject, body,
               payload: { oaId: t.line_oa_id || null, billId: b.id },
