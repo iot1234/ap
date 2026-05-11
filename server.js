@@ -1068,6 +1068,81 @@ app.post('/api/notify/bill', sameOrigin, csrfGuard, requireAuth, requireRole('ow
   }
 });
 
+// POST /api/tenants/notify - one-off admin message to the current tenant.
+// The tenants drawer used to show a fake "sent LINE" toast without calling
+// the backend. Resolve the active tenant by phone+room, use the unified
+// notifier (LINE/email/SMS + queue fallback), and surface no-channel cases.
+app.post('/api/tenants/notify', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager', 'staff'), async (req, res) => {
+  const b = req.body || {};
+  const phone = String(b.phone || '').replace(/[\s-]/g, '').slice(0, 32);
+  const roomId = String(b.roomId || '').slice(0, 32).trim();
+  const message = String(b.message || '').trim().slice(0, 1000);
+  if (!message || message.length < 2) {
+    return res.status(400).json({ error: 'message required', code: 'MESSAGE_REQUIRED' });
+  }
+  if (!phone && !roomId) {
+    return res.status(400).json({ error: 'phone or roomId required', code: 'TENANT_TARGET_REQUIRED' });
+  }
+  try {
+    const params = [];
+    const where = [`deleted_at IS NULL`, `status='active'`];
+    if (phone) { params.push(phone); where.push(`phone=$${params.length}`); }
+    if (roomId) { params.push(roomId); where.push(`current_room_id=$${params.length}`); }
+    const { rows } = await pool.query(
+      `SELECT id, full_name, phone, email, line_user_id, line_oa_id,
+              current_room_id, status
+         FROM tenants
+        WHERE ${where.join(' AND ')}
+        ORDER BY updated_at DESC
+        LIMIT 1`,
+      params
+    );
+    if (!rows.length) {
+      return res.status(404).json({
+        error: 'active tenant not found for this room/phone',
+        code: 'TENANT_NOT_FOUND',
+      });
+    }
+    const tenant = rows[0];
+    const flags = await features.load(pool);
+    const subject = String(b.subject || 'ข้อความจากหอพัก').slice(0, 200);
+    const text = [
+      subject,
+      `ผู้เช่า: ${tenant.full_name || '-'}`,
+      tenant.current_room_id ? `ห้อง: ${tenant.current_room_id}` : null,
+      '',
+      message,
+    ].filter((x) => x !== null).join('\n');
+    const out = await notifier.notifyTenant({ pool, features: flags }, tenant, {
+      subject,
+      text,
+    });
+    audit(req, 'tenant.notify', 'tenant', String(tenant.id), {
+      roomId: tenant.current_room_id,
+      channel: out.channel,
+      ok: out.ok,
+      queued: !!out.queued,
+    });
+    if (!out.ok && !out.queued) {
+      return res.status(409).json({
+        error: 'tenant has no reachable notification channel',
+        code: 'NO_TENANT_CHANNEL',
+        channel: out.channel,
+        reason: out.reason || null,
+      });
+    }
+    return res.json({
+      ok: true,
+      tenantId: tenant.id,
+      channel: out.channel,
+      queued: !!out.queued,
+    });
+  } catch (err) {
+    console.error('tenant notify error:', err.message);
+    return res.status(500).json({ error: 'internal error' });
+  }
+});
+
 // --- Bills: PDF rendering + PromptPay QR ----------------------------------
 // PDFKit + QR encoding are both CPU-bound. On a single Railway replica,
 // concurrent requests block the event loop and downstream requests time out.
@@ -2345,10 +2420,28 @@ app.post('/api/tenants', sameOrigin, csrfGuard, requireAuth, requireRole('owner'
       code: 'INVALID_EMERGENCY_PHONE',
     });
   }
-  try {
-    let rows;
+  const requestedRoomId = str(b.roomId, 32).trim() || null;
+  const tenantStatus = requestedRoomId
+    ? 'active'
+    : (VALID_TENANT_STATUS.has(b.status) ? b.status : 'active');
+  const roomLockKey = (roomId) => {
+    let h = 0x811c9dc5;
+    const s = String(roomId || '');
+    for (let j = 0; j < s.length; j++) {
+      h ^= s.charCodeAt(j);
+      h = Math.imul(h, 0x01000193);
+    }
+    return (h >>> 0) & 0x7fffffff;
+  };
+  const httpErr = (status, code, error, extra = {}) =>
+    Object.assign(new Error(error), { httpStatus: status, publicCode: code, publicError: error, extra });
+
+  async function insertTenantRow(db, useSavepoint = false) {
+    if (useSavepoint) {
+      await db.query('SAVEPOINT tenant_insert_schema');
+    }
     try {
-      ({ rows } = await pool.query(
+      const { rows } = await db.query(
         `INSERT INTO tenants
           (full_name, phone, citizen_id_encrypted, citizen_id_tail, citizen_id_hash,
            email, line_user_id, pin_hash, current_room_id, status, notes, locale,
@@ -2360,24 +2453,28 @@ app.post('/api/tenants', sameOrigin, csrfGuard, requireAuth, requireRole('owner'
           str(b.email, 200) || null,
           str(b.lineUserId, 64) || null,
           pinHash,
-          str(b.roomId, 32) || null,
-          VALID_TENANT_STATUS.has(b.status) ? b.status : 'active',
+          requestedRoomId,
+          tenantStatus,
           str(b.notes, 1000) || null,
           ['th', 'en'].includes(b.locale) ? b.locale : 'th',
           address, ecName, ecPhoneNorm, ecRel,
         ]
-      ));
+      );
+      if (useSavepoint) {
+        await db.query('RELEASE SAVEPOINT tenant_insert_schema');
+      }
+      return rows;
     } catch (err) {
-      // 23505 from the partial unique on citizen_id_hash → race lost.
       if (err.code === '23505' && err.constraint === 'uq_tenants_citizen_id_hash_active') {
-        return res.status(409).json({
-          error: 'เลขบัตรนี้ผูกกับผู้เช่ารายอื่นแล้ว (race)',
-          code: 'CITIZEN_ID_DUPLICATE',
-        });
+        throw httpErr(409, 'CITIZEN_ID_DUPLICATE',
+          'เลขบัตรนี้ผูกกับผู้เช่ารายอื่นแล้ว (race)');
       }
       // Older deploys without the new columns fall back to the legacy INSERT.
       if (err.code === '42703') {
-        ({ rows } = await pool.query(
+        if (useSavepoint) {
+          await db.query('ROLLBACK TO SAVEPOINT tenant_insert_schema');
+        }
+        const { rows } = await db.query(
           `INSERT INTO tenants
             (full_name, phone, citizen_id_encrypted, citizen_id_tail, email, line_user_id,
              pin_hash, current_room_id, status, notes, locale)
@@ -2388,15 +2485,134 @@ app.post('/api/tenants', sameOrigin, csrfGuard, requireAuth, requireRole('owner'
             str(b.email, 200) || null,
             str(b.lineUserId, 64) || null,
             pinHash,
-            str(b.roomId, 32) || null,
-            VALID_TENANT_STATUS.has(b.status) ? b.status : 'active',
+            requestedRoomId,
+            tenantStatus,
             str(b.notes, 1000) || null,
             ['th', 'en'].includes(b.locale) ? b.locale : 'th',
           ]
-        ));
-      } else {
-        throw err;
+        );
+        if (useSavepoint) {
+          await db.query('RELEASE SAVEPOINT tenant_insert_schema');
+        }
+        return rows;
       }
+      throw err;
+    }
+  }
+
+  async function claimRoomForTenant(client, roomId, tenantRow) {
+    await client.query(
+      'SELECT pg_advisory_xact_lock($1::int, $2::int)',
+      [0x54454e54, roomLockKey(roomId)] // "TENT": tenant assignment namespace
+    );
+
+    const occupants = await client.query(
+      `SELECT id, full_name FROM tenants
+         WHERE current_room_id=$1 AND status='active' AND deleted_at IS NULL
+           AND id <> $2
+         LIMIT 1
+         FOR UPDATE`,
+      [roomId, tenantRow.id]
+    );
+    if (occupants.rows.length) {
+      throw httpErr(409, 'ROOM_OCCUPIED',
+        `ห้อง ${roomId} มีผู้เช่ารายอื่นอยู่แล้ว`,
+        { occupant: occupants.rows[0], roomId });
+    }
+
+    await client.query(
+      `INSERT INTO app_data (key, value, updated_by)
+       VALUES ('baankarn_rooms_v1', '{}'::jsonb, 'system')
+       ON CONFLICT (key) DO NOTHING`
+    );
+    const roomBlob = await client.query(
+      `SELECT value FROM app_data WHERE key='baankarn_rooms_v1' FOR UPDATE`
+    );
+    const roomsObj = roomBlob.rows[0]?.value && typeof roomBlob.rows[0].value === 'object'
+      ? roomBlob.rows[0].value
+      : {};
+    const blobRoom = roomsObj[roomId] || null;
+    let roomV2 = null;
+    try {
+      const v2 = await client.query(
+        `SELECT room_code, status FROM rooms_v2
+           WHERE room_code=$1 AND deleted_at IS NULL
+           FOR UPDATE`,
+        [roomId]
+      );
+      roomV2 = v2.rows[0] || null;
+    } catch (err) {
+      if (err.code !== '42P01') throw err;
+    }
+
+    if (!blobRoom && !roomV2) {
+      throw httpErr(404, 'ROOM_NOT_FOUND',
+        `ไม่พบห้อง ${roomId} ในระบบ`, { roomId });
+    }
+    const blockingStatus = [blobRoom?.status, roomV2?.status]
+      .filter(Boolean)
+      .find((s) => s !== 'vacant');
+    if (blockingStatus) {
+      throw httpErr(409,
+        blockingStatus === 'occupied' ? 'ROOM_OCCUPIED' : 'ROOM_UNAVAILABLE',
+        `ห้อง ${roomId} ไม่พร้อมใช้งาน (${blockingStatus})`,
+        { roomId, currentStatus: blockingStatus });
+    }
+
+    const today = new Date().toISOString().slice(0, 10);
+    const blobTenant = {
+      name: tenantRow.full_name || fullName,
+      phone: tenantRow.phone || phone,
+      email: tenantRow.email || '',
+      occupation: str(b.occupation, 200) || '',
+      score: 'A',
+      tenantId: tenantRow.id,
+      since: today,
+    };
+    await client.query(
+      `UPDATE app_data
+          SET value = value || jsonb_build_object(
+                        $1::text,
+                        COALESCE(value->$1, '{}'::jsonb)
+                          || jsonb_build_object(
+                               'id', $1,
+                               'status', 'occupied',
+                               'tenant', $2::jsonb,
+                               'since', $3::text
+                             )
+                      ),
+              updated_at=NOW(),
+              updated_by=$4
+        WHERE key='baankarn_rooms_v1'`,
+      [roomId, JSON.stringify(blobTenant), today, req.session.user.username]
+    );
+    try {
+      await client.query(
+        `UPDATE rooms_v2 SET status='occupied', updated_at=NOW()
+           WHERE room_code=$1 AND deleted_at IS NULL`,
+        [roomId]
+      );
+    } catch (err) {
+      if (err.code !== '42P01') throw err;
+    }
+  }
+  try {
+    let rows;
+    if (requestedRoomId) {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        rows = await insertTenantRow(client, true);
+        await claimRoomForTenant(client, requestedRoomId, rows[0]);
+        await client.query('COMMIT');
+      } catch (err) {
+        await client.query('ROLLBACK').catch(() => {});
+        throw err;
+      } finally {
+        client.release();
+      }
+    } else {
+      rows = await insertTenantRow(pool);
     }
     // Optional: carry over the citizen ID photo from a public booking the
     // applicant submitted earlier. Without this hand-off the photo would
@@ -2462,6 +2678,13 @@ app.post('/api/tenants', sameOrigin, csrfGuard, requireAuth, requireRole('owner'
         ? `POST /api/tenants/${rows[0].id}/identity` : null,
     });
   } catch (err) {
+    if (err && err.httpStatus) {
+      return res.status(err.httpStatus).json({
+        error: err.publicError || err.message,
+        code: err.publicCode || 'TENANT_CREATE_FAILED',
+        ...(err.extra || {}),
+      });
+    }
     console.error('tenant create error:', err);
     res.status(500).json({ error: 'internal error' });
   }
@@ -5546,7 +5769,12 @@ app.put('/api/bookings/:id', sameOrigin, csrfGuard, requireAuth, requireRole('ow
         }
       } catch { /* ignore */ }
     }
-    res.json({ ok: true, booking: updated });
+    res.json({
+      ok: true,
+      booking: updated,
+      releasedRoomId,
+      room: releasedRoomId && roomsAfterRelease ? roomsAfterRelease[releasedRoomId] : null,
+    });
   } catch (err) {
     if (!txCommitted) {
       await client.query('ROLLBACK').catch(() => {});

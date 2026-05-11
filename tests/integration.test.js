@@ -479,6 +479,32 @@ test('/api/notify/bill resolves the tenant instead of notifying only the owner',
     'legacy bill notify must fail clearly when no tenant channel exists');
 });
 
+test('tenant drawer send-message button calls real tenant notify endpoint', () => {
+  // Regression: the button used to show "sent via LINE" without touching the
+  // backend. It must prompt for a message and POST to a server route that
+  // resolves the active tenant and dispatches via notifier.notifyTenant.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const route = server.match(/app\.post\('\/api\/tenants\/notify'[\s\S]+?\/\/ --- Bills:/)[0];
+  assert.match(route, /requireRole\('owner', 'manager', 'staff'\)/,
+    'tenant message endpoint must be role-gated');
+  assert.match(route, /status='active'/,
+    'endpoint must only target active tenants');
+  assert.match(route, /notifier\.notifyTenant\(\{ pool, features: flags \}, tenant/,
+    'endpoint must dispatch through the unified tenant notifier');
+  assert.match(route, /NO_TENANT_CHANNEL/,
+    'endpoint must surface no-channel failures instead of pretending success');
+
+  const ui = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-tenants.jsx'), 'utf8');
+  assert.match(ui, /window\.prompt\(`ส่งข้อความถึง \$\{t\.name\}/,
+    'UI must collect an actual message');
+  assert.match(ui, /apiFetch\('\/api\/tenants\/notify'/,
+    'UI button must POST to the real notify endpoint');
+  assert.doesNotMatch(ui, /ส่งข้อความถึง \$\{active\.name\} ทาง LINE แล้ว/,
+    'UI must not show the old fake LINE-sent toast');
+});
+
 test('/api/bills/:id/send fails closed when tenant has no reachable channel', () => {
   const fs = require('node:fs');
   const path = require('node:path');
@@ -2073,6 +2099,28 @@ test('BOOKING_STATUSES + BOOKING_TRANSITIONS include "completed" terminal state'
     'completed must still allow → cancelled (tenant backs out)');
 });
 
+test('bookings admin UI handles terminal statuses and uses valid reopen/cancel transitions', () => {
+  // Completed/cancelled bookings can appear in the "all" tab after contract
+  // handoff or no-show cancellation. The UI must render them safely and must
+  // not call backend-forbidden transitions such as approved → pending or
+  // rejected → pending.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-bookings.jsx'), 'utf8');
+  assert.match(src, /completed:\s*\{\s*label:[\s\S]{0,80}color: 'neutral'/,
+    'completed must have a status pill');
+  assert.match(src, /cancelled:\s*\{\s*label:[\s\S]{0,80}color: 'neutral'/,
+    'cancelled must have a status pill');
+  assert.match(src, /const meta = statusMap\[b\.status\] \|\|/,
+    'unknown/legacy booking statuses must not crash the table or drawer');
+  assert.match(src, /active\.status === 'approved'[\s\S]{0,260}updateStatus\(active\.id, 'cancelled'\)/,
+    'approved booking button must cancel/release, not return to pending');
+  assert.doesNotMatch(src, /active\.status === 'approved'[\s\S]{0,260}updateStatus\(active\.id, 'pending'\)/,
+    'approved → pending is forbidden by the backend state machine');
+  assert.match(src, /active\.status === 'rejected'[\s\S]{0,260}updateStatus\(active\.id, 'reviewing'\)/,
+    'rejected booking reopen must go through reviewing');
+});
+
 test('quick-invite refuses blacklisted tenant without force=true', () => {
   // Pre-fix: quick-invite silently flipped a blacklist tenant back to
   // 'active'. A hijacked admin session could re-onboard banned tenants
@@ -2678,6 +2726,33 @@ test('citizen-ID dedup pre-flight checks tail when hash is NULL', () => {
   // gated on citizenHash existing.
   assert.match(src, /if \(citizenIdNorm && b\.force !== true\)/,
     'dedup precondition must be on the normalised id, not the hash');
+});
+
+test('tenant create with room atomically claims room in tenants + room stores', () => {
+  // The tenants page can create a tenant and pick a room in one modal. That
+  // must not leave tenants.current_room_id set while rooms_v2 / the legacy
+  // rooms blob still say the room is vacant, or booking/contract flows can
+  // double-assign the room after reload.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const block = src.match(/app\.post\('\/api\/tenants'[\s\S]+?app\.put\('\/api\/tenants\/:id'/)[0];
+  assert.match(block, /pg_advisory_xact_lock\(\$1::int, \$2::int\)/,
+    'room assignment must be serialized per room');
+  assert.match(block,
+    /SELECT id, full_name FROM tenants[\s\S]{0,350}current_room_id=\$1[\s\S]{0,200}FOR UPDATE/,
+    'must lock and reject existing active occupants');
+  assert.match(block, /ROOM_OCCUPIED/,
+    'must return a clear occupied-room code');
+  assert.match(block, /SELECT value FROM app_data WHERE key='baankarn_rooms_v1' FOR UPDATE/,
+    'legacy room blob must be locked before writing room.tenant');
+  assert.match(block,
+    /value = value \|\| jsonb_build_object\([\s\S]{0,450}'status', 'occupied'[\s\S]{0,220}'tenant', \$2::jsonb/,
+    'legacy room blob must get status=occupied + tenant details');
+  assert.match(block, /UPDATE rooms_v2 SET status='occupied', updated_at=NOW\(\)/,
+    'rooms_v2 must be flipped to occupied too');
+  assert.match(block, /requestedRoomId[\s\S]{0,100}tenantStatus[\s\S]{0,120}'active'/,
+    'assigning a room must force the tenant row to active');
 });
 
 test('booking photo carryover only catches schema-missing errors silently', () => {

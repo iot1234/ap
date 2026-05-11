@@ -25,42 +25,56 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
     reviewing: bookings.filter(b => b.status === 'reviewing').length,
     approved:  bookings.filter(b => b.status === 'approved').length,
     rejected:  bookings.filter(b => b.status === 'rejected').length,
+    completed: bookings.filter(b => b.status === 'completed').length,
+    cancelled: bookings.filter(b => b.status === 'cancelled').length,
   }), [bookings]);
 
   const active = activeId ? bookings.find(b => b.id === activeId) : null;
 
-  // updateStatus is the canonical state-change hook. It still writes to the
-  // local bookings list (api-client mirrors this into baankarn_bookings_v1),
-  // and ALSO fires PUT /api/bookings/:id which on the server side enforces
-  // the transition guard, audits the change, and pushes notifications to
-  // owner + tenant. Fail-soft: a server outage doesn't block the UI from
-  // reflecting the action — local state still updates and the api-client's
-  // /api/data sync persists eventually.
+  // updateStatus is the canonical state-change hook. The server enforces
+  // transitions, audits, notifies owner/tenant, and releases reserved rooms
+  // on cancellation. If the server rejects the change, the optimistic row is
+  // reverted so the UI cannot show a phantom status.
   const updateStatus = async (id, status, extra = {}) => {
-    // Snapshot the prior state so we can revert if the server rejects the
-    // transition (e.g. trying to approve→reviewing — server returns 400 with
-    // an `allowed` list). Admin sees a toast instead of a phantom approval.
     const before = bookings.find((b) => b.id === id);
     setBookings(prev => prev.map(b => b.id === id ? { ...b, status, ...extra } : b));
     try {
-      const f = window.apiFetch || fetch;
-      const r = await f(`/api/bookings/${encodeURIComponent(id)}`, {
-        method: 'PUT',
-        body: JSON.stringify({ status, ...extra }),
-      });
-      if (r && r.ok === false || (r && r.status >= 400)) {
-        const j = await r.json().catch(() => ({}));
-        if (before) {
-          setBookings(prev => prev.map(b => b.id === id ? before : b));
-        }
-        setToast && setToast({
-          kind: 'error',
-          message: j.error || `เปลี่ยนสถานะไม่สำเร็จ (HTTP ${r.status})`,
+      let out = null;
+      if (window.apiCall) {
+        out = await window.apiCall(`/api/bookings/${encodeURIComponent(id)}`, {
+          method: 'PUT',
+          body: JSON.stringify({ status, ...extra }),
         });
+      } else {
+        const r = await fetch(`/api/bookings/${encodeURIComponent(id)}`, {
+          method: 'PUT',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status, ...extra }),
+        });
+        out = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          const err = new Error(out.error || `HTTP ${r.status}`);
+          err.status = r.status;
+          err.body = out;
+          throw err;
+        }
       }
+      if (out && out.booking) {
+        setBookings(prev => prev.map(b => b.id === id ? out.booking : b));
+      }
+      if (out && out.releasedRoomId && out.room && setRooms) {
+        setRooms(prev => ({ ...prev, [out.releasedRoomId]: out.room }));
+      }
+      return true;
     } catch (e) {
-      // Network failure → keep optimistic update; api-client.js will sync
-      // the bookings blob via /api/data once the connection is back.
+      if (before) {
+        setBookings(prev => prev.map(b => b.id === id ? before : b));
+      }
+      window.toastError
+        ? window.toastError(setToast, e, { action: `เปลี่ยนสถานะการจอง ${id}` })
+        : setToast && setToast({ kind: 'danger', message: e.message || 'เปลี่ยนสถานะการจองไม่สำเร็จ' });
+      return false;
     }
   };
 
@@ -148,8 +162,9 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
     });
     setActiveId(null); setConfirmAction(null);
   };
-  const handleReject = (id) => {
-    updateStatus(id, 'rejected');
+  const handleReject = async (id) => {
+    const ok = await updateStatus(id, 'rejected');
+    if (!ok) return;
     addActivity && addActivity({ icon: '❌', text: `ปฏิเสธการจอง ${id}`, type: 'booking' });
     setToast && setToast({ kind: 'info', message: 'ปฏิเสธการจองแล้ว' });
     setActiveId(null); setConfirmAction(null);
@@ -160,6 +175,8 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
     reviewing: { label: 'กำลังตรวจ', color: 'info' },
     approved:  { label: 'อนุมัติแล้ว', color: 'success' },
     rejected:  { label: 'ปฏิเสธ',     color: 'danger' },
+    completed: { label: 'เสร็จสิ้น',   color: 'neutral' },
+    cancelled: { label: 'ยกเลิก',     color: 'neutral' },
   };
 
   const columns = [
@@ -217,7 +234,10 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
     },
     {
       key: 'status', label: 'สถานะ', minWidth: 110,
-      render: b => <Pill color={statusMap[b.status].color} size="sm">{statusMap[b.status].label}</Pill>,
+      render: b => {
+        const meta = statusMap[b.status] || { label: b.status || 'unknown', color: 'neutral' };
+        return <Pill color={meta.color} size="sm">{meta.label}</Pill>;
+      },
     },
   ];
 
@@ -240,6 +260,8 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
           { value: 'reviewing', label: 'กำลังตรวจ', count: counts.reviewing },
           { value: 'approved',  label: 'อนุมัติแล้ว', count: counts.approved },
           { value: 'rejected',  label: 'ปฏิเสธ',     count: counts.rejected },
+          { value: 'completed', label: 'เสร็จสิ้น',  count: counts.completed },
+          { value: 'cancelled', label: 'ยกเลิก',     count: counts.cancelled },
           { value: 'all',       label: 'ทั้งหมด',    count: bookings.length },
         ]}
         value={tab}
@@ -265,9 +287,10 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
             <Btn variant="ghost" onClick={() => setActiveId(null)}>ปิด</Btn>
             {(active.status === 'pending' || active.status === 'reviewing') && (
               <>
-                <Btn variant="secondary" icon="🔍" onClick={() => {
+                <Btn variant="secondary" icon="🔍" onClick={async () => {
                   if (active.status === 'pending') {
-                    updateStatus(active.id, 'reviewing');
+                    const ok = await updateStatus(active.id, 'reviewing');
+                    if (!ok) return;
                     addActivity && addActivity({ icon: '🔍', text: `เริ่มตรวจสอบการจอง ${active.id}`, type: 'booking' });
                     setToast && setToast({ kind: 'info', message: 'เปลี่ยนเป็นกำลังตรวจสอบ' });
                   }
@@ -283,17 +306,20 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
               </>
             )}
             {active.status === 'approved' && (
-              <Btn variant="ghost" onClick={() => {
-                updateStatus(active.id, 'pending');
+              <Btn variant="ghost" onClick={async () => {
+                const ok = await updateStatus(active.id, 'cancelled');
+                if (!ok) return;
                 addActivity && addActivity({ icon: '↺', text: `ยกเลิกอนุมัติการจอง ${active.id}`, type: 'booking' });
-                setToast && setToast({ kind: 'info', message: 'ย้อนกลับเป็นรอตรวจสอบ' });
-              }}>↺ ย้อนกลับ</Btn>
+                setToast && setToast({ kind: 'info', message: 'ยกเลิกการจองและปล่อยห้องแล้ว' });
+                setActiveId(null);
+              }}>ยกเลิก/ปล่อยห้อง</Btn>
             )}
             {active.status === 'rejected' && (
-              <Btn variant="ghost" onClick={() => {
-                updateStatus(active.id, 'pending');
+              <Btn variant="ghost" onClick={async () => {
+                const ok = await updateStatus(active.id, 'reviewing');
+                if (!ok) return;
                 addActivity && addActivity({ icon: '↺', text: `ทบทวนการจอง ${active.id}`, type: 'booking' });
-                setToast && setToast({ kind: 'info', message: 'ย้อนกลับเป็นรอตรวจสอบ' });
+                setToast && setToast({ kind: 'info', message: 'ส่งกลับไปตรวจสอบใหม่แล้ว' });
               }}>↺ ทบทวนใหม่</Btn>
             )}
           </>
@@ -380,7 +406,10 @@ function BookingDetail({ b }) {
     reviewing: { label: 'กำลังตรวจ', color: 'info' },
     approved:  { label: 'อนุมัติแล้ว', color: 'success' },
     rejected:  { label: 'ปฏิเสธ',     color: 'danger' },
+    completed: { label: 'เสร็จสิ้น',   color: 'neutral' },
+    cancelled: { label: 'ยกเลิก',     color: 'neutral' },
   };
+  const meta = statusMap[b.status] || { label: b.status || 'unknown', color: 'neutral' };
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
@@ -391,7 +420,7 @@ function BookingDetail({ b }) {
             <div style={{ fontSize: 15, fontWeight: 600, color: C.ink }}>{b.name}</div>
             <div style={{ fontSize: 12.5, color: C.muted }}>{b.phone}</div>
           </div>
-          <Pill color={statusMap[b.status].color}>{statusMap[b.status].label}</Pill>
+          <Pill color={meta.color}>{meta.label}</Pill>
         </div>
       </Card>
 

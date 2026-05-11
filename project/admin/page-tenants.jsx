@@ -60,6 +60,45 @@ function PageTenants({ rooms, setRooms, addActivity, setToast }) {
 
   const active = activeId ? tenants.find(t => t.roomId === activeId) : null;
 
+  async function sendTenantMessage(t) {
+    if (!t) return;
+    const message = (window.prompt(`ส่งข้อความถึง ${t.name} (ห้อง ${t.roomId})`, '') || '').trim();
+    if (!message) return;
+    try {
+      const r = await apiFetch('/api/tenants/notify', {
+        method: 'POST',
+        body: JSON.stringify({
+          roomId: t.roomId,
+          phone: t.phone,
+          subject: 'ข้อความจากหอพัก',
+          message,
+        }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        const err = new Error(d.error || `HTTP ${r.status}`);
+        err.status = r.status;
+        err.body = d;
+        throw err;
+      }
+      setToast && setToast({
+        kind: d.queued ? 'warning' : 'success',
+        message: d.queued
+          ? `ส่งข้อความเข้าคิวแล้ว (${d.channel})`
+          : `ส่งข้อความถึง ${t.name} แล้ว (${d.channel})`,
+      });
+      addActivity && addActivity({
+        icon: '✉️',
+        text: `ส่งข้อความถึง ${t.name} (ห้อง ${t.roomId})`,
+        type: 'tenant',
+      });
+    } catch (err) {
+      window.toastError
+        ? window.toastError(setToast, err, { action: `ส่งข้อความถึง ${t.name}` })
+        : setToast && setToast({ kind: 'danger', message: err.message || 'ส่งข้อความไม่สำเร็จ' });
+    }
+  }
+
   const columns = [
     {
       key: 'name', label: 'ผู้เช่า', minWidth: 220,
@@ -180,10 +219,7 @@ function PageTenants({ rooms, setRooms, addActivity, setToast }) {
         footer={active && (
           <>
             <Btn variant="ghost" onClick={() => setActiveId(null)}>ปิด</Btn>
-            <Btn variant="secondary" icon="✉️" onClick={() => {
-              setToast && setToast({ kind: 'info', message: `ส่งข้อความถึง ${active.name} ทาง LINE แล้ว` });
-              addActivity && addActivity({ icon: '✉️', text: `ส่งข้อความถึง ${active.name} (ห้อง ${active.roomId})`, type: 'tenant' });
-            }}>ส่งข้อความ</Btn>
+            <Btn variant="secondary" icon="✉️" onClick={() => sendTenantMessage(active)}>ส่งข้อความ</Btn>
             <Btn variant="primary" icon="📋" onClick={() => setDrawerTab('contract')}>ดูสัญญา</Btn>
           </>
         )}
