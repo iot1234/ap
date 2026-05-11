@@ -9,6 +9,7 @@
 // ===========================================================================
 
 const { useState, useEffect, useMemo, useRef } = React;
+const PAYMENT_TOLERANCE_THB = 1;
 
 // ------------------------------------------------------------------ i18n ---
 const TR = {
@@ -484,37 +485,94 @@ function BillDetail({ bill, locale, onClose, slipFeature, refresh }) {
   // QR/slip UI and show a single info banner ("ทำไม QR ไม่ขึ้น") so the
   // tenant isn't left guessing why a button is missing.
   const [readiness, setReadiness] = useState(null);
+  const [readinessError, setReadinessError] = useState(null);
   React.useEffect(() => {
     let cancelled = false;
+    setReadiness(null);
+    setReadinessError(null);
     fetch('/api/tenant/payment-info', { credentials: 'same-origin' })
       .then((r) => r.json())
       .then((d) => { if (!cancelled && d && d.payment) setPay(d.payment); })
       .catch(() => {});
     fetch(`/api/tenant/pay-readiness/${encodeURIComponent(bill.id)}`, { credentials: 'same-origin' })
-      .then((r) => r.ok ? r.json() : null)
-      .then((d) => { if (!cancelled && d && d.ok) setReadiness(d); })
-      .catch(() => {});
+      .then(async (r) => {
+        const d = await r.json().catch(() => ({}));
+        if (cancelled) return;
+        if (r.ok && d && d.ok) {
+          setReadiness(d);
+          setReadinessError(null);
+          return;
+        }
+        setReadiness(null);
+        setReadinessError({
+          sev: r.status >= 500 ? 'med' : 'high',
+          code: d.code || `HTTP_${r.status}`,
+          msg: d.error || `HTTP ${r.status}`,
+          fix: r.status >= 500
+            ? (locale === 'th'
+              ? 'ลองใหม่อีกครั้ง หากยังไม่สำเร็จให้ติดต่อสำนักงาน'
+              : 'Try again. Contact the office if it still fails.')
+            : null,
+        });
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setReadinessError({
+            sev: 'med',
+            code: 'READINESS_FAILED',
+            msg: err.message || (locale === 'th' ? 'ตรวจสอบช่องทางชำระเงินไม่สำเร็จ' : 'Payment preflight failed'),
+            fix: locale === 'th'
+              ? 'ตรวจสอบอินเทอร์เน็ตแล้วลองใหม่'
+              : 'Check your connection and try again.',
+          });
+        }
+      });
     return () => { cancelled = true; };
-  }, [bill.id]);
+  }, [bill.id, locale]);
   // Prefer the server-side channels.qr flag — it incorporates checks the
   // browser can't see (PromptPay shape valid, not the demo target, amount
   // within MAX_AMOUNT).
   const qrUrl = (readiness?.channels?.qr === true)
     ? `/api/tenant/bills/${encodeURIComponent(bill.id)}/qr`
     : null;
+  const billTotal = Number(bill.total);
+  const paymentAmount = Number(amount);
+  const amountInvalid = !Number.isFinite(paymentAmount) || paymentAmount <= 0;
+  const amountMismatch = !amountInvalid
+    && Number.isFinite(billTotal)
+    && Math.abs(paymentAmount - billTotal) > PAYMENT_TOLERANCE_THB;
+  const readinessHardError = readinessError && readinessError.sev === 'high';
   const blockingIssues = readiness
     ? (readiness.issues || []).filter((i) => i.sev === 'high')
     : [];
+  if (readinessHardError) blockingIssues.push(readinessError);
   const advisoryIssues = readiness
     ? (readiness.issues || []).filter((i) => i.sev !== 'high' && i.code !== 'BILL_ALREADY_PAID')
     : [];
+  if (readinessError && !readinessHardError) advisoryIssues.push(readinessError);
+  const slipUploadBlocked = readiness?.channels?.slip === false
+    || !!readinessHardError
+    || amountInvalid
+    || amountMismatch;
   async function upload() {
-    if (!file) { setMsg(t('chooseFile')); return; }
+    if (amountInvalid) {
+      setMsg(locale === 'th' ? 'กรุณาระบุจำนวนเงินให้ถูกต้อง' : 'Enter a valid payment amount.');
+      return;
+    }
+    if (amountMismatch) {
+      setMsg(`${t('amountMismatchWarn')} (฿${fmtCurrency(bill.total)})`);
+      return;
+    }
+    if (readinessHardError) {
+      setMsg(readinessError.msg || 'Payment is not available for this bill.');
+      return;
+    }
     if (readiness?.channels?.slip === false) {
       const first = blockingIssues[0] || advisoryIssues[0];
       setMsg(first?.msg || 'Slip upload is not available for this bill.');
       return;
     }
+    if (!file) { setMsg(t('chooseFile')); return; }
     // Pre-flight using the readiness probe. Confirm if there's anything
     // unusual (different account configured, autoVerify not ready, etc.)
     // so the tenant gets a chance to read the reason before submitting.
@@ -623,9 +681,11 @@ function BillDetail({ bill, locale, onClose, slipFeature, refresh }) {
             <label style={lbl}>{t('amount')}</label>
             <input value={amount} onChange={(e) => setAmount(e.target.value)}
               type="number" step="0.01" style={inp} />
-            {Number(amount) !== Number(bill.total) ? (
+            {amountInvalid || amountMismatch ? (
               <div style={{ marginTop: 4, color: 'var(--red)', fontSize: 12.5 }}>
-                ⚠ จำนวนไม่ตรงยอดบิล (฿{fmtCurrency(bill.total)})
+                {amountInvalid
+                  ? (locale === 'th' ? 'กรุณาระบุจำนวนเงินให้ถูกต้อง' : 'Enter a valid payment amount.')
+                  : `${t('amountMismatchWarn')} (฿${fmtCurrency(bill.total)})`}
               </div>
             ) : null}
             <label style={lbl}>{t('chooseFile')}</label>
@@ -648,7 +708,7 @@ function BillDetail({ bill, locale, onClose, slipFeature, refresh }) {
                 ))}
               </div>
             ) : null}
-            <button onClick={upload} disabled={busy || readiness?.channels?.slip === false} style={btnPrimary}>{busy ? '…' : t('uploadSlip')}</button>
+            <button onClick={upload} disabled={busy || slipUploadBlocked} style={btnPrimary}>{busy ? '…' : t('uploadSlip')}</button>
             {msg ? <div style={{ marginTop: 8, color: 'var(--muted)', fontSize: 13 }}>{msg}</div> : null}
           </div>
         ) : null}

@@ -73,6 +73,19 @@ function PageSlipVerify({ setToast }) {
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || 'save failed');
       setFeatures(d.features);
+      // Invalidate the cached test result whenever a feature change could
+      // affect what the test would prove. Switching SlipOK ↔ EasySlip,
+      // toggling autoVerify, or disabling slipUpload all make the
+      // previously-green "✓ ผ่าน" misleading — admin would see it next
+      // to a config that hasn't actually been tested.
+      if (partial && partial.slipUpload && (
+        'provider' in partial.slipUpload
+        || 'providers' in partial.slipUpload
+        || 'autoVerify' in partial.slipUpload
+        || 'enabled' in partial.slipUpload
+      )) {
+        setTestResult(null);
+      }
       setToast && setToast({ kind: 'success', message: 'บันทึกการตั้งค่าฟีเจอร์แล้ว' });
       reload();
     } catch (e) {
@@ -96,6 +109,9 @@ function PageSlipVerify({ setToast }) {
       });
       setEditing((e) => ({ ...e, [key]: false }));
       setDrafts((d) => ({ ...d, [key]: '' }));
+      // Changing the API key invalidates the previous test result — the
+      // old "✓ ผ่าน" was for a different key. Force admin to re-test.
+      setTestResult(null);
       reload();
     } catch (e) {
       setErr(e.message);

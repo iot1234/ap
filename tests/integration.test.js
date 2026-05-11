@@ -689,6 +689,27 @@ test('tenant payment readiness controls QR and slip upload state', () => {
     'tenant UI must not fall back to browser payment-info for QR visibility');
 });
 
+test('tenant bill modal blocks bad payment steps before slip upload', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const tenant = fs.readFileSync(path.join(__dirname, '..', 'project', 'tenant.jsx'), 'utf8');
+
+  assert.match(tenant, /const PAYMENT_TOLERANCE_THB = 1/,
+    'tenant UI must share the same 1 THB mismatch tolerance as the server guard');
+  assert.match(tenant, /setReadinessError/,
+    'tenant UI must keep readiness API failures visible instead of dropping them');
+  assert.match(tenant, /const d = await r\.json\(\)\.catch\(\(\) => \(\{\}\)\)/,
+    'tenant UI must parse readiness error payloads such as BILL_NOT_LINKED');
+  assert.match(tenant, /readinessHardError/,
+    'tenant UI must classify hard readiness failures before upload');
+  assert.match(tenant, /Math\.abs\(paymentAmount - billTotal\) > PAYMENT_TOLERANCE_THB/,
+    'tenant UI must block amount mismatches before reading/uploading the slip image');
+  assert.match(tenant, /const slipUploadBlocked =[\s\S]{0,220}amountMismatch/,
+    'tenant UI must disable the upload action when the amount cannot pass the server');
+  assert.match(tenant, /disabled=\{busy \|\| slipUploadBlocked\}/,
+    'tenant upload button must use the combined step gate');
+});
+
 test('tenant payment readiness reports orphan bills with BILL_NOT_LINKED', () => {
   const fs = require('node:fs');
   const path = require('node:path');
@@ -733,6 +754,28 @@ test('admin billing readiness backs bill issue and payment preflights', () => {
     'bill issue flow must filter readiness issues by issue area');
   assert.match(billingPage, /force: issues\.length > 0/,
     'bill generation must explicitly force only after the admin accepts warnings');
+});
+
+test('admin slip-verify setup clears stale test results after config changes', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-slip-verify.jsx'), 'utf8');
+
+  const saveFeatureIdx = src.indexOf('async function saveFeature');
+  const saveSecretIdx = src.indexOf('async function saveSecret');
+  assert.ok(saveFeatureIdx > 0 && saveSecretIdx > saveFeatureIdx,
+    'slip verify page must have saveFeature and saveSecret handlers');
+  const saveFeature = src.slice(saveFeatureIdx, saveSecretIdx);
+  const saveSecret = src.slice(saveSecretIdx, src.indexOf('async function runTest', saveSecretIdx));
+
+  for (const key of ['provider', 'providers', 'autoVerify', 'enabled']) {
+    assert.match(saveFeature, new RegExp(`'${key}' in partial\\.slipUpload`),
+      `changing slipUpload.${key} must invalidate the previous provider test`);
+  }
+  assert.match(saveFeature, /setTestResult\(null\)/,
+    'feature changes must clear the cached provider test result');
+  assert.match(saveSecret, /setTestResult\(null\)/,
+    'API key changes must clear the cached provider test result');
 });
 
 test('payment verification uses canonical bill-before-payment lock order', () => {
