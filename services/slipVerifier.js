@@ -49,6 +49,7 @@
 //   - HMAC dedup (existing slip_hash) still active as a fallback.
 
 const https = require('https');
+const crypto = require('crypto');
 const secrets = require('./secrets');
 
 const TIMEOUT_MS = 10_000;
@@ -70,9 +71,104 @@ const TRANSIENT_CODES = new Set([
   'PROVIDER_ERROR',     // generic non-2xx from provider
   'SLIPOK_PARSE',       // SlipOK returned non-JSON
   'EASYSLIP_PARSE',     // EasySlip returned non-JSON
+  'SLIP_PENDING',       // provider accepted the image but bank data is not ready yet
   'NOT_CONFIGURED',     // provider key missing (caller already gates, defensive)
   'UNKNOWN_PROVIDER',   // typo in features.slipUpload.providers
 ]);
+
+function detectImageMime(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 4) return 'image/jpeg';
+  if (buffer[0] === 0xFF && buffer[1] === 0xD8 && buffer[2] === 0xFF) return 'image/jpeg';
+  if (buffer.length >= 8
+      && buffer[0] === 0x89 && buffer[1] === 0x50
+      && buffer[2] === 0x4E && buffer[3] === 0x47) return 'image/png';
+  if (buffer.slice(0, 3).toString('ascii') === 'GIF') return 'image/gif';
+  if (buffer.length >= 12
+      && buffer.slice(0, 4).toString('ascii') === 'RIFF'
+      && buffer.slice(8, 12).toString('ascii') === 'WEBP') return 'image/webp';
+  return 'image/jpeg';
+}
+
+function imageExtFromMime(mime) {
+  if (mime === 'image/png') return 'png';
+  if (mime === 'image/gif') return 'gif';
+  if (mime === 'image/webp') return 'webp';
+  return 'jpg';
+}
+
+function multipartField(boundary, name, value) {
+  return Buffer.from(
+    `--${boundary}\r\n`
+    + `Content-Disposition: form-data; name="${name}"\r\n\r\n`
+    + `${String(value)}\r\n`
+  );
+}
+
+function multipartFile(boundary, name, filename, mime, buffer) {
+  return Buffer.concat([
+    Buffer.from(
+      `--${boundary}\r\n`
+      + `Content-Disposition: form-data; name="${name}"; filename="${filename}"\r\n`
+      + `Content-Type: ${mime}\r\n\r\n`
+    ),
+    buffer,
+    Buffer.from('\r\n'),
+  ]);
+}
+
+function buildMultipartForm({ fields, file }) {
+  const boundary = '----ap-easyslip-' + crypto.randomBytes(12).toString('hex');
+  const parts = [];
+  for (const [name, value] of Object.entries(fields || {})) {
+    if (value === undefined || value === null || value === '') continue;
+    parts.push(multipartField(boundary, name, value));
+  }
+  parts.push(multipartFile(boundary, file.name, file.filename, file.mime, file.buffer));
+  parts.push(Buffer.from(`--${boundary}--\r\n`));
+  return {
+    body: Buffer.concat(parts),
+    contentType: `multipart/form-data; boundary=${boundary}`,
+  };
+}
+
+function pickLocalizedName(value) {
+  if (!value) return null;
+  if (typeof value === 'string') return value;
+  return value.displayName
+    || value.nameTh
+    || value.nameEn
+    || value.th
+    || value.en
+    || pickLocalizedName(value.name)
+    || null;
+}
+
+function pickBankShort(bank) {
+  if (!bank) return null;
+  if (typeof bank === 'string') return bank;
+  return bank.short || bank.shortCode || bank.code || bank.id || bank.name || null;
+}
+
+function pickAccountValue(value) {
+  if (!value) return null;
+  if (typeof value === 'string') return value;
+  return value.value
+    || value.account
+    || value.bankNumber
+    || value.number
+    || value.bank?.account
+    || value.proxy?.account
+    || null;
+}
+
+function mapEasySlipParty(party, matchedAccount) {
+  const account = party?.account || null;
+  return {
+    name: pickLocalizedName(account) || pickLocalizedName(party) || pickLocalizedName(matchedAccount),
+    bank: pickBankShort(party?.bank) || pickBankShort(matchedAccount?.bank),
+    account: pickAccountValue(account) || pickAccountValue(party) || pickAccountValue(matchedAccount),
+  };
+}
 
 /**
  * Returns the ORDERED list of providers admin has wired up. Tries the
@@ -221,6 +317,16 @@ async function verifyOne(providerId, buffer, expected) {
   // compare as many digits as both sides provide, up to the last 6, and
   // refuse to verify when the provider returned fewer than 4 (too short
   // to be a meaningful tail — could be all-zero placeholder).
+  if (expected.promptpayTarget && !result.receiver?.account) {
+    return {
+      ok: false,
+      error: 'ไม่สามารถยืนยันบัญชีปลายทางจากสลิปได้',
+      code: 'RECEIVER_UNREADABLE',
+      transRef: result.transRef,
+      raw: result.raw,
+      provider: providerId,
+    };
+  }
   if (expected.promptpayTarget && result.receiver?.account) {
     const expectedDigits = String(expected.promptpayTarget).replace(/[^0-9]/g, '');
     const actualDigits = String(result.receiver.account).replace(/[^0-9]/g, '');
@@ -430,26 +536,46 @@ async function verifyViaSlipOK(buffer, expected) {
 }
 
 // === Provider: EasySlip ==================================================
-// API: POST https://developer.easyslip.com/api/v1/verify
+// API: POST https://api.easyslip.com/v2/verify/bank
 // Headers: Authorization: Bearer <api-key>
-// Body: { image: <base64> }  OR  { payload: <qr text> }
+// Body: multipart/form-data with file field "image"
 //
 // Mirrors the SlipOK shape so the caller doesn't care which provider
 // is wired — both return { transRef, amount, sender, receiver, transDate }.
 async function verifyViaEasySlip(buffer, expected) {
   const apiKey = secrets.get('EASYSLIP_API_KEY');
   if (!apiKey) throw new Error('EASYSLIP_API_KEY not configured');
-  const body = JSON.stringify({
-    image: buffer.toString('base64'),
+  const expectedAmount = Number(expected?.amount);
+  const fields = { checkDuplicate: 'true' };
+  if (Number.isFinite(expectedAmount) && expectedAmount > 0) {
+    fields.matchAmount = String(expectedAmount);
+  }
+  if (expected?.billId !== undefined && expected?.billId !== null) {
+    fields.remark = `bill:${String(expected.billId).slice(0, 240)}`;
+  }
+  // EasySlip's matchAccount checks accounts registered inside EasySlip.
+  // Keep it opt-in; our local PromptPay tail check remains canonical.
+  if (expected?.easyslipMatchAccount === true) {
+    fields.matchAccount = 'true';
+  }
+  const mime = detectImageMime(buffer);
+  const { body, contentType } = buildMultipartForm({
+    fields,
+    file: {
+      name: 'image',
+      filename: `slip.${imageExtFromMime(mime)}`,
+      mime,
+      buffer,
+    },
   });
   return new Promise((resolve, reject) => {
     const req = https.request({
-      hostname: 'developer.easyslip.com',
-      path: '/api/v1/verify',
+      hostname: 'api.easyslip.com',
+      path: '/v2/verify/bank',
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(body),
+        'Content-Type': contentType,
+        'Content-Length': body.length,
         'Authorization': 'Bearer ' + apiKey,
       },
       timeout: TIMEOUT_MS,
@@ -459,23 +585,47 @@ async function verifyViaEasySlip(buffer, expected) {
       res.on('end', () => {
         try {
           const j = JSON.parse(buf);
-          if (res.statusCode !== 200 || j.status !== 200 || !j.data) {
+          if (res.statusCode !== 200 || j.success !== true || !j.data) {
+            const providerCode = j.error?.code || j.code || null;
             resolve({
               ok: false,
-              error: j.message || `EasySlip HTTP ${res.statusCode}`,
-              code: 'EASYSLIP_REJECT',
+              error: j.error?.message || j.message || `EasySlip HTTP ${res.statusCode}`,
+              code: res.statusCode >= 500 ? 'PROVIDER_ERROR' : (providerCode || 'EASYSLIP_REJECT'),
               raw: j,
             });
             return;
           }
           const d = j.data;
+          const rawSlip = d.rawSlip || {};
+          const transRef = rawSlip.transRef || d.transRef || rawSlip.payload || d.payload;
+          const amount = Number(d.amountInSlip ?? rawSlip.amount?.amount ?? rawSlip.amount ?? d.amount);
+          if (!transRef || !Number.isFinite(amount)) {
+            resolve({
+              ok: false,
+              error: 'EasySlip response missing transaction reference or amount',
+              code: 'EASYSLIP_REJECT',
+              raw: j,
+            });
+            return;
+          }
+          if (d.isDuplicate === true) {
+            resolve({
+              ok: false,
+              error: 'สลิปนี้ถูกตรวจสอบหรือใช้งานแล้ว',
+              code: 'DUPLICATE_SLIP',
+              transRef,
+              amount: Number.isFinite(amount) ? amount : undefined,
+              raw: j,
+            });
+            return;
+          }
           resolve({
             ok: true,
-            transRef: d.transRef || d.payload,
-            amount: Number(d.amount?.amount || d.amount),
-            sender:   { name: d.sender?.account?.name?.th, bank: d.sender?.bank?.short, account: d.sender?.account?.bank?.account },
-            receiver: { name: d.receiver?.account?.name?.th, bank: d.receiver?.bank?.short, account: d.receiver?.account?.bank?.account },
-            transDate: d.date,
+            transRef,
+            amount,
+            sender: mapEasySlipParty(rawSlip.sender),
+            receiver: mapEasySlipParty(rawSlip.receiver, d.matchedAccount),
+            transDate: rawSlip.date || d.date,
             raw: j,
           });
         } catch (e) {

@@ -67,7 +67,7 @@ const CATALOG = Object.freeze([
   // EasySlip (https://easyslip.com/) — alternative aggregator with
   // different pricing model. Pick ONE provider in features.slipUpload.provider.
   { key: 'EASYSLIP_API_KEY', group: 'slipverify', label: 'EasySlip API Key',
-    description: 'จาก developer.easyslip.com → ใช้แทน SlipOK ก็ได้ (เลือก provider ที่หน้า Features)',
+    description: 'จาก EasySlip API → ใช้แทน SlipOK ก็ได้ (เลือก provider ที่หน้า Features)',
     kind: 'password' },
 ]);
 const CATALOG_BY_KEY = Object.fromEntries(CATALOG.map((c) => [c.key, c]));

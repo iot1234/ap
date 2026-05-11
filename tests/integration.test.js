@@ -264,10 +264,51 @@ test('slipVerifier exports verifyWithFallback (regression: silent auto-verify fa
   // a hard rejection of one of these would falsely block a legit slip.
   for (const code of ['VERIFIER_THREW', 'PROVIDER_ERROR',
                       'SLIPOK_PARSE', 'EASYSLIP_PARSE',
-                      'NOT_CONFIGURED', 'UNKNOWN_PROVIDER']) {
+                      'SLIP_PENDING', 'NOT_CONFIGURED',
+                      'UNKNOWN_PROVIDER']) {
     assert.ok(sv.TRANSIENT_CODES.has(code),
       `TRANSIENT_CODES must include ${code} (server-side fallback contract)`);
   }
+});
+
+test('slipVerifier EasySlip integration uses v2 bank image multipart API', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'slipVerifier.js'), 'utf8');
+
+  assert.match(src, /hostname:\s*'api\.easyslip\.com'/,
+    'EasySlip must use the current api.easyslip.com host');
+  assert.match(src, /path:\s*'\/v2\/verify\/bank'/,
+    'EasySlip must call POST /v2/verify/bank');
+  assert.match(src, /multipart\/form-data; boundary=\$\{boundary\}/,
+    'EasySlip image verify must send multipart/form-data');
+  assert.match(src, /name:\s*'image'/,
+    'EasySlip multipart file field must be named image');
+  assert.match(src, /fields\.matchAmount/,
+    'EasySlip should pass expected amount to provider-side matching');
+  assert.match(src, /checkDuplicate:\s*'true'/,
+    'EasySlip should ask provider to flag duplicate/reused slips');
+  assert.match(src, /d\.rawSlip/,
+    'EasySlip v2 response mapper must read data.rawSlip');
+  assert.match(src, /d\.amountInSlip/,
+    'EasySlip v2 response mapper must read data.amountInSlip');
+  assert.match(src, /d\.isDuplicate === true/,
+    'EasySlip duplicate result must be a hard rejection');
+  assert.doesNotMatch(src, /developer\.easyslip\.com/,
+    'legacy EasySlip v1 developer host must not be used');
+  assert.doesNotMatch(src, /\/api\/v1\/verify/,
+    'legacy EasySlip v1 endpoint must not be used');
+});
+
+test('slipVerifier rejects auto-verify when provider omits receiver account', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'slipVerifier.js'), 'utf8');
+
+  assert.match(src, /expected\.promptpayTarget && !result\.receiver\?\.account/,
+    'auto-verify must require a provider receiver account when PromptPay target is configured');
+  assert.match(src, /code:\s*'RECEIVER_UNREADABLE'/,
+    'missing receiver account should be classified as RECEIVER_UNREADABLE');
 });
 
 test('slipVerifier.getConfiguredProviders gates by API-key presence', () => {
