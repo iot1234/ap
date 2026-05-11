@@ -891,6 +891,8 @@ test('healthCheck surfaces data integrity and failed notification backlog', () =
     'data integrity probe must flag occupied/overdue rooms without an active tenant');
   assert.match(hc, /reserved_rooms_without_hold/,
     'data integrity probe must flag stale reservations without booking or draft contract hold');
+  assert.match(hc, /rooms_reserved_by_ghost_contract/,
+    'data integrity probe must flag reservations pointing at inactive/missing contracts');
   assert.match(hc, /SELECT rec\.key AS room_code/,
     'JSONB room scan must qualify rec.key so app_data.key is not ambiguous in PostgreSQL');
   assert.match(hc, /legacy rooms exist but rooms_v2 is empty/,
@@ -1529,6 +1531,19 @@ test('healthCheck guards against rows[0] undefined (queue/failed_logins/lockouts
   assert.ok(arrayGuards.length >= 3, 'three rows[0]||{} guards expected (queue, failed_logins, lockouts)');
 });
 
+test('healthCheck samples pool stats before parallel probes', () => {
+  // Pool stats used to run inside the same Promise.all as every DB-heavy
+  // health probe. On small pools, /health warned about waiting queries that
+  // the health probe itself had just created.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'healthCheck.js'), 'utf8');
+  assert.match(src, /const poolResult = poolCheck \? await runOne\(poolCheck\) : null/,
+    'pool stats must be sampled before the fan-out starts');
+  assert.match(src, /CHECKS\.filter\(\(c\) => c\.id !== 'pool'\)\.map\(runOne\)/,
+    'non-pool checks may still run in parallel after the pool sample');
+});
+
 test('encryption.validateAtBoot exists and round-trips when keys configured', () => {
   process.env.ENCRYPTION_KEY_V1 = Buffer.alloc(32, 1).toString('base64');
   process.env.ENCRYPTION_KEY_CURRENT = '1';
@@ -1770,8 +1785,12 @@ test('booking cancellation releases only its own reserved room', () => {
   const block = src.match(/app\.put\('\/api\/bookings\/:id'[\s\S]+?\/\/ === v2: Recurring charges helper/)[0];
   assert.match(block, /SELECT value FROM app_data WHERE key='baankarn_bookings_v1' FOR UPDATE/,
     'booking updates must lock the booking blob');
-  assert.match(block, /room\.status === 'reserved' && room\.reservedBy === id/,
-    'room release must be guarded by reservedBy=booking id');
+  assert.match(block, /if \(room && room\.status === 'reserved'\)/,
+    'room release must only consider reserved rooms');
+  assert.match(block, /room\.reservedBy === id/,
+    'approved booking release must be guarded by reservedBy=booking id');
+  assert.match(block, /BOOKING_HAS_ACTIVE_CONTRACT/,
+    'completed booking cancellation must refuse release while a linked contract is active');
   assert.match(block, /const \{ tenant, reservedBy, reservedAt,[\s\S]{0,80}\} = room/,
     'release must drop stale tenant/reservation metadata from the room blob');
   assert.match(block,
