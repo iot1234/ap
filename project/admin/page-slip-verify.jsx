@@ -151,22 +151,43 @@ function PageSlipVerify({ setToast }) {
   const status = useMemo(() => {
     if (!features) return null;
     const slip = features.slipUpload || {};
-    const provider = slip.provider || 'slipok';
-    const keyName = provider === 'easyslip' ? 'EASYSLIP_API_KEY' : 'SLIPOK_API_KEY';
-    const keyEntry = secrets[keyName];
-    const keySet = !!(keyEntry && keyEntry.isSet);
+    // The backend supports either a single `provider` string (legacy) OR a
+    // `providers` array (new — for auto-failover chain). Reconcile both
+    // here so the UI can render the right "primary" while still allowing
+    // the operator to configure both keys side-by-side regardless of which
+    // representation the row currently carries.
+    const providersArr = Array.isArray(slip.providers) && slip.providers.length > 0
+      ? slip.providers
+      : (slip.provider ? [slip.provider] : ['slipok']);
+    const primary = providersArr[0];
+    // Per-provider key entries — both are surfaced in step 4 regardless of
+    // which is primary, so admin can save EITHER without first switching the
+    // dropdown. Fixes the bug where saving EasySlip's key hid SlipOK's input.
+    const slipokKey = secrets.SLIPOK_API_KEY;
+    const easyslipKey = secrets.EASYSLIP_API_KEY;
     const branchEntry = secrets.SLIPOK_BRANCH_ID;
+    const slipokKeySet = !!(slipokKey && slipokKey.isSet);
+    const easyslipKeySet = !!(easyslipKey && easyslipKey.isSet);
+    // Failover is "live" when BOTH keys are set AND both providers appear in
+    // the providers array. We auto-promote to providers=[primary, other]
+    // when both keys are detected — keeps the operator from having to know
+    // the JSON-array shape exists.
+    const failoverReady = slipokKeySet && easyslipKeySet
+      && providersArr.length >= 2
+      && providersArr.includes('slipok') && providersArr.includes('easyslip');
     return {
-      provider,
-      keyName,
-      keySet,
-      keyEntry,
-      branchSet: !!(branchEntry && branchEntry.isSet),
+      primary,
+      providersArr,
+      slipokKey, slipokKeySet,
+      easyslipKey, easyslipKeySet,
       branchEntry,
+      branchSet: !!(branchEntry && branchEntry.isSet),
+      failoverReady,
+      // step4 done when AT LEAST one provider's key is configured.
       step1Done: slip.enabled === true,
       step2Done: slip.autoVerify === true,
-      step3Done: !!provider,
-      step4Done: keySet,
+      step3Done: !!primary,
+      step4Done: slipokKeySet || easyslipKeySet,
       step5Done: testResult && testResult.ok === true,
       tenantPortalOff: features.tenantPortal && features.tenantPortal.enabled === false,
       // PromptPay target is needed for receiver-account verification — the
@@ -179,6 +200,27 @@ function PageSlipVerify({ setToast }) {
         : null,
     };
   }, [features, secrets, testResult, readiness]);
+
+  // When BOTH keys are set but features.slipUpload.providers doesn't yet
+  // reflect the failover chain (legacy single-provider config), auto-upgrade
+  // it once so verifyWithFallback iterates both. The setField fires only when
+  // the upgrade is actually needed — no-op on each subsequent render.
+  React.useEffect(() => {
+    if (!status) return;
+    if (status.slipokKeySet && status.easyslipKeySet) {
+      const currentProviders = features?.slipUpload?.providers;
+      const wantProviders = [status.primary, status.primary === 'slipok' ? 'easyslip' : 'slipok'];
+      const match = Array.isArray(currentProviders)
+        && currentProviders.length === 2
+        && currentProviders[0] === wantProviders[0]
+        && currentProviders[1] === wantProviders[1];
+      if (!match) {
+        // Fire once via saveFeature; the reload() inside will refresh the
+        // useMemo on the next render so this effect doesn't re-fire.
+        saveFeature({ slipUpload: { providers: wantProviders } });
+      }
+    }
+  }, [status?.slipokKeySet, status?.easyslipKeySet, status?.primary]);
 
   // Subset of billing-readiness issues that are RELEVANT to slip verification.
   // Filtering by code keeps the panel focused — admin shouldn't see
@@ -340,76 +382,135 @@ function PageSlipVerify({ setToast }) {
         ),
       ),
 
-      // Step 3: choose provider
+      // Step 3: choose PRIMARY provider (system tries this first; falls
+      // through to the other when both keys are set)
       React.createElement(StepHeader, {
         n: 3,
         done: status.step3Done && status.step2Done,
-        title: `เลือกผู้ให้บริการ — ตอนนี้: ${status.provider === 'easyslip' ? 'EasySlip' : 'SlipOK'}`,
-        hint: 'เลือก provider ที่สมัครไว้ — ระบบจะเรียก provider นี้ก่อน ถ้า provider ล่ม transient จะ fall through ไป provider สำรอง (ถ้ามีตั้งไว้ใน providers array)',
+        title: `Provider หลัก — ตอนนี้: ${status.primary === 'easyslip' ? 'EasySlip' : 'SlipOK'}`,
+        hint: status.failoverReady
+          ? '✓ Auto-failover พร้อม: ระบบจะเรียก provider หลักก่อน ถ้าตอบ transient error (timeout, 5xx, parse fail) จะลอง provider สำรองให้อัตโนมัติ'
+          : 'เลือก provider ที่จะถูกเรียกก่อน — เมื่อตั้ง key ทั้ง 2 ตัวด้านล่าง ระบบจะ enable auto-failover อัตโนมัติ',
       },
         React.createElement('div', { style: { display: 'flex', gap: 8 } },
           ['slipok', 'easyslip'].map((p) =>
             React.createElement('button', {
               key: p,
-              onClick: () => saveFeature({ slipUpload: { provider: p } }),
-              disabled: busy || status.provider === p || !status.step2Done,
+              // When admin re-picks a primary, also reorder the providers
+              // array if both keys are set — so verifyWithFallback hits
+              // the chosen one first.
+              onClick: () => {
+                if (status.slipokKeySet && status.easyslipKeySet) {
+                  saveFeature({ slipUpload: {
+                    provider: p,
+                    providers: [p, p === 'slipok' ? 'easyslip' : 'slipok'],
+                  }});
+                } else {
+                  saveFeature({ slipUpload: { provider: p, providers: [p] } });
+                }
+              },
+              disabled: busy || status.primary === p || !status.step2Done,
               style: {
                 padding: '8px 16px', borderRadius: 6,
-                border: `1px solid ${status.provider === p ? C.accent : C.border}`,
-                background: status.provider === p ? C.accent : 'transparent',
-                color: status.provider === p ? '#fff' : C.ink,
+                border: `1px solid ${status.primary === p ? C.accent : C.border}`,
+                background: status.primary === p ? C.accent : 'transparent',
+                color: status.primary === p ? '#fff' : C.ink,
                 cursor: busy || !status.step2Done ? 'not-allowed' : 'pointer',
                 fontFamily: 'inherit', fontSize: 13.5, fontWeight: 500,
               },
             }, p === 'easyslip' ? 'EasySlip' : 'SlipOK')
           ),
         ),
+        status.failoverReady ? React.createElement('div', {
+          style: {
+            marginTop: 10, padding: '6px 10px',
+            background: '#f0f9f0', border: '1px solid #bce0bc',
+            borderRadius: 6, fontSize: 12.5, color: '#1f5f3a',
+          },
+        }, `🔁 Auto-failover: ${status.primary === 'easyslip' ? 'EasySlip → SlipOK' : 'SlipOK → EasySlip'} `
+          + `(ถ้า ${status.primary === 'easyslip' ? 'EasySlip' : 'SlipOK'} ล่ม จะลอง ${status.primary === 'easyslip' ? 'SlipOK' : 'EasySlip'} ให้ทันที)`) : null,
       ),
 
-      // Step 4: API key
+      // Step 4: API keys — BOTH providers shown side-by-side so admin can
+      // configure either without first switching the primary selector.
+      // The previous version only rendered the selected provider's key,
+      // which made it impossible to save EasySlip then later set SlipOK
+      // without re-clicking the dropdown each time.
       React.createElement(StepHeader, {
         n: 4,
         done: status.step4Done,
-        title: `ใส่ API key ของ ${status.provider === 'easyslip' ? 'EasySlip' : 'SlipOK'}`,
-        hint: status.provider === 'slipok'
-          ? 'หาได้จาก https://slipok.com/ → API → x-authorization (และ Branch ID ถ้าเป็นแผน multi-branch)'
-          : 'หาได้จาก https://developer.easyslip.com/ → API Keys',
+        title: 'API keys (ตั้งทั้ง 2 → auto-failover พร้อม)',
+        hint: 'ตั้ง key อย่างน้อย 1 ใน 2 ก็เริ่มใช้งานได้ — ตั้งครบทั้ง 2 ระบบจะสลับมาใช้อันสำรองอัตโนมัติเมื่ออันหลักล่ม',
       },
-        React.createElement('div', null,
-          status.keyEntry ? React.createElement(SecretInput, {
-            spec: status.keyEntry,
-            editing: !!editing[status.keyName],
-            draft: drafts[status.keyName] || '',
-            busy,
-            C,
-            onEdit: () => setEditing((e) => ({ ...e, [status.keyName]: true })),
-            onCancel: () => {
-              setEditing((e) => ({ ...e, [status.keyName]: false }));
-              setDrafts((d) => ({ ...d, [status.keyName]: '' }));
-            },
-            onDraft: (v) => setDrafts((d) => ({ ...d, [status.keyName]: v })),
-            onSave: () => saveSecret(status.keyName, drafts[status.keyName] || ''),
-            onClear: () => saveSecret(status.keyName, ''),
-          }) : null,
-          status.provider === 'slipok' && status.branchEntry ? React.createElement('div', {
-            style: { marginTop: 10 },
-          },
-            React.createElement(SecretInput, {
-              spec: status.branchEntry,
-              editing: !!editing.SLIPOK_BRANCH_ID,
-              draft: drafts.SLIPOK_BRANCH_ID || '',
+        React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 12 } },
+          // SlipOK key — always shown, regardless of primary selection
+          React.createElement('div', null,
+            React.createElement('div', {
+              style: {
+                fontSize: 12.5, fontWeight: 600, marginBottom: 6,
+                color: status.primary === 'slipok' ? C.accent : C.muted,
+              },
+            }, `🧾 SlipOK${status.primary === 'slipok' ? ' (primary)' : ' (fallback)'}`),
+            status.slipokKey ? React.createElement(SecretInput, {
+              spec: status.slipokKey,
+              editing: !!editing.SLIPOK_API_KEY,
+              draft: drafts.SLIPOK_API_KEY || '',
               busy,
               C,
-              onEdit: () => setEditing((e) => ({ ...e, SLIPOK_BRANCH_ID: true })),
+              onEdit: () => setEditing((e) => ({ ...e, SLIPOK_API_KEY: true })),
               onCancel: () => {
-                setEditing((e) => ({ ...e, SLIPOK_BRANCH_ID: false }));
-                setDrafts((d) => ({ ...d, SLIPOK_BRANCH_ID: '' }));
+                setEditing((e) => ({ ...e, SLIPOK_API_KEY: false }));
+                setDrafts((d) => ({ ...d, SLIPOK_API_KEY: '' }));
               },
-              onDraft: (v) => setDrafts((d) => ({ ...d, SLIPOK_BRANCH_ID: v })),
-              onSave: () => saveSecret('SLIPOK_BRANCH_ID', drafts.SLIPOK_BRANCH_ID || ''),
-              onClear: () => saveSecret('SLIPOK_BRANCH_ID', ''),
-            })
-          ) : null,
+              onDraft: (v) => setDrafts((d) => ({ ...d, SLIPOK_API_KEY: v })),
+              onSave: () => saveSecret('SLIPOK_API_KEY', drafts.SLIPOK_API_KEY || ''),
+              onClear: () => saveSecret('SLIPOK_API_KEY', ''),
+            }) : React.createElement('div', { style: { color: C.muted, fontSize: 12.5 } },
+              'กำลังโหลด…'),
+            // SlipOK branch ID — optional, shown right under the SlipOK key
+            status.branchEntry ? React.createElement('div', { style: { marginTop: 8 } },
+              React.createElement(SecretInput, {
+                spec: status.branchEntry,
+                editing: !!editing.SLIPOK_BRANCH_ID,
+                draft: drafts.SLIPOK_BRANCH_ID || '',
+                busy,
+                C,
+                onEdit: () => setEditing((e) => ({ ...e, SLIPOK_BRANCH_ID: true })),
+                onCancel: () => {
+                  setEditing((e) => ({ ...e, SLIPOK_BRANCH_ID: false }));
+                  setDrafts((d) => ({ ...d, SLIPOK_BRANCH_ID: '' }));
+                },
+                onDraft: (v) => setDrafts((d) => ({ ...d, SLIPOK_BRANCH_ID: v })),
+                onSave: () => saveSecret('SLIPOK_BRANCH_ID', drafts.SLIPOK_BRANCH_ID || ''),
+                onClear: () => saveSecret('SLIPOK_BRANCH_ID', ''),
+              })
+            ) : null,
+          ),
+          // EasySlip key — always shown
+          React.createElement('div', null,
+            React.createElement('div', {
+              style: {
+                fontSize: 12.5, fontWeight: 600, marginBottom: 6,
+                color: status.primary === 'easyslip' ? C.accent : C.muted,
+              },
+            }, `🧾 EasySlip${status.primary === 'easyslip' ? ' (primary)' : ' (fallback)'}`),
+            status.easyslipKey ? React.createElement(SecretInput, {
+              spec: status.easyslipKey,
+              editing: !!editing.EASYSLIP_API_KEY,
+              draft: drafts.EASYSLIP_API_KEY || '',
+              busy,
+              C,
+              onEdit: () => setEditing((e) => ({ ...e, EASYSLIP_API_KEY: true })),
+              onCancel: () => {
+                setEditing((e) => ({ ...e, EASYSLIP_API_KEY: false }));
+                setDrafts((d) => ({ ...d, EASYSLIP_API_KEY: '' }));
+              },
+              onDraft: (v) => setDrafts((d) => ({ ...d, EASYSLIP_API_KEY: v })),
+              onSave: () => saveSecret('EASYSLIP_API_KEY', drafts.EASYSLIP_API_KEY || ''),
+              onClear: () => saveSecret('EASYSLIP_API_KEY', ''),
+            }) : React.createElement('div', { style: { color: C.muted, fontSize: 12.5 } },
+              'กำลังโหลด…'),
+          ),
         ),
       ),
 
