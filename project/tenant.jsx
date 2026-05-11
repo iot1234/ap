@@ -486,6 +486,13 @@ function BillDetail({ bill, locale, onClose, slipFeature, refresh }) {
   // tenant isn't left guessing why a button is missing.
   const [readiness, setReadiness] = useState(null);
   const [readinessError, setReadinessError] = useState(null);
+  // qrFallback holds the EMV payload string returned by ?format=json when
+  // the PNG <img> load fails. Banking apps accept the raw payload via
+  // "scan from clipboard" / "paste payload to pay" — so even if our
+  // qrcode-rendering pipeline crashes, the tenant can still pay by copying
+  // this string into their banking app. Null until onError fires.
+  const [qrFallback, setQrFallback] = useState(null);
+  const [copied, setCopied] = useState(false);
   React.useEffect(() => {
     let cancelled = false;
     setReadiness(null);
@@ -645,15 +652,82 @@ function BillDetail({ bill, locale, onClose, slipFeature, refresh }) {
             <div style={{ fontFamily: 'Sora', fontWeight: 600, fontSize: 14, marginBottom: 8 }}>
               ช่องทางชำระเงิน
             </div>
-            {qrUrl ? (
+            {qrUrl && !qrFallback ? (
               <div style={{ textAlign: 'center', marginBottom: 12 }}>
                 <img
                   src={qrUrl} alt="PromptPay QR" width="180" height="180"
                   style={{ border: '1px solid var(--border)', borderRadius: 10, padding: 6, background: '#fff' }}
-                  onError={(e) => { e.currentTarget.style.display = 'none'; }}
+                  onError={(e) => {
+                    // Image render failed (renderer crash / network blip /
+                    // 5xx mid-stream). Hide the broken image and fetch the
+                    // raw EMV payload so the tenant has a paste-to-pay
+                    // fallback — most Thai bank apps accept the EMV string
+                    // directly via "paste payload" UI.
+                    e.currentTarget.style.display = 'none';
+                    fetch(`${qrUrl}?format=json`, { credentials: 'same-origin' })
+                      .then((r) => r.ok ? r.json() : null)
+                      .then((d) => { if (d && d.payload) setQrFallback(d); })
+                      .catch(() => { /* fall back to bank info card only */ });
+                  }}
                 />
                 <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 4 }}>
                   สแกน PromptPay {pay.promptpayName ? `· ${pay.promptpayName}` : ''}
+                </div>
+              </div>
+            ) : null}
+            {qrFallback ? (
+              <div style={{
+                marginBottom: 12, padding: 12,
+                background: '#fffbe8', border: '1px solid #f0e3a7',
+                borderRadius: 8,
+              }}>
+                <div style={{ fontWeight: 600, fontSize: 13.5, marginBottom: 4 }}>
+                  ⚠ QR ไม่สามารถแสดงผลได้
+                </div>
+                <div style={{ fontSize: 12.5, color: '#6b5b1a', lineHeight: 1.6, marginBottom: 8 }}>
+                  คัดลอกข้อความด้านล่างนำไป paste ในแอปธนาคารหัวข้อ "วาง PromptPay payload"
+                  หรือใช้ข้อมูลโอนผ่านธนาคารด้านล่างแทน
+                </div>
+                <textarea
+                  readOnly
+                  value={qrFallback.payload}
+                  onClick={(e) => e.target.select()}
+                  style={{
+                    width: '100%', minHeight: 60,
+                    padding: 8, fontSize: 11,
+                    fontFamily: 'JetBrains Mono, monospace',
+                    border: '1px solid var(--border)', borderRadius: 6,
+                    background: '#fff', resize: 'none',
+                  }}
+                />
+                <button
+                  onClick={async () => {
+                    try {
+                      await navigator.clipboard.writeText(qrFallback.payload);
+                      setCopied(true);
+                      setTimeout(() => setCopied(false), 2000);
+                    } catch {
+                      // Old browsers / insecure contexts — instruct manual
+                      // copy. The textarea is already select-on-click above
+                      // so admin can ⌘C/Ctrl+C themselves.
+                      setCopied('manual');
+                      setTimeout(() => setCopied(false), 3000);
+                    }
+                  }}
+                  style={{
+                    marginTop: 8, padding: '6px 14px',
+                    borderRadius: 6, border: 0, cursor: 'pointer',
+                    background: copied === true ? '#2f8f5b' : 'var(--accent, #c46a3e)',
+                    color: '#fff', fontFamily: 'inherit', fontSize: 13, fontWeight: 500,
+                  }}
+                >
+                  {copied === true ? '✓ คัดลอกแล้ว'
+                    : copied === 'manual' ? 'คัดลอกด้วย ⌘C / Ctrl+C'
+                    : '📋 คัดลอก payload'}
+                </button>
+                <div style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 6 }}>
+                  ยอด ฿{fmtCurrency(qrFallback.amount)}
+                  {qrFallback.target ? ` · บัญชี …${String(qrFallback.target).slice(-4)}` : ''}
                 </div>
               </div>
             ) : null}

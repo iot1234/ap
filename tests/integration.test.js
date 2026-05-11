@@ -593,6 +593,20 @@ test('GET /api/tenant/bills/:id/pdf is wired (tenant PDF download)', () => {
     'tenant PDF must stream through renderBillPdf');
 });
 
+test('legacy /api/promptpay/qr endpoint is removed (no query-string QR)', () => {
+  // The generic /api/promptpay/qr accepted target+amount from the query
+  // string — useful only as an admin convenience, but a real attack
+  // surface (anyone within rate-limit headroom could render a QR for
+  // any account). It's been deleted; the tenant flow now uses
+  // /api/tenant/bills/:id/qr which loads amount from the DB row.
+  // Pin the removal so a future refactor doesn't re-add it accidentally.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.doesNotMatch(server, /app\.get\(\s*['"]\/api\/promptpay\/qr['"]/,
+    'generic /api/promptpay/qr must not be re-registered');
+});
+
 test('GET /api/tenant/bills/:id/qr uses DB bill total, not browser query amount', () => {
   // Tenant-side QR must be generated from the stored bill row. If the UI
   // passes target+amount through /api/promptpay/qr, a stale React state or
@@ -2530,6 +2544,7 @@ test('contract_invitations table + state machine columns', () => {
   // contracts.locked_at + locked_by columns
   assert.match(src, /ALTER TABLE contracts ADD COLUMN IF NOT EXISTS locked_at TIMESTAMPTZ/);
   assert.match(src, /ALTER TABLE contracts ADD COLUMN IF NOT EXISTS locked_by TEXT/);
+  assert.match(src, /ALTER TABLE contracts ADD COLUMN IF NOT EXISTS terms_template_snapshot JSONB/);
 });
 
 test('admin invitation endpoints exist + role-gated owner+manager', () => {
@@ -2575,6 +2590,16 @@ test('approve atomically applies draft + locks contract in single transaction', 
   assert.match(block, /BEGIN/, 'approve handler must open a transaction');
   assert.match(block, /COMMIT/, 'approve handler must commit');
   assert.match(block, /locked_at=NOW\(\)/, 'approve handler must lock contract');
+  assert.match(block, /WHERE id=\$1 AND deleted_at IS NULL AND locked_at IS NULL/,
+    'approve handler must refuse stale approvals against already-locked contracts');
+  assert.match(block, /loadContractTermsSnapshot\(client, cLock\.rows\[0\]\)/,
+    'approve handler must freeze the effective terms template before locking');
+  assert.match(block, /terms_template_snapshot=\$3::jsonb/,
+    'approve handler must persist the immutable PDF terms snapshot');
+  assert.match(block, /agreed_terms_at = COALESCE\(agreed_terms_at, NOW\(\)\)/,
+    'approve handler must stamp agreed_terms_at when a signature is accepted');
+  assert.match(block, /tenant-fill-v1/,
+    'approve handler must default a terms version for public tenant signatures');
   assert.match(block, /status='approved'/, 'approve handler must flip status');
   // Dedup escape: when applying tenant's draft, the partial unique on
   // citizen_id_hash can fire — must be mapped to a clean 409.
@@ -2626,6 +2651,23 @@ test('public fill: submit requires all critical fields before flipping status', 
   assert.match(src, /missing\.push\('emergencyContactPhone'\)/);
   assert.match(src, /missing\.push\('citizenIdFront'\)/);
   assert.match(src, /missing\.push\('citizenIdBack'\)/);
+});
+
+test('public fill: uploads are persisted into draft before submit can race', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const uploadBlock = src.match(/\/upload'[\s\S]+?\/\/ POST \/api\/contract-fill\/:token\/submit/);
+  assert.ok(uploadBlock, 'upload handler must be present');
+  const block = uploadBlock[0];
+  assert.match(block, /jsonb_build_object\(\$2::text, \$3::int\)/,
+    'upload handler must merge the new file id into invitation draft atomically');
+  assert.match(block, /RETURNING draft/,
+    'upload response must return the persisted draft');
+  assert.match(block, /storage\.remove\(pool, out\.id\)/,
+    'upload handler must clean up the saved file if draft persistence fails');
+  assert.match(block, /storage\.remove\(pool, previousFileId\)/,
+    'upload handler must clean up replaced files after a successful replacement');
 });
 
 test('admin UI: contract-invitations page registered + script-loaded', () => {
@@ -2686,6 +2728,24 @@ test('public contract-fill HTML page exists + has expected steps', () => {
   const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   assert.match(server,
     /app\.get\('\/contract\/fill\/:token'[\s\S]{0,200}contract-fill\.html/);
+});
+
+test('public contract-fill submit sends the just-uploaded signature id', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const html = fs.readFileSync(path.join(__dirname, '..', 'project', 'contract-fill.html'), 'utf8');
+  assert.match(html, /const submit = async \(draftOverride = null\)/,
+    'submit must accept an override draft from the signature step');
+  assert.match(html, /body: draftOverride \|\| draft/,
+    'submit must post the override draft when supplied');
+  assert.match(html, /if \(hasInk\)[\s\S]{0,120}saveSignature\(\)/,
+    'redrawing the signature must upload a fresh signature even when an old id exists');
+  assert.match(html, /signatureFileId: sigId/,
+    'submit override must carry the newly uploaded signature id');
+  assert.match(html, /agreedTermsVersion: draft\.agreedTermsVersion \|\| 'tenant-fill-v1'/,
+    'submit override must carry a durable terms version');
+  assert.match(html, /\(!hasInk && !draft\.signatureFileId\)/,
+    'existing saved signatures must allow submit after page reload');
 });
 
 test('checkOut schema declares generateClosingBill (zod must not strip the opt-out)', () => {
@@ -3029,6 +3089,30 @@ test('PDF endpoint resolves template by priority: explicit → contract → defa
   assert.match(src, /CONTRACT_TERMS_KEY/);
   // Audit trail records which template + room source were used
   assert.match(src, /templateId: explicitId, roomSource: room\.source/);
+});
+
+test('locked contracts use immutable terms snapshot for PDFs and edits are blocked', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(src, /async function loadContractTermsSnapshot/,
+    'server must define the terms snapshot builder');
+  assert.match(src, /snapshotVersion: 'contract-terms-snapshot-v1'/,
+    'snapshot should carry an explicit schema marker');
+  assert.match(src, /contract\.locked_at && contract\.terms_template_snapshot[\s\S]{0,120}template = contract\.terms_template_snapshot/,
+    'PDF endpoints must prefer the immutable snapshot for locked contracts');
+  assert.match(src, /PDF template override is disabled/,
+    'admin PDF template overrides must be refused after lock');
+  assert.match(src, /materialEditRequested[\s\S]{0,350}SELECT locked_at FROM contracts/,
+    'material contract edits must check locked_at under row lock');
+  assert.match(src, /contract is locked; material terms cannot be edited/,
+    'locked contracts must reject material term edits');
+  assert.match(src, /contract is locked; template cannot be changed/,
+    'locked contracts must reject template reassignment');
+  assert.match(src, /contract is locked; signature cannot be changed/,
+    'locked contracts must reject signature replacement');
+  assert.match(src, /AND locked_at IS NULL[\s\S]{0,120}AND \(status='active' OR \$5::boolean\)/,
+    'contract signing update must re-check locked_at atomically');
 });
 
 test('renderer honors section visibility flags + custom variables', () => {

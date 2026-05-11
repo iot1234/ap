@@ -46,8 +46,10 @@ check "GET /maintenance"            200 "$BASE_URL/maintenance"
 check "GET /login"                  200 "$BASE_URL/login"
 check "GET /api/data"               200 "$BASE_URL/api/data"
 check "GET /api/data/baankarn_rooms_v1"  200 "$BASE_URL/api/data/baankarn_rooms_v1"
-check "GET /api/promptpay/qr"       400 "$BASE_URL/api/promptpay/qr"   # no target
-check "GET /api/promptpay/qr?target=0812345678&amount=100"  200 "$BASE_URL/api/promptpay/qr?target=0812345678&amount=100"
+# Generic /api/promptpay/qr was removed (dead code; replaced by
+# /api/tenant/bills/:id/qr which loads the amount from the DB row).
+# Confirm the public route is gone — 404 means the cleanup is in effect.
+check "GET /api/promptpay/qr (removed)" 404 "$BASE_URL/api/promptpay/qr?target=0812345678&amount=100"
 
 echo ""
 echo "Auth-required endpoints (without session — expect 401):"
@@ -101,7 +103,9 @@ check "POST /api/auth/login (empty)"   400 -X POST -H "Content-Type: application
   -d '{}' -H "Origin: $BASE_URL" "$BASE_URL/api/auth/login"
 check "POST /api/bookings/public (no name)" 400 -X POST -H "Content-Type: application/json" \
   -d '{"phone":"0812345678"}' -H "Origin: $BASE_URL" "$BASE_URL/api/bookings/public"
-check "GET /api/promptpay/qr (bad shape)" 400 "$BASE_URL/api/promptpay/qr?target=1234567890"
+# /api/promptpay/qr removed — see line 49 note. The bad-shape validation
+# now lives in services/promptpay.normaliseTarget() and is exercised by
+# tests/promptpay.test.js + the /api/tenant/bills/:id/qr 503 path.
 
 echo ""
 echo "v2.1 routes/ modules:"

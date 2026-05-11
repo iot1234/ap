@@ -326,7 +326,7 @@ async function testGroup(group) {
     // Lightweight format check + try-build the EMV payload. Catches the
     // common "saved 9-digit phone" / "saved citizen-id with dashes" mistakes
     // before bills go out with a broken QR. We don't render the actual PNG
-    // (caller can do that via /api/promptpay/qr if they want a visual).
+    // here — the visual is generated per-bill at /api/tenant/bills/:id/qr.
     const target = get('PROMPTPAY_TARGET');
     if (!target) return { ok: false, error: 'PROMPTPAY_TARGET ยังไม่ตั้ง' };
     const cleaned = String(target).replace(/[\s-]/g, '');

@@ -632,6 +632,38 @@ async function checkDataIntegrity(pool) {
   }
 }
 
+// Probe the PromptPay QR rendering pipeline. We render a 1-baht QR against
+// a known-good test target (the bundled demo PromptPay) so a renderer crash
+// (qrcode/promptpay-qr package broken, OOM, or some unexpected exception)
+// surfaces on the health dashboard BEFORE a tenant tries to pay and gets a
+// 500. The probe doesn't touch the operator's real PROMPTPAY_TARGET or any
+// network — it's purely local module integrity.
+async function checkPromptpayRender() {
+  try {
+    const promptpay = require('./promptpay');
+    // Use the bundled demo target — guaranteed-valid shape, no real account
+    // touched. 1฿ is well under MAX_AMOUNT so the encoder doesn't reject.
+    const png = await promptpay.renderQrPng(promptpay.DEMO_TARGET, 1, { width: 64 });
+    if (!Buffer.isBuffer(png) || png.length < 100) {
+      return {
+        status: 'error',
+        message: 'QR renderer returned an empty / suspiciously small buffer',
+        detail: { bytes: png?.length || 0 },
+      };
+    }
+    return { status: 'ok', message: `QR renderer OK (${png.length} bytes)` };
+  } catch (err) {
+    // A throw here means either the promptpay-qr package or the qrcode
+    // package is broken — tenant /qr endpoints will 500. Surface as
+    // 'error' so it pages the operator before users notice.
+    return {
+      status: 'error',
+      message: `QR renderer broken: ${err.message}`,
+      detail: { stack: String(err.stack || '').split('\n').slice(0, 3).join('\n') },
+    };
+  }
+}
+
 async function checkPoolStats(pool) {
   try {
     // Standard pg.Pool exposes totalCount/idleCount/waitingCount. If a
@@ -677,6 +709,7 @@ const CHECKS = [
   { id: 'config',              label: 'Boot configuration',    fn: () => checkBootConfig() },
   { id: 'feature_deps',        label: 'Feature dependencies',  fn: (p, f) => checkFeatureDependencies(f, p) },
   { id: 'data_integrity',       label: 'Data integrity',        fn: (p) => checkDataIntegrity(p) },
+  { id: 'qr_renderer',         label: 'PromptPay QR renderer', fn: () => checkPromptpayRender() },
 ];
 
 /**

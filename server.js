@@ -14,7 +14,7 @@ const PgSession = require('connect-pg-simple')(session);
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const { renderBillPdf } = require('./services/pdf');
-const { renderQrPng, renderQrDataUrl, MAX_AMOUNT, isDemoTarget, normaliseTarget } = require('./services/promptpay');
+const { renderQrPng, renderQrDataUrl, buildPayload: buildPromptPayPayload, MAX_AMOUNT, isDemoTarget, normaliseTarget } = require('./services/promptpay');
 const lineNotify = require('./services/line');
 const features = require('./services/features');
 const cryptoSvc = require('./services/crypto');
@@ -138,6 +138,61 @@ const pool = new Pool({
 });
 
 pool.on('error', (err) => console.error('[pg] pool error:', sanitizeError(err)));
+
+async function loadContractTermsSnapshot(db, contract = {}) {
+  let rawTemplate = null;
+  let templateId = contract.template_id || null;
+  if (templateId) {
+    try {
+      const t = await db.query(
+        `SELECT id, mode, clauses, sections, variables
+           FROM contract_templates
+          WHERE id=$1 AND deleted_at IS NULL LIMIT 1`,
+        [templateId]
+      );
+      if (t.rows.length) rawTemplate = t.rows[0];
+    } catch (err) {
+      if (err.code !== '42P01') throw err;
+    }
+  }
+  if (!rawTemplate) {
+    try {
+      const t = await db.query(
+        `SELECT id, mode, clauses, sections, variables
+           FROM contract_templates
+          WHERE is_default=TRUE AND deleted_at IS NULL LIMIT 1`
+      );
+      if (t.rows.length) {
+        rawTemplate = t.rows[0];
+        templateId = t.rows[0].id;
+      }
+    } catch (err) {
+      if (err.code !== '42P01') throw err;
+    }
+  }
+  if (!rawTemplate) {
+    try {
+      const t = await db.query(
+        `SELECT value FROM system_settings WHERE key=$1`,
+        [CONTRACT_TERMS_KEY]
+      );
+      if (t.rows.length) rawTemplate = t.rows[0].value;
+    } catch { /* renderer defaults below */ }
+  }
+
+  const contractPdf = require('./services/contractPdf');
+  const clauses = contractPdf.resolveClauses(rawTemplate);
+  return {
+    templateId,
+    snapshot: {
+      mode: 'override',
+      clauses,
+      sections: rawTemplate && typeof rawTemplate.sections === 'object' ? rawTemplate.sections : {},
+      variables: rawTemplate && typeof rawTemplate.variables === 'object' ? rawTemplate.variables : {},
+      snapshotVersion: 'contract-terms-snapshot-v1',
+    },
+  };
+}
 
 // --- Schema migration -----------------------------------------------------
 // Delegates to db/migrate.js so the SQL is reusable from tests + scripts.
@@ -1339,43 +1394,16 @@ app.post('/api/bills/render', sameOrigin, csrfGuard, requireAuth, requireRole('o
   }
 });
 
-// GET /api/promptpay/qr?target=<phone-or-citizen-id>&amount=<thb>&format=png|json
-// Public for now (rate-limited indirectly via session middleware overhead);
-// in practice the only callers are admin/tenant pages already inside the app.
-app.get('/api/promptpay/qr', rateLimitQr, async (req, res) => {
-  const target = String(req.query.target || '').trim();
-  const amountRaw = req.query.amount;
-  const amount = amountRaw != null && amountRaw !== '' ? Number(amountRaw) : undefined;
-  const format = req.query.format === 'json' ? 'json' : 'png';
-  if (!target) return res.status(400).json({ error: 'target required' });
-  // Cap amount: realistic monthly bills are <100k THB. 999,999 is the upper
-  // sanity bound — bigger values are likely attempts to abuse the QR.
-  if (amount != null && (!Number.isFinite(amount) || amount <= 0 || amount > MAX_AMOUNT)) {
-    return res.status(400).json({ error: 'invalid amount' });
-  }
-  // C13 — strict shape: Thai phone (10 digits, leading 0) OR citizen ID (13).
-  // Previously a regex allowed `1234567890` (no leading 0) through, which
-  // generates a payload that no Thai bank app can parse.
-  const cleaned = target.replace(/-/g, '');
-  const isPhone = /^0\d{9}$/.test(cleaned);
-  const isCitizen = /^\d{13}$/.test(cleaned);
-  if (!isPhone && !isCitizen) {
-    return res.status(400).json({ error: 'PromptPay target must be a 10-digit Thai phone (0XXXXXXXXX) or 13-digit citizen ID' });
-  }
-  try {
-    if (format === 'json') {
-      const dataUrl = await renderQrDataUrl(target, amount);
-      return res.json({ ok: true, dataUrl });
-    }
-    const png = await renderQrPng(target, amount);
-    res.setHeader('Content-Type', 'image/png');
-    res.setHeader('Cache-Control', 'no-store');
-    return res.end(png);
-  } catch (err) {
-    console.error('qr render error:', err);
-    return res.status(500).json({ error: 'qr render failed' });
-  }
-});
+// Note: the generic GET /api/promptpay/qr?target=&amount= endpoint was
+// removed. It accepted a query-string target+amount and would render a QR
+// for ANY account — useful only as an admin convenience but no UI in this
+// build called it (tenant uses /api/tenant/bills/:id/qr which loads amount
+// from the DB row; PDFs render inline via services/pdf.js). The generic
+// endpoint was a small but real attack surface (anyone within rate-limit
+// headroom could synthesise QR images for arbitrary PromptPay accounts).
+// If a future admin tool needs preview rendering, prefer an owner-only
+// /api/admin/promptpay/qr that takes its target from server config rather
+// than from the caller's query string.
 
 // --- Maintenance tickets (Phase A4) ---------------------------------------
 // Lifecycle: open → assigned → in_progress → (awaiting_parts) → completed.
@@ -3471,6 +3499,17 @@ app.get('/api/tenant/bills/:id/qr', rateLimitQr, requireTenant, async (req, res)
     );
     if (!rows.length) return res.status(404).json({ error: 'bill not found' });
     const bill = rows[0];
+    // Orphan bill (tenant_id IS NULL) — same handling as /api/tenant/payments
+    // and /api/tenant/pay-readiness so the tenant sees a clear "ติดต่อ
+    // เจ้าหน้าที่" message instead of "not your bill" (which implies they
+    // tried to peek at someone else's QR — confusing for the actual victim
+    // of an unattached bill).
+    if (!bill.tenant_id) {
+      return res.status(403).json({
+        error: 'บิลนี้ยังไม่ได้ผูกกับผู้เช่า — กรุณาติดต่อเจ้าหน้าที่',
+        code: 'BILL_NOT_LINKED',
+      });
+    }
     if (Number(bill.tenant_id) !== Number(req.tenant.tenant_id)) {
       return res.status(403).json({ error: 'not your bill' });
     }
@@ -3502,6 +3541,64 @@ app.get('/api/tenant/bills/:id/qr', rateLimitQr, requireTenant, async (req, res)
       return res.status(503).json({
         error: 'PromptPay target is invalid',
         code: 'PROMPTPAY_INVALID_CONFIG',
+      });
+    }
+    // Refuse to render a QR for the bundled demo PromptPay account.
+    // Without this guard a fresh deploy ships with a QR that points at a
+    // hard-coded test target — tenants would scan and the transfer would
+    // go to nobody. Catch it here so the failure is loud + actionable
+    // ("admin: go set PromptPay") instead of silent + financial.
+    if (isDemoTarget(paymentBlock.promptpayTarget)) {
+      return res.status(503).json({
+        error: 'หอพักยังใช้ PromptPay demo — แจ้งเจ้าหน้าที่ให้ตั้งบัญชีจริงก่อน',
+        code: 'PROMPTPAY_DEMO',
+      });
+    }
+
+    // Two response shapes:
+    //   format=json  → { ok, payload, dataUrl, target, amount }
+    //                  payload is the raw EMV string — tenant can paste it
+    //                  into a banking app even if the rendered PNG fails to
+    //                  load (some apps support "paste payload to pay"). The
+    //                  dataUrl is best-effort: if QR rendering throws, the
+    //                  payload field still lets the client recover by
+    //                  rendering with a browser-side QR library OR by
+    //                  showing a copyable text fallback.
+    //   default      → image/png (legacy path, unchanged)
+    const format = String(req.query.format || 'png').toLowerCase();
+    if (format === 'json' || format === 'payload') {
+      // Build the EMV payload first — that's the durable contract value
+      // (a Thai banking-app-readable string) that doesn't require the
+      // QR rendering pipeline. If buildPayload itself throws (very rare —
+      // would mean promptpay-qr is broken), fall through to the catch
+      // below for a clean 500.
+      const payload = buildPromptPayPayload(paymentBlock.promptpayTarget, amount);
+      let dataUrl = null;
+      let renderError = null;
+      try {
+        dataUrl = await renderQrDataUrl(paymentBlock.promptpayTarget, amount);
+      } catch (renderErr) {
+        // QR rendering pipeline broke (qrcode package crash / OOM /
+        // unexpected). The payload is still usable — surface the error
+        // code so the client knows to display the text-paste fallback
+        // instead of a broken image placeholder.
+        renderError = renderErr.message || 'render failed';
+        console.error('[qr] dataUrl render failed (payload still served):', renderError);
+      }
+      res.setHeader('Cache-Control', 'no-store');
+      return res.json({
+        ok: true,
+        payload,
+        dataUrl,                            // null when rendering failed
+        renderError,                        // null on success; debug aid
+        target: paymentBlock.promptpayTarget,
+        amount,
+        billId: bill.id,
+        // Hand the bank-info card to the client so the fallback UI can
+        // render manual-transfer details in the same response — no
+        // second round-trip needed when QR fails.
+        bankInfo: paymentBlock.bankInfo || null,
+        promptpayName: paymentBlock.promptpayName || null,
       });
     }
 
@@ -3662,7 +3759,10 @@ app.get('/api/tenant/contract/:id/pdf', requireTenant, async (req, res) => {
 
     // Template — use the contract's bound template, or the system default.
     let template = null;
-    if (contract.template_id) {
+    if (contract.locked_at && contract.terms_template_snapshot) {
+      template = contract.terms_template_snapshot;
+    }
+    if (!template && contract.template_id) {
       try {
         const t = await pool.query(
           `SELECT mode, clauses, sections, variables FROM contract_templates
@@ -6853,10 +6953,31 @@ app.put('/api/contracts/:id', sameOrigin, csrfGuard, requireAuth, requireRole('o
     // contract shows ended but bills keep auto-generating and
     // /api/rooms still shows the room as occupied (drift #7 from audit).
     const isClosingContract = b.status === 'ended' || b.status === 'expired';
+    const materialEditRequested = b.discountPct !== undefined
+      || b.termMonths !== undefined
+      || b.endDate !== undefined;
 
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
+      if (materialEditRequested) {
+        const lockQ = await client.query(
+          `SELECT locked_at FROM contracts
+            WHERE id=$1 AND deleted_at IS NULL FOR UPDATE`,
+          [id]
+        );
+        if (!lockQ.rows.length) {
+          await client.query('ROLLBACK');
+          return res.status(404).json({ error: 'not found' });
+        }
+        if (lockQ.rows[0].locked_at) {
+          await client.query('ROLLBACK');
+          return res.status(409).json({
+            error: 'contract is locked; material terms cannot be edited',
+            code: 'CONTRACT_LOCKED',
+          });
+        }
+      }
       const { rows } = await client.query(
         `UPDATE contracts SET ${fields.join(', ')} WHERE id=$${i} AND deleted_at IS NULL RETURNING *`,
         params
@@ -6969,12 +7090,18 @@ app.post('/api/contracts/:id/sign', sameOrigin, csrfGuard, requireAuth, requireR
 
     // Verify the contract exists + is active before storing the photo.
     const cQ = await pool.query(
-      `SELECT id, contract_no, status, signature_image_id, tenant_id
+      `SELECT id, contract_no, status, signature_image_id, tenant_id, locked_at
          FROM contracts WHERE id=$1 AND deleted_at IS NULL`,
       [id]
     );
     if (!cQ.rows.length) return res.status(404).json({ error: 'contract not found' });
     const contract = cQ.rows[0];
+    if (contract.locked_at) {
+      return res.status(409).json({
+        error: 'contract is locked; signature cannot be changed',
+        code: 'CONTRACT_LOCKED',
+      });
+    }
     if (contract.status !== 'active' && !force) {
       return res.status(409).json({
         error: `สัญญาสถานะ ${contract.status} เซ็นไม่ได้ (เซ็นได้เฉพาะ active)`,
@@ -7018,6 +7145,7 @@ app.post('/api/contracts/:id/sign', sameOrigin, csrfGuard, requireAuth, requireR
                 agreed_terms_at = COALESCE(agreed_terms_at, NOW()),
                 agreed_terms_version = COALESCE($3, agreed_terms_version)
           WHERE id=$4 AND deleted_at IS NULL
+            AND locked_at IS NULL
             AND (status='active' OR $5::boolean)
             AND (signature_image_id IS NULL OR $5::boolean)
           RETURNING id, contract_no, signed_at, agreed_terms_at, agreed_terms_version,
@@ -7028,11 +7156,17 @@ app.post('/api/contracts/:id/sign', sameOrigin, csrfGuard, requireAuth, requireR
         // Rolling back the upload preserves storage cleanliness.
         await storage.remove(pool, savedFile.id).catch(() => {});
         const fresh = await pool.query(
-          `SELECT id, status, signature_image_id
+          `SELECT id, status, signature_image_id, locked_at
              FROM contracts WHERE id=$1 AND deleted_at IS NULL`,
           [id]
         );
         if (!fresh.rows.length) return res.status(404).json({ error: 'contract not found' });
+        if (fresh.rows[0].locked_at) {
+          return res.status(409).json({
+            error: 'contract is locked; signature cannot be changed',
+            code: 'CONTRACT_LOCKED',
+          });
+        }
         if (fresh.rows[0].status !== 'active' && !force) {
           return res.status(409).json({
             error: `สัญญาสถานะ ${fresh.rows[0].status} เซ็นไม่ได้ (เซ็นได้เฉพาะ active)`,
@@ -7428,25 +7562,47 @@ app.post('/api/contracts/:id/template', sameOrigin, csrfGuard, requireAuth, requ
     if (templateId != null && (!Number.isInteger(templateId) || templateId < 1)) {
       return res.status(400).json({ error: 'invalid templateId' });
     }
+    const client = await pool.connect();
     try {
+      await client.query('BEGIN');
+      const c = await client.query(
+        `SELECT id, locked_at FROM contracts
+          WHERE id=$1 AND deleted_at IS NULL FOR UPDATE`,
+        [id]
+      );
+      if (!c.rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'contract not found' });
+      }
+      if (c.rows[0].locked_at) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'contract is locked; template cannot be changed',
+          code: 'CONTRACT_LOCKED',
+        });
+      }
       // Verify the template exists (when set).
       if (templateId != null) {
-        const t = await pool.query(
+        const t = await client.query(
           `SELECT id FROM contract_templates WHERE id=$1 AND deleted_at IS NULL`,
           [templateId]
         );
-        if (!t.rows.length) return res.status(404).json({ error: 'template not found' });
+        if (!t.rows.length) {
+          await client.query('ROLLBACK');
+          return res.status(404).json({ error: 'template not found' });
+        }
       }
-      const { rows } = await pool.query(
+      const { rows } = await client.query(
         `UPDATE contracts SET template_id=$1, updated_at=NOW()
           WHERE id=$2 AND deleted_at IS NULL
           RETURNING id, contract_no, template_id`,
         [templateId, id]
       );
-      if (!rows.length) return res.status(404).json({ error: 'contract not found' });
+      await client.query('COMMIT');
       audit(req, 'contract.template_assign', 'contract', String(id), { templateId });
       res.json({ ok: true, contract: rows[0] });
     } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
       // Pre-migration: contracts.template_id might not exist yet.
       if (err.code === '42703') {
         return res.status(503).json({
@@ -7456,6 +7612,8 @@ app.post('/api/contracts/:id/template', sameOrigin, csrfGuard, requireAuth, requ
       }
       console.error('contract template assign error:', err);
       res.status(500).json({ error: 'internal error' });
+    } finally {
+      client.release();
     }
   });
 
@@ -8162,15 +8320,43 @@ app.post('/api/admin/contract-invitations/:id/approve',
       }
 
       // Apply signature → contracts row + lock the contract.
-      const updateSets = ['updated_at=NOW()', 'locked_at=NOW()', 'locked_by=$2'];
-      const updateParams = [inv.contract_id, req.session.user.username];
-      let pi = 3;
+      const cLock = await client.query(
+        `SELECT id, template_id, locked_at FROM contracts
+          WHERE id=$1 AND deleted_at IS NULL FOR UPDATE`,
+        [inv.contract_id]
+      );
+      if (!cLock.rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'contract not found', code: 'CONTRACT_NOT_FOUND' });
+      }
+      if (cLock.rows[0].locked_at) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'contract is already locked',
+          code: 'CONTRACT_LOCKED',
+        });
+      }
+      const termsSnapshot = await loadContractTermsSnapshot(client, cLock.rows[0]);
+      const updateSets = [
+        'updated_at=NOW()',
+        'locked_at=NOW()',
+        'locked_by=$2',
+        `terms_template_snapshot=$3::jsonb`,
+      ];
+      const updateParams = [
+        inv.contract_id,
+        req.session.user.username,
+        JSON.stringify(termsSnapshot.snapshot),
+      ];
+      let pi = 4;
       if (draft.signatureFileId) {
         updateSets.push(`signature_image_id=$${pi++}`,
-                        `signed_at = COALESCE(signed_at, NOW())`);
+                        `signed_at = COALESCE(signed_at, NOW())`,
+                        `agreed_terms_at = COALESCE(agreed_terms_at, NOW())`);
         updateParams.push(Number(draft.signatureFileId));
-      }
-      if (draft.agreedTermsVersion) {
+        updateSets.push(`agreed_terms_version = COALESCE(agreed_terms_version, $${pi++})`);
+        updateParams.push(String(draft.agreedTermsVersion || 'tenant-fill-v1').slice(0, 64));
+      } else if (draft.agreedTermsVersion) {
         updateSets.push(`agreed_terms_version=$${pi++}`,
                         `agreed_terms_at = COALESCE(agreed_terms_at, NOW())`);
         updateParams.push(String(draft.agreedTermsVersion).slice(0, 64));
@@ -8178,11 +8364,16 @@ app.post('/api/admin/contract-invitations/:id/approve',
       // Pull contract.room_id back so we can sync room state below.
       const cUpdate = await client.query(
         `UPDATE contracts SET ${updateSets.join(', ')}
-          WHERE id=$1 AND deleted_at IS NULL
-          RETURNING id, contract_no, room_id, tenant_id, monthly_rent, deposit, start_date`,
+          WHERE id=$1 AND deleted_at IS NULL AND locked_at IS NULL
+          RETURNING id, contract_no, room_id, tenant_id, monthly_rent, deposit,
+                    start_date, discount_pct, template_id, locked_at`,
         updateParams
       );
       const contract = cUpdate.rows[0];
+      if (!contract) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ error: 'contract is already locked', code: 'CONTRACT_LOCKED' });
+      }
 
       // ============== INTEGRATION: link tenant ↔ room ==============
       // Without this block the contract is approved but the room shows
@@ -8742,17 +8933,40 @@ app.post('/api/contract-fill/:token/upload', rateLimitContractFill, async (req, 
       maxBytes: 1_500_000,
       side,
     });
-    // Engagement signal — extend expiry the same way PUT does so the
-    // tenant doesn't lose their session mid-photo-upload after a long
-    // pause to find their citizen card.
-    await pool.query(
-      `UPDATE contract_invitations
-          SET expires_at = GREATEST(expires_at, NOW() + INTERVAL '7 days'),
-              updated_at=NOW()
-        WHERE id=$1`,
-      [inv.id]
-    ).catch(() => { /* best-effort, don't fail the upload on this */ });
-    res.json({ ok: true, file: { id: out.id, url: out.url, kind } });
+    // Persist the file id into the draft in the same request. This closes
+    // the race where upload succeeds but submit happens before autosave.
+    const draftKey = kind === 'signature'
+      ? 'signatureFileId'
+      : (kind === 'front' ? 'citizenIdImageFrontId' : 'citizenIdImageBackId');
+    const previousFileId = Number(inv.draft && inv.draft[draftKey]) || null;
+    let updatedDraft = null;
+    try {
+      const upd = await pool.query(
+        `UPDATE contract_invitations
+            SET draft = COALESCE(draft, '{}'::jsonb)
+                        || jsonb_build_object($2::text, $3::int),
+                expires_at = GREATEST(expires_at, NOW() + INTERVAL '7 days'),
+                updated_at=NOW()
+          WHERE id=$1 AND status='pending'
+          RETURNING draft`,
+        [inv.id, draftKey, out.id]
+      );
+      if (!upd.rows.length) {
+        await storage.remove(pool, out.id).catch(() => {});
+        return res.status(409).json({
+          error: 'à¸ªà¹ˆà¸‡à¹ƒà¸«à¹‰à¸•à¸£à¸§à¸ˆà¸ªà¸­à¸šà¹à¸¥à¹‰à¸§ â€” à¹à¸à¹‰à¹„à¸‚à¹„à¸¡à¹ˆà¹„à¸”à¹‰',
+          code: 'NOT_EDITABLE',
+        });
+      }
+      updatedDraft = upd.rows[0].draft;
+    } catch (err) {
+      await storage.remove(pool, out.id).catch(() => {});
+      throw err;
+    }
+    if (previousFileId && previousFileId !== out.id) {
+      storage.remove(pool, previousFileId).catch(() => {});
+    }
+    res.json({ ok: true, file: { id: out.id, url: out.url, kind }, draft: updatedDraft });
   } catch (err) {
     console.error('contract-fill upload error:', err.message);
     res.status(400).json({ error: err.message || 'upload failed' });
@@ -9176,10 +9390,19 @@ app.get('/api/contracts/:id/pdf', requireAuth, requireRole('owner', 'manager'),
       // legacy system_settings → null (renderer uses DEFAULT_CLAUSES).
       let template = null;
       const queryTemplateId = req.query.templateId ? Number(req.query.templateId) : null;
+      if (contract.locked_at && Number.isInteger(queryTemplateId) && queryTemplateId > 0) {
+        return res.status(409).json({
+          error: 'contract is locked; PDF template override is disabled',
+          code: 'CONTRACT_LOCKED',
+        });
+      }
       const explicitId = (Number.isInteger(queryTemplateId) && queryTemplateId > 0)
         ? queryTemplateId
         : (contract.template_id || null);
-      if (explicitId) {
+      if (contract.locked_at && contract.terms_template_snapshot) {
+        template = contract.terms_template_snapshot;
+      }
+      if (!template && explicitId) {
         try {
           const t = await pool.query(
             `SELECT mode, clauses, sections, variables FROM contract_templates
