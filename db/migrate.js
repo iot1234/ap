@@ -496,6 +496,31 @@ async function migrate(pool, opts = {}) {
     -- Cache the binding's OA on the tenant row too, so notifier doesn't have
     -- to JOIN every push. Updated by lineBinding.tryBind / revoke / block.
     ALTER TABLE tenants ADD COLUMN IF NOT EXISTS line_oa_id BIGINT;
+
+    -- Owner-claim tokens: admin generates a one-time OWNER-XXXXXXXX code,
+    -- sends it from their own LINE account to the OA. The webhook matches
+    -- the code → saves source.userId into line_oas.owner_user_id for the
+    -- OA that received the message. Replaces the manual "go find your
+    -- userId on developers.line.biz and paste it into LINE_OWNER_USER_ID"
+    -- step that was confusing operators.
+    CREATE TABLE IF NOT EXISTS owner_claim_tokens (
+      id              BIGSERIAL PRIMARY KEY,
+      code            TEXT NOT NULL,
+      oa_id           BIGINT,            -- NULL = any-OA (env fallback path)
+      status          TEXT NOT NULL DEFAULT 'pending',   -- pending | claimed | expired | revoked
+      claimed_user_id TEXT,              -- LINE userId that consumed the code
+      claimed_at      TIMESTAMPTZ,
+      expires_at      TIMESTAMPTZ NOT NULL,
+      created_by      TEXT,              -- admin username for audit
+      created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_owner_claim_tokens_code
+      ON owner_claim_tokens(code);
+    -- At most one pending claim per OA at a time; admin must revoke before
+    -- issuing a new one. Reduces phishing window (only one valid code live).
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_owner_claim_pending_per_oa
+      ON owner_claim_tokens(COALESCE(oa_id, 0)) WHERE status = 'pending';
   `);
 
   // === FK cascade hardening (idempotent) ===================================

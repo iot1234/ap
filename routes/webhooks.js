@@ -12,6 +12,8 @@ const express = require('express');
 const lineSvc = require('../services/line');
 const lineOa = require('../services/lineOa');
 const lineBinding = require('../services/lineBinding');
+const ownerClaim = require('../services/ownerClaim');
+const secrets = require('../services/secrets');
 const notifier = require('../services/notifier');
 const features = require('../services/features');
 
@@ -97,6 +99,43 @@ module.exports = function buildWebhooksRouter(ctx) {
     if (!userId || !ev.replyToken) return;
 
     const text = String(ev.message.text || '').trim();
+
+    // 0) Owner-claim code — match OWNER-XXXXXXXX. Checked BEFORE tenant
+    //    bind so the two namespaces never collide. The admin issuing the
+    //    claim is the only one who knows the code (and it's single-use +
+    //    5-min TTL), so an unsuspecting user sending OWNER-... to the OA
+    //    can't accidentally hijack the owner channel.
+    if (ownerClaim.isClaimCode(text)) {
+      let result;
+      try {
+        result = await ownerClaim.tryClaim(pool, {
+          code: text, lineUserId: userId, oaId: oa.id || null,
+          secretsModule: secrets,
+        });
+      } catch (err) {
+        console.error(`[line:${oa.slug}] owner-claim error:`, err.message);
+        await lineSvc.replyText(oa, ev.replyToken, '⚠️ ระบบขัดข้อง — โปรดลองใหม่');
+        return;
+      }
+      if (result.ok) {
+        await lineSvc.replyText(oa, ev.replyToken,
+          `✅ ตั้งคุณเป็น Owner ของ ${oa.name} เรียบร้อย\n\n` +
+          `LINE userId นี้จะได้รับ system alerts ทั้งหมด ` +
+          `(บิลที่ส่งไม่ได้ / สลิปใหม่ / health alert / ฯลฯ)\n\n` +
+          `เปลี่ยนได้ภายหลังที่ /admin#secrets`);
+        return;
+      }
+      const messages = {
+        invalid:      '❌ รหัสไม่ถูกต้อง — โปรดขอใหม่จาก /admin#secrets',
+        expired:      '❌ รหัสหมดอายุ (เกิน 5 นาที) — ขอใหม่ที่หน้า admin',
+        already_used: '❌ รหัสนี้ถูกใช้ไปแล้ว',
+        revoked:      '❌ รหัสนี้ถูกยกเลิก — ขอใหม่ที่หน้า admin',
+        wrong_oa:     '❌ รหัสนี้ออกให้ใช้กับ LINE OA อื่น',
+        error:        '⚠️ เกิดข้อผิดพลาด — โปรดลองใหม่',
+      };
+      await lineSvc.replyText(oa, ev.replyToken, messages[result.reason] || '❌ ตั้ง owner ไม่สำเร็จ');
+      return;
+    }
 
     // 1) Binding code — match BIND-XXXXXXXX (case-insensitive, 4-16 hex)
     if (/^BIND-[A-F0-9]{4,16}$/i.test(text)) {

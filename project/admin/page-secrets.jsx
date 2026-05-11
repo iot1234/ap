@@ -17,20 +17,25 @@ const GROUP_META = {
   line:       { title: 'LINE Messaging API',     icon: '💬', desc: 'Token + Owner ID สำหรับส่งแจ้งเตือนและรับ webhook' },
   smtp:       { title: 'อีเมล (SMTP)',           icon: '📧', desc: 'Host/User/Password สำหรับส่งอีเมลแจ้งเตือน (fallback ของ LINE)' },
   promptpay:  { title: 'PromptPay',              icon: '💸', desc: 'เบอร์โทร/บัตร ปชช. สำหรับสร้าง QR ในบิล' },
-  slipverify: { title: 'ตรวจสลิปอัตโนมัติ',     icon: '🧾', desc: 'API key ของ SlipOK / EasySlip — เปิด autoVerify ที่หน้า Features หลังตั้ง key เสร็จ' },
+  slipverify: { title: 'ตรวจสลิปอัตโนมัติ',     icon: '🧾', desc: 'API key ของ SlipOK / EasySlip / Slip2Go — เปิด autoVerify ที่หน้า Features หลังตั้ง key เสร็จ' },
   sentry:     { title: 'Error Tracking (Sentry)', icon: '🐛', desc: 'DSN สำหรับเก็บ exception report' },
   r2:         { title: 'Cloud Backup (R2/S3)',   icon: '☁️', desc: 'S3-compatible storage สำหรับ backup อัตโนมัติ' },
 };
 
 function PageSecrets({ setToast }) {
   const C = window.ADMIN_C;
-  const { Card, SectionHeading, Btn, Pill, PageContainer, PageHeader } = window;
+  const { Card, SectionHeading, Btn, Pill, PageContainer, PageHeader, Modal } = window;
   const apiFetch = window.apiFetch;
   const [groups, setGroups] = useState({});
   const [editing, setEditing] = useState({});
   const [drafts, setDrafts] = useState({});
   const [busy, setBusy] = useState(false);
   const [testing, setTesting] = useState({});
+  // Owner-claim modal state: token = { id, code, expiresAt } once issued;
+  // claimStatus polls /api/admin/line/owner-claim/:id and switches the
+  // modal between pending/claimed/expired views.
+  const [ownerClaim, setOwnerClaim] = useState(null);
+  const [claimStatus, setClaimStatus] = useState(null);
 
   async function load() {
     try {
@@ -117,6 +122,51 @@ function PageSecrets({ setToast }) {
   // bills + provider key for slip auto-verify).
   const groupOrder = ['line', 'smtp', 'promptpay', 'slipverify', 'sentry', 'r2'];
 
+  // Auto-detect Owner User ID. Generates a one-time OWNER-XXXXXXXX code,
+  // admin sends it from their personal LINE to the OA, webhook saves the
+  // userId — admin doesn't have to manually paste it.
+  async function startOwnerClaim() {
+    try {
+      const r = await apiFetch('/api/admin/line/owner-claim', {
+        method: 'POST', body: JSON.stringify({}),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'create failed');
+      setOwnerClaim(d);
+      setClaimStatus({ status: 'pending' });
+    } catch (e) {
+      setToast && setToast({ kind: 'error', message: e.message });
+    }
+  }
+  // Poll the claim status while the modal is open. Stops when claimed,
+  // expired, or revoked. 2-second interval is fast enough for UX without
+  // hammering the DB.
+  useEffect(() => {
+    if (!ownerClaim) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const r = await fetch(`/api/admin/line/owner-claim/${ownerClaim.id}`,
+          { credentials: 'same-origin' });
+        const d = await r.json();
+        if (cancelled) return;
+        if (r.ok) {
+          setClaimStatus(d);
+          if (d.status === 'claimed') {
+            setToast && setToast({
+              kind: 'success',
+              message: { title: '✅ ตั้ง Owner สำเร็จ', description: `userId ${d.claimedTail}` },
+            });
+            load();   // refresh secrets so LINE_OWNER_USER_ID shows as set
+          }
+        }
+      } catch { /* swallow — next poll will retry */ }
+    };
+    tick();
+    const interval = setInterval(tick, 2000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [ownerClaim?.id]);
+
   return (
     <PageContainer>
       <PageHeader title="ตั้งค่า API & Secrets"
@@ -146,12 +196,22 @@ function PageSecrets({ setToast }) {
                   the test endpoint's allowlist gates which group strings are
                   accepted. Sentry omitted: there's no read-side probe — sending
                   a fake event would litter the project's Issues stream. */}
-              {(group === 'line' || group === 'smtp' || group === 'r2'
-                || group === 'promptpay' || group === 'slipverify') && (
-                <Btn size="sm" onClick={() => testGroup(group)} disabled={!!testing[group]}>
-                  {testing[group] ? 'กำลังทดสอบ…' : '🔌 ทดสอบ'}
-                </Btn>
-              )}
+              <div style={{ display: 'flex', gap: 8 }}>
+                {/* Auto-detect button — only on the LINE group since it
+                    relies on the OA webhook being live. Clicking it
+                    generates a OWNER-code and opens the claim modal. */}
+                {group === 'line' && (
+                  <Btn size="sm" variant="ghost" onClick={startOwnerClaim}>
+                    🔗 Auto-detect Owner ID
+                  </Btn>
+                )}
+                {(group === 'line' || group === 'smtp' || group === 'r2'
+                  || group === 'promptpay' || group === 'slipverify') && (
+                  <Btn size="sm" onClick={() => testGroup(group)} disabled={!!testing[group]}>
+                    {testing[group] ? 'กำลังทดสอบ…' : '🔌 ทดสอบ'}
+                  </Btn>
+                )}
+              </div>
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 1, background: C.border, borderRadius: 8, overflow: 'hidden' }}>
               {groups[group].map((s) => (
@@ -177,7 +237,103 @@ function PageSecrets({ setToast }) {
           <div style={{ color: C.muted, textAlign: 'center', padding: 20 }}>กำลังโหลด…</div>
         </Card>
       )}
+
+      {/* Owner-claim modal — renders the OWNER-XXXXXXXX code with copy
+          + a live status pill that flips green when the webhook records
+          a userId. Auto-closes 1.5s after success so admin sees the ✓. */}
+      <Modal
+        open={!!ownerClaim}
+        onClose={() => { setOwnerClaim(null); setClaimStatus(null); }}
+        title="🔗 ผูก LINE Owner User ID อัตโนมัติ"
+        width={480}
+        footer={(
+          <Btn variant="ghost"
+            onClick={() => { setOwnerClaim(null); setClaimStatus(null); }}>
+            {claimStatus?.status === 'claimed' ? 'เสร็จสิ้น' : 'ปิด'}
+          </Btn>
+        )}
+      >
+        {ownerClaim && (
+          <OwnerClaimBody token={ownerClaim} status={claimStatus} C={C} />
+        )}
+      </Modal>
     </PageContainer>
+  );
+}
+
+// OwnerClaimBody — renders the 3-step claim flow + live status indicator.
+// Pure presentational; the parent owns the token + poll state.
+function OwnerClaimBody({ token, status, C }) {
+  const st = status?.status || 'pending';
+  const palette = {
+    pending:  { bg: '#fff7e0', border: '#f0e3a7', icon: '⏳', label: 'รอผู้ใช้ส่งรหัส', color: '#8a6b1a' },
+    claimed:  { bg: '#f0f9f0', border: '#bce0bc', icon: '✅', label: 'สำเร็จ', color: '#1f5f3a' },
+    expired:  { bg: '#fff5f4', border: '#f5c0b4', icon: '⌛', label: 'หมดอายุ', color: '#b94a48' },
+    revoked:  { bg: '#fff5f4', border: '#f5c0b4', icon: '❌', label: 'ถูกยกเลิก', color: '#b94a48' },
+  };
+  const p = palette[st] || palette.pending;
+  const expiresIn = token?.expiresAt
+    ? Math.max(0, Math.floor((new Date(token.expiresAt).getTime() - Date.now()) / 1000))
+    : 0;
+
+  const copyCode = async () => {
+    try {
+      await navigator.clipboard.writeText(token.code);
+      window.toast && window.toast({ kind: 'success', message: 'คัดลอกรหัสแล้ว' });
+    } catch { /* user copies manually */ }
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <div style={{ fontSize: 13, color: C.muted, lineHeight: 1.6 }}>
+        ขั้นตอน:
+        <ol style={{ margin: '6px 0 0 0', paddingLeft: 20, color: C.ink }}>
+          <li>เปิดแชต LINE คุยกับ LINE OA ของหอพัก (จากบัญชีตัวเอง)</li>
+          <li>ส่งรหัสด้านล่างไปที่ OA</li>
+          <li>รอ ~1-2 วินาที — ระบบจะตั้ง userId อัตโนมัติ</li>
+        </ol>
+      </div>
+
+      <div style={{
+        padding: 16, borderRadius: 10, textAlign: 'center',
+        background: '#fdfaf2', border: `1px solid ${C.borderSoft || C.border}`,
+      }}>
+        <div style={{ fontSize: 12, color: C.muted, marginBottom: 6 }}>รหัสที่ต้องส่ง</div>
+        <div style={{
+          fontFamily: 'JetBrains Mono, monospace',
+          fontSize: 22, fontWeight: 700, letterSpacing: 1, color: C.ink,
+        }}>{token.code}</div>
+        <Btn size="sm" variant="ghost" onClick={copyCode} style={{ marginTop: 8 }}>
+          📋 คัดลอก
+        </Btn>
+      </div>
+
+      <div style={{
+        padding: 12, borderRadius: 8,
+        background: p.bg, border: `1px solid ${p.border}`,
+      }}>
+        <div style={{ fontWeight: 600, fontSize: 14, color: p.color }}>
+          {p.icon} {p.label}
+        </div>
+        {st === 'pending' ? (
+          <div style={{ fontSize: 12.5, color: C.muted, marginTop: 4 }}>
+            หมดอายุใน {Math.floor(expiresIn / 60)}:{String(expiresIn % 60).padStart(2, '0')} นาที
+            — รอผู้ใช้ส่งรหัสมาที่ LINE OA
+          </div>
+        ) : null}
+        {st === 'claimed' && status?.claimedTail ? (
+          <div style={{ fontSize: 12.5, color: p.color, marginTop: 4 }}>
+            LINE userId: {status.claimedTail}
+            <br/>ระบบจะส่ง alert ทั้งหมดไปที่ user นี้ตั้งแต่นี้เป็นต้นไป
+          </div>
+        ) : null}
+        {st === 'expired' ? (
+          <div style={{ fontSize: 12.5, color: C.muted, marginTop: 4 }}>
+            ปิดหน้านี้แล้วกด "🔗 Auto-detect Owner ID" ใหม่
+          </div>
+        ) : null}
+      </div>
+    </div>
   );
 }
 

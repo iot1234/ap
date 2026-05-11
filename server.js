@@ -3347,6 +3347,56 @@ app.get('/api/tenant/pay-readiness/:billId', requireTenant, async (req, res) => 
 // Each issue: { sev: 'high'|'med'|'low'|'info', code, area: string[], msg, fix }
 // `summary.canIssueBills` / `canRecordPayments` flip to false when a high-
 // severity issue blocks that flow.
+
+// === LINE owner-claim flow ================================================
+// Generate a OWNER-XXXXXXXX code that the admin sends from THEIR OWN LINE
+// account to the OA. Webhook matches the code → saves source.userId into
+// line_oas.owner_user_id (or secrets.LINE_OWNER_USER_ID for env-fallback
+// deployments without a registered OA row). Replaces the manual paste
+// flow that confused operators.
+app.post('/api/admin/line/owner-claim',
+  sameOrigin, csrfGuard, requireAuth, requireRole('owner'),
+  async (req, res) => {
+    const oaId = req.body?.oaId ? Number(req.body.oaId) : null;
+    try {
+      const ownerClaim = require('./services/ownerClaim');
+      const token = await ownerClaim.createToken(pool, {
+        oaId, createdBy: req.session.user.username,
+      });
+      audit(req, 'line.owner_claim.create', 'owner_claim_token', String(token.id),
+        { oaId, code: token.code });
+      res.json({ ok: true, ...token });
+    } catch (err) {
+      console.error('owner-claim create error:', err);
+      res.status(500).json({ error: err.message || 'internal error' });
+    }
+  });
+
+app.get('/api/admin/line/owner-claim/:id',
+  requireAuth, requireRole('owner'),
+  async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+    try {
+      const ownerClaim = require('./services/ownerClaim');
+      const t = await ownerClaim.getToken(pool, id);
+      if (!t) return res.status(404).json({ error: 'not found' });
+      // Mask the userId tail so the admin browser doesn't display the
+      // raw value in full — confirm via the success status instead.
+      const claimedTail = t.claimed_user_id
+        ? '...' + String(t.claimed_user_id).slice(-6)
+        : null;
+      res.json({
+        ok: true,
+        id: t.id, code: t.code, oaId: t.oa_id, status: t.status,
+        claimedTail, claimedAt: t.claimed_at, expiresAt: t.expires_at,
+      });
+    } catch (err) {
+      console.error('owner-claim get error:', err);
+      res.status(500).json({ error: 'internal error' });
+    }
+  });
+
 app.get('/api/admin/billing-readiness',
   requireAuth, requireRole('owner', 'manager'),
   async (_req, res) => {
@@ -3467,7 +3517,7 @@ app.get('/api/admin/billing-readiness',
             issues.push({
               sev: 'med', code: 'PROVIDER_NAME_UNKNOWN', area: ['payment'],
               msg: `ชื่อ provider ไม่รู้จัก: ${audit.unknown.join(', ')} — ระบบจะข้ามและไม่เรียก provider เหล่านี้`,
-              fix: '/admin#features → ตรวจรายชื่อ providers (รองรับเฉพาะ slipok, easyslip)',
+              fix: '/admin#features → ตรวจรายชื่อ providers (รองรับเฉพาะ slipok, easyslip, slip2go)',
             });
           }
           if (audit.missingKeys.length > 0) {
@@ -3482,7 +3532,7 @@ app.get('/api/admin/billing-readiness',
             issues.push({
               sev: 'med', code: 'AUTOVERIFY_NO_PROVIDER', area: ['payment'],
               msg: 'autoVerify เปิด แต่ยังไม่ระบุ provider — สลิปจะตกเข้าคิว admin เหมือนเดิม',
-              fix: '/admin#features → กรอก providers: ["slipok"] หรือ ["easyslip"]',
+              fix: '/admin#features → กรอก providers: ["slipok"], ["easyslip"] หรือ ["slip2go"]',
             });
           }
         } else if (flags.slipUpload.requireVerification === false) {
@@ -4840,7 +4890,7 @@ app.post('/api/tenant/payments', sameOrigin, csrfGuard, requireTenant, ensureSli
       allowedMimes: req.features.slipUpload.allowedMimes || ['image/jpeg', 'image/png', 'image/webp'],
     });
 
-    // === Auto-verify the slip via configured provider (SlipOK/EasySlip) ==
+    // === Auto-verify the slip via configured provider (SlipOK/EasySlip/Slip2Go) ==
     // When slipUpload.autoVerify is on AND a provider key is configured,
     // we send the slip to the provider for instant validation BEFORE
     // touching the DB. The provider returns the bank's transaction
