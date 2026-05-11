@@ -120,6 +120,17 @@ const DEFAULTS = Object.freeze({
     hourUtc: 19,                 // 02:00 ICT = 19:00 UTC
     retainDays: 30,
   },
+  // Auto-reconcile stranded rooms. When enabled, the daily scheduler tick
+  // automatically closes orphan active contracts and frees room state when
+  // the orphan tenant is ALREADY moved_out (the unambiguous case). Disabled
+  // by default — operators should review the first few cycles' alerts to
+  // see what would have been auto-fixed before flipping this on. Detection
+  // + owner notification ALWAYS run regardless of this flag (so an operator
+  // who never opens /admin#health still finds out about stranded rooms via
+  // the daily owner message + Health → Anomaly LINE alert).
+  autoReconcileRooms: {
+    enabled: false,
+  },
   billAutoGenerate: {
     enabled: false,
     dayOfMonth: 1,               // run on the 1st of each month

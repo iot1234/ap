@@ -709,6 +709,162 @@ async function tickContractExpiry(pool, _flags, now, state) {
   }
 }
 
+// Auto-detect + reconcile stranded rooms. Two-stage:
+//   (1) detect — daily count of rooms where the JSONB blob shows a tenant
+//       but no active contract. Anomaly detector already alerts on this via
+//       healthCheck's stranded_occupied_rooms, but the daily tick produces
+//       a single concise "today's residue" line for owner so it's visible
+//       even without going through /admin#health.
+//   (2) auto-fix — when features.autoReconcileRooms.enabled is true, run
+//       /api/admin/rooms/:roomId/reconcile-equivalent SQL on rooms where
+//       the orphan contract's tenant is ALREADY moved_out (the safe case
+//       where reconcile has no ambiguity). Stranded rooms whose tenant is
+//       still 'active' are left alone — those need admin to decide if the
+//       contract should close (tenant disputes resolution / refund pending).
+// Either stage failing should never block the rest of the scheduler tick.
+async function tickAutoReconcileRooms(pool, flags, now, state) {
+  const todayKey = now.toISOString().slice(0, 10);
+  if (state.lastAutoReconcileAt === todayKey) return;
+  try {
+    // Stage 1: detect — query is the same shape as healthCheck's
+    // stranded_occupied_rooms but enriched with the room codes themselves
+    // so we can act on each one.
+    const { rows: stranded } = await pool.query(`
+      WITH blob_rooms AS (
+        SELECT rec.key AS room_code, rec.val AS room
+          FROM app_data, jsonb_each(value) AS rec(key, val)
+         WHERE app_data.key='baankarn_rooms_v1'
+           AND jsonb_typeof(value) = 'object'
+      )
+      SELECT br.room_code,
+             COALESCE(br.room->'tenant'->>'name', '?')   AS blob_tenant_name,
+             c.id   AS orphan_contract_id,
+             c.contract_no AS orphan_contract_no,
+             c.tenant_id AS orphan_tenant_id,
+             t.full_name AS orphan_tenant_name,
+             t.status   AS orphan_tenant_status
+        FROM blob_rooms br
+        LEFT JOIN contracts c
+               ON c.room_id = br.room_code
+              AND c.status='active' AND c.deleted_at IS NULL
+        LEFT JOIN tenants t ON t.id = c.tenant_id
+       WHERE br.room ? 'tenant'
+         AND br.room->'tenant' IS NOT NULL
+         AND br.room->'tenant' <> 'null'::jsonb
+         AND (c.id IS NULL OR t.status = 'moved_out')
+       ORDER BY br.room_code
+       LIMIT 500
+    `);
+
+    if (stranded.length === 0) {
+      state.lastAutoReconcileAt = todayKey;
+      writeState(state);
+      return;
+    }
+
+    // Stage 2: optionally auto-fix the "safe" subset. A row is safe to
+    // auto-reconcile when the orphan contract's tenant is already
+    // 'moved_out' OR the blob shows a tenant but no contract exists at
+    // all — in both cases there's no live tenant to disrupt and the
+    // reconcile action mirrors the explicit endpoint.
+    const autoEnabled = !!(flags?.autoReconcileRooms && flags.autoReconcileRooms.enabled);
+    const safe = stranded.filter((r) =>
+      // No contract OR contract's tenant is already moved_out
+      r.orphan_contract_id == null || r.orphan_tenant_status === 'moved_out'
+    );
+    const reconciled = [];
+    if (autoEnabled && safe.length > 0) {
+      for (const r of safe) {
+        // Use a tx per room — atomic per-reconcile, so a transient DB
+        // hiccup on room #5 doesn't lose the work on room #1-4.
+        const client = await pool.connect();
+        try {
+          await client.query('BEGIN');
+          if (r.orphan_contract_id) {
+            await client.query(
+              `UPDATE contracts SET status='ended', end_date=CURRENT_DATE,
+                  deposit_return_reason = COALESCE(deposit_return_reason,
+                    '[auto-reconcile] tenant already moved_out'),
+                  updated_at=NOW()
+                WHERE id=$1 AND status='active'`,
+              [r.orphan_contract_id]
+            );
+          }
+          // Free the blob: drop 'tenant' + flip status='vacant'.
+          await client.query(
+            `UPDATE app_data
+                SET value = jsonb_set(
+                              value,
+                              ARRAY[$1::text],
+                              ((value->$1) - 'tenant') || jsonb_build_object('status', 'vacant')
+                            ),
+                    updated_at=NOW()
+              WHERE key='baankarn_rooms_v1' AND value ? $1`,
+            [r.room_code]
+          );
+          // Best-effort rooms_v2 sync.
+          try {
+            await client.query(
+              `UPDATE rooms_v2 SET status='vacant', updated_at=NOW()
+                WHERE room_code=$1 AND deleted_at IS NULL`,
+              [r.room_code]
+            );
+          } catch (err) { if (err.code !== '42P01') throw err; }
+          await client.query('COMMIT');
+          reconciled.push(r);
+        } catch (err) {
+          await client.query('ROLLBACK').catch(() => {});
+          console.warn(`[scheduler] auto-reconcile room ${r.room_code} failed:`, err.message);
+        } finally {
+          client.release();
+        }
+      }
+    }
+
+    // Notify owner — one summary message per day. Detection-only mode
+    // (autoReconcileRooms off) makes the message a passive heads-up;
+    // auto-fix mode includes the list of fixed rooms + any leftover that
+    // need manual review.
+    const remaining = stranded.filter((r) => !reconciled.some((x) => x.room_code === r.room_code));
+    const lines = [];
+    if (reconciled.length > 0) {
+      lines.push(`🔧 Auto-reconciled ${reconciled.length} stranded room(s):`);
+      for (const r of reconciled) {
+        lines.push(`  • ห้อง ${r.room_code}` +
+          (r.orphan_contract_no ? ` — ปิดสัญญา ${r.orphan_contract_no} (อดีตผู้เช่า ${r.orphan_tenant_name || '-'})` : ''));
+      }
+    }
+    if (remaining.length > 0) {
+      lines.push((reconciled.length > 0 ? '\n' : '') + `⚠️ Stranded ห้องที่ต้องตรวจสอบเอง (${remaining.length}):`);
+      for (const r of remaining) {
+        lines.push(`  • ห้อง ${r.room_code} (blob ผู้เช่า: ${r.blob_tenant_name})` +
+          (r.orphan_contract_no ? ` — สัญญา ${r.orphan_contract_no} กับ ${r.orphan_tenant_name || '-'} (${r.orphan_tenant_status || '?'})` : ' — ไม่มีสัญญา active'));
+      }
+      if (!autoEnabled) {
+        lines.push(`\n💡 เปิดใช้งานการ reconcile อัตโนมัติได้ที่ /admin#features → autoReconcileRooms`);
+      }
+      lines.push(`\nรายละเอียดเต็ม + ปุ่ม Reconcile → /admin#rooms`);
+    }
+    if (lines.length > 0) {
+      try {
+        await notifier.notifyOwner({ pool, features: flags || {} }, {
+          subject: reconciled.length > 0 && remaining.length === 0
+            ? `✅ Reconciled ${reconciled.length} stranded room(s)`
+            : `⚠️ ห้องสถานะไม่สอดคล้อง ${stranded.length} ห้อง`,
+          text: lines.join('\n'),
+        });
+      } catch (err) {
+        console.warn('[scheduler] auto-reconcile notify failed:', err.message);
+      }
+    }
+
+    state.lastAutoReconcileAt = todayKey;
+    writeState(state);
+  } catch (err) {
+    console.error('[scheduler] auto-reconcile tick failed:', err.message);
+  }
+}
+
 // Postgres advisory-lock helper. The 64-bit lock id is derived from a per-
 // scheduler salt + a fixed namespace so cross-feature lock ids never collide.
 // Hash takes any string and folds it to int64 — good enough for cooperative
@@ -786,6 +942,7 @@ async function tick(pool) {
                                                           () => tickMeterSimulator(pool, flags, now, state)),
     _withAdvisoryLock(pool, `accessSync-${todayKey}`,    () => tickAccessControlSync(pool, flags, now, state)),
     _withAdvisoryLock(pool, `contractExpiry-${todayKey}`,() => tickContractExpiry(pool, flags, now, state)),
+    _withAdvisoryLock(pool, `autoReconcile-${todayKey}`, () => tickAutoReconcileRooms(pool, flags, now, state)),
   ]);
   for (const r of results) {
     if (r.status === 'rejected') {

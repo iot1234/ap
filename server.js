@@ -8194,20 +8194,41 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
       }
 
       const roomContract = await client.query(
-        `SELECT id, contract_no, tenant_id, locked_at FROM contracts
-           WHERE room_id=$1 AND status='active' AND deleted_at IS NULL
-             AND tenant_id <> $2
-           ORDER BY created_at DESC
-           LIMIT 1
-           FOR UPDATE`,
+        `SELECT c.id, c.contract_no, c.tenant_id, c.locked_at,
+                t.full_name AS tenant_name, t.status AS tenant_status
+           FROM contracts c
+           LEFT JOIN tenants t ON t.id = c.tenant_id
+          WHERE c.room_id=$1 AND c.status='active' AND c.deleted_at IS NULL
+            AND c.tenant_id <> $2
+          ORDER BY c.created_at DESC
+          LIMIT 1
+          FOR UPDATE`,
         [roomId, tenantId]
       );
       if (roomContract.rows.length) {
+        const conflict = roomContract.rows[0];
         await client.query('ROLLBACK');
+        // Distinguish "real" contract conflict (legitimate active tenant)
+        // from a "stranded" one (contract still active but tenant already
+        // moved_out — the bug surface that motivated the audit/reconcile
+        // endpoints). Stranded conflicts get a different error code +
+        // explicit reconcileUrl so the admin UI can offer one-click fix
+        // instead of a generic "ROOM_CONTRACT_EXISTS" dead-end.
+        if (conflict.tenant_status === 'moved_out') {
+          return res.status(409).json({
+            error: `ห้องนี้มีสัญญา active ค้างของอดีตผู้เช่า ${conflict.tenant_name || '-'} ` +
+                   `(สถานะ moved_out แล้ว แต่สัญญายังไม่ปิด) — รัน Reconcile ก่อนสร้างสัญญาใหม่`,
+            code: 'ROOM_STRANDED_CONTRACT',
+            conflict,
+            reconcileUrl: `/api/admin/rooms/${encodeURIComponent(roomId)}/reconcile`,
+            auditUrl: `/api/admin/rooms/${encodeURIComponent(roomId)}/audit`,
+            hint: 'เปิดหน้า /admin#rooms ห้องนี้ → กดปุ่ม "Reconcile ห้อง" ใน drawer แล้วลองใหม่',
+          });
+        }
         return res.status(409).json({
           error: 'room already has an active contract draft or lease',
           code: 'ROOM_CONTRACT_EXISTS',
-          conflict: roomContract.rows[0],
+          conflict,
         });
       }
 
