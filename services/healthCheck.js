@@ -535,6 +535,45 @@ async function checkDataIntegrity(pool) {
         (SELECT COUNT(*)::int FROM payments
           WHERE status NOT IN ('pending','verified','rejected')
              OR amount <= 0) AS invalid_payment_rows,
+        (SELECT COUNT(*)::int FROM tenants t
+           JOIN rooms_v2 rv
+             ON rv.room_code = t.current_room_id
+            AND rv.deleted_at IS NULL
+          WHERE t.deleted_at IS NULL
+            AND t.status = 'active'
+            AND t.current_room_id IS NOT NULL
+            AND t.current_room_id <> ''
+            AND rv.status NOT IN ('occupied','overdue')) AS active_tenant_room_status_mismatch,
+        (SELECT COUNT(*)::int FROM rooms_v2 rv
+          WHERE rv.deleted_at IS NULL
+            AND rv.status IN ('occupied','overdue')
+            AND NOT EXISTS (
+              SELECT 1 FROM tenants t
+               WHERE t.deleted_at IS NULL
+                 AND t.status = 'active'
+                 AND t.current_room_id = rv.room_code
+            )) AS busy_rooms_without_active_tenant,
+        (SELECT COUNT(*)::int FROM rooms_v2 rv
+          WHERE rv.deleted_at IS NULL
+            AND rv.status = 'reserved'
+            AND NOT EXISTS (
+              SELECT 1 FROM tenants t
+               WHERE t.deleted_at IS NULL
+                 AND t.status = 'active'
+                 AND t.current_room_id = rv.room_code
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM bookings b
+               WHERE b.room_id = rv.room_code
+                 AND b.status IN ('pending','reviewing','approved')
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM contracts c
+               WHERE c.room_id = rv.room_code
+                 AND c.deleted_at IS NULL
+                 AND c.status = 'active'
+                 AND c.locked_at IS NULL
+            )) AS reserved_rooms_without_hold,
         -- Moved-out tenants whose contract is still flagged 'active'. Symptom:
         -- room shows occupied in /api/rooms, recurring charges keep billing,
         -- access cards still valid. Root cause: admin used PUT /api/tenants/:id
@@ -547,7 +586,30 @@ async function checkDataIntegrity(pool) {
           WHERE t.deleted_at IS NULL
             AND t.status = 'moved_out'
             AND c.deleted_at IS NULL
-            AND c.status = 'active') AS moved_out_with_active_contract`);
+            AND c.status = 'active') AS moved_out_with_active_contract,
+        -- Rooms whose legacy JSONB blob shows a tenant attached but no
+        -- contract is active for that room. This is the "ห้องยังขึ้นมีคน
+        -- หลังย้ายออก" symptom — the rooms page reads from the blob so
+        -- it lies until reconciled. Fix via
+         -- POST /api/admin/rooms/:roomId/reconcile.
+         (WITH blob_rooms AS (
+           SELECT rec.key AS room_code, rec.val AS room
+             FROM app_data ad
+             CROSS JOIN LATERAL jsonb_each(ad.value) AS rec(key, val)
+            WHERE ad.key='baankarn_rooms_v1'
+              AND jsonb_typeof(ad.value) = 'object'
+         )
+         SELECT COUNT(*)::int FROM blob_rooms br
+          WHERE br.room ? 'tenant'
+            AND br.room->'tenant' IS NOT NULL
+            AND br.room->'tenant' <> 'null'::jsonb
+            AND NOT EXISTS (
+              SELECT 1 FROM contracts c
+               WHERE c.room_id = br.room_code
+                 AND c.status = 'active'
+                 AND c.deleted_at IS NULL
+            )
+        ) AS stranded_occupied_rooms`);
     const counts = countsQ.rows[0] || {};
 
     const dupRoomsQ = await pool.query(`
@@ -560,6 +622,60 @@ async function checkDataIntegrity(pool) {
        GROUP BY current_room_id
       HAVING COUNT(*) > 1
        ORDER BY tenants DESC, current_room_id ASC
+       LIMIT 10`);
+
+    const activeTenantRoomStatusQ = await pool.query(`
+      SELECT t.id, t.full_name, t.current_room_id, rv.status AS room_status
+        FROM tenants t
+        JOIN rooms_v2 rv
+          ON rv.room_code = t.current_room_id
+         AND rv.deleted_at IS NULL
+       WHERE t.deleted_at IS NULL
+         AND t.status='active'
+         AND t.current_room_id IS NOT NULL
+         AND t.current_room_id <> ''
+         AND rv.status NOT IN ('occupied','overdue')
+       ORDER BY t.id ASC
+       LIMIT 10`);
+
+    const busyRoomsWithoutTenantQ = await pool.query(`
+      SELECT rv.room_code, rv.status
+        FROM rooms_v2 rv
+       WHERE rv.deleted_at IS NULL
+         AND rv.status IN ('occupied','overdue')
+         AND NOT EXISTS (
+           SELECT 1 FROM tenants t
+            WHERE t.deleted_at IS NULL
+              AND t.status='active'
+              AND t.current_room_id=rv.room_code
+         )
+       ORDER BY rv.room_code ASC
+       LIMIT 10`);
+
+    const reservedRoomsWithoutHoldQ = await pool.query(`
+      SELECT rv.room_code, rv.status
+        FROM rooms_v2 rv
+       WHERE rv.deleted_at IS NULL
+         AND rv.status='reserved'
+         AND NOT EXISTS (
+           SELECT 1 FROM tenants t
+            WHERE t.deleted_at IS NULL
+              AND t.status='active'
+              AND t.current_room_id=rv.room_code
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM bookings b
+            WHERE b.room_id=rv.room_code
+              AND b.status IN ('pending','reviewing','approved')
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM contracts c
+            WHERE c.room_id=rv.room_code
+              AND c.deleted_at IS NULL
+              AND c.status='active'
+              AND c.locked_at IS NULL
+         )
+       ORDER BY rv.room_code ASC
        LIMIT 10`);
 
     const missingRoomsQ = await pool.query(`
@@ -601,9 +717,16 @@ async function checkDataIntegrity(pool) {
         duplicate_verified_payments_per_bill: Number(counts.duplicate_verified_payments_per_bill) || 0,
         invalid_bill_rows: Number(counts.invalid_bill_rows) || 0,
         invalid_payment_rows: Number(counts.invalid_payment_rows) || 0,
+        active_tenant_room_status_mismatch: Number(counts.active_tenant_room_status_mismatch) || 0,
+        busy_rooms_without_active_tenant: Number(counts.busy_rooms_without_active_tenant) || 0,
+        reserved_rooms_without_hold: Number(counts.reserved_rooms_without_hold) || 0,
         moved_out_with_active_contract: Number(counts.moved_out_with_active_contract) || 0,
+        stranded_occupied_rooms: Number(counts.stranded_occupied_rooms) || 0,
       },
       duplicate_active_room_assignments: dupRoomsQ.rows,
+      active_tenant_room_status_mismatch_samples: activeTenantRoomStatusQ.rows,
+      busy_rooms_without_active_tenant_samples: busyRoomsWithoutTenantQ.rows,
+      reserved_rooms_without_hold_samples: reservedRoomsWithoutHoldQ.rows,
       active_tenants_missing_room: missingRoomsQ.rows,
       orphan_payable_bill_samples: orphanBillsQ.rows,
     };
@@ -640,8 +763,20 @@ async function checkDataIntegrity(pool) {
     if (detail.counts.invalid_payment_rows > 0) {
       errors.push('payment rows contain invalid statuses or non-positive amounts');
     }
+    if (detail.counts.active_tenant_room_status_mismatch > 0) {
+      errors.push('active tenants are assigned to rooms not marked occupied/overdue');
+    }
+    if (detail.counts.busy_rooms_without_active_tenant > 0) {
+      errors.push('rooms are marked occupied/overdue without an active tenant');
+    }
     if (dupRoomsQ.rows.length > 0) {
       errors.push('more than one active tenant assigned to the same room');
+    }
+    if (detail.counts.stranded_occupied_rooms > 0) {
+      errors.push(
+        `${detail.counts.stranded_occupied_rooms} room(s) show occupied in the rooms blob but have no active contract — ` +
+        `run POST /api/admin/rooms/:roomId/reconcile for each (admin UI shows a "Reconcile" button on the room card)`
+      );
     }
     if (detail.counts.moved_out_with_active_contract > 0) {
       // Hard error — bills will keep auto-generating against a moved-out
@@ -657,6 +792,9 @@ async function checkDataIntegrity(pool) {
     }
     if (detail.counts.orphan_payable_bills > 0) {
       warnings.push('payable bills without tenant_id are blocked from tenant payments until reconciled');
+    }
+    if (detail.counts.reserved_rooms_without_hold > 0) {
+      warnings.push('rooms are marked reserved without an active booking or draft contract hold');
     }
     if (missingRoomsQ.rows.length > 0) {
       warnings.push('active tenants reference rooms missing from both legacy JSONB and rooms_v2');

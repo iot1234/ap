@@ -885,6 +885,14 @@ test('healthCheck surfaces data integrity and failed notification backlog', () =
     'health checks must include core data integrity probe');
   assert.match(hc, /orphan_payable_bills/,
     'data integrity probe must flag payable bills with tenant_id=NULL');
+  assert.match(hc, /active_tenant_room_status_mismatch/,
+    'data integrity probe must flag active tenants whose room is still reserved/vacant');
+  assert.match(hc, /busy_rooms_without_active_tenant/,
+    'data integrity probe must flag occupied/overdue rooms without an active tenant');
+  assert.match(hc, /reserved_rooms_without_hold/,
+    'data integrity probe must flag stale reservations without booking or draft contract hold');
+  assert.match(hc, /SELECT rec\.key AS room_code/,
+    'JSONB room scan must qualify rec.key so app_data.key is not ambiguous in PostgreSQL');
   assert.match(hc, /legacy rooms exist but rooms_v2 is empty/,
     'data integrity probe must flag unsynced legacy room inventory');
 });

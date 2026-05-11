@@ -3550,6 +3550,284 @@ app.get('/api/admin/billing-readiness',
     }
   });
 
+// GET /api/admin/rooms/:roomId/audit — full picture of a single room across
+// every source-of-truth: legacy JSONB blob, rooms_v2 table, active contract,
+// outstanding bills (with tenant name attached). Built to answer "why is
+// this room still showing occupied?" and "who owes the unpaid bill?" in one
+// admin call — no need to cross-reference billing/contracts/tenants tabs.
+// Returns:
+//   {
+//     ok: true,
+//     roomId: '101',
+//     blob:   { tenant: { name, phone, ... } | null, status: 'occupied' | 'vacant' | ... }
+//     v2:     { status, ... } | null,
+//     activeContract: { id, contract_no, tenant_id, tenant_name, start_date, end_date } | null,
+//     outstandingBills: [{ id, bill_no, period, total, status, due_date,
+//                          tenant_id, tenant_name, days_overdue }],
+//     issues: [{ sev, code, msg, fix }],
+//     reconcilable: boolean  // true when /reconcile would fix something
+//   }
+app.get('/api/admin/rooms/:roomId/audit',
+  requireAuth, requireRole('owner', 'manager'),
+  async (req, res) => {
+    const roomId = String(req.params.roomId).slice(0, 32);
+    if (!roomId) return res.status(400).json({ error: 'roomId required' });
+    try {
+      // Pull all four sources in parallel so a slow DB doesn't double the
+      // latency on the admin click.
+      const [blobQ, v2Q, contractQ, billsQ] = await Promise.all([
+        pool.query(
+          `SELECT value->$1 AS room
+             FROM app_data WHERE key='baankarn_rooms_v1' LIMIT 1`,
+          [roomId]
+        ),
+        pool.query(
+          `SELECT room_code, status, room_type, rent_price, updated_at
+             FROM rooms_v2 WHERE room_code=$1 AND deleted_at IS NULL LIMIT 1`,
+          [roomId]
+        ).catch((err) => {
+          // Legacy deploys without rooms_v2 — return empty result rather
+          // than 500 since the blob alone can still answer.
+          if (err.code === '42P01') return { rows: [] };
+          throw err;
+        }),
+        pool.query(
+          `SELECT c.id, c.contract_no, c.tenant_id, c.start_date, c.end_date,
+                  c.monthly_rent, c.deposit, c.status,
+                  t.full_name AS tenant_name, t.phone AS tenant_phone
+             FROM contracts c
+             LEFT JOIN tenants t ON t.id = c.tenant_id
+            WHERE c.room_id=$1 AND c.status='active' AND c.deleted_at IS NULL
+            ORDER BY c.start_date DESC LIMIT 1`,
+          [roomId]
+        ),
+        pool.query(
+          `SELECT b.id, b.bill_no, b.period, b.total, b.status, b.due_date,
+                  b.tenant_id, b.created_at,
+                  t.full_name AS tenant_name, t.phone AS tenant_phone,
+                  t.status AS tenant_status,
+                  GREATEST(0, (CURRENT_DATE - b.due_date)::int) AS days_overdue
+             FROM bills b
+             LEFT JOIN tenants t ON t.id = b.tenant_id
+            WHERE b.room_id=$1 AND b.deleted_at IS NULL
+              AND b.status IN ('pending','overdue')
+            ORDER BY b.due_date ASC, b.id ASC
+            LIMIT 50`,
+          [roomId]
+        ),
+      ]);
+
+      const blobRoom = blobQ.rows[0]?.room || null;
+      const v2 = v2Q.rows[0] || null;
+      const activeContract = contractQ.rows[0] || null;
+      const outstandingBills = billsQ.rows.map((b) => ({
+        id: b.id, billNo: b.bill_no, period: b.period,
+        total: Number(b.total), status: b.status, dueDate: b.due_date,
+        daysOverdue: Number(b.days_overdue) || 0,
+        tenantId: b.tenant_id,
+        tenantName: b.tenant_name || null,
+        tenantPhone: b.tenant_phone || null,
+        tenantStatus: b.tenant_status || null,  // 'active' | 'moved_out' | null
+        createdAt: b.created_at,
+      }));
+
+      // === Issue detection — cross-source consistency =====================
+      const issues = [];
+      const blobTenant = blobRoom?.tenant || null;
+      const blobStatus = blobRoom?.status || null;
+
+      // A) Blob says occupied (has tenant) but no active contract — the
+      // exact symptom user reported. Caused by PUT /tenants/:id bypass
+      // (now blocked) or pre-fix orphans.
+      if (blobTenant && !activeContract) {
+        issues.push({
+          sev: 'high', code: 'BLOB_TENANT_NO_CONTRACT',
+          msg: `ห้องแสดงผู้เช่า "${blobTenant.name || '-'}" แต่ไม่มีสัญญา active — ผู้เช่าออกแล้วแต่ blob ค้าง`,
+          fix: 'กดปุ่ม "Reconcile ห้อง" ด้านล่าง (จะปิดสัญญาที่ค้าง + ล้างผู้เช่าจาก blob)',
+        });
+      }
+
+      // B) Active contract but blob has no tenant — opposite drift, also
+      // means /api/rooms (blob-backed) lies to admin about availability.
+      if (activeContract && !blobTenant) {
+        issues.push({
+          sev: 'high', code: 'CONTRACT_NO_BLOB_TENANT',
+          msg: `มีสัญญา active กับ ${activeContract.tenant_name} แต่ blob ไม่มีข้อมูลผู้เช่า — sync ห้อง blob`,
+          fix: 'กดปุ่ม "Reconcile ห้อง" ด้านล่าง',
+        });
+      }
+
+      // C) Status divergence between blob and rooms_v2.
+      if (v2 && blobStatus && blobStatus !== v2.status) {
+        issues.push({
+          sev: 'med', code: 'STATUS_MISMATCH',
+          msg: `Blob: "${blobStatus}", rooms_v2: "${v2.status}" — สอง source ไม่ตรงกัน`,
+          fix: 'Reconcile จะ sync ทั้งสอง source ตาม contract เป็นตัวอ้างอิง',
+        });
+      }
+
+      // D) Outstanding bills from a moved_out tenant — the "ค้างของใคร"
+      // information the user asked to surface. Group by tenant for the UI.
+      const movedOutBillsByTenant = new Map();
+      for (const b of outstandingBills) {
+        if (b.tenantStatus === 'moved_out') {
+          const k = b.tenantId;
+          if (!movedOutBillsByTenant.has(k)) {
+            movedOutBillsByTenant.set(k, {
+              tenantId: b.tenantId, tenantName: b.tenantName,
+              tenantPhone: b.tenantPhone, bills: [],
+            });
+          }
+          movedOutBillsByTenant.get(k).bills.push(b);
+        }
+      }
+      const movedOutOwners = Array.from(movedOutBillsByTenant.values());
+      for (const owner of movedOutOwners) {
+        const total = owner.bills.reduce((s, b) => s + (b.total || 0), 0);
+        issues.push({
+          sev: 'high', code: 'OUTSTANDING_FROM_MOVED_OUT',
+          msg: `บิลค้าง ${owner.bills.length} ใบ ยอด ฿${total.toLocaleString('th-TH', { minimumFractionDigits: 2 })} ของอดีตผู้เช่า ${owner.tenantName || '-'}${owner.tenantPhone ? ` (${owner.tenantPhone})` : ''}`,
+          fix: 'ติดต่ออดีตผู้เช่าเก็บเงิน หรือ void บิลถ้าตัดสินใจไม่เก็บแล้ว',
+          detail: {
+            tenantId: owner.tenantId,
+            tenantName: owner.tenantName,
+            tenantPhone: owner.tenantPhone,
+            bills: owner.bills.map((b) => ({
+              id: b.id, billNo: b.billNo, total: b.total,
+              status: b.status, dueDate: b.dueDate, daysOverdue: b.daysOverdue,
+            })),
+          },
+        });
+      }
+
+      const reconcilable = issues.some((i) =>
+        i.code === 'BLOB_TENANT_NO_CONTRACT'
+        || i.code === 'CONTRACT_NO_BLOB_TENANT'
+        || i.code === 'STATUS_MISMATCH'
+      );
+
+      res.json({
+        ok: true,
+        roomId,
+        blob: blobRoom
+          ? { tenant: blobRoom.tenant || null, status: blobStatus }
+          : null,
+        v2: v2 ? { status: v2.status, rentPrice: Number(v2.rent_price), updatedAt: v2.updated_at } : null,
+        activeContract: activeContract ? {
+          id: activeContract.id, contractNo: activeContract.contract_no,
+          tenantId: activeContract.tenant_id, tenantName: activeContract.tenant_name,
+          tenantPhone: activeContract.tenant_phone,
+          startDate: activeContract.start_date, endDate: activeContract.end_date,
+          monthlyRent: Number(activeContract.monthly_rent),
+        } : null,
+        outstandingBills,
+        issues,
+        reconcilable,
+      });
+    } catch (err) {
+      console.error('room audit error:', err);
+      res.status(500).json({ error: 'internal error', message: err.message });
+    }
+  });
+
+// POST /api/admin/rooms/:roomId/reconcile — owner-only: fix a stranded room
+// by closing any orphan active contract, clearing the blob's tenant key,
+// and syncing rooms_v2.status to 'vacant'. Used by admin when /audit
+// reports `reconcilable: true` (e.g., a pre-fix orphan from before the PUT
+// block landed). Outstanding bills are NOT touched — admin chooses to
+// chase them or void them via /admin#billing.
+app.post('/api/admin/rooms/:roomId/reconcile',
+  sameOrigin, csrfGuard, requireAuth, requireRole('owner'),
+  async (req, res) => {
+    const roomId = String(req.params.roomId).slice(0, 32);
+    if (!roomId) return res.status(400).json({ error: 'roomId required' });
+    const reason = String(req.body?.reason || '').trim().slice(0, 500);
+    const client = await pool.connect();
+    const actions = [];
+    try {
+      await client.query('BEGIN');
+
+      // 1) Close any active contract on this room (lock first so concurrent
+      //    contract edits don't race past us).
+      const orphans = await client.query(
+        `SELECT id, contract_no, tenant_id FROM contracts
+           WHERE room_id=$1 AND status='active' AND deleted_at IS NULL
+           FOR UPDATE`,
+        [roomId]
+      );
+      for (const c of orphans.rows) {
+        await client.query(
+          `UPDATE contracts SET status='ended', end_date=CURRENT_DATE,
+                deposit_return_reason = COALESCE(deposit_return_reason, $2),
+                updated_at = NOW()
+            WHERE id=$1`,
+          [c.id, `[reconcile] ${reason || 'admin reconcile of stranded room'}`]
+        );
+        actions.push({ kind: 'contract_closed', id: c.id, contractNo: c.contract_no, tenantId: c.tenant_id });
+
+        // Cascade tenant to moved_out (if not already) + clear current_room_id.
+        await client.query(
+          `UPDATE tenants
+              SET status='moved_out', current_room_id=NULL, updated_at=NOW()
+            WHERE id=$1 AND status='active'`,
+          [c.tenant_id]
+        );
+
+        // Revoke any still-active access cards tied to that tenant.
+        const cards = await client.query(
+          `UPDATE access_cards SET status='revoked', revoked_at=NOW(),
+                revoke_reason='auto:reconcile'
+            WHERE tenant_id=$1 AND status='active' RETURNING id`,
+          [c.tenant_id]
+        );
+        if (cards.rowCount > 0) actions.push({ kind: 'cards_revoked', count: cards.rowCount, tenantId: c.tenant_id });
+
+        // Deactivate tenant-scoped recurring charges.
+        await client.query(
+          `UPDATE recurring_charges SET active=FALSE, updated_at=NOW()
+            WHERE tenant_id=$1 AND active=TRUE`,
+          [c.tenant_id]
+        ).catch((err) => { if (err.code !== '42P01') throw err; });
+      }
+
+      // 2) Free the room in the legacy JSONB blob: drop the 'tenant' key
+      //    + set status='vacant'. Skip silently if the room key isn't in
+      //    the blob (rooms_v2-only deploy).
+      const blobUpd = await client.query(
+        `UPDATE app_data
+            SET value = jsonb_set(
+                          value,
+                          ARRAY[$1::text],
+                          ((value->$1) - 'tenant') || jsonb_build_object('status', 'vacant')
+                        ),
+                updated_at = NOW()
+          WHERE key='baankarn_rooms_v1' AND value ? $1`,
+        [roomId]
+      );
+      if (blobUpd.rowCount > 0) actions.push({ kind: 'blob_freed' });
+
+      // 3) Sync rooms_v2.status='vacant' (tolerate missing table on legacy).
+      try {
+        const v2Upd = await client.query(
+          `UPDATE rooms_v2 SET status='vacant', updated_at=NOW()
+            WHERE room_code=$1 AND deleted_at IS NULL`,
+          [roomId]
+        );
+        if (v2Upd.rowCount > 0) actions.push({ kind: 'rooms_v2_freed' });
+      } catch (err) { if (err.code !== '42P01') throw err; }
+
+      await client.query('COMMIT');
+      audit(req, 'room.reconcile', 'room', roomId, { actions, reason: reason || null });
+      res.json({ ok: true, actions });
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      console.error('room reconcile error:', err);
+      res.status(500).json({ error: 'internal error', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
 // GET /api/tenant/bills/:id/qr — tenant-owned PromptPay QR generated from
 // the stored bill row. This avoids trusting a browser-side `amount=` query:
 // the amount encoded into the QR is always bills.total for that bill.

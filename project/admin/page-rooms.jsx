@@ -978,7 +978,66 @@ function RoomEditForm({ room, onUpdate, config }) {
   const ADMIN_ROOM_TYPE_KEYS = window.ADMIN_ROOM_TYPE_KEYS;
   const ADMIN_VIEWS = window.ADMIN_VIEWS;
   const { fmt, fmtCurrency, computeRoomRent } = window;
-  const { Input, Select, Toggle, Textarea, SectionHeading, DefList, Pill } = window;
+  const { Input, Select, Toggle, Textarea, SectionHeading, DefList, Pill, Btn } = window;
+  const apiFetch = window.apiFetch || ((u, o) => fetch(u, { credentials: 'same-origin', ...o }));
+
+  // Server-side audit for this room: cross-checks blob, rooms_v2, contracts,
+  // and outstanding bills to surface inconsistencies the rooms-blob UI alone
+  // can't see (e.g., blob shows tenant but no active contract → "stranded
+  // occupied" — the exact bug the operator reported). Also lists outstanding
+  // bills with tenant_name so admin knows whose unpaid bill is on this room.
+  const [audit, setAudit] = React.useState(null);
+  const [auditErr, setAuditErr] = React.useState(null);
+  const [reconciling, setReconciling] = React.useState(false);
+  const [auditLoadKey, setAuditLoadKey] = React.useState(0);
+  React.useEffect(() => {
+    let cancelled = false;
+    setAudit(null); setAuditErr(null);
+    fetch(`/api/admin/rooms/${encodeURIComponent(room.id)}/audit`, {
+      credentials: 'same-origin',
+    })
+      .then((r) => r.json().then((d) => ({ ok: r.ok, body: d })))
+      .then(({ ok, body }) => {
+        if (cancelled) return;
+        if (ok && body.ok) setAudit(body);
+        else setAuditErr(body.error || `HTTP ${ok ? '200 unexpected' : 'fail'}`);
+      })
+      .catch((e) => { if (!cancelled) setAuditErr(e.message); });
+    return () => { cancelled = true; };
+  }, [room.id, auditLoadKey]);
+
+  const reconcile = async () => {
+    if (!audit?.reconcilable) return;
+    const ok = window.confirm(
+      `ยืนยัน Reconcile ห้อง ${room.id}?\n\n` +
+      `ระบบจะ:\n` +
+      `  1) ปิดสัญญา active ที่ค้างอยู่ (status='ended', end_date=วันนี้)\n` +
+      `  2) ลบข้อมูลผู้เช่าออกจาก rooms blob (status='vacant')\n` +
+      `  3) sync rooms_v2.status='vacant'\n` +
+      `  4) เพิกถอน access cards ของ tenant ที่ค้าง\n` +
+      `  5) ปิด recurring charges ของ tenant\n\n` +
+      `* บิลค้างของอดีตผู้เช่าจะ "ไม่" ถูกแตะ — เปิดหน้า Billing เพื่อ void ถ้าตัดสินใจไม่เก็บเงิน`
+    );
+    if (!ok) return;
+    setReconciling(true);
+    try {
+      const r = await apiFetch(`/api/admin/rooms/${encodeURIComponent(room.id)}/reconcile`, {
+        method: 'POST',
+        body: JSON.stringify({ reason: 'admin reconcile from rooms page' }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'reconcile failed');
+      window.toast && window.toast({ kind: 'success', message: `Reconciled ห้อง ${room.id} — ${d.actions?.length || 0} actions` });
+      setAuditLoadKey((k) => k + 1);
+      // The parent rooms blob also needs a refresh — onUpdate is the
+      // hook into the parent state, but it expects a patch object. Pass
+      // the reconciled state so the rooms grid updates immediately
+      // without a full /api/data refetch.
+      onUpdate({ tenant: null, status: 'vacant', since: null, contractEnd: null });
+    } catch (e) {
+      window.toast && window.toast({ kind: 'danger', message: 'Reconcile ล้มเหลว: ' + (e.message || e) });
+    } finally { setReconciling(false); }
+  };
 
   const features = {
     balcony: room.balcony,
@@ -990,6 +1049,88 @@ function RoomEditForm({ room, onUpdate, config }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 22 }}>
+      {/* === Cross-source audit panel =================================
+          Shows server-side issues (stranded occupied, status mismatch)
+          + outstanding bills grouped by previous tenant. Renders only
+          when there's something worth showing — clean rooms stay quiet.
+       ============================================================= */}
+      {audit && (audit.issues.length > 0 || audit.outstandingBills.length > 0) ? (
+        <div style={{
+          padding: 14, borderRadius: 10,
+          background: audit.issues.some((i) => i.sev === 'high') ? '#fff5f4' : '#fff7e0',
+          border: `1px solid ${audit.issues.some((i) => i.sev === 'high') ? '#f5c0b4' : '#f0e3a7'}`,
+        }}>
+          <div style={{ fontFamily: 'Sora', fontWeight: 600, fontSize: 14, marginBottom: 8 }}>
+            {audit.issues.some((i) => i.sev === 'high') ? '🔴 ห้องนี้มีปัญหา' : '🟡 ห้องนี้มีบิลค้าง'}
+          </div>
+          {audit.issues.map((it, idx) => (
+            <div key={idx} style={{
+              padding: 10, marginBottom: 6, borderRadius: 6,
+              background: '#fff',
+              borderLeft: `3px solid ${it.sev === 'high' ? '#b94a48' : '#c08a2a'}`,
+              fontSize: 13, lineHeight: 1.6,
+            }}>
+              <div style={{ fontWeight: 500 }}>
+                {it.sev === 'high' ? '🔴' : '🟡'} {it.msg}
+              </div>
+              {it.fix ? (
+                <div style={{ fontSize: 12, color: C.muted, marginTop: 4 }}>→ {it.fix}</div>
+              ) : null}
+              {/* Outstanding-bill detail: list each bill with tenant name
+                  attached so admin sees exactly whose ค้าง is on this room. */}
+              {it.code === 'OUTSTANDING_FROM_MOVED_OUT' && it.detail?.bills ? (
+                <div style={{ marginTop: 8, padding: 8, background: '#faf6ee', borderRadius: 4 }}>
+                  <div style={{ fontSize: 12, color: C.muted, marginBottom: 4 }}>
+                    บิลค้าง ({it.detail.bills.length} ใบ) จาก{' '}
+                    <a href={`/admin#tenants/${it.detail.tenantId}`} style={{ color: C.accent, fontWeight: 600 }}>
+                      {it.detail.tenantName || '-'}
+                    </a>
+                    {it.detail.tenantPhone ? ` · โทร ${it.detail.tenantPhone}` : ''}
+                  </div>
+                  {it.detail.bills.map((b) => (
+                    <div key={b.id} style={{
+                      display: 'flex', justifyContent: 'space-between',
+                      fontSize: 12, padding: '4px 0',
+                      borderTop: '1px dashed #e5dec9',
+                    }}>
+                      <span>
+                        {b.billNo} · รอบ {b.period || '-'}
+                        {b.daysOverdue > 0 ? (
+                          <span style={{ color: '#b94a48', marginLeft: 6 }}>
+                            (เกิน {b.daysOverdue} วัน)
+                          </span>
+                        ) : null}
+                      </span>
+                      <strong>฿{fmtCurrency(b.total)}</strong>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          ))}
+          {audit.reconcilable ? (
+            <div style={{ marginTop: 10 }}>
+              <Btn variant="primary" icon="🔧"
+                onClick={reconcile} disabled={reconciling}>
+                {reconciling ? 'กำลัง reconcile…' : 'Reconcile ห้อง'}
+              </Btn>
+              <div style={{ fontSize: 11.5, color: C.muted, marginTop: 6 }}>
+                ปุ่มนี้จะ sync ทุก source ให้ตรงกัน (contract→ended + blob/v2→vacant)
+                — บิลค้างไม่ถูกแตะ
+              </div>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+      {auditErr ? (
+        <div style={{
+          padding: 10, borderRadius: 6, background: '#fff5f4',
+          border: '1px solid #f5c0b4', fontSize: 12.5, color: '#7a2920',
+        }}>
+          ⚠ ตรวจสอบสถานะห้องไม่สำเร็จ: {auditErr}
+        </div>
+      ) : null}
+
       {/* Quick info */}
       <div style={{
         background: C.surfaceAlt, padding: 14, borderRadius: 10,
