@@ -479,22 +479,59 @@ function BillDetail({ bill, locale, onClose, slipFeature, refresh }) {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState('');
   const [pay, setPay] = useState(null);
-  // Fetch operator's accepted payment channels (PromptPay/bank/etc.) so the
-  // tenant can scan the QR or copy bank details right from the bill modal.
-  // Falls back to no-op on error — the slip-upload section still works.
+  // pay-readiness: server-side preflight that tells us which channels are
+  // actually working for THIS bill + why others don't. Used to gate the
+  // QR/slip UI and show a single info banner ("ทำไม QR ไม่ขึ้น") so the
+  // tenant isn't left guessing why a button is missing.
+  const [readiness, setReadiness] = useState(null);
   React.useEffect(() => {
     let cancelled = false;
     fetch('/api/tenant/payment-info', { credentials: 'same-origin' })
       .then((r) => r.json())
       .then((d) => { if (!cancelled && d && d.payment) setPay(d.payment); })
       .catch(() => {});
+    fetch(`/api/tenant/pay-readiness/${encodeURIComponent(bill.id)}`, { credentials: 'same-origin' })
+      .then((r) => r.ok ? r.json() : null)
+      .then((d) => { if (!cancelled && d && d.ok) setReadiness(d); })
+      .catch(() => {});
     return () => { cancelled = true; };
-  }, []);
-  const qrUrl = pay && pay.promptpayTarget
+  }, [bill.id]);
+  // Prefer the server-side channels.qr flag — it incorporates checks the
+  // browser can't see (PromptPay shape valid, not the demo target, amount
+  // within MAX_AMOUNT).
+  const qrUrl = (readiness?.channels?.qr === true)
     ? `/api/tenant/bills/${encodeURIComponent(bill.id)}/qr`
     : null;
+  const blockingIssues = readiness
+    ? (readiness.issues || []).filter((i) => i.sev === 'high')
+    : [];
+  const advisoryIssues = readiness
+    ? (readiness.issues || []).filter((i) => i.sev !== 'high' && i.code !== 'BILL_ALREADY_PAID')
+    : [];
   async function upload() {
     if (!file) { setMsg(t('chooseFile')); return; }
+    if (readiness?.channels?.slip === false) {
+      const first = blockingIssues[0] || advisoryIssues[0];
+      setMsg(first?.msg || 'Slip upload is not available for this bill.');
+      return;
+    }
+    // Pre-flight using the readiness probe. Confirm if there's anything
+    // unusual (different account configured, autoVerify not ready, etc.)
+    // so the tenant gets a chance to read the reason before submitting.
+    if (readiness && blockingIssues.length > 0) {
+      const lines = blockingIssues.map((i, idx) => {
+        const fix = i.fix ? `\n   → ${i.fix}` : '';
+        return `${idx + 1}. 🔴 ${i.msg}${fix}`;
+      }).join('\n\n');
+      const ok = window.confirm(
+        `⚠️ พบ ${blockingIssues.length} ปัญหาที่อาจทำให้ส่งสลิปไม่สำเร็จ:\n\n` +
+        lines +
+        `\n\n📌 ยืนยันส่งสลิปต่อหรือไม่?\n` +
+        `   • กดยกเลิก → ติดต่อสำนักงานก่อน (แนะนำ)\n` +
+        `   • กดตกลง → ส่งต่อ (อาจถูกปฏิเสธ)`
+      );
+      if (!ok) return;
+    }
     setBusy(true); setMsg('');
     try {
       const dataUrl = await fileToDataUrl(file);
@@ -524,6 +561,27 @@ function BillDetail({ bill, locale, onClose, slipFeature, refresh }) {
             <span>{t('status')}</span><Pill color={STATUS_COLOR[bill.status]}>{t(bill.status)}</Pill>
           </div>
         </div>
+        {/* Server-side blocking issues (PromptPay misconfigured, bill not
+            payable, etc.). Render as a prominent banner so the tenant sees
+            the reason WHY a QR/slip button might be missing instead of
+            silently wondering. Includes a fix hint where applicable. */}
+        {blockingIssues.length > 0 ? (
+          <div style={{
+            marginTop: 12, padding: 12,
+            background: '#fff4f1',
+            border: '1px solid #f5c0b4',
+            borderRadius: 8,
+            fontSize: 13, color: '#7a2920', lineHeight: 1.6,
+          }}>
+            <div style={{ fontWeight: 600, marginBottom: 6 }}>⚠️ ไม่สามารถจ่ายผ่านระบบได้ในขณะนี้</div>
+            {blockingIssues.map((i, idx) => (
+              <div key={idx} style={{ marginBottom: 4 }}>
+                • {i.msg}
+                {i.fix ? <div style={{ fontSize: 12, color: '#5b3022', marginLeft: 12 }}>→ {i.fix}</div> : null}
+              </div>
+            ))}
+          </div>
+        ) : null}
         {bill.status !== 'paid' && bill.status !== 'void' && pay ? (
           <div style={{ ...card, marginTop: 12 }}>
             <div style={{ fontFamily: 'Sora', fontWeight: 600, fontSize: 14, marginBottom: 8 }}>
@@ -572,7 +630,25 @@ function BillDetail({ bill, locale, onClose, slipFeature, refresh }) {
             ) : null}
             <label style={lbl}>{t('chooseFile')}</label>
             <input type="file" accept="image/jpeg,image/png,image/webp" onChange={(e) => setFile(e.target.files[0])} style={{ marginBottom: 12 }} />
-            <button onClick={upload} disabled={busy} style={btnPrimary}>{busy ? '…' : t('uploadSlip')}</button>
+            {/* Advisory notices (autoVerify ไม่พร้อม, ไม่ผูก LINE/email, ฯลฯ).
+                Show inline above the submit so the tenant knows what to expect
+                — e.g., "สลิปต้องรอ admin ตรวจสอบ < 24 ชม." instead of expecting
+                instant verification. */}
+            {advisoryIssues.length > 0 ? (
+              <div style={{
+                marginBottom: 10, padding: 10,
+                background: '#fffbe8', border: '1px solid #f0e3a7',
+                borderRadius: 8, fontSize: 12.5, color: '#6b5b1a', lineHeight: 1.5,
+              }}>
+                {advisoryIssues.map((i, idx) => (
+                  <div key={idx} style={{ marginBottom: 2 }}>
+                    {i.sev === 'med' ? '🟡' : 'ℹ️'} {i.msg}
+                    {i.fix ? <span style={{ color: '#8a7a25' }}> — {i.fix}</span> : null}
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            <button onClick={upload} disabled={busy || readiness?.channels?.slip === false} style={btnPrimary}>{busy ? '…' : t('uploadSlip')}</button>
             {msg ? <div style={{ marginTop: 8, color: 'var(--muted)', fontSize: 13 }}>{msg}</div> : null}
           </div>
         ) : null}

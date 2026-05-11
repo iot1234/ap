@@ -629,6 +629,65 @@ test('tenant bill modal uses bill-owned QR endpoint', () => {
     'tenant UI must not build payment QR from browser-side target+amount');
 });
 
+test('tenant payment readiness controls QR and slip upload state', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const routeIdx = server.indexOf("app.get('/api/tenant/pay-readiness/:billId'");
+  assert.ok(routeIdx > 0, 'tenant pay-readiness endpoint must exist');
+  const route = server.slice(routeIdx, server.indexOf('// GET /api/admin/billing-readiness', routeIdx));
+  assert.match(route, /requireTenant/, 'pay-readiness must require tenant auth');
+  assert.match(route, /Number\(bill\.tenant_id\) !== Number\(req\.tenant\.tenant_id\)/,
+    'pay-readiness must enforce bill ownership');
+  assert.match(route, /promptpayReadyForPayment = true/,
+    'readiness must only mark PromptPay ready after validation');
+  assert.match(route, /flags\.slipUpload\.autoVerify && ready\.length > 0 && promptpayReadyForPayment/,
+    'autoVerify channel must require a validated real PromptPay target');
+  assert.doesNotMatch(route, /ready\.length > 0 && paymentBlock\.promptpayTarget/,
+    'autoVerify must not rely on raw promptpay presence');
+
+  const tenant = fs.readFileSync(path.join(__dirname, '..', 'project', 'tenant.jsx'), 'utf8');
+  assert.match(tenant, /readiness\?\.channels\?\.qr === true/,
+    'tenant UI must wait for server readiness before showing QR');
+  assert.match(tenant, /readiness\?\.channels\?\.slip === false/,
+    'tenant UI must block slip upload when readiness says the bill is not payable');
+  assert.doesNotMatch(tenant, /readiness \? readiness\.channels\.qr : \(pay && pay\.promptpayTarget\)/,
+    'tenant UI must not fall back to browser payment-info for QR visibility');
+});
+
+test('admin billing readiness backs bill issue and payment preflights', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const idx = server.indexOf("app.get('/api/admin/billing-readiness'");
+  assert.ok(idx > 0, 'admin billing-readiness endpoint must exist');
+  const route = server.slice(idx, server.indexOf('// GET /api/tenant/bills/:id/qr', idx));
+  assert.match(route, /requireAuth, requireRole\('owner', 'manager'\)/,
+    'billing-readiness must be admin-gated');
+  assert.match(route, /loadEffectivePaymentBlock\(\)/,
+    'billing-readiness must use the effective payment config');
+  for (const code of [
+    'NO_PROMPTPAY',
+    'NO_WATER_RATE',
+    'NO_ELEC_RATE',
+    'AUTOVERIFY_NO_PROVIDER',
+    'NO_LINE_OA',
+    'BIG_VERIFY_QUEUE',
+  ]) {
+    assert.match(route, new RegExp(code), `billing-readiness must report ${code}`);
+  }
+
+  const billingPage = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-billing.jsx'), 'utf8');
+  assert.match(billingPage, /\/api\/admin\/billing-readiness/,
+    'admin billing page must call the readiness endpoint');
+  assert.match(billingPage, /formatReadinessIssues\(readiness, 'payment'\)/,
+    'mark-paid flow must surface payment readiness issues');
+  assert.match(billingPage, /i\.area\.includes\('issue'\)/,
+    'bill issue flow must filter readiness issues by issue area');
+  assert.match(billingPage, /force: issues\.length > 0/,
+    'bill generation must explicitly force only after the admin accepts warnings');
+});
+
 test('access_cards CRUD endpoints exist', () => {
   // The scheduler revokes/restores cards but until now there was no way
   // for admin to issue them. Pin the three new endpoints.

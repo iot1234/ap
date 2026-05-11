@@ -2851,6 +2851,347 @@ app.get('/api/tenant/payment-info', requireTenant, async (_req, res) => {
   }
 });
 
+// GET /api/tenant/pay-readiness/:billId — tenant-side preflight that returns
+// what payment channels actually work for THIS bill, plus a structured list
+// of issues with sev/code/msg/fix so the BillDetail screen can show the
+// tenant a clear "ทำไมจ่าย QR ไม่ได้" message before they tap the button.
+// Channels: qr (PromptPay QR renderable), slip (slipUpload enabled),
+// autoVerify (provider configured). Issues are HINTS, not hard blocks —
+// admin may accept payments through channels we can't auto-detect here.
+app.get('/api/tenant/pay-readiness/:billId', requireTenant, async (req, res) => {
+  const id = Number(req.params.billId);
+  if (!Number.isInteger(id) || id < 1) {
+    return res.status(400).json({ error: 'invalid id' });
+  }
+  try {
+    const billQ = await pool.query(
+      `SELECT id, total, status, tenant_id, due_date
+         FROM bills WHERE id=$1 AND deleted_at IS NULL`,
+      [id]
+    );
+    if (!billQ.rows.length) return res.status(404).json({ error: 'bill not found' });
+    const bill = billQ.rows[0];
+    if (Number(bill.tenant_id) !== Number(req.tenant.tenant_id)) {
+      return res.status(403).json({ error: 'not your bill' });
+    }
+
+    const flags = await features.load(pool);
+    const { paymentBlock } = await loadEffectivePaymentBlock();
+    const promptpay = require('./services/promptpay');
+    const slipVerifier = require('./services/slipVerifier');
+    const issues = [];
+    const channels = { qr: false, slip: false, autoVerify: false };
+    let promptpayReadyForPayment = false;
+
+    if (bill.status === 'paid') {
+      issues.push({
+        sev: 'info', code: 'BILL_ALREADY_PAID',
+        msg: 'บิลนี้ชำระเรียบร้อยแล้ว — ไม่ต้องส่งสลิปอีก',
+        fix: null,
+      });
+    } else if (bill.status !== 'pending' && bill.status !== 'overdue') {
+      issues.push({
+        sev: 'high', code: 'BILL_NOT_PAYABLE',
+        msg: `บิลสถานะ "${bill.status}" — ไม่สามารถชำระได้`,
+        fix: 'ติดต่อสำนักงานเพื่อสอบถามรายละเอียด',
+      });
+    }
+
+    const billTotal = Number(bill.total);
+    const isBillPayable = bill.status === 'pending' || bill.status === 'overdue';
+    if (!Number.isFinite(billTotal) || billTotal <= 0) {
+      issues.push({
+        sev: 'high', code: 'INVALID_BILL_TOTAL',
+        msg: 'ยอดบิลไม่ถูกต้อง — ติดต่อสำนักงาน',
+        fix: null,
+      });
+    } else if (billTotal > MAX_AMOUNT) {
+      issues.push({
+        sev: 'high', code: 'AMOUNT_EXCEEDS_PROMPTPAY',
+        msg: `ยอด ฿${billTotal.toLocaleString('th-TH')} เกิน PromptPay limit (฿${MAX_AMOUNT.toLocaleString('th-TH')}) — จ่าย QR ไม่ได้`,
+        fix: 'โอนผ่าน mobile banking แทน หรือแบ่งชำระ',
+      });
+    }
+
+    if (!paymentBlock.promptpayTarget) {
+      if (isBillPayable) {
+        issues.push({
+          sev: 'high', code: 'PROMPTPAY_NOT_CONFIGURED',
+          msg: 'หอพักยังไม่ตั้งค่า PromptPay — สแกน QR เพื่อจ่ายไม่ได้',
+          fix: 'โอนตามหมายเลขบัญชีที่บิลแจ้ง หรือติดต่อสำนักงาน',
+        });
+      }
+    } else {
+      try {
+        promptpay.normaliseTarget(paymentBlock.promptpayTarget);
+        if (promptpay.isDemoTarget(paymentBlock.promptpayTarget)) {
+          issues.push({
+            sev: 'high', code: 'PROMPTPAY_DEMO',
+            msg: 'หอพักยังใช้ PromptPay demo — สแกนแล้วเงินจะไม่ถึงเจ้าของหอ',
+            fix: 'แจ้งสำนักงานให้ตั้งบัญชีจริงก่อน',
+          });
+        } else {
+          promptpayReadyForPayment = true;
+          if (Number.isFinite(billTotal) && billTotal > 0 && billTotal <= MAX_AMOUNT && isBillPayable) {
+            channels.qr = true;
+          }
+        }
+      } catch {
+        issues.push({
+          sev: 'high', code: 'PROMPTPAY_INVALID_CONFIG',
+          msg: 'รูปแบบ PromptPay ของหอพักไม่ถูกต้อง — สแกน QR ไม่ได้',
+          fix: 'แจ้งสำนักงานให้แก้ที่ Settings → การชำระเงิน',
+        });
+      }
+    }
+
+    if (!flags?.slipUpload?.enabled) {
+      issues.push({
+        sev: 'med', code: 'SLIP_UPLOAD_DISABLED',
+        msg: 'หอพักปิดการรับสลิปออนไลน์ — กรุณานำสลิปไปยื่นที่สำนักงาน',
+        fix: null,
+      });
+    } else if (isBillPayable && Number.isFinite(billTotal) && billTotal > 0) {
+      channels.slip = true;
+      const ready = slipVerifier.getConfiguredProviders(flags);
+      if (flags.slipUpload.autoVerify && ready.length > 0 && promptpayReadyForPayment) {
+        channels.autoVerify = true;
+      } else if (flags.slipUpload.autoVerify && ready.length === 0) {
+        issues.push({
+          sev: 'low', code: 'AUTOVERIFY_NOT_READY',
+          msg: 'การยืนยันสลิปอัตโนมัติยังไม่พร้อม — สลิปจะเข้าคิวรอเจ้าหน้าที่ตรวจสอบ (ปกติ < 24 ชม.)',
+          fix: null,
+        });
+      }
+    }
+
+    try {
+      const { rows: trows } = await pool.query(
+        `SELECT line_user_id, email FROM tenants WHERE id=$1 AND deleted_at IS NULL LIMIT 1`,
+        [req.tenant.tenant_id]
+      );
+      const t = trows[0] || {};
+      if (!t.line_user_id && !t.email) {
+        issues.push({
+          sev: 'low', code: 'NO_NOTIFY_CHANNEL',
+          msg: 'คุณยังไม่ได้ผูก LINE หรือใส่อีเมล — จะไม่ได้รับแจ้งเตือนเมื่อสลิปถูกตรวจสอบ',
+          fix: 'ไปที่ "บัญชีของฉัน" เพื่อผูก LINE หรือใส่อีเมล',
+        });
+      }
+    } catch { /* non-blocking */ }
+
+    res.json({
+      ok: true,
+      channels,
+      issues,
+      bill: {
+        id: bill.id,
+        total: billTotal,
+        status: bill.status,
+        dueDate: bill.due_date,
+      },
+      promptpayTarget: paymentBlock.promptpayTarget ? 'configured' : null,
+    });
+  } catch (err) {
+    console.error('tenant pay-readiness error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// GET /api/admin/billing-readiness — owner/manager preflight that the
+// admin UI calls before "ออกบิล" / "บันทึกรับชำระ" so the operator sees
+// structured issues with fix links (same pattern as handleGenerate's
+// existing confirm-modal) instead of getting a generic 500 mid-action.
+// Each issue: { sev: 'high'|'med'|'low'|'info', code, area: string[], msg, fix }
+// `summary.canIssueBills` / `canRecordPayments` flip to false when a high-
+// severity issue blocks that flow.
+app.get('/api/admin/billing-readiness',
+  requireAuth, requireRole('owner', 'manager'),
+  async (_req, res) => {
+    try {
+      const flags = await features.load(pool);
+      const { config: cfg, paymentBlock } = await loadEffectivePaymentBlock();
+      const promptpay = require('./services/promptpay');
+      const slipVerifier = require('./services/slipVerifier');
+      const secretsSvc = require('./services/secrets');
+      const issues = [];
+
+      if (!paymentBlock.promptpayTarget) {
+        issues.push({
+          sev: 'high', code: 'NO_PROMPTPAY', area: ['issue', 'payment'],
+          msg: 'ยังไม่ได้ตั้ง PromptPay — บิล PDF จะไม่มี QR และ auto-verify ตรวจบัญชีปลายทางไม่ได้',
+          fix: '/admin#settings → การชำระเงิน หรือใส่ PROMPTPAY_TARGET ใน /admin#secrets',
+        });
+      } else {
+        try {
+          promptpay.normaliseTarget(paymentBlock.promptpayTarget);
+          if (promptpay.isDemoTarget(paymentBlock.promptpayTarget)) {
+            issues.push({
+              sev: 'high', code: 'DEMO_PROMPTPAY', area: ['issue', 'payment'],
+              msg: 'PromptPay ยังเป็นค่า demo (0801234567) — ผู้เช่าจะสแกนแล้วเงินไปไม่ถึงบัญชีจริง',
+              fix: '/admin#settings → การชำระเงิน เป็นเบอร์/บัตรประชาชนจริง',
+            });
+          }
+        } catch {
+          issues.push({
+            sev: 'high', code: 'PROMPTPAY_INVALID_SHAPE', area: ['issue', 'payment'],
+            msg: `PromptPay "${paymentBlock.promptpayTarget}" รูปแบบไม่ถูกต้อง — ต้องเป็นเบอร์ 10 หลัก หรือเลขบัตรประชาชน 13 หลัก`,
+            fix: '/admin#settings → การชำระเงิน',
+          });
+        }
+      }
+
+      const wRate = Number(cfg?.utilities?.waterRate);
+      const eRate = Number(cfg?.utilities?.elecRate);
+      if (!Number.isFinite(wRate) || wRate <= 0) {
+        issues.push({
+          sev: 'high', code: 'NO_WATER_RATE', area: ['issue'],
+          msg: 'ค่าน้ำต่อหน่วยยังไม่ตั้ง — บิลจะออกค่าน้ำ ฿0 (ลูกบ้านอาจเข้าใจผิดว่าไม่ต้องจ่าย)',
+          fix: '/admin#pricing → ค่าน้ำ-ไฟ',
+        });
+      }
+      if (!Number.isFinite(eRate) || eRate <= 0) {
+        issues.push({
+          sev: 'high', code: 'NO_ELEC_RATE', area: ['issue'],
+          msg: 'ค่าไฟต่อหน่วยยังไม่ตั้ง — บิลจะออกค่าไฟ ฿0',
+          fix: '/admin#pricing → ค่าน้ำ-ไฟ',
+        });
+      }
+
+      if (!cfg?.building?.name || cfg.building.name === 'บ้านกาญจน์ เรสซิเดนซ์') {
+        issues.push({
+          sev: 'low', code: 'DEFAULT_BUILDING_NAME', area: ['issue'],
+          msg: 'ชื่อตึกยังเป็น default — บิล PDF จะแสดง "บ้านกาญจน์ เรสซิเดนซ์"',
+          fix: '/admin#settings → ข้อมูลตึก',
+        });
+      }
+      if (!cfg?.building?.phone) {
+        issues.push({
+          sev: 'low', code: 'NO_BUILDING_PHONE', area: ['issue'],
+          msg: 'เบอร์ติดต่อตึกยังไม่ใส่ — ผู้เช่าจะไม่รู้จะโทรสอบถามที่ไหน',
+          fix: '/admin#settings → ข้อมูลตึก',
+        });
+      }
+
+      try {
+        const { rows: roomBlob } = await pool.query(
+          `SELECT value FROM app_data WHERE key='baankarn_rooms_v1' LIMIT 1`
+        );
+        const rooms = roomBlob[0]?.value || {};
+        const tenantsWithBills = Object.values(rooms).filter(
+          (r) => r && r.tenant && (r.status === 'occupied' || r.status === 'overdue')
+        );
+        const noMeter = tenantsWithBills.filter((r) =>
+          (Number(r.waterUnits) || 0) === 0 && (Number(r.elecUnits) || 0) === 0
+        );
+        if (tenantsWithBills.length === 0) {
+          issues.push({
+            sev: 'high', code: 'NO_BILLABLE_TENANTS', area: ['issue'],
+            msg: 'ยังไม่มีห้องที่มีผู้เช่า status occupied/overdue — กดออกบิลจะออก 0 ใบ',
+            fix: '/admin#rooms → กำหนดผู้เช่าให้ห้องก่อน',
+          });
+        } else if (noMeter.length > 0) {
+          issues.push({
+            sev: 'med', code: 'NO_METER_READINGS', area: ['issue'],
+            msg: `${noMeter.length} ห้องยังไม่บันทึกค่าน้ำ/ไฟ — บิลจะออกแต่ยอดน้ำ-ไฟเป็น 0`,
+            fix: '/admin#meters → บันทึกค่ามิเตอร์ก่อนออกบิล',
+            detail: { rooms: noMeter.map((r) => r.id).slice(0, 20) },
+          });
+        }
+      } catch { /* tolerate empty rooms blob */ }
+
+      if (flags?.slipUpload?.enabled) {
+        if (!flags?.tenantPortal?.enabled) {
+          issues.push({
+            sev: 'high', code: 'SLIP_NEEDS_PORTAL', area: ['payment'],
+            msg: 'slipUpload เปิด แต่ tenantPortal ปิด — ผู้เช่า login ไม่ได้ จะ upload สลิปไม่ได้',
+            fix: '/admin#features → เปิด tenantPortal',
+          });
+        }
+        if (flags.slipUpload.allowUnverifiedAutoApprove === true) {
+          issues.push({
+            sev: 'med', code: 'AUTO_APPROVE_UNVERIFIED', area: ['payment'],
+            msg: 'allowUnverifiedAutoApprove เปิด — สลิปจะถูก mark paid โดยไม่ต้องตรวจสอบ (legacy trust mode)',
+            fix: '/admin#features → ปิด allowUnverifiedAutoApprove เว้นแต่ตั้งใจ',
+          });
+        }
+        if (flags.slipUpload.autoVerify) {
+          const ready = slipVerifier.getConfiguredProviders(flags);
+          if (ready.length === 0) {
+            const intended = Array.isArray(flags.slipUpload.providers)
+              ? flags.slipUpload.providers
+              : (flags.slipUpload.provider ? [flags.slipUpload.provider] : ['slipok']);
+            issues.push({
+              sev: 'med', code: 'AUTOVERIFY_NO_PROVIDER', area: ['payment'],
+              msg: `autoVerify เปิด แต่ไม่มี provider พร้อม (${intended.join(', ') || 'ไม่ระบุ'}) — สลิปจะตกเข้าคิว admin เหมือนเดิม`,
+              fix: '/admin#secrets → ตั้ง SLIPOK_API_KEY หรือ EASYSLIP_API_KEY',
+            });
+          }
+        } else if (flags.slipUpload.requireVerification === false) {
+          issues.push({
+            sev: 'med', code: 'NO_VERIFICATION_PATH', area: ['payment'],
+            msg: 'requireVerification ปิด แต่ autoVerify ก็ปิด — สลิปจะยังรอ admin ตรวจสอบเสมอ',
+            fix: '/admin#features → เปิด autoVerify (พร้อม provider key) หรือเปิด requireVerification กลับ',
+          });
+        }
+      } else {
+        issues.push({
+          sev: 'low', code: 'SLIP_UPLOAD_DISABLED', area: ['payment'],
+          msg: 'slipUpload ปิด — ผู้เช่าจะ upload สลิปจากพอร์ทัลไม่ได้',
+          fix: '/admin#features → เปิด slipUpload (ถ้าต้องการรับสลิปออนไลน์)',
+        });
+      }
+
+      let hasOaInDb = false;
+      try {
+        const oaQ = await pool.query(`SELECT COUNT(*)::int AS n FROM line_oas WHERE deleted_at IS NULL`);
+        hasOaInDb = (Number(oaQ.rows[0]?.n) || 0) > 0;
+      } catch { /* legacy deploys without line_oas */ }
+      const lineEnvCfg = !!(secretsSvc.get('LINE_CHANNEL_ACCESS_TOKEN') || secretsSvc.get('LINE_CHANNEL_SECRET'));
+      if (!lineEnvCfg && !hasOaInDb) {
+        issues.push({
+          sev: 'med', code: 'NO_LINE_OA', area: ['issue', 'payment'],
+          msg: 'ยังไม่มี LINE OA — การแจ้งบิล/แจ้งผลตรวจสลิปจะไม่ส่ง LINE',
+          fix: '/admin#line-oa → ผูก LINE Official Account',
+        });
+      }
+
+      try {
+        const pendQ = await pool.query(
+          `SELECT COUNT(*)::int AS n FROM payments
+            WHERE status='pending' AND created_at > NOW() - INTERVAL '7 days'`
+        );
+        const pendingN = Number(pendQ.rows[0]?.n) || 0;
+        if (pendingN > 20) {
+          issues.push({
+            sev: 'low', code: 'BIG_VERIFY_QUEUE', area: ['payment'],
+            msg: `${pendingN} สลิปรอตรวจสอบในช่วง 7 วัน — backlog ค่อนข้างใหญ่`,
+            fix: '/admin#payments → ตรวจสลิปค้างคิวก่อน',
+            detail: { pending: pendingN },
+          });
+        }
+      } catch { /* tolerate missing payments */ }
+
+      const blockingIssue = issues.some((i) => i.sev === 'high' && i.area.includes('issue'));
+      const blockingPayment = issues.some((i) => i.sev === 'high' && i.area.includes('payment'));
+      res.json({
+        ok: true,
+        checkedAt: new Date().toISOString(),
+        issues,
+        summary: {
+          canIssueBills: !blockingIssue,
+          canRecordPayments: !blockingPayment,
+          issueCount: issues.length,
+          highCount: issues.filter((i) => i.sev === 'high').length,
+          medCount: issues.filter((i) => i.sev === 'med').length,
+        },
+      });
+    } catch (err) {
+      console.error('billing-readiness error:', err);
+      res.status(500).json({ error: 'internal error', message: err.message });
+    }
+  });
+
 // GET /api/tenant/bills/:id/qr — tenant-owned PromptPay QR generated from
 // the stored bill row. This avoids trusting a browser-side `amount=` query:
 // the amount encoded into the QR is always bills.total for that bill.

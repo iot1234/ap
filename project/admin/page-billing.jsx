@@ -157,6 +157,38 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
     else setSelected(new Set(filtered.map(b => b.id)));
   };
 
+  // Pull the server-side preflight before risky billing actions. Used by
+  // both "บันทึกชำระ" and "ออกบิล" so the operator gets a structured warning
+  // with fix links instead of a generic 500 mid-action. Returns null on
+  // network error so the caller can fall through (avoid blocking on a
+  // transient blip).
+  const fetchBillingReadiness = React.useCallback(async () => {
+    try {
+      const r = await fetch('/api/admin/billing-readiness', { credentials: 'same-origin' });
+      if (!r.ok) return null;
+      return await r.json();
+    } catch { return null; }
+  }, []);
+
+  // Render the preflight modal text. Filters by `area` so the same endpoint
+  // serves both flows: "ออกบิล" wants area=issue, "บันทึกชำระ" wants payment.
+  const formatReadinessIssues = React.useCallback((readiness, area) => {
+    if (!readiness || !Array.isArray(readiness.issues)) return null;
+    const relevant = readiness.issues.filter((i) =>
+      Array.isArray(i.area) ? i.area.includes(area) : true
+    );
+    if (relevant.length === 0) return null;
+    const high = relevant.filter((i) => i.sev === 'high').length;
+    const lines = relevant.map((i, idx) => {
+      const icon = i.sev === 'high' ? '🔴'
+        : i.sev === 'med' ? '🟡'
+        : i.sev === 'info' ? 'ℹ️' : '⚪';
+      const fix = i.fix ? `\n   → ${i.fix}` : '';
+      return `${idx + 1}. ${icon} ${i.msg}${fix}`;
+    }).join('\n\n');
+    return { lines, high, count: relevant.length };
+  }, []);
+
   const handleMarkPaid = async (id, opts = {}) => {
     const bill = bills.find(b => b.id === id);
     if (!bill) return false;
@@ -164,11 +196,25 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
       setToast && setToast({ kind: 'warning', message: 'ต้องออกบิลเข้าระบบก่อน จึงจะบันทึกการชำระได้' });
       return false;
     }
+    // Pre-flight: catch config gaps that would silently produce a payment row
+    // for the wrong account / on the wrong bill state. Skip when caller passes
+    // confirm:false (bulk actions handle their own confirmation upstream).
     if (opts.confirm !== false) {
-      const ok = window.confirm(
-        `ยืนยันบันทึกชำระบิล ${bill.dbBillNo || bill.dbBillId}\n` +
-        `ห้อง ${bill.roomId} · ${fmtCurrency(bill.total)}`
-      );
+      const readiness = await fetchBillingReadiness();
+      const fmtIssues = formatReadinessIssues(readiness, 'payment');
+      let prompt = `ยืนยันบันทึกชำระบิล ${bill.dbBillNo || bill.dbBillId}\n` +
+                   `ห้อง ${bill.roomId} · ${fmtCurrency(bill.total)}`;
+      if (fmtIssues) {
+        prompt = `⚠️ พบ ${fmtIssues.count} ข้อควรทราบ${fmtIssues.high > 0 ? ` (${fmtIssues.high} ข้อสำคัญ)` : ''} ก่อนบันทึกชำระ:\n\n` +
+                 fmtIssues.lines +
+                 `\n\n📌 ${prompt}\n\n` +
+                 (fmtIssues.high > 0
+                   ? `   ⚠ บันทึกชำระยังทำได้ แต่ปัญหาข้างบนกระทบ flow รับชำระสลิป/ออก QR ถัดไป\n`
+                   : '') +
+                 `   • กดยกเลิก → แก้ปัญหาที่ link ด้านบนก่อน\n` +
+                 `   • กดตกลง → บันทึกชำระต่อ (รับผิดชอบเอง)`;
+      }
+      const ok = window.confirm(prompt);
       if (!ok) return false;
     }
     try {
@@ -265,66 +311,74 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
   };
 
   const handleGenerate = async () => {
-    // Pre-flight config sanity check. Without these, admin can blindly
-    // click "ออกบิล" and produce bills with: missing PromptPay (no QR
-    // on PDFs), default rates (4500/8/18 — which the operator may have
-    // never reviewed), zero water/elec readings (rooms ที่ไม่ได้บันทึก
-    // มิเตอร์เลย → bill ไม่มียอดน้ำ/ไฟ), or no rates set at all.
-    const issues = [];
-    const tenantsWithBills = Object.values(rooms || {}).filter(
-      (r) => r && r.tenant && (r.status === 'occupied' || r.status === 'overdue')
-    );
-    const ppTarget = config?.payment?.promptpay || config?.payment?.promptpayTarget;
-    if (!ppTarget) {
-      issues.push({
-        sev: 'high',
-        msg: 'ยังไม่ได้ตั้ง PromptPay — บิล PDF จะไม่มี QR (ผู้เช่าจะ scan-to-pay ไม่ได้)',
-        fix: 'ตั้งที่ /admin#secrets → กลุ่ม PromptPay หรือ Settings → การชำระเงิน',
-      });
-    }
-    const wRate = Number(config?.utilities?.waterRate);
-    const eRate = Number(config?.utilities?.elecRate);
-    if (!Number.isFinite(wRate) || wRate <= 0) {
-      issues.push({ sev: 'high', msg: 'ค่าน้ำต่อหน่วยไม่ได้ตั้ง — บิลจะ ฿0 ในส่วนค่าน้ำ', fix: '/admin#pricing → ค่าน้ำ-ไฟ' });
-    }
-    if (!Number.isFinite(eRate) || eRate <= 0) {
-      issues.push({ sev: 'high', msg: 'ค่าไฟต่อหน่วยไม่ได้ตั้ง — บิลจะ ฿0 ในส่วนค่าไฟ', fix: '/admin#pricing → ค่าน้ำ-ไฟ' });
-    }
-    // Count rooms with zero meter readings — admin probably forgot to
-    // record them. The bill will still generate but the utilities line
-    // items show 0 หน่วย, leading to "ทำไมบิลเดือนนี้ถูกจัง" tickets.
-    const noMeter = tenantsWithBills.filter((r) =>
-      (Number(r.waterUnits) || 0) === 0 && (Number(r.elecUnits) || 0) === 0
-    ).length;
-    if (noMeter > 0) {
-      issues.push({
-        sev: 'med',
-        msg: `${noMeter} ห้องยังไม่บันทึกค่าน้ำ/ไฟ — บิลจะออกแต่ยอดน้ำ/ไฟเป็น 0`,
-        fix: '/admin#meters → บันทึกค่ามิเตอร์ก่อนออกบิล',
-      });
-    }
-    if (tenantsWithBills.length === 0) {
-      issues.push({
-        sev: 'high',
-        msg: 'ยังไม่มีห้องที่มีผู้เช่าแสดงสถานะ "occupied" — จะออกบิล 0 ใบ',
-        fix: '/admin#rooms → กำหนดผู้เช่าให้ห้องก่อน',
-      });
-    }
-    // Building info — bill PDFs render building name + address + phone.
-    // Default placeholder makes the bill look unprofessional.
-    if (!config?.building?.name || config.building.name === 'บ้านกาญจน์ เรสซิเดนซ์') {
-      issues.push({
-        sev: 'low',
-        msg: 'ชื่อตึกยังเป็น default — บิล PDF จะแสดง "บ้านกาญจน์ เรสซิเดนซ์"',
-        fix: '/admin#settings → ข้อมูลตึก',
-      });
+    // Pre-flight: ask the server for the authoritative readiness picture
+    // (PromptPay shape, slip provider keys, LINE OA, queue backlog) since
+    // those are not visible from the browser-side config blob. Fall back
+    // to local-only checks if the endpoint is unreachable so a transient
+    // network blip doesn't block an admin who already knows the state.
+    const readiness = await fetchBillingReadiness();
+    let issues;
+    if (readiness && Array.isArray(readiness.issues)) {
+      issues = readiness.issues
+        .filter((i) => Array.isArray(i.area) ? i.area.includes('issue') : true)
+        .map((i) => ({
+          sev: i.sev === 'info' ? 'low' : i.sev,
+          msg: i.msg,
+          fix: i.fix || '',
+        }));
+    } else {
+      issues = [];
+      const tenantsWithBills = Object.values(rooms || {}).filter(
+        (r) => r && r.tenant && (r.status === 'occupied' || r.status === 'overdue')
+      );
+      const ppTarget = config?.payment?.promptpay || config?.payment?.promptpayTarget;
+      if (!ppTarget) {
+        issues.push({
+          sev: 'high',
+          msg: 'ยังไม่ได้ตั้ง PromptPay — บิล PDF จะไม่มี QR (ผู้เช่าจะ scan-to-pay ไม่ได้)',
+          fix: 'ตั้งที่ /admin#secrets → กลุ่ม PromptPay หรือ Settings → การชำระเงิน',
+        });
+      }
+      const wRate = Number(config?.utilities?.waterRate);
+      const eRate = Number(config?.utilities?.elecRate);
+      if (!Number.isFinite(wRate) || wRate <= 0) {
+        issues.push({ sev: 'high', msg: 'ค่าน้ำต่อหน่วยไม่ได้ตั้ง — บิลจะ ฿0 ในส่วนค่าน้ำ', fix: '/admin#pricing → ค่าน้ำ-ไฟ' });
+      }
+      if (!Number.isFinite(eRate) || eRate <= 0) {
+        issues.push({ sev: 'high', msg: 'ค่าไฟต่อหน่วยไม่ได้ตั้ง — บิลจะ ฿0 ในส่วนค่าไฟ', fix: '/admin#pricing → ค่าน้ำ-ไฟ' });
+      }
+      const noMeter = tenantsWithBills.filter((r) =>
+        (Number(r.waterUnits) || 0) === 0 && (Number(r.elecUnits) || 0) === 0
+      ).length;
+      if (noMeter > 0) {
+        issues.push({
+          sev: 'med',
+          msg: `${noMeter} ห้องยังไม่บันทึกค่าน้ำ/ไฟ — บิลจะออกแต่ยอดน้ำ/ไฟเป็น 0`,
+          fix: '/admin#meters → บันทึกค่ามิเตอร์ก่อนออกบิล',
+        });
+      }
+      if (tenantsWithBills.length === 0) {
+        issues.push({
+          sev: 'high',
+          msg: 'ยังไม่มีห้องที่มีผู้เช่าแสดงสถานะ "occupied" — จะออกบิล 0 ใบ',
+          fix: '/admin#rooms → กำหนดผู้เช่าให้ห้องก่อน',
+        });
+      }
+      if (!config?.building?.name || config.building.name === 'บ้านกาญจน์ เรสซิเดนซ์') {
+        issues.push({
+          sev: 'low',
+          msg: 'ชื่อตึกยังเป็น default — บิล PDF จะแสดง "บ้านกาญจน์ เรสซิเดนซ์"',
+          fix: '/admin#settings → ข้อมูลตึก',
+        });
+      }
     }
 
     if (issues.length > 0) {
       const high = issues.filter((i) => i.sev === 'high').length;
       const lines = issues.map((i, idx) => {
         const icon = i.sev === 'high' ? '🔴' : i.sev === 'med' ? '🟡' : '⚪';
-        return `${idx + 1}. ${icon} ${i.msg}\n   → ${i.fix}`;
+        const fix = i.fix ? `\n   → ${i.fix}` : '';
+        return `${idx + 1}. ${icon} ${i.msg}${fix}`;
       }).join('\n\n');
       const ok = window.confirm(
         `⚠️ พบ ${issues.length} ปัญหา${high > 0 ? ` (${high} ข้อสำคัญ)` : ''} ก่อนออกบิล:\n\n` +
