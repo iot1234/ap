@@ -33,6 +33,11 @@ function PageSlipVerify({ setToast }) {
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState(null);
   const [err, setErr] = useState('');
+  // providerStatus carries per-provider readiness from secrets.testGroup.
+  // Refreshed whenever the underlying keys change so the "ตอนนี้พร้อมไหม?"
+  // panel auto-updates as admin saves a new key without forcing them to
+  // click "ทดสอบ" again.
+  const [providerStatus, setProviderStatus] = useState(null);
 
   // Centralised reload — called after every mutation so the UI stays in sync
   // without manual cache invalidation. All three endpoints are cheap reads.
@@ -62,6 +67,25 @@ function PageSlipVerify({ setToast }) {
   }, [setToast]);
 
   useEffect(() => { reload(); }, [reload]);
+
+  // Probe per-provider connection state whenever the keys change. Surfaces
+  // "ระบบเชื่อมต่อได้ไหม" without admin having to click the test button.
+  const refreshProviderStatus = useCallback(async () => {
+    try {
+      const r = await apiFetch('/api/admin/secrets/test', {
+        method: 'POST',
+        body: JSON.stringify({ group: 'slipverify' }),
+      });
+      const d = await r.json();
+      setProviderStatus(d);
+    } catch { setProviderStatus(null); }
+  }, [apiFetch]);
+  useEffect(() => {
+    refreshProviderStatus();
+    // Track BOTH keys' isSet flags so a save of either re-probes the
+    // connection. tag-prop chains: saveSecret → reload → setSecrets →
+    // dep change here → refresh.
+  }, [refreshProviderStatus, secrets.SLIPOK_API_KEY?.isSet, secrets.EASYSLIP_API_KEY?.isSet]);
 
   async function saveFeature(partial) {
     setBusy(true); setErr('');
@@ -336,6 +360,64 @@ function PageSlipVerify({ setToast }) {
         'แนะนำให้กด "🔌 ทดสอบ" ด้านล่างหนึ่งครั้งเพื่อยืนยันว่า key ใช้ได้จริง'),
     ) : null),
 
+    // Live connection-status panel — answers "ระบบเชื่อมต่อได้ไหมตอนนี้?"
+    // without admin clicking the test button. Auto-refreshes when the
+    // underlying keys change (refreshProviderStatus effect above).
+    providerStatus ? React.createElement(Card, null,
+      React.createElement(SectionHeading, null, 'สถานะการเชื่อมต่อ provider'),
+      React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 10 } },
+        (providerStatus.providers || []).map((p) => {
+          const isPrimary = status.primary === p.id;
+          return React.createElement('div', {
+            key: p.id,
+            style: {
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              padding: '10px 14px', borderRadius: 8,
+              background: p.ready ? '#f0f9f0' : '#fff5f4',
+              border: `1px solid ${p.ready ? '#bce0bc' : '#f5c0b4'}`,
+            },
+          },
+            React.createElement('div', null,
+              React.createElement('div', { style: { fontWeight: 600, fontSize: 14 } },
+                `${p.ready ? '✅' : '❌'} ${p.label}`,
+                isPrimary ? React.createElement('span', {
+                  style: {
+                    marginLeft: 8, fontSize: 11, padding: '2px 8px',
+                    borderRadius: 999, background: C.accent + '22', color: C.accent, fontWeight: 600,
+                  },
+                }, 'PRIMARY') : null,
+              ),
+              React.createElement('div', { style: { fontSize: 12, color: C.muted, marginTop: 2 } },
+                p.ready
+                  ? (p.detail?.branchId
+                      ? `พร้อมใช้งาน · branch: ${p.detail.branchId}`
+                      : 'พร้อมใช้งาน — key ถูกตั้งแล้ว')
+                  : (p.detail?.hint || 'key ยังไม่ตั้ง')
+              ),
+            ),
+            React.createElement('div', { style: { fontSize: 12, color: C.muted } },
+              p.ready ? 'connected' : 'not configured',
+            ),
+          );
+        }),
+        // Overall summary
+        React.createElement('div', {
+          style: {
+            marginTop: 4, padding: '8px 12px', borderRadius: 6,
+            background: providerStatus.ok ? '#fdfaf2' : '#fff5f4',
+            border: `1px solid ${providerStatus.ok ? '#ece4d4' : '#f5c0b4'}`,
+            fontSize: 12.5, lineHeight: 1.6,
+          },
+        },
+          providerStatus.info?.failoverReady
+            ? `🔁 Auto-failover พร้อม — ทั้ง 2 provider เชื่อมต่อได้ ระบบจะใช้ ${status.primary === 'easyslip' ? 'EasySlip' : 'SlipOK'} ก่อน แล้ว fall through อีกอันถ้าล่ม`
+            : providerStatus.readyCount === 1
+              ? `⚠️ มีแค่ provider เดียวที่พร้อม — ถ้า provider นี้ล่ม สลิปจะตกเข้าคิว admin (ตั้ง key อีกอันเพื่อ enable auto-failover)`
+              : `🔴 ระบบยังเชื่อมต่อไม่ได้ — ต้องตั้ง key อย่างน้อย 1 provider ที่ Step 4 ด้านล่าง`,
+        ),
+      ),
+    ) : null,
+
     // Setup steps
     React.createElement(Card, null,
       React.createElement(SectionHeading, null, 'ขั้นตอนตั้งค่า'),
@@ -392,14 +474,30 @@ function PageSlipVerify({ setToast }) {
           ? '✓ Auto-failover พร้อม: ระบบจะเรียก provider หลักก่อน ถ้าตอบ transient error (timeout, 5xx, parse fail) จะลอง provider สำรองให้อัตโนมัติ'
           : 'เลือก provider ที่จะถูกเรียกก่อน — เมื่อตั้ง key ทั้ง 2 ตัวด้านล่าง ระบบจะ enable auto-failover อัตโนมัติ',
       },
-        React.createElement('div', { style: { display: 'flex', gap: 8 } },
-          ['slipok', 'easyslip'].map((p) =>
-            React.createElement('button', {
+        React.createElement('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
+          ['slipok', 'easyslip'].map((p) => {
+            const isActive = status.primary === p;
+            const targetKeySet = p === 'slipok' ? status.slipokKeySet : status.easyslipKeySet;
+            return React.createElement('button', {
               key: p,
-              // When admin re-picks a primary, also reorder the providers
-              // array if both keys are set — so verifyWithFallback hits
-              // the chosen one first.
               onClick: () => {
+                // Warn before switching to a provider whose key isn't set —
+                // the switch will succeed but auto-verify won't work. Better
+                // to surface this BEFORE the click takes effect so admin
+                // doesn't think "I switched but verification is silently
+                // broken". Confirm only — they can still proceed if they
+                // know what they're doing.
+                if (!isActive && !targetKeySet) {
+                  const ok = window.confirm(
+                    `⚠ ${p === 'slipok' ? 'SlipOK' : 'EasySlip'} ยังไม่ได้ตั้ง API key\n\n` +
+                    `ถ้าสลับเป็น primary ตอนนี้ ระบบจะ:\n` +
+                    `  • ใช้ ${p === 'slipok' ? 'SlipOK' : 'EasySlip'} เป็น primary (ตามที่เลือก)\n` +
+                    `  • แต่ verify จะใช้งานไม่ได้ทันที — สลิปจะตกเข้าคิว admin\n\n` +
+                    `📌 แนะนำ: ตั้ง API key ของ ${p === 'slipok' ? 'SlipOK' : 'EasySlip'} ที่ Step 4 ก่อน แล้วค่อยสลับ primary\n\n` +
+                    `ดำเนินการสลับต่อหรือไม่?`
+                  );
+                  if (!ok) return;
+                }
                 if (status.slipokKeySet && status.easyslipKeySet) {
                   saveFeature({ slipUpload: {
                     provider: p,
@@ -409,17 +507,18 @@ function PageSlipVerify({ setToast }) {
                   saveFeature({ slipUpload: { provider: p, providers: [p] } });
                 }
               },
-              disabled: busy || status.primary === p || !status.step2Done,
+              disabled: busy || isActive || !status.step2Done,
               style: {
                 padding: '8px 16px', borderRadius: 6,
-                border: `1px solid ${status.primary === p ? C.accent : C.border}`,
-                background: status.primary === p ? C.accent : 'transparent',
-                color: status.primary === p ? '#fff' : C.ink,
+                border: `1px solid ${isActive ? C.accent : (targetKeySet ? C.border : '#f0c5b4')}`,
+                background: isActive ? C.accent : 'transparent',
+                color: isActive ? '#fff' : C.ink,
                 cursor: busy || !status.step2Done ? 'not-allowed' : 'pointer',
                 fontFamily: 'inherit', fontSize: 13.5, fontWeight: 500,
+                opacity: !targetKeySet && !isActive ? 0.85 : 1,
               },
-            }, p === 'easyslip' ? 'EasySlip' : 'SlipOK')
-          ),
+            }, `${p === 'easyslip' ? 'EasySlip' : 'SlipOK'}${targetKeySet ? '' : ' ⚠ key ยังไม่ตั้ง'}`);
+          }),
         ),
         status.failoverReady ? React.createElement('div', {
           style: {

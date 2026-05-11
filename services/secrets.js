@@ -302,24 +302,55 @@ async function testGroup(group) {
     }
   }
   if (group === 'slipverify') {
-    // Test slip-verify by checking that the configured provider's key is
-    // set + reachable. We deliberately DON'T submit a real slip image
-    // here (no test slip available, and burning a real slip on a probe
-    // could double-charge the operator). Just resolve to "looks ready".
-    const slipok = get('SLIPOK_API_KEY');
-    const easyslip = get('EASYSLIP_API_KEY');
-    if (!slipok && !easyslip) {
-      return { ok: false, error: 'ทั้ง SLIPOK_API_KEY และ EASYSLIP_API_KEY ยังไม่ตั้ง — เลือก provider แล้วตั้ง key ก่อน' };
-    }
-    const provider = slipok ? 'slipok' : 'easyslip';
+    // Report per-provider readiness so the UI can show each one's state
+    // independently. We deliberately don't submit a real slip image (would
+    // burn provider credit + we have no test slip) — readiness here means
+    // "key is set and the right shape". The actual end-to-end probe happens
+    // on the first real tenant upload.
+    const slipokKey = get('SLIPOK_API_KEY');
+    const easyslipKey = get('EASYSLIP_API_KEY');
     const branchId = get('SLIPOK_BRANCH_ID');
+    const providers = [
+      {
+        id: 'slipok',
+        label: 'SlipOK',
+        keySet: !!slipokKey,
+        ready: !!slipokKey,
+        detail: slipokKey
+          ? { branchId: branchId || '(single-branch plan)' }
+          : { hint: 'ตั้งค่า SLIPOK_API_KEY ก่อน' },
+      },
+      {
+        id: 'easyslip',
+        label: 'EasySlip',
+        keySet: !!easyslipKey,
+        ready: !!easyslipKey,
+        detail: easyslipKey ? {} : { hint: 'ตั้งค่า EASYSLIP_API_KEY ก่อน' },
+      },
+    ];
+    const readyCount = providers.filter((p) => p.ready).length;
+    if (readyCount === 0) {
+      return {
+        ok: false,
+        error: 'ทั้ง SLIPOK_API_KEY และ EASYSLIP_API_KEY ยังไม่ตั้ง — ตั้งอย่างน้อย 1 ตัวก่อน',
+        providers,
+      };
+    }
+    // Pick the primary for legacy callers that read `info.provider`.
+    const primaryId = slipokKey ? 'slipok' : 'easyslip';
     return {
       ok: true,
       info: {
-        provider,
-        branchId: provider === 'slipok' ? (branchId || '(single-branch plan)') : null,
+        provider: primaryId,
+        branchId: primaryId === 'slipok' ? (branchId || '(single-branch plan)') : null,
         ready: true,
+        // Failover is "active" when both have keys AND verifyWithFallback
+        // can iterate them. The features layer decides chain order; this
+        // probe just confirms both creds are present.
+        failoverReady: readyCount === 2,
       },
+      providers,
+      readyCount,
     };
   }
   if (group === 'promptpay') {
