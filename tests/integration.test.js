@@ -2794,6 +2794,8 @@ test('GET /api/tenants/lookup-by-citizen-id finds active and moved_out records',
   const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   assert.match(src, /app\.get\('\/api\/tenants\/lookup-by-citizen-id'/,
     'lookup endpoint must exist');
+  assert.match(src, /app\.get\('\/api\/tenants\/:id\(\\\\d\+\)'/,
+    'numeric tenant detail route must not swallow /lookup-by-citizen-id');
   // Must be hash-first, fall back to tail (legacy data without hash).
   assert.match(src, /matchedByHash/, 'must surface high-confidence hash matches');
   assert.match(src, /matchedByTailOnly/, 'must surface lower-confidence tail-only matches');

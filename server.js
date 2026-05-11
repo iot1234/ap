@@ -1934,7 +1934,7 @@ app.get('/api/tenants', requireAuth, async (req, res) => {
   }
 });
 
-app.get('/api/tenants/:id', requireAuth, async (req, res) => {
+app.get('/api/tenants/:id(\\d+)', requireAuth, async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
   try {

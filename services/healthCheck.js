@@ -512,11 +512,15 @@ async function checkDataIntegrity(pool) {
           WHERE p.status='verified'
             AND b.deleted_at IS NULL
             AND (b.status <> 'paid' OR b.paid_at IS NULL)) AS verified_payment_unpaid_bills,
+        -- Tolerance matches the ±1฿ accepted by /api/tenant/payments,
+        -- /api/payments/:id/verify, and /api/bills/:id/pay. A tighter
+        -- value here would flag rounding-difference rows that the payment
+        -- endpoints already accept as valid → false-positive dashboard noise.
         (SELECT COUNT(*)::int FROM payments p
           JOIN bills b ON b.id=p.bill_id
           WHERE p.status IN ('pending','verified')
             AND b.deleted_at IS NULL
-            AND ABS(p.amount - b.total) > 0.009) AS payment_amount_mismatch,
+            AND ABS(p.amount - b.total) > 1.0) AS payment_amount_mismatch,
         (SELECT COUNT(*)::int FROM (
           SELECT bill_id
             FROM payments
