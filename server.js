@@ -2754,6 +2754,55 @@ app.put('/api/tenants/:id', sameOrigin, csrfGuard, requireAuth, requireRole('own
   if (b.roomId !== undefined) set('current_room_id', b.roomId ? String(b.roomId).slice(0, 32) : null);
   if (b.status !== undefined) {
     if (!VALID_TENANT_STATUS.has(String(b.status))) return res.status(400).json({ error: 'invalid status' });
+    // Block direct flip to moved_out when the tenant still has live links
+    // (active contract / active access cards / room assignment). Bare PUT
+    // can only update the tenants row — it doesn't cascade to close the
+    // contract, free the room, revoke cards, or deactivate recurring
+    // charges. Admin using "edit tenant → change status dropdown" was
+    // leaving contracts in status='active' tied to a moved-out tenant,
+    // which broke /api/rooms (still occupied), recurring billing (kept
+    // generating bills), and access control (cards still valid).
+    // Force admin to the dedicated POST /api/tenants/:id/checkout
+    // endpoint which runs the atomic cascade. `force:true` keeps a
+    // migration/cleanup escape hatch (audit-logged) for ghost rows.
+    if (b.status === 'moved_out' && b.force !== true) {
+      try {
+        const cur = await pool.query(
+          `SELECT t.status AS tenant_status, t.current_room_id,
+                  (SELECT COUNT(*)::int FROM contracts
+                     WHERE tenant_id=t.id AND status='active' AND deleted_at IS NULL) AS active_contracts,
+                  (SELECT COUNT(*)::int FROM access_cards
+                     WHERE tenant_id=t.id AND status='active') AS active_cards
+             FROM tenants t
+            WHERE t.id=$1 AND t.deleted_at IS NULL`,
+          [id]
+        );
+        const row = cur.rows[0];
+        if (row && row.tenant_status === 'active'
+            && (row.current_room_id || row.active_contracts > 0 || row.active_cards > 0)) {
+          return res.status(409).json({
+            error: 'ผู้เช่ายัง active อยู่ (ห้อง/สัญญา/บัตร) — ใช้ POST /api/tenants/:id/checkout เพื่อปิดสัญญา + คืนห้อง + เพิกถอนบัตรพร้อมกัน',
+            code: 'USE_CHECKOUT_ENDPOINT',
+            checkoutUrl: `/api/tenants/${id}/checkout`,
+            detail: {
+              currentRoom: row.current_room_id,
+              activeContracts: row.active_contracts,
+              activeCards: row.active_cards,
+            },
+            hint: 'ถ้าต้องการเปลี่ยน status เฉพาะข้อมูล (เช่น migrate / cleanup ghost) ส่ง { force: true } พร้อม audit log',
+          });
+        }
+      } catch (err) {
+        // If the dependency check fails (DB blip, missing table on legacy
+        // deploy), fall closed: refuse the change so we never silently
+        // create the inconsistency the cascade is meant to prevent.
+        console.error('[tenant.put] checkout precheck failed:', err.message);
+        return res.status(500).json({
+          error: 'ตรวจสถานะปัจจุบันไม่สำเร็จ — ลองใหม่หรือใช้ /checkout endpoint',
+          code: 'CHECKOUT_PRECHECK_FAILED',
+        });
+      }
+    }
     set('status', b.status);
     if (b.status === 'blacklist' && b.blacklistReason) set('blacklist_reason', String(b.blacklistReason).slice(0, 500));
   }
@@ -2870,7 +2919,13 @@ app.put('/api/tenants/:id', sameOrigin, csrfGuard, requireAuth, requireRole('own
       }
       return res.status(404).json({ error: 'not found', code: 'NOT_FOUND' });
     }
-    audit(req, 'tenant.update', 'tenant', String(id), { fields: Object.keys(b) });
+    // Audit the change. Include a 'forced' flag when admin bypassed the
+    // checkout cascade — that's the breadcrumb if a moved_out tenant later
+    // shows up with an orphan contract because of this PUT.
+    audit(req, 'tenant.update', 'tenant', String(id), {
+      fields: Object.keys(b),
+      forcedMovedOut: b.status === 'moved_out' && b.force === true ? true : undefined,
+    });
     res.json({ ok: true, id, updated_at: rows[0].updated_at });
   } catch (err) {
     console.error('tenant update error:', err);

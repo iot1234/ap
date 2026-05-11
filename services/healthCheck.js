@@ -534,7 +534,20 @@ async function checkDataIntegrity(pool) {
                  OR total <= 0 OR subtotal < 0)) AS invalid_bill_rows,
         (SELECT COUNT(*)::int FROM payments
           WHERE status NOT IN ('pending','verified','rejected')
-             OR amount <= 0) AS invalid_payment_rows`);
+             OR amount <= 0) AS invalid_payment_rows,
+        -- Moved-out tenants whose contract is still flagged 'active'. Symptom:
+        -- room shows occupied in /api/rooms, recurring charges keep billing,
+        -- access cards still valid. Root cause: admin used PUT /api/tenants/:id
+        -- to flip status without the checkout cascade. The PUT endpoint now
+        -- blocks this path but pre-fix rows linger — surface them here so
+        -- ops can reconcile (run the checkout endpoint with force=true or
+        -- close the contract manually).
+        (SELECT COUNT(*)::int FROM tenants t
+           JOIN contracts c ON c.tenant_id = t.id
+          WHERE t.deleted_at IS NULL
+            AND t.status = 'moved_out'
+            AND c.deleted_at IS NULL
+            AND c.status = 'active') AS moved_out_with_active_contract`);
     const counts = countsQ.rows[0] || {};
 
     const dupRoomsQ = await pool.query(`
@@ -588,11 +601,27 @@ async function checkDataIntegrity(pool) {
         duplicate_verified_payments_per_bill: Number(counts.duplicate_verified_payments_per_bill) || 0,
         invalid_bill_rows: Number(counts.invalid_bill_rows) || 0,
         invalid_payment_rows: Number(counts.invalid_payment_rows) || 0,
+        moved_out_with_active_contract: Number(counts.moved_out_with_active_contract) || 0,
       },
       duplicate_active_room_assignments: dupRoomsQ.rows,
       active_tenants_missing_room: missingRoomsQ.rows,
       orphan_payable_bill_samples: orphanBillsQ.rows,
     };
+
+    // Sample list of the orphaned contract pairs so admin can act directly
+    // (the count alone makes it hard to find which tenants to fix). Limit
+    // 10 so a runaway state doesn't blow up the response.
+    try {
+      const orphans = await pool.query(`
+        SELECT t.id AS tenant_id, t.full_name, c.id AS contract_id, c.contract_no, c.room_id
+          FROM tenants t
+          JOIN contracts c ON c.tenant_id = t.id
+         WHERE t.deleted_at IS NULL AND t.status='moved_out'
+           AND c.deleted_at IS NULL AND c.status='active'
+         ORDER BY c.id DESC
+         LIMIT 10`);
+      detail.moved_out_active_contract_samples = orphans.rows;
+    } catch { /* tolerate older schemas */ }
 
     const errors = [];
     const warnings = [];
@@ -613,6 +642,15 @@ async function checkDataIntegrity(pool) {
     }
     if (dupRoomsQ.rows.length > 0) {
       errors.push('more than one active tenant assigned to the same room');
+    }
+    if (detail.counts.moved_out_with_active_contract > 0) {
+      // Hard error — bills will keep auto-generating against a moved-out
+      // tenant and the room shows occupied. Quote the count so the dashboard
+      // tells admin exactly how many rows to reconcile.
+      errors.push(
+        `${detail.counts.moved_out_with_active_contract} moved_out tenant(s) still have an active contract — ` +
+        `close via PUT /api/contracts/:id { status: 'ended' } or re-run /api/tenants/:id/checkout`
+      );
     }
     if (detail.counts.legacy_rooms > 0 && detail.counts.rooms_v2 === 0) {
       warnings.push('legacy rooms exist but rooms_v2 is empty; run scripts/sync-rooms-v2-from-jsonb.js --apply');

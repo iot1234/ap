@@ -445,6 +445,31 @@ function Pill({ children, color }) {
 function BillsView({ locale, bills, refresh, slipFeature }) {
   const t = (k) => tr(locale, k);
   const [openId, setOpenId] = useState(null);
+  // Auto-open the bill detail when the tenant arrives via the LINE/email
+  // deep link (/tenant?bill=ID). The notification body now embeds this
+  // link so tapping it lands on the right bill instead of dropping the
+  // tenant on the bill list. Only triggers once per mount + only when the
+  // ?bill= bill actually belongs to this tenant (the list comes from
+  // /api/tenant/bills which already filters by tenant_id, so a bill in
+  // `bills` is implicitly owned).
+  React.useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const wanted = Number(params.get('bill'));
+      if (Number.isInteger(wanted) && wanted > 0 && bills.some((b) => b.id === wanted)) {
+        setOpenId(wanted);
+        // Clean the URL so refresh doesn't re-open after the tenant
+        // dismisses the modal. Use history.replaceState to avoid a nav.
+        params.delete('bill');
+        const qs = params.toString();
+        const newUrl = window.location.pathname + (qs ? `?${qs}` : '') + window.location.hash;
+        window.history.replaceState({}, '', newUrl);
+      }
+    } catch { /* tolerate browsers without URLSearchParams */ }
+    // bills.length used as dep so the effect re-runs once the bills array
+    // arrives from the API (initial render has bills=[]).
+  }, [bills.length]);
   const open = bills.find((b) => b.id === openId);
   return (
     <div style={{ padding: 20 }}>

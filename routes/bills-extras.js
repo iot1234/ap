@@ -254,7 +254,33 @@ module.exports = function buildBillsExtrasRouter(ctx) {
     if (billQ.rows[0].status === 'void') return { ok: false, error: 'bill is void' };
     const b = billQ.rows[0];
     const subject = `บิลรอบ ${b.period} — ห้อง ${b.room_id}`;
-    const body = `บิลใหม่\nผู้เช่า: ${b.tenant_name || '-'}\nห้อง: ${b.room_id}\nรอบ: ${b.period}\nยอด: ฿${Number(b.total).toLocaleString('th-TH', { minimumFractionDigits: 2 })}\nกำหนดชำระ: ${b.due_date}`;
+    // Deep link to the bill detail in the tenant portal. With this, tapping
+    // the LINE/email notification opens the bill modal directly — no need
+    // for the tenant to manually navigate /tenant → find the right bill in
+    // the list. PUBLIC_URL is set by the deploy (Railway sets it
+    // automatically as RAILWAY_PUBLIC_DOMAIN; we fall back to empty string
+    // so dev runs without the env var still produce a relative link the
+    // tenant.jsx side can route on). The `?bill=ID` query param is what
+    // the BillsView reads to auto-open the matching modal.
+    const publicUrl = (process.env.PUBLIC_URL
+      || (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : '')
+      || '').replace(/\/+$/, '');
+    const billLink = `${publicUrl}/tenant?bill=${encodeURIComponent(billId)}`;
+    const dueDateStr = b.due_date
+      ? new Date(b.due_date).toLocaleDateString('th-TH', { year: 'numeric', month: 'long', day: 'numeric' })
+      : '-';
+    const body = [
+      `📋 บิลใหม่ — ${b.period}`,
+      ``,
+      `ห้อง: ${b.room_id}`,
+      `ยอดชำระ: ฿${Number(b.total).toLocaleString('th-TH', { minimumFractionDigits: 2 })}`,
+      `กำหนดชำระ: ${dueDateStr}`,
+      ``,
+      `👉 ดูบิล + จ่ายด้วย QR:`,
+      billLink,
+      ``,
+      `(หากกดลิงก์ไม่ได้ ให้เข้า ${publicUrl || 'พอร์ทัล'}/tenant แล้วเลือกบิล ${b.bill_no || `#${billId}`})`,
+    ].join('\n');
     const enqueued = [];
     const hasLine = lineNotify.isLikelyUserId(b.line_user_id);
     if (!hasLine && !b.email) {
