@@ -73,6 +73,16 @@ async function dispatch(pool, features, row) {
       throw new Error(`LINE OA resolve failed: ${err.message}`);
     }
     if (!oa || !oa.channelAccessToken) throw new Error('LINE not configured');
+    // Rich-message path: payload.messages is the raw LINE messages array
+    // (Flex bubble + text fallback for bill reminders). Bundled as ONE
+    // push toward the rate limit so we don't double-count for the same
+    // notification. Falls back to plain pushText when the enqueueing
+    // caller didn't compose a rich payload.
+    if (Array.isArray(payload.messages) && payload.messages.length > 0) {
+      const ok = await lineNotify.pushMessages(oa, row.recipient, payload.messages);
+      if (!ok) throw new Error('LINE push (messages) returned false');
+      return;
+    }
     const ok = await lineNotify.pushText(oa, row.recipient, row.body || row.subject || '');
     if (!ok) throw new Error('LINE push returned false');
     return;

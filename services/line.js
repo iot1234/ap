@@ -131,6 +131,37 @@ async function pushText(...args) {
 }
 
 /**
+ * Push arbitrary LINE message objects (up to 5 per push). Use this when a
+ * single push needs more than plain text — text + image, Flex bubble, etc.
+ * Each `messages[]` element follows LINE's Messaging API spec verbatim
+ * (https://developers.line.biz/en/reference/messaging-api/#message-objects).
+ *
+ *   pushMessages(oa, userId, [{ type:'text', text:'hi' },
+ *                             { type:'image', originalContentUrl, previewImageUrl }])
+ *
+ * Counts as ONE push toward the LINE rate limit regardless of how many
+ * messages are bundled — preferable to two separate pushText calls for
+ * the same notification.
+ */
+async function pushMessages(...args) {
+  const { oa, rest } = _splitArgs(args, 3);
+  const [userId, messages] = rest;
+  const resolved = _resolveOa(oa);
+  if (!resolved || !userId || !Array.isArray(messages) || messages.length === 0) return false;
+  if (!isLikelyUserId(userId)) return false;
+  try {
+    await postJson(resolved, '/v2/bot/message/push', {
+      to: userId,
+      messages: messages.slice(0, 5),    // LINE max 5 messages per push
+    });
+    return true;
+  } catch (err) {
+    console.error(`[line:${resolved.slug || resolved.id}] push-messages failed:`, err.message);
+    return false;
+  }
+}
+
+/**
  * Reply to a webhook event using the one-shot replyToken.
  *   replyText(oa, replyToken, text)
  *   replyText(replyToken, text)   — legacy
@@ -176,6 +207,6 @@ function verifyWebhookSignature(...args) {
 }
 
 module.exports = {
-  isConfigured, pushText, replyText, verifyWebhookSignature, isLikelyUserId,
+  isConfigured, pushText, pushMessages, replyText, verifyWebhookSignature, isLikelyUserId,
   _resolveOa, // exported for tests
 };

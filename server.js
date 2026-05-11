@@ -2919,6 +2919,11 @@ app.put('/api/tenants/:id', sameOrigin, csrfGuard, requireAuth, requireRole('own
       }
       return res.status(404).json({ error: 'not found', code: 'NOT_FOUND' });
     }
+    if (b.status === 'moved_out' || b.status === 'blacklist') {
+      await pool.query(`DELETE FROM tenant_sessions WHERE tenant_id=$1`, [id]).catch((err) => {
+        console.warn('[tenant.update] session cleanup failed:', err.message);
+      });
+    }
     // Audit the change. Include a 'forced' flag when admin bypassed the
     // checkout cascade — that's the breadcrumb if a moved_out tenant later
     // shows up with an orphan contract because of this PUT.
@@ -2983,6 +2988,14 @@ function hashSid(sid) {
   return require('crypto').createHash('sha256').update(String(sid)).digest('hex');
 }
 
+function tenantCanUsePortal(t) {
+  return !!(
+    t
+    && t.status === 'active'
+    && String(t.current_room_id || '').trim() !== ''
+  );
+}
+
 async function tenantSessionLookup(req) {
   const flags = await features.load(pool);
   if (!flags.tenantPortal || !flags.tenantPortal.enabled) return null;
@@ -2998,6 +3011,10 @@ async function tenantSessionLookup(req) {
   );
   if (!rows.length) return null;
   const session = rows[0];
+  if (!tenantCanUsePortal(session)) {
+    await pool.query(`DELETE FROM tenant_sessions WHERE sid_hash=$1`, [sidHash]).catch(() => {});
+    return null;
+  }
   // Sliding session: when the cookie is past 50% of its lifetime, extend
   // expire to a fresh full window. Avoids logging tenants out mid-session
   // while they're actively using the portal. Best-effort: failures are
@@ -3020,7 +3037,6 @@ async function requireTenant(req, res, next) {
   try {
     const t = await tenantSessionLookup(req);
     if (!t) return res.status(401).json({ error: 'unauthorized' });
-    if (t.status === 'blacklist') return res.status(403).json({ error: 'account suspended' });
     req.tenant = t;
     next();
   } catch (err) {
@@ -3059,16 +3075,23 @@ app.post('/api/tenant/login', sameOrigin, rateLimitTenantLogin, features.require
       throw err;
     }
     const { rows } = await pool.query(
-      `SELECT id, full_name, pin_hash, status FROM tenants
-         WHERE phone=$1 AND deleted_at IS NULL LIMIT 1`,
+      `SELECT id, full_name, pin_hash, status, current_room_id
+         FROM tenants
+        WHERE phone=$1 AND deleted_at IS NULL
+        ORDER BY (status='active' AND current_room_id IS NOT NULL AND current_room_id <> '') DESC,
+                 updated_at DESC NULLS LAST, id DESC
+        LIMIT 10`,
       [phone]
     );
-    const t = rows[0] || null;
-    const hash = (t && t.pin_hash) ? t.pin_hash : DUMMY_HASH;
-    // Always run bcrypt so timing is constant — A3 fix: don't reveal account
-    // existence/status through response speed or status code.
-    const ok = await bcrypt.compare(pin, hash);
-    if (!t || !t.pin_hash || !ok) {
+    let matched = null;
+    let compared = false;
+    for (const candidate of rows) {
+      const ok = await bcrypt.compare(pin, candidate.pin_hash || DUMMY_HASH);
+      compared = true;
+      if (ok && candidate.pin_hash && !matched) matched = candidate;
+    }
+    if (!compared) await bcrypt.compare(pin, DUMMY_HASH);
+    if (!matched) {
       lockout.recordFailure(principal, 'tenant').catch(() => {});
       audit(req, 'tenant.login_failed', 'tenant', phone, null, phone).catch(() => {});
       return res.status(401).json({ error: 'invalid credentials' });
@@ -3076,8 +3099,16 @@ app.post('/api/tenant/login', sameOrigin, rateLimitTenantLogin, features.require
     // Only AFTER credentials check do we surface blacklist as a different
     // status — so attackers can't enumerate suspended accounts without
     // already knowing the PIN.
-    if (t.status === 'blacklist') {
+    if (matched.status === 'blacklist') {
       return res.status(403).json({ error: 'account suspended' });
+    }
+    if (!tenantCanUsePortal(matched)) {
+      audit(req, 'tenant.login_blocked_inactive', 'tenant', String(matched.id),
+        { status: matched.status, currentRoomId: matched.current_room_id }, phone).catch(() => {});
+      return res.status(403).json({
+        error: 'tenant is not active for portal access',
+        code: 'TENANT_NOT_ACTIVE',
+      });
     }
     lockout.reset(principal).catch(() => {});
     const sid = makeSid();
@@ -3089,7 +3120,7 @@ app.post('/api/tenant/login', sameOrigin, rateLimitTenantLogin, features.require
     await pool.query(
       `INSERT INTO tenant_sessions (sid, sid_hash, tenant_id, expire, ip, ua)
        VALUES ($1,$2,$3,$4,$5,$6)`,
-      [sidHash, sidHash, t.id, expire, clientIp(req), (req.headers['user-agent'] || '').slice(0, 400)]
+      [sidHash, sidHash, matched.id, expire, clientIp(req), (req.headers['user-agent'] || '').slice(0, 400)]
     );
     res.cookie(TENANT_COOKIE, sid, {
       httpOnly: true,
@@ -3098,8 +3129,8 @@ app.post('/api/tenant/login', sameOrigin, rateLimitTenantLogin, features.require
       path: '/',
       expires: expire,
     });
-    audit(req, 'tenant.login', 'tenant', String(t.id));
-    res.json({ ok: true, tenant: { id: t.id, fullName: t.full_name } });
+    audit(req, 'tenant.login', 'tenant', String(matched.id));
+    res.json({ ok: true, tenant: { id: matched.id, fullName: matched.full_name } });
   } catch (err) {
     console.error('tenant login error:', err);
     res.status(500).json({ error: 'internal error' });
@@ -3877,6 +3908,90 @@ app.post('/api/admin/rooms/:roomId/reconcile',
       client.release();
     }
   });
+
+// Sign / verify a bill QR token. Used by GET /p/bill-qr/:billId so the URL
+// can be sent over LINE Messaging API (which requires a public HTTPS URL —
+// can't auth with a session cookie). The token is HMAC(billId|expiry|secret)
+// + URL-safe base64. Two layers of protection:
+//   - billId is mixed into the HMAC so an attacker can't reuse a valid
+//     token for a different bill.
+//   - expiry is encoded in the token so old links naturally die after the
+//     LINE chat scrolls past them (default 30 days — matches a typical
+//     billing cycle so the link still works if the tenant pays late).
+// QR content is non-sensitive (just a payment QR to the dorm's PromptPay
+// target — anyone scanning it pays the dorm, not steals data), so a
+// time-limited public URL is acceptable trade-off.
+const _crypto = require('crypto');
+const BILL_QR_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;   // 30 days
+function _billQrSigningKey() {
+  // Derive from session secret so the same deploy verifies tokens it
+  // signed. Different secret across deploys → tokens auto-invalidate
+  // on rotation, which is the desired behaviour.
+  return _crypto.createHash('sha256').update(_runtimeSessionSecret + '|bill-qr').digest();
+}
+function signBillQrToken(billId, expiresAt) {
+  const exp = Math.floor((expiresAt || Date.now() + BILL_QR_TOKEN_TTL_MS) / 1000);
+  const payload = `${billId}.${exp}`;
+  const sig = _crypto.createHmac('sha256', _billQrSigningKey())
+    .update(payload).digest('base64')
+    .replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
+  return `${exp}.${sig}`;
+}
+function verifyBillQrToken(billId, token) {
+  if (!token || typeof token !== 'string') return false;
+  const [expStr, sig] = String(token).split('.');
+  const exp = Number(expStr);
+  if (!Number.isFinite(exp) || exp <= 0) return false;
+  if (Date.now() > exp * 1000) return false;
+  const expected = _crypto.createHmac('sha256', _billQrSigningKey())
+    .update(`${billId}.${exp}`).digest('base64')
+    .replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
+  try {
+    return _crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
+  } catch { return false; }
+}
+
+// GET /p/bill-qr/:billId?t=<token> — PUBLIC endpoint that LINE Platform
+// (and any browser following the link) can fetch as image content. Token
+// is HMAC-signed so it can't be enumerated to access bills you don't
+// know about. Returns 404 for unknown bill, 403 for invalid token,
+// otherwise the same PNG/SVG fallback chain as the tenant-auth path.
+app.get('/p/bill-qr/:billId', rateLimitQr, async (req, res) => {
+  const id = Number(req.params.billId);
+  if (!Number.isInteger(id) || id < 1) return res.status(400).end();
+  const token = String(req.query.t || '');
+  if (!verifyBillQrToken(id, token)) {
+    return res.status(403).json({ error: 'invalid or expired token' });
+  }
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, total, status, tenant_id FROM bills
+        WHERE id=$1 AND deleted_at IS NULL`,
+      [id]
+    );
+    if (!rows.length) return res.status(404).end();
+    const bill = rows[0];
+    const amount = Number(bill.total);
+    if (!Number.isFinite(amount) || amount <= 0 || amount > MAX_AMOUNT) {
+      return res.status(409).json({ error: 'invalid bill total' });
+    }
+    const { paymentBlock } = await loadEffectivePaymentBlock();
+    if (!paymentBlock.promptpayTarget) return res.status(503).json({ error: 'PromptPay not configured' });
+    try { paymentBlock.promptpayTarget = normaliseTarget(paymentBlock.promptpayTarget); }
+    catch { return res.status(503).json({ error: 'PromptPay target invalid' }); }
+    if (isDemoTarget(paymentBlock.promptpayTarget)) {
+      return res.status(503).json({ error: 'PromptPay still on demo target' });
+    }
+    const rendered = await renderQrWithFallback(paymentBlock.promptpayTarget, amount);
+    res.setHeader('Content-Type', rendered.contentType);
+    res.setHeader('Cache-Control', 'public, max-age=3600');   // LINE re-fetches
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    return res.end(rendered.body);
+  } catch (err) {
+    console.error('public bill qr error:', err);
+    return res.status(500).end();
+  }
+});
 
 // GET /api/tenant/bills/:id/qr — tenant-owned PromptPay QR generated from
 // the stored bill row. This avoids trusting a browser-side `amount=` query:
@@ -7298,6 +7413,10 @@ const _routesCtx = {
   csrfGuard,
   lockout,                                 // for per-principal brute-force defense
   makeIpLimiter,                           // shared IP-based rate-limit factory
+  // Token signing helpers — bills-extras uses signBillQrToken when
+  // building Flex Messages so the embedded /p/bill-qr URL passes the
+  // HMAC check at fetch time (LINE Platform has no session).
+  signBillQrToken,
 };
 const _routesMounted = _routesIndex(app, _routesCtx);
 

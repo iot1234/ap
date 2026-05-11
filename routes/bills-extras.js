@@ -20,8 +20,91 @@ const lineNotify = require('../services/line');
 const { queryWithRetry } = require('../db/pool');
 
 module.exports = function buildBillsExtrasRouter(ctx) {
-  const { pool, requireAuth, requireRole, sameOrigin, csrfGuard, audit } = ctx;
+  const { pool, requireAuth, requireRole, sameOrigin, csrfGuard, audit, signBillQrToken } = ctx;
   const r = express.Router();
+
+  // Compose the LINE Messages array for a bill notification. Two messages:
+  //   1. Flex bubble: bill summary header + QR image + bank info card + button
+  //   2. Text fallback: same info as plaintext so LINE clients that can't
+  //      render Flex (old versions, web preview) still get the gist.
+  // Counts as ONE push toward LINE's rate limit (Messaging API bundles
+  // up to 5 messages per push).
+  function buildBillLineMessages(b, opts = {}) {
+    const { publicUrl, billLink, dueDateStr, billNo, qrToken } = opts;
+    const total = Number(b.total) || 0;
+    const totalStr = total.toLocaleString('th-TH', { minimumFractionDigits: 2 });
+    // QR image URL — public endpoint with HMAC token so LINE Platform can
+    // fetch it without auth. signBillQrToken is injected via ctx so this
+    // module doesn't need to know about session secrets.
+    const qrUrl = publicUrl && qrToken
+      ? `${publicUrl}/p/bill-qr/${encodeURIComponent(b.id)}?t=${encodeURIComponent(qrToken)}`
+      : null;
+    // Flex bubble layout — single column, top-down:
+    //   ▸ "บิลใหม่" header band (accent colour)
+    //   ▸ Room + period + due date + amount block
+    //   ▸ QR image (if available) — tappable, opens fullscreen in LINE
+    //   ▸ "ดูบิล + จ่ายเลย" button → opens portal deep link
+    // Falls back to text-only when QR can't be served (no PUBLIC_URL).
+    const flexBody = [
+      { type: 'text', text: '📋 บิลใหม่', weight: 'bold', size: 'lg', color: '#c46a3e' },
+      { type: 'separator', margin: 'md' },
+      { type: 'box', layout: 'vertical', margin: 'md', spacing: 'sm', contents: [
+        rowKV('ห้อง', String(b.room_id || '-')),
+        rowKV('รอบ', String(b.period || '-')),
+        rowKV('กำหนดชำระ', String(dueDateStr || '-')),
+        rowKV('ยอดชำระ', `฿${totalStr}`, true),
+      ]},
+    ];
+    if (qrUrl) {
+      flexBody.push(
+        { type: 'separator', margin: 'lg' },
+        { type: 'text', text: 'สแกน PromptPay เพื่อชำระ', size: 'sm', color: '#8a7d6b',
+          align: 'center', margin: 'md' },
+        { type: 'image', url: qrUrl, size: 'full', aspectRatio: '1:1', aspectMode: 'cover',
+          margin: 'sm' });
+    }
+    const bubble = {
+      type: 'bubble',
+      body: { type: 'box', layout: 'vertical', contents: flexBody },
+      footer: billLink ? {
+        type: 'box', layout: 'vertical', spacing: 'sm', contents: [
+          { type: 'button', style: 'primary', color: '#c46a3e',
+            action: { type: 'uri', label: 'ดูบิล + ส่งสลิป', uri: billLink } },
+        ],
+      } : undefined,
+    };
+    const flexMsg = {
+      type: 'flex',
+      altText: `บิลใหม่ห้อง ${b.room_id} ยอด ฿${totalStr}`,
+      contents: bubble,
+    };
+    // Plain-text fallback message for clients that won't render Flex. Sent
+    // alongside the Flex so the user always gets the text version too —
+    // tracks better in LINE search and is copyable.
+    const textMsg = {
+      type: 'text',
+      text: [
+        `📋 บิลใหม่ — ${b.period || '-'}`,
+        ``,
+        `ห้อง: ${b.room_id || '-'}`,
+        `ยอดชำระ: ฿${totalStr}`,
+        `กำหนดชำระ: ${dueDateStr || '-'}`,
+        billLink ? `\n👉 ${billLink}` : null,
+      ].filter(Boolean).join('\n'),
+    };
+    return [flexMsg, textMsg];
+  }
+  function rowKV(label, value, bold) {
+    return {
+      type: 'box', layout: 'baseline', spacing: 'sm', contents: [
+        { type: 'text', text: label, color: '#8a7d6b', size: 'sm', flex: 2 },
+        { type: 'text', text: String(value || '-'),
+          color: bold ? '#c46a3e' : '#2c241b',
+          weight: bold ? 'bold' : 'regular',
+          size: bold ? 'md' : 'sm', flex: 4, wrap: true },
+      ],
+    };
+  }
 
   // POST /api/bills/bulk-generate
   // body (optional): { period: "YYYY-MM", dueDay: 15, force: false }
@@ -358,12 +441,30 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       };
     }
     if (hasLine) {
-      // Carry the tenant's bound OA in the payload so the queue worker
-      // pushes through the right channel (multi-OA tenants see different
-      // userIds per OA).
+      // Build a Flex Message bundle (Flex bubble + text fallback) so the
+      // tenant sees the bill summary + QR image + "จ่ายเลย" button in the
+      // LINE chat directly — no need to open the portal first to scan QR.
+      // Falls back to text-only when signBillQrToken isn't available
+      // (legacy startup without ctx wiring) or PUBLIC_URL isn't set.
+      const qrToken = typeof signBillQrToken === 'function'
+        ? signBillQrToken(billId)
+        : null;
+      const lineMessages = (publicUrl && qrToken)
+        ? buildBillLineMessages(b, {
+            publicUrl, billLink, dueDateStr, billNo: b.bill_no, qrToken,
+          })
+        : null;
       const qid = await notifQueue.enqueue(pool, {
         channel: 'line', recipient: b.line_user_id, subject, body,
-        payload: { oaId: b.line_oa_id || null, billId },
+        // payload.messages carries the raw LINE message array; the queue
+        // dispatcher uses pushMessages when this is present, falling back
+        // to plain pushText when absent. Keep `body` populated either way
+        // as a safety net + for the email channel duplicated below.
+        payload: {
+          oaId: b.line_oa_id || null,
+          billId,
+          messages: lineMessages,
+        },
       });
       enqueued.push({ channel: 'line', id: qid });
     } else if (!b.email) {
