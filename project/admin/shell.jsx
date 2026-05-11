@@ -91,6 +91,7 @@ const NAV_GROUPS = [
     items: [
       { id: 'billing',     label: 'บิล/ใบแจ้งหนี้',  icon: '🧾' },
       { id: 'payments',    label: 'สลิป/การชำระ',    icon: '💳' },
+      { id: 'slip-verify', label: 'ตรวจสลิปอัตโนมัติ', icon: '🤖', minRole: 'owner' },
       { id: 'pricing',     label: 'ตั้งราคา',         icon: '💰', minRole: 'manager' },
       { id: 'recurring',   label: 'ค่าใช้จ่ายประจำ',  icon: '💸', minRole: 'manager' },
       { id: 'reports',     label: 'รายงาน · กราฟ',    icon: '📊' },
@@ -146,6 +147,7 @@ const PAGE_TITLES = {
   maintenance: 'แจ้งซ่อม',
   billing:     'บิล/ใบแจ้งหนี้',
   payments:    'สลิปชำระเงิน',
+  'slip-verify': 'ตั้งค่าตรวจสลิปอัตโนมัติ',
   meters:      'มิเตอร์',
   access:      'เข้า-ออก',
   notifications: 'บันทึกการแจ้งเตือน',
@@ -994,6 +996,7 @@ function App() {
     maintenance: window.PageMaintenance,
     billing:     PageBilling,
     payments:    window.PagePayments,
+    'slip-verify': window.PageSlipVerify,
     meters:      window.PageMeters,
     access:      window.PageAccess,
     notifications: window.PageNotifications,

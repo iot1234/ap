@@ -14,11 +14,12 @@
 const { useState, useEffect, useMemo } = React;
 
 const GROUP_META = {
-  line:      { title: 'LINE Messaging API',  icon: '💬', desc: 'Token + Owner ID สำหรับส่งแจ้งเตือนและรับ webhook' },
-  smtp:      { title: 'อีเมล (SMTP)',          icon: '📧', desc: 'Host/User/Password สำหรับส่งอีเมลแจ้งเตือน (fallback ของ LINE)' },
-  promptpay: { title: 'PromptPay',             icon: '💸', desc: 'เบอร์โทร/บัตร ปชช. สำหรับสร้าง QR ในบิล' },
-  sentry:    { title: 'Error Tracking (Sentry)', icon: '🐛', desc: 'DSN สำหรับเก็บ exception report' },
-  r2:        { title: 'Cloud Backup (R2/S3)',  icon: '☁️', desc: 'S3-compatible storage สำหรับ backup อัตโนมัติ' },
+  line:       { title: 'LINE Messaging API',     icon: '💬', desc: 'Token + Owner ID สำหรับส่งแจ้งเตือนและรับ webhook' },
+  smtp:       { title: 'อีเมล (SMTP)',           icon: '📧', desc: 'Host/User/Password สำหรับส่งอีเมลแจ้งเตือน (fallback ของ LINE)' },
+  promptpay:  { title: 'PromptPay',              icon: '💸', desc: 'เบอร์โทร/บัตร ปชช. สำหรับสร้าง QR ในบิล' },
+  slipverify: { title: 'ตรวจสลิปอัตโนมัติ',     icon: '🧾', desc: 'API key ของ SlipOK / EasySlip — เปิด autoVerify ที่หน้า Features หลังตั้ง key เสร็จ' },
+  sentry:     { title: 'Error Tracking (Sentry)', icon: '🐛', desc: 'DSN สำหรับเก็บ exception report' },
+  r2:         { title: 'Cloud Backup (R2/S3)',   icon: '☁️', desc: 'S3-compatible storage สำหรับ backup อัตโนมัติ' },
 };
 
 function PageSecrets({ setToast }) {
@@ -79,6 +80,12 @@ function PageSecrets({ setToast }) {
           if (d.info.displayName) detail = ` — OA: ${d.info.displayName}`;
           else if (d.info.basicId) detail = ` — ${d.info.basicId}`;
           else if (d.info.format && d.info.masked) detail = ` — ${d.info.format} ${d.info.masked}`;
+          // slipverify returns { provider, branchId, ready } — show which
+          // provider's key was found so admin knows ตรงไหนถูกใช้
+          else if (d.info.provider) {
+            const br = d.info.branchId ? ` · branch: ${d.info.branchId}` : '';
+            detail = ` — ${d.info.provider}${br}`;
+          }
           else if (d.bucket) detail = ` — bucket: ${d.bucket}`;
         } else if (d.bucket) {
           detail = ` — bucket: ${d.bucket}`;
@@ -105,7 +112,10 @@ function PageSecrets({ setToast }) {
     }
   }
 
-  const groupOrder = ['line', 'smtp', 'promptpay', 'sentry', 'r2'];
+  // Order from "most-used" → "infrequent". slipverify sits next to promptpay
+  // because admins typically configure them together (PromptPay target for
+  // bills + provider key for slip auto-verify).
+  const groupOrder = ['line', 'smtp', 'promptpay', 'slipverify', 'sentry', 'r2'];
 
   return (
     <PageContainer>
@@ -136,7 +146,8 @@ function PageSecrets({ setToast }) {
                   the test endpoint's allowlist gates which group strings are
                   accepted. Sentry omitted: there's no read-side probe — sending
                   a fake event would litter the project's Issues stream. */}
-              {(group === 'line' || group === 'smtp' || group === 'r2' || group === 'promptpay') && (
+              {(group === 'line' || group === 'smtp' || group === 'r2'
+                || group === 'promptpay' || group === 'slipverify') && (
                 <Btn size="sm" onClick={() => testGroup(group)} disabled={!!testing[group]}>
                   {testing[group] ? 'กำลังทดสอบ…' : '🔌 ทดสอบ'}
                 </Btn>
