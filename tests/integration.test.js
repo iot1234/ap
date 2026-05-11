@@ -1916,6 +1916,12 @@ test('contract sign endpoint exists + rejects already-signed without force', () 
     'contract sign endpoint must exist');
   assert.match(src, /ALREADY_SIGNED/, 'must guard against accidental re-sign');
   assert.match(src, /CONTRACT_NOT_ACTIVE/, 'must reject signing on ended/expired contracts');
+  const block = src.match(/app\.post\('\/api\/contracts\/:id\/sign'[\s\S]+?\/\/ === v2: Contract templates/)[0];
+  assert.match(block,
+    /UPDATE contracts[\s\S]{0,600}signature_image_id IS NULL OR \$5::boolean/,
+    'signature update must re-check signature_image_id atomically to close double-click/admin race');
+  assert.match(block, /CONTRACT_SIGN_CONFLICT/,
+    'sign race must return a clean conflict instead of silently overwriting');
   // Schema must require a non-trivially-empty signature data URL.
   const sch = fs.readFileSync(path.join(__dirname, '..', 'schemas', 'index.js'), 'utf8');
   assert.match(sch, /schemas\.contractSign = z\.object\([\s\S]{0,200}signatureDataUrl/,
@@ -1989,6 +1995,10 @@ test('quick-invite locks the requested room before creating a draft contract', (
     'must block a second active contract or draft on the same room');
   assert.match(block, /ROOM_RESERVED/,
     'must block reservations owned by another booking/contract');
+  assert.match(block, /TENANT_ALREADY_ACTIVE/,
+    'must block quick-invite when the reused tenant is still active in another room');
+  assert.match(block, /ROOM_NOT_FOUND/,
+    'must reject unknown room ids instead of creating phantom rooms in the blob');
   assert.match(block, /roomStatuses\.includes\('occupied'\)[\s\S]{0,160}roomStatuses\.includes\('reserved'\)/,
     'rooms_v2 occupied/reserved state must override stale vacant JSONB');
   assert.match(block, /SELECT value FROM app_data WHERE key='baankarn_bookings_v1' FOR UPDATE[\s\S]{0,400}SELECT value FROM app_data WHERE key='baankarn_rooms_v1' FOR UPDATE/,
@@ -2312,7 +2322,7 @@ test('quick-invite endpoint exists + creates tenant + contract + invitation atom
   assert.match(block, /ROLLBACK/);
   // Must look up tenant by phone first to avoid duplicating rows for the
   // same person across multiple contracts.
-  assert.match(block, /SELECT id, full_name, status FROM tenants[\s\S]{0,200}WHERE phone=\$1/);
+  assert.match(block, /SELECT id, full_name, status, current_room_id FROM tenants[\s\S]{0,200}WHERE phone=\$1/);
   // Must reactivate moved_out tenants instead of creating new rows.
   assert.match(block, /SET status='active'/);
   // Must skip the heavy checkin guards (no IDENTITY_INCOMPLETE here).

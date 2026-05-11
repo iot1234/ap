@@ -6790,14 +6790,39 @@ app.post('/api/contracts/:id/sign', sameOrigin, csrfGuard, requireAuth, requireR
                 agreed_terms_at = COALESCE(agreed_terms_at, NOW()),
                 agreed_terms_version = COALESCE($3, agreed_terms_version)
           WHERE id=$4 AND deleted_at IS NULL
+            AND (status='active' OR $5::boolean)
+            AND (signature_image_id IS NULL OR $5::boolean)
           RETURNING id, contract_no, signed_at, agreed_terms_at, agreed_terms_version,
                     signature_image_id`,
-        [savedFile.id, savedFile.url, termsVersion, id]
+        [savedFile.id, savedFile.url, termsVersion, id, force]
       );
       if (!rows.length) {
         // Rolling back the upload preserves storage cleanliness.
         await storage.remove(pool, savedFile.id).catch(() => {});
-        return res.status(404).json({ error: 'contract not found' });
+        const fresh = await pool.query(
+          `SELECT id, status, signature_image_id
+             FROM contracts WHERE id=$1 AND deleted_at IS NULL`,
+          [id]
+        );
+        if (!fresh.rows.length) return res.status(404).json({ error: 'contract not found' });
+        if (fresh.rows[0].status !== 'active' && !force) {
+          return res.status(409).json({
+            error: `สัญญาสถานะ ${fresh.rows[0].status} เซ็นไม่ได้ (เซ็นได้เฉพาะ active)`,
+            code: 'CONTRACT_NOT_ACTIVE',
+            currentStatus: fresh.rows[0].status,
+          });
+        }
+        if (fresh.rows[0].signature_image_id && !force) {
+          return res.status(409).json({
+            error: 'สัญญาฉบับนี้ถูกลงนามไปแล้วโดยคำขออื่น — โหลดหน้าใหม่ก่อนทำต่อ',
+            code: 'ALREADY_SIGNED',
+            signatureFileId: fresh.rows[0].signature_image_id,
+          });
+        }
+        return res.status(409).json({
+          error: 'sign conflict — contract changed while saving signature',
+          code: 'CONTRACT_SIGN_CONFLICT',
+        });
       }
       // Old signature replaced? remove the prior file so we don't accumulate.
       if (contract.signature_image_id && contract.signature_image_id !== savedFile.id) {
@@ -7337,7 +7362,7 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
       // another row for the same person across multiple contracts.
       let tenantId = null;
       const tQ = await client.query(
-        `SELECT id, full_name, status FROM tenants
+        `SELECT id, full_name, status, current_room_id FROM tenants
            WHERE phone=$1 AND deleted_at IS NULL
            ORDER BY (status='active') DESC, updated_at DESC LIMIT 1`,
         [tenantPhone]
@@ -7355,6 +7380,19 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
             code: 'TENANT_BLACKLISTED',
             conflict: { id: tenantId, fullName: tQ.rows[0].full_name },
             hint: 'ตรวจประวัติที่ /admin#tenants ก่อนตัดสินใจ',
+          });
+        }
+        if (tQ.rows[0].status === 'active'
+            && tQ.rows[0].current_room_id
+            && tQ.rows[0].current_room_id !== roomId
+            && !isForced) {
+          await client.query('ROLLBACK');
+          return res.status(409).json({
+            error: `ผู้เช่ารายนี้ยัง active อยู่ห้อง ${tQ.rows[0].current_room_id} — ต้อง check-out หรือ force ก่อนสร้างสัญญาใหม่`,
+            code: 'TENANT_ALREADY_ACTIVE',
+            currentRoom: tQ.rows[0].current_room_id,
+            requestedRoom: roomId,
+            hint: 'ปิดสัญญา/checkout ห้องเดิมก่อน หรือส่ง { force: true } สำหรับงาน migrate เท่านั้น',
           });
         }
         // If the existing tenant is moved_out, reactivate to 'active'
@@ -7451,6 +7489,14 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
         roomV2 = roomV2Q.rows[0] || null;
       } catch (err) {
         if (err.code !== '42P01') throw err;
+      }
+      if (!blobRoom && !roomV2 && !isForced) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({
+          error: `ไม่พบห้อง ${roomId} ในระบบ — ตรวจเลขห้องก่อนสร้างสัญญา`,
+          code: 'ROOM_NOT_FOUND',
+          requestedRoom: roomId,
+        });
       }
       const roomStatuses = [blobRoom?.status, roomV2?.status].filter(Boolean);
       const roomState = roomStatuses.includes('occupied') ? 'occupied'
