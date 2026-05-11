@@ -429,7 +429,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           await client.query('ROLLBACK');
           return res.status(409).json({ error: 'bill total is invalid', code: 'INVALID_BILL_TOTAL' });
         }
-        if (requestedAmount != null && Math.abs(requestedAmount - billTotal) > 1.0) {
+        if (requestedAmount != null && Math.abs(requestedAmount - billTotal) > billing.PAYMENT_TOLERANCE_THB) {
           await client.query('ROLLBACK');
           return res.status(409).json({
             error: 'payment amount does not match bill total',
@@ -503,7 +503,20 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       const id = Number(req.params.id);
       if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
       const accept = req.body?.accept !== false;
-      const reason = String(req.body?.reason || '').trim().slice(0, 500);
+      const reasonRaw = String(req.body?.reason || '').trim();
+      // Reject explicit length errors instead of silently slicing to 500.
+      // Silent truncation cut off the URL/instructions on long reasons,
+      // leaving the tenant with an incomplete message. The admin UI gets
+      // a clear REJECT_REASON_TOO_LONG so it can show a character counter.
+      if (reasonRaw.length > 500) {
+        return res.status(400).json({
+          error: 'เหตุผลที่ปฏิเสธยาวเกินไป (สูงสุด 500 ตัวอักษร)',
+          code: 'REJECT_REASON_TOO_LONG',
+          maxLength: 500,
+          actualLength: reasonRaw.length,
+        });
+      }
+      const reason = reasonRaw;
       if (!accept && reason.length < 3) {
         return res.status(400).json({
           error: 'reject reason is required',
@@ -548,7 +561,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           const billTotal = Number(bill.rows[0].total);
           const paymentAmount = Number(pres.rows[0].amount);
           if (!Number.isFinite(billTotal) || !Number.isFinite(paymentAmount)
-              || Math.abs(paymentAmount - billTotal) > 1.0) {
+              || Math.abs(paymentAmount - billTotal) > billing.PAYMENT_TOLERANCE_THB) {
             await client.query('ROLLBACK');
             return res.status(409).json({
               error: 'payment amount does not match bill total',

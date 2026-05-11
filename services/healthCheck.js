@@ -634,14 +634,30 @@ async function checkDataIntegrity(pool) {
 
 async function checkPoolStats(pool) {
   try {
-    const total = pool.totalCount ?? 0;
-    const idle  = pool.idleCount  ?? 0;
-    const waiting = pool.waitingCount ?? 0;
+    // Standard pg.Pool exposes totalCount/idleCount/waitingCount. If a
+    // wrapper or different driver is in use these may be missing — flag
+    // as 'warn' (not 'ok') so operators notice the metrics are blind
+    // before pool contention surfaces as user-facing 500s with no signal.
+    const hasMetrics = pool.totalCount != null && pool.idleCount != null && pool.waitingCount != null;
+    if (!hasMetrics) {
+      return {
+        status: 'warn',
+        message: 'Pool stats unavailable — pg.Pool counters missing (custom wrapper?)',
+        detail: {
+          totalCount: pool.totalCount ?? null,
+          idleCount: pool.idleCount ?? null,
+          waitingCount: pool.waitingCount ?? null,
+        },
+      };
+    }
+    const total = pool.totalCount;
+    const idle  = pool.idleCount;
+    const waiting = pool.waitingCount;
     if (waiting > 5) return { status: 'error', message: `${waiting} queries waiting on a free connection`, detail: { total, idle, waiting } };
     if (waiting > 0) return { status: 'warn',  message: `${waiting} queries waiting`, detail: { total, idle, waiting } };
     return { status: 'ok', message: `Pool ${idle}/${total} idle`, detail: { total, idle, waiting } };
   } catch (err) {
-    return { status: 'ok', message: 'Pool stats unavailable' };
+    return { status: 'warn', message: `Pool stats threw: ${err.message}` };
   }
 }
 

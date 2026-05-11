@@ -3139,15 +3139,31 @@ app.get('/api/admin/billing-readiness',
           });
         }
         if (flags.slipUpload.autoVerify) {
-          const ready = slipVerifier.getConfiguredProviders(flags);
-          if (ready.length === 0) {
-            const intended = Array.isArray(flags.slipUpload.providers)
-              ? flags.slipUpload.providers
-              : (flags.slipUpload.provider ? [flags.slipUpload.provider] : ['slipok']);
+          // Audit each provider explicitly so a typo'd name ('slipo')
+          // surfaces as "ชื่อ provider ไม่รู้จัก" with the exact bad string,
+          // and a missing key surfaces as "ตั้ง KEY_NAME ใน Secrets" with
+          // the exact key name.
+          const audit = slipVerifier.auditProviders(flags);
+          if (audit.unknown.length > 0) {
+            issues.push({
+              sev: 'med', code: 'PROVIDER_NAME_UNKNOWN', area: ['payment'],
+              msg: `ชื่อ provider ไม่รู้จัก: ${audit.unknown.join(', ')} — ระบบจะข้ามและไม่เรียก provider เหล่านี้`,
+              fix: '/admin#features → ตรวจรายชื่อ providers (รองรับเฉพาะ slipok, easyslip)',
+            });
+          }
+          if (audit.missingKeys.length > 0) {
+            const keyList = audit.missingKeys.flatMap((p) => p.keys);
+            issues.push({
+              sev: 'med', code: 'AUTOVERIFY_MISSING_KEY', area: ['payment'],
+              msg: `provider ${audit.missingKeys.map((p) => p.id).join(', ')} ตั้งชื่อไว้แต่ key ยังไม่ใส่`,
+              fix: `/admin#secrets → ตั้ง ${keyList.join(', ')}`,
+            });
+          }
+          if (audit.ready.length === 0 && audit.unknown.length === 0 && audit.missingKeys.length === 0) {
             issues.push({
               sev: 'med', code: 'AUTOVERIFY_NO_PROVIDER', area: ['payment'],
-              msg: `autoVerify เปิด แต่ไม่มี provider พร้อม (${intended.join(', ') || 'ไม่ระบุ'}) — สลิปจะตกเข้าคิว admin เหมือนเดิม`,
-              fix: '/admin#secrets → ตั้ง SLIPOK_API_KEY หรือ EASYSLIP_API_KEY',
+              msg: 'autoVerify เปิด แต่ยังไม่ระบุ provider — สลิปจะตกเข้าคิว admin เหมือนเดิม',
+              fix: '/admin#features → กรอก providers: ["slipok"] หรือ ["easyslip"]',
             });
           }
         } else if (flags.slipUpload.requireVerification === false) {
@@ -4082,7 +4098,7 @@ app.post('/api/tenant/payments', sameOrigin, csrfGuard, requireTenant, ensureSli
     // ±1฿ to match the slipVerifier's own bank-rounding tolerance, but reject
     // anything beyond that here BEFORE saving the slip / hitting the provider.
     const billTotal = Number(billRes.rows[0].total) || 0;
-    if (Math.abs(amount - billTotal) > 1.0) {
+    if (Math.abs(amount - billTotal) > billing.PAYMENT_TOLERANCE_THB) {
       return res.status(400).json({
         error: `จำนวนเงินไม่ตรงกับยอดบิล — บิลนี้ ฿${billTotal.toLocaleString('th-TH', { minimumFractionDigits: 2 })} แต่ผู้เช่าระบุ ฿${amount.toLocaleString('th-TH', { minimumFractionDigits: 2 })}`,
         code: 'AMOUNT_NOT_BILL_TOTAL',
@@ -4217,13 +4233,13 @@ app.post('/api/tenant/payments', sameOrigin, csrfGuard, requireTenant, ensureSli
     // so even uploading the same legit slip again returns 409. The slip
     // is effectively LOST. Map provider/transport-level errors to
     // 'pending' so the admin queue catches them.
-    // Source of truth lives in services/slipVerifier.js — re-importing
-    // here keeps the two paths' classification identical when new codes
-    // (e.g. provider-specific timeout codes) are added.
-    const TRANSIENT_CODES = slipVerifier.TRANSIENT_CODES
-      || new Set(['VERIFIER_THREW', 'PROVIDER_ERROR',
-                  'SLIPOK_PARSE', 'EASYSLIP_PARSE',
-                  'NOT_CONFIGURED', 'UNKNOWN_PROVIDER']);
+    // Single source of truth — slipVerifier owns the classification.
+    // A local fallback set used to live here but it silently drifted
+    // when slipVerifier added new transient codes (the old fallback
+    // never picked them up, causing legit timeouts to hard-reject).
+    // If the export is missing the require above would have already
+    // failed, so we can rely on it.
+    const TRANSIENT_CODES = slipVerifier.TRANSIENT_CODES;
     let initialStatus, initialReason = null;
     if (autoVerifyAttempted) {
       if (verifyResult && verifyResult.ok) {
@@ -4771,7 +4787,16 @@ app.put('/api/payments/:id/verify', sameOrigin, csrfGuard, requireAuth, requireR
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
   const accept = req.body?.accept !== false;
-  const reason = String(req.body?.reason || '').trim().slice(0, 500);
+  const reasonRaw = String(req.body?.reason || '').trim();
+  if (reasonRaw.length > 500) {
+    return res.status(400).json({
+      error: 'เหตุผลที่ปฏิเสธยาวเกินไป (สูงสุด 500 ตัวอักษร)',
+      code: 'REJECT_REASON_TOO_LONG',
+      maxLength: 500,
+      actualLength: reasonRaw.length,
+    });
+  }
+  const reason = reasonRaw;
   if (!accept && reason.length < 3) {
     return res.status(400).json({
       error: 'reject reason is required',
@@ -4858,7 +4883,7 @@ app.put('/api/payments/:id/verify', sameOrigin, csrfGuard, requireAuth, requireR
       const billTotal = Number(bill.rows[0].total);
       const paymentAmount = Number(row.amount);
       if (!Number.isFinite(billTotal) || !Number.isFinite(paymentAmount)
-          || Math.abs(paymentAmount - billTotal) > 1.0) {
+          || Math.abs(paymentAmount - billTotal) > billing.PAYMENT_TOLERANCE_THB) {
         await client.query('ROLLBACK');
         return res.status(409).json({
           error: 'payment amount does not match bill total',
@@ -5135,7 +5160,8 @@ app.post('/api/bookings/:id/approve-and-assign', sameOrigin, csrfGuard, requireA
       (!booking.wantType || r.type === booking.wantType) &&
       (!booking.wantFloor || Number(r.floor) === Number(booking.wantFloor))
     );
-    const blobCandidates = Object.values(rooms || {})
+    const rawBlobCandidates = Object.entries(rooms || {})
+      .map(([roomCode, room]) => ({ id: room?.id || roomCode, ...(room || {}) }))
       .filter((r) => r && r.status === 'vacant' && want(r));
 
     // Lock + read rooms_v2 vacant rows under the same transaction so a
@@ -5168,8 +5194,36 @@ app.post('/api/bookings/:id/approve-and-assign', sameOrigin, csrfGuard, requireA
       if (err.code !== '42P01') throw err;  // table missing on legacy deploy
     }
 
-    const candidate = [...blobCandidates, ...v2Candidates]
-      .sort((a, b) => String(a.id).localeCompare(String(b.id)))[0];
+    // Prefer the lowest room id, but de-duplicate JSONB+rooms_v2 matches.
+    // When JSONB says "vacant" but rooms_v2 says otherwise, skip the room:
+    // rooms_v2 is the source used by newer admin room CRUD, so approving
+    // against stale JSONB would double-reserve an occupied/reserved room.
+    const sortedCandidates = [...rawBlobCandidates, ...v2Candidates]
+      .sort((a, b) => String(a.id).localeCompare(String(b.id)));
+    let candidate = null;
+    const seenRoomIds = new Set();
+    for (const cand of sortedCandidates) {
+      const roomId = String(cand.id || '').trim();
+      if (!roomId || seenRoomIds.has(roomId)) continue;
+      seenRoomIds.add(roomId);
+      if (cand._source !== 'v2') {
+        try {
+          const v2State = await client.query(
+            `SELECT status FROM rooms_v2
+               WHERE room_code=$1 AND deleted_at IS NULL
+               FOR UPDATE`,
+            [roomId]
+          );
+          if (v2State.rows.length && v2State.rows[0].status !== 'vacant') {
+            continue;
+          }
+        } catch (err) {
+          if (err.code !== '42P01') throw err;
+        }
+      }
+      candidate = cand;
+      break;
+    }
 
     let assignedRoomId = null;
     if (candidate) {
@@ -5200,16 +5254,17 @@ app.post('/api/bookings/:id/approve-and-assign', sameOrigin, csrfGuard, requireA
       };
       delete reservation._source;
       rooms[candidate.id] = reservation;
-      if (candidate._source === 'v2') {
-        try {
-          await client.query(
-            `UPDATE rooms_v2 SET status='reserved', updated_at=NOW()
-               WHERE room_code=$1 AND deleted_at IS NULL`,
-            [candidate.id]
-          );
-        } catch (err) {
-          if (err.code !== '42P01') throw err;
+      try {
+        const v2Reserve = await client.query(
+          `UPDATE rooms_v2 SET status='reserved', updated_at=NOW()
+             WHERE room_code=$1 AND status='vacant' AND deleted_at IS NULL`,
+          [candidate.id]
+        );
+        if (candidate._source === 'v2' && v2Reserve.rowCount !== 1) {
+          throw new Error('rooms_v2 reservation failed: room no longer vacant');
         }
+      } catch (err) {
+        if (err.code !== '42P01') throw err;
       }
     }
 
@@ -5339,15 +5394,22 @@ app.put('/api/bookings/:id', sameOrigin, csrfGuard, requireAuth, requireRole('ow
   if (b.status && !BOOKING_STATUSES.has(String(b.status))) {
     return res.status(400).json({ error: 'invalid status' });
   }
+  const client = await pool.connect();
+  let txCommitted = false;
   try {
-    const { rows: cur } = await pool.query(`SELECT value FROM app_data WHERE key='baankarn_bookings_v1'`);
+    await client.query('BEGIN');
+    const { rows: cur } = await client.query(`SELECT value FROM app_data WHERE key='baankarn_bookings_v1' FOR UPDATE`);
     const list = cur.length && Array.isArray(cur[0].value) ? cur[0].value : [];
     const idx = list.findIndex((x) => x && x.id === id);
-    if (idx < 0) return res.status(404).json({ error: 'booking not found' });
+    if (idx < 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'booking not found' });
+    }
     const before = list[idx];
     if (b.status && b.status !== before.status) {
       const allowed = BOOKING_TRANSITIONS[before.status || 'pending'] || [];
       if (!allowed.includes(b.status)) {
+        await client.query('ROLLBACK');
         return res.status(400).json({
           error: `cannot transition ${before.status} → ${b.status}`,
           allowed,
@@ -5362,18 +5424,54 @@ app.put('/api/bookings/:id', sameOrigin, csrfGuard, requireAuth, requireRole('ow
       updatedAt: new Date().toISOString(),
       updatedBy: req.session.user.username,
     };
+    let releasedRoomId = null;
+    let roomsAfterRelease = null;
+    if (updated.status === 'cancelled' && before.status !== 'cancelled') {
+      const roomToRelease = String(before.assignedRoomId || before.roomId || '').slice(0, 32);
+      if (roomToRelease) {
+        const rRes = await client.query(
+          `SELECT value FROM app_data WHERE key='baankarn_rooms_v1' FOR UPDATE`
+        );
+        const rooms = rRes.rows.length && rRes.rows[0].value && typeof rRes.rows[0].value === 'object'
+          ? rRes.rows[0].value
+          : {};
+        const room = rooms[roomToRelease];
+        if (room && room.status === 'reserved' && room.reservedBy === id) {
+          const { tenant, reservedBy, reservedAt, ...rest } = room;
+          rooms[roomToRelease] = { ...rest, status: 'vacant' };
+          roomsAfterRelease = rooms;
+          releasedRoomId = roomToRelease;
+          try {
+            await client.query(
+              `UPDATE rooms_v2 SET status='vacant', updated_at=NOW()
+                 WHERE room_code=$1 AND status='reserved' AND deleted_at IS NULL`,
+              [roomToRelease]
+            );
+          } catch (err) {
+            if (err.code !== '42P01') throw err;
+          }
+        }
+      }
+    }
     list[idx] = updated;
-    await pool.query(
+    await client.query(
       `INSERT INTO app_data (key, value, updated_by) VALUES ($1, $2, $3)
        ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW(), updated_by=EXCLUDED.updated_by`,
       ['baankarn_bookings_v1', JSON.stringify(list), req.session.user.username]
     );
+    if (roomsAfterRelease) {
+      await client.query(
+        `INSERT INTO app_data (key, value, updated_by) VALUES ($1, $2, $3)
+         ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW(), updated_by=EXCLUDED.updated_by`,
+        ['baankarn_rooms_v1', JSON.stringify(roomsAfterRelease), req.session.user.username]
+      );
+    }
     // Mirror status / room changes into the relational bookings table.
     // Best-effort: a missing row (legacy booking from before the dual-write
     // landed) is fine — UPDATE is a no-op then.
     if (b.status !== undefined || b.roomId !== undefined) {
       try {
-        await pool.query(
+        await client.query(
           `UPDATE bookings
               SET status=$2, room_id=$3, updated_at=NOW()
             WHERE external_id=$1`,
@@ -5383,8 +5481,10 @@ app.put('/api/bookings/:id', sameOrigin, csrfGuard, requireAuth, requireRole('ow
         console.warn('[booking] relational status sync skipped:', err.message);
       }
     }
+    await client.query('COMMIT');
+    txCommitted = true;
     audit(req, 'booking.update', 'booking', id, {
-      from: before.status, to: updated.status, fields: Object.keys(b),
+      from: before.status, to: updated.status, fields: Object.keys(b), releasedRoomId,
     });
 
     // Fire-and-forget notify on status change (so the tenant + owner know
@@ -5448,8 +5548,13 @@ app.put('/api/bookings/:id', sameOrigin, csrfGuard, requireAuth, requireRole('ow
     }
     res.json({ ok: true, booking: updated });
   } catch (err) {
+    if (!txCommitted) {
+      await client.query('ROLLBACK').catch(() => {});
+    }
     console.error('booking update error:', err);
     res.status(500).json({ error: 'internal error' });
+  } finally {
+    client.release();
   }
 });
 
@@ -6537,6 +6642,7 @@ app.put('/api/contracts/:id', sameOrigin, csrfGuard, requireAuth, requireRole('o
       // Cascade: closing the contract → tenant moves out + room freed.
       // Skip if tenant is already non-active (idempotent re-closure).
       if (isClosingContract && contract.tenant_id && contract.room_id) {
+        let roomFreed = false;
         const tQ = await client.query(
           `SELECT id, status, current_room_id FROM tenants
              WHERE id=$1 AND deleted_at IS NULL FOR UPDATE`,
@@ -6568,6 +6674,32 @@ app.put('/api/contracts/:id', sameOrigin, csrfGuard, requireAuth, requireRole('o
           ).catch((err) => {
             if (err.code !== '42P01') throw err;
           });
+          roomFreed = true;
+        }
+        if (!roomFreed) {
+          const rQ = await client.query(
+            `SELECT value FROM app_data WHERE key='baankarn_rooms_v1' FOR UPDATE`
+          );
+          const rooms = rQ.rows.length && rQ.rows[0].value && typeof rQ.rows[0].value === 'object'
+            ? rQ.rows[0].value
+            : {};
+          const room = rooms[contract.room_id];
+          if (room && room.status === 'reserved' && String(room.reservedBy || '') === `contract:${contract.id}`) {
+            const { tenant, reservedBy, reservedAt, sourceBookingId, ...rest } = room;
+            rooms[contract.room_id] = { ...rest, status: 'vacant' };
+            await client.query(
+              `INSERT INTO app_data (key, value, updated_by) VALUES ($1, $2, $3)
+                 ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW(), updated_by=EXCLUDED.updated_by`,
+              ['baankarn_rooms_v1', JSON.stringify(rooms), req.session.user.username]
+            );
+            await client.query(
+              `UPDATE rooms_v2 SET status='vacant', updated_at=NOW()
+                 WHERE room_code=$1 AND status='reserved' AND deleted_at IS NULL`,
+              [contract.room_id]
+            ).catch((err) => {
+              if (err.code !== '42P01') throw err;
+            });
+          }
         }
       }
       await client.query('COMMIT');
@@ -7128,6 +7260,7 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
     const termMonths = b.termMonths != null ? Number(b.termMonths) : null;
     const discountPct = b.discountPct != null ? Number(b.discountPct) : 0;
     const expiresInHours = Number(b.expiresInHours) || 168;
+    const bookingIdForRoom = b.bookingId ? String(b.bookingId).slice(0, 64) : null;
     if (termMonths != null && (!Number.isInteger(termMonths) || termMonths < 1 || termMonths > 60)) {
       return res.status(400).json({ error: 'termMonths must be 1-60', code: 'INVALID_TERM' });
     }
@@ -7247,6 +7380,103 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
         tenantId = ins.rows[0].id;
       }
 
+      // Room-level guard for draft contracts. Quick-invite happens before
+      // final checkin/approval, but it still claims a room. Lock the room
+      // state here so two admins cannot create competing unsigned contracts
+      // or place a draft on top of an occupied/reserved room.
+      const occupant = await client.query(
+        `SELECT id, full_name FROM tenants
+           WHERE current_room_id=$1 AND status='active' AND deleted_at IS NULL
+             AND id <> $2
+           LIMIT 1
+           FOR UPDATE`,
+        [roomId, tenantId]
+      );
+      if (occupant.rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'room is already occupied by another active tenant',
+          code: 'ROOM_OCCUPIED',
+          conflict: occupant.rows[0],
+        });
+      }
+
+      const roomContract = await client.query(
+        `SELECT id, contract_no, tenant_id, locked_at FROM contracts
+           WHERE room_id=$1 AND status='active' AND deleted_at IS NULL
+             AND tenant_id <> $2
+           ORDER BY created_at DESC
+           LIMIT 1
+           FOR UPDATE`,
+        [roomId, tenantId]
+      );
+      if (roomContract.rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'room already has an active contract draft or lease',
+          code: 'ROOM_CONTRACT_EXISTS',
+          conflict: roomContract.rows[0],
+        });
+      }
+
+      let bookingCarryoverList = null;
+      let bookingCarryoverIdx = -1;
+      if (bookingIdForRoom) {
+        const bookingBlobQ = await client.query(
+          `SELECT value FROM app_data WHERE key='baankarn_bookings_v1' FOR UPDATE`
+        );
+        bookingCarryoverList = bookingBlobQ.rows.length && Array.isArray(bookingBlobQ.rows[0].value)
+          ? bookingBlobQ.rows[0].value
+          : [];
+        bookingCarryoverIdx = bookingCarryoverList.findIndex((x) => x && x.id === bookingIdForRoom);
+      }
+
+      const roomBlobQ = await client.query(
+        `SELECT value FROM app_data WHERE key='baankarn_rooms_v1' FOR UPDATE`
+      );
+      const roomsForInvite = roomBlobQ.rows.length && roomBlobQ.rows[0].value
+        && typeof roomBlobQ.rows[0].value === 'object'
+        ? roomBlobQ.rows[0].value
+        : {};
+      const blobRoom = roomsForInvite[roomId];
+      let roomV2 = null;
+      try {
+        const roomV2Q = await client.query(
+          `SELECT room_code, room_type, floor, room_no, rent_price, deposit_price, wifi_fee, status
+             FROM rooms_v2
+             WHERE room_code=$1 AND deleted_at IS NULL
+             FOR UPDATE`,
+          [roomId]
+        );
+        roomV2 = roomV2Q.rows[0] || null;
+      } catch (err) {
+        if (err.code !== '42P01') throw err;
+      }
+      const roomStatuses = [blobRoom?.status, roomV2?.status].filter(Boolean);
+      const roomState = roomStatuses.includes('occupied') ? 'occupied'
+        : roomStatuses.includes('maintenance') ? 'maintenance'
+        : roomStatuses.includes('reserved') ? 'reserved'
+        : 'vacant';
+      if (roomState === 'occupied' || roomState === 'maintenance') {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: `room is not available (${roomState})`,
+          code: roomState === 'occupied' ? 'ROOM_OCCUPIED' : 'ROOM_UNAVAILABLE',
+          currentStatus: roomState,
+        });
+      }
+      const currentReservationOwner = blobRoom?.reservedBy ? String(blobRoom.reservedBy) : null;
+      const reservationOwnerOk = currentReservationOwner && currentReservationOwner === bookingIdForRoom;
+      if (roomState === 'reserved' && !reservationOwnerOk) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'room is already reserved by another booking or contract',
+          code: 'ROOM_RESERVED',
+          currentStatus: roomState,
+          reservedBy: currentReservationOwner,
+        });
+      }
+
       // 2. Create the contract row. We skip the heavy checkin guards
       // (identity images, address, emergency contact) — the tenant fills
       // those via the invitation. Status='active' so the contracts page
@@ -7292,15 +7522,53 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
       );
       const contract = cIns.rows[0];
 
+      const draftReservation = {
+        ...(blobRoom || {}),
+        id: blobRoom?.id || roomId,
+        type: blobRoom?.type || roomV2?.room_type || undefined,
+        floor: blobRoom?.floor ?? roomV2?.floor,
+        no: blobRoom?.no || roomV2?.room_no || undefined,
+        rent: blobRoom?.rent ?? (roomV2 ? Number(roomV2.rent_price) : monthlyRent),
+        deposit: blobRoom?.deposit ?? (roomV2 ? Number(roomV2.deposit_price) : deposit),
+        wifi: blobRoom?.wifi ?? (roomV2 ? Number(roomV2.wifi_fee || 0) : 0),
+        status: 'reserved',
+        tenant: {
+          name: tenantName,
+          phone: tenantPhone,
+          email: tenantEmail || '',
+          occupation: '',
+          score: 'A',
+          since: moveInDate,
+        },
+        reservedBy: `contract:${contract.id}`,
+        reservedAt: new Date().toISOString(),
+      };
+      if (bookingIdForRoom) draftReservation.sourceBookingId = bookingIdForRoom;
+      roomsForInvite[roomId] = draftReservation;
+      await client.query(
+        `INSERT INTO app_data (key, value, updated_by) VALUES ($1, $2, $3)
+           ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW(), updated_by=EXCLUDED.updated_by`,
+        ['baankarn_rooms_v1', JSON.stringify(roomsForInvite), req.session.user.username]
+      );
+      try {
+        await client.query(
+          `UPDATE rooms_v2 SET status='reserved', updated_at=NOW()
+             WHERE room_code=$1 AND status='vacant' AND deleted_at IS NULL`,
+          [roomId]
+        );
+      } catch (err) {
+        if (err.code !== '42P01') throw err;
+      }
+
       // 2b. Optional booking carry-over. When admin sends an invite from
       // an already-approved booking, the public form may have collected
       // a citizen-ID front photo. Re-target that file_uploads row onto
       // the new tenant so they don't have to re-upload via the link.
       // Also link the booking row to the freshly-created tenant +
       // contract for audit traceability.
-      if (b.bookingId) {
+      if (bookingIdForRoom) {
         try {
-          const bookingId = String(b.bookingId).slice(0, 64);
+          const bookingId = bookingIdForRoom;
           let frontFileId = null;
           try {
             const bk = await client.query(
@@ -7343,6 +7611,24 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
             );
           } catch (err) {
             if (err.code !== '42703' && err.code !== '42P01') throw err;
+          }
+          if (bookingCarryoverList && bookingCarryoverIdx >= 0) {
+            bookingCarryoverList[bookingCarryoverIdx] = {
+              ...bookingCarryoverList[bookingCarryoverIdx],
+              status: 'completed',
+              roomId,
+              assignedRoomId: roomId,
+              tenantId,
+              contractId: contract.id,
+              completedAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+              updatedBy: req.session.user.username,
+            };
+            await client.query(
+              `INSERT INTO app_data (key, value, updated_by) VALUES ($1, $2, $3)
+                 ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW(), updated_by=EXCLUDED.updated_by`,
+              ['baankarn_bookings_v1', JSON.stringify(bookingCarryoverList), req.session.user.username]
+            );
           }
         } catch (err) {
           console.warn('[quick-invite] booking carry-over skipped:', err.message);

@@ -104,6 +104,43 @@ function getConfiguredProviders(features) {
 }
 
 /**
+ * Audit the provider config and surface every problem (unknown provider
+ * names, missing keys). Used by health check + /api/admin/billing-readiness
+ * so operators can see WHY auto-verify is silent instead of just "not
+ * configured". Returns:
+ *   { ready: [{id,label}], unknown: ['slipo'], missingKeys: [{id,keys:[]}] }
+ * Empty arrays mean "no problem in that bucket".
+ */
+function auditProviders(features) {
+  const ready = [];
+  const unknown = [];
+  const missingKeys = [];
+  if (!features?.slipUpload?.autoVerify) {
+    return { ready, unknown, missingKeys, autoVerifyEnabled: false };
+  }
+  const raw = features.slipUpload.providers
+    || (features.slipUpload.provider ? [features.slipUpload.provider] : []);
+  if (!Array.isArray(raw)) return { ready, unknown, missingKeys, autoVerifyEnabled: true };
+  const seen = new Set();
+  for (const id of raw) {
+    if (typeof id !== 'string' || seen.has(id)) continue;
+    seen.add(id);
+    const meta = PROVIDERS[id];
+    if (!meta) {
+      unknown.push(id);
+      continue;
+    }
+    const missing = meta.keys.filter((k) => !secrets.get(k));
+    if (missing.length) {
+      missingKeys.push({ id, label: meta.label, keys: missing });
+    } else {
+      ready.push({ id, label: meta.label });
+    }
+  }
+  return { ready, unknown, missingKeys, autoVerifyEnabled: true };
+}
+
+/**
  * Is auto-verify configured? At least one provider must be ready (key
  * set) for this to return true — otherwise the upload endpoint should
  * fall through to the admin queue.
@@ -162,8 +199,10 @@ async function verifyOne(providerId, buffer, expected) {
   // paid to OUR account). This is the safety layer that stops a tenant
   // from uploading a real-but-unrelated slip ("here's a slip I paid to
   // 7-Eleven for 4500฿, please mark my bill paid").
-  const tolerance = 1.0;   // ±1฿ for bank rounding edge cases
-  if (Math.abs(Number(result.amount) - Number(expected.amount)) > tolerance) {
+  // Shared with /api/tenant/payments, /api/payments/:id/verify, etc. so
+  // a tightening here automatically applies everywhere. See services/billing.js.
+  const { PAYMENT_TOLERANCE_THB } = require('./billing');
+  if (Math.abs(Number(result.amount) - Number(expected.amount)) > PAYMENT_TOLERANCE_THB) {
     return {
       ok: false,
       error: `ยอดไม่ตรง — สลิปแสดง ฿${Number(result.amount).toLocaleString('th-TH', { minimumFractionDigits: 2 })} ` +
@@ -175,17 +214,37 @@ async function verifyOne(providerId, buffer, expected) {
       provider: providerId,
     };
   }
-  // Receiver account match — compare LAST 4 digits because providers may
-  // mask leading digits (e.g. "xxx-xxx-1234"). expected.promptpayTarget is
-  // either a 10-digit phone or 13-digit citizen-id; receiver.account from
-  // the slip might be either format too.
+  // Receiver account match — providers mask leading digits ("xxx-xxx-1234")
+  // so we can only compare the tail. We used to compare the last 4 digits
+  // alone, which has a ~1-in-10,000 collision chance (a tenant's friend's
+  // PromptPay ending in the same 4 digits would silently pass). Now we
+  // compare as many digits as both sides provide, up to the last 6, and
+  // refuse to verify when the provider returned fewer than 4 (too short
+  // to be a meaningful tail — could be all-zero placeholder).
   if (expected.promptpayTarget && result.receiver?.account) {
-    const expectedTail = String(expected.promptpayTarget).replace(/[^0-9]/g, '').slice(-4);
-    const actualTail = String(result.receiver.account).replace(/[^0-9]/g, '').slice(-4);
+    const expectedDigits = String(expected.promptpayTarget).replace(/[^0-9]/g, '');
+    const actualDigits = String(result.receiver.account).replace(/[^0-9]/g, '');
+    // Provider returned account with fewer than 4 digits → suspicious.
+    // Reject rather than letting an empty/garbage value match.
+    if (actualDigits.length < 4) {
+      return {
+        ok: false,
+        error: `ไม่สามารถยืนยันบัญชีปลายทางจากสลิป — provider ส่งเลขบัญชีสั้นเกินไป (${actualDigits.length} หลัก)`,
+        code: 'RECEIVER_UNREADABLE',
+        transRef: result.transRef,
+        raw: result.raw,
+        provider: providerId,
+      };
+    }
+    // Compare the longest tail both sides can provide, capped at 6 digits.
+    // Bumping from 4 → 6 drops collision odds from 1e-4 to 1e-6.
+    const compareLen = Math.min(6, expectedDigits.length, actualDigits.length);
+    const expectedTail = expectedDigits.slice(-compareLen);
+    const actualTail = actualDigits.slice(-compareLen);
     if (expectedTail && actualTail && expectedTail !== actualTail) {
       return {
         ok: false,
-        error: `บัญชีปลายทางไม่ใช่ของหอพัก — สลิปจ่ายไปที่บัญชี ลงท้าย ${actualTail} ` +
+        error: `บัญชีปลายทางไม่ใช่ของหอพัก — สลิปจ่ายไปที่บัญชีลงท้าย ${actualTail} ` +
                `แต่หอพักรับที่บัญชีลงท้าย ${expectedTail}`,
         code: 'RECEIVER_MISMATCH',
         transRef: result.transRef,
@@ -436,6 +495,7 @@ module.exports = {
   verifyWithFallback,
   isConfigured,
   getConfiguredProviders,
+  auditProviders,
   probeAll,
   // Exported so server.js (and any future caller) can reuse the same set
   // without re-declaring it. A drift between server.js's local copy and the

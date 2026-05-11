@@ -380,8 +380,12 @@ test('/api/payments/:id/verify rejects amount mismatches before marking paid', (
   const body = nextIdx > 0 ? tail.slice(0, 50 + nextIdx) : tail.slice(0, 5000);
   assert.match(body, /Number\(bill\.rows\[0\]\.total\)/,
     'verify path must read the bill total under lock');
-  assert.match(body, /Math\.abs\(paymentAmount - billTotal\) > 1\.0/,
-    'verify path must compare payment amount to bill total');
+  // Tolerance lives in services/billing.PAYMENT_TOLERANCE_THB so the four
+  // enforcement points (tenant upload, payment verify, bill verify-slip,
+  // manual pay) stay in sync. The check must reference the shared constant
+  // rather than a hard-coded literal — pin that here.
+  assert.match(body, /Math\.abs\(paymentAmount - billTotal\) > billing\.PAYMENT_TOLERANCE_THB/,
+    'verify path must compare payment amount to bill total via shared constant');
   assert.match(body, /PAYMENT_AMOUNT_MISMATCH/,
     'verify path must fail closed on amount mismatch');
 });
@@ -405,7 +409,11 @@ test('/api/bills/:id/verify-slip matches owner-manager payment verification poli
   const route = fs.readFileSync(path.join(__dirname, '..', 'routes', 'bills-extras.js'), 'utf8');
   const idx = route.indexOf("r.post('/:id/verify-slip'");
   assert.ok(idx > 0, 'should find bill verify-slip handler');
-  const body = route.slice(idx, idx + 2500);
+  // 4000 char window — handler grew when REJECT_REASON_TOO_LONG validation
+  // + verifier session-fallback guard were added. The handler boundary is
+  // the next `r.post(` or end-of-file, but slicing a generous fixed window
+  // keeps the test simple while still bounded.
+  const body = route.slice(idx, idx + 4000);
   assert.match(body, /requireRole\('owner', 'manager'\)/,
     'bill-id verify path must use the same owner/manager policy as payment-id verify');
   assert.doesNotMatch(body, /requireRole\('owner', 'manager', 'staff'\)/,
@@ -1644,6 +1652,44 @@ test('booking-approve resolves vacant rooms from rooms_v2 too (not just JSONB bl
     'and reserve via rooms_v2 when picked from there');
 });
 
+test('booking approval keeps JSONB and rooms_v2 room locks consistent', () => {
+  // A room can exist in both the legacy rooms blob and rooms_v2. If the
+  // candidate comes from the blob, rooms_v2 still has to flip to reserved;
+  // otherwise another approval can see rooms_v2=vacant and double-assign it.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const block = src.match(/app\.post\('\/api\/bookings\/:id\/approve-and-assign'[\s\S]+?app\.put\('\/api\/bookings\/:id'/)[0];
+  assert.match(block, /SELECT status FROM rooms_v2[\s\S]{0,200}FOR UPDATE/,
+    'blob candidates must check the matching rooms_v2 row under lock');
+  assert.match(block, /v2State\.rows\.length && v2State\.rows\[0\]\.status !== 'vacant'[\s\S]{0,80}continue/,
+    'stale JSONB vacancies must be skipped when rooms_v2 is not vacant');
+  assert.match(block,
+    /UPDATE rooms_v2 SET status='reserved', updated_at=NOW\(\)[\s\S]{0,120}WHERE room_code=\$1 AND status='vacant'/,
+    'rooms_v2 must be reserved even when the selected candidate came from JSONB');
+});
+
+test('booking cancellation releases only its own reserved room', () => {
+  // Approved bookings reserve a room. If admin cancels before contract
+  // handoff, the room must become vacant again, but only when reservedBy
+  // matches this booking id so we never free someone else's room.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const block = src.match(/app\.put\('\/api\/bookings\/:id'[\s\S]+?\/\/ === v2: Recurring charges helper/)[0];
+  assert.match(block, /SELECT value FROM app_data WHERE key='baankarn_bookings_v1' FOR UPDATE/,
+    'booking updates must lock the booking blob');
+  assert.match(block, /room\.status === 'reserved' && room\.reservedBy === id/,
+    'room release must be guarded by reservedBy=booking id');
+  assert.match(block, /const \{ tenant, reservedBy, reservedAt,[\s\S]{0,80}\} = room/,
+    'release must drop stale tenant/reservation metadata from the room blob');
+  assert.match(block,
+    /UPDATE rooms_v2 SET status='vacant', updated_at=NOW\(\)[\s\S]{0,120}WHERE room_code=\$1 AND status='reserved'/,
+    'rooms_v2 must be released only from reserved status');
+  assert.match(block, /COMMIT/,
+    'booking status update and room release must be atomic');
+});
+
 test('checkin/checkout dual-write rooms_v2 status', () => {
   const fs = require('node:fs');
   const path = require('node:path');
@@ -1928,6 +1974,32 @@ test('quick-invite refuses duplicate unsigned drafts for same tenant', () => {
     'duplicate-draft check is gated on !isForced');
 });
 
+test('quick-invite locks the requested room before creating a draft contract', () => {
+  // Quick-invite creates an unsigned active contract. That is still a room
+  // claim, so the backend must prevent drafts on occupied rooms, rooms with
+  // another active contract, or reservations owned by another booking.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const block = src.match(/quick-invite'[\s\S]+?app\.post\('\/api\/contracts\/:id\/invite-tenant'/)[0];
+  assert.match(block,
+    /SELECT id, full_name FROM tenants[\s\S]{0,250}current_room_id=\$1[\s\S]{0,160}id <> \$2[\s\S]{0,120}FOR UPDATE/,
+    'must lock/check active occupant by room before drafting');
+  assert.match(block, /ROOM_CONTRACT_EXISTS/,
+    'must block a second active contract or draft on the same room');
+  assert.match(block, /ROOM_RESERVED/,
+    'must block reservations owned by another booking/contract');
+  assert.match(block, /roomStatuses\.includes\('occupied'\)[\s\S]{0,160}roomStatuses\.includes\('reserved'\)/,
+    'rooms_v2 occupied/reserved state must override stale vacant JSONB');
+  assert.match(block, /SELECT value FROM app_data WHERE key='baankarn_bookings_v1' FOR UPDATE[\s\S]{0,400}SELECT value FROM app_data WHERE key='baankarn_rooms_v1' FOR UPDATE/,
+    'must lock booking blob before room blob to keep the app_data lock order stable');
+  assert.match(block, /reservedBy: `contract:\$\{contract\.id\}`/,
+    'draft contract must own the room reservation');
+  assert.match(block,
+    /UPDATE rooms_v2 SET status='reserved', updated_at=NOW\(\)[\s\S]{0,120}WHERE room_code=\$1 AND status='vacant'/,
+    'draft reservation must be mirrored to rooms_v2 when the room was vacant');
+});
+
 test('PUT /api/contracts/:id status=ended cascades tenant + room state', () => {
   // Pre-fix: admin manually flipped contracts.status='ended' via the
   // contracts editor — but tenant.status stayed 'active', current_room_id
@@ -1949,6 +2021,11 @@ test('PUT /api/contracts/:id status=ended cascades tenant + room state', () => {
   assert.match(block, /BEGIN/);
   assert.match(block, /COMMIT/);
   assert.match(block, /ROLLBACK/);
+  assert.match(block, /reservedBy[\s\S]{0,120}`contract:\$\{contract\.id\}`/,
+    'closing an unsigned draft contract must release its contract-owned reservation too');
+  assert.match(block,
+    /UPDATE rooms_v2 SET status='vacant', updated_at=NOW\(\)[\s\S]{0,120}WHERE room_code=\$1 AND status='reserved'/,
+    'draft close must release rooms_v2 only from reserved status');
 });
 
 test('approve ROOM_OCCUPIED + CITIZEN_ID_DUPLICATE return nextActions for self-recovery', () => {
@@ -2126,6 +2203,12 @@ test('quick-invite carries booking photo + marks booking completed', () => {
     /WHERE id=\$1 AND category='citizen_id_image'[\s\S]{0,200}ref_id='public-booking-pending'/);
   // Booking marked completed
   assert.match(block, /UPDATE bookings SET status='completed'/);
+  assert.match(block, /SELECT value FROM app_data WHERE key='baankarn_bookings_v1' FOR UPDATE/,
+    'quick-invite must lock the JSONB booking list before marking it completed');
+  assert.match(block, /status: 'completed'[\s\S]{0,220}contractId: contract\.id/,
+    'quick-invite must mark the JSONB booking completed and link the contract');
+  assert.match(block, /'baankarn_bookings_v1', JSON\.stringify\(bookingCarryoverList\)/,
+    'quick-invite must persist the completed status back to the JSONB booking list');
 });
 
 test('approve invitation links tenant ↔ room (current_room_id + rooms_v2 + JSONB)', () => {

@@ -262,8 +262,23 @@ function isChargeApplicableForPeriod(charge, period) {
   return true;
 }
 
+// Tolerance (Thai baht) for accepting a payment whose amount differs from
+// the bill total. Banks round in different directions for fees/discounts
+// (e.g. PromptPay ±0.50, some processors ±1.00), so a strict equality
+// would reject legitimate slips. Exported as a single source of truth so
+// the four enforcement points stay in sync:
+//   1) POST /api/tenant/payments        (tenant slip upload)
+//   2) PUT  /api/payments/:id/verify    (admin verify by payment id)
+//   3) POST /api/bills/:id/verify-slip  (admin verify by bill id)
+//   4) POST /api/bills/:id/pay          (admin offline manual pay)
+//   5) services/slipVerifier#verifyOne  (provider amount cross-check)
+//   6) services/healthCheck data integrity
+// Tightening this value affects all six paths together — that's the point.
+const PAYMENT_TOLERANCE_THB = 1.0;
+
 module.exports = {
   buildBill, buildPaymentBlock, statusOf, makeBillNo,
   formatPeriodNow, formatDueDate, formatYMD, round2,
   isChargeApplicableForPeriod,
+  PAYMENT_TOLERANCE_THB,
 };
