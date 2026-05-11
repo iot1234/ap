@@ -7,6 +7,11 @@ function fakeRes() {
   return {
     statusCode: null,
     body: null,
+    cookies: {},
+    cookie(name, value) {
+      this.cookies[name] = value;
+      return this;
+    },
     status(code) {
       this.statusCode = code;
       return this;
@@ -47,4 +52,22 @@ test('csrfErrorHandler preserves unrelated errors for the global handler', () =>
 
   assert.equal(nextErr, err);
   assert.equal(res.statusCode, null);
+});
+
+test('generateCsrfToken overwrite refreshes token when session identifier changes', () => {
+  const csrf = makeCsrf({ secret: 'test-secret-for-csrf-handler', secure: false });
+  const anonReq = { headers: {}, cookies: {}, ip: '127.0.0.1' };
+  const anonRes = fakeRes();
+  csrf.generateCsrfToken(anonReq, anonRes);
+
+  const tenantReq = {
+    headers: { cookie: 'tenant_sid=tenant-session-raw-value' },
+    cookies: { 'csrf-token': anonRes.cookies['csrf-token'] },
+    ip: '127.0.0.1',
+  };
+  const tenantRes = fakeRes();
+
+  assert.throws(() => csrf.generateCsrfToken(tenantReq, tenantRes), /invalid csrf token/);
+  assert.doesNotThrow(() => csrf.generateCsrfToken(tenantReq, tenantRes, true));
+  assert.ok(tenantRes.cookies['csrf-token']);
 });

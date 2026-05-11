@@ -385,7 +385,12 @@ const csrf = makeCsrf({
   secure: NODE_ENV === 'production',
 });
 app.get('/api/csrf-token', (req, res) => {
-  const token = csrf.generateCsrfToken(req, res);
+  // Always issue a fresh cookie/token pair. A user can legitimately move from
+  // anonymous -> tenant/admin session in the same browser tab; the previous
+  // anonymous CSRF cookie is then invalid for the new session identifier. The
+  // csrf-csrf default validates an existing cookie before reusing it, which
+  // turns that normal login transition into "invalid csrf token".
+  const token = csrf.generateCsrfToken(req, res, true);
   res.json({ csrfToken: token });
 });
 // Wrap doubleCsrfProtection with our existing sameOrigin so the order is:

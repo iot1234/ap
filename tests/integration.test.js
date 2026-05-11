@@ -940,6 +940,16 @@ test('tenant API does not send tenants back to login on CSRF retryable 403', () 
     'tenant UI must not treat every 403 as session expiry');
 });
 
+test('csrf token endpoint overwrites stale anonymous token after tenant login', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const route = server.match(/app\.get\('\/api\/csrf-token'[\s\S]{0,650}?res\.json\(\{ csrfToken: token \}\);\s*\}\);/);
+  assert.ok(route, 'csrf-token route must exist');
+  assert.match(route[0], /generateCsrfToken\(req,\s*res,\s*true\)/,
+    'csrf-token route must force overwrite stale cookies when session identity changes');
+});
+
 test('tenant payment readiness reports orphan bills with BILL_NOT_LINKED', () => {
   const fs = require('node:fs');
   const path = require('node:path');
