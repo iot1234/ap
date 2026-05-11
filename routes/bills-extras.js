@@ -20,7 +20,7 @@ const lineNotify = require('../services/line');
 const { queryWithRetry } = require('../db/pool');
 
 module.exports = function buildBillsExtrasRouter(ctx) {
-  const { pool, requireAuth, requireRole, sameOrigin, csrfGuard, audit, signBillQrToken } = ctx;
+  const { pool, requireAuth, requireRole, sameOrigin, csrfGuard, audit, signBillQrToken, signBillPayToken } = ctx;
   const r = express.Router();
 
   // Compose the LINE Messages array for a bill notification. Two messages:
@@ -402,7 +402,12 @@ module.exports = function buildBillsExtrasRouter(ctx) {
     const publicUrl = (process.env.PUBLIC_URL
       || (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : '')
       || '').replace(/\/+$/, '');
-    const billLink = `${publicUrl}/tenant?bill=${encodeURIComponent(billId)}`;
+    const payToken = (publicUrl && typeof signBillPayToken === 'function')
+      ? signBillPayToken(billId)
+      : null;
+    const billLink = (publicUrl && payToken)
+      ? `${publicUrl}/pay/${encodeURIComponent(billId)}?t=${encodeURIComponent(payToken)}`
+      : `${publicUrl}/tenant?bill=${encodeURIComponent(billId)}`;
     const dueDateStr = b.due_date
       ? new Date(b.due_date).toLocaleDateString('th-TH', { year: 'numeric', month: 'long', day: 'numeric' })
       : '-';

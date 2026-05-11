@@ -143,7 +143,7 @@ async function loadContractTermsSnapshot(db, contract = {}) {
   let rawTemplate = null;
   let templateId = contract.template_id || null;
   if (templateId) {
-    try {
+    if (!req.skipTenantAck) try {
       const t = await db.query(
         `SELECT id, mode, clauses, sections, variables
            FROM contract_templates
@@ -874,6 +874,7 @@ function makeIpLimiter({ windowMs, max, message = 'too many requests' }) {
 const rateLimitBooking = makeIpLimiter({ windowMs: 60_000, max: 3 });
 const rateLimitTicket  = makeIpLimiter({ windowMs: 60_000, max: 3 });
 const rateLimitQr      = makeIpLimiter({ windowMs: 60_000, max: 30 });
+const rateLimitPublicPayment = makeIpLimiter({ windowMs: 60_000, max: 10 });
 // A7 — lookup endpoint can leak phone↔room mapping by enumeration. Tight
 // per-IP cap + small random jitter on the response to neutralise timing.
 const rateLimitLookup  = makeIpLimiter({ windowMs: 60_000, max: 10 });
@@ -2982,7 +2983,7 @@ async function tenantSessionLookup(req) {
   const sidHash = hashSid(sid);
   const { rows } = await pool.query(
     `SELECT s.tenant_id, s.expire, s.sid_hash, t.full_name, t.phone, t.email, t.line_user_id,
-            t.current_room_id, t.status, t.locale
+            t.line_oa_id, t.current_room_id, t.status, t.locale
        FROM tenant_sessions s JOIN tenants t ON t.id = s.tenant_id
        WHERE s.sid_hash = $1 AND s.expire > NOW() AND t.deleted_at IS NULL`,
     [sidHash]
@@ -3927,6 +3928,32 @@ function verifyBillQrToken(billId, token) {
   } catch { return false; }
 }
 
+const BILL_PAY_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;   // 30 days
+function _billPaySigningKey() {
+  return _crypto.createHash('sha256').update(_runtimeSessionSecret + '|bill-pay').digest();
+}
+function signBillPayToken(billId, expiresAt) {
+  const exp = Math.floor((expiresAt || Date.now() + BILL_PAY_TOKEN_TTL_MS) / 1000);
+  const payload = `${billId}.${exp}`;
+  const sig = _crypto.createHmac('sha256', _billPaySigningKey())
+    .update(payload).digest('base64')
+    .replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
+  return `${exp}.${sig}`;
+}
+function verifyBillPayToken(billId, token) {
+  if (!token || typeof token !== 'string') return false;
+  const [expStr, sig] = String(token).split('.');
+  const exp = Number(expStr);
+  if (!Number.isFinite(exp) || exp <= 0) return false;
+  if (Date.now() > exp * 1000) return false;
+  const expected = _crypto.createHmac('sha256', _billPaySigningKey())
+    .update(`${billId}.${exp}`).digest('base64')
+    .replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
+  try {
+    return _crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
+  } catch { return false; }
+}
+
 // GET /p/bill-qr/:billId?t=<token> — PUBLIC endpoint that LINE Platform
 // (and any browser following the link) can fetch as image content. Token
 // is HMAC-signed so it can't be enumerated to access bills you don't
@@ -3966,6 +3993,137 @@ app.get('/p/bill-qr/:billId', rateLimitQr, async (req, res) => {
   } catch (err) {
     console.error('public bill qr error:', err);
     return res.status(500).end();
+  }
+});
+
+app.get('/pay/:billId', rateLimitPublicPayment, (req, res) => {
+  const id = Number(req.params.billId);
+  if (!Number.isInteger(id) || id < 1) return res.status(400).end();
+  res.sendFile(path.join(__dirname, 'project', 'pay.html'));
+});
+
+app.get('/api/public/bills/:billId/payment', rateLimitPublicPayment, async (req, res) => {
+  const id = Number(req.params.billId);
+  if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+  const token = String(req.query.t || '');
+  if (!verifyBillPayToken(id, token)) {
+    return res.status(403).json({ error: 'invalid or expired token', code: 'INVALID_TOKEN' });
+  }
+  try {
+    const { rows } = await pool.query(
+      `SELECT b.id, b.bill_no, b.period, b.total, b.due_date, b.status, b.room_id, b.tenant_id,
+              t.full_name, t.phone, t.email, t.line_user_id, t.line_oa_id,
+              t.current_room_id, t.status AS tenant_status, t.deleted_at AS tenant_deleted_at
+         FROM bills b
+         LEFT JOIN tenants t ON t.id = b.tenant_id
+        WHERE b.id=$1 AND b.deleted_at IS NULL
+        LIMIT 1`,
+      [id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'bill not found' });
+    const bill = rows[0];
+    if (!bill.tenant_id || bill.tenant_deleted_at || bill.tenant_status !== 'active') {
+      return res.status(409).json({
+        error: 'bill is not linked to an active tenant',
+        code: 'BILL_NOT_LINKED_TO_ACTIVE_TENANT',
+      });
+    }
+    const flags = await features.load(pool);
+    const { paymentBlock } = await loadEffectivePaymentBlock();
+    const billTotal = Number(bill.total);
+    const payable = bill.status === 'pending' || bill.status === 'overdue';
+    const qrUsable = payable
+      && Number.isFinite(billTotal) && billTotal > 0 && billTotal <= MAX_AMOUNT
+      && !!paymentBlock.promptpayTarget
+      && !isDemoTarget(paymentBlock.promptpayTarget);
+    let qrUrl = null;
+    if (qrUsable) {
+      try {
+        normaliseTarget(paymentBlock.promptpayTarget);
+        qrUrl = `/p/bill-qr/${encodeURIComponent(id)}?t=${encodeURIComponent(signBillQrToken(id))}`;
+      } catch {
+        qrUrl = null;
+      }
+    }
+    res.json({
+      ok: true,
+      bill: {
+        id: bill.id,
+        billNo: bill.bill_no,
+        period: bill.period,
+        total: billTotal,
+        dueDate: bill.due_date,
+        status: bill.status,
+        roomId: bill.room_id,
+      },
+      payment: paymentBlock,
+      channels: {
+        slip: !!(flags.slipUpload && flags.slipUpload.enabled && payable),
+        qr: !!qrUrl,
+      },
+      paid: bill.status === 'paid',
+      qrUrl,
+    });
+  } catch (err) {
+    console.error('public bill payment info error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+app.post('/api/public/bills/:billId/payments', rateLimitPublicPayment, sameOrigin, async (req, res) => {
+  const id = Number(req.params.billId);
+  if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+  const token = String(req.query.t || '');
+  if (!verifyBillPayToken(id, token)) {
+    return res.status(403).json({ error: 'invalid or expired token', code: 'INVALID_TOKEN' });
+  }
+  try {
+    const { rows } = await pool.query(
+      `SELECT b.id, b.total, b.status, b.tenant_id,
+              t.full_name, t.phone, t.email, t.line_user_id, t.line_oa_id,
+              t.current_room_id, t.status AS tenant_status, t.locale
+         FROM bills b
+         JOIN tenants t ON t.id = b.tenant_id
+        WHERE b.id=$1 AND b.deleted_at IS NULL AND t.deleted_at IS NULL
+        LIMIT 1`,
+      [id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'bill not found' });
+    const row = rows[0];
+    if (row.tenant_status !== 'active' || !row.current_room_id) {
+      return res.status(403).json({
+        error: 'tenant is not active for this bill',
+        code: 'TENANT_NOT_ACTIVE',
+      });
+    }
+    const flags = await features.load(pool);
+    if (!flags.slipUpload || !flags.slipUpload.enabled) {
+      return res.status(503).json({ error: 'slipUpload disabled' });
+    }
+    req.features = flags;
+    req.tenant = {
+      tenant_id: row.tenant_id,
+      full_name: row.full_name,
+      phone: row.phone,
+      email: row.email,
+      line_user_id: row.line_user_id,
+      line_oa_id: row.line_oa_id,
+      current_room_id: row.current_room_id,
+      status: row.tenant_status,
+      locale: row.locale,
+    };
+    req.body = {
+      ...(req.body || {}),
+      billId: id,
+      amount: Number((req.body || {}).amount || row.total),
+    };
+    return tenantPaymentUploadHandler(req, res);
+  } catch (err) {
+    console.error('public bill slip upload error:', err);
+    return res.status(500).json({
+      error: 'upload failed, please try again',
+      code: 'UPLOAD_FAILED',
+    });
   }
 });
 
@@ -4896,7 +5054,7 @@ async function ensureSlipUpload(req, res, next) {
   next();
 }
 
-app.post('/api/tenant/payments', sameOrigin, csrfGuard, requireTenant, ensureSlipUpload, async (req, res) => {
+async function tenantPaymentUploadHandler(req, res) {
   const b = req.body || {};
   const billId = Number(b.billId);
   if (!Number.isInteger(billId) || billId < 1) return res.status(400).json({ error: 'billId required' });
@@ -5484,7 +5642,44 @@ app.post('/api/tenant/payments', sameOrigin, csrfGuard, requireTenant, ensureSli
       code: 'UPLOAD_FAILED',
     });
   }
-});
+}
+
+app.post('/api/tenant/payments', sameOrigin, csrfGuard, requireTenant, ensureSlipUpload, tenantPaymentUploadHandler);
+
+async function processTenantSlipUpload({ tenant, billId, amount, slip, features: featureFlags, source = 'internal', skipTenantAck = false } = {}) {
+  if (!tenant) throw new Error('tenant required');
+  const req = {
+    body: { billId, amount, slip },
+    tenant,
+    features: featureFlags || await features.load(pool),
+    headers: {},
+    session: null,
+    ip: null,
+    id: `slip-${source}`,
+    skipTenantAck,
+    get: () => '',
+  };
+  let statusCode = 200;
+  let payload;
+  const res = {
+    status(code) {
+      statusCode = code;
+      return this;
+    },
+    json(body) {
+      payload = body;
+      return this;
+    },
+  };
+  await tenantPaymentUploadHandler(req, res);
+  if (statusCode >= 400) {
+    const err = new Error((payload && payload.error) || `slip upload failed (${statusCode})`);
+    err.status = statusCode;
+    err.data = payload;
+    throw err;
+  }
+  return payload;
+}
 
 // Small cached helper — building name shows up in every tenant-facing
 // notification so they know who's writing. Lookup the building config
@@ -7393,6 +7588,8 @@ const _routesCtx = {
   // building Flex Messages so the embedded /p/bill-qr URL passes the
   // HMAC check at fetch time (LINE Platform has no session).
   signBillQrToken,
+  signBillPayToken,
+  processTenantSlipUpload,
 };
 const _routesMounted = _routesIndex(app, _routesCtx);
 

@@ -100,6 +100,53 @@ function postJson(oa, pathname, body) {
   });
 }
 
+function getBinary(oa, pathname, opts = {}) {
+  return new Promise((resolve, reject) => {
+    if (!oa || !oa.channelAccessToken) {
+      return reject(new Error('LINE OA not configured'));
+    }
+    let token;
+    try { token = sanitiseToken(oa.channelAccessToken); }
+    catch (err) { return reject(err); }
+    const maxBytes = Number(opts.maxBytes) || 1_500_000;
+    const req = https.request(
+      {
+        hostname: 'api-data.line.me', port: 443, path: pathname, method: 'GET',
+        headers: { Authorization: `Bearer ${token}` },
+        timeout: 8000,
+      },
+      (res) => {
+        const chunks = [];
+        let total = 0;
+        res.on('data', (chunk) => {
+          total += chunk.length;
+          if (total > maxBytes) {
+            req.destroy(new Error('LINE content too large'));
+            return;
+          }
+          chunks.push(chunk);
+        });
+        res.on('end', () => {
+          const body = Buffer.concat(chunks);
+          if (res.statusCode >= 200 && res.statusCode < 300) {
+            resolve({
+              ok: true,
+              status: res.statusCode,
+              contentType: String(res.headers['content-type'] || ''),
+              body,
+            });
+          } else {
+            reject(new Error(`LINE content API ${res.statusCode}: ${body.toString('utf8').slice(0, 500)}`));
+          }
+        });
+      }
+    );
+    req.on('error', reject);
+    req.on('timeout', () => req.destroy(new Error('LINE content API timeout')));
+    req.end();
+  });
+}
+
 // --- Public API -----------------------------------------------------------
 
 function isConfigured(oa) {
@@ -183,6 +230,19 @@ async function replyText(...args) {
   }
 }
 
+async function getMessageContent(...args) {
+  let oa, messageId, opts;
+  if (args[0] && typeof args[0] === 'object') {
+    [oa, messageId, opts] = args;
+  } else {
+    [messageId, opts] = args;
+    oa = null;
+  }
+  const resolved = _resolveOa(oa);
+  if (!resolved || !messageId) throw new Error('LINE OA/message id missing');
+  return getBinary(resolved, `/v2/bot/message/${encodeURIComponent(messageId)}/content`, opts || {});
+}
+
 /**
  * Verify the X-Line-Signature header. Per-OA: each OA has its own channel
  * secret, so the slug-based webhook MUST pass its own OA in.
@@ -207,6 +267,6 @@ function verifyWebhookSignature(...args) {
 }
 
 module.exports = {
-  isConfigured, pushText, pushMessages, replyText, verifyWebhookSignature, isLikelyUserId,
+  isConfigured, pushText, pushMessages, replyText, getMessageContent, verifyWebhookSignature, isLikelyUserId,
   _resolveOa, // exported for tests
 };

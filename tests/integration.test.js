@@ -410,9 +410,9 @@ test('/api/tenant/payments locks the bill row inside its tx (concurrency guard)'
   const fs = require('node:fs');
   const path = require('node:path');
   const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
-  // Locate the /api/tenant/payments handler and isolate the tx body.
+  // Locate the shared tenant payment handler and isolate the tx body.
   const m = server.match(
-    /app\.post\('\/api\/tenant\/payments'[\s\S]*?await client\.query\('BEGIN'\);([\s\S]*?)await client\.query\('COMMIT'\)/
+    /async function tenantPaymentUploadHandler[\s\S]*?await client\.query\('BEGIN'\);([\s\S]*?)await client\.query\('COMMIT'\)/
   );
   assert.ok(m, 'should find tenant payment tx body');
   const txBody = m[1];
@@ -640,7 +640,7 @@ test('/api/tenant/payments does not auto-approve unverified slips by default', (
   const fs = require('node:fs');
   const path = require('node:path');
   const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
-  const idx = server.indexOf("app.post('/api/tenant/payments'");
+  const idx = server.indexOf('async function tenantPaymentUploadHandler');
   assert.ok(idx > 0, 'should find tenant payment upload handler');
   const end = server.indexOf('// Atomic:', idx);
   const body = server.slice(idx, end > idx ? end : idx + 12000);
@@ -654,7 +654,7 @@ test('/api/tenant/payments auto-verify checks the effective PromptPay target', (
   const fs = require('node:fs');
   const path = require('node:path');
   const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
-  const idx = server.indexOf("app.post('/api/tenant/payments'");
+  const idx = server.indexOf('async function tenantPaymentUploadHandler');
   assert.ok(idx > 0, 'should find tenant payment upload handler');
   const end = server.indexOf('// Decide the payment row', idx);
   const body = server.slice(idx, end > idx ? end : idx + 14000);
@@ -677,6 +677,70 @@ test('/api/tenant/payments refuses orphan bills (BILL_NOT_LINKED)', () => {
   const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   assert.match(server, /code: 'BILL_NOT_LINKED'/,
     'tenant payment must refuse orphan bills');
+});
+
+test('public bill payment link is tokenized and does not require tenant login', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const billsExtras = fs.readFileSync(path.join(__dirname, '..', 'routes', 'bills-extras.js'), 'utf8');
+  const payHtml = fs.readFileSync(path.join(__dirname, '..', 'project', 'pay.html'), 'utf8');
+  assert.match(server, /function signBillPayToken\(billId/,
+    'server must sign a dedicated public bill-payment token');
+  assert.match(server, /function verifyBillPayToken\(billId, token\)/,
+    'server must verify public bill-payment tokens');
+  assert.match(server, /app\.get\('\/pay\/:billId'/,
+    'public pay page must be served without tenant auth');
+  assert.match(server, /app\.get\('\/api\/public\/bills\/:billId\/payment'/,
+    'public payment info endpoint must exist');
+  assert.match(server, /app\.post\('\/api\/public\/bills\/:billId\/payments'/,
+    'public slip upload endpoint must exist');
+  assert.match(server, /verifyBillPayToken\(id, token\)/,
+    'public endpoints must reject invalid or expired tokens');
+  assert.match(server, /tenantPaymentUploadHandler\(req, res\)/,
+    'public upload must reuse the same slip validation/payment handler');
+  assert.match(billsExtras, /signBillPayToken\(billId\)/,
+    'bill notifications must generate public pay links');
+  assert.match(billsExtras, /\/pay\/\$\{encodeURIComponent\(billId\)\}\?t=/,
+    'bill notifications must link to /pay/:billId with token');
+  assert.match(payHtml, /<meta name="referrer" content="same-origin"\/>/,
+    'public token page must not leak the full token URL as cross-origin referer');
+});
+
+test('LINE image messages can submit slips through the shared payment handler', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const webhooks = fs.readFileSync(path.join(__dirname, '..', 'routes', 'webhooks.js'), 'utf8');
+  const line = fs.readFileSync(path.join(__dirname, '..', 'services', 'line.js'), 'utf8');
+  assert.match(line, /async function getMessageContent/,
+    'LINE service must download message image content');
+  assert.match(webhooks, /ev\.message\?\.type === 'image'/,
+    'webhook must branch on LINE image messages');
+  assert.match(webhooks, /handleSlipImageMessage/,
+    'webhook must route images to a slip handler');
+  assert.match(webhooks, /lineSvc\.getMessageContent\(oa, ev\.message\.id/,
+    'LINE image handler must download the image bytes from LINE');
+  assert.match(webhooks, /processTenantSlipUpload\(\{/,
+    'LINE image handler must reuse the shared payment upload handler');
+  assert.match(webhooks, /skipTenantAck: true/,
+    'LINE image handler should reply in-chat instead of sending a duplicate tenant ack');
+  assert.match(webhooks, /bills\.length > 1/,
+    'LINE image handler must refuse ambiguous multiple payable bills');
+});
+
+test('bill upload UIs refresh status and hide upload controls after paid', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const tenant = fs.readFileSync(path.join(__dirname, '..', 'project', 'tenant.jsx'), 'utf8');
+  const pay = fs.readFileSync(path.join(__dirname, '..', 'project', 'pay.jsx'), 'utf8');
+  assert.match(tenant, /setInterval\(\(\) => \{\s*if \(typeof refresh === 'function'\) refresh\(\);[\s\S]*5000/,
+    'tenant bill modal must poll for payment status changes while open');
+  assert.match(pay, /const paid = !!\(data && data\.paid\)/,
+    'public pay page must derive a paid state');
+  assert.match(pay, /const canUpload = !!\(data && data\.channels && data\.channels\.slip && !paid\)/,
+    'public pay page must disable upload controls once paid');
+  assert.match(pay, /setInterval\(\(\) => load\(true\), 5000\)/,
+    'public pay page must poll for near-real-time status updates');
 });
 
 test('GET /api/tenant/bills/:id/pdf is wired (tenant PDF download)', () => {

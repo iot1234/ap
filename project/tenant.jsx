@@ -461,6 +461,13 @@ function BillDetail({ bill, locale, onClose, slipFeature, refresh }) {
       });
     return () => { cancelled = true; };
   }, [bill.id, locale]);
+  React.useEffect(() => {
+    if (bill.status === 'paid' || bill.status === 'void') return undefined;
+    const timer = setInterval(() => {
+      if (typeof refresh === 'function') refresh();
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [bill.id, bill.status, refresh]);
   // Prefer the server-side channels.qr flag — it incorporates checks the
   // browser can't see (PromptPay shape valid, not the demo target, amount
   // within MAX_AMOUNT).

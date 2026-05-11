@@ -16,9 +16,10 @@ const ownerClaim = require('../services/ownerClaim');
 const secrets = require('../services/secrets');
 const notifier = require('../services/notifier');
 const features = require('../services/features');
+const storage = require('../services/storage');
 
 module.exports = function buildWebhooksRouter(ctx) {
-  const { pool } = ctx;
+  const { pool, processTenantSlipUpload, signBillPayToken } = ctx;
   const r = express.Router();
 
   // ---- handler factory ---------------------------------------------------
@@ -156,8 +157,15 @@ module.exports = function buildWebhooksRouter(ctx) {
       );
     } catch { /* ignore */ }
 
-    if (ev.type !== 'message' || ev.message?.type !== 'text') return;
     if (!userId || !ev.replyToken) return;
+    if (ev.type !== 'message') return;
+
+    if (ev.message?.type === 'image') {
+      await handleSlipImageMessage(oa, ev, userId);
+      return;
+    }
+
+    if (ev.message?.type !== 'text') return;
 
     const text = String(ev.message.text || '').trim();
 
@@ -292,7 +300,8 @@ module.exports = function buildWebhooksRouter(ctx) {
   async function getBoundTenant(lineUserId, oaId) {
     if (!lineUserId) return null;
     const { rows } = await pool.query(
-      `SELECT t.id, t.full_name, t.phone, t.current_room_id, t.status
+      `SELECT t.id, t.full_name, t.phone, t.email, t.line_user_id, t.line_oa_id,
+              t.current_room_id, t.status, t.locale
          FROM tenants t
          JOIN line_bindings b ON b.tenant_id = t.id
         WHERE b.line_user_id = $1
@@ -306,14 +315,104 @@ module.exports = function buildWebhooksRouter(ctx) {
     return rows[0] || null;
   }
 
+  async function handleSlipImageMessage(oa, ev, userId) {
+    const tenant = await getBoundTenant(userId, oa.id || null);
+    if (!tenant) return await replyUnbound(oa, ev.replyToken);
+    if (typeof processTenantSlipUpload !== 'function') {
+      await lineSvc.replyText(oa, ev.replyToken, 'ระบบรับสลิปผ่าน LINE ยังไม่พร้อมใช้งาน โปรดใช้ลิงก์ในบิล');
+      return;
+    }
+    const flags = await features.load(pool);
+    if (!flags.slipUpload || !flags.slipUpload.enabled) {
+      await lineSvc.replyText(oa, ev.replyToken, 'ระบบรับสลิปออนไลน์ยังไม่เปิดใช้งาน โปรดติดต่อสำนักงาน');
+      return;
+    }
+    const { rows: bills } = await pool.query(
+      `SELECT id, bill_no, period, total, status, due_date
+         FROM bills
+        WHERE tenant_id=$1
+          AND deleted_at IS NULL
+          AND status IN ('pending','overdue')
+        ORDER BY due_date NULLS LAST, created_at DESC, id DESC
+        LIMIT 3`,
+      [tenant.id]
+    );
+    if (!bills.length) {
+      await lineSvc.replyText(oa, ev.replyToken, 'ยังไม่มีบิลค้างชำระในระบบ หรือบิลถูกชำระแล้ว ไม่ต้องส่งสลิปเพิ่มเติม');
+      return;
+    }
+    if (bills.length > 1) {
+      const lines = bills.map((b) => {
+        const amount = Number(b.total).toLocaleString('th-TH', { minimumFractionDigits: 2 });
+        return `- ${b.bill_no || `#${b.id}`} รอบ ${b.period || '-'} ยอด ฿${amount}`;
+      }).join('\n');
+      await lineSvc.replyText(oa, ev.replyToken,
+        `พบหลายบิลที่ยังค้างชำระ จึงยังไม่แนบสลิปให้อัตโนมัติเพื่อป้องกันลงบิลผิด\n${lines}\n\nโปรดเปิดลิงก์ของบิลที่ต้องการชำระ แล้วอัปโหลดสลิปจากลิงก์นั้น`);
+      return;
+    }
+
+    const bill = bills[0];
+    try {
+      const content = await lineSvc.getMessageContent(oa, ev.message.id, {
+        maxBytes: (flags.slipUpload && flags.slipUpload.maxBytes) || 1_500_000,
+      });
+      const headerMime = /^image\/(jpeg|png|webp)\b/i.test(content.contentType || '')
+        ? content.contentType.split(';')[0].toLowerCase()
+        : 'image/jpeg';
+      const mime = storage.detectMime(content.body) || headerMime;
+      const dataUrl = `data:${mime};base64,${content.body.toString('base64')}`;
+      const out = await processTenantSlipUpload({
+        tenant: {
+          tenant_id: tenant.id,
+          full_name: tenant.full_name,
+          phone: tenant.phone,
+          email: tenant.email,
+          line_user_id: userId,
+          line_oa_id: oa.id || tenant.line_oa_id || null,
+          current_room_id: tenant.current_room_id,
+          status: tenant.status,
+          locale: tenant.locale,
+        },
+        billId: bill.id,
+        amount: Number(bill.total),
+        slip: dataUrl,
+        features: flags,
+        source: 'line',
+        skipTenantAck: true,
+      });
+      const payment = out && out.payment;
+      if (payment && payment.status === 'verified') {
+        await lineSvc.replyText(oa, ev.replyToken,
+          `✅ ชำระเงินสำเร็จ\nบิล ${bill.bill_no || `#${bill.id}`} อัปเดตเป็นชำระแล้วเรียบร้อย`);
+      } else if (payment && payment.status === 'rejected') {
+        await lineSvc.replyText(oa, ev.replyToken,
+          `❌ สลิปไม่ผ่านการตรวจสอบ\nบิล ${bill.bill_no || `#${bill.id}`}\nเหตุผล: ${payment.rejected_reason || 'ไม่ผ่านการตรวจสอบ'}`);
+      } else {
+        await lineSvc.replyText(oa, ev.replyToken,
+          `📥 ได้รับสลิปแล้ว\nบิล ${bill.bill_no || `#${bill.id}`} กำลังรอเจ้าหน้าที่ตรวจสอบ`);
+      }
+    } catch (err) {
+      const code = err.data && err.data.code;
+      const message = err.data && err.data.error ? err.data.error : err.message;
+      if (code === 'BILL_ALREADY_PAID' || code === 'BILL_NOT_PAYABLE' || /ชำระ.*แล้ว/.test(String(message || ''))) {
+        await lineSvc.replyText(oa, ev.replyToken, 'บิลนี้ชำระแล้ว ไม่ต้องส่งสลิปเพิ่มเติม');
+      } else {
+        await lineSvc.replyText(oa, ev.replyToken, `อัปโหลดสลิปไม่สำเร็จ: ${message || 'โปรดลองใหม่'}`);
+      }
+    }
+  }
+
   async function replyUnbound(oa, replyToken) {
     await lineSvc.replyText(oa, replyToken,
       'บัญชีนี้ยังไม่ได้ผูกห้อง — ส่งรหัส BIND-XXXXXXXX (ขอจากแอดมิน) ก่อนนะครับ');
   }
 
   async function replyLatestBill(oa, replyToken, tenant) {
+    const publicUrl = (process.env.PUBLIC_URL
+      || (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : '')
+      || '').replace(/\/+$/, '');
     const { rows } = await pool.query(
-      `SELECT bill_no, period, total, due_date, status
+      `SELECT id, bill_no, period, total, due_date, status
          FROM bills WHERE tenant_id=$1 AND deleted_at IS NULL
          ORDER BY created_at DESC LIMIT 3`,
       [tenant.id]
@@ -328,10 +427,14 @@ module.exports = function buildWebhooksRouter(ctx) {
       return v.toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     };
     const STATUS_TH = { pending: 'รอชำระ', paid: 'ชำระแล้ว', overdue: 'ค้างชำระ', void: 'ยกเลิก' };
-    const lines = rows.map((b, i) =>
-      `${i + 1}) ${b.bill_no} (${b.period})\n   ฿${fmt(b.total)} · ${STATUS_TH[b.status] || b.status}\n   ครบกำหนด ${b.due_date}`
-    ).join('\n');
-    await lineSvc.replyText(oa, replyToken, `📑 บิลล่าสุด:\n${lines}\n\nเข้าพอร์ทัลเพื่อดูบิลทั้งหมด`);
+    const lines = rows.map((b, i) => {
+      const token = publicUrl && typeof signBillPayToken === 'function'
+        ? signBillPayToken(b.id)
+        : null;
+      const link = token ? `\n   ${publicUrl}/pay/${encodeURIComponent(b.id)}?t=${encodeURIComponent(token)}` : '';
+      return `${i + 1}) ${b.bill_no} (${b.period})\n   ฿${fmt(b.total)} · ${STATUS_TH[b.status] || b.status}\n   ครบกำหนด ${b.due_date}${link}`;
+    }).join('\n');
+    await lineSvc.replyText(oa, replyToken, `📑 บิลล่าสุด:\n${lines}\n\nเปิดลิงก์ของบิลเพื่อชำระหรือส่งสลิป`);
   }
 
   async function replyRoomStatus(oa, replyToken, tenant) {
