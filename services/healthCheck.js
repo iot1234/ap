@@ -609,7 +609,30 @@ async function checkDataIntegrity(pool) {
                  AND c.status = 'active'
                  AND c.deleted_at IS NULL
             )
-        ) AS stranded_occupied_rooms`);
+        ) AS stranded_occupied_rooms,
+        -- Rooms reserved by "contract:N" where N is no longer an active
+        -- contract. Cause: a 'completed' booking was cancelled but the
+        -- code didn't clear the contract: pointer, OR the contract was
+        -- closed by some other path that left the blob untouched. The
+        -- booking-cancel handler now cleans these inline, but pre-fix
+        -- rooms linger — surface them here so ops can reconcile.
+        (WITH blob_rooms AS (
+           SELECT rec.key AS room_code, rec.val AS room
+             FROM app_data ad
+             CROSS JOIN LATERAL jsonb_each(ad.value) AS rec(key, val)
+            WHERE ad.key='baankarn_rooms_v1'
+              AND jsonb_typeof(ad.value) = 'object'
+         )
+         SELECT COUNT(*)::int FROM blob_rooms br
+          WHERE br.room->>'status' = 'reserved'
+            AND br.room->>'reservedBy' LIKE 'contract:%'
+            AND NOT EXISTS (
+              SELECT 1 FROM contracts c
+               WHERE c.id = NULLIF(SUBSTRING(br.room->>'reservedBy' FROM 10), '')::bigint
+                 AND c.status = 'active'
+                 AND c.deleted_at IS NULL
+            )
+        ) AS rooms_reserved_by_ghost_contract`);
     const counts = countsQ.rows[0] || {};
 
     const dupRoomsQ = await pool.query(`
@@ -722,6 +745,7 @@ async function checkDataIntegrity(pool) {
         reserved_rooms_without_hold: Number(counts.reserved_rooms_without_hold) || 0,
         moved_out_with_active_contract: Number(counts.moved_out_with_active_contract) || 0,
         stranded_occupied_rooms: Number(counts.stranded_occupied_rooms) || 0,
+        rooms_reserved_by_ghost_contract: Number(counts.rooms_reserved_by_ghost_contract) || 0,
       },
       duplicate_active_room_assignments: dupRoomsQ.rows,
       active_tenant_room_status_mismatch_samples: activeTenantRoomStatusQ.rows,
@@ -776,6 +800,16 @@ async function checkDataIntegrity(pool) {
       errors.push(
         `${detail.counts.stranded_occupied_rooms} room(s) show occupied in the rooms blob but have no active contract — ` +
         `run POST /api/admin/rooms/:roomId/reconcile for each (admin UI shows a "Reconcile" button on the room card)`
+      );
+    }
+    if (detail.counts.rooms_reserved_by_ghost_contract > 0) {
+      // Warn rather than error — this is cosmetic-only (the room is just
+      // wrongly flagged "reserved"; no money is lost), but it still blocks
+      // the room from being re-rented because the rooms-page UI treats
+      // reserved as unavailable.
+      warnings.push(
+        `${detail.counts.rooms_reserved_by_ghost_contract} room(s) are flagged 'reserved' by a contract that is no longer active — ` +
+        `cancel-then-recreate-booking or call POST /api/admin/rooms/:roomId/reconcile`
       );
     }
     if (detail.counts.moved_out_with_active_contract > 0) {
@@ -928,25 +962,34 @@ const CHECKS = [
 async function runChecks(pool) {
   let flags = {};
   try { flags = await features.load(pool); } catch { /* keep going with empty flags */ }
-  const results = await Promise.all(
-    CHECKS.map(async (c) => {
-      const start = Date.now();
-      let res;
-      try {
-        res = await c.fn(pool, flags);
-      } catch (err) {
-        res = { status: 'error', message: err.message };
-      }
-      return {
-        id: c.id,
-        label: c.label,
-        status: res.status || 'ok',
-        message: res.message || '',
-        detail: res.detail || null,
-        durationMs: Date.now() - start,
-      };
-    })
+  const runOne = async (c) => {
+    const start = Date.now();
+    let res;
+    try {
+      res = await c.fn(pool, flags);
+    } catch (err) {
+      res = { status: 'error', message: err.message };
+    }
+    return {
+      id: c.id,
+      label: c.label,
+      status: res.status || 'ok',
+      message: res.message || '',
+      detail: res.detail || null,
+      durationMs: Date.now() - start,
+    };
+  };
+
+  // Measure pool contention before this health probe fans out DB queries;
+  // otherwise the probe can warn about the queue it created itself.
+  const poolCheck = CHECKS.find((c) => c.id === 'pool');
+  const poolResult = poolCheck ? await runOne(poolCheck) : null;
+  const parallelResults = await Promise.all(
+    CHECKS.filter((c) => c.id !== 'pool').map(runOne)
   );
+  const byId = new Map(parallelResults.map((r) => [r.id, r]));
+  if (poolResult) byId.set('pool', poolResult);
+  const results = CHECKS.map((c) => byId.get(c.id)).filter(Boolean);
   // Worst rung wins — surfaces the highest severity for badge / alerting.
   const worst = results.reduce(
     (acc, r) => (SEVERITY_RANK[r.status] > SEVERITY_RANK[acc] ? r.status : acc),

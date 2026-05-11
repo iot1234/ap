@@ -6118,7 +6118,46 @@ app.put('/api/bookings/:id', sameOrigin, csrfGuard, requireAuth, requireRole('ow
     let releasedRoomId = null;
     let roomsAfterRelease = null;
     if (updated.status === 'cancelled' && before.status !== 'cancelled') {
+      // A booking can be cancelled from any prior state, but the room-release
+      // logic depends on which state we're cancelling FROM:
+      //   - pending/reviewing/rejected → no room reservation to release
+      //   - approved → room is 'reserved' with reservedBy=<booking.id>
+      //   - completed → quick-invite already created a contract and changed
+      //                 reservedBy to "contract:<id>"; the room belongs to
+      //                 the contract now, not this booking.
+      // The OLD code only handled the 'approved' case (reservedBy===booking.id).
+      // For 'completed' we refuse the cancel outright when the linked
+      // contract is still active — admin must end the contract first so the
+      // checkout cascade runs (revokes cards, deactivates recurring, ฯลฯ).
+      // If the contract has already been ended/expired/cancelled we proceed
+      // and free any stale 'contract:N' reservation.
       const roomToRelease = String(before.assignedRoomId || before.roomId || '').slice(0, 32);
+      if (before.status === 'completed' && roomToRelease) {
+        // Find the contract that was created from this booking.
+        // contracts.notes / source field doesn't link back to bookings
+        // directly, so we look for an active contract on the same room
+        // that was created after the booking was approved.
+        let linkedContract = null;
+        try {
+          const cQ = await client.query(
+            `SELECT id, contract_no, tenant_id, status FROM contracts
+               WHERE room_id=$1 AND deleted_at IS NULL
+               ORDER BY created_at DESC LIMIT 1`,
+            [roomToRelease]
+          );
+          linkedContract = cQ.rows[0] || null;
+        } catch { /* no contracts table on legacy deploys — fall through */ }
+        if (linkedContract && linkedContract.status === 'active') {
+          await client.query('ROLLBACK');
+          return res.status(409).json({
+            error: `ยกเลิก booking นี้ไม่ได้ — มีสัญญา ${linkedContract.contract_no} active อยู่บนห้อง ${roomToRelease}`,
+            code: 'BOOKING_HAS_ACTIVE_CONTRACT',
+            contract: linkedContract,
+            hint: 'ยกเลิก/ปิดสัญญาก่อน (จะ cascade คืนห้องอัตโนมัติ) — หรือใช้ POST /api/tenants/:tenantId/checkout',
+            contractUrl: `/admin#contracts/${linkedContract.id}`,
+          });
+        }
+      }
       if (roomToRelease) {
         const rRes = await client.query(
           `SELECT value FROM app_data WHERE key='baankarn_rooms_v1' FOR UPDATE`
@@ -6127,7 +6166,32 @@ app.put('/api/bookings/:id', sameOrigin, csrfGuard, requireAuth, requireRole('ow
           ? rRes.rows[0].value
           : {};
         const room = rooms[roomToRelease];
-        if (room && room.status === 'reserved' && room.reservedBy === id) {
+        // Free the room when it was reserved BY this booking OR by a
+        // contract that has since been ended (the contract cascade
+        // didn't reset reservedBy because the room transitioned through
+        // 'occupied' first). The second condition catches the stale
+        // "contract:N" pointer on a contract that is no longer active.
+        let shouldFree = false;
+        if (room && room.status === 'reserved') {
+          if (room.reservedBy === id) {
+            shouldFree = true;   // approved-then-cancelled, no contract created
+          } else if (typeof room.reservedBy === 'string'
+              && room.reservedBy.startsWith('contract:')) {
+            const cid = Number(room.reservedBy.slice('contract:'.length));
+            if (Number.isInteger(cid)) {
+              try {
+                const cR = await client.query(
+                  `SELECT status FROM contracts WHERE id=$1 LIMIT 1`,
+                  [cid]
+                );
+                if (!cR.rows.length || cR.rows[0].status !== 'active') {
+                  shouldFree = true;
+                }
+              } catch { /* no contracts table — leave the reservation alone */ }
+            }
+          }
+        }
+        if (shouldFree) {
           const { tenant, reservedBy, reservedAt, ...rest } = room;
           rooms[roomToRelease] = { ...rest, status: 'vacant' };
           roomsAfterRelease = rooms;
