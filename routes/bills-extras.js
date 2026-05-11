@@ -418,6 +418,100 @@ module.exports = function buildBillsExtrasRouter(ctx) {
     });
   }
 
+  // GET /api/bills/send-readiness-batch?period=YYYY-MM — bulk preflight.
+  // Returns a compact map { billId → { canSend, blockCode, channels } } for
+  // every pending/overdue bill in the period so the admin UI can render
+  // per-row status icons without N round-trips. Uses the same join+filter
+  // logic as enqueueBillNotifications but stops at status detection
+  // (no notifications enqueued).
+  r.get('/send-readiness-batch', requireAuth, requireRole('owner', 'manager'),
+    async (req, res) => {
+      const period = String(req.query.period || '').slice(0, 7);
+      if (!/^\d{4}-\d{2}$/.test(period)) {
+        return res.status(400).json({ error: 'period required (YYYY-MM)', code: 'INVALID_PERIOD' });
+      }
+      try {
+        // One query joining bills + tenants + their move-in room.
+        const { rows } = await pool.query(
+          `SELECT b.id, b.bill_no, b.room_id, b.status AS bill_status,
+                  b.tenant_id,
+                  t.id AS tenant_row_id, t.full_name AS tenant_name,
+                  t.line_user_id, t.email,
+                  t.status AS tenant_status, t.current_room_id AS tenant_current_room
+             FROM bills b
+             LEFT JOIN tenants t
+               ON t.id = b.tenant_id
+              AND t.deleted_at IS NULL
+            WHERE b.period = $1
+              AND b.deleted_at IS NULL
+              AND b.status IN ('pending','overdue')
+            ORDER BY b.id ASC`,
+          [period]
+        );
+        const billsMap = {};
+        const issueCounts = {};      // code → count for summary
+        let canSendCount = 0, blockedCount = 0;
+        for (const b of rows) {
+          // Compute one "block" code per bill so the UI shows the most
+          // urgent reason. Order mirrors enqueueBillNotifications' early-
+          // return chain (most specific → least).
+          let blockCode = null;
+          let blockMsg = null;
+          if (b.tenant_id == null) {
+            blockCode = 'BILL_NOT_LINKED';
+            blockMsg = 'บิลไม่ได้ผูกผู้เช่า';
+          } else if (!b.tenant_row_id) {
+            blockCode = 'TENANT_DELETED';
+            blockMsg = 'ผู้เช่าถูกลบไปแล้ว';
+          } else if (b.tenant_status !== 'active') {
+            blockCode = 'TENANT_NOT_ACTIVE';
+            blockMsg = `ผู้เช่าสถานะ "${b.tenant_status}"`;
+          } else if (b.tenant_current_room && String(b.tenant_current_room) !== String(b.room_id)) {
+            blockCode = 'TENANT_MOVED_ROOM';
+            blockMsg = `ย้ายไปห้อง ${b.tenant_current_room}`;
+          } else {
+            const hasLine = lineNotify.isLikelyUserId(b.line_user_id);
+            if (!hasLine && !b.email) {
+              blockCode = 'NO_TENANT_CHANNEL';
+              blockMsg = 'ไม่ผูก LINE + ไม่มีอีเมล';
+            }
+          }
+          const channels = {
+            line: lineNotify.isLikelyUserId(b.line_user_id),
+            email: !!b.email,
+          };
+          billsMap[b.id] = {
+            canSend: !blockCode,
+            blockCode,
+            blockMsg,
+            channels,
+            tenantName: b.tenant_name || null,
+            warnCode: !blockCode && !channels.line && channels.email ? 'EMAIL_ONLY' : null,
+          };
+          if (blockCode) {
+            blockedCount++;
+            issueCounts[blockCode] = (issueCounts[blockCode] || 0) + 1;
+          } else {
+            canSendCount++;
+          }
+        }
+        res.json({
+          ok: true,
+          period,
+          summary: {
+            total: rows.length,
+            canSend: canSendCount,
+            blocked: blockedCount,
+            issueCounts,    // { NO_TENANT_CHANNEL: 3, TENANT_MOVED_ROOM: 1, ... }
+          },
+          bills: billsMap,
+        });
+      } catch (err) {
+        console.error('send-readiness-batch error:', err);
+        res.status(500).json({ error: 'internal error', code: 'DB_ERROR' });
+      }
+    });
+
   // GET /api/bills/:id/send-readiness — preflight that returns structured
   // issues so the admin UI can render a confirm modal BEFORE firing
   // /:id/send. Without this the UI either silently failed (bill sent to a

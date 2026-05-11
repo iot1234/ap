@@ -20,6 +20,16 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
   // of falling back to ugly window.confirm() native dialogs. null = closed.
   const [sendConfirm, setSendConfirm] = useState(null);
   const [sendingNow, setSendingNow] = useState(false);
+  // batchReadiness maps billId → { canSend, blockCode, blockMsg, channels,
+  // warnCode } for every pending/overdue bill in the current period. Fetched
+  // once on mount + after fetchDbBills so the bills table can show per-row
+  // status icons instead of forcing admin to click each row to find out
+  // which ones are blocked.
+  const [batchReadiness, setBatchReadiness] = useState(null);
+  // bulkSendPreview holds the readiness summary while the admin is staring
+  // at the bulk-send confirmation modal. null = closed.
+  const [bulkSendPreview, setBulkSendPreview] = useState(null);
+  const [bulkSendingNow, setBulkSendingNow] = useState(false);
 
   // Real bills from DB for the current period. Falls back to client estimate
   // (computed from rooms blob below) when no bills have been issued yet, so
@@ -48,6 +58,24 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
     return () => { cancel = true; };
   }, [currentPeriod]);
   React.useEffect(() => fetchDbBills(), [fetchDbBills]);
+
+  // Batch readiness — refreshed alongside dbBills so the row status icons
+  // stay in sync with the underlying ledger. Cheap (one JOIN-aggregated
+  // query) so we can re-run it on every bills refresh without throttling.
+  const fetchBatchReadiness = React.useCallback(() => {
+    let cancel = false;
+    fetch(`/api/bills/send-readiness-batch?period=${encodeURIComponent(currentPeriod)}`,
+      { credentials: 'same-origin' })
+      .then(async (r) => {
+        const d = await r.json().catch(() => ({}));
+        if (cancel) return;
+        if (r.ok && d.ok) setBatchReadiness(d);
+        else setBatchReadiness(null);
+      })
+      .catch(() => { if (!cancel) setBatchReadiness(null); });
+    return () => { cancel = true; };
+  }, [currentPeriod]);
+  React.useEffect(() => fetchBatchReadiness(), [fetchBatchReadiness, dbBills]);
   // Map room_id → real DB bill so the in-memory estimate can adopt the
   // real status / total for any room that's already been billed this month.
   const realBillsByRoom = useMemo(() => {
@@ -429,16 +457,12 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
     }
   };
 
-  // Bulk-send all pending/overdue bills via LINE+email.
-  // Pre-flight: count from local DB-bills overlay so admin sees exactly
-  // how many notifications they're about to dispatch + total amount.
-  // Without this, a single "OK" click could fire 200 LINE pushes (which
-  // hits LINE's rate limit AND looks spammy to tenants), or fire ZERO
-  // because the admin filtered the list and forgot the bulk-send acts
-  // on ALL bills not just the visible ones.
+  // Bulk-send all pending/overdue bills. Opens a Modal showing the
+  // server-computed breakdown (X พร้อม / Y มีปัญหา + reasons) before
+  // firing. Replaces the old window.confirm() blob with a richer preview
+  // the admin can actually read.
   const handleBulkSend = async () => {
     const pending = (dbBills || []).filter((b) => b.status === 'pending' || b.status === 'overdue');
-    const totalAmount = pending.reduce((s, b) => s + (Number(b.total) || 0), 0);
     if (pending.length === 0) {
       setToast && setToast({
         kind: 'info',
@@ -449,66 +473,43 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
       });
       return;
     }
-    const overdueCnt = pending.filter((b) => b.status === 'overdue').length;
-    const fmt = (n) => Number(n).toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-
-    // Pre-flight reachability check: count how many of the pending bills'
-    // tenants actually have a contactable channel. server-side sender
-    // skips bills with no LINE userId AND no email — those tenants get
-    // ZERO notifications, but admin doesn't see that distinction without
-    // digging through the queue. Surface it up front so admin knows
-    // "12 bills sent → 9 will reach a person, 3 will silently drop".
-    let unreachable = 0;
-    try {
-      const r = await fetch('/api/tenants?status=active', { credentials: 'same-origin' });
-      if (r.ok) {
-        const j = await r.json();
-        const byPhone = new Map();
-        for (const t of (j.tenants || [])) {
-          if (t.phone) byPhone.set(String(t.phone).replace(/[\s-]/g, ''), t);
+    const totalAmount = pending.reduce((s, b) => s + (Number(b.total) || 0), 0);
+    // Reuse the batch readiness already cached on the page when fresh;
+    // otherwise force a fresh fetch so the modal has up-to-date numbers.
+    let readiness = batchReadiness;
+    if (!readiness || readiness.period !== currentPeriod) {
+      try {
+        const r = await fetch(
+          `/api/bills/send-readiness-batch?period=${encodeURIComponent(currentPeriod)}`,
+          { credentials: 'same-origin' });
+        const d = await r.json();
+        if (r.ok && d.ok) {
+          readiness = d;
+          setBatchReadiness(d);
         }
-        for (const b of pending) {
-          // Tenants without LINE binding AND without email are unreachable
-          // via the bulk-send pipeline. b.tenant_id is what server uses;
-          // we approximate with the rooms-blob data we have.
-          const room = Object.values(rooms || {}).find((r) => r.id === b.room_id);
-          const phone = room?.tenant?.phone ? String(room.tenant.phone).replace(/[\s-]/g, '') : null;
-          const tenantRow = phone ? byPhone.get(phone) : null;
-          const hasLine = !!tenantRow?.line_user_id;
-          const hasEmail = !!tenantRow?.email || !!room?.tenant?.email;
-          if (!hasLine && !hasEmail) unreachable++;
-        }
-      }
-    } catch { /* fail-soft — show the warning conservatively when we can't tell */ }
+      } catch { /* fall through with stale data */ }
+    }
+    setBulkSendPreview({ pending, totalAmount, readiness });
+  };
 
-    const ok = window.confirm(
-      `ส่งแจ้งเตือนทุกบิลที่ยังไม่ชำระ?\n\n` +
-      `📊 จำนวน: ${pending.length} ใบ` +
-      (overdueCnt > 0 ? ` (ค้างชำระ ${overdueCnt}, รอชำระ ${pending.length - overdueCnt})` : '') + `\n` +
-      `💰 ยอดรวม: ฿${fmt(totalAmount)}\n` +
-      (unreachable > 0
-        ? `\n⚠ ${unreachable} ใบจะส่งไม่ถึงผู้เช่า:\n` +
-          `   ผู้เช่า ${unreachable} คน ไม่ได้ผูก LINE และไม่ใส่อีเมล\n` +
-          `   📌 แนะนำ: ไป /admin#tenants → tab "Portal Access" ผูก LINE ก่อน,\n` +
-          `   หรือใส่อีเมลใน Settings ของผู้เช่า\n`
-        : '\n✅ ทุกบิลมีช่องทางส่งถึง (LINE หรือ อีเมล)\n') +
-      `\n📌 ระบบจะ enqueue ในคิว — ส่งจริงภายใน ~1 นาที\n` +
-      `📌 ดูคิวที่ /admin#notifications-queue\n` +
-      `📌 กดบ่อย = ผู้เช่าได้ข้อความซ้ำ (rate-limit ของ LINE = 1000/วัน)`
-    );
-    if (!ok) return;
+  const doBulkSendNow = async () => {
+    setBulkSendingNow(true);
     const apiCall = window.apiCall;
     try {
       const d = await apiCall('/api/bills/bulk-send', { method: 'POST' });
       setToast && setToast({
         kind: d.enqueued > 0 ? 'success' : 'info',
         message: d.enqueued > 0
-          ? `จัดคิวแจ้งเตือน ${d.enqueued}/${d.attempted} ใบ${d.failed ? ` — พลาด ${d.failed} ใบ (ดูรายละเอียดใน "คิวแจ้งเตือน")` : ''}`
+          ? `จัดคิวแจ้งเตือน ${d.enqueued}/${d.attempted} ใบ${d.failed ? ` — พลาด ${d.failed} ใบ (ดูใน "คิวแจ้งเตือน")` : ''}`
           : `ไม่มีบิลค้างที่ต้องแจ้งเตือน`,
       });
       addActivity && addActivity({ icon: '🔔', text: `ส่งเตือนทุกบิลค้าง: ${d.enqueued} ใบ`, type: 'system' });
+      setBulkSendPreview(null);
+      fetchBatchReadiness();   // status icons refresh
     } catch (e) {
       window.toastError(setToast, e, { action: 'ส่งแจ้งเตือนทุกบิล' });
+    } finally {
+      setBulkSendingNow(false);
     }
   };
 
@@ -577,6 +578,45 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
           </span>
         </div>
       ),
+    },
+    {
+      // Per-bill readiness icon — at a glance shows whether THIS bill can
+      // be sent (or why not). Avoids "click 30 bills to find the 3 that
+      // fail" pattern. Tooltip on the icon carries the reason.
+      key: 'sendStatus', label: 'พร้อมส่ง', align: 'center', minWidth: 90,
+      render: b => {
+        if (b._source !== 'db' || !b.dbBillId) {
+          return <span style={{ fontSize: 11, color: C.muted }}>—</span>;
+        }
+        if (b.status !== 'unpaid' && b.status !== 'overdue') {
+          return <span style={{ fontSize: 11, color: C.muted }}>{b.status === 'paid' ? 'ชำระแล้ว' : '—'}</span>;
+        }
+        const r = batchReadiness && batchReadiness.bills && batchReadiness.bills[b.dbBillId];
+        if (!r) return <span style={{ fontSize: 11, color: C.muted }}>…</span>;
+        if (r.canSend && r.warnCode === 'EMAIL_ONLY') {
+          return (
+            <span title="ไม่ผูก LINE — จะส่งทางอีเมล (อาจไปกล่อง spam)"
+                  style={{ fontSize: 13, color: '#c08a2a' }}>📧 อีเมล</span>
+          );
+        }
+        if (r.canSend) {
+          return (
+            <span title="LINE + (อีเมลถ้ามี) พร้อม — กดส่งได้เลย"
+                  style={{ fontSize: 13, color: '#1f5f3a' }}>✅ พร้อม</span>
+          );
+        }
+        return (
+          <span title={r.blockMsg || r.blockCode || 'block'}
+                style={{ fontSize: 12, color: '#b94a48', fontWeight: 600 }}>
+            🚫 {r.blockCode === 'NO_TENANT_CHANNEL' ? 'ไม่มี channel'
+              : r.blockCode === 'TENANT_MOVED_ROOM' ? 'ย้ายห้อง'
+              : r.blockCode === 'TENANT_NOT_ACTIVE' ? 'ออกแล้ว'
+              : r.blockCode === 'TENANT_DELETED' ? 'ลบแล้ว'
+              : r.blockCode === 'BILL_NOT_LINKED' ? 'ไม่ผูก'
+              : 'block'}
+          </span>
+        );
+      },
     },
     {
       key: 'actions', label: '', align: 'right', minWidth: 130,
@@ -943,7 +983,114 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
       >
         {sendConfirm && <SendReminderConfirmBody confirm={sendConfirm} C={C} fmtCurrency={fmtCurrency} />}
       </Modal>
+
+      {/* Bulk-send preflight — replaces the wall-of-text window.confirm()
+          with a Modal showing the server's per-issue breakdown so admin
+          knows exactly how many bills will succeed vs fail before firing
+          the bulk-send pipeline. */}
+      <Modal
+        open={!!bulkSendPreview}
+        onClose={() => !bulkSendingNow && setBulkSendPreview(null)}
+        title="🔔 ส่งเตือนทุกบิลที่ค้าง"
+        width={560}
+        footer={bulkSendPreview && (() => {
+          const ready = bulkSendPreview.readiness?.summary?.canSend ?? bulkSendPreview.pending.length;
+          return (
+            <>
+              <Btn variant="ghost" onClick={() => setBulkSendPreview(null)} disabled={bulkSendingNow}>
+                ยกเลิก
+              </Btn>
+              <Btn variant="primary" icon="🔔"
+                onClick={doBulkSendNow}
+                disabled={bulkSendingNow || ready === 0}>
+                {bulkSendingNow ? 'กำลังส่ง…' : `ยืนยันส่ง (${ready} ใบที่พร้อม)`}
+              </Btn>
+            </>
+          );
+        })()}
+      >
+        {bulkSendPreview && <BulkSendPreviewBody
+          preview={bulkSendPreview} C={C} fmtCurrency={fmtCurrency} />}
+      </Modal>
     </PageContainer>
+  );
+}
+
+// BulkSendPreviewBody — renders the breakdown of which bills will/won't
+// send, grouped by block code, so the admin sees the picture before
+// firing the pipeline.
+function BulkSendPreviewBody({ preview, C, fmtCurrency }) {
+  const { pending, totalAmount, readiness } = preview;
+  const summary = readiness?.summary || {
+    total: pending.length, canSend: pending.length, blocked: 0, issueCounts: {},
+  };
+  const blockCodeLabel = {
+    BILL_NOT_LINKED: 'บิลไม่ผูกผู้เช่า',
+    TENANT_DELETED: 'ผู้เช่าถูกลบ',
+    TENANT_NOT_ACTIVE: 'ผู้เช่าออกแล้ว (moved_out)',
+    TENANT_MOVED_ROOM: 'ผู้เช่าย้ายห้อง',
+    NO_TENANT_CHANNEL: 'ไม่ผูก LINE + ไม่มีอีเมล',
+  };
+  const codes = Object.entries(summary.issueCounts || {}).sort((a, b) => b[1] - a[1]);
+  const fmt = (n) => Number(n).toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      {/* Headline summary */}
+      <div style={{
+        padding: 14, borderRadius: 10,
+        background: summary.blocked === 0 ? '#f0f9f0' : (summary.canSend === 0 ? '#fff5f4' : '#fff7e0'),
+        border: `1px solid ${summary.blocked === 0 ? '#bce0bc' : (summary.canSend === 0 ? '#f5c0b4' : '#f0e3a7')}`,
+      }}>
+        <div style={{ fontFamily: 'Sora', fontWeight: 600, fontSize: 14.5 }}>
+          {summary.blocked === 0 ? '✅ ทุกบิลพร้อมส่ง'
+            : summary.canSend === 0 ? '🚫 ส่งไม่ได้สักใบ'
+            : `⚠️ ส่งได้ ${summary.canSend} ใบ — ติดปัญหา ${summary.blocked} ใบ`}
+        </div>
+        <div style={{ fontSize: 12.5, color: C.muted, marginTop: 4 }}>
+          ทั้งหมด {summary.total} ใบ · ยอดรวม ฿{fmt(totalAmount)}
+        </div>
+      </div>
+
+      {/* Per-issue breakdown */}
+      {codes.length > 0 ? (
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>
+            ปัญหาที่พบ (จะถูกข้าม):
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {codes.map(([code, count]) => (
+              <div key={code} style={{
+                padding: 10, borderRadius: 6,
+                background: '#fff5f4',
+                borderLeft: '3px solid #b94a48',
+                fontSize: 13,
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <strong style={{ color: '#7a2920' }}>
+                    🔴 {blockCodeLabel[code] || code}
+                  </strong>
+                  <span style={{ color: '#7a2920', fontWeight: 600 }}>{count} ใบ</span>
+                </div>
+              </div>
+            ))}
+          </div>
+          <div style={{ fontSize: 12, color: C.muted, marginTop: 8, lineHeight: 1.5 }}>
+            💡 แก้ปัญหารายห้องที่ /admin#tenants ก่อน แล้วกลับมากดส่งใหม่
+          </div>
+        </div>
+      ) : null}
+
+      {/* Footnote */}
+      <div style={{
+        padding: 10, borderRadius: 6, background: '#fdfaf2',
+        border: `1px solid ${C.borderSoft || C.border}`,
+        fontSize: 12, color: C.muted, lineHeight: 1.6,
+      }}>
+        📌 ระบบจะ enqueue ในคิว — ส่งจริงภายใน ~1 นาที<br/>
+        📌 ดูคิวที่ /admin#notifications-queue<br/>
+        📌 กดบ่อย = ผู้เช่าได้ข้อความซ้ำ (LINE rate-limit = 1000/วัน)
+      </div>
+    </div>
   );
 }
 
