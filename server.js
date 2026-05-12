@@ -5842,8 +5842,6 @@ async function tenantPaymentUploadHandler(req, res) {
       const statusTh = initialStatus === 'verified' ? 'ผ่านอัตโนมัติ'
         : initialStatus === 'rejected' ? 'ปฏิเสธอัตโนมัติ'
         : 'รอตรวจสอบ';
-      const reasonLine = initialReason ? `\nเหตุผล: ${initialReason}` : '';
-      const refLine = verifyResult?.transRef ? `\ntransRef: ${verifyResult.transRef}` : '';
       let adminBill = null;
       let adminAttempts = null;
       try {
@@ -5854,35 +5852,67 @@ async function tenantPaymentUploadHandler(req, res) {
         adminBill = billInfo.rows[0] || null;
         adminAttempts = attemptInfo || null;
       } catch { /* notification detail is best-effort */ }
-      const adminDetailText = [
-        adminBill?.room_id ? `Room: ${adminBill.room_id}` : null,
-        adminBill?.bill_no ? `Bill no: ${adminBill.bill_no}` : null,
-        adminBill?.period ? `Period: ${adminBill.period}` : null,
-        adminBill?.status ? `Current bill status: ${adminBill.status}` : null,
+      // Translate every label into Thai so a non-dev owner reading the
+      // LINE/email push on their phone doesn't have to context-switch
+      // between Thai header and English detail block. Layout is one
+      // labeled fact per line so it skims well on a small screen.
+      const billStatusTh = ({
+        pending: 'รอชำระ',
+        overdue: 'ค้างชำระ',
+        paid: 'ชำระแล้ว',
+        void: 'ยกเลิก',
+      })[adminBill?.status] || adminBill?.status || '-';
+      const latestSlipStatusTh = ({
+        pending: 'รอตรวจสอบ',
+        verified: 'อนุมัติแล้ว',
+        rejected: 'ถูกปฏิเสธ',
+      })[adminAttempts?.latest?.status] || adminAttempts?.latest?.status || '-';
+      const adminDetailLines = [
+        adminBill?.room_id ? `🏠 ห้อง: ${adminBill.room_id}` : null,
+        adminBill?.bill_no ? `📄 เลขบิล: ${adminBill.bill_no}` : null,
+        adminBill?.period ? `📅 รอบบิล: ${adminBill.period}` : null,
+        adminBill?.status ? `📌 สถานะบิลปัจจุบัน: ${billStatusTh}` : null,
         adminBill?.total != null
-          ? `Bill total: THB ${Number(adminBill.total).toLocaleString('th-TH', { minimumFractionDigits: 2 })}`
+          ? `💰 ยอดตามบิล: ฿${Number(adminBill.total).toLocaleString('th-TH', { minimumFractionDigits: 2 })}`
           : null,
         adminAttempts
-          ? `Slip upload attempts: ${adminAttempts.used}/${adminAttempts.max} (remaining ${adminAttempts.remaining})`
+          ? `📥 ผู้เช่าอัปโหลดสลิปครั้งที่: ${adminAttempts.used}/${adminAttempts.max} (เหลืออีก ${adminAttempts.remaining} ครั้ง)`
           : null,
-        adminAttempts?.pendingCount ? `Pending slips: ${adminAttempts.pendingCount}` : null,
-        adminAttempts?.rejectedCount ? `Rejected slips: ${adminAttempts.rejectedCount}` : null,
+        adminAttempts?.pendingCount
+          ? `⏳ สลิปรอตรวจของบิลนี้: ${adminAttempts.pendingCount} ใบ` : null,
+        adminAttempts?.rejectedCount
+          ? `❌ สลิปที่ถูกปฏิเสธก่อนหน้า: ${adminAttempts.rejectedCount} ใบ` : null,
         adminAttempts?.latest
-          ? `Latest slip: ${adminAttempts.latest.status}${adminAttempts.latest.rejected_reason ? ` - ${adminAttempts.latest.rejected_reason}` : ''}`
+          ? `🕐 สลิปล่าสุด: ${latestSlipStatusTh}${adminAttempts.latest.rejected_reason ? ` — ${adminAttempts.latest.rejected_reason}` : ''}`
           : null,
+        initialReason ? `📝 ผลการตรวจอัตโนมัติ: ${initialReason}` : null,
+        verifyResult?.transRef ? `🔖 เลขอ้างอิงรายการโอน: ${verifyResult.transRef}` : null,
+        '', // blank line before action
         initialStatus === 'verified'
-          ? 'Action: system marked the bill as paid.'
+          ? '✅ ระบบทำเครื่องหมายบิลเป็น "ชำระแล้ว" ให้แล้ว ไม่ต้องดำเนินการเพิ่ม'
           : initialStatus === 'pending'
-            ? 'Action: review this slip in /admin#payments. Bill is still unpaid until approved.'
-            : 'Action: slip was rejected. Bill is still unpaid; contact tenant if needed.',
-      ].filter(Boolean).join('\n');
-      const ownerDetailLine = adminDetailText ? `\n${adminDetailText}` : '';
+            ? '👉 ที่ต้องทำ: เข้า /admin#payments เพื่อตรวจสลิป — บิลยังเป็น "ยังไม่ชำระ" จนกว่าจะอนุมัติ'
+            : '👉 ที่ต้องทำ: เข้า /admin#payments เพื่อดูเหตุผลที่ระบบปฏิเสธ และติดต่อผู้เช่าหากจำเป็น — บิลยังไม่ถูกชำระ',
+      ].filter((l) => l !== null && l !== undefined);
+      // Lead with the most important facts (who + how much + room) on
+      // line 1 so a glance at the LINE preview already tells the owner
+      // what room paid before they tap to open.
+      const headerLine = adminBill?.room_id
+        ? `🏠 ห้อง ${adminBill.room_id} · คุณ${req.tenant.full_name} (${req.tenant.phone || 'ไม่มีเบอร์'})`
+        : `คุณ${req.tenant.full_name} (${req.tenant.phone || 'ไม่มีเบอร์'})`;
+      const subjectRoomPart = adminBill?.room_id ? ` · ห้อง ${adminBill.room_id}` : '';
       notifier.notifyOwner(
         { pool, features: req.features },
-        { subject: `${statusEmoji} สลิปใหม่ (${statusTh}) — บิล #${billId}`,
-          text: `บิล #${billId} จำนวน ฿${amount.toLocaleString('th-TH', { minimumFractionDigits: 2 })} `
-                + `จาก ${req.tenant.full_name} (${req.tenant.phone})\n`
-                + `สถานะเริ่มต้น: ${statusTh}${reasonLine}${refLine}${ownerDetailLine}` }
+        {
+          subject: `${statusEmoji} สลิปใหม่${subjectRoomPart} — ${statusTh} · ฿${amount.toLocaleString('th-TH', { minimumFractionDigits: 2 })}`,
+          text: [
+            headerLine,
+            `💸 ผู้เช่าระบุยอดที่โอน: ฿${amount.toLocaleString('th-TH', { minimumFractionDigits: 2 })}`,
+            `🚦 สถานะการตรวจอัตโนมัติ: ${statusTh}`,
+            '',
+            ...adminDetailLines,
+          ].join('\n'),
+        }
       ).catch(() => {});
     }
 

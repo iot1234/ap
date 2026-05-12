@@ -105,41 +105,93 @@ async function tickLateFee(pool, flags, now, state) {
   const todayKey = now.toISOString().slice(0, 10);
   if (state.lastLateFeeMark === todayKey) return;
   try {
-    // Capture the rooms whose bills just flipped so we can sync ONLY those
-    // rooms' status downstream instead of scanning every room nightly.
-    // RETURNING room_id lets us batch the room-status update without a
-    // second SELECT pass.
     // PostgreSQL doesn't allow DISTINCT inside RETURNING — the old query
     // raised "syntax error at or near DISTINCT" every tick, so bills past
     // due_date were NEVER auto-marked overdue (and the room status cascade
-    // below never ran). Wrap in a CTE so we can de-dupe room_id with a
-    // plain SELECT DISTINCT on top.
-    const { rows } = await pool.query(
+    // below never ran). Wrap in a CTE so we can shape the result freely.
+    // We return one row per flipped bill (not deduped) because we need each
+    // bill's tenant + bill_no for the per-tenant overdue notification below.
+    const { rows: flipped } = await pool.query(
       `WITH bumped AS (
          UPDATE bills SET status='overdue'
            WHERE status='pending' AND due_date < CURRENT_DATE
-           RETURNING room_id
+           RETURNING id, room_id, tenant_id, total, due_date, bill_no, period
        )
-       SELECT DISTINCT room_id, COUNT(*)::int AS cnt FROM bumped GROUP BY room_id`
+       SELECT b.id, b.room_id, b.tenant_id, b.total, b.due_date, b.bill_no, b.period,
+              t.full_name, t.phone, t.email, t.line_user_id, t.line_oa_id, t.status AS tenant_status, t.deleted_at
+         FROM bumped b
+         LEFT JOIN tenants t ON t.id = b.tenant_id`
     );
-    if (rows.length) {
-      const total = rows.reduce((s, r) => s + (Number(r.cnt) || 0), 0);
-      console.log(`[scheduler] marked ${total} bill(s) overdue across ${rows.length} room(s)`);
-    }
-    // Cascade: any room with a freshly-overdue bill should flip to
-    // 'overdue' status. Imported lazily so a missing module on legacy
-    // deploys doesn't break the late-fee tick itself.
-    if (rows.length) {
+    if (flipped.length) {
+      const rooms = new Set(flipped.map((r) => r.room_id).filter(Boolean));
+      console.log(`[scheduler] marked ${flipped.length} bill(s) overdue across ${rooms.size} room(s)`);
+
+      // Cascade room status: any room with a freshly-overdue bill should
+      // flip to 'overdue' status. Imported lazily so a missing module on
+      // legacy deploys doesn't break the rest of the tick.
       try {
         const roomStatus = require('./roomStatus');
-        for (const r of rows) {
-          if (r.room_id) {
-            await roomStatus.syncRoom(pool, r.room_id, { reason: 'bill-overdue-cron' })
-              .catch((err) => console.warn(`[scheduler] room-status sync ${r.room_id} failed:`, err.message));
-          }
+        for (const roomId of rooms) {
+          await roomStatus.syncRoom(pool, roomId, { reason: 'bill-overdue-cron' })
+            .catch((err) => console.warn(`[scheduler] room-status sync ${roomId} failed:`, err.message));
         }
       } catch (err) {
         console.warn('[scheduler] room-status cascade unavailable:', err.message);
+      }
+
+      // Notify each tenant the same day their bill flipped overdue. Without
+      // this the only signal the tenant got was the next month's bill +
+      // accumulated late fee — surprise charges drive support tickets. Plain
+      // Thai, with the bill identity, the amount, what to do, and who to
+      // contact, so the tenant doesn't have to guess.
+      // Inline lookup — server.js has a loadBuildingName helper but it's
+      // private; we don't pull it through a require to avoid the cycle.
+      let buildingName = 'หอพัก';
+      try {
+        const cfgRes = await pool.query(
+          `SELECT value FROM app_data WHERE key='baankarn_config_v1' LIMIT 1`
+        );
+        const cfg = cfgRes.rows.length ? cfgRes.rows[0].value : {};
+        buildingName = (cfg && cfg.building && cfg.building.name) || 'หอพัก';
+      } catch { /* default already set */ }
+      for (const b of flipped) {
+        if (!b.tenant_id || b.tenant_status !== 'active' || b.deleted_at) continue;
+        try {
+          const amtStr = Number(b.total).toLocaleString('th-TH', { minimumFractionDigits: 2 });
+          const dueStr = b.due_date ? new Date(b.due_date).toLocaleDateString('th-TH', { year: 'numeric', month: 'short', day: 'numeric' }) : '-';
+          await notifier.notifyTenant({ pool, features: flags || {} }, {
+            id: b.tenant_id,
+            full_name: b.full_name,
+            phone: b.phone,
+            email: b.email,
+            line_user_id: b.line_user_id,
+            line_oa_id: b.line_oa_id,
+            status: b.tenant_status,
+          }, {
+            subject: '⏰ บิลของคุณเลยกำหนดชำระแล้ว',
+            text: [
+              `เรียน คุณ${b.full_name}`,
+              '',
+              `แจ้งให้ทราบว่า บิลด้านล่างเลยวันที่ครบกำหนดชำระแล้ว`,
+              '',
+              `📄 บิล: ${b.bill_no || `#${b.id}`}${b.period ? ` (รอบ ${b.period})` : ''}`,
+              `🏠 ห้อง: ${b.room_id || '-'}`,
+              `💰 ยอดที่ต้องชำระ: ฿${amtStr}`,
+              `📅 ครบกำหนดเมื่อ: ${dueStr}`,
+              '',
+              `📋 สิ่งที่ต้องทำ:`,
+              `   1) ชำระผ่าน QR PromptPay หรือโอนเงินตามที่ระบุในบิล`,
+              `   2) อัปโหลดสลิปที่พอร์ทัลผู้เช่า /tenant`,
+              `   3) ถ้าชำระเรียบร้อยแล้ว ระบบจะอัปเดตให้อัตโนมัติ`,
+              '',
+              `หมายเหตุ: หากค้างต่อเนื่องหลายวัน อาจมีค่าปรับและการระงับบัตรเข้า-ออก`,
+              '',
+              `หากชำระแล้วหรือมีข้อสงสัย ติดต่อ ${buildingName}`,
+            ].join('\n'),
+          });
+        } catch (err) {
+          console.warn(`[scheduler] overdue tenant notify failed for bill ${b.id}:`, err.message);
+        }
       }
     }
     state.lastLateFeeMark = todayKey;
