@@ -12,6 +12,10 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
           PageContainer, PageHeader, SectionHeading, DefList, Tabs, EmptyState } = window;
 
   const [tab, setTab] = useState('current');
+  // Period selector — defaults to current month but admin can step back to
+  // see past months. Without this the bills page only ever showed "now",
+  // so reconciling last quarter's invoices required hitting the API directly.
+  const [periodOffset, setPeriodOffset] = useState(0);
   const [selected, setSelected] = useState(new Set());
   const [confirmGenerate, setConfirmGenerate] = useState(false);
   const [previewBill, setPreviewBill] = useState(null);
@@ -37,15 +41,20 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
   // visible via `realBillsByRoom` so admin can tell estimate from issued.
   const currentPeriod = useMemo(() => {
     const now = new Date();
-    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-  }, []);
+    const dt = new Date(now.getFullYear(), now.getMonth() + periodOffset, 1);
+    return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}`;
+  }, [periodOffset]);
+  const currentPeriodDate = useMemo(() => {
+    const [y, m] = currentPeriod.split('-').map(Number);
+    return new Date(y, (m || 1) - 1, 1);
+  }, [currentPeriod]);
   const [dbBills, setDbBills] = React.useState(null);   // null = loading
   const [dbBillsErr, setDbBillsErr] = React.useState(null);
   const fetchDbBills = React.useCallback(() => {
     let cancel = false;
     setDbBills(null);
     setDbBillsErr(null);
-    fetch(`/api/bills?period=${encodeURIComponent(currentPeriod)}&limit=500`, {
+    fetch(`/api/bills?period=${encodeURIComponent(currentPeriod)}&limit=500&withPayments=1`, {
       credentials: 'same-origin',
     })
       .then(async (r) => {
@@ -158,6 +167,16 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
           status: real.status === 'paid' ? 'paid' : 'unpaid',
           dbStatus: real.status,                     // pending / paid / overdue / void
           total: Number(real.total) || est.total,    // trust DB total over estimate
+          // Slip summary (only present when fetched with withPayments=1).
+          // Used by the row "การชำระ" column + the new "📥 รอตรวจสลิป" tab
+          // so admin can see at-a-glance which bills have slips waiting,
+          // which were auto-paid, and which were admin-approved.
+          pendingSlipCount: Number(real.pending_slip_count) || 0,
+          verifiedSlipCount: Number(real.verified_slip_count) || 0,
+          rejectedSlipCount: Number(real.rejected_slip_count) || 0,
+          latestPaidBy: real.latest_paid_by || null,
+          latestPaidProvider: real.latest_paid_provider || null,
+          latestPaidAt: real.latest_paid_at || null,
         };
       });
   }, [rooms, config, realBillsByRoom]);
@@ -166,8 +185,14 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
     if (tab === 'current') return bills;
     if (tab === 'unpaid')  return bills.filter(b => b.status === 'unpaid');
     if (tab === 'paid')    return bills.filter(b => b.status === 'paid');
+    if (tab === 'review')  return bills.filter(b => (b.pendingSlipCount || 0) > 0);
     return bills;
   }, [bills, tab]);
+
+  const pendingReviewCount = useMemo(
+    () => bills.filter((b) => (b.pendingSlipCount || 0) > 0).length,
+    [bills]
+  );
 
   const stats = useMemo(() => {
     const issued = bills.length;
@@ -580,6 +605,80 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
       ),
     },
     {
+      // Slip status — at a glance shows whether a tenant has submitted a
+      // slip, whether it was auto-verified or admin-approved, and whether
+      // there's still one waiting for review. Clicking the badge jumps to
+      // /admin#payments pre-filtered to this bill so admin can act
+      // immediately without scanning the queue.
+      key: 'slipStatus', label: 'การชำระ', align: 'center', minWidth: 130,
+      render: b => {
+        if (b._source !== 'db' || !b.dbBillId) {
+          return <span style={{ fontSize: 11, color: C.muted }}>—</span>;
+        }
+        const pend = Number(b.pendingSlipCount) || 0;
+        const rej = Number(b.rejectedSlipCount) || 0;
+        const paidBy = b.latestPaidBy;
+        const jumpToPayments = (e) => {
+          e.stopPropagation();
+          window.location.hash = `#payments?billId=${encodeURIComponent(b.dbBillId)}`;
+        };
+        if (b.status === 'paid' && paidBy) {
+          const isAuto = String(paidBy).startsWith('auto:');
+          const provider = b.latestPaidProvider
+            || (isAuto ? String(paidBy).slice(5) : null);
+          const providerLabel = ({ slipok: 'SlipOK', easyslip: 'EasySlip', slip2go: 'Slip2Go' })[provider] || provider;
+          return (
+            <span
+              onClick={jumpToPayments}
+              title={isAuto
+                ? `ระบบตรวจสลิปอัตโนมัติยืนยันแล้ว (${providerLabel || '-'}) — คลิกดูสลิป`
+                : `แอดมิน "${paidBy}" อนุมัติด้วยตัวเอง — คลิกดูสลิป`}
+              style={{
+                cursor: 'pointer', fontSize: 12,
+                padding: '3px 8px', borderRadius: 999,
+                background: isAuto ? '#e3f3e8' : '#eaf1fb',
+                color: isAuto ? '#1d4a2c' : '#1d3a5b',
+                fontWeight: 600,
+              }}
+            >
+              {isAuto ? `🤖 ${providerLabel || 'ออโต้'}` : `👤 ${paidBy}`}
+            </span>
+          );
+        }
+        if (pend > 0) {
+          return (
+            <span
+              onClick={jumpToPayments}
+              title={`มีสลิป ${pend} ใบรอตรวจสอบ — คลิกเพื่อตรวจ`}
+              style={{
+                cursor: 'pointer', fontSize: 12,
+                padding: '3px 8px', borderRadius: 999,
+                background: '#fff4d4', color: '#7a5a18', fontWeight: 600,
+              }}
+            >
+              📥 รอตรวจ {pend} ใบ
+            </span>
+          );
+        }
+        if (rej > 0) {
+          return (
+            <span
+              onClick={jumpToPayments}
+              title={`สลิป ${rej} ใบถูกปฏิเสธ — รอผู้เช่าส่งใหม่`}
+              style={{
+                cursor: 'pointer', fontSize: 11.5,
+                padding: '3px 8px', borderRadius: 999,
+                background: '#ffe6e2', color: '#7a2920', fontWeight: 600,
+              }}
+            >
+              ⚠️ สลิปถูกปฏิเสธ {rej}
+            </span>
+          );
+        }
+        return <span style={{ fontSize: 11, color: C.muted }}>ยังไม่มีสลิป</span>;
+      },
+    },
+    {
       // Per-bill readiness icon — at a glance shows whether THIS bill can
       // be sent (or why not). Avoids "click 30 bills to find the 3 that
       // fail" pattern. Tooltip on the icon carries the reason.
@@ -641,9 +740,41 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
     <PageContainer>
       <PageHeader
         title="บิลและการเงิน"
-        subtitle={`เดือน ${fmtMonthTH(new Date())} · ${bills.length} ใบ`}
+        subtitle={`เดือน ${fmtMonthTH(currentPeriodDate)} · ${bills.length} ใบ`}
         actions={
           <>
+            <div style={{
+              display: 'inline-flex', alignItems: 'center', gap: 6,
+              padding: '4px 6px', border: `1px solid ${C.border}`,
+              borderRadius: 8, background: C.bg, color: C.ink,
+            }}>
+              <button
+                type="button"
+                aria-label="เดือนก่อนหน้า"
+                onClick={() => setPeriodOffset((x) => x - 1)}
+                style={{ border: 0, background: 'transparent', color: C.ink, cursor: 'pointer', fontSize: 16 }}
+              >‹</button>
+              <span style={{ minWidth: 76, textAlign: 'center', fontSize: 12.5, fontWeight: 600 }}>{currentPeriod}</span>
+              <button
+                type="button"
+                aria-label="เดือนถัดไป"
+                disabled={periodOffset >= 0}
+                onClick={() => setPeriodOffset((x) => Math.min(x + 1, 0))}
+                style={{
+                  border: 0, background: 'transparent',
+                  color: periodOffset >= 0 ? C.muted : C.ink,
+                  cursor: periodOffset >= 0 ? 'not-allowed' : 'pointer',
+                  fontSize: 16,
+                }}
+              >›</button>
+              {periodOffset !== 0 ? (
+                <button
+                  type="button"
+                  onClick={() => setPeriodOffset(0)}
+                  style={{ border: 0, background: 'transparent', color: C.accent || C.ink, cursor: 'pointer', fontSize: 12 }}
+                >เดือนนี้</button>
+              ) : null}
+            </div>
             <Btn variant="secondary" icon="📤" onClick={() => {
               if (window.exportBillsCSV(bills)) {
                 addActivity && addActivity({ icon: '📤', text: `ส่งออกบิลเดือนนี้ ${bills.length} ใบ เป็น CSV`, type: 'system' });
@@ -729,9 +860,10 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
 
       <Tabs
         items={[
-          { value: 'current', label: 'เดือนนี้',   count: bills.length },
-          { value: 'unpaid',  label: 'ค้างชำระ',  count: stats.unpaidCount },
-          { value: 'paid',    label: 'ชำระแล้ว',  count: stats.paidCount },
+          { value: 'current', label: 'เดือนนี้',         count: bills.length },
+          { value: 'unpaid',  label: 'ค้างชำระ',        count: stats.unpaidCount },
+          { value: 'review',  label: '📥 รอตรวจสลิป', count: pendingReviewCount },
+          { value: 'paid',    label: 'ชำระแล้ว',       count: stats.paidCount },
         ]}
         value={tab}
         onChange={setTab}
