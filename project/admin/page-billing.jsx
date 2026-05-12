@@ -68,6 +68,24 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
   }, [currentPeriod]);
   React.useEffect(() => fetchDbBills(), [fetchDbBills]);
 
+  // Cross-link consumer: when /admin#payments → "ดูบิลในหน้าบิล" hops over
+  // to /admin#billing?billId=42 we auto-open the matching bill's preview
+  // modal so the operator lands directly on the relevant row instead of
+  // having to scan the table.
+  React.useEffect(() => {
+    const openFromHash = () => {
+      const m = String(window.location.hash || '').match(/billId=([^&]+)/);
+      if (!m || !Array.isArray(dbBills)) return;
+      const id = Number(decodeURIComponent(m[1]));
+      if (!id) return;
+      const target = bills.find((b) => Number(b.dbBillId) === id);
+      if (target) setPreviewBill(target);
+    };
+    openFromHash();
+    window.addEventListener('hashchange', openFromHash);
+    return () => window.removeEventListener('hashchange', openFromHash);
+  }, [bills, dbBills]);
+
   // Batch readiness — refreshed alongside dbBills so the row status icons
   // stay in sync with the underlying ledger. Cheap (one JOIN-aggregated
   // query) so we can re-run it on every bills refresh without throttling.
