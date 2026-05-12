@@ -139,6 +139,28 @@ async function tickLateFee(pool, flags, now, state) {
         console.warn('[scheduler] room-status cascade unavailable:', err.message);
       }
 
+      // De-dupe with tickAccessControlSync: any tenant whose card will be
+      // revoked TODAY (because they already have a bill ≥ threshold days
+      // overdue) gets a single comprehensive "card suspended + here are
+      // ALL your unpaid bills" message from access-sync. Sending them an
+      // extra "another bill of yours is overdue" alert at the same hour
+      // is redundant and noisy. Collect those tenant ids up front and
+      // skip them in the per-bill loop below.
+      const tenantsGettingAccessAlert = new Set();
+      if (flags?.accessControl?.enabled && flags?.accessControl?.requirePaymentForCard) {
+        const rawThr = Number(flags.accessControl.overdueDaysThreshold);
+        const thr = Number.isFinite(rawThr) ? Math.max(1, Math.min(365, Math.trunc(rawThr))) : 30;
+        try {
+          const dq = await pool.query(`
+            SELECT DISTINCT tenant_id FROM bills
+              WHERE status='overdue' AND tenant_id IS NOT NULL
+                AND deleted_at IS NULL AND paid_at IS NULL
+                AND due_date < CURRENT_DATE - ($1::int * INTERVAL '1 day')
+          `, [thr]);
+          for (const r of dq.rows) tenantsGettingAccessAlert.add(Number(r.tenant_id));
+        } catch { /* fall back to sending the per-bill alert */ }
+      }
+
       // Notify each tenant the same day their bill flipped overdue. Without
       // this the only signal the tenant got was the next month's bill +
       // accumulated late fee — surprise charges drive support tickets. Plain
@@ -156,6 +178,10 @@ async function tickLateFee(pool, flags, now, state) {
       } catch { /* default already set */ }
       for (const b of flipped) {
         if (!b.tenant_id || b.tenant_status !== 'active' || b.deleted_at) continue;
+        // Skip this per-bill alert when the same tenant is about to get a
+        // comprehensive "card suspended + full unpaid list" message from
+        // tickAccessControlSync — sending both at the same hour is noise.
+        if (tenantsGettingAccessAlert.has(Number(b.tenant_id))) continue;
         try {
           const amtStr = Number(b.total).toLocaleString('th-TH', { minimumFractionDigits: 2 });
           const dueStr = b.due_date ? new Date(b.due_date).toLocaleDateString('th-TH', { year: 'numeric', month: 'short', day: 'numeric' }) : '-';
@@ -564,6 +590,87 @@ async function tickMeterSimulator(pool, flags, now, state) {
   }
 }
 
+// Auto-revoke reason — exported so callers (server.js, scheduler ticks)
+// agree on which `revoke_reason` value belongs to this subsystem. Manual
+// admin revokes use other reason strings, so restores only target our own
+// auto-revokes and never undo an admin's deliberate suspension.
+const ACCESS_CARD_AUTO_REVOKE_REASON = 'auto:overdue_bill';
+
+// Restore any cards that this subsystem auto-revoked for one tenant, but
+// only when the tenant no longer has any bill ≥ threshold days overdue.
+// Used by tickAccessControlSync (bulk daily pass) AND by the payment
+// verify path in server.js so the card un-blocks the SAME MINUTE the
+// tenant pays — instead of forcing them to wait up to 24 hours for the
+// next cron tick. Returns { restoredCount, restoredCardIds, tenant }.
+async function restoreAccessCardsForTenantIfClear(pool, tenantId, { threshold = 30, notifier: _notifier, flags, audit } = {}) {
+  if (!Number.isInteger(Number(tenantId))) return { restoredCount: 0, restoredCardIds: [] };
+  try {
+    const safeThreshold = Math.max(1, Math.min(365, Math.trunc(Number(threshold) || 30)));
+    const restore = await pool.query(`
+      UPDATE access_cards SET status='active', revoked_at=NULL, revoke_reason=NULL
+        WHERE status='revoked' AND revoke_reason=$1
+          AND tenant_id = $2
+          AND NOT EXISTS (
+            SELECT 1 FROM bills b
+              WHERE b.tenant_id = access_cards.tenant_id
+                AND b.status='overdue'
+                AND b.due_date < CURRENT_DATE - ($3::int * INTERVAL '1 day')
+                AND b.paid_at IS NULL
+                AND b.deleted_at IS NULL
+          )
+        RETURNING id, card_id
+    `, [ACCESS_CARD_AUTO_REVOKE_REASON, Number(tenantId), safeThreshold]);
+    if (restore.rowCount === 0) {
+      return { restoredCount: 0, restoredCardIds: [] };
+    }
+    // Audit each card individually so a /admin#access-events search shows
+    // exactly which physical card was reinstated, by whom, and why.
+    if (audit && typeof audit === 'function') {
+      for (const r of restore.rows) {
+        try {
+          await audit({
+            actor: 'system:payment-clear',
+            action: 'access_card.restore',
+            entity: 'access_card',
+            entityId: String(r.id),
+            details: { card_id: r.card_id, tenant_id: tenantId, trigger: 'bill-paid' },
+          });
+        } catch { /* audit is best-effort */ }
+      }
+    }
+    // Look up the tenant for the notify message.
+    let tenantRow = null;
+    try {
+      const t = await pool.query(
+        `SELECT id, full_name, phone, email, line_user_id, line_oa_id, status
+           FROM tenants WHERE id=$1 AND deleted_at IS NULL AND status='active'`,
+        [tenantId]
+      );
+      tenantRow = t.rows[0] || null;
+    } catch { /* fall through */ }
+    if (tenantRow && _notifier && typeof _notifier.notifyTenant === 'function') {
+      _notifier.notifyTenant({ pool, features: flags || {} }, tenantRow, {
+        subject: '🔓 บัตรเข้า-ออกกลับมาใช้ได้แล้ว',
+        text: [
+          `เรียน คุณ${tenantRow.full_name}`,
+          '',
+          `🎉 ระบบเปิดบัตรเข้า-ออกของคุณให้แล้ว — ขอบคุณที่ชำระบิลค้างเรียบร้อย`,
+          '',
+          `จำนวนบัตรที่กลับมาใช้ได้: ${restore.rowCount} ใบ`,
+        ].join('\n'),
+      }).catch((err) => console.warn('[access-restore] notify failed:', err.message));
+    }
+    return {
+      restoredCount: restore.rowCount,
+      restoredCardIds: restore.rows.map((r) => r.card_id),
+      tenant: tenantRow,
+    };
+  } catch (err) {
+    console.warn(`[access-restore] failed for tenant ${tenantId}:`, err.message);
+    return { restoredCount: 0, restoredCardIds: [], error: err.message };
+  }
+}
+
 // B2 — access control: revoke cards for tenants with overdue bills past
 // the configured grace window. Re-activate when their bills clear.
 async function tickAccessControlSync(pool, flags, now, state) {
@@ -575,7 +682,7 @@ async function tickAccessControlSync(pool, flags, now, state) {
   // older than `accessControl.overdueDaysThreshold` days past due. Bound
   // the threshold to a sane range (1-365) so a misconfigured value can't
   // either revoke same-day or never trigger.
-  const REVOKE_REASON = 'auto:overdue_bill';
+  const REVOKE_REASON = ACCESS_CARD_AUTO_REVOKE_REASON;
   const rawThreshold = Number(flags.accessControl?.overdueDaysThreshold);
   const threshold = Number.isFinite(rawThreshold)
     ? Math.max(1, Math.min(365, Math.trunc(rawThreshold)))
@@ -635,6 +742,42 @@ async function tickAccessControlSync(pool, flags, now, state) {
     writeState(state);
     if (revoked || restored) {
       console.log(`[scheduler] access cards: revoked=${revoked} restored=${restored}`);
+      // Audit log so /admin#access-events has a queryable trail of
+      // automatic revoke/restore actions. Previously the only signal was
+      // the console log + the access_cards row's revoked_at/revoke_reason
+      // — admins couldn't search "what did the cron do on 2026-05-12?"
+      // without grepping Railway logs.
+      try {
+        await pool.query(
+          `INSERT INTO audit_log (actor, action, entity, entity_id, details)
+           VALUES ('system:overdue-cron', 'access_card.bulk_sync', 'access_card', $1, $2::jsonb)`,
+          [
+            todayKey,
+            JSON.stringify({
+              revoked,
+              restored,
+              threshold,
+              revokedTenantIds: [...revokedTenants],
+              restoredTenantIds: [...restoredTenants],
+            }),
+          ]
+        );
+      } catch (err) {
+        if (err.code !== '42P01' && err.code !== '42703') {
+          console.warn('[scheduler] access-sync audit insert failed:', err.message);
+        }
+      }
+      // Stash today's action set in state so tickOverdueDigest (which
+      // runs in the same cycle but in a separate advisory lock) can mention
+      // the auto-revokes in the owner's daily digest. Without this the
+      // owner only saw the overdue bill list — not which tenants got
+      // their cards cut.
+      state.todaysAccessSync = {
+        date: todayKey,
+        revokedCount: revoked,
+        restoredCount: restored,
+      };
+      writeState(state);
     }
     // Notify each affected tenant individually so they understand WHY
     // their card stopped working (or that it's working again). Use the
@@ -660,18 +803,57 @@ async function tickAccessControlSync(pool, flags, now, state) {
         for (const t of affected.rows) {
           const action = tenantsToNotify.get(Number(t.id));
           const isRevoked = action === 'revoked';
+          // For the revoke message, pull the tenant's full list of unpaid
+          // bills so the message can ENUMERATE what's owed instead of just
+          // saying "you have overdue bills". A separate "today's bill is
+          // overdue" alert from tickLateFee would otherwise feel duplicate
+          // and disconnected — listing here gives one consolidated picture.
+          let billsBlock = '';
+          let totalOwed = 0;
+          if (isRevoked) {
+            try {
+              const ob = await pool.query(
+                `SELECT bill_no, period, total, due_date,
+                        (CURRENT_DATE - due_date)::int AS days_late
+                   FROM bills
+                  WHERE tenant_id=$1 AND status='overdue' AND deleted_at IS NULL
+                  ORDER BY due_date ASC
+                  LIMIT 10`,
+                [t.id]
+              );
+              if (ob.rows.length) {
+                billsBlock = '\n📋 บิลที่ค้างทั้งหมดของคุณ:\n';
+                for (const b of ob.rows) {
+                  const amt = Number(b.total).toLocaleString('th-TH', { minimumFractionDigits: 2 });
+                  totalOwed += Number(b.total) || 0;
+                  billsBlock += `   • ${b.bill_no || '-'} (รอบ ${b.period || '-'}) — ฿${amt} · ค้าง ${b.days_late} วัน\n`;
+                }
+                billsBlock += `\n💰 ยอดค้างรวม: ฿${totalOwed.toLocaleString('th-TH', { minimumFractionDigits: 2 })}\n`;
+              }
+            } catch { /* listing is best-effort */ }
+          }
           const subject = isRevoked
             ? '🔒 บัตรเข้า-ออกถูกระงับ — ค้างชำระค่าเช่า'
             : '🔓 บัตรเข้า-ออกกลับมาใช้ได้แล้ว';
           const body = isRevoked
-            ? `เรียน คุณ${t.full_name}\n\n`
-              + `ระบบได้ระงับบัตรเข้า-ออกของคุณชั่วคราวเนื่องจากมีบิลค้างชำระเกิน ${threshold} วัน\n\n`
-              + `📋 วิธีแก้:\n`
-              + `   1) ชำระบิลค้างผ่านพอร์ทัล /tenant\n`
-              + `   2) เมื่อยืนยันการชำระเรียบร้อย ระบบจะเปิดใช้บัตรอัตโนมัติภายใน 24 ชม.\n\n`
-              + `หากมีปัญหาติดต่อสำนักงาน`
-            : `เรียน คุณ${t.full_name}\n\n`
-              + `บัตรเข้า-ออกของคุณกลับมาใช้ได้แล้ว — ขอบคุณที่ชำระบิลตรงเวลา 🎉`;
+            ? [
+              `เรียน คุณ${t.full_name}`,
+              '',
+              `ระบบได้ระงับบัตรเข้า-ออกของคุณชั่วคราว เนื่องจากมีบิลค้างชำระเกิน ${threshold} วัน`,
+              billsBlock,
+              `📋 วิธีแก้:`,
+              `   1) ชำระบิลค้างทั้งหมดผ่านพอร์ทัลผู้เช่า /tenant`,
+              `   2) เมื่อยืนยันการชำระเรียบร้อย ระบบจะเปิดใช้บัตรให้ทันที`,
+              `      (ไม่ต้องรอ — ทันทีที่สลิปผ่านการตรวจสอบ)`,
+              '',
+              `หากมีปัญหาติดต่อสำนักงาน`,
+            ].filter(Boolean).join('\n')
+            : [
+              `เรียน คุณ${t.full_name}`,
+              '',
+              `🎉 บัตรเข้า-ออกของคุณกลับมาใช้ได้แล้ว`,
+              `ขอบคุณที่ชำระบิลค้าง — ระบบยืนยันแล้วว่าไม่มีบิลค้างเกินกำหนด`,
+            ].join('\n');
           notifier.notifyTenant({ pool, features: flags || {} }, t, {
             subject, text: body,
           }).catch((err) => {
@@ -907,6 +1089,24 @@ async function tickOverdueDigest(pool, flags, now, state) {
       lines.push('');
       lines.push(`📥 สลิปรอตรวจ ${pendingCount} ใบ — รวม ฿${pendingAmount.toLocaleString('th-TH', { minimumFractionDigits: 2 })}`);
       lines.push('   → ตรวจที่ /admin#payments');
+    }
+    // Surface today's access-card auto-revoke / auto-restore activity so
+    // the owner sees the consequence of overdue bills (cards cut) in the
+    // same daily message. The data is stashed by tickAccessControlSync
+    // for this exact tick — same calendar date guard so we don't surface
+    // yesterday's number.
+    const accessToday = state.todaysAccessSync;
+    if (accessToday && accessToday.date === todayKey
+        && (accessToday.revokedCount || accessToday.restoredCount)) {
+      lines.push('');
+      lines.push(`🔐 บัตรเข้า-ออกอัตโนมัติวันนี้:`);
+      if (accessToday.revokedCount) {
+        lines.push(`   🔒 ระงับ: ${accessToday.revokedCount} ใบ (ค้างชำระเกินกำหนด)`);
+      }
+      if (accessToday.restoredCount) {
+        lines.push(`   🔓 คืนสิทธิ์: ${accessToday.restoredCount} ใบ (ชำระเรียบร้อย)`);
+      }
+      lines.push('   → ดูที่ /admin#access');
     }
     if (rows.length > 0) {
       lines.push('');
@@ -1187,4 +1387,13 @@ function stop() {
   _interval = null;
 }
 
-module.exports = { start, stop, tick };
+module.exports = {
+  start,
+  stop,
+  tick,
+  // Exported for server.js so the payment.verify and slip auto-verify
+  // paths can reinstate cards the moment a tenant clears their overdue
+  // balance — instead of forcing them to wait for the next daily tick.
+  restoreAccessCardsForTenantIfClear,
+  ACCESS_CARD_AUTO_REVOKE_REASON,
+};

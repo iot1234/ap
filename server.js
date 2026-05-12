@@ -4039,21 +4039,26 @@ async function loadBillPaymentAttemptSummary(db, billId, tenantId) {
 }
 
 function publicSlipBlockReason({ flags, payable, paid, attempts }) {
-  if (paid) return { code: 'PAID', message: 'bill is already paid' };
+  if (paid) return { code: 'PAID', message: 'บิลนี้ชำระเรียบร้อยแล้ว ไม่ต้องส่งสลิปเพิ่ม' };
   if (!flags.slipUpload || !flags.slipUpload.enabled) {
-    return { code: 'SLIP_UPLOAD_DISABLED', message: 'slip upload is disabled' };
+    return { code: 'SLIP_UPLOAD_DISABLED', message: 'ระบบยังไม่เปิดรับอัปโหลดสลิปออนไลน์' };
   }
-  if (!payable) return { code: 'BILL_NOT_PAYABLE', message: 'bill is not payable' };
+  if (!payable) {
+    return {
+      code: 'BILL_NOT_PAYABLE',
+      message: 'บิลนี้ยังไม่สามารถชำระผ่านระบบได้ กรุณาติดต่อแอดมิน',
+    };
+  }
   if (attempts && attempts.hasPending) {
     return {
       code: 'PAYMENT_UNDER_REVIEW',
-      message: 'a slip is already waiting for admin review',
+      message: 'มีสลิปรอแอดมินตรวจสอบอยู่แล้ว กรุณารอผลก่อนส่งใหม่',
     };
   }
   if (attempts && attempts.remaining <= 0) {
     return {
       code: 'SLIP_UPLOAD_LIMIT_REACHED',
-      message: 'slip upload limit reached; contact admin',
+      message: 'อัปโหลดสลิปครบ 3 ครั้งแล้ว กรุณาติดต่อแอดมิน',
     };
   }
   return null;
@@ -4265,10 +4270,10 @@ app.get('/pay/:billId', rateLimitPublicPayment, (req, res) => {
 
 app.get('/api/public/bills/:billId/payment', rateLimitPublicPayment, async (req, res) => {
   const id = Number(req.params.billId);
-  if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+  if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'ลิงก์ชำระเงินไม่ถูกต้อง กรุณาติดต่อแอดมิน' });
   const token = String(req.query.t || '');
   if (!verifyBillPayToken(id, token)) {
-    return res.status(403).json({ error: 'invalid or expired token', code: 'INVALID_TOKEN' });
+    return res.status(403).json({ error: 'ลิงก์ชำระเงินไม่ถูกต้องหรือหมดอายุ กรุณาติดต่อแอดมิน', code: 'INVALID_TOKEN' });
   }
   try {
     const { rows } = await pool.query(
@@ -4281,11 +4286,11 @@ app.get('/api/public/bills/:billId/payment', rateLimitPublicPayment, async (req,
         LIMIT 1`,
       [id]
     );
-    if (!rows.length) return res.status(404).json({ error: 'bill not found' });
+    if (!rows.length) return res.status(404).json({ error: 'ไม่พบบิลนี้ กรุณาติดต่อแอดมิน' });
     const bill = rows[0];
     if (!bill.tenant_id || bill.tenant_deleted_at || bill.tenant_status !== 'active') {
       return res.status(409).json({
-        error: 'bill is not linked to an active tenant',
+        error: 'บิลนี้ยังไม่ได้ผูกกับผู้เช่าที่ใช้งานอยู่ กรุณาติดต่อแอดมิน',
         code: 'BILL_NOT_LINKED_TO_ACTIVE_TENANT',
       });
     }
@@ -4345,10 +4350,10 @@ app.get('/api/public/bills/:billId/payment', rateLimitPublicPayment, async (req,
 
 app.post('/api/public/bills/:billId/payments', rateLimitPublicPayment, sameOrigin, async (req, res) => {
   const id = Number(req.params.billId);
-  if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+  if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'ลิงก์ชำระเงินไม่ถูกต้อง กรุณาติดต่อแอดมิน' });
   const token = String(req.query.t || '');
   if (!verifyBillPayToken(id, token)) {
-    return res.status(403).json({ error: 'invalid or expired token', code: 'INVALID_TOKEN' });
+    return res.status(403).json({ error: 'ลิงก์ชำระเงินไม่ถูกต้องหรือหมดอายุ กรุณาติดต่อแอดมิน', code: 'INVALID_TOKEN' });
   }
   try {
     const { rows } = await pool.query(
@@ -4361,17 +4366,17 @@ app.post('/api/public/bills/:billId/payments', rateLimitPublicPayment, sameOrigi
         LIMIT 1`,
       [id]
     );
-    if (!rows.length) return res.status(404).json({ error: 'bill not found' });
+    if (!rows.length) return res.status(404).json({ error: 'ไม่พบบิลนี้ กรุณาติดต่อแอดมิน' });
     const row = rows[0];
     if (row.tenant_status !== 'active' || !row.current_room_id) {
       return res.status(403).json({
-        error: 'tenant is not active for this bill',
+        error: 'บิลนี้ไม่ได้อยู่กับผู้เช่าที่ใช้งานอยู่ กรุณาติดต่อแอดมิน',
         code: 'TENANT_NOT_ACTIVE',
       });
     }
     const flags = await features.load(pool);
     if (!flags.slipUpload || !flags.slipUpload.enabled) {
-      return res.status(503).json({ error: 'slipUpload disabled' });
+      return res.status(503).json({ error: 'ระบบยังไม่เปิดรับอัปโหลดสลิปออนไลน์ กรุณาติดต่อแอดมิน' });
     }
     const payable = row.status === 'pending' || row.status === 'overdue';
     const attempts = await loadBillPaymentAttemptSummary(pool, id, row.tenant_id);
@@ -5333,6 +5338,14 @@ app.put('/api/bills/:id/void', sameOrigin, csrfGuard, requireAuth, requireRole('
       hadVerifiedPayment: verified.rows.length > 0,
     });
     notifyBillVoided(rows[0], reason, req.session.user.username).catch(() => {});
+    // Voiding the last overdue bill should flip the room out of 'overdue'
+    // — without this cascade the room kept showing 'overdue' until the
+    // daily safety-net tick, so admins clicking "void" then expecting
+    // the room to free up immediately saw stale state.
+    if (rows[0].room_id) {
+      require('./services/roomStatus').syncRoom(pool, rows[0].room_id, { reason: 'bill-void' })
+        .catch((err) => console.warn(`[bill.void] room sync failed:`, err.message));
+    }
     res.json({ ok: true, bill: rows[0] });
   } catch (err) {
     console.error('bill void error:', err);
@@ -5820,6 +5833,28 @@ async function tenantPaymentUploadHandler(req, res) {
       require('./services/roomStatus').syncRoom(pool, committedRoomId, { reason: 'slip-auto-verify' })
         .catch((err) => console.warn(`[slip-upload] room sync failed:`, err.message));
     }
+    // Immediate access-card reinstate when the auto-verified payment
+    // cleared a tenant's overdue balance. Mirrors the cascade in
+    // /api/payments/:id/verify so a tenant who uploads via portal /
+    // public link / LINE doesn't have to wait for the next daily tick
+    // to use their access card again.
+    if (initialStatus === 'verified' && req.tenant?.tenant_id) {
+      try {
+        const threshold = Number(req.features?.accessControl?.overdueDaysThreshold) || 30;
+        require('./services/scheduler').restoreAccessCardsForTenantIfClear(pool, req.tenant.tenant_id, {
+          threshold,
+          notifier: require('./services/notifier'),
+          flags: req.features,
+          audit: async (entry) => {
+            await pool.query(
+              `INSERT INTO audit_log (actor, action, entity, entity_id, details)
+               VALUES ($1, $2, $3, $4, $5::jsonb)`,
+              [entry.actor, entry.action, entry.entity, entry.entityId, JSON.stringify(entry.details || {})]
+            ).catch(() => {});
+          },
+        }).catch((err) => console.warn(`[slip-upload] access-card restore failed:`, err.message));
+      } catch (err) { console.warn(`[slip-upload] access-card restore outer error:`, err.message); }
+    }
     audit(req, 'tenant.slip_upload', 'payment', String(row.id),
       {
         billId, amount,
@@ -5867,6 +5902,32 @@ async function tenantPaymentUploadHandler(req, res) {
         verified: 'อนุมัติแล้ว',
         rejected: 'ถูกปฏิเสธ',
       })[adminAttempts?.latest?.status] || adminAttempts?.latest?.status || '-';
+      const partyDetail = (label, party) => {
+        if (!party || typeof party !== 'object') return null;
+        const detail = [
+          party.name || party.displayName || null,
+          party.bank || null,
+          party.account ? `บัญชีลงท้าย ${String(party.account).replace(/[^0-9]/g, '').slice(-6) || party.account}` : null,
+        ].filter(Boolean).join(' / ');
+        return detail ? `${label}: ${detail}` : null;
+      };
+      const verifyAttemptTrail = Array.isArray(verifyResult?.attempts) && verifyResult.attempts.length
+        ? verifyResult.attempts
+            .map((a) => `${a.provider || 'provider'}:${a.ok ? 'ผ่าน' : (a.code || 'ไม่ผ่าน')}`)
+            .join(', ')
+        : null;
+      const verifyAmount = Number(verifyResult?.amount);
+      const verifyDetailLines = [
+        verifyResult?.provider ? `บริการตรวจสลิป: ${verifyResult.provider}` : null,
+        verifyResult?.code ? `รหัสผลตรวจสำหรับแอดมิน: ${verifyResult.code}` : null,
+        Number.isFinite(verifyAmount)
+          ? `ยอดที่บริการอ่านจากสลิป: ฿${verifyAmount.toLocaleString('th-TH', { minimumFractionDigits: 2 })}`
+          : null,
+        partyDetail('ผู้โอนในสลิป', verifyResult?.sender),
+        partyDetail('ผู้รับในสลิป', verifyResult?.receiver),
+        verifyResult?.transDate ? `เวลารายการในสลิป: ${verifyResult.transDate}` : null,
+        verifyAttemptTrail ? `เส้นทาง provider: ${verifyAttemptTrail}` : null,
+      ].filter(Boolean);
       const adminDetailLines = [
         adminBill?.room_id ? `🏠 ห้อง: ${adminBill.room_id}` : null,
         adminBill?.bill_no ? `📄 เลขบิล: ${adminBill.bill_no}` : null,
@@ -5885,6 +5946,7 @@ async function tenantPaymentUploadHandler(req, res) {
         adminAttempts?.latest
           ? `🕐 สลิปล่าสุด: ${latestSlipStatusTh}${adminAttempts.latest.rejected_reason ? ` — ${adminAttempts.latest.rejected_reason}` : ''}`
           : null,
+        ...verifyDetailLines,
         initialReason ? `📝 ผลการตรวจอัตโนมัติ: ${initialReason}` : null,
         verifyResult?.transRef ? `🔖 เลขอ้างอิงรายการโอน: ${verifyResult.transRef}` : null,
         '', // blank line before action
@@ -6045,9 +6107,9 @@ async function tenantPaymentUploadHandler(req, res) {
       ...attemptSummary,
       canUpload: attemptSummary.remaining > 0 && !attemptSummary.hasPending && row.status !== 'verified',
       blocked: attemptSummary.remaining <= 0
-        ? { code: 'SLIP_UPLOAD_LIMIT_REACHED', message: 'slip upload limit reached; contact admin' }
+        ? { code: 'SLIP_UPLOAD_LIMIT_REACHED', message: 'อัปโหลดสลิปครบ 3 ครั้งแล้ว กรุณาติดต่อแอดมิน' }
         : (attemptSummary.hasPending
-            ? { code: 'PAYMENT_UNDER_REVIEW', message: 'a slip is already waiting for admin review' }
+            ? { code: 'PAYMENT_UNDER_REVIEW', message: 'มีสลิปรอแอดมินตรวจสอบอยู่แล้ว กรุณารอผลก่อนส่งใหม่' }
             : null),
     } : null;
     res.json({
@@ -6436,6 +6498,30 @@ app.put('/api/payments/:id/verify', sameOrigin, csrfGuard, requireAuth, requireR
             .catch((err) => console.warn(`[payment.verify] room sync failed:`, err.message));
         }
       } catch (err) { console.warn(`[payment.verify] room lookup failed:`, err.message); }
+      // Immediate access-card reinstate. Previously the tenant had to wait
+      // until the next daily tickAccessControlSync — up to 24 hours — even
+      // though they just cleared their balance. Now: pay → bill paid →
+      // cascade restores any cards this subsystem auto-revoked, and the
+      // tenant gets "🔓 บัตรเข้า-ออกกลับมาใช้ได้แล้ว" in the same minute.
+      // Threshold pulled from features so it matches the daily cron's logic.
+      if (row.tenant_id) {
+        try {
+          const flags = await features.load(pool).catch(() => ({}));
+          const threshold = Number(flags?.accessControl?.overdueDaysThreshold) || 30;
+          require('./services/scheduler').restoreAccessCardsForTenantIfClear(pool, row.tenant_id, {
+            threshold,
+            notifier: require('./services/notifier'),
+            flags,
+            audit: async (entry) => {
+              await pool.query(
+                `INSERT INTO audit_log (actor, action, entity, entity_id, details)
+                 VALUES ($1, $2, $3, $4, $5::jsonb)`,
+                [entry.actor, entry.action, entry.entity, entry.entityId, JSON.stringify(entry.details || {})]
+              ).catch(() => {});
+            },
+          }).catch((err) => console.warn(`[payment.verify] access-card restore failed:`, err.message));
+        } catch (err) { console.warn(`[payment.verify] access-card restore outer error:`, err.message); }
+      }
       return res.json({ ok: true, payment: row });
     }
     // accept === false — reject path. No bill UPDATE needed because a

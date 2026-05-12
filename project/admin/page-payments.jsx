@@ -7,6 +7,45 @@
 (function () {
 const { useState, useEffect, useMemo, useRef } = React;
 
+const PAYMENT_STATUS_LABEL = {
+  pending: 'รอตรวจสอบ',
+  verified: 'อนุมัติแล้ว',
+  rejected: 'ปฏิเสธ',
+};
+
+const BILL_STATUS_LABEL = {
+  pending: 'รอชำระ',
+  overdue: 'ค้างชำระ',
+  paid: 'ชำระแล้ว',
+  void: 'ยกเลิก',
+};
+
+function paymentStatusLabel(status) {
+  return PAYMENT_STATUS_LABEL[status] || status || '-';
+}
+
+function billStatusLabel(status) {
+  return BILL_STATUS_LABEL[status] || status || '-';
+}
+
+function fmtMoney(value) {
+  return Number(value || 0).toLocaleString('th-TH', { minimumFractionDigits: 2 });
+}
+
+function partySummary(party) {
+  if (!party) return '-';
+  return [
+    party.name,
+    party.bank,
+    party.account ? `บัญชีลงท้าย ${String(party.account).replace(/[^0-9]/g, '').slice(-6) || party.account}` : null,
+  ].filter(Boolean).join(' / ') || '-';
+}
+
+function formatVerifyAttempt(attempt) {
+  if (!attempt) return '-';
+  return `${attempt.provider || 'provider'}:${attempt.ok ? 'ผ่าน' : (attempt.code || 'ไม่ผ่าน')}`;
+}
+
 function PagePayments({ setToast }) {
   // Diagnostic: prove the component actually mounted. Visible in DevTools
   // console — useful when the user reports a "white screen with no error"
@@ -191,16 +230,18 @@ function PagePayments({ setToast }) {
                 gridTemplateColumns: '1fr auto auto', gap: 16, alignItems: 'center', cursor: 'pointer',
               }} onClick={() => openPayment(p)}>
                 <div>
-                  <div style={{ fontWeight: 600 }}>{p.tenant_name || '—'} · ห้อง {p.bill_no || p.bill_id}</div>
+                  <div style={{ fontWeight: 600 }}>
+                    {p.tenant_name || '—'} · ห้อง {p.room_id || '-'} · บิล {p.bill_no || p.bill_id}
+                  </div>
                   <div style={{ color: C.muted, fontSize: 12.5 }}>
                     {p.tenant_phone || ''} · {new Date(p.created_at).toLocaleString('th-TH')}
                   </div>
                 </div>
-                <div style={{ fontFamily: 'Sora', fontWeight: 600 }}>฿{Number(p.amount).toLocaleString('th-TH', { minimumFractionDigits: 2 })}</div>
+                <div style={{ fontFamily: 'Sora', fontWeight: 600 }}>฿{fmtMoney(p.amount)}</div>
                 <div style={{ textAlign: 'right' }}>
-                  <Pill color={stColor[p.status]}>{p.status}</Pill>
+                  <Pill color={stColor[p.status]}>{paymentStatusLabel(p.status)}</Pill>
                   <div style={{ marginTop: 4, color: p.status === 'rejected' ? C.danger : C.muted, fontSize: 11.5 }}>
-                    ห้อง {p.room_id || '-'} · {p.bill_status || '-'} · อัปโหลด {p.upload_attempts || 1}/3
+                    สถานะบิล {billStatusLabel(p.bill_status)} · อัปโหลด {p.upload_attempts || 1}/3
                   </div>
                 </div>
               </div>
@@ -237,7 +278,7 @@ function SlipModal({ payment, busy, onClose, onDecide }) {
       }}>
         <h3 style={{ margin: 0, fontFamily: 'Sora', fontWeight: 600 }}>สลิปชำระเงิน</h3>
         <p style={{ color: C.muted, fontSize: 13 }}>
-          {payment.tenant_name || ''} · {payment.tenant_phone || ''} · บิล {payment.bill_no || payment.bill_id}
+          {payment.tenant_name || ''} · {payment.tenant_phone || ''} · ห้อง {payment.room_id || '-'} · บิล {payment.bill_no || payment.bill_id}
         </p>
         {payment._slipLoading ? (
           <div style={{ color: C.muted, padding: '12px 0' }}>กำลังโหลดสลิป...</div>
@@ -248,12 +289,13 @@ function SlipModal({ payment, busy, onClose, onDecide }) {
           </a>
         ) : <div style={{ color: C.muted }}>ไม่มีรูปสลิป</div>}
         <div style={{ marginTop: 12 }}>
-          <div>จำนวนเงิน: <strong>฿{Number(payment.amount).toLocaleString('th-TH', { minimumFractionDigits: 2 })}</strong></div>
+          <div>จำนวนเงินที่ผู้เช่าระบุ: <strong>฿{fmtMoney(payment.amount)}</strong></div>
           <div>วันที่: {new Date(payment.created_at).toLocaleString('th-TH')}</div>
+          <div>สถานะสลิป: {paymentStatusLabel(payment.status)}</div>
         </div>
         <div style={{ marginTop: 10, padding: 10, borderRadius: 8, background: C.bgSoft || '#fbf6ec', color: C.ink2, fontSize: 12.5, lineHeight: 1.6 }}>
-          <div>ห้อง: {payment.room_id || '-'} · สถานะบิล: {payment.bill_status || '-'}</div>
-          {payment.bill_total != null ? <div>ยอดตามบิล: ฿{Number(payment.bill_total).toLocaleString('th-TH', { minimumFractionDigits: 2 })}</div> : null}
+          <div>ห้อง: {payment.room_id || '-'} · สถานะบิล: {billStatusLabel(payment.bill_status)}</div>
+          {payment.bill_total != null ? <div>ยอดตามบิล: ฿{fmtMoney(payment.bill_total)}</div> : null}
           <div>อัปโหลดสลิป: {payment.upload_attempts || 1}/3</div>
           {payment.rejected_reason ? <div>เหตุผลปฏิเสธ: {payment.rejected_reason}</div> : null}
           {payment.verify_provider ? <div>ผู้ตรวจ: {payment.verify_provider}</div> : null}
@@ -261,17 +303,19 @@ function SlipModal({ payment, busy, onClose, onDecide }) {
           {payment.verify_payload && payment.verify_payload.code ? <div>รหัสตรวจสลิป: {payment.verify_payload.code}</div> : null}
           {payment.verify_payload && payment.verify_payload.error ? <div>ข้อความจากบริการตรวจ: {payment.verify_payload.error}</div> : null}
           {payment.verify_payload && payment.verify_payload.amount != null ? (
-            <div>ยอดที่บริการอ่านได้: ฿{Number(payment.verify_payload.amount).toLocaleString('th-TH', { minimumFractionDigits: 2 })}</div>
+            <div>ยอดที่บริการอ่านได้: ฿{fmtMoney(payment.verify_payload.amount)}</div>
+          ) : null}
+          {payment.verify_payload && payment.verify_payload.sender ? (
+            <div>ผู้โอนในสลิป: {partySummary(payment.verify_payload.sender)}</div>
           ) : null}
           {payment.verify_payload && payment.verify_payload.receiver ? (
-            <div>ผู้รับในสลิป: {[
-              payment.verify_payload.receiver.name,
-              payment.verify_payload.receiver.bank,
-              payment.verify_payload.receiver.account ? `...${String(payment.verify_payload.receiver.account).slice(-6)}` : null,
-            ].filter(Boolean).join(' / ') || '-'}</div>
+            <div>ผู้รับในสลิป: {partySummary(payment.verify_payload.receiver)}</div>
+          ) : null}
+          {payment.verify_payload && payment.verify_payload.transDate ? (
+            <div>เวลารายการในสลิป: {payment.verify_payload.transDate}</div>
           ) : null}
           {payment.verify_payload && Array.isArray(payment.verify_payload.attempts) && payment.verify_payload.attempts.length ? (
-            <div>เส้นทางตรวจ: {payment.verify_payload.attempts.map((a) => `${a.provider}:${a.ok ? 'ok' : (a.code || 'fail')}`).join(', ')}</div>
+            <div>เส้นทางตรวจ: {payment.verify_payload.attempts.map(formatVerifyAttempt).join(', ')}</div>
           ) : null}
         </div>
         {payment.status === 'pending' ? (
@@ -299,7 +343,7 @@ function SlipModal({ payment, busy, onClose, onDecide }) {
                   // status flips. Show the amount + bill so admin spots a
                   // mismatched slip image (e.g. tenant uploaded the wrong
                   // month's slip).
-                  const amt = Number(payment.amount).toLocaleString('th-TH', { minimumFractionDigits: 2 });
+                  const amt = fmtMoney(payment.amount);
                   const ok = window.confirm(
                     `อนุมัติสลิป — ตั้งบิลเป็น "ชำระแล้ว"?\n\n` +
                     `ผู้เช่า: ${payment.tenant_name || '-'}\n` +

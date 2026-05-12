@@ -784,6 +784,14 @@ test('slip upload returns structured verifier results to tenant/public UIs', () 
     'server notice must explain receiver mismatches');
   assert.match(server, /attempts:\s*Array\.isArray\(verifyResult\?\.attempts\)/,
     'server notice must include provider attempt trail');
+  assert.match(server, /const verifyDetailLines = \[/,
+    'owner payment notification must build a detailed verifier section');
+  assert.match(server, /ยอดที่บริการอ่านจากสลิป/,
+    'owner payment notification must include the provider-read amount');
+  assert.match(server, /ผู้รับในสลิป/,
+    'owner payment notification must include the slip receiver detail');
+  assert.match(server, /เส้นทาง provider/,
+    'owner payment notification must include provider fallback trail');
 
   assert.match(tenant, /paymentNoticeFromResponse/,
     'tenant portal must render structured verification response');
@@ -791,6 +799,8 @@ test('slip upload returns structured verifier results to tenant/public UIs', () 
     'tenant upload must show verifier outcome from the API');
   assert.match(tenant, /บริการตรวจสลิป/,
     'tenant notice must include provider detail');
+  assert.match(tenant, /รหัสอ้างอิงสำหรับแจ้งแอดมิน/,
+    'tenant notice should present verifier codes as admin reference, not user-facing jargon');
   assert.doesNotMatch(tenant, /setMsg\(t\('uploadOk'\)\)/,
     'tenant upload must not collapse every outcome to a generic success string');
   assert.doesNotMatch(tenant, /setTimeout\(\(\) => \{ onClose\(\); refresh\(\); \}, 800\)/,
@@ -800,6 +810,8 @@ test('slip upload returns structured verifier results to tenant/public UIs', () 
     'public pay link must render structured verification response');
   assert.match(pay, /ยอดที่อ่านจากสลิป/,
     'public pay link must show the provider-read amount when available');
+  assert.match(pay, /รหัสอ้างอิงสำหรับแจ้งแอดมิน/,
+    'public pay link should present verifier codes as an admin reference');
 });
 
 test('/api/payments exposes admin queue summary counts', () => {
@@ -820,6 +832,14 @@ test('/api/payments exposes admin queue summary counts', () => {
     'admin payments page must display per-status counts');
   assert.match(adminPayments, /เส้นทางตรวจ:/,
     'admin payment modal must show provider attempt trail');
+  assert.match(adminPayments, /function paymentStatusLabel/,
+    'admin payments page must translate payment statuses into Thai labels');
+  assert.match(adminPayments, /function billStatusLabel/,
+    'admin payments page must translate bill statuses into Thai labels');
+  assert.match(adminPayments, /formatVerifyAttempt/,
+    'admin payment modal must translate provider attempt trail for operators');
+  assert.match(adminPayments, /ผู้โอนในสลิป/,
+    'admin payment modal must show sender details when verifier provides them');
 });
 
 test('LINE image messages can submit slips through the shared payment handler', () => {

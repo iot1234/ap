@@ -285,7 +285,7 @@ function paymentNoticeFromResponse(out, locale) {
         : (th ? 'สลิปถูกส่งให้แอดมินตรวจสอบ ระบบจะแจ้งผลเมื่ออนุมัติหรือปฏิเสธ' : 'The slip is queued for admin review.'));
   const details = [];
   if (v && v.provider) details.push(`${th ? 'บริการตรวจสลิป' : 'Verifier'}: ${v.provider}`);
-  if (v && v.code) details.push(`${th ? 'รหัสผลตรวจ' : 'Result code'}: ${v.code}`);
+  if (v && v.code) details.push(`${th ? 'รหัสอ้างอิงสำหรับแจ้งแอดมิน' : 'Admin reference code'}: ${v.code}`);
   if (v && v.transactionRef) details.push(`${th ? 'เลขอ้างอิง' : 'Reference'}: ${v.transactionRef}`);
   if (v && v.amount != null) details.push(`${th ? 'ยอดที่อ่านจากสลิป' : 'Slip amount'}: ฿${fmtCurrency(v.amount)}`);
   const sender = partyText(v && v.sender);

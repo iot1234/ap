@@ -384,6 +384,14 @@ module.exports = function buildTenantOpsRouter(ctx) {
         );
 
         await client.query('COMMIT');
+        // Cascade room status post-commit. The blob + rooms_v2 updates above
+        // set the room to 'occupied' directly, but if a cron tick raced the
+        // checkin and saw a stale state (e.g. an old contract still 'active'),
+        // the room could drift. syncRoom re-derives from authoritative sources
+        // (contracts + active bills + reservation pointer) so the result
+        // matches what /admin#rooms shows.
+        require('../services/roomStatus').syncRoom(pool, roomId, { reason: 'tenant-checkin' })
+          .catch((err) => console.warn(`[checkin] room sync failed:`, err.message));
         audit(req, 'tenant.checkin', 'tenant', String(id),
           { roomId, depositAmount, monthlyRent, contractNo,
             forced: isForced, missingAtCheckin: missing });
@@ -630,6 +638,15 @@ module.exports = function buildTenantOpsRouter(ctx) {
         }
 
         await client.query('COMMIT');
+        // Cascade room status. Checkout set status='vacant' inline, but the
+        // closing bill (if generated) is in 'pending' state and could fire a
+        // late-fee tick concurrently — syncRoom re-derives the final state
+        // (vacant when no active contract + no payable bills) so an admin
+        // looking at /admin#rooms right after checkout sees the right thing.
+        if (oldRoom) {
+          require('../services/roomStatus').syncRoom(pool, oldRoom, { reason: 'tenant-checkout' })
+            .catch((err) => console.warn(`[checkout] room sync failed:`, err.message));
+        }
         audit(req, 'tenant.checkout', 'tenant', String(id),
           { oldRoom, reason, refund,
             cardsRevoked: revokedCards.rows.map((c) => c.card_id),

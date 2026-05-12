@@ -87,7 +87,7 @@ function verificationMessage(out, fallbackUpload) {
     v.message,
   ];
   if (v.provider) lines.push(`บริการตรวจสลิป: ${v.provider}`);
-  if (v.code) lines.push(`รหัสผลตรวจ: ${v.code}`);
+  if (v.code) lines.push(`รหัสอ้างอิงสำหรับแจ้งแอดมิน: ${v.code}`);
   if (v.transactionRef) lines.push(`เลขอ้างอิง: ${v.transactionRef}`);
   if (v.amount != null) lines.push(`ยอดที่อ่านจากสลิป: ฿${fmt(v.amount)}`);
   const sender = slipPartyText(v.sender);
