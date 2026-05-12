@@ -65,6 +65,41 @@ function contactAdminMessage(upload) {
   return 'บิลนี้ไม่สามารถอัปโหลดสลิปเพิ่มได้แล้ว กรุณาติดต่อแอดมิน';
 }
 
+function slipPartyText(party) {
+  if (!party) return '';
+  return [party.name, party.bank, party.account ? `...${String(party.account).slice(-6)}` : null]
+    .filter(Boolean).join(' / ');
+}
+
+function verificationMessage(out, fallbackUpload) {
+  const v = out && out.verification;
+  const payment = (out && out.payment) || {};
+  const upload = (out && out.upload) || fallbackUpload || null;
+  if (!v) {
+    if (payment.status === 'verified') return 'ชำระเงินสำเร็จ ระบบอัปเดตสถานะบิลแล้ว';
+    if (payment.status === 'rejected') {
+      return `${payment.rejected_reason || 'สลิปไม่ผ่านการตรวจสอบ'}\n${contactAdminMessage(upload)}`;
+    }
+    return 'อัปโหลดสลิปสำเร็จ รอแอดมินตรวจสอบ';
+  }
+  const lines = [
+    v.title || 'ผลการตรวจสอบสลิป',
+    v.message,
+  ];
+  if (v.provider) lines.push(`บริการตรวจสลิป: ${v.provider}`);
+  if (v.code) lines.push(`รหัสผลตรวจ: ${v.code}`);
+  if (v.transactionRef) lines.push(`เลขอ้างอิง: ${v.transactionRef}`);
+  if (v.amount != null) lines.push(`ยอดที่อ่านจากสลิป: ฿${fmt(v.amount)}`);
+  const sender = slipPartyText(v.sender);
+  const receiver = slipPartyText(v.receiver);
+  if (sender) lines.push(`ผู้โอน: ${sender}`);
+  if (receiver) lines.push(`ผู้รับ: ${receiver}`);
+  if (v.nextAction) lines.push(`ขั้นตอนถัดไป: ${v.nextAction}`);
+  if (upload) lines.push(`อัปโหลดแล้ว: ${upload.used}/${upload.max} ครั้ง`);
+  if (v.status === 'rejected') lines.push(contactAdminMessage(upload));
+  return lines.filter(Boolean).join('\n');
+}
+
 function blockMessage(upload) {
   const code = upload && upload.blocked && upload.blocked.code;
   if (code === 'PAYMENT_UNDER_REVIEW') return 'มีสลิปรอแอดมินตรวจสอบอยู่ กรุณารอผลการตรวจสอบ';
@@ -155,19 +190,21 @@ function App() {
       const st = out.payment && out.payment.status;
       if (st === 'verified') {
         setMessageKind('success');
-        setMessage('ชำระเงินสำเร็จ ระบบอัปเดตสถานะบิลแล้ว');
+        setMessage(verificationMessage(out, data && data.upload));
       } else if (st === 'rejected') {
         setMessageKind('error');
-        setMessage(`${out.payment.rejected_reason || 'สลิปไม่ผ่านการตรวจสอบ'}\n${contactAdminMessage(out.upload || (data && data.upload))}`);
+        setMessage(verificationMessage(out, data && data.upload));
       } else {
         setMessageKind('pending');
-        setMessage('อัปโหลดสลิปสำเร็จ รอแอดมินตรวจสอบ');
+        setMessage(verificationMessage(out, data && data.upload));
       }
       setFile(null);
       await load(true);
     } catch (e) {
       setMessageKind('error');
-      setMessage(`${e.message || 'อัปโหลดไม่สำเร็จ'}\n${contactAdminMessage(e.data && e.data.upload)}`);
+      setMessage(e.data && e.data.verification
+        ? verificationMessage(e.data, e.data.upload)
+        : `${e.message || 'อัปโหลดไม่สำเร็จ'}\n${contactAdminMessage(e.data && e.data.upload)}`);
       await load(true);
     } finally {
       setBusy(false);

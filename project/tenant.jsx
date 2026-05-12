@@ -246,6 +246,102 @@ function fmtCurrency(n) {
   return Number(n || 0).toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
+function partyText(party) {
+  if (!party) return '';
+  return [party.name, party.bank, party.account ? `...${String(party.account).slice(-6)}` : null]
+    .filter(Boolean).join(' / ');
+}
+
+function noticeStyle(kind) {
+  if (kind === 'success') {
+    return { background: '#eef8f1', border: '1px solid #bee4ca', color: 'var(--green)' };
+  }
+  if (kind === 'error') {
+    return { background: '#fff4f1', border: '1px solid #f3c2b8', color: 'var(--red)' };
+  }
+  if (kind === 'processing' || kind === 'pending') {
+    return { background: '#fffbe8', border: '1px solid #f0e3a7', color: '#6b5b1a' };
+  }
+  return { background: '#f3f7ff', border: '1px solid #c7d8f5', color: '#315a9c' };
+}
+
+function paymentNoticeFromResponse(out, locale) {
+  const th = locale !== 'en';
+  const v = out && out.verification ? out.verification : null;
+  const payment = out && out.payment ? out.payment : {};
+  const status = (v && v.status) || payment.status;
+  const kind = status === 'verified' ? 'success' : status === 'rejected' ? 'error' : 'pending';
+  const title = (v && v.title) || (status === 'verified'
+    ? (th ? 'ชำระเงินสำเร็จ' : 'Payment verified')
+    : status === 'rejected'
+      ? (th ? 'สลิปไม่ผ่านการตรวจสอบ' : 'Slip rejected')
+      : (th ? 'รับสลิปแล้ว รอตรวจสอบ' : 'Slip received, awaiting review'));
+  const message = (v && v.message)
+    || payment.rejected_reason
+    || (status === 'verified'
+      ? (th ? 'ระบบตรวจสอบสลิปและอัปเดตบิลแล้ว' : 'The slip was verified and the bill was updated.')
+      : status === 'rejected'
+        ? (th ? 'กรุณาตรวจสอบยอด บัญชีปลายทาง และ QR code แล้วอัปโหลดใหม่ หากยังไม่ผ่านให้ติดต่อแอดมิน' : 'Check the amount, receiver account, and QR code, then upload again or contact admin.')
+        : (th ? 'สลิปถูกส่งให้แอดมินตรวจสอบ ระบบจะแจ้งผลเมื่ออนุมัติหรือปฏิเสธ' : 'The slip is queued for admin review.'));
+  const details = [];
+  if (v && v.provider) details.push(`${th ? 'บริการตรวจสลิป' : 'Verifier'}: ${v.provider}`);
+  if (v && v.code) details.push(`${th ? 'รหัสผลตรวจ' : 'Result code'}: ${v.code}`);
+  if (v && v.transactionRef) details.push(`${th ? 'เลขอ้างอิง' : 'Reference'}: ${v.transactionRef}`);
+  if (v && v.amount != null) details.push(`${th ? 'ยอดที่อ่านจากสลิป' : 'Slip amount'}: ฿${fmtCurrency(v.amount)}`);
+  const sender = partyText(v && v.sender);
+  const receiver = partyText(v && v.receiver);
+  if (sender) details.push(`${th ? 'ผู้โอน' : 'Sender'}: ${sender}`);
+  if (receiver) details.push(`${th ? 'ผู้รับ' : 'Receiver'}: ${receiver}`);
+  if (v && v.nextAction) details.push(`${th ? 'ขั้นตอนถัดไป' : 'Next'}: ${v.nextAction}`);
+  if (out && out.upload) {
+    details.push(`${th ? 'จำนวนครั้งที่อัปโหลด' : 'Upload attempts'}: ${out.upload.used}/${out.upload.max}`);
+  }
+  return { kind, title, message, details };
+}
+
+function paymentNoticeFromError(err, locale) {
+  const th = locale !== 'en';
+  if (err && err.data && err.data.verification) {
+    return paymentNoticeFromResponse(err.data, locale);
+  }
+  const code = err && (err.code || err.data?.code);
+  const message = (err && err.message) || (th ? 'อัปโหลดสลิปไม่สำเร็จ' : 'Slip upload failed');
+  const byCode = {
+    CSRF_INVALID: th
+      ? 'ระบบยืนยันความปลอดภัยหมดอายุ กรุณากดอัปโหลดอีกครั้งหรือรีเฟรชหน้า'
+      : 'The security token expired. Upload again or refresh the page.',
+    INVALID_SLIP: th
+      ? 'ไฟล์สลิปไม่ถูกต้องหรืออ่านไม่ได้ กรุณาอัปโหลดรูป JPG/PNG/WebP ที่ชัดเจน'
+      : 'Invalid slip file. Upload a clear JPG/PNG/WebP image.',
+    AMOUNT_NOT_BILL_TOTAL: th
+      ? 'ยอดที่กรอกไม่ตรงกับยอดบิล กรุณาตรวจยอดแล้วอัปโหลดใหม่'
+      : 'The entered amount does not match the bill total.',
+    DUPLICATE_SLIP_HASH: th
+      ? 'สลิปนี้ถูกใช้ไปแล้ว กรุณาอัปโหลดสลิปของรายการโอนใหม่หรือติดต่อแอดมิน'
+      : 'This slip was already used. Upload another transfer slip or contact admin.',
+    DUPLICATE_TRANSACTION: th
+      ? 'เลขอ้างอิงรายการโอนซ้ำ กรุณาใช้สลิปรายการใหม่หรือติดต่อแอดมิน'
+      : 'Duplicate transfer reference. Upload a new transfer slip or contact admin.',
+    PAYMENT_UNDER_REVIEW: th
+      ? 'มีสลิปรอตรวจสอบอยู่แล้ว กรุณารอแอดมินอนุมัติหรือติดต่อแอดมิน'
+      : 'A slip is already under review. Wait for admin approval or contact admin.',
+    SLIP_UPLOAD_LIMIT_REACHED: th
+      ? 'อัปโหลดครบ 3 ครั้งแล้ว ระบบไม่รับสลิปเพิ่ม กรุณาติดต่อแอดมิน'
+      : 'The upload limit has been reached. Contact admin.',
+  };
+  const details = [];
+  if (code) details.push(`${th ? 'รหัสข้อผิดพลาด' : 'Error code'}: ${code}`);
+  if (err && err.data && err.data.upload) {
+    details.push(`${th ? 'จำนวนครั้งที่อัปโหลด' : 'Upload attempts'}: ${err.data.upload.used}/${err.data.upload.max}`);
+  }
+  return {
+    kind: 'error',
+    title: th ? 'อัปโหลดสลิปไม่สำเร็จ' : 'Slip upload failed',
+    message: byCode[code] || message,
+    details,
+  };
+}
+
 const STATUS_COLOR = {
   pending: '#c08a2a', overdue: '#b94a48', paid: '#2f8f5b', void: '#8a7d6b',
   open: '#c08a2a', assigned: '#3a7bba', in_progress: '#3a7bba',
@@ -429,7 +525,7 @@ function BillDetail({ bill, locale, onClose, slipFeature, refresh }) {
   const [amount, setAmount] = useState(String(bill.total));
   const [file, setFile] = useState(null);
   const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState('');
+  const [notice, setNotice] = useState(null);
   const [pay, setPay] = useState(null);
   // pay-readiness: server-side preflight that tells us which channels are
   // actually working for THIS bill + why others don't. Used to gate the
@@ -521,23 +617,26 @@ function BillDetail({ bill, locale, onClose, slipFeature, refresh }) {
     || amountMismatch;
   async function upload() {
     if (amountInvalid) {
-      setMsg(locale === 'th' ? 'กรุณาระบุจำนวนเงินให้ถูกต้อง' : 'Enter a valid payment amount.');
+      setNotice({ kind: 'error', title: locale === 'th' ? 'จำนวนเงินไม่ถูกต้อง' : 'Invalid amount', message: locale === 'th' ? 'กรุณาระบุจำนวนเงินให้ถูกต้อง' : 'Enter a valid payment amount.' });
       return;
     }
     if (amountMismatch) {
-      setMsg(`${t('amountMismatchWarn')} (฿${fmtCurrency(bill.total)})`);
+      setNotice({ kind: 'error', title: locale === 'th' ? 'ยอดไม่ตรงกับบิล' : 'Amount mismatch', message: `${t('amountMismatchWarn')} (฿${fmtCurrency(bill.total)})` });
       return;
     }
     if (readinessHardError) {
-      setMsg(readinessError.msg || 'Payment is not available for this bill.');
+      setNotice({ kind: 'error', title: locale === 'th' ? 'ยังชำระผ่านระบบไม่ได้' : 'Payment unavailable', message: readinessError.msg || 'Payment is not available for this bill.' });
       return;
     }
     if (readiness?.channels?.slip === false) {
       const first = blockingIssues[0] || advisoryIssues[0];
-      setMsg(first?.msg || 'Slip upload is not available for this bill.');
+      setNotice({ kind: 'error', title: locale === 'th' ? 'อัปโหลดสลิปไม่ได้' : 'Slip upload unavailable', message: first?.msg || 'Slip upload is not available for this bill.' });
       return;
     }
-    if (!file) { setMsg(t('chooseFile')); return; }
+    if (!file) {
+      setNotice({ kind: 'error', title: t('chooseFile'), message: locale === 'th' ? 'กรุณาแนบรูปสลิปก่อนกดยืนยัน' : 'Attach a slip image before submitting.' });
+      return;
+    }
     // Pre-flight using the readiness probe. Confirm if there's anything
     // unusual (different account configured, autoVerify not ready, etc.)
     // so the tenant gets a chance to read the reason before submitting.
@@ -555,17 +654,26 @@ function BillDetail({ bill, locale, onClose, slipFeature, refresh }) {
       );
       if (!ok) return;
     }
-    setBusy(true); setMsg('');
+    setBusy(true);
+    setNotice({
+      kind: 'processing',
+      title: locale === 'th' ? 'กำลังตรวจสอบสลิป' : 'Checking slip',
+      message: locale === 'th'
+        ? 'ระบบกำลังอัปโหลดและส่งสลิปไปตรวจสอบกับบริการตรวจสลิป กรุณารอสักครู่'
+        : 'Uploading and verifying the slip. Please wait.',
+    });
     try {
       const dataUrl = await fileToDataUrl(file);
-      await api('/api/tenant/payments', {
+      const out = await api('/api/tenant/payments', {
         method: 'POST',
         body: JSON.stringify({ billId: bill.id, amount: Number(amount), slip: dataUrl }),
       });
-      setMsg(t('uploadOk'));
-      setTimeout(() => { onClose(); refresh(); }, 800);
+      setNotice(paymentNoticeFromResponse(out, locale));
+      setFile(null);
+      if (typeof refresh === 'function') refresh();
     } catch (e) {
-      setMsg(e.message || 'error');
+      setNotice(paymentNoticeFromError(e, locale));
+      if (typeof refresh === 'function') refresh();
     } finally { setBusy(false); }
   }
   return (
@@ -741,7 +849,21 @@ function BillDetail({ bill, locale, onClose, slipFeature, refresh }) {
               </div>
             ) : null}
             <button onClick={upload} disabled={busy || slipUploadBlocked} style={btnPrimary}>{busy ? '…' : t('uploadSlip')}</button>
-            {msg ? <div style={{ marginTop: 8, color: 'var(--muted)', fontSize: 13 }}>{msg}</div> : null}
+            {notice ? (
+              <div style={{
+                marginTop: 10, padding: 12, borderRadius: 8,
+                fontSize: 13, lineHeight: 1.55,
+                ...noticeStyle(notice.kind),
+              }}>
+                <div style={{ fontWeight: 700, marginBottom: 4 }}>{notice.title}</div>
+                <div>{notice.message}</div>
+                {notice.details && notice.details.length ? (
+                  <div style={{ marginTop: 8, fontSize: 12.5 }}>
+                    {notice.details.map((line, idx) => <div key={idx}>- {line}</div>)}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
           </div>
         ) : null}
         {/* When slip upload is gated off, the tenant still sees this bill

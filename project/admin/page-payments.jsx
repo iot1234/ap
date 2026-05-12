@@ -41,6 +41,7 @@ function PagePayments({ setToast }) {
 
   const [filter, setFilter] = useState('pending');
   const [list, setList] = useState([]);
+  const [summary, setSummary] = useState(null);
   const [open, setOpen] = useState(null);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -70,13 +71,16 @@ function PagePayments({ setToast }) {
           setLoadError(d.error || `HTTP ${r.status}`);
         }
         setList([]);
+        setSummary(null);
       } else {
         setList(Array.isArray(d.payments) ? d.payments : []);
+        setSummary(d.summary || null);
       }
     } catch (err) {
       if (err.name !== 'AbortError') {
         setLoadError(err.message || 'network error');
         setList([]);
+        setSummary(null);
       }
     } finally {
       req.done();
@@ -127,6 +131,9 @@ function PagePayments({ setToast }) {
   }
 
   const stColor = { pending: C.warning, verified: C.success, rejected: C.danger };
+  const countFor = (status) => Number(summary?.[status]?.count || 0);
+  const amountFor = (status) => Number(summary?.[status]?.amount || 0)
+    .toLocaleString('th-TH', { minimumFractionDigits: 2 });
 
   return (
     <PageContainer>
@@ -140,6 +147,31 @@ function PagePayments({ setToast }) {
             <option value="rejected">ปฏิเสธ</option>
           </select>
         } />
+      {summary ? (
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit,minmax(150px,1fr))',
+          gap: 10,
+          marginBottom: 12,
+        }}>
+          {[
+            ['pending', 'รอตรวจสอบ', C.warning],
+            ['verified', 'อนุมัติแล้ว', C.success],
+            ['rejected', 'ปฏิเสธ', C.danger],
+          ].map(([status, label, color]) => (
+            <div key={status} style={{
+              padding: '10px 12px',
+              border: '1px solid ' + (C.borderSoft || C.border),
+              borderRadius: 8,
+              background: C.bgSoft || C.bg,
+              color: C.ink,
+            }}>
+              <div style={{ color, fontWeight: 700, fontSize: 18 }}>{countFor(status)}</div>
+              <div style={{ fontSize: 12.5, color: C.muted }}>{label} · ฿{amountFor(status)}</div>
+            </div>
+          ))}
+        </div>
+      ) : null}
       <Card>
         {loading ? (
           <div style={{ padding: 32, textAlign: 'center', color: C.muted, fontSize: 13.5 }}>
@@ -221,11 +253,26 @@ function SlipModal({ payment, busy, onClose, onDecide }) {
         </div>
         <div style={{ marginTop: 10, padding: 10, borderRadius: 8, background: C.bgSoft || '#fbf6ec', color: C.ink2, fontSize: 12.5, lineHeight: 1.6 }}>
           <div>ห้อง: {payment.room_id || '-'} · สถานะบิล: {payment.bill_status || '-'}</div>
+          {payment.bill_total != null ? <div>ยอดตามบิล: ฿{Number(payment.bill_total).toLocaleString('th-TH', { minimumFractionDigits: 2 })}</div> : null}
           <div>อัปโหลดสลิป: {payment.upload_attempts || 1}/3</div>
           {payment.rejected_reason ? <div>เหตุผลปฏิเสธ: {payment.rejected_reason}</div> : null}
           {payment.verify_provider ? <div>ผู้ตรวจ: {payment.verify_provider}</div> : null}
           {payment.transaction_ref ? <div>เลขอ้างอิง: {payment.transaction_ref}</div> : null}
           {payment.verify_payload && payment.verify_payload.code ? <div>รหัสตรวจสลิป: {payment.verify_payload.code}</div> : null}
+          {payment.verify_payload && payment.verify_payload.error ? <div>ข้อความจากบริการตรวจ: {payment.verify_payload.error}</div> : null}
+          {payment.verify_payload && payment.verify_payload.amount != null ? (
+            <div>ยอดที่บริการอ่านได้: ฿{Number(payment.verify_payload.amount).toLocaleString('th-TH', { minimumFractionDigits: 2 })}</div>
+          ) : null}
+          {payment.verify_payload && payment.verify_payload.receiver ? (
+            <div>ผู้รับในสลิป: {[
+              payment.verify_payload.receiver.name,
+              payment.verify_payload.receiver.bank,
+              payment.verify_payload.receiver.account ? `...${String(payment.verify_payload.receiver.account).slice(-6)}` : null,
+            ].filter(Boolean).join(' / ') || '-'}</div>
+          ) : null}
+          {payment.verify_payload && Array.isArray(payment.verify_payload.attempts) && payment.verify_payload.attempts.length ? (
+            <div>เส้นทางตรวจ: {payment.verify_payload.attempts.map((a) => `${a.provider}:${a.ok ? 'ok' : (a.code || 'fail')}`).join(', ')}</div>
+          ) : null}
         </div>
         {payment.status === 'pending' ? (
           <>

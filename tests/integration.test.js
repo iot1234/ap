@@ -724,6 +724,15 @@ test('public bill payment upload has retry limit + admin-visible diagnostics', (
     'server must block uploads after the retry limit is reached');
   assert.match(server, /upload:\s*\{/,
     'public payment APIs must return upload attempt details to the page');
+  const handlerIdx = server.indexOf('async function tenantPaymentUploadHandler');
+  const retryGate = server.slice(handlerIdx, server.indexOf('// Hash the actual slip bytes', handlerIdx));
+  assert.match(retryGate, /const attemptsBeforeUpload = await loadBillPaymentAttemptSummary/,
+    'shared upload handler must load attempt state before accepting any slip');
+  assert.ok(
+    retryGate.indexOf('const attemptsBeforeUpload = await loadBillPaymentAttemptSummary')
+      < retryGate.indexOf('if (req.publicPayment)'),
+    'retry gate must apply before the public-link-only metadata branch so tenant portal uploads are capped too'
+  );
   assert.match(pay, /redirect:\s*'manual'/,
     'public pay page must not silently follow an auth/login redirect during upload');
   assert.match(pay, /กำลังประมวลผลสลิป/,
@@ -736,6 +745,61 @@ test('public bill payment upload has retry limit + admin-visible diagnostics', (
     'admin slip modal must show whether the bill is still unpaid/paid');
   assert.match(adminPayments, /รหัสตรวจสลิป:/,
     'admin slip modal must surface verifier failure codes for detailed review');
+});
+
+test('slip upload returns structured verifier results to tenant/public UIs', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const tenant = fs.readFileSync(path.join(__dirname, '..', 'project', 'tenant.jsx'), 'utf8');
+  const pay = fs.readFileSync(path.join(__dirname, '..', 'project', 'pay.jsx'), 'utf8');
+
+  assert.match(server, /function buildSlipVerificationNotice/,
+    'server must build a structured tenant-facing verifier notice');
+  assert.match(server, /verification:\s*buildSlipVerificationNotice/,
+    'upload response must include the verifier notice');
+  assert.match(server, /AMOUNT_MISMATCH[\s\S]{0,300}ยอดในสลิปไม่ตรงกับยอดบิล/,
+    'server notice must explain amount mismatches');
+  assert.match(server, /RECEIVER_MISMATCH[\s\S]{0,300}บัญชีปลายทางไม่ตรงกับที่ตั้งไว้/,
+    'server notice must explain receiver mismatches');
+  assert.match(server, /attempts:\s*Array\.isArray\(verifyResult\?\.attempts\)/,
+    'server notice must include provider attempt trail');
+
+  assert.match(tenant, /paymentNoticeFromResponse/,
+    'tenant portal must render structured verification response');
+  assert.match(tenant, /setNotice\(paymentNoticeFromResponse\(out, locale\)\)/,
+    'tenant upload must show verifier outcome from the API');
+  assert.match(tenant, /บริการตรวจสลิป/,
+    'tenant notice must include provider detail');
+  assert.doesNotMatch(tenant, /setMsg\(t\('uploadOk'\)\)/,
+    'tenant upload must not collapse every outcome to a generic success string');
+  assert.doesNotMatch(tenant, /setTimeout\(\(\) => \{ onClose\(\); refresh\(\); \}, 800\)/,
+    'tenant modal must stay open long enough to show the upload result');
+
+  assert.match(pay, /verificationMessage/,
+    'public pay link must render structured verification response');
+  assert.match(pay, /ยอดที่อ่านจากสลิป/,
+    'public pay link must show the provider-read amount when available');
+});
+
+test('/api/payments exposes admin queue summary counts', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const adminPayments = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-payments.jsx'), 'utf8');
+
+  assert.match(server, /summaryRes\s*=\s*await pool\.query/,
+    'payments list endpoint must query global payment status summary');
+  assert.match(server, /const summary = \{\s*pending:\s*\{ count: 0, amount: 0 \}/,
+    'payments list endpoint must return a stable pending/verified/rejected summary shape');
+  assert.match(server, /res\.json\(\{ ok: true, payments: rows, summary, limit, offset \}\)/,
+    'payments list response must include summary');
+  assert.match(adminPayments, /const \[summary, setSummary\]/,
+    'admin payments page must track queue summary state');
+  assert.match(adminPayments, /countFor\(status\)/,
+    'admin payments page must display per-status counts');
+  assert.match(adminPayments, /เส้นทางตรวจ:/,
+    'admin payment modal must show provider attempt trail');
 });
 
 test('LINE image messages can submit slips through the shared payment handler', () => {

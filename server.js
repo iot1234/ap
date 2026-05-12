@@ -4036,6 +4036,141 @@ function publicSlipBlockReason({ flags, payable, paid, attempts }) {
   return null;
 }
 
+function publicPartyForSlipNotice(party) {
+  if (!party || typeof party !== 'object') return null;
+  return {
+    name: party.name || party.displayName || null,
+    bank: party.bank || null,
+    account: party.account || null,
+  };
+}
+
+function slipRejectCopy(code, fallback) {
+  const map = {
+    AMOUNT_MISMATCH: {
+      title: 'ยอดในสลิปไม่ตรงกับยอดบิล',
+      message: fallback || 'ระบบตรวจพบว่ายอดเงินในสลิปไม่ตรงกับยอดที่ต้องชำระ',
+      nextAction: 'ตรวจยอดในบิลและอัปโหลดสลิปที่โอนยอดถูกต้องใหม่ หากโอนถูกแล้วให้ติดต่อแอดมิน',
+    },
+    RECEIVER_MISMATCH: {
+      title: 'บัญชีปลายทางไม่ตรงกับที่ตั้งไว้',
+      message: fallback || 'สลิปนี้ไม่ได้โอนเข้าบัญชี/พร้อมเพย์ของหอพักที่ตั้งไว้ในระบบ',
+      nextAction: 'ตรวจบัญชีปลายทางก่อนอัปโหลดใหม่ หากแน่ใจว่าโอนถูกบัญชีให้ติดต่อแอดมิน',
+    },
+    RECEIVER_UNREADABLE: {
+      title: 'ตรวจบัญชีปลายทางจากสลิปไม่ได้',
+      message: fallback || 'บริการตรวจสลิปอ่านข้อมูลบัญชีปลายทางจากสลิปไม่ได้',
+      nextAction: 'อัปโหลดรูปสลิปที่ชัดเจน มี QR code และรายละเอียดครบ หรือ ติดต่อแอดมิน',
+    },
+    DUPLICATE_SLIP: {
+      title: 'สลิปนี้ถูกใช้หรือตรวจสอบไปแล้ว',
+      message: fallback || 'ระบบพบว่าสลิปหรือรายการโอนนี้ถูกใช้ไปแล้ว',
+      nextAction: 'อัปโหลดสลิปของรายการโอนใหม่ หากเป็นความผิดพลาดให้ติดต่อแอดมิน',
+    },
+    DUPLICATE_SLIP_HASH: {
+      title: 'สลิปนี้ถูกอัปโหลดซ้ำ',
+      message: fallback || 'ไฟล์สลิปนี้ถูกใช้ไปแล้ว ไม่สามารถส่งซ้ำได้',
+      nextAction: 'อัปโหลดสลิปใหม่ หรือ ติดต่อแอดมินหากชำระถูกต้องแล้ว',
+    },
+    DUPLICATE_TRANSACTION: {
+      title: 'เลขอ้างอิงรายการโอนซ้ำ',
+      message: fallback || 'รายการโอนนี้ถูกใช้กับสลิปก่อนหน้าแล้ว',
+      nextAction: 'อัปโหลดสลิปของรายการโอนอื่น หรือ ติดต่อแอดมิน',
+    },
+    DATE_MISMATCH: {
+      title: 'วันที่ในสลิปไม่ตรงเงื่อนไข',
+      message: fallback || 'บริการตรวจสลิปแจ้งว่าวันที่ของรายการไม่ตรงตามเงื่อนไข',
+      nextAction: 'ตรวจสลิปให้ตรงกับบิลนี้ หรือ ติดต่อแอดมิน',
+    },
+    SLIPOK_REJECT: {
+      title: 'สลิปไม่ผ่านการตรวจสอบ',
+      message: fallback || 'บริการตรวจสลิปไม่สามารถยืนยันสลิปนี้ได้ อาจไม่มี QR code หรือข้อมูลไม่ถูกต้อง',
+      nextAction: 'อัปโหลดสลิปตัวจริงที่มี QR code ชัดเจน หรือ ติดต่อแอดมิน',
+    },
+    EASYSLIP_REJECT: {
+      title: 'สลิปไม่ผ่านการตรวจสอบ',
+      message: fallback || 'บริการตรวจสลิปไม่สามารถยืนยันสลิปนี้ได้ อาจไม่มี QR code หรือข้อมูลไม่ถูกต้อง',
+      nextAction: 'อัปโหลดสลิปตัวจริงที่มี QR code ชัดเจน หรือ ติดต่อแอดมิน',
+    },
+    SLIP2GO_REJECT: {
+      title: 'สลิปไม่ผ่านการตรวจสอบ',
+      message: fallback || 'บริการตรวจสลิปไม่สามารถยืนยันสลิปนี้ได้ อาจไม่มี QR code หรือข้อมูลไม่ถูกต้อง',
+      nextAction: 'อัปโหลดสลิปตัวจริงที่มี QR code ชัดเจน หรือ ติดต่อแอดมิน',
+    },
+  };
+  if (map[code]) return map[code];
+  return {
+    title: 'สลิปไม่ผ่านการตรวจสอบ',
+    message: fallback || 'บริการตรวจสลิปแจ้งว่าสลิปนี้ไม่ถูกต้องหรือยืนยันไม่ได้',
+    nextAction: 'ตรวจยอด บัญชีปลายทาง และ QR code แล้วอัปโหลดใหม่ หากยังไม่ผ่านให้ติดต่อแอดมิน',
+  };
+}
+
+function buildSlipVerificationNotice({
+  initialStatus,
+  verifyResult,
+  autoVerifyAttempted,
+  requireVerification,
+  upload,
+}) {
+  const code = verifyResult?.code || null;
+  const provider = verifyResult?.provider || null;
+  const fallback = verifyResult?.error || null;
+  let title;
+  let message;
+  let nextAction;
+  let severity = 'info';
+
+  if (initialStatus === 'verified') {
+    severity = 'success';
+    title = 'ชำระเงินสำเร็จ';
+    message = verifyResult?.ok
+      ? 'ระบบตรวจสอบแล้วว่าสลิปเป็นรายการจริง ยอดและบัญชีปลายทางตรงกับที่ตั้งไว้'
+      : 'ระบบรับสลิปและบันทึกการชำระเงินสำเร็จ';
+    nextAction = 'บิลถูกตั้งเป็นชำระแล้ว';
+  } else if (initialStatus === 'pending') {
+    severity = 'pending';
+    if (verifyResult?.ok && requireVerification) {
+      title = 'สลิปตรวจผ่าน รอแอดมินอนุมัติ';
+      message = 'บริการตรวจสลิปยืนยันรายการแล้ว แต่ระบบตั้งค่าให้แอดมินตรวจทานก่อนปิดบิล';
+      nextAction = 'รอแอดมินอนุมัติ ระบบจะแจ้งผลเมื่อดำเนินการแล้ว';
+    } else if (autoVerifyAttempted) {
+      title = 'รับสลิปแล้ว แต่ยังตรวจอัตโนมัติไม่สำเร็จ';
+      message = fallback || 'บริการตรวจสลิปยังไม่สามารถยืนยันผลได้ในขณะนี้ สลิปถูกส่งเข้าแถวรอแอดมินตรวจ';
+      nextAction = 'ไม่ต้องอัปโหลดซ้ำระหว่างรอตรวจ หากต้องการความช่วยเหลือให้ติดต่อแอดมิน';
+    } else {
+      title = 'รับสลิปแล้ว รอแอดมินตรวจสอบ';
+      message = 'ระบบยังไม่ได้เปิดหรือยังไม่พร้อมใช้การตรวจสลิปอัตโนมัติ สลิปถูกส่งให้แอดมินตรวจ';
+      nextAction = 'รอแอดมินอนุมัติ ระบบจะแจ้งผลเมื่อดำเนินการแล้ว';
+    }
+  } else {
+    severity = 'error';
+    const copy = slipRejectCopy(code, fallback);
+    title = copy.title;
+    message = copy.message;
+    nextAction = copy.nextAction;
+  }
+
+  return {
+    status: initialStatus,
+    severity,
+    attempted: !!autoVerifyAttempted,
+    ok: !!(verifyResult && verifyResult.ok),
+    provider,
+    code,
+    transactionRef: verifyResult?.transRef || null,
+    amount: verifyResult?.amount ?? null,
+    sender: publicPartyForSlipNotice(verifyResult?.sender),
+    receiver: publicPartyForSlipNotice(verifyResult?.receiver),
+    transDate: verifyResult?.transDate || null,
+    attempts: Array.isArray(verifyResult?.attempts) ? verifyResult.attempts : [],
+    title,
+    message,
+    nextAction,
+    canRetry: upload ? upload.remaining > 0 && !upload.hasPending && initialStatus !== 'verified' : null,
+  };
+}
+
 app.get('/p/bill-qr/:billId', rateLimitQr, async (req, res) => {
   const id = Number(req.params.billId);
   if (!Number.isInteger(id) || id < 1) return res.status(400).end();
@@ -5226,28 +5361,28 @@ async function tenantPaymentUploadHandler(req, res) {
         status: billStatus,
       });
     }
-    if (req.publicPayment) {
-      const attempts = await loadBillPaymentAttemptSummary(pool, billId, req.tenant.tenant_id);
-      const slipBlock = publicSlipBlockReason({
-        flags: req.features,
-        payable: true,
-        paid: false,
-        attempts,
+    const attemptsBeforeUpload = await loadBillPaymentAttemptSummary(pool, billId, req.tenant.tenant_id);
+    const slipBlock = publicSlipBlockReason({
+      flags: req.features,
+      payable: true,
+      paid: false,
+      attempts: attemptsBeforeUpload,
+    });
+    if (slipBlock) {
+      const status = slipBlock.code === 'SLIP_UPLOAD_LIMIT_REACHED' ? 429 : 409;
+      return res.status(status).json({
+        error: slipBlock.message,
+        code: slipBlock.code,
+        upload: {
+          ...attemptsBeforeUpload,
+          canUpload: false,
+          blocked: slipBlock,
+        },
       });
-      if (slipBlock) {
-        const status = slipBlock.code === 'SLIP_UPLOAD_LIMIT_REACHED' ? 429 : 409;
-        return res.status(status).json({
-          error: slipBlock.message,
-          code: slipBlock.code,
-          upload: {
-            ...attempts,
-            canUpload: false,
-            blocked: slipBlock,
-          },
-        });
-      }
-      req.publicPayment.attemptNo = attempts.used + 1;
-      req.publicPayment.previousAttempts = attempts;
+    }
+    if (req.publicPayment) {
+      req.publicPayment.attemptNo = attemptsBeforeUpload.used + 1;
+      req.publicPayment.previousAttempts = attemptsBeforeUpload;
     }
     // Hash the actual slip bytes BEFORE saving so dedup works (prior version
     // hashed the URL+size which were always unique → unique index never
@@ -5820,18 +5955,26 @@ async function tenantPaymentUploadHandler(req, res) {
 
     const attemptSummary = await loadBillPaymentAttemptSummary(pool, billId, req.tenant.tenant_id)
       .catch(() => null);
+    const uploadState = attemptSummary ? {
+      ...attemptSummary,
+      canUpload: attemptSummary.remaining > 0 && !attemptSummary.hasPending && row.status !== 'verified',
+      blocked: attemptSummary.remaining <= 0
+        ? { code: 'SLIP_UPLOAD_LIMIT_REACHED', message: 'slip upload limit reached; contact admin' }
+        : (attemptSummary.hasPending
+            ? { code: 'PAYMENT_UNDER_REVIEW', message: 'a slip is already waiting for admin review' }
+            : null),
+    } : null;
     res.json({
       ok: true,
       payment: row,
-      upload: attemptSummary ? {
-        ...attemptSummary,
-        canUpload: attemptSummary.remaining > 0 && !attemptSummary.hasPending && row.status !== 'verified',
-        blocked: attemptSummary.remaining <= 0
-          ? { code: 'SLIP_UPLOAD_LIMIT_REACHED', message: 'slip upload limit reached; contact admin' }
-          : (attemptSummary.hasPending
-              ? { code: 'PAYMENT_UNDER_REVIEW', message: 'a slip is already waiting for admin review' }
-              : null),
-      } : null,
+      verification: buildSlipVerificationNotice({
+        initialStatus,
+        verifyResult,
+        autoVerifyAttempted,
+        requireVerification: !!req.features?.slipUpload?.requireVerification,
+        upload: uploadState,
+      }),
+      upload: uploadState,
     });
   } catch (err) {
     console.error('tenant payment error:', err);
@@ -5991,7 +6134,25 @@ app.get('/api/payments', requireAuth, requireRole('owner', 'manager', 'staff'), 
          ORDER BY p.created_at DESC LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params
     );
-    res.json({ ok: true, payments: rows, limit, offset });
+    const summaryRes = await pool.query(
+      `SELECT status, COUNT(*)::int AS count, COALESCE(SUM(amount), 0)::numeric AS amount
+         FROM payments
+        WHERE status IN ('pending','verified','rejected')
+        GROUP BY status`
+    );
+    const summary = {
+      pending: { count: 0, amount: 0 },
+      verified: { count: 0, amount: 0 },
+      rejected: { count: 0, amount: 0 },
+    };
+    for (const r of summaryRes.rows) {
+      if (!summary[r.status]) continue;
+      summary[r.status] = {
+        count: Number(r.count) || 0,
+        amount: Number(r.amount) || 0,
+      };
+    }
+    res.json({ ok: true, payments: rows, summary, limit, offset });
   } catch (err) {
     console.error('payments list error:', err);
     res.status(500).json({ error: 'internal error' });
