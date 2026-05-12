@@ -679,10 +679,17 @@ async function verifyViaEasySlip(buffer, expected) {
           const transRef = rawSlip.transRef || d.transRef || rawSlip.payload || d.payload;
           const amount = Number(d.amountInSlip ?? rawSlip.amount?.amount ?? rawSlip.amount ?? d.amount);
           if (!transRef || !Number.isFinite(amount)) {
+            // Provider answered 200 but the response shape is incomplete —
+            // we don't know if the slip is genuine or if EasySlip changed
+            // their field names. Classify as PROVIDER_ERROR (transient) so
+            // the slip falls into the admin review queue instead of telling
+            // the tenant their slip is fake. Tenants who genuinely paid
+            // shouldn't have their bill stranded because of a provider-side
+            // schema drift.
             resolve({
               ok: false,
               error: 'EasySlip response missing transaction reference or amount',
-              code: 'EASYSLIP_REJECT',
+              code: 'PROVIDER_ERROR',
               raw: j,
             });
             return;
@@ -801,10 +808,13 @@ async function verifyViaSlip2Go(buffer, expected) {
           const transRef = d.transRef || d.referenceId || d.decode;
           const amount = Number(d.amount);
           if (!transRef || !Number.isFinite(amount)) {
+            // 200 OK + incomplete shape — same reasoning as the EasySlip
+            // case above: don't accuse the tenant of a fake slip when the
+            // problem is on the provider side. Fall back to admin queue.
             resolve({
               ok: false,
               error: 'Slip2Go response missing transaction reference or amount',
-              code: 'SLIP2GO_REJECT',
+              code: 'PROVIDER_ERROR',
               raw: j,
             });
             return;

@@ -713,8 +713,35 @@ app.put('/api/data/:key', sameOrigin, csrfGuard, requireAuth, requireRole('owner
         console.error('[bridge] rooms→rooms_v2 sync failed:', err.message);
         roomSyncResult = { ok: false, error: err.message };
       }
-      mirrorRoomsToTenants(value, req.session.user.username).catch((err) => {
+      mirrorRoomsToTenants(value, req.session.user.username).catch(async (err) => {
         console.error('[bridge] rooms→tenants mirror failed:', err.message);
+        // Surface to the owner: a failed mirror leaves rooms in the blob
+        // without matching tenants rows, which breaks: tenant login by
+        // phone, /api/tenant/bills (no JOIN match), LINE binding (no
+        // tenant_id target), and scheduler bill-gen (filters on tenants
+        // row presence for tenant_id). Without an alert the admin only
+        // discovers the gap when a tenant complains they "can't see
+        // their bill" — sometimes weeks later.
+        try {
+          const flags = await features.load(pool).catch(() => ({}));
+          await notifier.notifyOwner({ pool, features: flags }, {
+            subject: '⚠️ ระบบ sync ผู้เช่าล้มเหลว — กรุณาตรวจสอบ',
+            text: [
+              'ระบบไม่สามารถ sync ข้อมูลผู้เช่าจากผังห้องเข้าตาราง tenants ได้',
+              '',
+              `เหตุผล: ${err.message}`,
+              '',
+              '⚠️ ผลกระทบที่อาจเกิดขึ้น:',
+              '   • ผู้เช่าใหม่ login พอร์ทัลด้วยเบอร์โทรไม่ได้',
+              '   • บิลใหม่ที่ออกหาผู้เช่าไม่เจอ → orphan bill',
+              '   • LINE binding ไม่ทำงาน',
+              '',
+              '👉 ที่ต้องทำ: เปิด /admin#health ดู data integrity และกดบันทึกห้องใหม่อีกครั้ง',
+            ].join('\n'),
+          });
+        } catch (notifyErr) {
+          console.warn('[bridge] mirror failure alert also failed:', notifyErr.message);
+        }
       });
     }
     res.json({ ok: true, key, roomSync: roomSyncResult });
@@ -6961,8 +6988,32 @@ app.post('/api/bookings/:id/approve-and-assign', sameOrigin, csrfGuard, requireA
     // Bridge tenant row out-of-tx (mirror function does its own writes;
     // we don't want to block the response on it).
     if (assignedRoomId) {
-      mirrorRoomsToTenants(rooms, req.session.user.username).catch((err) => {
+      mirrorRoomsToTenants(rooms, req.session.user.username).catch(async (err) => {
         console.error('[bridge] rooms→tenants mirror failed after approve:', err.message);
+        // Same failure-alert pattern as the rooms PUT bridge. After a
+        // booking approval the room blob says 'reserved' but if the tenant
+        // upsert failed there's no tenants row → checkin will create a
+        // FRESH tenant + contract leaving an orphan, the scheduler can't
+        // bill the room, and /admin#rooms shows a phantom resident. Loud
+        // alert so the operator notices BEFORE the tenant moves in.
+        try {
+          const flags = await features.load(pool).catch(() => ({}));
+          await notifier.notifyOwner({ pool, features: flags }, {
+            subject: `⚠️ การจอง ${id} อนุมัติแล้วแต่ sync ผู้เช่าล้มเหลว`,
+            text: [
+              `การจอง ${id} (${booking.name || '-'} · ${booking.phone || '-'}) อนุมัติแล้ว`,
+              `จัดห้อง: ${assignedRoomId}`,
+              '',
+              `❌ แต่ระบบ sync ผู้เช่าเข้าตาราง tenants ไม่สำเร็จ`,
+              `เหตุผล: ${err.message}`,
+              '',
+              '⚠️ ผลกระทบ: ห้องสถานะ "reserved" แต่ไม่มีผู้เช่าจริงในระบบ',
+              '👉 ที่ต้องทำ: เปิด /admin#rooms กดอนุมัติห้องใหม่ หรือทำ checkin เลย',
+            ].join('\n'),
+          });
+        } catch (notifyErr) {
+          console.warn('[bridge] approve mirror failure alert also failed:', notifyErr.message);
+        }
       });
     }
     // Notify owner + tenant fire-and-forget.

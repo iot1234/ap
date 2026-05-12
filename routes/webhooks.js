@@ -267,13 +267,13 @@ module.exports = function buildWebhooksRouter(ctx) {
     const tenantRow = await getBoundTenant(userId, oa.id || null);
 
     if (/^(บิล|bills?|invoice)$/i.test(text)) {
-      if (!tenantRow) return await replyUnbound(oa, ev.replyToken);
+      if (!tenantRow) return await replyUnbound(oa, ev.replyToken, userId);
       await replyLatestBill(oa, ev.replyToken, tenantRow);
       return;
     }
 
     if (/^(สถานะ|status|ห้อง|room)$/i.test(text)) {
-      if (!tenantRow) return await replyUnbound(oa, ev.replyToken);
+      if (!tenantRow) return await replyUnbound(oa, ev.replyToken, userId);
       await replyRoomStatus(oa, ev.replyToken, tenantRow);
       return;
     }
@@ -317,7 +317,7 @@ module.exports = function buildWebhooksRouter(ctx) {
 
   async function handleSlipImageMessage(oa, ev, userId) {
     const tenant = await getBoundTenant(userId, oa.id || null);
-    if (!tenant) return await replyUnbound(oa, ev.replyToken);
+    if (!tenant) return await replyUnbound(oa, ev.replyToken, userId);
     if (typeof processTenantSlipUpload !== 'function') {
       await lineSvc.replyText(oa, ev.replyToken, 'ระบบรับสลิปผ่าน LINE ยังไม่พร้อมใช้งาน โปรดใช้ลิงก์ในบิล');
       return;
@@ -402,7 +402,39 @@ module.exports = function buildWebhooksRouter(ctx) {
     }
   }
 
-  async function replyUnbound(oa, replyToken) {
+  async function replyUnbound(oa, replyToken, lineUserId) {
+    // Before assuming the user is unbound, check whether they're bound
+    // to a DIFFERENT OA. The "ส่งรหัส BIND" message is misleading when
+    // the user is already bound — they don't need a new code, they need
+    // to message the right OA. This was a real support-ticket driver
+    // when a building runs multi-OA (e.g. one OA per branch).
+    if (lineUserId) {
+      try {
+        const { rows } = await pool.query(
+          `SELECT b.oa_id, o.display_name, o.slug
+             FROM line_bindings b
+             LEFT JOIN line_oa o ON o.id = b.oa_id
+            WHERE b.line_user_id = $1 AND b.status = 'bound'
+            LIMIT 1`,
+          [lineUserId]
+        );
+        if (rows.length) {
+          const r = rows[0];
+          const isDifferentOa = (oa && oa.id != null && r.oa_id != null && Number(r.oa_id) !== Number(oa.id))
+            || (oa && oa.id == null && r.oa_id != null);
+          if (isDifferentOa) {
+            const otherName = r.display_name || r.slug || `OA #${r.oa_id}`;
+            await lineSvc.replyText(oa, replyToken,
+              `บัญชี LINE ของคุณถูกผูกกับ ${otherName} อยู่แล้ว — โปรดส่งสลิป/ติดต่อผ่าน ${otherName} เท่านั้น\n\n`
+              + `(ถ้าต้องการย้ายมาผูกที่ OA นี้แทน กรุณาติดต่อแอดมิน)`);
+            return;
+          }
+        }
+      } catch (err) {
+        console.warn('[webhook] wrong-OA detection failed:', err.message);
+        // fall through to the generic unbound reply
+      }
+    }
     await lineSvc.replyText(oa, replyToken,
       'บัญชีนี้ยังไม่ได้ผูกห้อง — ส่งรหัส BIND-XXXXXXXX (ขอจากแอดมิน) ก่อนนะครับ');
   }

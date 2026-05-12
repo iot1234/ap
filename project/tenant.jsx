@@ -467,6 +467,20 @@ function Pill({ children, color }) {
 function BillsView({ locale, bills, refresh, slipFeature }) {
   const t = (k) => tr(locale, k);
   const [openId, setOpenId] = useState(null);
+  // Poll the bills list every 20s while the view is mounted. Without this,
+  // a tenant who left /tenant#bills open would never see an admin's "ผ่าน"
+  // decision (or a scheduler-flipped 'overdue' status) until they manually
+  // navigated away and back. 20s is the same cadence as /admin#payments and
+  // is well below the LINE/email notification round-trip — by the time the
+  // tenant gets the LINE push, the list has already refreshed in the tab
+  // they had open. Skip when a bill detail modal is open (that has its own
+  // tighter 5s poll) to avoid double-firing.
+  React.useEffect(() => {
+    if (openId != null) return undefined;
+    if (typeof refresh !== 'function') return undefined;
+    const id = setInterval(() => refresh(), 20000);
+    return () => clearInterval(id);
+  }, [openId, refresh]);
   // Auto-open the bill detail when the tenant arrives via the LINE/email
   // deep link (/tenant?bill=ID). The notification body now embeds this
   // link so tapping it lands on the right bill instead of dropping the
