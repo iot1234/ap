@@ -128,7 +128,7 @@ paths:
           required: true
           schema:
             type: string
-            enum: [baankarn_rooms_v1, baankarn_config_v1, baankarn_bookings_v1, baankarn_activities_v1, baankarn_users_v1]
+            enum: [baankarn_rooms_v1, baankarn_config_v1, baankarn_bookings_v1, baankarn_activities_v1]
       responses:
         '200': { description: OK }
     put:

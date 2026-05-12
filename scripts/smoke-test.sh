@@ -93,7 +93,7 @@ check "GET /api/payments"             200 -b "$COOKIE_JAR" "$BASE_URL/api/paymen
 
 echo ""
 echo "Public PII protection:"
-check "GET /api/data/baankarn_users_v1 (no auth) blocked"  401 "$BASE_URL/api/data/baankarn_users_v1"
+check "GET /api/data/baankarn_users_v1 (removed)"  400 "$BASE_URL/api/data/baankarn_users_v1"
 check "GET /api/data/baankarn_bookings_v1 (no auth) blocked" 401 "$BASE_URL/api/data/baankarn_bookings_v1"
 check "GET /api/data/baankarn_rooms_v1 (no auth) masked"   200 "$BASE_URL/api/data/baankarn_rooms_v1"
 

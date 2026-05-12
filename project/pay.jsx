@@ -126,6 +126,7 @@ function App() {
   const [err, setErr] = useState('');
   const [amount, setAmount] = useState('');
   const [file, setFile] = useState(null);
+  const [fileInputKey, setFileInputKey] = useState(0);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [messageKind, setMessageKind] = useState('');
@@ -199,6 +200,7 @@ function App() {
         setMessage(verificationMessage(out, data && data.upload));
       }
       setFile(null);
+      setFileInputKey((x) => x + 1);
       await load(true);
     } catch (e) {
       setMessageKind('error');
@@ -286,7 +288,7 @@ function App() {
                 <label style={label}>จำนวนเงิน</label>
                 <input style={input} type="number" step="0.01" value={amount} readOnly />
                 <label style={label}>รูปสลิป</label>
-                <input type="file" accept="image/jpeg,image/png,image/webp" disabled={busy} onChange={(e) => setFile(e.target.files[0] || null)} />
+                <input key={fileInputKey} type="file" accept="image/jpeg,image/png,image/webp" disabled={busy} onChange={(e) => setFile(e.target.files[0] || null)} />
                 <button style={button} disabled={busy} onClick={upload}>
                   {busy ? 'กำลังประมวลผล...' : 'อัปโหลดสลิป'}
                 </button>

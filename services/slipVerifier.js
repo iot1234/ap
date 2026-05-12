@@ -368,7 +368,23 @@ async function verifyOne(providerId, buffer, expected) {
   // compare as many digits as both sides provide, up to the last 6, and
   // refuse to verify when the provider returned fewer than 4 (too short
   // to be a meaningful tail — could be all-zero placeholder).
-  if (expected.promptpayTarget && !result.receiver?.account) {
+  // Build the set of acceptable receiver tails. Operators can publish
+  // BOTH a PromptPay number AND a regular bank account on the invoice
+  // (config.payment.promptpay + config.payment.bankAcc). A tenant who
+  // copies the bank account number instead of scanning the PromptPay QR
+  // will produce a slip whose receiver.account is the bank account, NOT
+  // the PromptPay digits — so we need to accept either. Caller passes
+  // any extras via expected.additionalReceiverTargets (array of strings,
+  // already in raw account-number form).
+  const acceptableTargets = [];
+  if (expected.promptpayTarget) acceptableTargets.push(expected.promptpayTarget);
+  if (Array.isArray(expected.additionalReceiverTargets)) {
+    for (const t of expected.additionalReceiverTargets) {
+      if (t) acceptableTargets.push(t);
+    }
+  }
+
+  if (acceptableTargets.length && !result.receiver?.account) {
     return {
       ok: false,
       error: 'ไม่สามารถยืนยันบัญชีปลายทางจากสลิปได้',
@@ -378,8 +394,7 @@ async function verifyOne(providerId, buffer, expected) {
       provider: providerId,
     };
   }
-  if (expected.promptpayTarget && result.receiver?.account) {
-    const expectedDigits = String(expected.promptpayTarget).replace(/[^0-9]/g, '');
+  if (acceptableTargets.length && result.receiver?.account) {
     const actualDigits = String(result.receiver.account).replace(/[^0-9]/g, '');
     // Provider returned account with fewer than 4 digits → suspicious.
     // Reject rather than letting an empty/garbage value match.
@@ -395,14 +410,27 @@ async function verifyOne(providerId, buffer, expected) {
     }
     // Compare the longest tail both sides can provide, capped at 6 digits.
     // Bumping from 4 → 6 drops collision odds from 1e-4 to 1e-6.
-    const compareLen = Math.min(6, expectedDigits.length, actualDigits.length);
-    const expectedTail = expectedDigits.slice(-compareLen);
-    const actualTail = actualDigits.slice(-compareLen);
-    if (expectedTail && actualTail && expectedTail !== actualTail) {
+    // We try every acceptable target; PASS if ANY matches.
+    let matched = false;
+    const expectedTails = [];
+    for (const target of acceptableTargets) {
+      const expectedDigits = String(target).replace(/[^0-9]/g, '');
+      if (!expectedDigits) continue;
+      const compareLen = Math.min(6, expectedDigits.length, actualDigits.length);
+      const expectedTail = expectedDigits.slice(-compareLen);
+      const actualTail = actualDigits.slice(-compareLen);
+      expectedTails.push(expectedTail);
+      if (expectedTail && actualTail && expectedTail === actualTail) {
+        matched = true;
+        break;
+      }
+    }
+    if (!matched) {
+      const actualTail = actualDigits.slice(-6);
       return {
         ok: false,
         error: `บัญชีปลายทางไม่ใช่ของหอพัก — สลิปจ่ายไปที่บัญชีลงท้าย ${actualTail} ` +
-               `แต่หอพักรับที่บัญชีลงท้าย ${expectedTail}`,
+               `แต่หอพักรับที่บัญชีลงท้าย ${expectedTails.join(' หรือ ')}`,
         code: 'RECEIVER_MISMATCH',
         transRef: result.transRef,
         raw: result.raw,

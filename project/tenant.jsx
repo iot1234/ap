@@ -524,6 +524,7 @@ function BillDetail({ bill, locale, onClose, slipFeature, refresh }) {
   const t = (k) => tr(locale, k);
   const [amount, setAmount] = useState(String(bill.total));
   const [file, setFile] = useState(null);
+  const [fileInputKey, setFileInputKey] = useState(0);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState(null);
   const [pay, setPay] = useState(null);
@@ -670,6 +671,7 @@ function BillDetail({ bill, locale, onClose, slipFeature, refresh }) {
       });
       setNotice(paymentNoticeFromResponse(out, locale));
       setFile(null);
+      setFileInputKey((x) => x + 1);
       if (typeof refresh === 'function') refresh();
     } catch (e) {
       setNotice(paymentNoticeFromError(e, locale));
@@ -829,7 +831,7 @@ function BillDetail({ bill, locale, onClose, slipFeature, refresh }) {
               </div>
             ) : null}
             <label style={lbl}>{t('chooseFile')}</label>
-            <input type="file" accept="image/jpeg,image/png,image/webp" onChange={(e) => setFile(e.target.files[0])} style={{ marginBottom: 12 }} />
+            <input key={fileInputKey} type="file" accept="image/jpeg,image/png,image/webp" onChange={(e) => setFile(e.target.files[0])} style={{ marginBottom: 12 }} />
             {/* Advisory notices (autoVerify ไม่พร้อม, ไม่ผูก LINE/email, ฯลฯ).
                 Show inline above the submit so the tenant knows what to expect
                 — e.g., "สลิปต้องรอ admin ตรวจสอบ < 24 ชม." instead of expecting

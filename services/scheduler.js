@@ -109,12 +109,23 @@ async function tickLateFee(pool, flags, now, state) {
     // rooms' status downstream instead of scanning every room nightly.
     // RETURNING room_id lets us batch the room-status update without a
     // second SELECT pass.
+    // PostgreSQL doesn't allow DISTINCT inside RETURNING — the old query
+    // raised "syntax error at or near DISTINCT" every tick, so bills past
+    // due_date were NEVER auto-marked overdue (and the room status cascade
+    // below never ran). Wrap in a CTE so we can de-dupe room_id with a
+    // plain SELECT DISTINCT on top.
     const { rows } = await pool.query(
-      `UPDATE bills SET status='overdue'
-         WHERE status='pending' AND due_date < CURRENT_DATE
-       RETURNING DISTINCT room_id`
+      `WITH bumped AS (
+         UPDATE bills SET status='overdue'
+           WHERE status='pending' AND due_date < CURRENT_DATE
+           RETURNING room_id
+       )
+       SELECT DISTINCT room_id, COUNT(*)::int AS cnt FROM bumped GROUP BY room_id`
     );
-    if (rows.length) console.log(`[scheduler] marked ${rows.length} bill(s) overdue`);
+    if (rows.length) {
+      const total = rows.reduce((s, r) => s + (Number(r.cnt) || 0), 0);
+      console.log(`[scheduler] marked ${total} bill(s) overdue across ${rows.length} room(s)`);
+    }
     // Cascade: any room with a freshly-overdue bill should flip to
     // 'overdue' status. Imported lazily so a missing module on legacy
     // deploys doesn't break the late-fee tick itself.
@@ -781,6 +792,93 @@ async function tickContractExpiry(pool, _flags, now, state) {
 //       still 'active' are left alone — those need admin to decide if the
 //       contract should close (tenant disputes resolution / refund pending).
 // Either stage failing should never block the rest of the scheduler tick.
+
+// Daily "who hasn't paid" digest for the owner. Runs once per day after
+// tickLateFee has already flipped pending → overdue, so the digest sees the
+// authoritative set. Without this tick the operator had to remember to open
+// /admin#bills?status=overdue manually; missed days meant a tenant could be
+// 30+ days late before anyone noticed.
+//
+// One LINE/email message per day, even when there are zero overdue bills —
+// the "all clear" message proves the digest fired (avoid "did the cron run
+// today?" anxiety). Skipped on weekend? No — late-rent doesn't take weekends.
+async function tickOverdueDigest(pool, flags, now, state) {
+  const todayKey = now.toISOString().slice(0, 10);
+  if (state.lastOverdueDigestAt === todayKey) return;
+  try {
+    // Pull all overdue bills + owner-relevant fields. days_late computed in SQL
+    // (CURRENT_DATE - due_date) so the message is correct regardless of when
+    // tick fires within the day. LEFT JOIN tenants so orphan bills (tenant_id
+    // NULL — legacy) still surface; admin needs to know about those too.
+    const { rows } = await pool.query(`
+      SELECT b.id, b.bill_no, b.room_id, b.period, b.total, b.due_date,
+             (CURRENT_DATE - b.due_date)::int AS days_late,
+             t.full_name, t.phone
+        FROM bills b
+        LEFT JOIN tenants t ON t.id = b.tenant_id AND t.deleted_at IS NULL
+       WHERE b.status='overdue' AND b.deleted_at IS NULL
+       ORDER BY (CURRENT_DATE - b.due_date) DESC, b.room_id ASC
+       LIMIT 200
+    `);
+
+    // Also count slip queue health so the owner sees both halves of the
+    // "money in" picture in one message — overdue bills (no slip yet) and
+    // pending slips (uploaded, awaiting admin review).
+    const queueRes = await pool.query(`
+      SELECT COUNT(*)::int AS pending_count,
+             COALESCE(SUM(amount), 0)::numeric AS pending_amount
+        FROM payments WHERE status='pending'
+    `);
+    const pendingCount = Number(queueRes.rows[0]?.pending_count || 0);
+    const pendingAmount = Number(queueRes.rows[0]?.pending_amount || 0);
+
+    const totalOverdue = rows.reduce((s, r) => s + (Number(r.total) || 0), 0);
+    const lines = [];
+    if (rows.length === 0) {
+      lines.push('✅ ไม่มีบิลค้างชำระวันนี้');
+    } else {
+      lines.push(`🔴 บิลค้างชำระ ${rows.length} ใบ — รวม ฿${totalOverdue.toLocaleString('th-TH', { minimumFractionDigits: 2 })}`);
+      lines.push('');
+      const display = rows.slice(0, 30);
+      for (const r of display) {
+        const amt = Number(r.total).toLocaleString('th-TH', { minimumFractionDigits: 2 });
+        const tenant = r.full_name || '(ไม่มีผู้เช่าผูก)';
+        const phone = r.phone ? ` · ${r.phone}` : '';
+        lines.push(`  • ห้อง ${r.room_id || '-'} · ${tenant}${phone}`);
+        lines.push(`      บิล ${r.bill_no || `#${r.id}`} (${r.period || '-'}) — ฿${amt} · ค้าง ${r.days_late} วัน`);
+      }
+      if (rows.length > display.length) {
+        lines.push(`  …และอีก ${rows.length - display.length} ห้อง`);
+      }
+    }
+    if (pendingCount > 0) {
+      lines.push('');
+      lines.push(`📥 สลิปรอตรวจ ${pendingCount} ใบ — รวม ฿${pendingAmount.toLocaleString('th-TH', { minimumFractionDigits: 2 })}`);
+      lines.push('   → ตรวจที่ /admin#payments');
+    }
+    if (rows.length > 0) {
+      lines.push('');
+      lines.push('รายละเอียดเต็ม → /admin#bills?status=overdue');
+    }
+
+    try {
+      await notifier.notifyOwner({ pool, features: flags || {} }, {
+        subject: rows.length === 0
+          ? '✅ รายงานบิลค้างชำระ — ไม่มี'
+          : `🔴 บิลค้างชำระ ${rows.length} ใบ — ฿${totalOverdue.toLocaleString('th-TH', { minimumFractionDigits: 2 })}`,
+        text: lines.join('\n'),
+      });
+    } catch (err) {
+      console.warn('[scheduler] overdue digest notify failed:', err.message);
+    }
+
+    state.lastOverdueDigestAt = todayKey;
+    writeState(state);
+  } catch (err) {
+    console.error('[scheduler] overdue digest tick failed:', err.message);
+  }
+}
+
 async function tickAutoReconcileRooms(pool, flags, now, state) {
   const todayKey = now.toISOString().slice(0, 10);
   if (state.lastAutoReconcileAt === todayKey) return;
@@ -1001,6 +1099,7 @@ async function tick(pool) {
                                                           () => tickMeterSimulator(pool, flags, now, state)),
     _withAdvisoryLock(pool, `accessSync-${todayKey}`,    () => tickAccessControlSync(pool, flags, now, state)),
     _withAdvisoryLock(pool, `contractExpiry-${todayKey}`,() => tickContractExpiry(pool, flags, now, state)),
+    _withAdvisoryLock(pool, `overdueDigest-${todayKey}`, () => tickOverdueDigest(pool, flags, now, state)),
     _withAdvisoryLock(pool, `autoReconcile-${todayKey}`, () => tickAutoReconcileRooms(pool, flags, now, state)),
     _withAdvisoryLock(pool, `roomStatusSync-${todayKey}`, () => tickRoomStatusSync(pool, flags, now, state)),
   ]);

@@ -328,10 +328,30 @@ test('slipVerifier rejects auto-verify when provider omits receiver account', ()
   const path = require('node:path');
   const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'slipVerifier.js'), 'utf8');
 
-  assert.match(src, /expected\.promptpayTarget && !result\.receiver\?\.account/,
-    'auto-verify must require a provider receiver account when PromptPay target is configured');
+  assert.match(src, /acceptableTargets\.length && !result\.receiver\?\.account/,
+    'auto-verify must require a provider receiver account when any receiver target is configured');
   assert.match(src, /code:\s*'RECEIVER_UNREADABLE'/,
     'missing receiver account should be classified as RECEIVER_UNREADABLE');
+});
+
+test('slipVerifier accepts the configured bank account as a secondary receiver target', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'slipVerifier.js'), 'utf8');
+
+  // The invoice's bank account (config.payment.bankAcc) must be forwarded
+  // to slipVerifier as a fallback receiver, so a tenant who pays the bank
+  // account directly (instead of scanning the PromptPay QR) isn't falsely
+  // rejected with RECEIVER_MISMATCH.
+  assert.match(server, /paymentBlock\.bankInfo && paymentBlock\.bankInfo\.account/,
+    'upload handler must read the invoice bank account from paymentBlock');
+  assert.match(server, /additionalReceiverTargets:\s*extraTargets/,
+    'upload handler must pass extra receiver targets to slipVerifier');
+  assert.match(src, /additionalReceiverTargets/,
+    'slipVerifier must accept additionalReceiverTargets in expected');
+  assert.match(src, /acceptableTargets\.push/,
+    'slipVerifier must accumulate every acceptable receiver target before matching');
 });
 
 test('slipVerifier.getConfiguredProviders gates by API-key presence', () => {
@@ -805,6 +825,7 @@ test('/api/payments exposes admin queue summary counts', () => {
 test('LINE image messages can submit slips through the shared payment handler', () => {
   const fs = require('node:fs');
   const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   const webhooks = fs.readFileSync(path.join(__dirname, '..', 'routes', 'webhooks.js'), 'utf8');
   const line = fs.readFileSync(path.join(__dirname, '..', 'services', 'line.js'), 'utf8');
   assert.match(line, /async function getMessageContent/,
@@ -819,6 +840,10 @@ test('LINE image messages can submit slips through the shared payment handler', 
     'LINE image handler must reuse the shared payment upload handler');
   assert.match(webhooks, /skipTenantAck: true/,
     'LINE image handler should reply in-chat instead of sending a duplicate tenant ack');
+  const handlerIdx = server.indexOf('async function tenantPaymentUploadHandler');
+  const ackBlock = server.slice(handlerIdx, server.indexOf('const attemptSummary = await loadBillPaymentAttemptSummary', handlerIdx));
+  assert.match(ackBlock, /if \(!req\.skipTenantAck\) \{\s*try \{/,
+    'shared slip handler must suppress tenant ack when LINE webhook already replies in-chat');
   assert.match(webhooks, /bills\.length > 1/,
     'LINE image handler must refuse ambiguous multiple payable bills');
 });
@@ -836,6 +861,14 @@ test('bill upload UIs refresh status and hide upload controls after paid', () =>
     'public pay page must disable upload controls once paid');
   assert.match(pay, /setInterval\(\(\) => load\(true\), 5000\)/,
     'public pay page must poll for near-real-time status updates');
+  assert.match(tenant, /const \[fileInputKey, setFileInputKey\]/,
+    'tenant upload UI must track a file input reset key');
+  assert.match(tenant, /<input key=\{fileInputKey\} type="file"/,
+    'tenant upload UI must clear the file input after a handled upload');
+  assert.match(pay, /const \[fileInputKey, setFileInputKey\]/,
+    'public pay UI must track a file input reset key');
+  assert.match(pay, /<input key=\{fileInputKey\} type="file"/,
+    'public pay UI must clear the file input after a handled upload');
 });
 
 test('GET /api/tenant/bills/:id/pdf is wired (tenant PDF download)', () => {
@@ -954,6 +987,12 @@ test('tenant payment readiness controls QR and slip upload state', () => {
     'readiness must only mark PromptPay ready after validation');
   assert.match(route, /flags\.slipUpload\.autoVerify && ready\.length > 0 && promptpayReadyForPayment/,
     'autoVerify channel must require a validated real PromptPay target');
+  assert.match(route, /loadBillPaymentAttemptSummary/,
+    'readiness must load persisted slip upload attempts');
+  assert.match(route, /slipBlockReadinessIssue/,
+    'readiness must surface pending/limit slip blocks before the upload button is enabled');
+  assert.match(route, /upload: uploadAttempts/,
+    'readiness must return upload attempt state to the tenant UI');
   assert.doesNotMatch(route, /ready\.length > 0 && paymentBlock\.promptpayTarget/,
     'autoVerify must not rely on raw promptpay presence');
 
@@ -3452,6 +3491,10 @@ test('locked contracts use immutable terms snapshot for PDFs and edits are block
     'server must define the terms snapshot builder');
   assert.match(src, /snapshotVersion: 'contract-terms-snapshot-v1'/,
     'snapshot should carry an explicit schema marker');
+  const snapIdx = src.indexOf('async function loadContractTermsSnapshot');
+  const snapBody = src.slice(snapIdx, src.indexOf('// --- Schema migration', snapIdx));
+  assert.doesNotMatch(snapBody, /req\.skipTenantAck/,
+    'contract terms snapshot builder must not reference request-scoped slip-upload flags');
   assert.match(src, /contract\.locked_at && contract\.terms_template_snapshot[\s\S]{0,120}template = contract\.terms_template_snapshot/,
     'PDF endpoints must prefer the immutable snapshot for locked contracts');
   assert.match(src, /PDF template override is disabled/,

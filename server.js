@@ -143,7 +143,7 @@ async function loadContractTermsSnapshot(db, contract = {}) {
   let rawTemplate = null;
   let templateId = contract.template_id || null;
   if (templateId) {
-    if (!req.skipTenantAck) try {
+    try {
       const t = await db.query(
         `SELECT id, mode, clauses, sections, variables
            FROM contract_templates
@@ -3300,6 +3300,7 @@ app.get('/api/tenant/pay-readiness/:billId', requireTenant, async (req, res) => 
       }
     }
 
+    let uploadAttempts = null;
     if (!flags?.slipUpload?.enabled) {
       issues.push({
         sev: 'med', code: 'SLIP_UPLOAD_DISABLED',
@@ -3307,16 +3308,28 @@ app.get('/api/tenant/pay-readiness/:billId', requireTenant, async (req, res) => 
         fix: null,
       });
     } else if (isBillPayable && Number.isFinite(billTotal) && billTotal > 0) {
-      channels.slip = true;
-      const ready = slipVerifier.getConfiguredProviders(flags);
-      if (flags.slipUpload.autoVerify && ready.length > 0 && promptpayReadyForPayment) {
-        channels.autoVerify = true;
-      } else if (flags.slipUpload.autoVerify && ready.length === 0) {
-        issues.push({
-          sev: 'low', code: 'AUTOVERIFY_NOT_READY',
-          msg: 'การยืนยันสลิปอัตโนมัติยังไม่พร้อม — สลิปจะเข้าคิวรอเจ้าหน้าที่ตรวจสอบ (ปกติ < 24 ชม.)',
-          fix: null,
-        });
+      uploadAttempts = await loadBillPaymentAttemptSummary(pool, id, req.tenant.tenant_id);
+      const slipBlock = publicSlipBlockReason({
+        flags,
+        payable: true,
+        paid: false,
+        attempts: uploadAttempts,
+      });
+      if (slipBlock) {
+        const issue = slipBlockReadinessIssue(slipBlock);
+        if (issue) issues.push(issue);
+      } else {
+        channels.slip = true;
+        const ready = slipVerifier.getConfiguredProviders(flags);
+        if (flags.slipUpload.autoVerify && ready.length > 0 && promptpayReadyForPayment) {
+          channels.autoVerify = true;
+        } else if (flags.slipUpload.autoVerify && ready.length === 0) {
+          issues.push({
+            sev: 'low', code: 'AUTOVERIFY_NOT_READY',
+            msg: 'การยืนยันสลิปอัตโนมัติยังไม่พร้อม — สลิปจะเข้าคิวรอเจ้าหน้าที่ตรวจสอบ (ปกติ < 24 ชม.)',
+            fix: null,
+          });
+        }
       }
     }
 
@@ -3345,6 +3358,16 @@ app.get('/api/tenant/pay-readiness/:billId', requireTenant, async (req, res) => 
         status: bill.status,
         dueDate: bill.due_date,
       },
+      upload: uploadAttempts ? {
+        ...uploadAttempts,
+        canUpload: channels.slip === true,
+        blocked: channels.slip === true ? null : publicSlipBlockReason({
+          flags,
+          payable: isBillPayable,
+          paid: bill.status === 'paid',
+          attempts: uploadAttempts,
+        }),
+      } : null,
       promptpayTarget: paymentBlock.promptpayTarget ? 'configured' : null,
     });
   } catch (err) {
@@ -4034,6 +4057,32 @@ function publicSlipBlockReason({ flags, payable, paid, attempts }) {
     };
   }
   return null;
+}
+
+function slipBlockReadinessIssue(slipBlock) {
+  if (!slipBlock) return null;
+  if (slipBlock.code === 'SLIP_UPLOAD_LIMIT_REACHED') {
+    return {
+      sev: 'high',
+      code: slipBlock.code,
+      msg: 'อัปโหลดสลิปครบ 3 ครั้งแล้ว กรุณาติดต่อแอดมิน',
+      fix: 'ติดต่อแอดมินเพื่อให้ตรวจสอบการชำระเงินหรือเปิดรอบอัปโหลดใหม่',
+    };
+  }
+  if (slipBlock.code === 'PAYMENT_UNDER_REVIEW') {
+    return {
+      sev: 'high',
+      code: slipBlock.code,
+      msg: 'มีสลิปรอแอดมินตรวจสอบอยู่ กรุณารอผลการตรวจสอบ',
+      fix: 'ติดต่อแอดมินหากต้องการตรวจสอบเร่งด่วน',
+    };
+  }
+  return {
+    sev: 'high',
+    code: slipBlock.code,
+    msg: slipBlock.message || 'ไม่สามารถอัปโหลดสลิปได้ในขณะนี้',
+    fix: 'ติดต่อแอดมิน',
+  };
 }
 
 function publicPartyForSlipNotice(party) {
@@ -5467,9 +5516,25 @@ async function tenantPaymentUploadHandler(req, res) {
         // tolerances and means slipVerifier's amount-mismatch reasoning is
         // pinned to the same number the bill is invoiced at.
         if (ppTarget) {
+          // The invoice can advertise BOTH PromptPay AND a regular bank
+          // account (config.payment.bankAcc). Some tenants ignore the QR
+          // and key the bank account into their banking app — the slip's
+          // receiver.account then matches the bank account, not the
+          // PromptPay number, and we'd false-reject with RECEIVER_MISMATCH.
+          // Pass the bank account as a secondary acceptable receiver tail.
+          const extraTargets = [];
+          if (paymentBlock.bankInfo && paymentBlock.bankInfo.account) {
+            const bankDigits = String(paymentBlock.bankInfo.account).replace(/[^0-9]/g, '');
+            if (bankDigits.length >= 4) extraTargets.push(bankDigits);
+          }
           verifyResult = await slipVerifier.verifyWithFallback(
             rawBuf,
-            { amount: billTotal, billId, promptpayTarget: ppTarget },
+            {
+              amount: billTotal,
+              billId,
+              promptpayTarget: ppTarget,
+              additionalReceiverTargets: extraTargets,
+            },
             req.features
           );
         }
@@ -5789,17 +5854,6 @@ async function tenantPaymentUploadHandler(req, res) {
         adminBill = billInfo.rows[0] || null;
         adminAttempts = attemptInfo || null;
       } catch { /* notification detail is best-effort */ }
-      const roomLine = adminBill?.room_id ? `\nà¸«à¹‰à¸­à¸‡: ${adminBill.room_id}` : '';
-      const billNoLine = adminBill?.bill_no ? `\nà¹€à¸¥à¸‚à¸šà¸´à¸¥: ${adminBill.bill_no}` : '';
-      const billStatusLine = adminBill?.status ? `\nà¸ªà¸–à¸²à¸™à¸°à¸šà¸´à¸¥à¸›à¸±à¸ˆà¸ˆà¸¸à¸šà¸±à¸™: ${adminBill.status}` : '';
-      const attemptLine = adminAttempts
-        ? `\nà¸ˆà¸³à¸™à¸§à¸™à¸„à¸£à¸±à¹‰à¸‡à¸—à¸µà¹ˆà¸­à¸±à¸›à¹‚à¸«à¸¥à¸”: ${adminAttempts.used}/${adminAttempts.max} (à¹€à¸«à¸¥à¸·à¸­ ${adminAttempts.remaining})`
-        : '';
-      const actionLine = initialStatus === 'verified'
-        ? '\nà¸œà¸¥à¸¥à¸±à¸žà¸˜à¹Œ: à¸£à¸°à¸šà¸š mark paid à¹à¸¥à¹‰à¸§'
-        : initialStatus === 'pending'
-          ? '\nà¸ªà¸´à¹ˆà¸‡à¸—à¸µà¹ˆà¸•à¹‰à¸­à¸‡à¸—à¸³: à¹€à¸‚à¹‰à¸² /admin#payments à¹€à¸žà¸·à¹ˆà¸­à¸•à¸£à¸§à¸ˆà¸ªà¸¥à¸´à¸› à¸šà¸´à¸¥à¸¢à¸±à¸‡à¹„à¸¡à¹ˆà¸–à¸¹à¸ mark paid'
-          : '\nà¸ªà¸´à¹ˆà¸‡à¸—à¸µà¹ˆà¸•à¹‰à¸­à¸‡à¸—à¸³: à¸•à¸£à¸§à¸ˆà¹€à¸«à¸•à¸¸à¸œà¸¥à¹ƒà¸™ /admin#payments à¹à¸¥à¸°à¸•à¸´à¸”à¸•à¹ˆà¸­à¸œà¸¹à¹‰à¹€à¸Šà¹ˆà¸² à¸šà¸´à¸¥à¸¢à¸±à¸‡à¹„à¸¡à¹่à¸Šà¸³à¸£à¸°';
       const adminDetailText = [
         adminBill?.room_id ? `Room: ${adminBill.room_id}` : null,
         adminBill?.bill_no ? `Bill no: ${adminBill.bill_no}` : null,
@@ -5838,44 +5892,45 @@ async function tenantPaymentUploadHandler(req, res) {
     // → "got it, we'll check" with expected timeline. Without this the
     // tenant uploaded a slip and got nothing back until admin manually
     // approved hours later — fueling "ส่งไปแล้วทำไมเงียบ" support tickets.
-    try {
-      // Pull the bill period so the tenant's confirmation message can
-      // reference the rounded "เดือน X" instead of just bill_id (less
-      // friendly).
-      const billQ = await pool.query(
-        `SELECT bill_no, period FROM bills WHERE id=$1 LIMIT 1`,
-        [billId]
-      );
-      const billNo = billQ.rows[0]?.bill_no || `#${billId}`;
-      const period = billQ.rows[0]?.period || '';
-      const amtStr = amount.toLocaleString('th-TH', { minimumFractionDigits: 2 });
-      const buildingName = await loadBuildingName(pool);
+    if (!req.skipTenantAck) {
+      try {
+        // Pull the bill period so the tenant's confirmation message can
+        // reference the rounded "เดือน X" instead of just bill_id (less
+        // friendly).
+        const billQ = await pool.query(
+          `SELECT bill_no, period FROM bills WHERE id=$1 LIMIT 1`,
+          [billId]
+        );
+        const billNo = billQ.rows[0]?.bill_no || `#${billId}`;
+        const period = billQ.rows[0]?.period || '';
+        const amtStr = amount.toLocaleString('th-TH', { minimumFractionDigits: 2 });
+        const buildingName = await loadBuildingName(pool);
 
-      // Pick the tenant message based on the actual decision the row
-      // landed on. Three outcomes possible now: verified (auto), rejected
-      // (auto), or pending (manual queue).
-      let tenantNotice;
-      if (initialStatus === 'verified') {
-        tenantNotice = {
-          subject: '✅ ชำระเงินเรียบร้อยแล้ว — ขอบคุณ',
-          text: [
-            `เรียน คุณ${req.tenant.full_name}`,
-            ``,
-            `🎉 ขอบคุณที่ชำระเงินตรงเวลา`,
-            ``,
-            `บิล: ${billNo}${period ? ` (รอบ ${period})` : ''}`,
-            `จำนวน: ฿${amtStr}`,
-            `สถานะ: ชำระแล้ว ✓`,
-            verifyResult?.ok
-              ? `ตรวจสอบโดย: ระบบอัตโนมัติ (${verifyResult.provider})${verifyResult.transRef ? ` · ref ${verifyResult.transRef}` : ''}`
-              : null,
-            ``,
-            `ใบเสร็จ: ดูได้ที่พอร์ทัลผู้เช่า /tenant`,
-            ``,
-            `${buildingName}`,
-          ].filter(Boolean).join('\n'),
-        };
-      } else if (initialStatus === 'rejected') {
+        // Pick the tenant message based on the actual decision the row
+        // landed on. Three outcomes possible now: verified (auto), rejected
+        // (auto), or pending (manual queue).
+        let tenantNotice;
+        if (initialStatus === 'verified') {
+          tenantNotice = {
+            subject: '✅ ชำระเงินเรียบร้อยแล้ว — ขอบคุณ',
+            text: [
+              `เรียน คุณ${req.tenant.full_name}`,
+              ``,
+              `🎉 ขอบคุณที่ชำระเงินตรงเวลา`,
+              ``,
+              `บิล: ${billNo}${period ? ` (รอบ ${period})` : ''}`,
+              `จำนวน: ฿${amtStr}`,
+              `สถานะ: ชำระแล้ว ✓`,
+              verifyResult?.ok
+                ? `ตรวจสอบโดย: ระบบอัตโนมัติ (${verifyResult.provider})${verifyResult.transRef ? ` · ref ${verifyResult.transRef}` : ''}`
+                : null,
+              ``,
+              `ใบเสร็จ: ดูได้ที่พอร์ทัลผู้เช่า /tenant`,
+              ``,
+              `${buildingName}`,
+            ].filter(Boolean).join('\n'),
+          };
+        } else if (initialStatus === 'rejected') {
         // Auto-verifier rejected the slip — give the tenant the SPECIFIC
         // reason from the verifier so they know what to fix. Common cases:
         //   AMOUNT_MISMATCH   → "ยอดไม่ตรง — สลิป ฿X แต่บิล ฿Y"
@@ -5949,8 +6004,9 @@ async function tenantPaymentUploadHandler(req, res) {
         },
         tenantNotice
       ).catch(() => {});
-    } catch (err) {
-      console.warn('[slip-upload] tenant ack failed:', err.message);
+      } catch (err) {
+        console.warn('[slip-upload] tenant ack failed:', err.message);
+      }
     }
 
     const attemptSummary = await loadBillPaymentAttemptSummary(pool, billId, req.tenant.tenant_id)
