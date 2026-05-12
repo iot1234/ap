@@ -152,6 +152,47 @@ function PagePayments({ setToast }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filter]);
 
+  // Cross-link consumer: when /admin#billing → "ดูสลิปของบิลนี้" jumps to
+  // /admin#payments?billId=42, we auto-switch the status filter to the
+  // status of THAT bill's latest slip (or 'pending' as default) and open
+  // the modal so the operator lands directly on the right row. The
+  // billId match is best-effort — if the page is still loading, we re-try
+  // on the next load() completion.
+  const [pendingBillIdFromHash, setPendingBillIdFromHash] = useState(null);
+  useEffect(() => {
+    const readHash = () => {
+      const m = String(window.location.hash || '').match(/billId=([^&]+)/);
+      if (m) {
+        const id = Number(decodeURIComponent(m[1]));
+        if (id) setPendingBillIdFromHash(id);
+      }
+    };
+    readHash();
+    window.addEventListener('hashchange', readHash);
+    return () => window.removeEventListener('hashchange', readHash);
+  }, []);
+  useEffect(() => {
+    if (!pendingBillIdFromHash || !Array.isArray(list) || loading) return;
+    const target = list.find((p) => Number(p.bill_id) === pendingBillIdFromHash);
+    if (target) {
+      openPayment(target);
+      setPendingBillIdFromHash(null);
+      // Scrub the query off the hash so a refresh doesn't keep re-opening
+      // the modal, but keep the page id so the user stays on /admin#payments.
+      const cleanHash = String(window.location.hash || '').split('?')[0];
+      try { history.replaceState(null, '', cleanHash || '#payments'); } catch {}
+    } else if (filter === 'pending') {
+      // Not in the current filter — try verified, then rejected.
+      setFilter('verified');
+    } else if (filter === 'verified') {
+      setFilter('rejected');
+    } else if (filter === 'rejected') {
+      // Exhausted all filters — clear the hash so we don't loop.
+      setPendingBillIdFromHash(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingBillIdFromHash, list, filter, loading]);
+
   // Lazy-load the slip_url when admin opens a row. The list endpoint no longer
   // returns slip_url (defends against legacy base64 in the column from
   // pre-storage-service rows blowing up the renderer when the list is large).

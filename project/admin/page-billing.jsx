@@ -997,6 +997,21 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         footer={previewBill && (
           <>
             <Btn variant="ghost" onClick={() => setPreviewBill(null)}>ปิด</Btn>
+            {/* Cross-link to /admin#payments. Only show when the bill is
+                actually persisted (no point linking to an estimate) and
+                only when there's something to see (a slip is attached or
+                the bill is already paid via a slip). For unsent bills
+                with no slip yet this button stays hidden so the footer
+                isn't cluttered. */}
+            {previewBill._source === 'db' && previewBill.dbBillId
+              && ((previewBill.pendingSlipCount || 0) > 0
+                  || (previewBill.verifiedSlipCount || 0) > 0
+                  || (previewBill.rejectedSlipCount || 0) > 0) ? (
+              <Btn variant="secondary" icon="💳" onClick={() => {
+                window.location.hash = `#payments?billId=${encodeURIComponent(previewBill.dbBillId)}`;
+                setPreviewBill(null);
+              }}>ดูสลิปของบิลนี้</Btn>
+            ) : null}
             <Btn variant="secondary" icon="📥" onClick={async () => {
               const b = previewBill;
               // Build the bill payload matching services/pdf.js renderBillPdf shape.
