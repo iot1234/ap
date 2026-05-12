@@ -5881,8 +5881,12 @@ async function tenantPaymentUploadHandler(req, res) {
           notifier: require('./services/notifier'),
           flags: req.features,
           audit: async (entry) => {
+            // Table name is `audit_logs` (plural) with columns
+            // (user_id, action, entity_type, entity_id, detail) — see
+            // db/migrate.js:65. Earlier version used singular `audit_log`
+            // and renamed columns, which silently failed with 42P01.
             await pool.query(
-              `INSERT INTO audit_log (actor, action, entity, entity_id, details)
+              `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, detail)
                VALUES ($1, $2, $3, $4, $5::jsonb)`,
               [entry.actor, entry.action, entry.entity, entry.entityId, JSON.stringify(entry.details || {})]
             ).catch(() => {});
@@ -6549,8 +6553,11 @@ app.put('/api/payments/:id/verify', sameOrigin, csrfGuard, requireAuth, requireR
             notifier: require('./services/notifier'),
             flags,
             audit: async (entry) => {
+              // Table is `audit_logs` (plural). See note at the matching
+              // slip-upload site above + db/migrate.js:65 for the canonical
+              // column shape.
               await pool.query(
-                `INSERT INTO audit_log (actor, action, entity, entity_id, details)
+                `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, detail)
                  VALUES ($1, $2, $3, $4, $5::jsonb)`,
                 [entry.actor, entry.action, entry.entity, entry.entityId, JSON.stringify(entry.details || {})]
               ).catch(() => {});

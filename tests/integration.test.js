@@ -1820,6 +1820,35 @@ test('scheduler runs access-card sync before overdue owner digest', () => {
     'overdue digest reads state.todaysAccessSync, so access sync must finish before the parallel digest batch');
 });
 
+test('audit log inserts target the audit_logs table with canonical columns', () => {
+  // Regression guard: a previous version of access-card audit inserts
+  // used singular `audit_log` with renamed columns (actor / entity /
+  // details). The table is actually `audit_logs` (plural) with columns
+  // (user_id, action, entity_type, entity_id, detail) — see db/migrate.js.
+  // The wrong-table INSERT silently failed with 42P01 ("relation does not
+  // exist") and the audit trail stayed empty even though tests passed.
+  // This guard scans both server.js and services/scheduler.js for the
+  // bad pattern so the same mistake can't recur.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  for (const rel of ['server.js', 'services/scheduler.js']) {
+    const src = fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
+    // Strip block + line comments so the regression note inside a
+    // comment doesn't trip the assertion.
+    const code = src
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+    assert.doesNotMatch(code, /INSERT\s+INTO\s+audit_log\s*\(/i,
+      `${rel} must INSERT into audit_logs (plural), not audit_log`);
+    assert.doesNotMatch(code, /INSERT\s+INTO\s+audit_logs\s*\([^)]*\bdetails\b/i,
+      `${rel} must use detail (singular) column, not details`);
+    assert.doesNotMatch(code, /INSERT\s+INTO\s+audit_logs\s*\([^)]*\bactor\b/i,
+      `${rel} must use user_id column, not actor`);
+    assert.doesNotMatch(code, /INSERT\s+INTO\s+audit_logs\s*\([^)]*\bentity\b(?!_)/i,
+      `${rel} must use entity_type column, not entity`);
+  }
+});
+
 test('formatDueDate / formatYMD are timezone-safe (Asia/Bangkok regression)', () => {
   // The old `new Date(y, m, d).toISOString().slice(0, 10)` pattern shifted
   // back ~17h on Asia/Bangkok (UTC+7) — bills generated with dueDay=15

@@ -754,8 +754,14 @@ async function tickAccessControlSync(pool, flags, now, state) {
       // — admins couldn't search "what did the cron do on 2026-05-12?"
       // without grepping Railway logs.
       try {
+        // Table is `audit_logs` (plural) with columns (user_id, action,
+        // entity_type, entity_id, detail) — see db/migrate.js:65. The first
+        // version of this insert used singular `audit_log` with renamed
+        // columns (actor / entity / details), so it silently failed with
+        // 42P01 "relation does not exist". Caught by the err.code check
+        // below, but the audit trail stayed empty.
         await pool.query(
-          `INSERT INTO audit_log (actor, action, entity, entity_id, details)
+          `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, detail)
            VALUES ('system:overdue-cron', 'access_card.bulk_sync', 'access_card', $1, $2::jsonb)`,
           [
             todayKey,
