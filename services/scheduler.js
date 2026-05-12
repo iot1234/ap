@@ -140,7 +140,7 @@ async function tickLateFee(pool, flags, now, state) {
       }
 
       // De-dupe with tickAccessControlSync: any tenant whose card will be
-      // revoked TODAY (because they already have a bill ≥ threshold days
+      // revoked TODAY (because they already have a bill at least threshold days
       // overdue) gets a single comprehensive "card suspended + here are
       // ALL your unpaid bills" message from access-sync. Sending them an
       // extra "another bill of yours is overdue" alert at the same hour
@@ -155,7 +155,7 @@ async function tickLateFee(pool, flags, now, state) {
             SELECT DISTINCT tenant_id FROM bills
               WHERE status='overdue' AND tenant_id IS NOT NULL
                 AND deleted_at IS NULL AND paid_at IS NULL
-                AND due_date < CURRENT_DATE - ($1::int * INTERVAL '1 day')
+                AND due_date <= CURRENT_DATE - ($1::int * INTERVAL '1 day')
           `, [thr]);
           for (const r of dq.rows) tenantsGettingAccessAlert.add(Number(r.tenant_id));
         } catch { /* fall back to sending the per-bill alert */ }
@@ -597,15 +597,21 @@ async function tickMeterSimulator(pool, flags, now, state) {
 const ACCESS_CARD_AUTO_REVOKE_REASON = 'auto:overdue_bill';
 
 // Restore any cards that this subsystem auto-revoked for one tenant, but
-// only when the tenant no longer has any bill ≥ threshold days overdue.
+// only when the tenant no longer has any bill at least threshold days overdue.
 // Used by tickAccessControlSync (bulk daily pass) AND by the payment
 // verify path in server.js so the card un-blocks the SAME MINUTE the
 // tenant pays — instead of forcing them to wait up to 24 hours for the
 // next cron tick. Returns { restoredCount, restoredCardIds, tenant }.
 async function restoreAccessCardsForTenantIfClear(pool, tenantId, { threshold = 30, notifier: _notifier, flags, audit } = {}) {
-  if (!Number.isInteger(Number(tenantId))) return { restoredCount: 0, restoredCardIds: [] };
+  const tenantIdNum = Number(tenantId);
+  if (!Number.isInteger(tenantIdNum) || tenantIdNum < 1) {
+    return { restoredCount: 0, restoredCardIds: [] };
+  }
   try {
-    const safeThreshold = Math.max(1, Math.min(365, Math.trunc(Number(threshold) || 30)));
+    const rawThreshold = Number(threshold);
+    const safeThreshold = Number.isFinite(rawThreshold)
+      ? Math.max(1, Math.min(365, Math.trunc(rawThreshold)))
+      : 30;
     const restore = await pool.query(`
       UPDATE access_cards SET status='active', revoked_at=NULL, revoke_reason=NULL
         WHERE status='revoked' AND revoke_reason=$1
@@ -614,12 +620,12 @@ async function restoreAccessCardsForTenantIfClear(pool, tenantId, { threshold = 
             SELECT 1 FROM bills b
               WHERE b.tenant_id = access_cards.tenant_id
                 AND b.status='overdue'
-                AND b.due_date < CURRENT_DATE - ($3::int * INTERVAL '1 day')
+                AND b.due_date <= CURRENT_DATE - ($3::int * INTERVAL '1 day')
                 AND b.paid_at IS NULL
                 AND b.deleted_at IS NULL
           )
         RETURNING id, card_id
-    `, [ACCESS_CARD_AUTO_REVOKE_REASON, Number(tenantId), safeThreshold]);
+    `, [ACCESS_CARD_AUTO_REVOKE_REASON, tenantIdNum, safeThreshold]);
     if (restore.rowCount === 0) {
       return { restoredCount: 0, restoredCardIds: [] };
     }
@@ -633,7 +639,7 @@ async function restoreAccessCardsForTenantIfClear(pool, tenantId, { threshold = 
             action: 'access_card.restore',
             entity: 'access_card',
             entityId: String(r.id),
-            details: { card_id: r.card_id, tenant_id: tenantId, trigger: 'bill-paid' },
+            details: { card_id: r.card_id, tenant_id: tenantIdNum, trigger: 'bill-paid' },
           });
         } catch { /* audit is best-effort */ }
       }
@@ -644,7 +650,7 @@ async function restoreAccessCardsForTenantIfClear(pool, tenantId, { threshold = 
       const t = await pool.query(
         `SELECT id, full_name, phone, email, line_user_id, line_oa_id, status
            FROM tenants WHERE id=$1 AND deleted_at IS NULL AND status='active'`,
-        [tenantId]
+        [tenantIdNum]
       );
       tenantRow = t.rows[0] || null;
     } catch { /* fall through */ }
@@ -666,7 +672,7 @@ async function restoreAccessCardsForTenantIfClear(pool, tenantId, { threshold = 
       tenant: tenantRow,
     };
   } catch (err) {
-    console.warn(`[access-restore] failed for tenant ${tenantId}:`, err.message);
+    console.warn(`[access-restore] failed for tenant ${tenantIdNum}:`, err.message);
     return { restoredCount: 0, restoredCardIds: [], error: err.message };
   }
 }
@@ -679,7 +685,7 @@ async function tickAccessControlSync(pool, flags, now, state) {
   const todayKey = now.toISOString().slice(0, 10);
   if (state.lastAccessSync === todayKey) return;
   // Revoke active cards belonging to tenants whose oldest unpaid bill is
-  // older than `accessControl.overdueDaysThreshold` days past due. Bound
+  // at least `accessControl.overdueDaysThreshold` days past due. Bound
   // the threshold to a sane range (1-365) so a misconfigured value can't
   // either revoke same-day or never trigger.
   const REVOKE_REASON = ACCESS_CARD_AUTO_REVOKE_REASON;
@@ -688,7 +694,7 @@ async function tickAccessControlSync(pool, flags, now, state) {
     ? Math.max(1, Math.min(365, Math.trunc(rawThreshold)))
     : 30;
   try {
-    // Find tenants with overdue bills > threshold days. We pass threshold
+    // Find tenants with overdue bills at least threshold days late. We pass threshold
     // as a parameter so it can't smuggle SQL even if the feature flag was
     // tampered with.
     const overdue = await pool.query(`
@@ -696,7 +702,7 @@ async function tickAccessControlSync(pool, flags, now, state) {
         WHERE status='overdue'
           AND tenant_id IS NOT NULL
           AND deleted_at IS NULL
-          AND due_date < CURRENT_DATE - ($1::int * INTERVAL '1 day')
+          AND due_date <= CURRENT_DATE - ($1::int * INTERVAL '1 day')
           AND paid_at IS NULL
     `, [threshold]);
     const overdueIds = overdue.rows.map((r) => Number(r.tenant_id));
@@ -720,7 +726,7 @@ async function tickAccessControlSync(pool, flags, now, state) {
       for (const row of r.rows) revokedTenants.add(Number(row.tenant_id));
     }
     // Restore previously auto-revoked cards whose tenant no longer has any
-    // overdue bill > threshold. Only undo our own auto-revokes (manual
+    // overdue bill at least threshold days late. Only undo our own auto-revokes (manual
     // revokes stay revoked — admin made that call deliberately).
     const restore = await pool.query(`
       UPDATE access_cards SET status='active', revoked_at=NULL, revoke_reason=NULL
@@ -730,7 +736,7 @@ async function tickAccessControlSync(pool, flags, now, state) {
             SELECT 1 FROM bills b
               WHERE b.tenant_id = access_cards.tenant_id
                 AND b.status='overdue'
-                AND b.due_date < CURRENT_DATE - ($2::int * INTERVAL '1 day')
+                AND b.due_date <= CURRENT_DATE - ($2::int * INTERVAL '1 day')
                 AND b.paid_at IS NULL
                 AND b.deleted_at IS NULL
           )
@@ -839,7 +845,7 @@ async function tickAccessControlSync(pool, flags, now, state) {
             ? [
               `เรียน คุณ${t.full_name}`,
               '',
-              `ระบบได้ระงับบัตรเข้า-ออกของคุณชั่วคราว เนื่องจากมีบิลค้างชำระเกิน ${threshold} วัน`,
+              `ระบบได้ระงับบัตรเข้า-ออกของคุณชั่วคราว เนื่องจากมีบิลค้างชำระครบ ${threshold} วันขึ้นไป`,
               billsBlock,
               `📋 วิธีแก้:`,
               `   1) ชำระบิลค้างทั้งหมดผ่านพอร์ทัลผู้เช่า /tenant`,
@@ -1344,12 +1350,21 @@ async function tick(pool) {
   // The advisory lock is held only for the duration of one tick cycle; the
   // state-file latch still blocks repeats within the same instance.
   const todayKey = now.toISOString().slice(0, 10);
+  // Access sync feeds today's revoke/restore counts into state.todaysAccessSync,
+  // and the overdue digest prints that summary for the owner. Keep access sync
+  // before the parallel daily batch so the digest cannot race ahead with a
+  // stale/empty access-card section.
+  try {
+    await _withAdvisoryLock(pool, `accessSync-${todayKey}`, () => tickAccessControlSync(pool, flags, now, state));
+  } catch (err) {
+    console.error('[scheduler] access sync:', err.message);
+  }
+
   const results = await Promise.allSettled([
     _withAdvisoryLock(pool, `autoBackup-${todayKey}`,    () => tickAutoBackup(pool, flags, now, state)),
     _withAdvisoryLock(pool, `billGen-${todayKey}`,       () => tickBillGen(pool, flags, now, state)),
     _withAdvisoryLock(pool, `meterSim-${now.toISOString().slice(0,13)}`,
                                                           () => tickMeterSimulator(pool, flags, now, state)),
-    _withAdvisoryLock(pool, `accessSync-${todayKey}`,    () => tickAccessControlSync(pool, flags, now, state)),
     _withAdvisoryLock(pool, `contractExpiry-${todayKey}`,() => tickContractExpiry(pool, flags, now, state)),
     _withAdvisoryLock(pool, `overdueDigest-${todayKey}`, () => tickOverdueDigest(pool, flags, now, state)),
     _withAdvisoryLock(pool, `autoReconcile-${todayKey}`, () => tickAutoReconcileRooms(pool, flags, now, state)),

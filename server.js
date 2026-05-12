@@ -4425,7 +4425,7 @@ app.post('/api/public/bills/:billId/payments', rateLimitPublicPayment, sameOrigi
   } catch (err) {
     console.error('public bill slip upload error:', err);
     return res.status(500).json({
-      error: 'upload failed, please try again',
+      error: 'อัปโหลดสลิปล้มเหลว กรุณาลองใหม่อีกครั้งหรือติดต่อแอดมิน',
       code: 'UPLOAD_FAILED',
     });
   }
@@ -5065,29 +5065,60 @@ app.post('/api/tenant/maintenance/:id/rate', sameOrigin, csrfGuard, requireTenan
 app.get('/api/bills', requireAuth, async (req, res) => {
   const status = req.query.status;
   const params = [];
-  const where = ['deleted_at IS NULL'];
+  const where = ['b.deleted_at IS NULL'];
   if (status && ['pending', 'paid', 'overdue', 'void'].includes(String(status))) {
-    params.push(status); where.push(`status=$${params.length}`);
+    params.push(status); where.push(`b.status=$${params.length}`);
   }
   if (req.query.roomId) {
     params.push(String(req.query.roomId).slice(0, 32));
-    where.push(`room_id=$${params.length}`);
+    where.push(`b.room_id=$${params.length}`);
   }
   if (req.query.period) {
     params.push(String(req.query.period).slice(0, 16));
-    where.push(`period=$${params.length}`);
+    where.push(`b.period=$${params.length}`);
   }
   // Pagination so admins working with > 500 historical bills can page
   // through them. Default 200/page; max 500 (preserves the previous cap).
   const limit = Math.min(Math.max(Number(req.query.limit) || 200, 1), 500);
   const offset = Math.max(Number(req.query.offset) || 0, 0);
   params.push(limit, offset);
+  // Opt-in payment summary so the admin billing page can show per-row
+  // "📥 สลิปรอตรวจ" / "🤖 ออโต้" / "👤 admin" badges without firing a
+  // second request per row. Off by default for backward compat — older
+  // callers (reports, exports, CSV) still get the bare bills shape.
+  const withPayments = String(req.query.withPayments || '').toLowerCase() === '1'
+                     || String(req.query.withPayments || '').toLowerCase() === 'true';
   try {
-    const { rows } = await pool.query(
-      `SELECT * FROM bills WHERE ${where.join(' AND ')}
-        ORDER BY created_at DESC LIMIT $${params.length - 1} OFFSET $${params.length}`,
-      params
-    );
+    const sql = withPayments
+      ? `SELECT b.*,
+                COUNT(p.id) FILTER (WHERE p.status='pending')::int  AS pending_slip_count,
+                COUNT(p.id) FILTER (WHERE p.status='verified')::int AS verified_slip_count,
+                COUNT(p.id) FILTER (WHERE p.status='rejected')::int AS rejected_slip_count,
+                (
+                  SELECT verified_by FROM payments
+                   WHERE bill_id=b.id AND status='verified'
+                   ORDER BY verified_at DESC LIMIT 1
+                ) AS latest_paid_by,
+                (
+                  SELECT verified_at FROM payments
+                   WHERE bill_id=b.id AND status='verified'
+                   ORDER BY verified_at DESC LIMIT 1
+                ) AS latest_paid_at,
+                (
+                  SELECT verify_provider FROM payments
+                   WHERE bill_id=b.id AND status='verified' AND verify_provider IS NOT NULL
+                   ORDER BY verified_at DESC LIMIT 1
+                ) AS latest_paid_provider
+           FROM bills b
+           LEFT JOIN payments p ON p.bill_id = b.id
+          WHERE ${where.join(' AND ')}
+          GROUP BY b.id
+          ORDER BY b.created_at DESC
+          LIMIT $${params.length - 1} OFFSET $${params.length}`
+      : `SELECT b.* FROM bills b WHERE ${where.join(' AND ')}
+          ORDER BY b.created_at DESC
+          LIMIT $${params.length - 1} OFFSET $${params.length}`;
+    const { rows } = await pool.query(sql, params);
     res.json({ ok: true, bills: rows, limit, offset });
   } catch (err) {
     console.error('bills list error:', err);
@@ -5360,7 +5391,10 @@ app.put('/api/bills/:id/void', sameOrigin, csrfGuard, requireAuth, requireRole('
 async function ensureSlipUpload(req, res, next) {
   const flags = await features.load(pool);
   if (!flags.slipUpload || !flags.slipUpload.enabled) {
-    return res.status(503).json({ error: 'slipUpload disabled' });
+    return res.status(503).json({
+      error: 'ระบบยังไม่เปิดรับอัปโหลดสลิปออนไลน์ กรุณาติดต่อแอดมิน',
+      code: 'SLIP_UPLOAD_DISABLED',
+    });
   }
   req.features = flags;
   next();
@@ -5840,7 +5874,8 @@ async function tenantPaymentUploadHandler(req, res) {
     // to use their access card again.
     if (initialStatus === 'verified' && req.tenant?.tenant_id) {
       try {
-        const threshold = Number(req.features?.accessControl?.overdueDaysThreshold) || 30;
+        const rawThreshold = Number(req.features?.accessControl?.overdueDaysThreshold);
+        const threshold = Number.isFinite(rawThreshold) ? rawThreshold : 30;
         require('./services/scheduler').restoreAccessCardsForTenantIfClear(pool, req.tenant.tenant_id, {
           threshold,
           notifier: require('./services/notifier'),
@@ -6507,7 +6542,8 @@ app.put('/api/payments/:id/verify', sameOrigin, csrfGuard, requireAuth, requireR
       if (row.tenant_id) {
         try {
           const flags = await features.load(pool).catch(() => ({}));
-          const threshold = Number(flags?.accessControl?.overdueDaysThreshold) || 30;
+          const rawThreshold = Number(flags?.accessControl?.overdueDaysThreshold);
+          const threshold = Number.isFinite(rawThreshold) ? rawThreshold : 30;
           require('./services/scheduler').restoreAccessCardsForTenantIfClear(pool, row.tenant_id, {
             threshold,
             notifier: require('./services/notifier'),

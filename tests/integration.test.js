@@ -742,6 +742,10 @@ test('public bill payment upload has retry limit + admin-visible diagnostics', (
     'server must block another upload while a slip is pending admin review');
   assert.match(server, /SLIP_UPLOAD_LIMIT_REACHED/,
     'server must block uploads after the retry limit is reached');
+  assert.match(server, /SLIP_UPLOAD_DISABLED/,
+    'tenant/public upload paths must return a stable disabled code');
+  assert.match(server, /อัปโหลดสลิปล้มเหลว/,
+    'public upload fallback errors must be user-facing Thai, not raw English');
   assert.match(server, /upload:\s*\{/,
     'public payment APIs must return upload attempt details to the page');
   const handlerIdx = server.indexOf('async function tenantPaymentUploadHandler');
@@ -1781,8 +1785,39 @@ test('access card revoke/restore notifies the affected tenant', () => {
     'revoke UPDATE must capture affected tenant_id via RETURNING');
   assert.match(body, /UPDATE access_cards[\s\S]{0,800}status='active'[\s\S]{0,800}RETURNING tenant_id/,
     'restore UPDATE must capture affected tenant_id via RETURNING');
+  assert.match(body, /due_date <= CURRENT_DATE - \(\$1::int \* INTERVAL '1 day'\)/,
+    'revoke threshold must trigger when a bill reaches the configured day count, not one day late');
+  assert.match(body, /b\.due_date <= CURRENT_DATE - \(\$2::int \* INTERVAL '1 day'\)/,
+    'restore threshold check must use the same inclusive boundary as revoke');
   assert.ok(!/ac\.updated_at/.test(body),
     'must not reference ac.updated_at — no such column on access_cards');
+  const restoreStart = sched.indexOf('async function restoreAccessCardsForTenantIfClear');
+  const restoreEnd = sched.indexOf('// B2', restoreStart);
+  assert.ok(restoreStart > 0 && restoreEnd > restoreStart);
+  const restoreBody = sched.slice(restoreStart, restoreEnd);
+  assert.match(restoreBody, /tenantIdNum < 1/,
+    'immediate payment restore helper must reject null/empty tenant ids instead of treating them as tenant 0');
+  assert.match(restoreBody, /Number\.isFinite\(rawThreshold\)/,
+    'immediate payment restore helper must clamp thresholds consistently with daily cron');
+  assert.match(restoreBody, /b\.due_date <= CURRENT_DATE - \(\$3::int \* INTERVAL '1 day'\)/,
+    'immediate payment restore helper must use the same inclusive overdue boundary');
+});
+
+test('scheduler runs access-card sync before overdue owner digest', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const sched = fs.readFileSync(
+    path.join(__dirname, '..', 'services', 'scheduler.js'), 'utf8'
+  );
+  const start = sched.indexOf('async function tick(pool)');
+  const end = sched.indexOf('let _interval', start);
+  assert.ok(start > 0 && end > start);
+  const body = sched.slice(start, end);
+  const accessIdx = body.indexOf("await _withAdvisoryLock(pool, `accessSync-${todayKey}`");
+  const parallelIdx = body.indexOf('const results = await Promise.allSettled');
+  const digestIdx = body.indexOf("`overdueDigest-${todayKey}`");
+  assert.ok(accessIdx > 0 && accessIdx < parallelIdx && parallelIdx < digestIdx,
+    'overdue digest reads state.todaysAccessSync, so access sync must finish before the parallel digest batch');
 });
 
 test('formatDueDate / formatYMD are timezone-safe (Asia/Bangkok regression)', () => {
