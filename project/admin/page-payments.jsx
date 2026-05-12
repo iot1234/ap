@@ -46,6 +46,25 @@ function formatVerifyAttempt(attempt) {
   return `${attempt.provider || 'provider'}:${attempt.ok ? 'ผ่าน' : (attempt.code || 'ไม่ผ่าน')}`;
 }
 
+// "auto:slipok" / "auto:easyslip" / "auto:slip2go" → friendly Thai label
+// so admins reading the page don't see raw enum-ish strings. Anything
+// else (an actual username) is returned as-is prefixed with 👤.
+const PROVIDER_LABEL = {
+  slipok: 'SlipOK',
+  easyslip: 'EasySlip',
+  slip2go: 'Slip2Go',
+};
+function prettyVerifiedBy(verifiedBy) {
+  if (!verifiedBy) return '-';
+  const s = String(verifiedBy);
+  if (s.startsWith('auto:')) {
+    const id = s.slice(5);
+    const label = PROVIDER_LABEL[id] || id;
+    return `🤖 ระบบอัตโนมัติ (${label})`;
+  }
+  return `👤 ${s}`;
+}
+
 function PagePayments({ setToast }) {
   // Diagnostic: prove the component actually mounted. Visible in DevTools
   // console — useful when the user reports a "white screen with no error"
@@ -373,10 +392,32 @@ function SlipModal({ payment, busy, onClose, onDecide }) {
           </>
         ) : (
           <div style={{ marginTop: 12, padding: 10, borderRadius: 8, background: C.bgSoft, color: C.ink2, fontSize: 13 }}>
-            ตรวจสอบโดย {payment.verified_by} เมื่อ {new Date(payment.verified_at).toLocaleString('th-TH')}
+            ตรวจสอบโดย {prettyVerifiedBy(payment.verified_by)} เมื่อ {new Date(payment.verified_at).toLocaleString('th-TH')}
             {payment.rejected_reason ? ` · เหตุผล: ${payment.rejected_reason}` : ''}
           </div>
         )}
+        {/* Cross-link: jump straight to the bill row in /admin#billing so
+            the operator can see the full bill context (line items, due
+            date, send-readiness) without copy-pasting the bill_no. The
+            anchor is consumed by page-billing.jsx which opens the matching
+            bill's preview on mount. */}
+        {(payment.bill_id || payment.bill_no) ? (
+          <div style={{ marginTop: 8, textAlign: 'center' }}>
+            <a
+              href={`#billing?billId=${encodeURIComponent(payment.bill_id || '')}`}
+              onClick={(e) => {
+                // History push so the admin shell's hash router picks it up
+                // without a full reload; we also dispatch hashchange because
+                // some shells listen on that, not popstate.
+                e.preventDefault();
+                window.location.hash = `#billing?billId=${encodeURIComponent(payment.bill_id || '')}`;
+              }}
+              style={{ fontSize: 12.5, color: C.muted, textDecoration: 'underline' }}
+            >
+              ดูบิลในหน้าบิล/ใบแจ้งหนี้ →
+            </a>
+          </div>
+        ) : null}
         <button onClick={onClose} style={{
           marginTop: 12, width: '100%', padding: 10, borderRadius: 8, border: 0,
           background: 'transparent', color: C.muted, cursor: 'pointer', fontFamily: 'inherit',
