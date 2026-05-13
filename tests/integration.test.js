@@ -1033,6 +1033,35 @@ test('admin billing mark-paid uses the bill payment endpoint, not the rooms blob
     'mark-paid must not fake payment status by mutating rooms');
 });
 
+test('admin billing selected period drives estimates and bulk generation', () => {
+  // The period selector is authoritative. When admin views a back-filled
+  // month, both the preview rows and /api/bills/bulk-generate payload must
+  // use that selected YYYY-MM, not the browser wall-clock month.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-billing.jsx'), 'utf8');
+
+  const billsIdx = src.indexOf('const bills = useMemo');
+  assert.ok(billsIdx > 0, 'should find bills useMemo');
+  const billsBlock = src.slice(billsIdx, src.indexOf('const filtered = useMemo', billsIdx));
+  assert.match(billsBlock, /const periodDisplay = fmtMonthTH\(currentPeriodDate\)/,
+    'estimate display month must follow selected period');
+  assert.match(billsBlock, /const dueIso = `\$\{currentPeriod\}-\$\{String\(dueDay\)\.padStart\(2, '0'\)\}`/,
+    'estimate due date must be inside selected period');
+  assert.match(billsBlock, /const periodIso = currentPeriod;/,
+    'estimate bill id/API period must use selected period');
+  assert.match(billsBlock, /\[rooms, config, realBillsByRoom, currentPeriod, currentPeriodDate\]/,
+    'estimate must recompute after period changes');
+
+  const genIdx = src.indexOf('const handleGenerate = async');
+  assert.ok(genIdx > 0, 'should find handleGenerate');
+  const generateBlock = src.slice(genIdx, src.indexOf('// Bulk-send all pending', genIdx));
+  assert.match(generateBlock, /const period = currentPeriod;/,
+    'bulk-generate payload must use the selected period');
+  assert.doesNotMatch(generateBlock, /const now = new Date\(\)[\s\S]{0,120}const period =/,
+    'bulk generation must not silently switch back to wall-clock month');
+});
+
 test('tenant bill modal uses bill-owned QR endpoint', () => {
   const fs = require('node:fs');
   const path = require('node:path');
@@ -2981,6 +3010,40 @@ test('contracts page has "+ สร้างสัญญา" entry button + Quick
   // Result panel shows the URL with copy
   assert.match(src, /result\.invitation\.url/);
   assert.match(src, /navigator\.clipboard\.writeText/);
+});
+
+test('contracts quick-invite uses vacant room inventory and auto-fills room pricing', () => {
+  // Quick contract creation is a stock-locking workflow, so the UI should not
+  // make the operator type arbitrary room IDs when it already has the rooms
+  // inventory from the admin shell.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-contracts.jsx'), 'utf8');
+  assert.match(src, /function PageContracts\(\{ setToast, addActivity, rooms = \{\} \}\)/,
+    'contracts page must accept rooms from shell props');
+  assert.match(src, /<QuickInviteModal[\s\S]{0,120}rooms=\{rooms\}/,
+    'quick-invite modal must receive room inventory');
+
+  const start = src.indexOf('function QuickInviteModal');
+  assert.ok(start > 0, 'should find QuickInviteModal');
+  const modal = src.slice(start, src.indexOf('const lbl =', start));
+  assert.match(modal, /function QuickInviteModal\(\{ rooms = \{\}, onClose, onSaved, onError \}\)/);
+  assert.match(modal, /const roomList = useMemo\(\(\) => Object\.values\(rooms \|\| \{\}\)/,
+    'modal must derive room list from inventory');
+  assert.match(modal, /const availableRooms = useMemo\(\(\) => roomList\.filter/,
+    'modal must derive available rooms');
+  assert.match(modal, /String\(r\.status \|\| 'vacant'\) === 'vacant' && !r\.tenant/,
+    'modal must only offer vacant rooms with no tenant');
+  assert.match(modal, /<select style=\{inp\} value=\{form\.roomId\}/,
+    'room field should become a select when inventory exists');
+  assert.match(modal, /onChange=\{\(e\) => setRoomId\(e\.target\.value\)\}/,
+    'choosing a room must run the default-fill handler');
+  assert.match(modal, /monthlyRent: Number\.isFinite\(rent\) && rent > 0 \? String\(rent\)/,
+    'room rent should auto-fill monthlyRent');
+  assert.match(modal, /String\(rent \* 2\)/,
+    'missing room deposit should fall back to 2x rent');
+  assert.match(modal, /&& roomAvailable/,
+    'submit must be disabled when selected room is not available');
 });
 
 test('contract-fill HTML reads view.rejectionReason (camelCase, not snake_case)', () => {
