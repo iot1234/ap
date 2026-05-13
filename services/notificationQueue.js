@@ -9,9 +9,25 @@ const lineNotify = require('./line');
 const lineOa = require('./lineOa');
 const email = require('./email');
 const sms = require('./sms');
+const crypto = require('crypto');
 
 const MAX_RETRY = 3;
 const BACKOFF_MIN = [60_000, 5 * 60_000, 30 * 60_000]; // 1m, 5m, 30m
+
+function retryKeyForRowId(rowId) {
+  const hex = crypto
+    .createHash('sha256')
+    .update(`notifications_queue:${rowId}`)
+    .digest('hex');
+  const variant = (8 + (parseInt(hex.slice(16, 17), 16) % 4)).toString(16);
+  return [
+    hex.slice(0, 8),
+    hex.slice(8, 12),
+    `4${hex.slice(13, 16)}`,
+    `${variant}${hex.slice(17, 20)}`,
+    hex.slice(20, 32),
+  ].join('-');
+}
 
 async function logResult(pool, row, result, error) {
   try {
@@ -78,7 +94,7 @@ async function dispatch(pool, features, row) {
     // whose response was truncated mid-read would be retried and the
     // tenant would receive the same message twice (or more). LINE caches
     // results per retry key for ~10 minutes.
-    const retryKey = `notifq-${row.id}`;
+    const retryKey = retryKeyForRowId(row.id);
     // Rich-message path: payload.messages is the raw LINE messages array
     // (Flex bubble + text fallback for bill reminders). Bundled as ONE
     // push toward the rate limit so we don't double-count for the same
@@ -313,4 +329,4 @@ async function retryById(pool, id) {
   );
 }
 
-module.exports = { enqueue, tick, start, stop, retryById };
+module.exports = { enqueue, tick, start, stop, retryById, _retryKeyForRowId: retryKeyForRowId };

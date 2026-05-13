@@ -292,6 +292,18 @@ test('db/migrate: emits all required tables + new columns + admin bootstrap', as
 // 5. NOTIFICATION QUEUE — retry math
 // =====================================================================
 
+test('notifQueue LINE retry key is a deterministic UUID accepted by LINE', () => {
+  const notifQueue = require('../services/notificationQueue');
+  const key1 = notifQueue._retryKeyForRowId(160);
+  const key2 = notifQueue._retryKeyForRowId(160);
+  const key3 = notifQueue._retryKeyForRowId(161);
+  assert.equal(key1, key2, 'retry key must stay stable for the same queue row');
+  assert.notEqual(key1, key3, 'different queue rows need different retry keys');
+  assert.match(key1,
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    'LINE rejects ad-hoc keys like notifq-160; use UUID format');
+});
+
 test('notifQueue.tick: claims pending rows + retries on failure with exponential backoff', async () => {
   // We can't call processOne directly (not exported), but we can drive
   // tick() which claims one row and processes it. To assert backoff math
