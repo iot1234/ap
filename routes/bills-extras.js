@@ -615,7 +615,12 @@ module.exports = function buildBillsExtrasRouter(ctx) {
   }
 
   // POST /api/bills/:id/send — enqueue LINE/email
-  async function notifyManualPayment(payment, bill, actor) {
+  // supersededCount: number of pending slips that this manual-pay
+  // auto-rejected as siblings. When > 0 we mention it in the message
+  // so the tenant understands their "รอตรวจสอบ" slip status changed.
+  // Without this hint the tenant might open /tenant later and see a
+  // surprise "rejected" badge on a slip they thought was still queued.
+  async function notifyManualPayment(payment, bill, actor, supersededCount = 0) {
     if (!payment || !payment.tenant_id) return;
     const { rows } = await pool.query(
       `SELECT id, full_name, phone, email, line_user_id, line_oa_id, status
@@ -642,6 +647,9 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       manual: '👤 บันทึกโดยเจ้าหน้าที่',
     })[String(payment.method || 'manual').toLowerCase()]
       || `ช่องทางอื่น (${payment.method || 'manual'})`;
+    const supersededLine = supersededCount > 0
+      ? `\n📝 ระบบยกเลิกสลิปที่รออยู่ ${supersededCount} ใบ (เพราะบิลนี้ชำระเรียบร้อยแล้ว)`
+      : null;
     await notifier.notifyTenant({ pool, features: flags }, rows[0], {
       subject: '✅ ยืนยันการชำระเงินเรียบร้อยแล้ว',
       text: [
@@ -654,6 +662,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         `💳 ช่องทางชำระ: ${methodTh}`,
         payment.ref ? `🔖 อ้างอิง: ${payment.ref}` : null,
         actor ? `👤 บันทึกโดย: ${actor}` : null,
+        supersededLine,
         '',
         'สถานะ: ชำระแล้ว ✓',
         'ใบเสร็จ: ดูได้ที่พอร์ทัลผู้เช่า /tenant',
@@ -1205,7 +1214,12 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           method,
           supersededPaymentIds: supersededPending.rows.map((r) => r.id),
         });
-        notifyManualPayment(payment.rows[0], paid.rows[0] || row, verifier).catch(() => {});
+        notifyManualPayment(
+          payment.rows[0],
+          paid.rows[0] || row,
+          verifier,
+          supersededPending.rows.length
+        ).catch(() => {});
         // Auto-recompute room status — if this was the last overdue bill,
         // the room flips overdue → occupied without admin clicking.
         // paid.rows[0].room_id comes from the RETURNING * above.

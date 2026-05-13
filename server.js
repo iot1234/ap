@@ -9331,12 +9331,29 @@ app.delete('/api/admin/contract-templates/:id', sameOrigin, csrfGuard, requireAu
       }
       // Soft delete + null any contracts.template_id pointing here so
       // re-prints fall back to whatever the current default is.
+      //
+      // Also blank `terms_template_snapshot` on DRAFT contracts
+      // (locked_at IS NULL) that were prepped from this template.
+      // Without this, the snapshot stayed cached from the soon-to-be-
+      // deleted template — and the next print rendered the deleted
+      // text, not the new default. Locked contracts keep their
+      // snapshot (audit / legal trail).
       await pool.query(
         `UPDATE contract_templates SET deleted_at=NOW(), enabled=FALSE WHERE id=$1`,
         [id]
       );
       await pool.query(
-        `UPDATE contracts SET template_id=NULL WHERE template_id=$1`,
+        `UPDATE contracts
+            SET template_id=NULL,
+                terms_template_snapshot=NULL
+          WHERE template_id=$1 AND locked_at IS NULL`,
+        [id]
+      ).catch((err) => {
+        if (err.code !== '42703') throw err;
+      });
+      await pool.query(
+        `UPDATE contracts SET template_id=NULL
+          WHERE template_id=$1 AND locked_at IS NOT NULL`,
         [id]
       ).catch((err) => {
         if (err.code !== '42703') throw err;

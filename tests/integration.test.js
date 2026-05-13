@@ -1001,9 +1001,11 @@ test('GET /api/tenant/bills/:id/pdf is wired (tenant PDF download)', () => {
     'tenant PDF endpoint must exist');
   // Must enforce ownership — refuse to serve another tenant's bill.
   const idx = server.indexOf("app.get('/api/tenant/bills/:id/pdf'");
-  const body = server.slice(idx, idx + 4000);
+  const body = server.slice(idx, idx + 5000);
   assert.match(body, /not your bill/,
     'tenant PDF must reject mismatched tenant_id');
+  assert.match(body, /BILL_VOID/,
+    'tenant PDF must refuse void bills (so tenants do not pay via QR on a dead bill)');
   assert.match(body, /renderBillPdf\(bill, res\)/,
     'tenant PDF must stream through renderBillPdf');
 });
