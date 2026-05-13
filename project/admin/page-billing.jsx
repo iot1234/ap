@@ -8,7 +8,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
   const C = window.ADMIN_C;
   const ADMIN_ROOM_TYPES = window.ADMIN_ROOM_TYPES;
   const { fmt, fmtCurrency, fmtMonthTH } = window;
-  const { Card, Btn, IconBtn, Avatar, Pill, KpiCard, DataTable, Modal, Toggle,
+  const { Card, Btn, Avatar, Pill, KpiCard, DataTable, Modal, Toggle,
           PageContainer, PageHeader, SectionHeading, DefList, Tabs, EmptyState } = window;
 
   const [tab, setTab] = useState('current');
@@ -186,7 +186,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
           dbStatus: real.status,                     // pending / paid / overdue / void
           total: Number(real.total) || est.total,    // trust DB total over estimate
           // Slip summary (only present when fetched with withPayments=1).
-          // Used by the row "การชำระ" column + the new "📥 รอตรวจสลิป" tab
+          // Used by the row "การชำระ" column + the "รอตรวจสลิป" tab
           // so admin can see at-a-glance which bills have slips waiting,
           // which were auto-paid, and which were admin-approved.
           pendingSlipCount: Number(real.pending_slip_count) || 0,
@@ -256,11 +256,11 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
     if (relevant.length === 0) return null;
     const high = relevant.filter((i) => i.sev === 'high').length;
     const lines = relevant.map((i, idx) => {
-      const icon = i.sev === 'high' ? '🔴'
-        : i.sev === 'med' ? '🟡'
-        : i.sev === 'info' ? 'ℹ️' : '⚪';
+      const severity = i.sev === 'high' ? 'สำคัญ'
+        : i.sev === 'med' ? 'ควรตรวจ'
+        : i.sev === 'info' ? 'ข้อมูล' : 'ทั่วไป';
       const fix = i.fix ? `\n   → ${i.fix}` : '';
-      return `${idx + 1}. ${icon} ${i.msg}${fix}`;
+      return `${idx + 1}. [${severity}] ${i.msg}${fix}`;
     }).join('\n\n');
     return { lines, high, count: relevant.length };
   }, []);
@@ -419,7 +419,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         });
       }
       setToast && setToast({ kind: 'success', message: `ส่งเตือนบิล ${id} แล้ว` });
-      addActivity && addActivity({ icon: '🔔', text: `ส่งเตือนชำระบิล ${id}`, type: 'system' });
+      addActivity && addActivity({ icon: 'ส่ง', text: `ส่งเตือนชำระบิล ${id}`, type: 'system' });
       setSendConfirm(null);
     } catch (err) {
       window.toastError(setToast, err, { action: `ส่งเตือนบิล ${id}` });
@@ -531,15 +531,15 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
     if (issues.length > 0) {
       const high = issues.filter((i) => i.sev === 'high').length;
       const lines = issues.map((i, idx) => {
-        const icon = i.sev === 'high' ? '🔴' : i.sev === 'med' ? '🟡' : '⚪';
+        const severity = i.sev === 'high' ? 'สำคัญ' : i.sev === 'med' ? 'ควรตรวจ' : 'ทั่วไป';
         const fix = i.fix ? `\n   → ${i.fix}` : '';
-        return `${idx + 1}. ${icon} ${i.msg}${fix}`;
+        return `${idx + 1}. [${severity}] ${i.msg}${fix}`;
       }).join('\n\n');
       const ok = window.confirm(
-        `⚠️ พบ ${issues.length} ปัญหา${high > 0 ? ` (${high} ข้อสำคัญ)` : ''} ก่อนออกบิล:\n\n` +
+        `พบ ${issues.length} ปัญหา${high > 0 ? ` (${high} ข้อสำคัญ)` : ''} ก่อนออกบิล:\n\n` +
         lines +
-        `\n\n📌 ออกบิลเดี๋ยวนี้ทั้งที่ปัญหาข้างบนยังไม่แก้?\n` +
-        (high > 0 ? `   ⚠ บิลที่ออกอาจมี QR หาย / ยอดน้ำ-ไฟ ผิด — ผู้เช่าจ่ายไม่ได้ / ทักท้วงสูง\n` : '') +
+        `\n\nออกบิลเดี๋ยวนี้ทั้งที่ปัญหาข้างบนยังไม่แก้?\n` +
+        (high > 0 ? `   บิลที่ออกอาจมี QR หาย / ยอดน้ำ-ไฟผิด ผู้เช่าอาจจ่ายไม่ได้หรือทักท้วงสูง\n` : '') +
         `\n   • กดยกเลิก → แก้ปัญหาก่อนแล้วค่อยมาออกบิล (แนะนำ)\n` +
         `   • กดตกลง → ออกบิลตามค่าปัจจุบัน (รับผิดชอบเอง)`
       );
@@ -560,7 +560,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         method: 'POST',
         body: JSON.stringify({ period, dueDay, force: issues.length > 0 }),
       });
-      addActivity && addActivity({ icon: '📋', text: `ออกบิลรอบ ${period}: ${d.made} ใบ (ข้าม ${d.skipped})`, type: 'billing' });
+      addActivity && addActivity({ icon: 'บิล', text: `ออกบิลรอบ ${period}: ${d.made} ใบ (ข้าม ${d.skipped})`, type: 'billing' });
       setToast && setToast({
         kind: d.made > 0 ? 'success' : 'info',
         message: d.made > 0
@@ -621,7 +621,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
           ? `จัดคิวแจ้งเตือน ${d.enqueued}/${d.attempted} ใบ${d.failed ? ` — พลาด ${d.failed} ใบ (ดูใน "คิวแจ้งเตือน")` : ''}`
           : `ไม่มีบิลค้างที่ต้องแจ้งเตือน`,
       });
-      addActivity && addActivity({ icon: '🔔', text: `ส่งเตือนทุกบิลค้าง: ${d.enqueued} ใบ`, type: 'system' });
+      addActivity && addActivity({ icon: 'ส่ง', text: `ส่งเตือนทุกบิลค้าง: ${d.enqueued} ใบ`, type: 'system' });
       setBulkSendPreview(null);
       fetchBatchReadiness();   // status icons refresh
     } catch (e) {
@@ -683,7 +683,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
       render: b => (
         <div style={{ display: 'inline-flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start' }}>
           {b.status === 'paid'
-            ? <Pill color="success" size="sm" icon="✓">ชำระแล้ว</Pill>
+            ? <Pill color="success" size="sm">ชำระแล้ว</Pill>
             : <Pill color="danger" size="sm">ค้าง {b.overdueDays} วัน</Pill>}
           <span title={b._source === 'db' ? `บิล #${b.dbBillNo || b.dbBillId}` : 'ยังไม่ได้บันทึกเข้าระบบ'}
                 style={{
@@ -734,7 +734,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
                 fontWeight: 600,
               }}
             >
-              {isAuto ? `🤖 ${providerLabel || 'ออโต้'}` : `👤 ${paidBy}`}
+              {isAuto ? `ตรวจอัตโนมัติ: ${providerLabel || 'ระบบ'}` : `อนุมัติโดย: ${paidBy}`}
             </span>
           );
         }
@@ -749,7 +749,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
                 background: '#fff4d4', color: '#7a5a18', fontWeight: 600,
               }}
             >
-              📥 รอตรวจ {pend} ใบ
+              รอตรวจสลิป {pend} ใบ
             </span>
           );
         }
@@ -764,7 +764,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
                 background: '#ffe6e2', color: '#7a2920', fontWeight: 600,
               }}
             >
-              ⚠️ สลิปถูกปฏิเสธ {rej}
+              สลิปถูกปฏิเสธ {rej} ใบ
             </span>
           );
         }
@@ -788,24 +788,24 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         if (r.canSend && r.warnCode === 'EMAIL_ONLY') {
           return (
             <span title="ไม่ผูก LINE — จะส่งทางอีเมล (อาจไปกล่อง spam)"
-                  style={{ fontSize: 13, color: '#c08a2a' }}>📧 อีเมล</span>
+                  style={{ fontSize: 13, color: '#c08a2a' }}>ส่งทางอีเมล</span>
           );
         }
         if (r.canSend) {
           return (
             <span title="LINE + (อีเมลถ้ามี) พร้อม — กดส่งได้เลย"
-                  style={{ fontSize: 13, color: '#1f5f3a' }}>✅ พร้อม</span>
+                  style={{ fontSize: 13, color: '#1f5f3a' }}>พร้อมส่ง</span>
           );
         }
         return (
           <span title={r.blockMsg || r.blockCode || 'block'}
                 style={{ fontSize: 12, color: '#b94a48', fontWeight: 600 }}>
-            🚫 {r.blockCode === 'NO_TENANT_CHANNEL' ? 'ไม่มี channel'
+            ส่งไม่ได้: {r.blockCode === 'NO_TENANT_CHANNEL' ? 'ไม่มีช่องทาง'
               : r.blockCode === 'TENANT_MOVED_ROOM' ? 'ย้ายห้อง'
               : r.blockCode === 'TENANT_NOT_ACTIVE' ? 'ออกแล้ว'
               : r.blockCode === 'TENANT_DELETED' ? 'ลบแล้ว'
               : r.blockCode === 'BILL_NOT_LINKED' ? 'ไม่ผูก'
-              : 'block'}
+              : 'ติดปัญหา'}
           </span>
         );
       },
@@ -813,16 +813,16 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
     {
       key: 'actions', label: '', align: 'right', minWidth: 130,
       render: b => (
-        <div style={{ display: 'inline-flex', gap: 4 }} onClick={(e) => e.stopPropagation()}>
-          <IconBtn icon="👁" label="ดูบิล" onClick={() => setPreviewBill(b)} />
+        <div style={{ display: 'inline-flex', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end' }} onClick={(e) => e.stopPropagation()}>
+          <Btn size="sm" variant="ghost" onClick={() => setPreviewBill(b)}>ดูบิล</Btn>
           {b.status === 'unpaid' && b._source === 'db' && (
             <>
-              <IconBtn icon="🔔" label="ส่งเตือน" onClick={() => handleSendReminder(b.id)} />
-              <IconBtn icon="✓" label="บันทึกชำระ" onClick={() => handleMarkPaid(b.id)} />
+              <Btn size="sm" variant="ghost" onClick={() => handleSendReminder(b.id)}>ส่งเตือน</Btn>
+              <Btn size="sm" variant="ghost" onClick={() => handleMarkPaid(b.id)}>บันทึกชำระ</Btn>
             </>
           )}
           {b.status === 'paid' && b._source === 'db' && (
-            <IconBtn icon="↺" label="ยกเลิกการชำระ" onClick={() => handleUnmarkPaid(b.id)} />
+            <Btn size="sm" variant="ghost" onClick={() => handleUnmarkPaid(b.id)}>ยกเลิกชำระ</Btn>
           )}
         </div>
       ),
@@ -868,16 +868,16 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
                 >เดือนนี้</button>
               ) : null}
             </div>
-            <Btn variant="secondary" icon="📤" onClick={() => {
+            <Btn variant="secondary" onClick={() => {
               if (window.exportBillsCSV(bills)) {
-                addActivity && addActivity({ icon: '📤', text: `ส่งออกบิลเดือนนี้ ${bills.length} ใบ เป็น CSV`, type: 'system' });
+                addActivity && addActivity({ icon: 'CSV', text: `ส่งออกบิลเดือนนี้ ${bills.length} ใบ เป็น CSV`, type: 'system' });
                 setToast && setToast({ kind: 'success', message: `ดาวน์โหลด CSV ${bills.length} ใบเรียบร้อย` });
               }
             }}>ส่งออก CSV</Btn>
-            <Btn variant="primary" icon="📋" onClick={() => setConfirmGenerate(true)}>
+            <Btn variant="primary" onClick={() => setConfirmGenerate(true)}>
               ออกบิลรายเดือน
             </Btn>
-            <Btn icon="🔔" onClick={handleBulkSend}>
+            <Btn onClick={handleBulkSend}>
               ส่งเตือนทั้งหมด
             </Btn>
           </>
@@ -899,7 +899,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
               background: C.warningSoft || '#fef6e0', color: C.warningInk || '#7a5a18',
               fontSize: 13, display: 'flex', alignItems: 'center', gap: 10,
             }}>
-              <span style={{ fontSize: 16 }}>⚠️</span>
+              <span style={{ fontSize: 12, fontWeight: 700 }}>คำเตือน</span>
               <span><strong>ยังไม่ได้ออกบิลรอบ {currentPeriod}</strong> — ตารางด้านล่างเป็นการประมาณการจากข้อมูลห้อง กดปุ่ม "ออกบิลเดือนนี้" เพื่อบันทึกเข้า DB</span>
             </div>
           );
@@ -911,7 +911,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
               background: C.infoSoft || '#e3eef7', color: C.infoInk || '#1d3b5a',
               fontSize: 13, display: 'flex', alignItems: 'center', gap: 10,
             }}>
-              <span style={{ fontSize: 16 }}>ℹ️</span>
+              <span style={{ fontSize: 12, fontWeight: 700 }}>ข้อมูล</span>
               <span>ออกบิลแล้ว {dbCount} ใบ (รอบ {currentPeriod}) · เหลือห้องที่ยังไม่ออก {estCount} ห้อง — กด "ออกบิลเดือนนี้" เพื่อออกบิลส่วนที่เหลือ</span>
             </div>
           );
@@ -923,7 +923,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
               background: C.successSoft || '#e3f3e8', color: C.successInk || '#1d4a2c',
               fontSize: 13, display: 'flex', alignItems: 'center', gap: 10,
             }}>
-              <span style={{ fontSize: 16 }}>✓</span>
+              <span style={{ fontSize: 12, fontWeight: 700 }}>สำเร็จ</span>
               <span>ออกบิลครบทุกห้องแล้วสำหรับรอบ {currentPeriod} ({dbCount} ใบ)</span>
             </div>
           );
@@ -945,17 +945,17 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
       )}
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 14, marginBottom: 20 }}>
-        <KpiCard label="บิลที่ออก"     value={fmt(stats.issued)}     sub="ใบประจำเดือน" icon="📋" />
-        <KpiCard label="ชำระแล้ว"       value={fmt(stats.paidCount)} sub={fmtCurrency(stats.totalRevenue)} color="success" icon="✓" />
-        <KpiCard label="ค้างชำระ"        value={fmt(stats.unpaidCount)} sub={fmtCurrency(stats.overdueAmt)} color="danger" icon="⚠️" />
-        <KpiCard label="อัตราการชำระ" value={stats.issued ? Math.round(stats.paidCount/stats.issued*100) + '%' : '-'} color="info" icon="📊" />
+        <KpiCard label="บิลที่ออก"     value={fmt(stats.issued)}     sub="ใบประจำเดือน" />
+        <KpiCard label="ชำระแล้ว"       value={fmt(stats.paidCount)} sub={fmtCurrency(stats.totalRevenue)} color="success" />
+        <KpiCard label="ค้างชำระ"        value={fmt(stats.unpaidCount)} sub={fmtCurrency(stats.overdueAmt)} color="danger" />
+        <KpiCard label="อัตราการชำระ" value={stats.issued ? Math.round(stats.paidCount/stats.issued*100) + '%' : '-'} color="info" />
       </div>
 
       <Tabs
         items={[
           { value: 'current', label: 'เดือนนี้',         count: bills.length },
           { value: 'unpaid',  label: 'ค้างชำระ',        count: stats.unpaidCount },
-          { value: 'review',  label: '📥 รอตรวจสลิป', count: pendingReviewCount },
+          { value: 'review',  label: 'รอตรวจสลิป', count: pendingReviewCount },
           { value: 'paid',    label: 'ชำระแล้ว',       count: stats.paidCount },
         ]}
         value={tab}
@@ -974,7 +974,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
             เลือกแล้ว {selected.size} รายการ
           </span>
           <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
-            <Btn variant="soft" size="sm" icon="🔔" onClick={async () => {
+            <Btn variant="soft" size="sm" onClick={async () => {
               const ids = [...selected];
               const targets = bills.filter((b) => ids.includes(b.id));
               const apiFetch = window.apiFetch || ((u, o) => fetch(u, { credentials: 'same-origin', ...o }));
@@ -998,7 +998,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
                   if (r.status === 503) { skip = true; break; }
                   if (r.ok) {
                     okCount++;
-                    addActivity && addActivity({ icon: '🔔', text: `ส่งเตือนชำระบิล ${b.id}`, type: 'system' });
+                    addActivity && addActivity({ icon: 'ส่ง', text: `ส่งเตือนชำระบิล ${b.id}`, type: 'system' });
                   } else failCount++;
                 } catch { failCount++; }
               }
@@ -1011,13 +1011,13 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
               }
               setSelected(new Set());
             }}>ส่งเตือนทั้งหมด</Btn>
-            <Btn variant="soft" size="sm" icon="📥" onClick={() => {
+            <Btn variant="soft" size="sm" onClick={() => {
               const selectedBills = bills.filter(b => selected.has(b.id));
               if (window.exportBillsCSV(selectedBills)) {
                 setToast && setToast({ kind: 'success', message: `ดาวน์โหลด ${selectedBills.length} บิลเรียบร้อย` });
               }
             }}>ดาวน์โหลด CSV</Btn>
-            <Btn variant="soft" size="sm" icon="✓" onClick={async () => {
+            <Btn variant="soft" size="sm" onClick={async () => {
               const ids = [...selected];
               for (const id of ids) {
                 const bill = bills.find(b => b.id === id);
@@ -1047,12 +1047,12 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
           //   4) eligible rooms exist but no bill row → tell admin to
           //      click "ออกบิลรายเดือน" or wait for scheduler
           if (dbBills === null) {
-            return <EmptyState icon="⏳" title="กำลังโหลด..." />;
+            return <EmptyState icon="โหลด" title="กำลังโหลด..." />;
           }
           if (dbBillsErr) {
             return (
               <EmptyState
-                icon="⚠️"
+                icon="ผิดพลาด"
                 title="โหลดบิลไม่สำเร็จ"
                 description={`${dbBillsErr} — ลองรีเฟรชหน้า หรือถ้ายังไม่ได้ ติดต่อทีมเทคนิค`}
               />
@@ -1064,7 +1064,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
           if (eligibleRooms === 0) {
             return (
               <EmptyState
-                icon="🏠"
+                icon="ห้อง"
                 title="ยังไม่มีห้องที่เปิดให้เช่า"
                 description={'ต้องมีห้องสถานะ "occupied" หรือ "overdue" ก่อน — เพิ่มผู้เช่าที่ /admin#rooms หรือ check-in ผู้เช่าใหม่'}
               />
@@ -1073,7 +1073,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
           if (tab === 'review') {
             return (
               <EmptyState
-                icon="✨"
+                icon="สลิป"
                 title="ไม่มีบิลที่รอตรวจสลิป"
                 description="ผู้เช่ายังไม่ได้อัปโหลดสลิป หรือสลิปทั้งหมดผ่านการตรวจอัตโนมัติแล้ว"
               />
@@ -1082,7 +1082,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
           if (tab === 'paid') {
             return (
               <EmptyState
-                icon="💰"
+                icon="ชำระแล้ว"
                 title="ยังไม่มีบิลที่ชำระแล้ว"
                 description="บิลที่ทำเครื่องหมายชำระแล้วจะปรากฏที่นี่ ลองเปิด tab อื่นเพื่อดูบิลที่รอจ่าย"
               />
@@ -1091,7 +1091,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
           if (tab === 'unpaid') {
             return (
               <EmptyState
-                icon="🎉"
+                icon="ไม่มีค้าง"
                 title="ไม่มีบิลค้างชำระ"
                 description={`มีห้องที่เปิดให้เช่า ${eligibleRooms} ห้อง ทั้งหมดชำระเรียบร้อยแล้ว`}
               />
@@ -1100,7 +1100,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
           // tab='current' — eligible rooms exist but no DB bill row this period
           return (
             <EmptyState
-              icon="🧾"
+              icon="บิล"
               title={`ยังไม่มีบิลเดือนนี้ (${currentPeriod})`}
               description={
                 'มีห้องเปิดให้เช่า ' + eligibleRooms + ' ห้อง แต่ยังไม่ได้ออกบิลรอบนี้ — '
@@ -1129,9 +1129,9 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
           padding: 12, background: C.surfaceAlt, borderRadius: 8,
           fontSize: 12.5, color: C.ink2,
         }}>
-          <div>📅 ครบกำหนดชำระ: <b>วันที่ {config.notify?.dueOnDay ?? 7} ของเดือน</b></div>
-          <div>💰 ยอดรวมโดยประมาณ: <b>{fmtCurrency(bills.reduce((s,b) => s+b.total, 0))}</b></div>
-          <div>📨 ส่งทาง: LINE, Email</div>
+          <div>ครบกำหนดชำระ: <b>วันที่ {config.notify?.dueOnDay ?? 7} ของเดือน</b></div>
+          <div>ยอดรวมโดยประมาณ: <b>{fmtCurrency(bills.reduce((s,b) => s+b.total, 0))}</b></div>
+          <div>ช่องทางส่ง: LINE, Email</div>
         </div>
       </Modal>
 
@@ -1153,12 +1153,12 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
               && ((previewBill.pendingSlipCount || 0) > 0
                   || (previewBill.verifiedSlipCount || 0) > 0
                   || (previewBill.rejectedSlipCount || 0) > 0) ? (
-              <Btn variant="secondary" icon="💳" onClick={() => {
+              <Btn variant="secondary" onClick={() => {
                 window.location.hash = `#payments?billId=${encodeURIComponent(previewBill.dbBillId)}`;
                 setPreviewBill(null);
               }}>ดูสลิปของบิลนี้</Btn>
             ) : null}
-            <Btn variant="secondary" icon="📥" onClick={async () => {
+            <Btn variant="secondary" onClick={async () => {
               const b = previewBill;
               // Build the bill payload matching services/pdf.js renderBillPdf shape.
               const items = [
@@ -1211,13 +1211,13 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
                 a.remove();
                 URL.revokeObjectURL(url);
                 setToast && setToast({ kind: 'success', message: `ดาวน์โหลดบิล ${b.id} เรียบร้อย` });
-                addActivity && addActivity({ icon: '📥', text: `ดาวน์โหลดบิล ${b.id} (PDF)`, type: 'billing' });
+                addActivity && addActivity({ icon: 'PDF', text: `ดาวน์โหลดบิล ${b.id} (PDF)`, type: 'billing' });
               } catch (err) {
                 console.error('PDF download failed:', err);
                 setToast && setToast({ kind: 'error', message: 'ดาวน์โหลดบิลไม่สำเร็จ' });
               }
             }}>ดาวน์โหลด PDF</Btn>
-            <Btn variant="primary" icon="📨" onClick={async () => {
+            <Btn variant="primary" onClick={async () => {
               const b = previewBill;
               const apiFetch = window.apiFetch || ((u, o) => fetch(u, { credentials: 'same-origin', ...o }));
               try {
@@ -1248,7 +1248,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
                   return;
                 }
                 setToast && setToast({ kind: 'success', message: `ส่งบิล ${b.id} ทาง LINE แล้ว` });
-                addActivity && addActivity({ icon: '📨', text: `ส่งบิล ${b.id} ให้ ${b.tenant}`, type: 'billing' });
+                addActivity && addActivity({ icon: 'ส่ง', text: `ส่งบิล ${b.id} ให้ ${b.tenant}`, type: 'billing' });
                 setPreviewBill(null);
               } catch (err) {
                 console.error('notify bill failed:', err);
@@ -1277,7 +1277,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
               ยกเลิก
             </Btn>
             {sendConfirm.readiness?.summary?.canSend ? (
-              <Btn variant="primary" icon="🔔"
+              <Btn variant="primary"
                 onClick={() => doSendReminder(sendConfirm.billId)}
                 disabled={sendingNow}>
                 {sendingNow ? 'กำลังส่ง…' : 'ยืนยันส่ง'}
@@ -1302,7 +1302,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
       <Modal
         open={!!bulkSendPreview}
         onClose={() => !bulkSendingNow && setBulkSendPreview(null)}
-        title="🔔 ส่งเตือนทุกบิลที่ค้าง"
+        title="ส่งเตือนทุกบิลที่ค้าง"
         width={560}
         footer={bulkSendPreview && (() => {
           const ready = bulkSendPreview.readiness?.summary?.canSend ?? bulkSendPreview.pending.length;
@@ -1311,7 +1311,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
               <Btn variant="ghost" onClick={() => setBulkSendPreview(null)} disabled={bulkSendingNow}>
                 ยกเลิก
               </Btn>
-              <Btn variant="primary" icon="🔔"
+              <Btn variant="primary"
                 onClick={doBulkSendNow}
                 disabled={bulkSendingNow || ready === 0}>
                 {bulkSendingNow ? 'กำลังส่ง…' : `ยืนยันส่ง (${ready} ใบที่พร้อม)`}
@@ -1326,7 +1326,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
 
       {/* Manual mark-paid modal — replaces the old window.confirm() that
           forced method='transfer' for every offline payment. Admin now
-          picks 💵 เงินสด / 🏦 โอน / 📱 PromptPay, can add a note, and the
+          picks เงินสด / โอน / PromptPay, can add a note, and the
           tenant's confirmation message labels the actual method. */}
       <Modal
         open={!!markPaidPrompt}
@@ -1338,7 +1338,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
             <Btn variant="ghost"
                  onClick={() => setMarkPaidPrompt(null)}
                  disabled={markPaidPrompt.busy}>ยกเลิก</Btn>
-            <Btn variant="primary" icon="✓"
+            <Btn variant="primary"
                  onClick={async () => {
                    setMarkPaidPrompt({ ...markPaidPrompt, busy: true });
                    const ok = await submitMarkPaid({
@@ -1377,7 +1377,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
                 whiteSpace: 'pre-line',
               }}>
                 <div style={{ fontWeight: 600, marginBottom: 4 }}>
-                  ⚠️ พบ {markPaidPrompt.readinessIssues.count} ข้อควรทราบเรื่องตั้งค่ารับชำระ
+                  พบ {markPaidPrompt.readinessIssues.count} ข้อควรทราบเรื่องตั้งค่ารับชำระ
                 </div>
                 {markPaidPrompt.readinessIssues.lines}
               </div>
@@ -1386,9 +1386,9 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
             <div style={{ fontWeight: 600, marginBottom: 6 }}>ผู้เช่าจ่ายมาทางไหน? *</div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, marginBottom: 14 }}>
               {[
-                { key: 'cash', label: '💵 เงินสด', desc: 'รับที่สำนักงาน' },
-                { key: 'transfer', label: '🏦 โอน', desc: 'ธนาคารปกติ' },
-                { key: 'promptpay', label: '📱 PromptPay', desc: 'QR สแกน' },
+                { key: 'cash', label: 'เงินสด', desc: 'รับที่สำนักงาน' },
+                { key: 'transfer', label: 'โอน', desc: 'ธนาคารปกติ' },
+                { key: 'promptpay', label: 'PromptPay', desc: 'QR สแกน' },
               ].map((m) => {
                 const sel = markPaidPrompt.method === m.key;
                 return (
@@ -1472,7 +1472,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
             <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 12 }}>
               เก็บเป็นหลักฐานในประวัติชำระ ดูได้ที่ /admin#payments · JPG/PNG/WebP · ไม่เกิน 5 MB
               {markPaidPrompt.slipFile
-                ? ` · ✓ ${markPaidPrompt.slipFile.name} (${Math.ceil(markPaidPrompt.slipFile.size / 1024)} KB)`
+                ? ` · เลือกไฟล์แล้ว: ${markPaidPrompt.slipFile.name} (${Math.ceil(markPaidPrompt.slipFile.size / 1024)} KB)`
                 : ''}
             </div>
 
@@ -1481,13 +1481,13 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
               background: C.bgSoft || '#fbf6ec', color: C.ink2,
               fontSize: 12.5, lineHeight: 1.6,
             }}>
-              <div style={{ fontWeight: 600, marginBottom: 4 }}>📌 สิ่งที่จะเกิดขึ้น</div>
+              <div style={{ fontWeight: 600, marginBottom: 4 }}>สิ่งที่จะเกิดขึ้น</div>
               <div>• บิลจะถูกตั้งเป็น <b>ชำระแล้ว</b> ทันที</div>
-              <div>• ผู้เช่าจะได้รับแจ้งเตือนทาง LINE/อีเมล พร้อมระบุช่องทาง <b>{({ cash: '💵 เงินสด', transfer: '🏦 โอน', promptpay: '📱 PromptPay' })[markPaidPrompt.method] || markPaidPrompt.method}</b></div>
+              <div>• ผู้เช่าจะได้รับแจ้งเตือนทาง LINE/อีเมล พร้อมระบุช่องทาง <b>{({ cash: 'เงินสด', transfer: 'โอน', promptpay: 'PromptPay' })[markPaidPrompt.method] || markPaidPrompt.method}</b></div>
               <div>• เก็บใน audit log โดยใช้ชื่อ login ของคุณ</div>
               {markPaidPrompt.method === 'cash'
-                ? <div style={{ marginTop: 4 }}>• ✅ <b>เงินสด</b> — ไม่ต้องมีสลิป</div>
-                : <div style={{ marginTop: 4 }}>• ℹ️ ถ้ามีสลิปจริง แนะนำให้ผู้เช่าอัปโหลดที่ /tenant จะดีกว่า (auto-verify)</div>}
+                ? <div style={{ marginTop: 4 }}>• <b>เงินสด</b> — ไม่ต้องมีสลิป</div>
+                : <div style={{ marginTop: 4 }}>• ถ้ามีสลิปจริง แนะนำให้ผู้เช่าอัปโหลดที่ /tenant จะดีกว่า เพราะระบบตรวจสลิปอัตโนมัติได้</div>}
             </div>
           </div>
         )}
@@ -1522,9 +1522,9 @@ function BulkSendPreviewBody({ preview, C, fmtCurrency }) {
         border: `1px solid ${summary.blocked === 0 ? '#bce0bc' : (summary.canSend === 0 ? '#f5c0b4' : '#f0e3a7')}`,
       }}>
         <div style={{ fontFamily: 'Sora', fontWeight: 600, fontSize: 14.5 }}>
-          {summary.blocked === 0 ? '✅ ทุกบิลพร้อมส่ง'
-            : summary.canSend === 0 ? '🚫 ส่งไม่ได้สักใบ'
-            : `⚠️ ส่งได้ ${summary.canSend} ใบ — ติดปัญหา ${summary.blocked} ใบ`}
+          {summary.blocked === 0 ? 'ทุกบิลพร้อมส่ง'
+            : summary.canSend === 0 ? 'ส่งไม่ได้สักใบ'
+            : `ส่งได้ ${summary.canSend} ใบ — ติดปัญหา ${summary.blocked} ใบ`}
         </div>
         <div style={{ fontSize: 12.5, color: C.muted, marginTop: 4 }}>
           ทั้งหมด {summary.total} ใบ · ยอดรวม ฿{fmt(totalAmount)}
@@ -1547,7 +1547,7 @@ function BulkSendPreviewBody({ preview, C, fmtCurrency }) {
               }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                   <strong style={{ color: '#7a2920' }}>
-                    🔴 {blockCodeLabel[code] || code}
+                    ปัญหา: {blockCodeLabel[code] || code}
                   </strong>
                   <span style={{ color: '#7a2920', fontWeight: 600 }}>{count} ใบ</span>
                 </div>
@@ -1555,7 +1555,7 @@ function BulkSendPreviewBody({ preview, C, fmtCurrency }) {
             ))}
           </div>
           <div style={{ fontSize: 12, color: C.muted, marginTop: 8, lineHeight: 1.5 }}>
-            💡 แก้ปัญหารายห้องที่ /admin#tenants ก่อน แล้วกลับมากดส่งใหม่
+            คำแนะนำ: แก้ปัญหารายห้องที่ /admin#tenants ก่อน แล้วกลับมากดส่งใหม่
           </div>
         </div>
       ) : null}
@@ -1566,9 +1566,9 @@ function BulkSendPreviewBody({ preview, C, fmtCurrency }) {
         border: `1px solid ${C.borderSoft || C.border}`,
         fontSize: 12, color: C.muted, lineHeight: 1.6,
       }}>
-        📌 ระบบจะ enqueue ในคิว — ส่งจริงภายใน ~1 นาที<br/>
-        📌 ดูคิวที่ /admin#notifications-queue<br/>
-        📌 กดบ่อย = ผู้เช่าได้ข้อความซ้ำ (LINE rate-limit = 1000/วัน)
+        ระบบจะ enqueue ในคิว — ส่งจริงภายใน ~1 นาที<br/>
+        ดูคิวที่ /admin#notifications-queue<br/>
+        กดบ่อย = ผู้เช่าได้ข้อความซ้ำ (LINE rate-limit = 1000/วัน)
       </div>
     </div>
   );
@@ -1588,10 +1588,10 @@ function SendReminderConfirmBody({ confirm, C, fmtCurrency }) {
   const issues = Array.isArray(r.issues) ? r.issues : [];
 
   const sevPalette = {
-    high: { bg: '#fff5f4', border: '#f5c0b4', accent: '#b94a48', icon: '🔴' },
-    med:  { bg: '#fff7e0', border: '#f0e3a7', accent: '#8a6b1a', icon: '🟡' },
-    low:  { bg: '#f4f8fc', border: '#cfdde9', accent: '#3a5a78', icon: '⚪' },
-    info: { bg: '#f4f8fc', border: '#cfdde9', accent: '#3a5a78', icon: 'ℹ️' },
+    high: { bg: '#fff5f4', border: '#f5c0b4', accent: '#b94a48', label: 'ปัญหาสำคัญ' },
+    med:  { bg: '#fff7e0', border: '#f0e3a7', accent: '#8a6b1a', label: 'ควรตรวจ' },
+    low:  { bg: '#f4f8fc', border: '#cfdde9', accent: '#3a5a78', label: 'ข้อมูล' },
+    info: { bg: '#f4f8fc', border: '#cfdde9', accent: '#3a5a78', label: 'ข้อมูล' },
   };
 
   // Show send history as a top-of-modal banner so admin sees it BEFORE
@@ -1609,10 +1609,10 @@ function SendReminderConfirmBody({ confirm, C, fmtCurrency }) {
       }}>
         <div style={{ fontFamily: 'Sora', fontWeight: 600, fontSize: 14.5 }}>
           {blocked
-            ? `🚫 ส่งไม่ได้ — พบ ${summary.highCount || issues.length} ปัญหาสำคัญ`
+            ? `ส่งไม่ได้ — พบ ${summary.highCount || issues.length} ปัญหาสำคัญ`
             : issues.length > 0
-              ? `⚠️ ส่งได้ — แต่มี ${issues.length} ข้อควรทราบ`
-              : `✅ พร้อมส่ง`}
+              ? `ส่งได้ — แต่มี ${issues.length} ข้อควรทราบ`
+              : `พร้อมส่ง`}
         </div>
         <div style={{ fontSize: 12.5, color: C.muted, marginTop: 4, lineHeight: 1.5 }}>
           {blocked
@@ -1630,7 +1630,7 @@ function SendReminderConfirmBody({ confirm, C, fmtCurrency }) {
           border: `1px solid ${sendHistory.recently ? '#f0c47a' : '#cfdde9'}`,
         }}>
           <div style={{ fontWeight: 600, marginBottom: 4 }}>
-            {sendHistory.recently ? '⏱ เพิ่งส่งไปไม่นาน' : '📤 เคยส่งเตือนมาแล้ว'}
+            {sendHistory.recently ? 'เพิ่งส่งไปไม่นาน' : 'เคยส่งเตือนมาแล้ว'}
           </div>
           <div style={{ fontSize: 12.5, color: C.muted, lineHeight: 1.6 }}>
             <div>
@@ -1640,7 +1640,7 @@ function SendReminderConfirmBody({ confirm, C, fmtCurrency }) {
                 : ''}
             </div>
             <div style={{ marginTop: 4 }}>
-              ✓ ส่งซ้ำได้เลย — แต่ระวังผู้เช่ารำคาญถ้าส่งบ่อย
+              ส่งซ้ำได้เลย — แต่ระวังผู้เช่ารำคาญถ้าส่งบ่อย
               {sendHistory.count >= 3
                 ? ' (ส่งไปแล้ว ' + sendHistory.count + ' ครั้ง — ลองโทรหรือทักทาง LINE OA ส่วนตัวแทน)'
                 : ''}
@@ -1687,14 +1687,14 @@ function SendReminderConfirmBody({ confirm, C, fmtCurrency }) {
               background: channels.line ? '#e6f4ec' : '#fbeae7',
               color: channels.line ? '#1f5f3a' : '#7a2920',
             }}>
-              {channels.line ? '✓ LINE' : '✗ ไม่มี LINE'}
+              {channels.line ? 'มี LINE' : 'ไม่มี LINE'}
             </span>
             <span style={{
               fontSize: 11.5, padding: '3px 9px', borderRadius: 999,
               background: channels.email ? '#e6f4ec' : '#fbeae7',
               color: channels.email ? '#1f5f3a' : '#7a2920',
             }}>
-              {channels.email ? '✓ Email' : '✗ ไม่มี Email'}
+              {channels.email ? 'มี Email' : 'ไม่มี Email'}
             </span>
           </div>
         </div>
@@ -1712,7 +1712,7 @@ function SendReminderConfirmBody({ confirm, C, fmtCurrency }) {
                 borderLeft: `3px solid ${p.accent}`,
               }}>
                 <div style={{ fontWeight: 500, fontSize: 13.5, lineHeight: 1.5 }}>
-                  {p.icon} {it.msg}
+                  <span style={{ color: p.accent, fontWeight: 700 }}>{p.label}: </span>{it.msg}
                 </div>
                 {it.fix ? (
                   <div style={{ fontSize: 12, color: C.muted, marginTop: 4 }}>
