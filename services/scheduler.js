@@ -268,7 +268,15 @@ async function tickRoomStatusSync(pool, _flags, now, state) {
 async function tickBillGen(pool, flags, now, state) {
   if (!flags.billAutoGenerate || !flags.billAutoGenerate.enabled) return;
   const dom = Number(flags.billAutoGenerate.dayOfMonth || 1);
-  if (now.getDate() !== dom) return;
+  // Clamp the configured day to the actual last day of THIS month. Without
+  // this, dom=31 silently skips every month with <31 days (Feb 28/29, Apr,
+  // Jun, Sep, Nov) — those tenants got their bill 1 month late. dom=30 in
+  // February (28/29 days) had the same issue. Now: if today is the
+  // calendar dom OR if today is the last day of the month AND dom > last,
+  // we treat it as "today is bill day" and run.
+  const lastDayOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+  const effectiveDom = Math.min(dom, lastDayOfMonth);
+  if (now.getDate() !== effectiveDom) return;
   const period = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
   if (state.lastBillPeriod === period) return;
   try {
@@ -1056,13 +1064,25 @@ async function tickOverdueDigest(pool, flags, now, state) {
     // (CURRENT_DATE - due_date) so the message is correct regardless of when
     // tick fires within the day. LEFT JOIN tenants so orphan bills (tenant_id
     // NULL — legacy) still surface; admin needs to know about those too.
+    //
+    // EXCLUDE bills whose tenant has moved out or been soft-deleted. Without
+    // this filter, the digest counted historical bills from ex-tenants as
+    // "currently overdue", driving owners to call phone numbers that no
+    // longer belong to them. Those bills should be reconciled (voided or
+    // attributed to the moved-out tenant's final settlement), not chased.
+    // Bills with tenant_id IS NULL (orphans) still surface — admin needs
+    // to know about those so they can be linked or voided.
     const { rows } = await pool.query(`
       SELECT b.id, b.bill_no, b.room_id, b.period, b.total, b.due_date,
              (CURRENT_DATE - b.due_date)::int AS days_late,
              t.full_name, t.phone
         FROM bills b
-        LEFT JOIN tenants t ON t.id = b.tenant_id AND t.deleted_at IS NULL
+        LEFT JOIN tenants t ON t.id = b.tenant_id
        WHERE b.status='overdue' AND b.deleted_at IS NULL
+         AND (
+           b.tenant_id IS NULL
+           OR (t.deleted_at IS NULL AND COALESCE(t.status,'active')='active')
+         )
        ORDER BY (CURRENT_DATE - b.due_date) DESC, b.room_id ASC
        LIMIT 200
     `);
@@ -1334,6 +1354,87 @@ async function _withAdvisoryLock(pool, name, fn) {
   }
 }
 
+// === Janitor: prune old failed notifications ============================
+// notifications_queue rows with status='failed' linger forever — there
+// was no TTL or cleanup before this. Over months the table accumulates
+// thousands of dead rows from misconfigured SMTP / revoked LINE tokens /
+// missing recipients, which inflates /admin#health "queue backlog" and
+// makes the table slow to scan. We keep failed rows 30 days for forensics
+// (admin can see "why didn't the message go through?") then prune.
+async function tickPruneFailedNotifications(pool, _flags, now, state) {
+  const todayKey = now.toISOString().slice(0, 10);
+  if (state.lastNotifQueuePruneAt === todayKey) return;
+  try {
+    const r = await pool.query(`
+      DELETE FROM notifications_queue
+        WHERE status='failed'
+          AND created_at < NOW() - INTERVAL '30 days'
+    `);
+    if (r.rowCount > 0) {
+      console.log(`[scheduler] pruned ${r.rowCount} failed notification(s) older than 30 days`);
+    }
+    state.lastNotifQueuePruneAt = todayKey;
+    writeState(state);
+  } catch (err) {
+    // Tolerate missing table on legacy deploys without notifications_queue.
+    if (err.code !== '42P01') {
+      console.warn('[scheduler] prune-failed-notifications failed:', err.message);
+    }
+  }
+}
+
+// === Janitor: orphan slip files ============================================
+// When the slip upload pipeline crashes between storage.saveBase64 and the
+// payments INSERT commit, file_uploads has a row pointing at a real file
+// but no payments row references it. The transactional rollback path in
+// server.js handles the in-process error; this tick catches the case where
+// the Node process itself died (Railway restart, OOM kill, deploy mid-
+// request) leaving file orphans on R2 / local disk + a dead file_uploads
+// row. Conservative: only prune slip-category uploads older than 24h with
+// no referencing payment.
+async function tickPruneOrphanSlips(pool, _flags, now, state) {
+  const todayKey = now.toISOString().slice(0, 10);
+  if (state.lastOrphanSlipPruneAt === todayKey) return;
+  try {
+    // Look up orphan file_uploads rows first so we can call storage.remove
+    // (which deletes the underlying file in R2 / local). We don't bulk-
+    // DELETE in SQL because the file bytes won't be reachable afterwards.
+    const orphans = await pool.query(`
+      SELECT fu.id, fu.url
+        FROM file_uploads fu
+        LEFT JOIN payments p ON p.slip_url = fu.url
+       WHERE fu.category = 'slip'
+         AND p.id IS NULL
+         AND fu.uploaded_at < NOW() - INTERVAL '24 hours'
+       LIMIT 200
+    `);
+    if (orphans.rows.length === 0) {
+      state.lastOrphanSlipPruneAt = todayKey;
+      writeState(state);
+      return;
+    }
+    const storage = require('./storage');
+    let removed = 0;
+    for (const o of orphans.rows) {
+      try {
+        await storage.remove(pool, o.id);
+        removed++;
+      } catch (err) {
+        console.warn(`[scheduler] orphan slip cleanup id=${o.id} failed:`, err.message);
+      }
+    }
+    if (removed > 0) {
+      console.log(`[scheduler] pruned ${removed}/${orphans.rows.length} orphan slip file(s)`);
+    }
+    state.lastOrphanSlipPruneAt = todayKey;
+    writeState(state);
+  } catch (err) {
+    if (err.code !== '42P01') {
+      console.warn('[scheduler] prune-orphan-slips failed:', err.message);
+    }
+  }
+}
+
 async function tick(pool) {
   let flags;
   try { flags = await features.load(pool); } catch { return; }
@@ -1375,6 +1476,8 @@ async function tick(pool) {
     _withAdvisoryLock(pool, `overdueDigest-${todayKey}`, () => tickOverdueDigest(pool, flags, now, state)),
     _withAdvisoryLock(pool, `autoReconcile-${todayKey}`, () => tickAutoReconcileRooms(pool, flags, now, state)),
     _withAdvisoryLock(pool, `roomStatusSync-${todayKey}`, () => tickRoomStatusSync(pool, flags, now, state)),
+    _withAdvisoryLock(pool, `notifQueuePrune-${todayKey}`, () => tickPruneFailedNotifications(pool, flags, now, state)),
+    _withAdvisoryLock(pool, `orphanSlipPrune-${todayKey}`, () => tickPruneOrphanSlips(pool, flags, now, state)),
   ]);
   for (const r of results) {
     if (r.status === 'rejected') {

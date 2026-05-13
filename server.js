@@ -8431,7 +8431,33 @@ app.put('/api/contracts/:id', sameOrigin, csrfGuard, requireAuth, requireRole('o
         await client.query('ROLLBACK');
         return res.status(404).json({ error: 'not found' });
       }
-      const contract = rows[0];
+      let contract = rows[0];
+
+      // Repair the auto-expire vs admin-extend race. If admin pushes
+      // end_date into the future on a contract that the scheduler had
+      // already marked 'expired' (tickContractExpiry runs at 00:00), the
+      // contract was left in {status='expired', end_date>NOW()} — a
+      // self-contradicting state that the UI rendered as "ended" even
+      // though it had a valid future end_date. Detect + auto-restore
+      // status='active' when the new end_date is in the future, the
+      // admin didn't explicitly request a status flip, and the row is
+      // not soft-closed.
+      const adminFlippedStatus = b.status !== undefined;
+      const extendedIntoFuture = b.endDate !== undefined
+        && b.endDate !== null
+        && /^\d{4}-\d{2}-\d{2}$/.test(String(b.endDate))
+        && new Date(b.endDate) >= new Date(new Date().toDateString());
+      if (!adminFlippedStatus && extendedIntoFuture && contract.status === 'expired') {
+        const repair = await client.query(
+          `UPDATE contracts SET status='active', updated_at=NOW()
+             WHERE id=$1 AND status='expired' AND deleted_at IS NULL
+             RETURNING *`,
+          [id]
+        );
+        if (repair.rows.length) {
+          contract = repair.rows[0];
+        }
+      }
 
       // Cascade: closing the contract → tenant moves out + room freed.
       // Skip if tenant is already non-active (idempotent re-closure).
