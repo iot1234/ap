@@ -419,18 +419,16 @@ module.exports = function buildBillsExtrasRouter(ctx) {
     const bankInfo = paymentBlock.bankInfo && paymentBlock.bankInfo.account
       ? paymentBlock.bankInfo
       : null;
-    const paymentChoices = [];
+    let canShowPromptPayQr = false;
     if (paymentBlock.promptpayTarget) {
-      paymentChoices.push(`1) สแกน QR PromptPay ใน LINE/หน้าบิล`);
+      try {
+        const normalizedPromptPay = promptpay.normaliseTarget(paymentBlock.promptpayTarget);
+        canShowPromptPayQr = !promptpay.isDemoTarget(normalizedPromptPay);
+      } catch {
+        canShowPromptPayQr = false;
+      }
     }
-    if (bankInfo) {
-      paymentChoices.push([
-        `${paymentChoices.length + 1}) โอนเข้าบัญชีธนาคาร`,
-        `   ธนาคาร: ${bankInfo.bank || '-'}`,
-        `   เลขบัญชี: ${bankInfo.account}`,
-        bankInfo.name ? `   ชื่อบัญชี: ${bankInfo.name}` : null,
-      ].filter(Boolean).join('\n'));
-    }
+    const paymentChoices = [];
     // Refuse to send when the bill isn't linked to a live tenant. The
     // earlier code reached this state via several silent paths (orphan
     // bill with tenant_id NULL, tenant soft-deleted after bill creation,
@@ -490,12 +488,29 @@ module.exports = function buildBillsExtrasRouter(ctx) {
     const payToken = (publicUrl && typeof signBillPayToken === 'function')
       ? signBillPayToken(billId)
       : null;
+    const qrToken = typeof signBillQrToken === 'function'
+      ? signBillQrToken(billId)
+      : null;
+    const canEmbedPromptPayQr = !!(publicUrl && qrToken && canShowPromptPayQr);
     const billLink = (publicUrl && payToken)
       ? `${publicUrl}/pay/${encodeURIComponent(billId)}?t=${encodeURIComponent(payToken)}`
       : `${publicUrl}/tenant?bill=${encodeURIComponent(billId)}`;
     const dueDateStr = b.due_date
       ? new Date(b.due_date).toLocaleDateString('th-TH', { year: 'numeric', month: 'long', day: 'numeric' })
       : '-';
+    if (canShowPromptPayQr) {
+      paymentChoices.push(canEmbedPromptPayQr
+        ? `1) สแกน QR PromptPay ใน LINE/หน้าบิล`
+        : `1) สแกน QR PromptPay ในหน้าบิล`);
+    }
+    if (bankInfo) {
+      paymentChoices.push([
+        `${paymentChoices.length + 1}) โอนเข้าบัญชีธนาคาร`,
+        `   ธนาคาร: ${bankInfo.bank || '-'}`,
+        `   เลขบัญชี: ${bankInfo.account}`,
+        bankInfo.name ? `   ชื่อบัญชี: ${bankInfo.name}` : null,
+      ].filter(Boolean).join('\n'));
+    }
     const body = [
       `📋 บิลใหม่ — ${b.period}`,
       ``,
@@ -539,12 +554,14 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       // LINE chat directly — no need to open the portal first to scan QR.
       // Falls back to text-only when signBillQrToken isn't available
       // (legacy startup without ctx wiring) or PUBLIC_URL isn't set.
-      const qrToken = typeof signBillQrToken === 'function'
-        ? signBillQrToken(billId)
-        : null;
-      const lineMessages = (publicUrl && qrToken)
+      const lineMessages = (publicUrl && (canEmbedPromptPayQr || bankInfo))
         ? buildBillLineMessages(b, {
-            publicUrl, billLink, dueDateStr, billNo: b.bill_no, qrToken, bankInfo,
+            publicUrl,
+            billLink,
+            dueDateStr,
+            billNo: b.bill_no,
+            qrToken: canEmbedPromptPayQr ? qrToken : null,
+            bankInfo,
           })
         : null;
       const qid = await notifQueue.enqueue(pool, {

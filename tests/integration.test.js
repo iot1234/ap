@@ -671,6 +671,28 @@ test('LINE bill notification offers both PromptPay QR and bank transfer details'
     'bill send helper must pass bankInfo into LINE messages');
 });
 
+test('LINE bill notification only advertises usable PromptPay QR', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const route = fs.readFileSync(path.join(__dirname, '..', 'routes', 'bills-extras.js'), 'utf8');
+  const helperStart = route.indexOf('async function enqueueBillNotifications');
+  assert.ok(helperStart > 0, 'should find bill send helper');
+  const helperBody = route.slice(helperStart, route.indexOf('  // POST /api/bills/:id/send', helperStart));
+
+  assert.match(helperBody, /normaliseTarget\(paymentBlock\.promptpayTarget\)/,
+    'helper must validate PromptPay target before advertising QR');
+  assert.match(helperBody, /isDemoTarget\(normalizedPromptPay\)/,
+    'helper must hide demo PromptPay QR from tenant notifications');
+  assert.match(helperBody, /if \(canShowPromptPayQr\) \{[\s\S]{0,180}paymentChoices\.push/,
+    'QR payment choice must be gated by PromptPay readiness');
+  assert.match(helperBody, /const canEmbedPromptPayQr = !!\(publicUrl && qrToken && canShowPromptPayQr\)/,
+    'LINE QR image requires public URL, signed token, and a usable PromptPay target');
+  assert.match(helperBody, /qrToken: canEmbedPromptPayQr \? qrToken : null/,
+    'Flex builder must not receive a QR token when QR should be hidden');
+  assert.match(helperBody, /publicUrl && \(canEmbedPromptPayQr \|\| bankInfo\)/,
+    'bank-transfer-only LINE Flex should still be allowed when a public URL exists');
+});
+
 test('healthCheck flags duplicate verified payments and invalid ledger rows', () => {
   const fs = require('node:fs');
   const path = require('node:path');
