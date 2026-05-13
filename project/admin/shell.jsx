@@ -783,15 +783,18 @@ function App() {
   }, []);
 
   // --- Routing via hash ---
-  const [page, setPage] = useState(() => {
-    const h = location.hash.replace('#', '');
-    return PAGE_TITLES[h] ? h : 'overview';
-  });
-  useEffect(() => { location.hash = page; }, [page]);
+  const pageFromHash = () => {
+    const raw = location.hash.replace('#', '');
+    const base = raw.split('?')[0].split('/')[0];
+    return PAGE_TITLES[base] ? base : 'overview';
+  };
+  const [page, setPage] = useState(pageFromHash);
+  useEffect(() => {
+    if (pageFromHash() !== page) location.hash = page;
+  }, [page]);
   useEffect(() => {
     const onHash = () => {
-      const h = location.hash.replace('#', '');
-      if (PAGE_TITLES[h]) setPage(h);
+      setPage(pageFromHash());
     };
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);

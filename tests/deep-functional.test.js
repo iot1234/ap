@@ -319,12 +319,12 @@ test('notifQueue.tick: claims pending rows + retries on failure with exponential
   });
   // Fail LINE dispatch by returning no OA.
   m.on('FROM line_oas', () => ({ rows: [] }));
-  // Capture the retry UPDATE shape — params [id, retry_count, errMsg, waitMs]
+  // Capture the retry UPDATE shape — params [id, errMsg, waitMs].
   let retryWait = null;
   const originalQuery = m.pool.query.bind(m.pool);
   m.pool.query = async (text, params) => {
-    if (text.includes('next_attempt_at=NOW()') && text.includes('INTERVAL') && params?.length === 4) {
-      retryWait = params[3];
+    if (text.includes('next_attempt_at=NOW()') && text.includes('INTERVAL') && params?.length === 3) {
+      retryWait = params[2];
     }
     return originalQuery(text, params);
   };

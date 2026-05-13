@@ -21,6 +21,7 @@ function PageTenants({ rooms, setRooms, addActivity, setToast }) {
   const [activeId, setActiveId] = useState(null);
   const [drawerTab, setDrawerTab] = useState('profile');
   const [addOpen, setAddOpen] = useState(false);
+  const [initialAddRoomId, setInitialAddRoomId] = useState('');
   const [busy, setBusy] = useState(false);
 
   // Build tenants list from rooms
@@ -59,6 +60,44 @@ function PageTenants({ rooms, setRooms, addActivity, setToast }) {
   }), [tenants]);
 
   const active = activeId ? tenants.find(t => t.roomId === activeId) : null;
+
+  React.useEffect(() => {
+    const validTabs = new Set(['profile', 'portal', 'contract', 'bills', 'notes']);
+    const applyTenantRoute = () => {
+      const raw = String(window.location.hash || '').replace(/^#/, '');
+      const [pathPart, queryPart = ''] = raw.split('?');
+      const parts = pathPart.split('/').filter(Boolean);
+      if (parts[0] !== 'tenants') return;
+
+      const params = new URLSearchParams(queryPart);
+      const pathRef = parts[1] || '';
+      const tenantRef = params.get('tenantId') || (!rooms[pathRef] ? pathRef : '');
+      let roomId = params.get('room') || params.get('roomId') || (rooms[pathRef] ? pathRef : '');
+      if (!roomId && tenantRef) {
+        const found = tenants.find((t) =>
+          String(t.tenantId || t.id || t.dbId || '') === String(tenantRef));
+        roomId = found ? found.roomId : '';
+      }
+
+      if (params.get('add') === '1') {
+        setActiveId(null);
+        setInitialAddRoomId(roomId || '');
+        setAddOpen(true);
+        return;
+      }
+
+      if (!roomId) return;
+      if (tenants.some((t) => t.roomId === roomId)) {
+        setActiveId(roomId);
+        const tab = params.get('tab');
+        setDrawerTab(validTabs.has(tab) ? tab : 'profile');
+      }
+    };
+
+    applyTenantRoute();
+    window.addEventListener('hashchange', applyTenantRoute);
+    return () => window.removeEventListener('hashchange', applyTenantRoute);
+  }, [rooms, tenants]);
 
   async function sendTenantMessage(t) {
     if (!t) return;
@@ -191,11 +230,16 @@ function PageTenants({ rooms, setRooms, addActivity, setToast }) {
 
       <AddTenantModal
         open={addOpen}
-        onClose={() => !busy && setAddOpen(false)}
+        onClose={() => {
+          if (busy) return;
+          setAddOpen(false);
+          setInitialAddRoomId('');
+        }}
         rooms={rooms}
         setRooms={setRooms}
         busy={busy}
         setBusy={setBusy}
+        initialRoomId={initialAddRoomId}
         addActivity={addActivity}
         setToast={setToast}
         apiFetch={apiFetch}
@@ -255,7 +299,7 @@ function PageTenants({ rooms, setRooms, addActivity, setToast }) {
 // table, used by tenant portal + LINE binding) AND optionally writes the
 // tenant into the legacy rooms blob if a room was picked, so the table on
 // this page (which reads from rooms) shows the new tenant immediately.
-function AddTenantModal({ open, onClose, rooms, setRooms, busy, setBusy, addActivity, setToast, apiFetch, onTenantCreated }) {
+function AddTenantModal({ open, onClose, rooms, setRooms, busy, setBusy, initialRoomId = '', addActivity, setToast, apiFetch, onTenantCreated }) {
   const C = window.ADMIN_C;
   const { Btn, Input, Select, Textarea, Modal } = window;
   const [form, setForm] = React.useState({
@@ -265,11 +309,15 @@ function AddTenantModal({ open, onClose, rooms, setRooms, busy, setBusy, addActi
 
   // Reset whenever modal opens (don't leak stale input from a cancelled session)
   React.useEffect(() => {
+    const initialRoom = initialRoomId ? rooms[initialRoomId] : null;
+    const canUseInitialRoom = initialRoom
+      && String(initialRoom.status || 'vacant') === 'vacant'
+      && !initialRoom.tenant;
     if (open) setForm({
       fullName: '', phone: '', citizenId: '', email: '',
-      occupation: '', roomId: '', notes: '',
+      occupation: '', roomId: canUseInitialRoom ? initialRoomId : '', notes: '',
     });
-  }, [open]);
+  }, [open, initialRoomId]);
 
   const vacantRooms = React.useMemo(() => {
     return Object.values(rooms || {})
@@ -826,19 +874,23 @@ function TabContract({ t, setToast, addActivity, setRooms, onClosed }) {
     }
     setBusy(true);
     try {
+      const reservedBy = t.room && t.room.reservedBy ? String(t.room.reservedBy) : '';
+      const bookingId = reservedBy && !reservedBy.startsWith('contract:') ? reservedBy : null;
+      const payload = {
+        tenantName: t.name,
+        tenantPhone: String(t.phone || '').replace(/[\s-]/g, ''),
+        tenantEmail: t.email || null,
+        roomId: t.roomId,
+        monthlyRent: rent,
+        deposit: rent * 2,
+        moveInDate: new Date().toISOString().slice(0, 10),
+        termMonths: 12,
+        expiresInHours: 168,
+      };
+      if (bookingId) payload.bookingId = bookingId;
       const d = await apiCall('/api/contracts/quick-invite', {
         method: 'POST',
-        body: JSON.stringify({
-          tenantName: t.name,
-          tenantPhone: String(t.phone || '').replace(/[\s-]/g, ''),
-          tenantEmail: t.email || null,
-          roomId: t.roomId,
-          monthlyRent: rent,
-          deposit: rent * 2,
-          moveInDate: new Date().toISOString().slice(0, 10),
-          termMonths: 12,
-          expiresInHours: 168,
-        }),
+        body: JSON.stringify(payload),
       });
       setLiveLink({
         url: d.invitation.url,
@@ -846,10 +898,22 @@ function TabContract({ t, setToast, addActivity, setRooms, onClosed }) {
         invitationId: d.invitation.id,
       });
       addActivity && addActivity({ icon: '✨',
-        text: `สร้างสัญญา + ส่งลิงก์ให้ ${t.name} (ห้อง ${t.roomId})`, type: 'contract' });
+        text: bookingId
+          ? `สร้างสัญญาจากการจอง ${bookingId} + ส่งลิงก์ให้ ${t.name} (ห้อง ${t.roomId})`
+          : `สร้างสัญญา + ส่งลิงก์ให้ ${t.name} (ห้อง ${t.roomId})`,
+        type: 'contract' });
       reload();
     } catch (err) {
-      setToast && setToast({ kind: 'danger', message: 'สร้างสัญญาล้มเหลว: ' + err.message });
+      const body = err && err.body ? err.body : {};
+      setToast && setToast({
+        kind: 'danger',
+        message: body.code === 'ROOM_RESERVED'
+          ? {
+              title: 'ห้องนี้ถูกจองอยู่แล้ว',
+              description: 'ถ้าเป็น booking ที่เพิ่งอนุมัติ ให้เปิดจากรายการจองหรือ refresh แล้วลองสร้างสัญญาอีกครั้ง',
+            }
+          : 'สร้างสัญญาล้มเหลว: ' + err.message,
+      });
     } finally { setBusy(false); }
   };
 
@@ -1614,7 +1678,7 @@ function CheckInModal({ tenantId, tenant, onClose, onDone, onError }) {
           </div>
           <div>
             <label style={inLbl}>ระยะสัญญา (เดือน)</label>
-            <input type="number" min="1" max="120" value={form.termMonths}
+            <input type="number" min="1" max="60" value={form.termMonths}
               onChange={(e) => setForm({ ...form, termMonths: e.target.value })}
               placeholder="12" style={inInp} />
           </div>

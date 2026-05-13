@@ -88,7 +88,6 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
     // SELECTs both blobs FOR UPDATE so the second caller sees the first's
     // reservation + falls through to the next vacant room cleanly.
     let assignedRoomId = null;
-    let serverApproved = false;
     try {
       const apiCall = window.apiCall;
       if (apiCall) {
@@ -97,7 +96,6 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
           body: JSON.stringify({}),
         });
         assignedRoomId = out.assignedRoomId;
-        serverApproved = true;
         // Mirror the server's mutation into local React state so the table
         // + drawer reflect "approved" + "reserved" without waiting for the
         // next /api/data poll.
@@ -146,14 +144,18 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
           ? `✅ อนุมัติแล้ว — จัดห้อง ${assignedRoomId}`
           : '✅ อนุมัติแล้ว',
         description: assignedRoomId
-          ? 'ขั้นต่อไป: ตรวจเบอร์ผู้เช่า + ผูก LINE เพื่อให้เข้าใช้ portal และรับแจ้งเตือนได้'
+          ? 'ขั้นต่อไป: เปิดหน้าสัญญาของผู้เช่าห้องนี้ แล้วสร้างสัญญา/ส่งลิงก์จาก booking เดิม'
           : 'ยังไม่มีห้องว่างตรงเงื่อนไข — กำหนดห้องด้วยตนเองที่หน้า "ห้องพัก" ก่อนตั้งค่าผู้เช่า',
         action: assignedRoomId ? {
-          label: 'ตั้งค่าผู้เช่า →',
+          label: 'สร้างสัญญา →',
           // Jump to tenants page; admin can find the just-mirrored row
-          // (mirrorRoomsToTenants creates it from the rooms-blob save) and
-          // confirm phone portal access + issue a LINE binding code from there.
-          onClick: () => { window.location.hash = '#tenants'; },
+          // (mirrorRoomsToTenants creates it from the rooms-blob save).
+          // Keep the booking id in the URL so the next page can preserve
+          // context while the quick-invite payload pulls reservedBy from room.
+          onClick: () => {
+            window.location.hash =
+              `#tenants?room=${encodeURIComponent(assignedRoomId)}&tab=contract&booking=${encodeURIComponent(id)}`;
+          },
         } : {
           label: 'ไปจัดห้อง →',
           onClick: () => { window.location.hash = '#rooms'; },

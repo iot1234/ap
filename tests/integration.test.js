@@ -1750,6 +1750,38 @@ test('TabContract resolves tenant phone with the same normaliser the DB uses', (
     'normaliser must strip whitespace + dashes (matches mirrorRoomsToTenants)');
 });
 
+test('admin booking-to-contract handoff preserves booking reservation context', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const bookings = fs.readFileSync(
+    path.join(__dirname, '..', 'project', 'admin', 'page-bookings.jsx'), 'utf8'
+  );
+  const tenants = fs.readFileSync(
+    path.join(__dirname, '..', 'project', 'admin', 'page-tenants.jsx'), 'utf8'
+  );
+  const rooms = fs.readFileSync(
+    path.join(__dirname, '..', 'project', 'admin', 'page-rooms.jsx'), 'utf8'
+  );
+  const shell = fs.readFileSync(
+    path.join(__dirname, '..', 'project', 'admin', 'shell.jsx'), 'utf8'
+  );
+
+  assert.match(bookings, /#tenants\?room=\$\{encodeURIComponent\(assignedRoomId\)\}&tab=contract&booking=/,
+    'approve toast must deep-link to the tenant contract tab for the assigned room');
+  assert.match(shell, /raw\.split\('\?'\)\[0\]\.split\('\/'\)\[0\]/,
+    'hash router must preserve query params such as room/tab/booking');
+  assert.match(tenants, /const bookingId = reservedBy && !reservedBy\.startsWith\('contract:'\) \? reservedBy : null/,
+    'tenant contract flow must infer bookingId from room.reservedBy');
+  assert.match(tenants, /if \(bookingId\) payload\.bookingId = bookingId/,
+    'quick-invite payload must pass bookingId so reserved booking rooms can become contracts');
+  assert.match(rooms, /#tenants\?add=1&room=\$\{encodeURIComponent\(room\.id\)\}/,
+    'rooms page tenant add must route through the tenants workflow');
+  assert.doesNotMatch(rooms, /setConfirmRemove\(true\)/,
+    'rooms page must not expose local blob-only move-out as the normal action');
+  assert.match(tenants, /<input type="number" min="1" max="60" value=\{form\.termMonths\}/,
+    'check-in UI must match the server termMonths cap');
+});
+
 test('slip upload re-validates bill.tenant_id under FOR UPDATE lock (BILL_REASSIGNED)', () => {
   // The outside SELECT (line 2592) checks bill.tenant_id matches the
   // session, but admin could change tenant_id during the 5-10s slipVerifier

@@ -699,33 +699,18 @@ function BulkAddFloorModal({ open, onClose, onAdd, existingFloors }) {
 }
 
 // --- Tenant section (in edit drawer) -----------------------------------
-function TenantSection({ room, onUpdate }) {
+function TenantSection({ room }) {
   const C = window.ADMIN_C;
-  const { Input, SectionHeading, Btn, DefList, Pill, Modal } = window;
-  const { fmtDateTH } = window;
-  const [editMode, setEditMode] = React.useState(false);
-  const [confirmRemove, setConfirmRemove] = React.useState(false);
+  const { SectionHeading, Btn, DefList } = window;
 
   const hasTenant = !!room.tenant;
 
   const startNew = () => {
-    onUpdate({
-      tenant: { name: '', occupation: '', phone: '', email: '', score: 'A' },
-      since: fmtDateTH(new Date()),
-      contractEnd: fmtDateTH(new Date(Date.now() + 365*24*60*60*1000)),
-      status: room.status === 'vacant' ? 'occupied' : room.status,
-    });
-    setEditMode(true);
+    window.location.hash = `#tenants?add=1&room=${encodeURIComponent(room.id)}`;
   };
 
-  const removeTenant = () => {
-    onUpdate({ tenant: null, since: null, contractEnd: null, status: 'vacant' });
-    setEditMode(false);
-    setConfirmRemove(false);
-  };
-
-  const updateTenant = (k, v) => {
-    onUpdate({ tenant: { ...room.tenant, [k]: v } });
+  const manageTenant = () => {
+    window.location.hash = `#tenants?room=${encodeURIComponent(room.id)}&tab=profile`;
   };
 
   if (!hasTenant) {
@@ -738,7 +723,7 @@ function TenantSection({ room, onUpdate }) {
         }}>
           <div style={{ fontSize: 32, marginBottom: 8 }}>👤</div>
           <div style={{ fontSize: 13, color: C.muted, marginBottom: 12 }}>ห้องนี้ยังไม่มีผู้เช่า</div>
-          <Btn variant="primary" size="sm" icon="+" onClick={startNew}>เพิ่มผู้เช่า</Btn>
+          <Btn variant="primary" size="sm" icon="+" onClick={startNew}>เพิ่มผ่านหน้าผู้เช่า</Btn>
         </div>
       </div>
     );
@@ -752,85 +737,23 @@ function TenantSection({ room, onUpdate }) {
         style={{ marginBottom: 10 }}
         action={
           <div style={{ display: 'flex', gap: 6 }}>
-            <Btn variant="ghost" size="sm" onClick={() => setEditMode(m => !m)}>
-              {editMode ? '✓ เสร็จสิ้น' : '✎ แก้ไข'}
+            <Btn variant="primary" size="sm" onClick={manageTenant}>
+              จัดการที่หน้าผู้เช่า
             </Btn>
-            <Btn variant="ghost" size="sm" danger onClick={() => setConfirmRemove(true)}>🗑 ย้ายออก</Btn>
           </div>
         }
       />
-      <Modal
-        open={confirmRemove}
-        onClose={() => setConfirmRemove(false)}
-        title="ยืนยันการย้ายออก"
-        footer={
-          <>
-            <Btn variant="ghost" onClick={() => setConfirmRemove(false)}>ยกเลิก</Btn>
-            <Btn variant="danger" onClick={removeTenant}>ย้ายออก</Btn>
-          </>
-        }
-      >
-        <div style={{ fontSize: 14, color: C.ink2, lineHeight: 1.7 }}>
-          <div style={{ marginBottom: 12 }}>
-            ลบข้อมูลผู้เช่า <b style={{ color: C.ink }}>{room.tenant?.name}</b>
-            {room.tenant?.phone && <span style={{ color: C.muted }}> ({room.tenant.phone})</span>}
-            {' '}ออกจากห้อง <b>{room.id}</b> และตั้งสถานะเป็น "ว่าง"
-          </div>
-          {/* Sanity-check checklist for the things that DON'T move with this
-              action — admin must clear them manually before/after. The room
-              blob's `tenant` field is just a display copy; bills, contracts,
-              and tickets in the relational DB still point at this room and
-              tenant_id, and they're correct to do so (audit trail). */}
-          <div style={{
-            padding: 12, background: C.warningSoft || '#fbf1de',
-            borderLeft: `3px solid ${C.warning || '#c98a2b'}`,
-            borderRadius: 6, fontSize: 12.5,
-          }}>
-            <div style={{ fontWeight: 700, marginBottom: 6 }}>📌 สิ่งที่ "ย้ายออก" จะไม่ทำให้</div>
-            <div style={{ lineHeight: 1.7 }}>
-              ● บิลที่ยังไม่ชำระ — ยังเปิดอยู่ในชื่อผู้เช่าเดิม (ดูได้ที่ <b>บิล/ใบแจ้งหนี้</b>)<br/>
-              ● สัญญาเช่า — สถานะใน DB ยังคงเดิม (ปิดสัญญาเองที่หน้า <b>ผู้เช่า</b>)<br/>
-              ● ตั๋วแจ้งซ่อม — ยังเชื่อมกับ tenant_id เดิม<br/>
-              ● Portal login + LINE binding — ยังใช้ login/รับแจ้งเตือนได้
-            </div>
-            <div style={{ marginTop: 8, fontWeight: 600, color: C.warningInk || '#5a3a0d' }}>
-              💡 แนะนำขั้นตอนที่ถูก: <br/>
-              &nbsp;&nbsp; 1) เคลียร์บิลค้างที่หน้า "บิล/ใบแจ้งหนี้"<br/>
-              &nbsp;&nbsp; 2) ปิด session/binding ที่ "ผู้เช่า → Portal Access" (เพื่อความปลอดภัย)<br/>
-              &nbsp;&nbsp; 3) ตั้งสถานะ tenant เป็น "moved_out" หรือ "blacklist"<br/>
-              &nbsp;&nbsp; 4) ค่อยกด "ย้ายออก" ที่นี่
-            </div>
-          </div>
-        </div>
-      </Modal>
-      {editMode ? (
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-          <Input label="ชื่อ-นามสกุล" value={room.tenant.name || ''}
-                 onChange={(v) => updateTenant('name', v)} />
-          <Input label="อาชีพ"          value={room.tenant.occupation || ''}
-                 onChange={(v) => updateTenant('occupation', v)} />
-          <Input label="เบอร์โทร"      value={room.tenant.phone || ''}
-                 onChange={(v) => updateTenant('phone', v)} />
-          <Input label="อีเมล"           value={room.tenant.email || ''}
-                 onChange={(v) => updateTenant('email', v)} />
-          <Input label="วันที่เข้าพัก" value={room.since || ''}
-                 onChange={(v) => onUpdate({ since: v })} />
-          <Input label="สัญญาสิ้นสุด" value={room.contractEnd || ''}
-                 onChange={(v) => onUpdate({ contractEnd: v })} />
-        </div>
-      ) : (
-        <DefList
-          columns={2}
-          items={[
-            { label: 'ชื่อ',                value: room.tenant.name, bold: true },
-            { label: 'อาชีพ',              value: room.tenant.occupation },
-            { label: 'เบอร์โทร',          value: room.tenant.phone },
-            { label: 'อีเมล',               value: room.tenant.email },
-            { label: 'เข้าพักเมื่อ',     value: room.since },
-            { label: 'สัญญาสิ้นสุด',  value: room.contractEnd },
-          ]}
-        />
-      )}
+      <DefList
+        columns={2}
+        items={[
+          { label: 'ชื่อ',                value: room.tenant.name, bold: true },
+          { label: 'อาชีพ',              value: room.tenant.occupation },
+          { label: 'เบอร์โทร',          value: room.tenant.phone },
+          { label: 'อีเมล',               value: room.tenant.email },
+          { label: 'เข้าพักเมื่อ',     value: room.since },
+          { label: 'สัญญาสิ้นสุด',  value: room.contractEnd },
+        ]}
+      />
     </div>
   );
 }
