@@ -230,20 +230,30 @@ async function tick(pool, features, batchSize = 25) {
     // broken dispatch). Without this delay reaped rows landed in the
     // very next tick with no backoff applied, defeating the retry
     // schedule for crash-during-dispatch cases.
+    // The reaper tips the row to 'failed' when its bump would cross
+    // MAX_RETRY. Without this guard, a row whose worker keeps crashing
+    // mid-dispatch would reap forever — reap bumps retry_count and
+    // resets status='pending', next claim crashes again, reap, …
+    // Status is computed in SQL so the bumped retry_count and the
+    // status assignment stay consistent without a second round-trip.
     await client.query(
       `WITH stuck AS (
-         SELECT id FROM notifications_queue
+         SELECT id, retry_count FROM notifications_queue
           WHERE status='processing' AND sent_at IS NULL
             AND next_attempt_at < NOW() - INTERVAL '10 minutes'
           FOR UPDATE SKIP LOCKED
        )
        UPDATE notifications_queue q
-          SET status='pending',
-              retry_count = q.retry_count + 1,
+          SET status = CASE
+                WHEN stuck.retry_count + 1 >= $1 THEN 'failed'
+                ELSE 'pending'
+              END,
+              retry_count = stuck.retry_count + 1,
               next_attempt_at = NOW() + INTERVAL '1 minute',
               last_error = COALESCE(q.last_error, '') || ' [reaped after stuck processing]'
          FROM stuck
-        WHERE q.id = stuck.id`
+        WHERE q.id = stuck.id`,
+      [MAX_RETRY]
     );
 
     await client.query('BEGIN');

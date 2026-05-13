@@ -1104,13 +1104,18 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         // pending payment never gets resolved. Mark them rejected with
         // a structured reason so the queue empties and the slip preview
         // remains intact for forensic review.
+        // verified_by/verified_at record the actor + decision time of
+        // this rejection, matching the standard slip-reject pattern at
+        // server.js per-payment verify.
         const supersededPending = await client.query(
           `UPDATE payments
               SET status='rejected',
+                  verified_by=$3,
+                  verified_at=NOW(),
                   rejected_reason=$2
             WHERE bill_id=$1 AND status='pending'
           RETURNING id`,
-          [id, `superseded_by_manual_pay: ${method} ${ref}`]
+          [id, `superseded_by_manual_pay: ${method} ${ref}`, verifier]
         );
         const paid = await client.query(
           `UPDATE bills SET status='paid', paid_at=NOW()

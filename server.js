@@ -5485,13 +5485,24 @@ app.put('/api/bills/:id/void', sameOrigin, csrfGuard, requireAuth, requireRole('
     // business decision outside the DB; this just makes the ledger consistent.
     let reversedPayments = [];
     if (verified.rows.length) {
+      // Stamp verified_by/verified_at to the voider so a future "show
+      // me all verifies by Alice" report doesn't count this row as a
+      // successful verification by Alice. The original verifier remains
+      // in audit_logs (action='payment.verify'); we don't lose history,
+      // we just stop counting reversed payments as verifications. This
+      // matches the standard reject pattern used elsewhere in the file
+      // (one actor column repurposed for "who decided", with the
+      // decision encoded by status + rejected_reason).
+      const voider = req.session?.user?.username || 'admin:unknown';
       const reversed = await client.query(
         `UPDATE payments
             SET status='rejected',
+                verified_by=$3,
+                verified_at=NOW(),
                 rejected_reason=$2
           WHERE bill_id=$1 AND status='verified'
         RETURNING id, amount`,
-        [id, `superseded_by_void: ${reason || '(no reason)'}`]
+        [id, `superseded_by_void: ${reason || '(no reason)'}`, voider]
       );
       reversedPayments = reversed.rows.map((p) => ({
         id: p.id, amount: Number(p.amount),
@@ -5595,14 +5606,20 @@ app.post('/api/bills/:id/unmark-paid',
         // (legacy mark-paid before audit hooks?). Allow the flip but log it.
         console.warn(`[bill.unmark-paid] bill #${id} is paid but has no verified payment row`);
       }
+      // See void path: stamp the unmarker as the new verified_by so
+      // counts of "verifications by X" don't double-count reversed rows.
+      // Original verifier is still in audit_logs.
+      const unmarker = req.session?.user?.username || 'admin:unknown';
       const reversed = payments.rows.length
         ? await client.query(
             `UPDATE payments
                 SET status='rejected',
+                    verified_by=$3,
+                    verified_at=NOW(),
                     rejected_reason=$2
               WHERE bill_id=$1 AND status='verified'
             RETURNING id, amount, method, ref`,
-            [id, `unmark_paid_correction: ${reason}`]
+            [id, `unmark_paid_correction: ${reason}`, unmarker]
           )
         : { rows: [] };
       // Restore the bill status. Pick 'overdue' vs 'pending' based on
