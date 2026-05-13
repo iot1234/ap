@@ -4367,7 +4367,7 @@ app.get('/api/public/bills/:billId/payment', rateLimitPublicPayment, async (req,
       });
     }
     const flags = await features.load(pool);
-    const { paymentBlock } = await loadEffectivePaymentBlock();
+    const { config, paymentBlock } = await loadEffectivePaymentBlock();
     const billTotal = Number(bill.total);
     const payable = bill.status === 'pending' || bill.status === 'overdue';
     const attempts = await loadBillPaymentAttemptSummary(pool, id, bill.tenant_id);
@@ -4377,6 +4377,15 @@ app.get('/api/public/bills/:billId/payment', rateLimitPublicPayment, async (req,
       paid: bill.status === 'paid',
       attempts,
     });
+    // Surface the building name + phone so the public pay page can show
+    // a concrete escalation contact in error messages instead of the
+    // vague "ติดต่อแอดมิน". Without this, tenants who hit a problem
+    // (link expired, slip rejected, network blip) had no idea where to
+    // get help. Building data already lives in config — just exposing it.
+    const buildingInfo = {
+      name: (config && config.building && config.building.name) || null,
+      phone: (config && config.building && config.building.phone) || null,
+    };
     const qrUsable = payable
       && Number.isFinite(billTotal) && billTotal > 0 && billTotal <= MAX_AMOUNT
       && !!paymentBlock.promptpayTarget
@@ -4402,6 +4411,7 @@ app.get('/api/public/bills/:billId/payment', rateLimitPublicPayment, async (req,
         roomId: bill.room_id,
       },
       payment: paymentBlock,
+      building: buildingInfo,
       channels: {
         slip: !slipBlock,
         qr: !!qrUrl,

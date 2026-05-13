@@ -63,11 +63,20 @@ function statusColor(status) {
   })[status] || 'var(--muted)';
 }
 
-function contactAdminMessage(upload) {
+function buildContactSuffix(building) {
+  if (!building) return '';
+  const name = building.name ? `"${building.name}"` : '';
+  const phone = building.phone ? ` โทร ${building.phone}` : '';
+  if (!name && !phone) return '';
+  return ` (${[name, phone].filter(Boolean).join('')})`.replace('( ', '(');
+}
+
+function contactAdminMessage(upload, building) {
+  const suffix = buildContactSuffix(building);
   if (upload && upload.remaining > 0) {
-    return `หากโอนถูกต้องแล้วกรุณาติดต่อแอดมิน หรือรีเฟรช/เปิดลิงก์นี้ใหม่เพื่ออัปโหลดอีกครั้ง เหลือ ${upload.remaining}/${upload.max} ครั้ง`;
+    return `หากโอนถูกต้องแล้วกรุณาติดต่อแอดมิน${suffix} หรือรีเฟรช/เปิดลิงก์นี้ใหม่เพื่ออัปโหลดอีกครั้ง เหลือ ${upload.remaining}/${upload.max} ครั้ง`;
   }
-  return 'บิลนี้ไม่สามารถอัปโหลดสลิปเพิ่มได้แล้ว กรุณาติดต่อแอดมิน';
+  return `บิลนี้ไม่สามารถอัปโหลดสลิปเพิ่มได้แล้ว กรุณาติดต่อแอดมิน${suffix}`;
 }
 
 function slipPartyText(party) {
@@ -76,14 +85,14 @@ function slipPartyText(party) {
     .filter(Boolean).join(' / ');
 }
 
-function verificationMessage(out, fallbackUpload) {
+function verificationMessage(out, fallbackUpload, building) {
   const v = out && out.verification;
   const payment = (out && out.payment) || {};
   const upload = (out && out.upload) || fallbackUpload || null;
   if (!v) {
     if (payment.status === 'verified') return 'ชำระเงินสำเร็จ ระบบอัปเดตสถานะบิลแล้ว';
     if (payment.status === 'rejected') {
-      return `${payment.rejected_reason || 'สลิปไม่ผ่านการตรวจสอบ'}\n${contactAdminMessage(upload)}`;
+      return `${payment.rejected_reason || 'สลิปไม่ผ่านการตรวจสอบ'}\n${contactAdminMessage(upload, building)}`;
     }
     return 'อัปโหลดสลิปสำเร็จ รอแอดมินตรวจสอบ';
   }
@@ -101,7 +110,7 @@ function verificationMessage(out, fallbackUpload) {
   if (receiver) lines.push(`ผู้รับ: ${receiver}`);
   if (v.nextAction) lines.push(`ขั้นตอนถัดไป: ${v.nextAction}`);
   if (upload) lines.push(`อัปโหลดแล้ว: ${upload.used}/${upload.max} ครั้ง`);
-  if (v.status === 'rejected') lines.push(contactAdminMessage(upload));
+  if (v.status === 'rejected') lines.push(contactAdminMessage(upload, building));
   return lines.filter(Boolean).join('\n');
 }
 
@@ -224,24 +233,26 @@ function App() {
       }).then(readJson);
 
       const st = out.payment && out.payment.status;
+      const building = data && data.building;
       if (st === 'verified') {
         setMessageKind('success');
-        setMessage(verificationMessage(out, data && data.upload));
+        setMessage(verificationMessage(out, data && data.upload, building));
       } else if (st === 'rejected') {
         setMessageKind('error');
-        setMessage(verificationMessage(out, data && data.upload));
+        setMessage(verificationMessage(out, data && data.upload, building));
       } else {
         setMessageKind('pending');
-        setMessage(verificationMessage(out, data && data.upload));
+        setMessage(verificationMessage(out, data && data.upload, building));
       }
       setFile(null);
       setFileInputKey((x) => x + 1);
       await load(true);
     } catch (e) {
       setMessageKind('error');
+      const building = data && data.building;
       setMessage(e.data && e.data.verification
-        ? verificationMessage(e.data, e.data.upload)
-        : `${e.message || 'อัปโหลดไม่สำเร็จ'}\n${contactAdminMessage(e.data && e.data.upload)}`);
+        ? verificationMessage(e.data, e.data.upload, building)
+        : `${e.message || 'อัปโหลดไม่สำเร็จ'}\n${contactAdminMessage(e.data && e.data.upload, building)}`);
       await load(true);
     } finally {
       setBusy(false);
@@ -389,7 +400,23 @@ function App() {
                 <label style={label}>จำนวนเงิน</label>
                 <input style={input} type="number" step="0.01" value={amount} readOnly />
                 <label style={label}>รูปสลิป</label>
-                <input key={fileInputKey} type="file" accept="image/jpeg,image/png,image/webp" disabled={busy} onChange={(e) => setFile(e.target.files[0] || null)} />
+                <input key={fileInputKey} type="file" accept="image/jpeg,image/png,image/webp" disabled={busy}
+                  onChange={(e) => {
+                    // Client-side size guard so a 4G tenant doesn't waste
+                    // 30s uploading a 10MB photo only to hit the server's
+                    // 5MB cap. Mirror the limit on the tenant portal.
+                    const f = e.target.files[0] || null;
+                    if (f && f.size > 5 * 1024 * 1024) {
+                      alert('ไฟล์ใหญ่เกินไป (เกิน 5 MB) — โปรดถ่ายใหม่หรือลดขนาดภาพก่อน');
+                      e.target.value = '';
+                      setFile(null);
+                      return;
+                    }
+                    setFile(f);
+                  }} />
+                <div style={{ fontSize: 11.5, color: 'var(--muted)', margin: '6px 0 8px' }}>
+                  ภาพต้องชัด เห็น QR/หมายเลขอ้างอิงครบ · JPG/PNG/WebP · ไม่เกิน 5 MB
+                </div>
                 <button style={button} disabled={busy} onClick={upload}>
                   {busy ? 'กำลังประมวลผล...' : 'อัปโหลดสลิป'}
                 </button>

@@ -313,10 +313,47 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
     }
   };
 
-  const handleUnmarkPaid = (id) => {
+  const handleUnmarkPaid = async (id) => {
     const bill = bills.find(b => b.id === id);
-    if (!bill) return;
-    setToast && setToast({ kind: 'info', message: 'การยกเลิกชำระต้องทำผ่านการ void/reconcile เพื่อเก็บ audit trail' });
+    if (!bill || bill._source !== 'db' || !bill.dbBillId) {
+      setToast && setToast({ kind: 'info', message: 'บิลนี้ยังไม่ได้บันทึกในระบบ ไม่ต้องยกเลิก' });
+      return;
+    }
+    // Previous version just showed an unhelpful toast ("ต้องทำผ่าน
+    // void/reconcile") and left admin stuck — no way to actually undo
+    // a wrongly-marked-paid bill. Now: prompt for a reason and call
+    // the real /api/bills/:id/void endpoint with force=true (the
+    // server requires force when a verified payment exists, which is
+    // exactly this case). Audit trail preserved on the server side.
+    const reason = window.prompt(
+      `ยกเลิก/void บิล ${bill.dbBillNo || bill.dbBillId} (ห้อง ${bill.roomId})?\n\n`
+      + `บิลจะถูก void และตั้งสถานะใหม่ — เก็บใน audit log\n\n`
+      + `กรุณาระบุเหตุผล (เช่น "ผู้เช่าจ่ายผิดบิล", "บันทึกผิดจำนวน"):`
+    );
+    if (reason === null) return; // cancelled
+    const trimmed = String(reason || '').trim();
+    if (trimmed.length < 3) {
+      setToast && setToast({ kind: 'error', message: 'กรุณาระบุเหตุผล ≥ 3 ตัวอักษร' });
+      return;
+    }
+    const apiFetch = window.apiFetch || ((u, o) => fetch(u, { credentials: 'same-origin', ...o }));
+    try {
+      const r = await apiFetch(`/api/bills/${bill.dbBillId}/void`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason: trimmed, force: true }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        setToast && setToast({ kind: 'error', message: d.error || `ยกเลิกบิลไม่สำเร็จ (HTTP ${r.status})` });
+        return;
+      }
+      setToast && setToast({ kind: 'success', message: `ยกเลิกบิล ${bill.dbBillNo || bill.dbBillId} เรียบร้อย` });
+      addActivity && addActivity({ icon: '↺', text: `ยกเลิก/void บิล ${bill.dbBillNo || bill.dbBillId}: ${trimmed}`, type: 'billing' });
+      fetchDbBills();
+    } catch (err) {
+      setToast && setToast({ kind: 'error', message: err.message || 'เชื่อมต่อเซิร์ฟเวอร์ไม่ได้' });
+    }
   };
 
   // Actual send — called after the confirm modal accepts. Splits into
@@ -962,7 +999,78 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         columns={columns}
         rows={filtered}
         onRowClick={(b) => setPreviewBill(b)}
-        empty={<EmptyState icon="🧾" title="ยังไม่มีบิล" />}
+        empty={(() => {
+          // Diagnose why the table is empty so admin knows what to do
+          // next instead of staring at "ยังไม่มีบิล" with no clue. The
+          // 4 distinct cases give different messages:
+          //   1) loading      → spinner
+          //   2) load error   → show error + retry hint
+          //   3) no rooms     → tell admin to add a tenant
+          //   4) eligible rooms exist but no bill row → tell admin to
+          //      click "ออกบิลรายเดือน" or wait for scheduler
+          if (dbBills === null) {
+            return <EmptyState icon="⏳" title="กำลังโหลด..." />;
+          }
+          if (dbBillsErr) {
+            return (
+              <EmptyState
+                icon="⚠️"
+                title="โหลดบิลไม่สำเร็จ"
+                description={`${dbBillsErr} — ลองรีเฟรชหน้า หรือถ้ายังไม่ได้ ติดต่อทีมเทคนิค`}
+              />
+            );
+          }
+          const eligibleRooms = Object.values(rooms || {}).filter(
+            (r) => r && r.tenant && (r.status === 'occupied' || r.status === 'overdue')
+          ).length;
+          if (eligibleRooms === 0) {
+            return (
+              <EmptyState
+                icon="🏠"
+                title="ยังไม่มีห้องที่เปิดให้เช่า"
+                description={'ต้องมีห้องสถานะ "occupied" หรือ "overdue" ก่อน — เพิ่มผู้เช่าที่ /admin#rooms หรือ check-in ผู้เช่าใหม่'}
+              />
+            );
+          }
+          if (tab === 'review') {
+            return (
+              <EmptyState
+                icon="✨"
+                title="ไม่มีบิลที่รอตรวจสลิป"
+                description="ผู้เช่ายังไม่ได้อัปโหลดสลิป หรือสลิปทั้งหมดผ่านการตรวจอัตโนมัติแล้ว"
+              />
+            );
+          }
+          if (tab === 'paid') {
+            return (
+              <EmptyState
+                icon="💰"
+                title="ยังไม่มีบิลที่ชำระแล้ว"
+                description="บิลที่ทำเครื่องหมายชำระแล้วจะปรากฏที่นี่ ลองเปิด tab อื่นเพื่อดูบิลที่รอจ่าย"
+              />
+            );
+          }
+          if (tab === 'unpaid') {
+            return (
+              <EmptyState
+                icon="🎉"
+                title="ไม่มีบิลค้างชำระ"
+                description={`มีห้องที่เปิดให้เช่า ${eligibleRooms} ห้อง ทั้งหมดชำระเรียบร้อยแล้ว`}
+              />
+            );
+          }
+          // tab='current' — eligible rooms exist but no DB bill row this period
+          return (
+            <EmptyState
+              icon="🧾"
+              title={`ยังไม่มีบิลเดือนนี้ (${currentPeriod})`}
+              description={
+                'มีห้องเปิดให้เช่า ' + eligibleRooms + ' ห้อง แต่ยังไม่ได้ออกบิลรอบนี้ — '
+                + 'กด "ออกบิลรายเดือน" ด้านบน หรือรอ scheduler รันอัตโนมัติตามวันที่ตั้งไว้ใน /admin#features'
+              }
+            />
+          );
+        })()}
       />
 
       <Modal

@@ -359,9 +359,16 @@ function LoginView({ locale, setLocale, onLoggedIn, portalEnabled }) {
   async function submit(e) {
     e.preventDefault();
     setErr(''); setBusy(true);
+    // Strip the visual separators a tenant might paste in (081-234-5678,
+    // 081 234 5678, 081.234.5678) so the same digits match the stored
+    // phone regardless of how the tenant typed them. Server already accepts
+    // 0XXXXXXXXX but the form previously sent the dashed version verbatim,
+    // and a tenant who tried "081-234-5678" got "invalid login" even when
+    // "0812345678" was correct.
+    const normalizedPhone = String(phone || '').replace(/[\s\-.()]/g, '');
     try {
       const out = await api('/api/tenant/login', {
-        method: 'POST', body: JSON.stringify({ phone }),
+        method: 'POST', body: JSON.stringify({ phone: normalizedPhone }),
       });
       onLoggedIn(out.tenant);
     } catch (e2) {
@@ -388,7 +395,11 @@ function LoginView({ locale, setLocale, onLoggedIn, portalEnabled }) {
         <fieldset disabled={portalEnabled === false || busy} style={{ border: 0, padding: 0, margin: 0 }}>
           <label style={lbl}>{t('phone')}</label>
           <input value={phone} onChange={(e) => setPhone(e.target.value)} required
-            type="tel" maxLength={32} style={inp} placeholder="081-234-5678" />
+            type="tel" inputMode="tel" autoComplete="tel"
+            maxLength={32} style={inp} placeholder="081-234-5678" />
+          <div style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 6 }}>
+            กรอกได้ทั้งรูปแบบ 081-234-5678 หรือ 0812345678 — ระบบจะปรับให้เอง
+          </div>
           {err ? <div style={{ color: 'var(--red)', fontSize: 13, marginTop: 8 }}>{err}</div> : null}
           <button type="submit" style={btnPrimary}>{busy ? '…' : t('signIn')}</button>
         </fieldset>
@@ -845,7 +856,24 @@ function BillDetail({ bill, locale, onClose, slipFeature, refresh }) {
               </div>
             ) : null}
             <label style={lbl}>{t('chooseFile')}</label>
-            <input key={fileInputKey} type="file" accept="image/jpeg,image/png,image/webp" onChange={(e) => setFile(e.target.files[0])} style={{ marginBottom: 12 }} />
+            <input key={fileInputKey} type="file" accept="image/jpeg,image/png,image/webp"
+              onChange={(e) => {
+                // Reject too-big files up front instead of letting the server
+                // 413 us — tenants on 4G shouldn't waste 30s uploading a 10MB
+                // photo only to be told to try again.
+                const f = e.target.files[0];
+                if (f && f.size > 5 * 1024 * 1024) {
+                  alert('ไฟล์ใหญ่เกินไป (เกิน 5 MB) — โปรดถ่ายใหม่หรือลดขนาดภาพก่อน');
+                  e.target.value = '';
+                  setFile(null);
+                  return;
+                }
+                setFile(f);
+              }}
+              style={{ marginBottom: 6 }} />
+            <div style={{ fontSize: 11.5, color: 'var(--muted)', marginBottom: 12 }}>
+              ภาพต้องชัด เห็น QR/หมายเลขอ้างอิงครบ · JPG/PNG/WebP · ไม่เกิน 5 MB
+            </div>
             {/* Advisory notices (autoVerify ไม่พร้อม, ไม่ผูก LINE/email, ฯลฯ).
                 Show inline above the submit so the tenant knows what to expect
                 — e.g., "สลิปต้องรอ admin ตรวจสอบ < 24 ชม." instead of expecting
