@@ -646,6 +646,31 @@ test('/api/bills/:id/send fails closed when tenant has no reachable channel', ()
     'single-send route must surface no-channel as a conflict, not success');
 });
 
+test('LINE bill notification offers both PromptPay QR and bank transfer details', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const route = fs.readFileSync(path.join(__dirname, '..', 'routes', 'bills-extras.js'), 'utf8');
+  const msgStart = route.indexOf('function buildBillLineMessages');
+  assert.ok(msgStart > 0, 'should find LINE bill message builder');
+  const msgBody = route.slice(msgStart, route.indexOf('  function rowKV', msgStart));
+  assert.match(msgBody, /bankInfo/,
+    'LINE Flex builder must accept bankInfo');
+  assert.match(msgBody, /หรือโอนเข้าบัญชีธนาคาร/,
+    'LINE Flex body must show bank-transfer as an alternative to QR');
+  assert.match(msgBody, /เลขบัญชี/,
+    'LINE text fallback must include the bank account number');
+  assert.match(msgBody, /ส่งสลิป/,
+    'LINE message must tell tenant where to send the slip after paying');
+
+  const helperStart = route.indexOf('async function enqueueBillNotifications');
+  assert.ok(helperStart > 0, 'should find bill send helper');
+  const helperBody = route.slice(helperStart, route.indexOf('  // POST /api/bills/:id/send', helperStart));
+  assert.match(helperBody, /billing\.buildPaymentBlock\(configRow\.rows\[0\]\?\.value \|\| \{\}\)/,
+    'bill send helper must load configured payment block before composing LINE');
+  assert.match(helperBody, /buildBillLineMessages\(b,[\s\S]{0,200}bankInfo/,
+    'bill send helper must pass bankInfo into LINE messages');
+});
+
 test('healthCheck flags duplicate verified payments and invalid ledger rows', () => {
   const fs = require('node:fs');
   const path = require('node:path');

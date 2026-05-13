@@ -34,9 +34,10 @@ module.exports = function buildBillsExtrasRouter(ctx) {
   // Counts as ONE push toward LINE's rate limit (Messaging API bundles
   // up to 5 messages per push).
   function buildBillLineMessages(b, opts = {}) {
-    const { publicUrl, billLink, dueDateStr, billNo, qrToken } = opts;
+    const { publicUrl, billLink, dueDateStr, billNo, qrToken, bankInfo } = opts;
     const total = Number(b.total) || 0;
     const totalStr = total.toLocaleString('th-TH', { minimumFractionDigits: 2 });
+    const hasBankInfo = !!(bankInfo && bankInfo.account);
     // QR image URL — public endpoint with HMAC token so LINE Platform can
     // fetch it without auth. signBillQrToken is injected via ctx so this
     // module doesn't need to know about session secrets.
@@ -67,6 +68,22 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         { type: 'image', url: qrUrl, size: 'full', aspectRatio: '1:1', aspectMode: 'cover',
           margin: 'sm' });
     }
+    if (hasBankInfo) {
+      flexBody.push(
+        { type: 'separator', margin: 'lg' },
+        { type: 'text', text: 'หรือโอนเข้าบัญชีธนาคาร', size: 'sm', color: '#8a7d6b',
+          weight: 'bold', margin: 'md' },
+        { type: 'box', layout: 'vertical', margin: 'sm', spacing: 'xs', contents: [
+          rowKV('ธนาคาร', bankInfo.bank || '-'),
+          rowKV('เลขบัญชี', bankInfo.account, true),
+          bankInfo.name ? rowKV('ชื่อบัญชี', bankInfo.name) : null,
+        ].filter(Boolean) });
+    }
+    if (qrUrl || hasBankInfo) {
+      flexBody.push(
+        { type: 'text', text: 'หลังชำระแล้ว กดปุ่มด้านล่างเพื่อส่งสลิปให้แอดมินตรวจ',
+          size: 'xs', color: '#8a7d6b', wrap: true, margin: 'md' });
+    }
     const bubble = {
       type: 'bubble',
       body: { type: 'box', layout: 'vertical', contents: flexBody },
@@ -93,7 +110,16 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         `ห้อง: ${b.room_id || '-'}`,
         `ยอดชำระ: ฿${totalStr}`,
         `กำหนดชำระ: ${dueDateStr || '-'}`,
-        billLink ? `\n👉 ${billLink}` : null,
+        ``,
+        `วิธีชำระเงิน:`,
+        qrUrl ? `1) สแกน QR PromptPay ในข้อความนี้` : null,
+        hasBankInfo ? [
+          `${qrUrl ? '2' : '1'}) โอนเข้าบัญชีธนาคาร`,
+          `   ธนาคาร: ${bankInfo.bank || '-'}`,
+          `   เลขบัญชี: ${bankInfo.account}`,
+          bankInfo.name ? `   ชื่อบัญชี: ${bankInfo.name}` : null,
+        ].filter(Boolean).join('\n') : null,
+        billLink ? `\nส่งสลิป / ดูบิล:\n👉 ${billLink}` : null,
       ].filter(Boolean).join('\n'),
     };
     return [flexMsg, textMsg];
@@ -386,6 +412,25 @@ module.exports = function buildBillsExtrasRouter(ctx) {
     // (tenant called saying they didn't see the first message) works
     // without forcing admin to wait 60 min.
     const b = billQ.rows[0];
+    const configRow = await pool.query(
+      `SELECT value FROM app_data WHERE key='baankarn_config_v1' LIMIT 1`
+    );
+    const paymentBlock = billing.buildPaymentBlock(configRow.rows[0]?.value || {});
+    const bankInfo = paymentBlock.bankInfo && paymentBlock.bankInfo.account
+      ? paymentBlock.bankInfo
+      : null;
+    const paymentChoices = [];
+    if (paymentBlock.promptpayTarget) {
+      paymentChoices.push(`1) สแกน QR PromptPay ใน LINE/หน้าบิล`);
+    }
+    if (bankInfo) {
+      paymentChoices.push([
+        `${paymentChoices.length + 1}) โอนเข้าบัญชีธนาคาร`,
+        `   ธนาคาร: ${bankInfo.bank || '-'}`,
+        `   เลขบัญชี: ${bankInfo.account}`,
+        bankInfo.name ? `   ชื่อบัญชี: ${bankInfo.name}` : null,
+      ].filter(Boolean).join('\n'));
+    }
     // Refuse to send when the bill isn't linked to a live tenant. The
     // earlier code reached this state via several silent paths (orphan
     // bill with tenant_id NULL, tenant soft-deleted after bill creation,
@@ -458,7 +503,10 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       `ยอดชำระ: ฿${Number(b.total).toLocaleString('th-TH', { minimumFractionDigits: 2 })}`,
       `กำหนดชำระ: ${dueDateStr}`,
       ``,
-      `👉 ดูบิล + จ่ายด้วย QR:`,
+      `วิธีชำระเงิน:`,
+      paymentChoices.length ? paymentChoices.join('\n') : `เปิดหน้าบิลเพื่อตรวจสอบช่องทางชำระเงิน`,
+      ``,
+      `👉 ดูบิล + ส่งสลิป:`,
       billLink,
       ``,
       `(หากกดลิงก์ไม่ได้ ให้เข้า ${publicUrl || 'พอร์ทัล'}/tenant แล้วเลือกบิล ${b.bill_no || `#${billId}`})`,
@@ -496,7 +544,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         : null;
       const lineMessages = (publicUrl && qrToken)
         ? buildBillLineMessages(b, {
-            publicUrl, billLink, dueDateStr, billNo: b.bill_no, qrToken,
+            publicUrl, billLink, dueDateStr, billNo: b.bill_no, qrToken, bankInfo,
           })
         : null;
       const qid = await notifQueue.enqueue(pool, {
