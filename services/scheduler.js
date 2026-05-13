@@ -427,15 +427,17 @@ async function tickBillGen(pool, flags, now, state) {
         if (cq.rows[0]) discountPct = Number(cq.rows[0].discount_pct) || 0;
       } catch { /* legacy deploys without contracts table */ }
       const bill = billing.buildBill({ room, config, features: flags, previous, recurring, period, dueDate, discountPct });
+      // Transactional bill insert + one_off deactivation. Previously
+      // these were two separate pool queries; a process crash or DB
+      // error between them left one_off charges active=TRUE forever,
+      // and the next bulk run re-billed them. BEGIN/COMMIT keeps the
+      // pair atomic. See the matching block in routes/bills-extras.js
+      // for the manual bulk-generate path.
+      const billClient = await pool.connect();
       try {
-        // `other` JSONB persists the recurring breakdown so the PDF render
-        // and tenant portal bill-detail can reproduce the line items. The
-        // manual /api/bills POST + bulk-generate paths already write this;
-        // the scheduler used to skip it, so auto-generated bills lost their
-        // recurring breakdown on read (total stayed correct, but admins
-        // couldn't see WHICH charges made up the total).
+        await billClient.query('BEGIN');
         const otherJson = JSON.stringify(recurring || []);
-        const ins = await pool.query(
+        const ins = await billClient.query(
           `INSERT INTO bills (bill_no, tenant_id, room_id, period, rent,
               water_units, water_rate, water_amount,
               elec_units, elec_rate, elec_amount, wifi, other, subtotal, vat, late_fee, total, due_date, status)
@@ -450,30 +452,29 @@ async function tickBillGen(pool, flags, now, state) {
             bill.dueDate,
           ]
         );
-        // Only count the bill as "made" + deactivate one_off charges if the
-        // INSERT actually wrote a row (rowCount > 0). ON CONFLICT DO NOTHING
-        // returns 0 rows when the bill_no collided with an existing one —
-        // and in that case we DON'T want to mark one_offs inactive (they
-        // weren't billed this run).
         if (ins.rowCount > 0) {
+          if (usedOneOffIds.length) {
+            await billClient.query(
+              `UPDATE recurring_charges SET active=FALSE, updated_at=NOW()
+                 WHERE id = ANY($1::bigint[])`,
+              [usedOneOffIds]
+            );
+          }
+          await billClient.query('COMMIT');
           made++;
           billsCreated.push({ id: ins.rows[0].id, tenantId, roomId: bill.roomId, billNo: bill.billNo, period, total: bill.total, dueDate: bill.dueDate });
-          if (usedOneOffIds.length) {
-            try {
-              await pool.query(
-                `UPDATE recurring_charges SET active=FALSE, updated_at=NOW()
-                   WHERE id = ANY($1::bigint[])`,
-                [usedOneOffIds]
-              );
-            } catch (e) {
-              console.warn('[scheduler] one_off deactivate failed for room', room.id, ':', e.message);
-            }
-          }
+        } else {
+          // ON CONFLICT DO NOTHING → bill_no collided. one_offs stay
+          // active because they weren't billed this run.
+          await billClient.query('COMMIT');
         }
       } catch (e) {
+        await billClient.query('ROLLBACK').catch(() => {});
         // Partial-unique on (room_id, period) blocks duplicates even when
         // bill_no differs across paths; treat as silent skip.
         if (e.code !== '23505') console.error('[scheduler] bill insert failed:', e.message);
+      } finally {
+        billClient.release();
       }
     }
     state.lastBillPeriod = period;

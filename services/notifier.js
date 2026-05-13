@@ -91,7 +91,15 @@ async function notifyOwner(ctx, msg) {
       error: 'invalid owner LINE userId shape',
     });
   }
+  // Track which channels we've already attempted inline so the queue
+  // fallback below doesn't re-fire the same broken channel. Previously
+  // a failed LINE push got logged as 'failed' AND re-enqueued through
+  // the SAME OA — the worker retried 3× through the same channel access
+  // token, generating 4 failure log rows for one alert.
+  let lineInlineTried = false;
+  let emailInlineTried = false;
   if (oaForOwner && oaForOwner.channelAccessToken && lineOwner) {
+    lineInlineTried = true;
     const ok = await lineNotify.pushText(oaForOwner, lineOwner, text);
     await logResult(pool, {
       channel: 'line',
@@ -104,6 +112,7 @@ async function notifyOwner(ctx, msg) {
 
   // 2. Email (fallback)
   if (email.isConfigured(features) && features.email && features.email.from) {
+    emailInlineTried = true;
     const to = secrets.get('OWNER_EMAIL') || features.email.from;
     const ok = await email.send(features, {
       to, subject,
@@ -117,13 +126,18 @@ async function notifyOwner(ctx, msg) {
     if (ok) return { channel: 'email', ok: true };
   }
 
-  // 3. Queue fallback — if LINE attempted-but-failed or email transient-down,
-  // park the message for retry rather than dropping it. Owner alerts are
-  // the highest-priority class (anomaly detector, contract expiry, slip
-  // queue summary) so silent loss is unacceptable.
+  // 3. Queue fallback — only for channels NOT yet attempted inline.
+  // If LINE was tried inline and failed, the OA/token is likely
+  // structurally broken (401, OA disabled), and re-queuing would just
+  // burn retries on the same problem. The inline 'failed' log row is
+  // already there for admin to act on. Same for email.
+  //
+  // Owner alerts are the highest-priority class (anomaly detector,
+  // contract expiry, slip queue summary), so silent loss is bad — but
+  // duplicate-spam through a broken channel is worse for signal/noise.
   const queue = getQueue();
   if (queue) {
-    if (oaForOwner && oaForOwner.channelAccessToken && lineOwner) {
+    if (oaForOwner && oaForOwner.channelAccessToken && lineOwner && !lineInlineTried) {
       try {
         await queue.enqueue(pool, {
           channel: 'line', recipient: lineOwner, subject, body: text,
@@ -131,12 +145,12 @@ async function notifyOwner(ctx, msg) {
         });
         await logResult(pool, {
           channel: 'queue', recipient: lineOwner, subject, body: text,
-          status: 'queued', error: 'owner LINE push failed — enqueued',
+          status: 'queued', error: 'owner LINE not attempted inline — enqueued',
         });
         return { channel: 'queue', ok: false, queued: true };
       } catch { /* fall through */ }
     }
-    if (email.isConfigured(features) && features?.email?.from) {
+    if (email.isConfigured(features) && features?.email?.from && !emailInlineTried) {
       const to = secrets.get('OWNER_EMAIL') || features.email.from;
       try {
         await queue.enqueue(pool, {
@@ -145,7 +159,7 @@ async function notifyOwner(ctx, msg) {
         });
         await logResult(pool, {
           channel: 'queue', recipient: to, subject, body: text,
-          status: 'queued', error: 'owner email failed — enqueued',
+          status: 'queued', error: 'owner email not attempted inline — enqueued',
         });
         return { channel: 'queue', ok: false, queued: true };
       } catch { /* fall through */ }

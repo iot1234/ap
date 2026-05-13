@@ -584,10 +584,20 @@ async function verifyViaSlipOK(buffer, expected) {
             // SlipOK returns 4xx with `code` for tenant-actionable errors
             // (bad QR, slip already used at SlipOK side, expired). Surface
             // their message so the tenant sees what to fix.
+            //
+            // 5xx (and 4xx without a SlipOK error code) means SlipOK itself
+            // is having trouble — classify as PROVIDER_ERROR so the
+            // multi-provider fallback chain keeps going to EasySlip/Slip2Go.
+            // Previously a SlipOK 503 was tagged SLIPOK_REJECT, which the
+            // fallback treated as "tenant fault, stop trying" — so a
+            // SlipOK outage left tenants unable to upload slips even
+            // though other providers were configured.
+            const isProviderError = res.statusCode >= 500
+              || (res.statusCode >= 400 && !j.code);
             resolve({
               ok: false,
               error: j.message || j.error || `SlipOK HTTP ${res.statusCode}`,
-              code: j.code || 'SLIPOK_REJECT',
+              code: isProviderError ? 'PROVIDER_ERROR' : (j.code || 'SLIPOK_REJECT'),
               raw: j,
             });
             return;

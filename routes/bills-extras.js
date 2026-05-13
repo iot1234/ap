@@ -265,13 +265,21 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             if (cq.rows[0]) discountPct = Number(cq.rows[0].discount_pct) || 0;
           } catch { /* legacy deploys */ }
           const bill = billing.buildBill({ room, config, features: flags, previous, recurring, period, dueDate, discountPct });
+          // Single transaction per room: INSERT bill + deactivate one_off
+          // charges atomically. Previously the two ran as separate pool
+          // queries; if the deactivate failed (or the process died
+          // between), the one_off stayed active=TRUE and got re-billed
+          // every subsequent month. Wrapping in BEGIN/COMMIT ensures
+          // "bill made AND one_offs settled" or "neither" — never half.
+          // queryWithRetry was useful for transient connection drops,
+          // but inside a tx a transient drop also rolls back the bill,
+          // so admin re-runs bulk-generate (the ON CONFLICT clause
+          // makes the rerun idempotent on bill_no).
+          const billClient = await pool.connect();
           try {
-            // Persist the recurring line items in bills.other so the PDF
-            // render + tenant-portal bill detail can reproduce them later.
-            // Without this the line items only existed in bill.subtotal —
-            // the breakdown was lost on read.
+            await billClient.query('BEGIN');
             const otherJson = JSON.stringify(recurring || []);
-            const { rowCount } = await queryWithRetry(
+            const ins = await billClient.query(
               `INSERT INTO bills
                  (bill_no, tenant_id, room_id, period, rent,
                   water_units, water_rate, water_amount,
@@ -287,35 +295,33 @@ module.exports = function buildBillsExtrasRouter(ctx) {
                 bill.wifi, otherJson,
                 bill.subtotal, bill.vat, bill.lateFee, bill.total,
                 bill.dueDate,
-              ],
-              { pool, attempts: 3 }
+              ]
             );
-            if (rowCount) {
-              made++;
-              // Deactivate one_off charges only when the INSERT actually
-              // wrote a row (rowCount > 0). ON CONFLICT DO NOTHING returns
-              // 0 when the bill_no collided — in that case the one_offs
-              // weren't billed this run, so we mustn't mark them inactive.
+            if (ins.rowCount) {
               if (usedOneOffIds.length) {
-                try {
-                  await queryWithRetry(
-                    `UPDATE recurring_charges SET active=FALSE, updated_at=NOW()
-                       WHERE id = ANY($1::bigint[])`,
-                    [usedOneOffIds],
-                    { pool, attempts: 3 }
-                  );
-                } catch (e) {
-                  console.warn('[bulk-generate] one_off deactivate failed for room', room.id, ':', e.message);
-                }
+                await billClient.query(
+                  `UPDATE recurring_charges SET active=FALSE, updated_at=NOW()
+                     WHERE id = ANY($1::bigint[])`,
+                  [usedOneOffIds]
+                );
               }
+              await billClient.query('COMMIT');
+              made++;
             } else {
+              // ON CONFLICT DO NOTHING returns 0 when the bill_no
+              // collided — the bill wasn't created this run, so we
+              // mustn't mark one_offs inactive. COMMIT (no-op) and skip.
+              await billClient.query('COMMIT');
               skipped++;
             }
           } catch (e) {
+            await billClient.query('ROLLBACK').catch(() => {});
             // A7 — partial unique on (room_id, period) also blocks duplicates
             // when the two paths produce different bill_nos for same period.
             if (e.code !== '23505') console.error('[bulk-generate] insert failed:', e.message);
             skipped++;
+          } finally {
+            billClient.release();
           }
         }
         audit(req, 'bill.bulk_generate', 'period', period, { made, skipped });
@@ -965,8 +971,22 @@ module.exports = function buildBillsExtrasRouter(ctx) {
     async (req, res) => {
       const id = Number(req.params.id);
       if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
-      const requestedAmount = req.body?.amount == null ? null : Number(req.body.amount);
-      if (requestedAmount != null && (!Number.isFinite(requestedAmount) || requestedAmount <= 0)) {
+      // Amount is required. Previously a missing amount silently fell
+      // through to "pay billTotal", so an admin curl/script that
+      // forgot the field paid the full bill without operator
+      // confirmation — and the audit log captured only the resulting
+      // amount, not the fact that no amount was specified. The current
+      // admin UI always sends amount (page-billing.jsx:329), so this
+      // tightening doesn't change the human flow.
+      if (req.body?.amount == null) {
+        return res.status(400).json({
+          error: 'ต้องระบุยอดชำระ (amount)',
+          code: 'AMOUNT_REQUIRED',
+          hint: 'ส่ง amount ในตัว body — ระบบจะเทียบกับยอดบิลก่อนบันทึก',
+        });
+      }
+      const requestedAmount = Number(req.body.amount);
+      if (!Number.isFinite(requestedAmount) || requestedAmount <= 0) {
         return res.status(400).json({ error: 'invalid amount', code: 'INVALID_AMOUNT' });
       }
       const methodRaw = String(req.body?.method || 'transfer').toLowerCase();
@@ -1039,7 +1059,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           await client.query('ROLLBACK');
           return res.status(409).json({ error: 'bill total is invalid', code: 'INVALID_BILL_TOTAL' });
         }
-        if (requestedAmount != null && Math.abs(requestedAmount - billTotal) > billing.PAYMENT_TOLERANCE_THB) {
+        if (Math.abs(requestedAmount - billTotal) > billing.PAYMENT_TOLERANCE_THB) {
           await client.query('ROLLBACK');
           return res.status(409).json({
             error: 'payment amount does not match bill total',
@@ -1077,6 +1097,21 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             JSON.stringify({ source: 'admin-billing', requestedAmount }),
           ]
         );
+        // Reject sibling pending slips that the tenant uploaded before
+        // admin recorded this offline payment. Without this, admin opens
+        // the queued slip in /admin#payments later and gets a
+        // 409 BILL_ALREADY_PAID with no way to clear the row — the
+        // pending payment never gets resolved. Mark them rejected with
+        // a structured reason so the queue empties and the slip preview
+        // remains intact for forensic review.
+        const supersededPending = await client.query(
+          `UPDATE payments
+              SET status='rejected',
+                  rejected_reason=$2
+            WHERE bill_id=$1 AND status='pending'
+          RETURNING id`,
+          [id, `superseded_by_manual_pay: ${method} ${ref}`]
+        );
         const paid = await client.query(
           `UPDATE bills SET status='paid', paid_at=NOW()
              WHERE id=$1 AND status IN ('pending','overdue')
@@ -1095,6 +1130,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           paymentId: payment.rows[0].id,
           amount: billTotal,
           method,
+          supersededPaymentIds: supersededPending.rows.map((r) => r.id),
         });
         notifyManualPayment(payment.rows[0], paid.rows[0] || row, verifier).catch(() => {});
         // Auto-recompute room status — if this was the last overdue bill,
@@ -1204,6 +1240,21 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             await client.query('ROLLBACK');
             return res.status(404).json({ error: 'no pending slip for this bill' });
           }
+          // Reject any OTHER pending payments on this bill in the same
+          // transaction. The handler previously selected only the most
+          // recent pending row and verified it — if the tenant uploaded
+          // two slips before admin reviewed (e.g. retry after suspected
+          // submit failure), the older one stayed `pending` forever and
+          // showed up in the slip queue as an unresolvable orphan.
+          await client.query(
+            `UPDATE payments
+                SET status='rejected',
+                    verified_by=$1,
+                    verified_at=NOW(),
+                    rejected_reason='superseded_by_verified_sibling'
+              WHERE bill_id=$2 AND status='pending' AND id<>$3`,
+            [verifier, id, pid]
+          );
           const paid = await client.query(
             // Only flip pending/overdue → paid. status<>'paid' would also
             // match 'void', re-animating a bill the admin already cancelled.

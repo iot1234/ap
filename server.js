@@ -6773,6 +6773,21 @@ app.put('/api/payments/:id/verify', sameOrigin, csrfGuard, requireAuth, requireR
         return res.status(404).json({ error: 'not found or already decided' });
       }
       row = upd.rows[0];
+      // Reject sibling pending payments on the same bill. Without this,
+      // if a tenant uploaded slip A → admin verified slip B (different
+      // upload, same bill), slip A stayed forever in 'pending' and
+      // showed as an orphan in the slip queue. Bills-extras.js does the
+      // same for its by-bill verify path; this canonical by-payment-id
+      // path needed the same fix to stay consistent.
+      await client.query(
+        `UPDATE payments
+            SET status='rejected',
+                verified_by=$1,
+                verified_at=NOW(),
+                rejected_reason='superseded_by_verified_sibling'
+          WHERE bill_id=$2 AND status='pending' AND id<>$3`,
+        [req.session.user.username, row.bill_id, id]
+      );
       const paid = await client.query(
         `UPDATE bills SET status='paid', paid_at=NOW()
            WHERE id=$1 AND status IN ('pending','overdue')

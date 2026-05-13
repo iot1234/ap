@@ -62,7 +62,12 @@ function isLikelyUserId(value) {
 }
 
 // --- HTTP helpers ---------------------------------------------------------
-function postJson(oa, pathname, body) {
+// opts.retryKey — if provided, sent as `X-Line-Retry-Key`. LINE uses this
+//   header to deduplicate identical retries: a successful push that lost
+//   its response (network blip mid-body) and got retried will NOT
+//   re-deliver the message — LINE recognizes the retry key and returns
+//   the cached success. Recommended UUID/stable id per logical push.
+function postJson(oa, pathname, body, opts = {}) {
   return new Promise((resolve, reject) => {
     if (!oa || !oa.channelAccessToken) {
       return reject(new Error('LINE OA not configured'));
@@ -71,16 +76,17 @@ function postJson(oa, pathname, body) {
     try { token = sanitiseToken(oa.channelAccessToken); }
     catch (err) { return reject(err); }
     const data = Buffer.from(JSON.stringify(body), 'utf8');
+    const headers = {
+      'Content-Type': 'application/json',
+      'Content-Length': data.length,
+      Authorization: `Bearer ${token}`,
+    };
+    if (opts.retryKey) {
+      // LINE Messaging API idempotency header; max 64 chars.
+      headers['X-Line-Retry-Key'] = String(opts.retryKey).slice(0, 64);
+    }
     const req = https.request(
-      {
-        hostname: 'api.line.me', port: 443, path: pathname, method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Content-Length': data.length,
-          Authorization: `Bearer ${token}`,
-        },
-        timeout: 5000,
-      },
+      { hostname: 'api.line.me', port: 443, path: pathname, method: 'POST', headers, timeout: 5000 },
       (res) => {
         let buf = '';
         res.on('data', (chunk) => { buf += chunk; });
@@ -88,7 +94,20 @@ function postJson(oa, pathname, body) {
           if (res.statusCode >= 200 && res.statusCode < 300) {
             resolve({ ok: true, status: res.statusCode, body: buf });
           } else {
-            reject(new Error(`LINE API ${res.statusCode}: ${buf}`));
+            // Surface HTTP status on the Error so callers can branch
+            // on it (queue dispatcher fast-fails on 401, longer backoff
+            // on 429). Previously this info was only in the message
+            // string and got lost when pushText flattened to boolean.
+            const err = new Error(`LINE API ${res.statusCode}: ${buf}`);
+            err.status = res.statusCode;
+            err.responseBody = buf;
+            // Honor Retry-After if LINE returns one (for 429 and 503).
+            const ra = res.headers && (res.headers['retry-after'] || res.headers['Retry-After']);
+            if (ra) {
+              const n = Number(String(ra).trim());
+              if (Number.isFinite(n) && n > 0) err.retryAfterSeconds = n;
+            }
+            reject(err);
           }
         });
       }
@@ -208,6 +227,59 @@ async function pushMessages(...args) {
   }
 }
 
+// Status-aware variants used by the queue dispatcher. Unlike the boolean
+// pushText/pushMessages, these THROW on failure with .status / .retryAfterSeconds
+// attached, so the retry policy can branch on 401 (fatal — don't retry),
+// 429 (longer backoff, honor Retry-After), and transient 5xx. opts.retryKey
+// is forwarded as `X-Line-Retry-Key` for idempotent retries (LINE dedupes
+// duplicate retries when the same key is sent — protects against
+// successful-but-truncated-response → retried → tenant gets it twice).
+async function pushTextStrict(oa, userId, text, opts = {}) {
+  const resolved = _resolveOa(oa);
+  if (!resolved || !resolved.channelAccessToken) {
+    const e = new Error('LINE OA not configured');
+    e.fatal = true;
+    throw e;
+  }
+  if (!userId || !isLikelyUserId(userId)) {
+    const e = new Error('invalid LINE userId');
+    e.fatal = true;
+    throw e;
+  }
+  if (!text) {
+    const e = new Error('LINE push text empty');
+    e.fatal = true;
+    throw e;
+  }
+  await postJson(resolved, '/v2/bot/message/push', {
+    to: userId,
+    messages: [{ type: 'text', text: String(text).slice(0, 5000) }],
+  }, { retryKey: opts.retryKey });
+}
+
+async function pushMessagesStrict(oa, userId, messages, opts = {}) {
+  const resolved = _resolveOa(oa);
+  if (!resolved || !resolved.channelAccessToken) {
+    const e = new Error('LINE OA not configured');
+    e.fatal = true;
+    throw e;
+  }
+  if (!userId || !isLikelyUserId(userId)) {
+    const e = new Error('invalid LINE userId');
+    e.fatal = true;
+    throw e;
+  }
+  if (!Array.isArray(messages) || messages.length === 0) {
+    const e = new Error('messages must be non-empty array');
+    e.fatal = true;
+    throw e;
+  }
+  await postJson(resolved, '/v2/bot/message/push', {
+    to: userId,
+    messages: messages.slice(0, 5),
+  }, { retryKey: opts.retryKey });
+}
+
 /**
  * Reply to a webhook event using the one-shot replyToken.
  *   replyText(oa, replyToken, text)
@@ -267,6 +339,8 @@ function verifyWebhookSignature(...args) {
 }
 
 module.exports = {
-  isConfigured, pushText, pushMessages, replyText, getMessageContent, verifyWebhookSignature, isLikelyUserId,
+  isConfigured, pushText, pushMessages,
+  pushTextStrict, pushMessagesStrict,
+  replyText, getMessageContent, verifyWebhookSignature, isLikelyUserId,
   _resolveOa, // exported for tests
 };

@@ -73,18 +73,26 @@ async function dispatch(pool, features, row) {
       throw new Error(`LINE OA resolve failed: ${err.message}`);
     }
     if (!oa || !oa.channelAccessToken) throw new Error('LINE not configured');
+    // Idempotency: send a stable retry key derived from the queue row id
+    // so LINE dedupes duplicate retries. Without this, a successful push
+    // whose response was truncated mid-read would be retried and the
+    // tenant would receive the same message twice (or more). LINE caches
+    // results per retry key for ~10 minutes.
+    const retryKey = `notifq-${row.id}`;
     // Rich-message path: payload.messages is the raw LINE messages array
     // (Flex bubble + text fallback for bill reminders). Bundled as ONE
     // push toward the rate limit so we don't double-count for the same
     // notification. Falls back to plain pushText when the enqueueing
     // caller didn't compose a rich payload.
+    //
+    // Use the *Strict variants so HTTP status flows back as err.status
+    // (instead of being flattened to "returned false"). processOne uses
+    // the status to fast-fail 401 and apply a longer backoff on 429.
     if (Array.isArray(payload.messages) && payload.messages.length > 0) {
-      const ok = await lineNotify.pushMessages(oa, row.recipient, payload.messages);
-      if (!ok) throw new Error('LINE push (messages) returned false');
+      await lineNotify.pushMessagesStrict(oa, row.recipient, payload.messages, { retryKey });
       return;
     }
-    const ok = await lineNotify.pushText(oa, row.recipient, row.body || row.subject || '');
-    if (!ok) throw new Error('LINE push returned false');
+    await lineNotify.pushTextStrict(oa, row.recipient, row.body || row.subject || '', { retryKey });
     return;
   }
   if (channel === 'email') {
@@ -117,14 +125,39 @@ async function processOne(pool, features, row) {
     );
     await logResult(pool, row, 'sent', null);
   } catch (err) {
+    // nextRetry is computed from the snapshot at CLAIM TIME, but the
+    // DB-side UPDATE below uses `retry_count + 1` so a concurrent reaper
+    // that bumped retry_count between claim and now isn't silently
+    // overwritten. We still use `nextRetry` for the BACKOFF index choice
+    // and for the MAX_RETRY threshold — close enough for backoff math.
     const nextRetry = row.retry_count + 1;
     const errMsg = String(err.message || err).slice(0, 1000);
+    // Fatal errors (401 invalid token, configured-as-invalid OA, malformed
+    // recipient) won't get better with retries — they need admin to fix
+    // the OA config or the tenant binding. Park immediately at 'failed'
+    // so the row surfaces in the admin queue and stops burning attempts.
+    const status = Number(err.status) || null;
+    const isFatal = err.fatal === true || status === 401 || status === 403 || status === 400;
+    if (isFatal) {
+      await pool.query(
+        `UPDATE notifications_queue
+           SET status='failed',
+               retry_count = retry_count + 1,
+               last_error=$2
+           WHERE id=$1`,
+        [row.id, errMsg]
+      );
+      await logResult(pool, row, 'failed', errMsg);
+      return;
+    }
     if (nextRetry >= MAX_RETRY) {
       await pool.query(
         `UPDATE notifications_queue
-           SET status='failed', retry_count=$2, last_error=$3
+           SET status='failed',
+               retry_count = retry_count + 1,
+               last_error=$2
            WHERE id=$1`,
-        [row.id, nextRetry, errMsg]
+        [row.id, errMsg]
       );
       await logResult(pool, row, 'failed', errMsg);
     } else {
@@ -132,25 +165,36 @@ async function processOne(pool, features, row) {
       // (1m). Previously this read BACKOFF_MIN[1] (5m) on the first retry,
       // skipping the 1-minute step entirely → effective backoffs were
       // 5m, 30m instead of the intended 1m, 5m, 30m.
-      const wait = BACKOFF_MIN[Math.min(nextRetry - 1, BACKOFF_MIN.length - 1)];
+      let wait = BACKOFF_MIN[Math.min(nextRetry - 1, BACKOFF_MIN.length - 1)];
+      // Rate limit / service-unavailable: honor Retry-After header from
+      // the provider so we don't hammer past the window. We pick the
+      // LARGER of (default backoff, Retry-After) so a tiny Retry-After
+      // value can't shrink our intended backoff.
+      if ((status === 429 || status === 503) && err.retryAfterSeconds > 0) {
+        const raMs = err.retryAfterSeconds * 1000;
+        if (raMs > wait) wait = raMs;
+      } else if (status === 429) {
+        // 429 without Retry-After — be conservative.
+        wait = Math.max(wait, 5 * 60 * 1000);
+      }
       // Multiply integer parameter by a fixed-unit interval — avoids the
       // implicit text-cast that the `int || 'milliseconds'` form depends
       // on (works in PG 9.5+ but reads ambiguous; this version is plain
       // SQL standard arithmetic).
       //
-      // CRITICAL: reset status to 'pending' so the next tick can claim it.
-      // Previously this UPDATE left status='processing', which only the
-      // 10-min reaper could fix — and the reaper ALSO bumps retry_count,
-      // so a single transient failure burned 2 of MAX_RETRY=3 attempts.
-      // Effective real attempts dropped to ~2 with a forced 10-min wait
-      // between retries even when the schedule said 1m/5m/30m.
+      // Atomic increment (`retry_count + 1`) preserves any reaper bump
+      // that happened concurrently between this worker's claim and now.
+      // Previously this wrote `retry_count=$2` (the captured snapshot+1),
+      // which could overwrite a reaper increment and let a poison
+      // message slip past MAX_RETRY.
       await pool.query(
         `UPDATE notifications_queue
            SET status='pending',
-               retry_count=$2, last_error=$3,
-               next_attempt_at=NOW() + ($4::int * INTERVAL '1 millisecond')
+               retry_count = retry_count + 1,
+               last_error=$2,
+               next_attempt_at=NOW() + ($3::int * INTERVAL '1 millisecond')
            WHERE id=$1`,
-        [row.id, nextRetry, errMsg, wait]
+        [row.id, errMsg, wait]
       );
     }
   }
@@ -175,14 +219,31 @@ async function tick(pool, features, batchSize = 25) {
   let rows;
   try {
     // Reaper: messages stuck `processing` for >10 min are presumed orphaned
-    // (worker died). Reset to `pending` so they get retried — bumps
-    // retry_count so a poison message still parks at MAX_RETRY.
+    // (worker died). The CTE+SKIP LOCKED pattern prevents two replicas
+    // from both bumping retry_count on the same row when their tick
+    // happens to overlap on the reaper sweep — previous version was a
+    // bare UPDATE which Postgres still serialized but applied BOTH
+    // bumps, double-aging a stuck row.
+    //
+    // We also set next_attempt_at to NOW() + 1m so a reaped row doesn't
+    // immediately re-fire (which would burst-retry through the same
+    // broken dispatch). Without this delay reaped rows landed in the
+    // very next tick with no backoff applied, defeating the retry
+    // schedule for crash-during-dispatch cases.
     await client.query(
-      `UPDATE notifications_queue
-         SET status='pending', retry_count = retry_count + 1,
-             last_error = COALESCE(last_error, '') || ' [reaped after stuck processing]'
-       WHERE status='processing' AND sent_at IS NULL
-         AND next_attempt_at < NOW() - INTERVAL '10 minutes'`
+      `WITH stuck AS (
+         SELECT id FROM notifications_queue
+          WHERE status='processing' AND sent_at IS NULL
+            AND next_attempt_at < NOW() - INTERVAL '10 minutes'
+          FOR UPDATE SKIP LOCKED
+       )
+       UPDATE notifications_queue q
+          SET status='pending',
+              retry_count = q.retry_count + 1,
+              next_attempt_at = NOW() + INTERVAL '1 minute',
+              last_error = COALESCE(q.last_error, '') || ' [reaped after stuck processing]'
+         FROM stuck
+        WHERE q.id = stuck.id`
     );
 
     await client.query('BEGIN');
