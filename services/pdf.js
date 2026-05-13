@@ -83,13 +83,24 @@ async function renderBillPdf(bill, stream) {
     .text(buildingAddr || '', 48, doc.y + 2)
     .text(buildingPhone ? `โทร. ${buildingPhone}` : '', 48, doc.y + 2);
 
-  // Right side: title + bill no + date
+  // Right side: title + bill no + date. When the bill is paid we re-label
+  // the title to "ใบเสร็จรับเงิน" so the document doubles as a receipt; the
+  // PAID stamp below makes it unmistakable for anyone glancing at the
+  // printed copy or LINE-forwarded PDF. Avoids the prior failure mode
+  // where a paid bill looked identical to an unpaid one and tenants got
+  // confused about whether they still owed money.
+  const isPaid = String(bill.status || '').toLowerCase() === 'paid';
   doc
     .fillColor(C.ink).font('th-bold').fontSize(16)
-    .text('ใบแจ้งหนี้', 360, 48, { width: 200, align: 'right' })
+    .text(isPaid ? 'ใบเสร็จรับเงิน' : 'ใบแจ้งหนี้', 360, 48, { width: 200, align: 'right' })
     .font('th').fontSize(10).fillColor(C.ink2)
     .text(`เลขที่: ${bill.billNo || '—'}`, 360, doc.y + 4, { width: 200, align: 'right' })
     .text(`วันที่ออก: ${fmtThaiDate(new Date())}`, 360, doc.y + 2, { width: 200, align: 'right' });
+  if (isPaid && bill.paidAt) {
+    doc.font('th').fontSize(10).fillColor('#2f8f5b')
+      .text(`ชำระเมื่อ: ${fmtThaiDate(new Date(bill.paidAt))}`, 360, doc.y + 2,
+        { width: 200, align: 'right' });
+  }
 
   // Divider
   doc
@@ -225,13 +236,33 @@ async function renderBillPdf(bill, stream) {
     payY += cardH + 8;
   }
 
+  // --- PAID watermark (only when bill is paid) ---
+  // Diagonal "ชำระแล้ว" overlay across the page so a printed/forwarded
+  // PDF is unambiguous at a glance. Rendered LAST so it sits on top of
+  // the totals + payment block — readable but transparent enough that the
+  // numbers underneath stay visible. Translates the title to receipt
+  // wording above + this stamp here so the document can't be mistaken
+  // for an unpaid invoice.
+  if (isPaid) {
+    doc.save();
+    doc.opacity(0.15);
+    doc.rotate(-22, { origin: [297.5, 400] });  // ~A4 center, slight tilt
+    doc.font('th-bold').fontSize(96).fillColor('#2f8f5b')
+      .text('ชำระแล้ว', 0, 360, { width: 595, align: 'center' });
+    doc.restore();
+  }
+
   // --- Footer ---
   const footerY = 750;
   doc
     .fontSize(9).fillColor(C.muted)
-    .text('กรุณาชำระเงินภายในกำหนด หากมีข้อสงสัยติดต่อเจ้าหน้าที่', 48, footerY, {
-      width: 499, align: 'center',
-    });
+    .text(
+      isPaid
+        ? `บิลนี้ชำระเรียบร้อยแล้ว — ${bill.paidAt ? `เมื่อ ${fmtThaiDate(new Date(bill.paidAt))}` : ''} ขอบคุณที่ใช้บริการ`
+        : 'กรุณาชำระเงินภายในกำหนด หากมีข้อสงสัยติดต่อเจ้าหน้าที่',
+      48, footerY,
+      { width: 499, align: 'center' }
+    );
 
   doc.end();
 

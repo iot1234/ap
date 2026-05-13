@@ -325,7 +325,16 @@ module.exports = function buildBillsExtrasRouter(ctx) {
   // Internal helper used by both /:id/send and /bulk-send so neither path
   // round-trips through HTTP. Previously bulk-send self-fetched localhost
   // without admin session/CSRF, so it always enqueued 0.
-  async function enqueueBillNotifications(billId) {
+  //
+  // `opts.debounceMinutes` (default 60) is the minimum gap between two
+  // reminders for the same bill. Pass 0 to bypass the debounce — bulk-send
+  // sets that explicitly because the user already saw the per-bill list
+  // and confirmed intent. The single-bill /:id/send route uses the default
+  // so a double-click within an hour can't spam the tenant.
+  async function enqueueBillNotifications(billId, opts = {}) {
+    const debounceMinutes = Number.isFinite(opts.debounceMinutes)
+      ? Math.max(0, Math.floor(opts.debounceMinutes))
+      : 60;
     // Filter the tenant join on deleted_at AND status — without these we
     // happily pushed bill reminders to soft-deleted tenants (whose
     // line_user_id was still in the row) and to ex-tenants who had
@@ -345,6 +354,39 @@ module.exports = function buildBillsExtrasRouter(ctx) {
     );
     if (!billQ.rows.length) return { ok: false, error: 'not found' };
     if (billQ.rows[0].status === 'void') return { ok: false, error: 'bill is void' };
+    // Refuse to re-send reminders for bills that have already been paid.
+    // Without this guard, admin could re-trigger "ขอเตือนชำระค่าเช่า" on
+    // a row that was paid hours ago — the tenant gets a confusing
+    // "please pay" message after they already did, and support tickets
+    // pile up. This protects BOTH the single-bill /:id/send route AND
+    // the bulk-send loop (which technically filters by status, but
+    // belt-and-braces in the shared helper closes any future caller too).
+    if (billQ.rows[0].status === 'paid') {
+      return {
+        ok: false,
+        error: 'บิลนี้ชำระเรียบร้อยแล้ว ไม่ต้องส่งเตือนอีก',
+        code: 'BILL_ALREADY_PAID',
+        paidAt: billQ.rows[0].paid_at,
+        hint: 'ตรวจสอบที่ /admin#payments ว่าใครเป็นคนยืนยัน',
+      };
+    }
+    // Debounce repeat reminders so admin double-click / accidental bulk
+    // overlap doesn't spam the tenant. `last_reminded_at` is set after
+    // every successful enqueue below; here we just refuse a too-soon repeat.
+    if (debounceMinutes > 0 && billQ.rows[0].last_reminded_at) {
+      const lastMs = new Date(billQ.rows[0].last_reminded_at).getTime();
+      const minutesAgo = (Date.now() - lastMs) / 60_000;
+      if (minutesAgo < debounceMinutes) {
+        const wait = Math.ceil(debounceMinutes - minutesAgo);
+        return {
+          ok: false,
+          error: `เพิ่งส่งเตือนบิลนี้ไปแล้ว — โปรดรออีกประมาณ ${wait} นาทีก่อนส่งซ้ำ`,
+          code: 'REMINDER_DEBOUNCED',
+          lastRemindedAt: billQ.rows[0].last_reminded_at,
+          retryAfterMinutes: wait,
+        };
+      }
+    }
     const b = billQ.rows[0];
     // Refuse to send when the bill isn't linked to a live tenant. The
     // earlier code reached this state via several silent paths (orphan
@@ -489,6 +531,16 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         payload: { billId },
       });
       enqueued.push({ channel: 'email', id: qid });
+    }
+    // Stamp the bill so the next reminder request within debounceMinutes
+    // is refused. Only stamp when we actually enqueued something — a NO-
+    // CHANNEL early return above already short-circuited; here we know at
+    // least one notification was queued.
+    if (enqueued.length > 0) {
+      await pool.query(
+        `UPDATE bills SET last_reminded_at=NOW() WHERE id=$1`,
+        [billId]
+      ).catch((err) => console.warn('[enqueueBillNotifications] stamp last_reminded_at failed:', err.message));
     }
     return { ok: true, enqueued };
   }

@@ -4278,10 +4278,48 @@ app.get('/p/bill-qr/:billId', rateLimitQr, async (req, res) => {
     if (isDemoTarget(paymentBlock.promptpayTarget)) {
       return res.status(503).json({ error: 'PromptPay still on demo target' });
     }
+    const format = String(req.query.format || 'png').toLowerCase();
+    if (format === 'json' || format === 'payload') {
+      const payload = buildPromptPayPayload(paymentBlock.promptpayTarget, amount);
+      let dataUrl = null;
+      let svg = null;
+      let renderer = null;
+      let renderError = null;
+      try {
+        dataUrl = await renderQrDataUrl(paymentBlock.promptpayTarget, amount);
+        renderer = 'qrcode';
+      } catch (renderErr) {
+        renderError = renderErr.message || 'render failed';
+        console.error('[public-qr] dataUrl render failed, attempting SVG fallback:', renderError);
+        try {
+          svg = renderQrSvg(paymentBlock.promptpayTarget, amount);
+          renderer = 'qrcode-svg';
+        } catch (svgErr) {
+          renderError += ' | svg fallback: ' + (svgErr.message || 'failed');
+          console.error('[public-qr] svg fallback also failed:', svgErr.message);
+        }
+      }
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      return res.json({
+        ok: true,
+        payload,
+        dataUrl,
+        svg,
+        renderer,
+        renderError,
+        amount,
+        billId: bill.id,
+        targetLast4: String(paymentBlock.promptpayTarget).slice(-4),
+        bankInfo: paymentBlock.bankInfo || null,
+        promptpayName: paymentBlock.promptpayName || null,
+      });
+    }
     const rendered = await renderQrWithFallback(paymentBlock.promptpayTarget, amount);
     res.setHeader('Content-Type', rendered.contentType);
     res.setHeader('Cache-Control', 'public, max-age=3600');   // LINE re-fetches
     res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-QR-Renderer', rendered.renderer);
     return res.end(rendered.body);
   } catch (err) {
     console.error('public bill qr error:', err);

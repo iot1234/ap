@@ -16,6 +16,11 @@ function fileToDataUrl(file) {
   });
 }
 
+function appendQuery(url, params) {
+  const qs = new URLSearchParams(params).toString();
+  return `${url}${String(url || '').includes('?') ? '&' : '?'}${qs}`;
+}
+
 async function readJson(res) {
   const contentType = (res.headers && res.headers.get && res.headers.get('content-type')) || '';
   if ((res.status >= 300 && res.status < 400) || res.type === 'opaqueredirect') {
@@ -130,6 +135,8 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [messageKind, setMessageKind] = useState('');
+  const [qrFallback, setQrFallback] = useState(null);
+  const [qrCopied, setQrCopied] = useState(false);
 
   async function load(silent = false) {
     if (!billId || !token) {
@@ -161,6 +168,34 @@ function App() {
     const timer = setInterval(() => load(true), 5000);
     return () => clearInterval(timer);
   }, [data && data.paid, apiBase]);
+
+  useEffect(() => {
+    setQrFallback(null);
+    setQrCopied(false);
+  }, [data && data.qrUrl]);
+
+  async function loadQrFallback() {
+    if (!data || !data.qrUrl) return;
+    const payment = data.payment || {};
+    try {
+      const fallback = await fetch(appendQuery(data.qrUrl, { format: 'json' }), {
+        credentials: 'same-origin',
+        redirect: 'manual',
+      }).then(readJson);
+      if (!fallback || !fallback.payload) throw new Error('QR payload missing');
+      setQrFallback({
+        ...fallback,
+        bankInfo: fallback.bankInfo || payment.bankInfo || null,
+        promptpayName: fallback.promptpayName || payment.promptpayName || null,
+      });
+    } catch (e) {
+      setQrFallback({
+        error: 'ไม่สามารถแสดง QR ได้ กรุณาโอนผ่านบัญชีธนาคารด้านล่างหรือแจ้งแอดมิน',
+        bankInfo: payment.bankInfo || null,
+        promptpayName: payment.promptpayName || null,
+      });
+    }
+  }
 
   async function upload() {
     const n = Number(amount);
@@ -217,6 +252,11 @@ function App() {
   const paid = !!(data && data.paid);
   const uploadState = data && data.upload;
   const canUpload = !!(data && data.channels && data.channels.slip && !paid && (!uploadState || uploadState.canUpload !== false));
+  const qrFallbackImageSrc = qrFallback && qrFallback.dataUrl
+    ? qrFallback.dataUrl
+    : qrFallback && qrFallback.svg
+      ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(qrFallback.svg)}`
+      : '';
 
   const messageStyle = messageKind === 'success'
     ? successBox
@@ -269,7 +309,68 @@ function App() {
             {!paid && data.qrUrl ? (
               <div style={card}>
                 <div style={{ fontWeight: 600, marginBottom: 10 }}>สแกน PromptPay</div>
-                <img src={data.qrUrl} alt="PromptPay QR" width="180" height="180" style={qr} />
+                {!qrFallback ? (
+                  <img
+                    src={data.qrUrl}
+                    alt="PromptPay QR"
+                    width="180"
+                    height="180"
+                    style={qr}
+                    onError={(e) => {
+                      e.currentTarget.style.display = 'none';
+                      loadQrFallback();
+                    }}
+                  />
+                ) : null}
+                {qrFallbackImageSrc ? (
+                  <img src={qrFallbackImageSrc} alt="PromptPay QR fallback" width="180" height="180" style={qr} />
+                ) : null}
+                {qrFallback ? (
+                  <div style={qrFallback.payload ? qrFallbackBox : errorBox}>
+                    <div style={{ fontWeight: 700 }}>
+                      {qrFallback.payload ? 'ระบบใช้ช่องทางสำรองสำหรับ QR นี้' : 'ไม่สามารถแสดง QR ได้'}
+                    </div>
+                    <div style={{ fontSize: 12.5, marginTop: 4 }}>
+                      {qrFallback.payload
+                        ? 'หากสแกนไม่ได้ ให้คัดลอก PromptPay payload ไปวางในแอปธนาคาร หรือโอนผ่านบัญชีธนาคารด้านล่าง'
+                        : qrFallback.error || 'กรุณาโอนผ่านบัญชีธนาคารด้านล่างหรือแจ้งแอดมิน'}
+                    </div>
+                    {qrFallback.payload ? (
+                      <>
+                        <textarea
+                          readOnly
+                          value={qrFallback.payload}
+                          onClick={(e) => e.target.select()}
+                          style={payloadInput}
+                        />
+                        <button
+                          type="button"
+                          style={secondaryButton}
+                          onClick={async () => {
+                            try {
+                              await navigator.clipboard.writeText(qrFallback.payload);
+                              setQrCopied(true);
+                              setTimeout(() => setQrCopied(false), 2000);
+                            } catch {
+                              setQrCopied('manual');
+                              setTimeout(() => setQrCopied(false), 3000);
+                            }
+                          }}
+                        >
+                          {qrCopied === true
+                            ? 'คัดลอกแล้ว'
+                            : qrCopied === 'manual'
+                              ? 'เลือกข้อความแล้ว กด Ctrl+C เพื่อคัดลอก'
+                              : 'คัดลอก payload'}
+                        </button>
+                        <div style={{ fontSize: 11.5, marginTop: 6 }}>
+                          ยอด ฿{fmt(qrFallback.amount || bill.total)}
+                          {qrFallback.targetLast4 ? ` · บัญชีลงท้าย ${qrFallback.targetLast4}` : ''}
+                        </div>
+                      </>
+                    ) : null}
+                  </div>
+                ) : null}
                 {data.payment && data.payment.promptpayName ? <div style={muted}>{data.payment.promptpayName}</div> : null}
               </div>
             ) : null}
@@ -330,6 +431,9 @@ const amountBox = { marginTop: 18, padding: 16, border: '1px solid var(--border)
 const amountText = { fontFamily: 'Sora, sans-serif', fontSize: 34, fontWeight: 700 };
 const card = { marginTop: 14, padding: 14, border: '1px solid var(--border)', borderRadius: 8 };
 const qr = { display: 'block', margin: '0 auto 8px', background: '#fff', border: '1px solid var(--border)', borderRadius: 8, padding: 6 };
+const qrFallbackBox = { marginTop: 10, padding: 12, background: '#fff8e6', border: '1px solid #ead49a', borderRadius: 8, color: '#6b5b1a', lineHeight: 1.5 };
+const payloadInput = { width: '100%', minHeight: 64, marginTop: 8, padding: 8, border: '1px solid var(--border)', borderRadius: 6, background: '#fff', fontFamily: 'Sora, monospace', fontSize: 11, resize: 'none' };
+const secondaryButton = { marginTop: 8, padding: '7px 12px', border: '1px solid var(--border)', borderRadius: 6, background: '#fff', color: 'var(--text)', font: 'inherit', fontSize: 13, fontWeight: 700, cursor: 'pointer' };
 const label = { display: 'block', fontSize: 13, fontWeight: 600, margin: '10px 0 6px' };
 const input = { width: '100%', height: 42, padding: '0 12px', borderRadius: 6, border: '1px solid var(--border)', font: 'inherit' };
 const button = { marginTop: 14, width: '100%', height: 44, border: 0, borderRadius: 6, background: 'var(--accent)', color: '#fff', font: 'inherit', fontWeight: 700, cursor: 'pointer' };
