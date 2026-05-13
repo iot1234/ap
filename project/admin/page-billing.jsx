@@ -34,6 +34,10 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
   // at the bulk-send confirmation modal. null = closed.
   const [bulkSendPreview, setBulkSendPreview] = useState(null);
   const [bulkSendingNow, setBulkSendingNow] = useState(false);
+  // markPaidPrompt holds the modal state for the manual mark-paid flow.
+  // null = closed. Holds { bill, method, ref, note, busy } so admin picks
+  // payment method (cash/transfer/promptpay) before the row flips paid.
+  const [markPaidPrompt, setMarkPaidPrompt] = useState(null);
 
   // Real bills from DB for the current period. Falls back to client estimate
   // (computed from rooms blob below) when no bills have been issued yet, so
@@ -117,6 +121,12 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
     const waterRate = config.utilities?.waterRate ?? 18;
     const elecRate  = config.utilities?.elecRate  ?? 8;
     const wifiFee   = config.utilities?.wifi      ?? 250;
+    // Keep client estimates aligned with the period selected in the toolbar.
+    // If admin is looking at a back-filled month, preview rows and bulk issue
+    // payloads must not fall back to the wall-clock month.
+    const periodDisplay = fmtMonthTH(currentPeriodDate);
+    const dueDay = Math.max(1, Math.min(28, Number(config.notify?.dueOnDay) || 7));
+    const dueIso = `${currentPeriod}-${String(dueDay).padStart(2, '0')}`;
     return Object.values(rooms)
       .filter(r => r.tenant && (r.status === 'occupied' || r.status === 'overdue'))
       .map(r => {
@@ -131,17 +141,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         const overdue = r.status === 'overdue';
         const penalty = overdue ? (r.overdueDays || 0) * (config.fees?.latePenaltyPerDay || 0) : 0;
         const grandTotal = total + penalty;
-        const now = new Date();
-        // Period in ISO YYYY-MM (server schema requires this) — was Thai
-        // text which made bill_no unicode and didn't match scheduler's ISO
-        // period, so the same room/month produced two different bill rows.
-        const periodIso = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-        // Display period in Thai for the UI; ISO is for the API + bill_no.
-        const periodDisplay = fmtMonthTH(now);
-        // Due date in ISO YYYY-MM-DD (also schema-required). Uses
-        // config.notify.dueOnDay if set, else 7th.
-        const dueDay = Math.max(1, Math.min(28, Number(config.notify?.dueOnDay) || 7));
-        const dueIso = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(dueDay).padStart(2, '0')}`;
+        const periodIso = currentPeriod;
         return {
           id: `INV-${periodIso}-${r.id}`,
           roomId: r.id,
@@ -197,7 +197,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
           latestPaidAt: real.latest_paid_at || null,
         };
       });
-  }, [rooms, config, realBillsByRoom]);
+  }, [rooms, config, realBillsByRoom, currentPeriod, currentPeriodDate]);
 
   const filtered = useMemo(() => {
     if (tab === 'current') return bills;
@@ -272,38 +272,67 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
       setToast && setToast({ kind: 'warning', message: 'ต้องออกบิลเข้าระบบก่อน จึงจะบันทึกการชำระได้' });
       return false;
     }
-    // Pre-flight: catch config gaps that would silently produce a payment row
-    // for the wrong account / on the wrong bill state. Skip when caller passes
-    // confirm:false (bulk actions handle their own confirmation upstream).
-    if (opts.confirm !== false) {
-      const readiness = await fetchBillingReadiness();
-      const fmtIssues = formatReadinessIssues(readiness, 'payment');
-      let prompt = `ยืนยันบันทึกชำระบิล ${bill.dbBillNo || bill.dbBillId}\n` +
-                   `ห้อง ${bill.roomId} · ${fmtCurrency(bill.total)}`;
-      if (fmtIssues) {
-        prompt = `⚠️ พบ ${fmtIssues.count} ข้อควรทราบ${fmtIssues.high > 0 ? ` (${fmtIssues.high} ข้อสำคัญ)` : ''} ก่อนบันทึกชำระ:\n\n` +
-                 fmtIssues.lines +
-                 `\n\n📌 ${prompt}\n\n` +
-                 (fmtIssues.high > 0
-                   ? `   ⚠ บันทึกชำระยังทำได้ แต่ปัญหาข้างบนกระทบ flow รับชำระสลิป/ออก QR ถัดไป\n`
-                   : '') +
-                 `   • กดยกเลิก → แก้ปัญหาที่ link ด้านบนก่อน\n` +
-                 `   • กดตกลง → บันทึกชำระต่อ (รับผิดชอบเอง)`;
-      }
-      const ok = window.confirm(prompt);
-      if (!ok) return false;
+    // Bulk-pay callers skip the modal so they can confirm once for the
+    // whole batch — they pass { confirm: false, method, ref } directly.
+    if (opts.confirm === false) {
+      return await submitMarkPaid({
+        bill,
+        method: opts.method || 'transfer',
+        ref: opts.ref || `admin-billing:${bill.id}`,
+        note: opts.note || '',
+      }, opts);
     }
+    // Pre-flight readiness check — surface config gaps (PromptPay not
+    // set, slip provider keys missing, etc.) so admin can act on them
+    // before recording payment. Failure is non-blocking; we still let
+    // admin proceed (the readiness call itself doesn't gate mark-paid).
+    let readinessIssues = null;
     try {
+      const readiness = await fetchBillingReadiness();
+      const fmt = formatReadinessIssues(readiness, 'payment');
+      if (fmt) readinessIssues = fmt;
+    } catch { /* readiness fetch is best-effort */ }
+    // Open the structured method-picker modal. Replaces the old
+    // window.confirm() that hardcoded method='transfer' — admin can now
+    // record cash payments without inventing a fake slip + the tenant
+    // notification labels the actual method ("รับเงินสดที่สำนักงาน" vs
+    // "โอนผ่านธนาคาร" vs "PromptPay"), so the tenant knows exactly how
+    // the payment was recorded.
+    setMarkPaidPrompt({
+      bill,
+      method: 'cash',
+      ref: '',
+      note: '',
+      busy: false,
+      readinessIssues,
+    });
+    return true;
+  };
+
+  const submitMarkPaid = async ({ bill, method, ref, note }, opts = {}) => {
+    try {
+      const cleanRef = String(ref || '').trim();
+      const cleanNote = String(note || '').trim();
+      const refToSend = cleanRef
+        || (method === 'cash' ? `เงินสด·${bill.dbBillNo || bill.dbBillId}` : `admin-billing:${bill.id}`);
       await window.apiCall(`/api/bills/${bill.dbBillId}/pay`, {
         method: 'POST',
         body: JSON.stringify({
-          method: 'transfer',
+          method,
           amount: Number(bill.total) || 0,
-          ref: `admin-billing:${bill.id}`,
+          ref: cleanNote ? `${refToSend} — ${cleanNote}` : refToSend,
         }),
       });
-      addActivity && addActivity({ icon: '💳', text: `รับชำระบิล ${bill.dbBillNo || bill.dbBillId} จำนวน ${fmtCurrency(bill.total)}`, type: 'payment' });
-      setToast && setToast({ kind: 'success', message: `บันทึกชำระห้อง ${bill.roomId} แล้ว` });
+      const methodLabel = ({ cash: 'เงินสด', transfer: 'โอน', promptpay: 'PromptPay' })[method] || method;
+      addActivity && addActivity({
+        icon: '💳',
+        text: `รับชำระ ${methodLabel} บิล ${bill.dbBillNo || bill.dbBillId} จำนวน ${fmtCurrency(bill.total)}`,
+        type: 'payment',
+      });
+      setToast && setToast({
+        kind: 'success',
+        message: `บันทึกชำระห้อง ${bill.roomId} (${methodLabel}) แล้ว — ผู้เช่าได้รับแจ้งเตือน`,
+      });
       if (opts.refresh !== false) fetchDbBills();
       return true;
     } catch (err) {
@@ -510,9 +539,8 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
     setConfirmGenerate(false);
     const apiCall = window.apiCall;
     try {
-      const now = new Date();
-      const period = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-      const dueDay = Number(config.notify?.dueOnDay) || 7;
+      const period = currentPeriod;
+      const dueDay = Math.max(1, Math.min(28, Number(config.notify?.dueOnDay) || 7));
       // Pass `force` when there were issues but admin confirmed the warning.
       // The server has its own copy of the same checks (defence-in-depth)
       // and will 412 unless we explicitly opt in. issues.length > 0 here
@@ -1285,6 +1313,138 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         {bulkSendPreview && <BulkSendPreviewBody
           preview={bulkSendPreview} C={C} fmtCurrency={fmtCurrency} />}
       </Modal>
+
+      {/* Manual mark-paid modal — replaces the old window.confirm() that
+          forced method='transfer' for every offline payment. Admin now
+          picks 💵 เงินสด / 🏦 โอน / 📱 PromptPay, can add a note, and the
+          tenant's confirmation message labels the actual method. */}
+      <Modal
+        open={!!markPaidPrompt}
+        onClose={() => markPaidPrompt && !markPaidPrompt.busy && setMarkPaidPrompt(null)}
+        title="บันทึกการชำระเงิน"
+        width={460}
+        footer={markPaidPrompt && (
+          <>
+            <Btn variant="ghost"
+                 onClick={() => setMarkPaidPrompt(null)}
+                 disabled={markPaidPrompt.busy}>ยกเลิก</Btn>
+            <Btn variant="primary" icon="✓"
+                 onClick={async () => {
+                   setMarkPaidPrompt({ ...markPaidPrompt, busy: true });
+                   const ok = await submitMarkPaid({
+                     bill: markPaidPrompt.bill,
+                     method: markPaidPrompt.method,
+                     ref: markPaidPrompt.ref,
+                     note: markPaidPrompt.note,
+                   });
+                   if (ok) setMarkPaidPrompt(null);
+                   else setMarkPaidPrompt({ ...markPaidPrompt, busy: false });
+                 }}
+                 disabled={markPaidPrompt.busy}>
+              {markPaidPrompt.busy ? 'กำลังบันทึก…' : 'ยืนยันบันทึก'}
+            </Btn>
+          </>
+        )}
+      >
+        {markPaidPrompt && (
+          <div style={{ fontSize: 13.5, color: C.ink, lineHeight: 1.6 }}>
+            <div style={{ marginBottom: 12, padding: 10, background: C.bgSoft || '#fbf6ec', borderRadius: 8 }}>
+              <div style={{ fontWeight: 600, marginBottom: 4 }}>
+                บิล {markPaidPrompt.bill.dbBillNo || markPaidPrompt.bill.dbBillId} ·
+                ห้อง {markPaidPrompt.bill.roomId}
+              </div>
+              <div style={{ color: C.muted, fontSize: 12.5 }}>
+                ผู้เช่า: {markPaidPrompt.bill.tenant || '-'} · ยอด ฿{fmtCurrency(markPaidPrompt.bill.total)}
+              </div>
+            </div>
+            {markPaidPrompt.readinessIssues ? (
+              <div style={{
+                marginBottom: 12, padding: 10,
+                background: markPaidPrompt.readinessIssues.high > 0 ? '#fff4f1' : '#fff8e6',
+                border: `1px solid ${markPaidPrompt.readinessIssues.high > 0 ? '#f3c2b8' : '#ead49a'}`,
+                borderRadius: 8, fontSize: 12, color: C.ink2, lineHeight: 1.5,
+                whiteSpace: 'pre-line',
+              }}>
+                <div style={{ fontWeight: 600, marginBottom: 4 }}>
+                  ⚠️ พบ {markPaidPrompt.readinessIssues.count} ข้อควรทราบเรื่องตั้งค่ารับชำระ
+                </div>
+                {markPaidPrompt.readinessIssues.lines}
+              </div>
+            ) : null}
+
+            <div style={{ fontWeight: 600, marginBottom: 6 }}>ผู้เช่าจ่ายมาทางไหน? *</div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, marginBottom: 14 }}>
+              {[
+                { key: 'cash', label: '💵 เงินสด', desc: 'รับที่สำนักงาน' },
+                { key: 'transfer', label: '🏦 โอน', desc: 'ธนาคารปกติ' },
+                { key: 'promptpay', label: '📱 PromptPay', desc: 'QR สแกน' },
+              ].map((m) => {
+                const sel = markPaidPrompt.method === m.key;
+                return (
+                  <button key={m.key} type="button"
+                    onClick={() => setMarkPaidPrompt({ ...markPaidPrompt, method: m.key })}
+                    disabled={markPaidPrompt.busy}
+                    style={{
+                      padding: '10px 8px', textAlign: 'center', cursor: 'pointer',
+                      border: `2px solid ${sel ? (C.accent || '#c08a2a') : C.border}`,
+                      background: sel ? (C.accentSoft || '#fef6e0') : C.bg,
+                      color: C.ink, borderRadius: 8,
+                      fontFamily: 'inherit', fontSize: 13, fontWeight: sel ? 600 : 400,
+                    }}>
+                    <div>{m.label}</div>
+                    <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>{m.desc}</div>
+                  </button>
+                );
+              })}
+            </div>
+
+            <div style={{ fontWeight: 600, marginBottom: 6 }}>
+              อ้างอิง (ไม่บังคับ)
+              {markPaidPrompt.method !== 'cash'
+                ? <span style={{ fontWeight: 400, color: C.muted, fontSize: 12 }}> — เช่น เลขที่สลิป / transRef</span>
+                : <span style={{ fontWeight: 400, color: C.muted, fontSize: 12 }}> — เช่น เลขใบเสร็จที่ออกให้ผู้เช่า</span>}
+            </div>
+            <input type="text" maxLength={120}
+              value={markPaidPrompt.ref}
+              onChange={(e) => setMarkPaidPrompt({ ...markPaidPrompt, ref: e.target.value })}
+              disabled={markPaidPrompt.busy}
+              placeholder={markPaidPrompt.method === 'cash' ? 'เช่น RC-001/2026' : 'เช่น 2026051500001'}
+              style={{
+                width: '100%', padding: '8px 10px', borderRadius: 6,
+                border: `1px solid ${C.border}`, background: C.bg, color: C.ink,
+                fontFamily: 'inherit', fontSize: 13, marginBottom: 12,
+              }} />
+
+            <div style={{ fontWeight: 600, marginBottom: 6 }}>
+              บันทึกเพิ่ม (ไม่บังคับ)
+            </div>
+            <input type="text" maxLength={200}
+              value={markPaidPrompt.note}
+              onChange={(e) => setMarkPaidPrompt({ ...markPaidPrompt, note: e.target.value })}
+              disabled={markPaidPrompt.busy}
+              placeholder="เช่น 'รับจากคุณแม่ของผู้เช่า'"
+              style={{
+                width: '100%', padding: '8px 10px', borderRadius: 6,
+                border: `1px solid ${C.border}`, background: C.bg, color: C.ink,
+                fontFamily: 'inherit', fontSize: 13, marginBottom: 12,
+              }} />
+
+            <div style={{
+              padding: 10, borderRadius: 8,
+              background: C.bgSoft || '#fbf6ec', color: C.ink2,
+              fontSize: 12.5, lineHeight: 1.6,
+            }}>
+              <div style={{ fontWeight: 600, marginBottom: 4 }}>📌 สิ่งที่จะเกิดขึ้น</div>
+              <div>• บิลจะถูกตั้งเป็น <b>ชำระแล้ว</b> ทันที</div>
+              <div>• ผู้เช่าจะได้รับแจ้งเตือนทาง LINE/อีเมล พร้อมระบุช่องทาง <b>{({ cash: '💵 เงินสด', transfer: '🏦 โอน', promptpay: '📱 PromptPay' })[markPaidPrompt.method] || markPaidPrompt.method}</b></div>
+              <div>• เก็บใน audit log โดยใช้ชื่อ login ของคุณ</div>
+              {markPaidPrompt.method === 'cash'
+                ? <div style={{ marginTop: 4 }}>• ✅ <b>เงินสด</b> — ไม่ต้องมีสลิป</div>
+                : <div style={{ marginTop: 4 }}>• ℹ️ ถ้ามีสลิปจริง แนะนำให้ผู้เช่าอัปโหลดที่ /tenant จะดีกว่า (auto-verify)</div>}
+            </div>
+          </div>
+        )}
+      </Modal>
     </PageContainer>
   );
 }
@@ -1387,6 +1547,11 @@ function SendReminderConfirmBody({ confirm, C, fmtCurrency }) {
     info: { bg: '#f4f8fc', border: '#cfdde9', accent: '#3a5a78', icon: 'ℹ️' },
   };
 
+  // Surface the "เพิ่งส่งไปแล้ว" warning as a top-of-modal banner so admin
+  // sees it BEFORE they click confirm — not buried in the issues list.
+  // Server returns this when bills.last_reminded_at is within the 60-min
+  // debounce window.
+  const recentlySent = summary.recentlySent;
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       {/* Top banner — ready / blocked summary */}
@@ -1410,6 +1575,25 @@ function SendReminderConfirmBody({ confirm, C, fmtCurrency }) {
               : 'ผู้เช่ามีช่องทางรับ + บิลพร้อม — กดยืนยันได้เลย'}
         </div>
       </div>
+
+      {recentlySent ? (
+        <div style={{
+          padding: 12, borderRadius: 8,
+          background: recentlySent.withinDebounce ? '#fff5e8' : '#f4f8fc',
+          border: `1px solid ${recentlySent.withinDebounce ? '#f0c47a' : '#cfdde9'}`,
+        }}>
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>
+            {recentlySent.withinDebounce ? '⏱ เพิ่งส่งไปไม่นาน' : '📤 เคยส่งเตือนมาแล้ว'}
+          </div>
+          <div style={{ fontSize: 12.5, color: C.muted, lineHeight: 1.5 }}>
+            ส่งครั้งล่าสุดเมื่อ <b>{recentlySent.minutesAgo} นาทีก่อน</b>
+            {' '}({new Date(recentlySent.at).toLocaleString('th-TH')})
+            {recentlySent.withinDebounce
+              ? ` — ระบบกัน double-send อีก ${(recentlySent.debounceMinutes || 60) - recentlySent.minutesAgo} นาที ถ้ายืนยันส่ง จะถูกตอบกลับ 409 REMINDER_DEBOUNCED`
+              : ''}
+          </div>
+        </div>
+      ) : null}
 
       {/* Bill summary card */}
       <div style={{

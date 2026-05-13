@@ -561,16 +561,33 @@ module.exports = function buildBillsExtrasRouter(ctx) {
     const amountText = Number.isFinite(amount)
       ? amount.toLocaleString('th-TH', { minimumFractionDigits: 2 })
       : '-';
+    // Translate the payment method code into the Thai label the tenant
+    // expects to see. "transfer" was the old hardcoded value when admin
+    // had no method picker; the new UI lets admin choose cash/transfer/
+    // promptpay, and the tenant's confirmation reads in plain Thai so
+    // there's no ambiguity about how the bill was recorded as paid.
+    const methodTh = ({
+      cash: '💵 รับเงินสดที่สำนักงาน',
+      transfer: '🏦 โอนผ่านธนาคาร',
+      promptpay: '📱 PromptPay',
+      manual: '👤 บันทึกโดยเจ้าหน้าที่',
+    })[String(payment.method || 'manual').toLowerCase()]
+      || `ช่องทางอื่น (${payment.method || 'manual'})`;
     await notifier.notifyTenant({ pool, features: flags }, rows[0], {
-      subject: 'Payment received',
+      subject: '✅ ยืนยันการชำระเงินเรียบร้อยแล้ว',
       text: [
-        `Payment received`,
-        `Bill: ${bill?.bill_no || payment.bill_id || '-'}`,
-        bill?.period ? `Period: ${bill.period}` : null,
-        `Amount: THB ${amountText}`,
-        `Method: ${payment.method || 'manual'}`,
-        payment.ref ? `Reference: ${payment.ref}` : null,
-        actor ? `Recorded by: ${actor}` : null,
+        `เรียน คุณ${rows[0].full_name || ''}`,
+        '',
+        '🎉 ระบบบันทึกการชำระเงินของคุณเรียบร้อยแล้ว',
+        '',
+        `📄 บิล: ${bill?.bill_no || `#${payment.bill_id}` || '-'}${bill?.period ? ` (รอบ ${bill.period})` : ''}`,
+        `💰 จำนวน: ฿${amountText}`,
+        `💳 ช่องทางชำระ: ${methodTh}`,
+        payment.ref ? `🔖 อ้างอิง: ${payment.ref}` : null,
+        actor ? `👤 บันทึกโดย: ${actor}` : null,
+        '',
+        'สถานะ: ชำระแล้ว ✓',
+        'ใบเสร็จ: ดูได้ที่พอร์ทัลผู้เช่า /tenant',
       ].filter(Boolean).join('\n'),
       force: true,
     });
@@ -682,7 +699,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       try {
         const billQ = await pool.query(
           `SELECT b.id, b.bill_no, b.room_id, b.period, b.total, b.status, b.due_date,
-                  b.tenant_id,
+                  b.tenant_id, b.last_reminded_at,
                   t.id AS tenant_row_id, t.full_name AS tenant_name, t.phone AS tenant_phone,
                   t.line_user_id, t.line_oa_id, t.email, t.status AS tenant_status,
                   t.current_room_id AS tenant_current_room
@@ -746,6 +763,29 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           }
         }
 
+        // Surface last_reminded_at so the admin's confirm modal can warn
+        // "เพิ่งส่งไปเมื่อ X นาทีก่อน" instead of letting them double-send.
+        // Hint at the 60-minute debounce so admin understands why a second
+        // send within an hour would be rejected.
+        let recentlySent = null;
+        if (b.last_reminded_at) {
+          const ms = Date.now() - new Date(b.last_reminded_at).getTime();
+          const minutes = Math.max(0, Math.round(ms / 60_000));
+          recentlySent = {
+            at: b.last_reminded_at,
+            minutesAgo: minutes,
+            withinDebounce: minutes < 60,
+            debounceMinutes: 60,
+          };
+          if (recentlySent.withinDebounce) {
+            issues.push({
+              sev: 'med', code: 'REMINDER_RECENTLY_SENT',
+              msg: `เพิ่งส่งเตือนบิลนี้ไปเมื่อ ${minutes} นาทีก่อน`,
+              fix: `ระบบกัน double-send อีก ${60 - minutes} นาที — โปรดรอ หรือถ้าเร่งด่วน ส่งทาง LINE OA โดยตรง`,
+            });
+          }
+        }
+
         const blockingHigh = issues.filter((i) => i.sev === 'high');
         const canSend = blockingHigh.length === 0;
         res.json({
@@ -756,10 +796,12 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             issueCount: issues.length,
             highCount: blockingHigh.length,
             channels,
+            recentlySent,
           },
           bill: {
             id: b.id, billNo: b.bill_no, roomId: b.room_id, period: b.period,
             total: Number(b.total), status: b.status, dueDate: b.due_date,
+            lastRemindedAt: b.last_reminded_at,
           },
           tenant: b.tenant_row_id ? {
             id: b.tenant_row_id, name: b.tenant_name, phone: b.tenant_phone,

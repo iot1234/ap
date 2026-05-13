@@ -7,7 +7,7 @@
 
 const { useState, useEffect, useMemo } = React;
 
-function PageContracts({ setToast, addActivity }) {
+function PageContracts({ setToast, addActivity, rooms = {} }) {
   const C = window.ADMIN_C;
   const { Card, Btn, Input, Select, Modal, Pill, SectionHeading,
           PageContainer, PageHeader } = window;
@@ -284,6 +284,7 @@ function PageContracts({ setToast, addActivity }) {
 
       {quickCreating ? (
         <QuickInviteModal
+          rooms={rooms}
           onClose={() => setQuickCreating(false)}
           onSaved={(payload) => {
             setQuickCreating(false);
@@ -829,10 +830,20 @@ function ContractEditModal({ contract, onClose, onSaved, onError }) {
 // must know up-front (room, rent, deposit, dates) plus the tenant's name
 // + phone so the link can be addressed correctly. Everything else (address,
 // emergency contact, ID photos, signature) the TENANT fills via the link.
-function QuickInviteModal({ onClose, onSaved, onError }) {
+function QuickInviteModal({ rooms = {}, onClose, onSaved, onError }) {
   const C = window.ADMIN_C;
   const { Modal, Btn } = window;
   const apiCall = window.apiCall;
+  const roomList = useMemo(() => Object.values(rooms || {})
+    .filter(Boolean)
+    .sort((a, b) => String(a.id || '').localeCompare(String(b.id || ''), undefined, {
+      numeric: true,
+      sensitivity: 'base',
+    })), [rooms]);
+  const availableRooms = useMemo(() => roomList.filter((r) =>
+    String(r.status || 'vacant') === 'vacant' && !r.tenant
+  ), [roomList]);
+  const hasRoomInventory = roomList.length > 0;
   const [form, setForm] = useState({
     tenantName: '',
     tenantPhone: '',
@@ -848,6 +859,21 @@ function QuickInviteModal({ onClose, onSaved, onError }) {
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState(null);
   const [copied, setCopied] = useState(false);
+  const setRoomId = (roomId) => {
+    const room = roomList.find((r) => String(r.id) === String(roomId));
+    setForm((f) => {
+      const rent = Number(room?.rent);
+      const deposit = Number(room?.deposit);
+      return {
+        ...f,
+        roomId,
+        monthlyRent: Number.isFinite(rent) && rent > 0 ? String(rent) : f.monthlyRent,
+        deposit: Number.isFinite(deposit) && deposit >= 0
+          ? String(deposit)
+          : (Number.isFinite(rent) && rent > 0 ? String(rent * 2) : f.deposit),
+      };
+    });
+  };
 
   // Auto-set deposit = 2 × monthlyRent when admin types rent (Thai dorm
   // standard) — admin can override after.
@@ -906,9 +932,13 @@ function QuickInviteModal({ onClose, onSaved, onError }) {
     }
   };
 
+  const roomAvailable = !hasRoomInventory || availableRooms.some((r) =>
+    String(r.id) === String(form.roomId).trim()
+  );
   const valid = form.tenantName.trim()
     && /^[\d+\s-]{8,20}$/.test(form.tenantPhone.trim())
     && form.roomId.trim()
+    && roomAvailable
     && Number(form.monthlyRent) > 0
     && /^\d{4}-\d{2}-\d{2}$/.test(form.moveInDate);
 
@@ -971,9 +1001,28 @@ function QuickInviteModal({ onClose, onSaved, onError }) {
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
             <div>
               <label style={lbl}>ห้องเลขที่ *</label>
-              <input style={inp} maxLength={32}
-                value={form.roomId}
-                onChange={(e) => setForm({ ...form, roomId: e.target.value })} />
+              {hasRoomInventory ? (
+                <select style={inp} value={form.roomId}
+                  onChange={(e) => setRoomId(e.target.value)}>
+                  <option value="">{availableRooms.length ? 'เลือกห้องว่าง' : 'ไม่มีห้องว่าง'}</option>
+                  {availableRooms.map((r) => (
+                    <option key={r.id} value={r.id}>
+                      {r.id} · ฿{Number(r.rent || 0).toLocaleString('th-TH')}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <input style={inp} maxLength={32}
+                  value={form.roomId}
+                  onChange={(e) => setForm({ ...form, roomId: e.target.value })} />
+              )}
+              {hasRoomInventory ? (
+                <div style={{ marginTop: 4, fontSize: 11, color: roomAvailable ? C.muted : (C.danger || '#b94a48') }}>
+                  {availableRooms.length
+                    ? `เลือกได้ ${availableRooms.length} ห้องว่างจากระบบ`
+                    : 'ทุกห้องไม่ว่าง/ติดจอง/ซ่อมบำรุง ต้องปลดสถานะห้องก่อนสร้างสัญญา'}
+                </div>
+              ) : null}
             </div>
             <div>
               <label style={lbl}>ค่าเช่า/เดือน *</label>
