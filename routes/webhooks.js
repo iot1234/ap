@@ -410,10 +410,17 @@ module.exports = function buildWebhooksRouter(ctx) {
     // when a building runs multi-OA (e.g. one OA per branch).
     if (lineUserId) {
       try {
+        // Table is `line_oas` and the human-readable column is `name`,
+        // not `line_oa` / `display_name` (which is what an earlier version
+        // assumed). Querying the wrong names always threw, the catch
+        // below swallowed it, and tenants who messaged a SECOND OA they
+        // were already bound to elsewhere saw the generic "send BIND
+        // code" reply — letting them re-bind cross-OA. Schema source of
+        // truth: db/migrate.js:466 (CREATE TABLE line_oas …).
         const { rows } = await pool.query(
-          `SELECT b.oa_id, o.display_name, o.slug
+          `SELECT b.oa_id, o.name AS oa_name, o.slug
              FROM line_bindings b
-             LEFT JOIN line_oa o ON o.id = b.oa_id
+             LEFT JOIN line_oas o ON o.id = b.oa_id
             WHERE b.line_user_id = $1 AND b.status = 'bound'
             LIMIT 1`,
           [lineUserId]
@@ -423,7 +430,7 @@ module.exports = function buildWebhooksRouter(ctx) {
           const isDifferentOa = (oa && oa.id != null && r.oa_id != null && Number(r.oa_id) !== Number(oa.id))
             || (oa && oa.id == null && r.oa_id != null);
           if (isDifferentOa) {
-            const otherName = r.display_name || r.slug || `OA #${r.oa_id}`;
+            const otherName = r.oa_name || r.slug || `OA #${r.oa_id}`;
             await lineSvc.replyText(oa, replyToken,
               `บัญชี LINE ของคุณถูกผูกกับ ${otherName} อยู่แล้ว — โปรดส่งสลิป/ติดต่อผ่าน ${otherName} เท่านั้น\n\n`
               + `(ถ้าต้องการย้ายมาผูกที่ OA นี้แทน กรุณาติดต่อแอดมิน)`);

@@ -137,9 +137,17 @@ async function processOne(pool, features, row) {
       // implicit text-cast that the `int || 'milliseconds'` form depends
       // on (works in PG 9.5+ but reads ambiguous; this version is plain
       // SQL standard arithmetic).
+      //
+      // CRITICAL: reset status to 'pending' so the next tick can claim it.
+      // Previously this UPDATE left status='processing', which only the
+      // 10-min reaper could fix — and the reaper ALSO bumps retry_count,
+      // so a single transient failure burned 2 of MAX_RETRY=3 attempts.
+      // Effective real attempts dropped to ~2 with a forced 10-min wait
+      // between retries even when the schedule said 1m/5m/30m.
       await pool.query(
         `UPDATE notifications_queue
-           SET retry_count=$2, last_error=$3,
+           SET status='pending',
+               retry_count=$2, last_error=$3,
                next_attempt_at=NOW() + ($4::int * INTERVAL '1 millisecond')
            WHERE id=$1`,
         [row.id, nextRetry, errMsg, wait]

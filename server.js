@@ -2113,11 +2113,26 @@ app.get('/api/tenants/:id(\\d+)', requireAuth, async (req, res) => {
     const out = maskTenantOut(rows[0]);
     // Don't echo the hash either — it's internal dedup state.
     delete out.citizen_id_hash;
-    // Decrypt for admin if encryption is on AND the request asks
-    if (flags.citizenIdEncryption && flags.citizenIdEncryption.enabled
-        && req.query.includeCitizen === '1' && rows[0].citizen_id_encrypted) {
-      try { out.citizen_id = cryptoSvc.decryptString(rows[0].citizen_id_encrypted); }
-      catch (_e) { out.citizen_id = null; }
+    // Decrypt for admin if encryption is on AND the request asks.
+    // Role-gated: only owner/manager can pull the cleartext citizen ID,
+    // because the route itself is requireAuth (so staff + readonly can
+    // browse tenant cards) — but the sibling identity endpoint at
+    // /api/tenants/lookup-by-citizen-id already requires owner/manager,
+    // and this decryption path was missed. ROLE_RANK: manager=3, owner=4.
+    if (req.query.includeCitizen === '1') {
+      const role = req.session.user && req.session.user.role;
+      const rank = ({ owner: 4, manager: 3, staff: 2, readonly: 1 })[role] || 0;
+      if (rank < 3) {
+        return res.status(403).json({
+          error: 'forbidden — citizen ID requires owner or manager role',
+          code: 'FORBIDDEN_CITIZEN_ID',
+        });
+      }
+      if (flags.citizenIdEncryption && flags.citizenIdEncryption.enabled
+          && rows[0].citizen_id_encrypted) {
+        try { out.citizen_id = cryptoSvc.decryptString(rows[0].citizen_id_encrypted); }
+        catch (_e) { out.citizen_id = null; }
+      }
     }
     res.json({ ok: true, tenant: out });
   } catch (err) {
@@ -5419,18 +5434,42 @@ app.put('/api/bills/:id/void', sameOrigin, csrfGuard, requireAuth, requireRole('
   if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
   const reason = String(req.body?.reason || '').slice(0, 500);
   const force = req.body && req.body.force === true;
+  // Single transaction with FOR UPDATE locks: previously the "any verified
+  // payment?" check and the UPDATE-to-void ran as two separate pool queries.
+  // A concurrent /pay or slip /verify could land a verified payment row
+  // between the two queries — admin's force:true then voided a bill that
+  // had just been paid, leaving a verified payments row pointing at a
+  // void bill (accounting drift: money received, no live bill). Now we
+  // hold a row lock on the bill across the whole flow and re-read the
+  // verified-payments list under the lock, then atomically void the bill
+  // AND mark the verified payments as rejected (reason: superseded_by_void)
+  // AND clear paid_at so the bill is no longer treated as paid for stats.
+  const client = await pool.connect();
+  let result;
   try {
-    // Cross-feature consistency guard: if there's already a verified payment
-    // pointing at this bill, voiding silently would leave the payment row
-    // orphaned (tenant uploaded slip → admin verified → admin then voids the
-    // bill = "we accepted your money but the bill never existed"). Block by
-    // default; let admin pass `force: true` after explicit confirmation in
-    // the UI. Audit captures the override so the trail is clear.
-    const verified = await pool.query(
-      `SELECT id, amount FROM payments WHERE bill_id=$1 AND status='verified' LIMIT 1`,
+    await client.query('BEGIN');
+    const billLock = await client.query(
+      `SELECT id, status, room_id, paid_at FROM bills
+        WHERE id=$1 AND deleted_at IS NULL
+        FOR UPDATE`,
+      [id]
+    );
+    if (!billLock.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'not found' });
+    }
+    if (billLock.rows[0].status === 'void') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'already void', code: 'BILL_ALREADY_VOID' });
+    }
+    const verified = await client.query(
+      `SELECT id, amount FROM payments
+        WHERE bill_id=$1 AND status='verified'
+        FOR UPDATE`,
       [id]
     );
     if (verified.rows.length && !force) {
+      await client.query('ROLLBACK');
       return res.status(409).json({
         error: 'บิลนี้มีสลิปที่ยืนยันแล้ว — โปรดยืนยันการ void ก่อนทำต่อ',
         code: 'BILL_HAS_VERIFIED_PAYMENT',
@@ -5439,32 +5478,177 @@ app.put('/api/bills/:id/void', sameOrigin, csrfGuard, requireAuth, requireRole('
         hint: 'ส่ง { force: true } เพื่อยืนยันการ void ทั้งที่มีการชำระแล้ว',
       });
     }
-
-    const { rows } = await pool.query(
-      `UPDATE bills SET status='void', void_reason=$1 WHERE id=$2 AND status<>'paid' RETURNING *`,
+    // Reject the verified payment(s) in the same tx. We use status='rejected'
+    // with a structured rejected_reason so the audit trail makes clear this
+    // wasn't an admin reviewing a slip — it was a forced reversal driven by
+    // the bill void. Refund handling (if money has to be returned) is a
+    // business decision outside the DB; this just makes the ledger consistent.
+    let reversedPayments = [];
+    if (verified.rows.length) {
+      const reversed = await client.query(
+        `UPDATE payments
+            SET status='rejected',
+                rejected_reason=$2
+          WHERE bill_id=$1 AND status='verified'
+        RETURNING id, amount`,
+        [id, `superseded_by_void: ${reason || '(no reason)'}`]
+      );
+      reversedPayments = reversed.rows.map((p) => ({
+        id: p.id, amount: Number(p.amount),
+      }));
+    }
+    const voided = await client.query(
+      `UPDATE bills
+          SET status='void',
+              void_reason=$1,
+              paid_at=NULL
+        WHERE id=$2
+      RETURNING *`,
       [reason, id]
     );
-    if (!rows.length) return res.status(404).json({ error: 'not found or already paid' });
-    audit(req, 'bill.void', 'bill', String(id), {
-      reason,
-      force: !!force,
-      hadVerifiedPayment: verified.rows.length > 0,
-    });
-    notifyBillVoided(rows[0], reason, req.session.user.username).catch(() => {});
-    // Voiding the last overdue bill should flip the room out of 'overdue'
-    // — without this cascade the room kept showing 'overdue' until the
-    // daily safety-net tick, so admins clicking "void" then expecting
-    // the room to free up immediately saw stale state.
-    if (rows[0].room_id) {
-      require('./services/roomStatus').syncRoom(pool, rows[0].room_id, { reason: 'bill-void' })
-        .catch((err) => console.warn(`[bill.void] room sync failed:`, err.message));
+    if (!voided.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'not found' });
     }
-    res.json({ ok: true, bill: rows[0] });
+    await client.query('COMMIT');
+    result = { bill: voided.rows[0], reversedPayments };
   } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
     console.error('bill void error:', err);
-    res.status(500).json({ error: 'internal error' });
+    return res.status(500).json({ error: 'internal error' });
+  } finally {
+    client.release();
   }
+  audit(req, 'bill.void', 'bill', String(id), {
+    reason,
+    force: !!force,
+    reversedPayments: result.reversedPayments,
+  });
+  notifyBillVoided(result.bill, reason, req.session.user.username).catch(() => {});
+  // Voiding the last overdue bill should flip the room out of 'overdue'
+  // — without this cascade the room kept showing 'overdue' until the
+  // daily safety-net tick, so admins clicking "void" then expecting
+  // the room to free up immediately saw stale state.
+  if (result.bill.room_id) {
+    require('./services/roomStatus').syncRoom(pool, result.bill.room_id, { reason: 'bill-void' })
+      .catch((err) => console.warn(`[bill.void] room sync failed:`, err.message));
+  }
+  res.json({ ok: true, bill: result.bill, reversedPayments: result.reversedPayments });
 });
+
+// Admin correction path: undo a "paid" decision when admin recorded the
+// payment in error (typo, wrong bill, duplicate receipt). Reverses the
+// most recent verified payment AND flips the bill back to pending. We
+// require an explicit reason and capture it in the audit log so the
+// trail explains why a paid bill un-paid. Refund of actual money to the
+// tenant is a business action outside the DB; this only fixes the
+// ledger state so future operations work correctly.
+//
+// NOT a refund endpoint — for a true refund (money sent back) a separate
+// payment row with negative amount would be the right model. This is
+// strictly for clerical-error corrections within the office.
+app.post('/api/bills/:id/unmark-paid',
+  sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'),
+  async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id < 1) {
+      return res.status(400).json({ error: 'invalid id' });
+    }
+    const reason = String(req.body?.reason || '').trim().slice(0, 500);
+    if (reason.length < 5) {
+      return res.status(400).json({
+        error: 'ต้องระบุเหตุผลอย่างน้อย 5 ตัวอักษร',
+        code: 'REASON_REQUIRED',
+      });
+    }
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const bill = await client.query(
+        `SELECT id, bill_no, room_id, total, status, due_date, tenant_id
+           FROM bills
+          WHERE id=$1 AND deleted_at IS NULL
+          FOR UPDATE`,
+        [id]
+      );
+      if (!bill.rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'bill not found' });
+      }
+      const row = bill.rows[0];
+      if (row.status !== 'paid') {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: `บิลนี้ยังไม่ได้สถานะ "ชำระแล้ว" — ปัจจุบันคือ "${row.status}"`,
+          code: 'BILL_NOT_PAID',
+          billStatus: row.status,
+        });
+      }
+      const payments = await client.query(
+        `SELECT id, amount, method, ref FROM payments
+          WHERE bill_id=$1 AND status='verified'
+          FOR UPDATE`,
+        [id]
+      );
+      if (!payments.rows.length) {
+        // Bill is paid with no verified payment row — that's a data anomaly
+        // (legacy mark-paid before audit hooks?). Allow the flip but log it.
+        console.warn(`[bill.unmark-paid] bill #${id} is paid but has no verified payment row`);
+      }
+      const reversed = payments.rows.length
+        ? await client.query(
+            `UPDATE payments
+                SET status='rejected',
+                    rejected_reason=$2
+              WHERE bill_id=$1 AND status='verified'
+            RETURNING id, amount, method, ref`,
+            [id, `unmark_paid_correction: ${reason}`]
+          )
+        : { rows: [] };
+      // Restore the bill status. Pick 'overdue' vs 'pending' based on
+      // due_date so the resulting state is consistent with what the
+      // daily overdue tick would set.
+      const now = new Date();
+      const dueDate = row.due_date ? new Date(row.due_date) : null;
+      const restoredStatus = dueDate && dueDate < now ? 'overdue' : 'pending';
+      const restored = await client.query(
+        `UPDATE bills
+            SET status=$2,
+                paid_at=NULL
+          WHERE id=$1
+        RETURNING *`,
+        [id, restoredStatus]
+      );
+      await client.query('COMMIT');
+      audit(req, 'bill.unmark_paid', 'bill', String(id), {
+        reason,
+        restoredStatus,
+        reversedPayments: reversed.rows.map((p) => ({
+          id: p.id, amount: Number(p.amount), method: p.method, ref: p.ref,
+        })),
+      });
+      // Room status may flip back to 'overdue' if this was the bill keeping
+      // the room "occupied". Same cascade pattern as /void.
+      if (row.room_id) {
+        require('./services/roomStatus')
+          .syncRoom(pool, row.room_id, { reason: 'bill-unmark-paid' })
+          .catch((err) => console.warn(`[bill.unmark-paid] room sync failed:`, err.message));
+      }
+      res.json({
+        ok: true,
+        bill: restored.rows[0],
+        reversedPayments: reversed.rows.map((p) => ({
+          id: p.id, amount: Number(p.amount), method: p.method, ref: p.ref,
+        })),
+      });
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      console.error('bill unmark-paid error:', err);
+      res.status(500).json({ error: 'internal error', code: 'DB_ERROR' });
+    } finally {
+      client.release();
+    }
+  });
 
 // === v2: Payments + slip upload ===========================================
 // Tenant uploads a slip via /api/tenant/payments (gated by slipUpload).
@@ -10415,7 +10599,13 @@ async function _contractFillFriendlyError(pool, contractInvitation, token, res) 
 }
 
 // PUT /api/contract-fill/:token — save draft (intermediate state)
-app.put('/api/contract-fill/:token', rateLimitContractFill, async (req, res) => {
+// sameOrigin: token-in-URL is the only auth, so a leaked link is enough
+// to read the form (acceptable — it's a 32-byte random). But a leaked
+// link must NOT be enough to OVERWRITE the draft from a third-party
+// page (e.g. tenant clicks a phishing link that fires a hidden XHR
+// to PUT a malicious signature image). sameOrigin denies cross-site
+// fetches that lack the Origin/Referer of this app.
+app.put('/api/contract-fill/:token', rateLimitContractFill, sameOrigin, async (req, res) => {
   const token = String(req.params.token).slice(0, 80);
   const contractInvitation = require('./services/contractInvitation');
   try {
@@ -10450,7 +10640,10 @@ app.put('/api/contract-fill/:token', rateLimitContractFill, async (req, res) => 
 });
 
 // POST /api/contract-fill/:token/upload — tenant uploads ID front/back/signature
-app.post('/api/contract-fill/:token/upload', rateLimitContractFill, async (req, res) => {
+// sameOrigin: see PUT above. Without this guard, a third-party page that
+// has obtained the token (forwarded LINE message, screenshot etc.)
+// could overwrite the tenant's signature/ID images via a hidden form.
+app.post('/api/contract-fill/:token/upload', rateLimitContractFill, sameOrigin, async (req, res) => {
   const token = String(req.params.token).slice(0, 80);
   const contractInvitation = require('./services/contractInvitation');
   try {
@@ -10526,7 +10719,7 @@ app.post('/api/contract-fill/:token/upload', rateLimitContractFill, async (req, 
 // invalid we drill into the raw row state so the response distinguishes
 // expired / revoked / approved / never-existed — without this the tenant
 // sees a generic "ลิงก์ใช้ไม่ได้" with no actionable next step.
-app.post('/api/contract-fill/:token/submit', rateLimitContractFill, async (req, res) => {
+app.post('/api/contract-fill/:token/submit', rateLimitContractFill, sameOrigin, async (req, res) => {
   const token = String(req.params.token).slice(0, 80);
   const contractInvitation = require('./services/contractInvitation');
   try {
