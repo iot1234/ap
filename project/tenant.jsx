@@ -246,6 +246,33 @@ function fmtCurrency(n) {
   return Number(n || 0).toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
+// Translate developer-tagged rejection reasons into tenant-friendly Thai.
+// The server writes structured codes like "superseded_by_void: ..." or
+// "superseded_by_verified_sibling" into payments.rejected_reason so admin
+// + audit forensics see exactly why a row was rejected, but a tenant
+// staring at "superseded_by_verified_sibling" in their payment history
+// has no idea what that means. The map covers the codes the server can
+// produce; anything else (admin-typed free-text reasons) falls through
+// unchanged.
+function tenantRejectedReason(raw) {
+  if (!raw) return raw;
+  const s = String(raw);
+  if (s.startsWith('superseded_by_verified_sibling')) {
+    return 'ระบบรับสลิปอีกใบสำหรับบิลนี้ไปแล้ว';
+  }
+  if (s.startsWith('superseded_by_manual_pay')) {
+    return 'แอดมินบันทึกการชำระเงินด้วยช่องทางอื่น (เงินสด/โอน) แล้ว';
+  }
+  if (s.startsWith('superseded_by_void')) {
+    return 'บิลนี้ถูกยกเลิกแล้ว — โปรดติดต่อแอดมิน';
+  }
+  if (s.startsWith('unmark_paid_correction')) {
+    return 'แอดมินยกเลิกการบันทึกชำระ — โปรดติดต่อแอดมิน';
+  }
+  return s;
+}
+window.tenantRejectedReason = tenantRejectedReason;
+
 function partyText(party) {
   if (!party) return '';
   return [party.name, party.bank, party.account ? `...${String(party.account).slice(-6)}` : null]
@@ -277,7 +304,7 @@ function paymentNoticeFromResponse(out, locale) {
       ? (th ? 'สลิปไม่ผ่านการตรวจสอบ' : 'Slip rejected')
       : (th ? 'รับสลิปแล้ว รอตรวจสอบ' : 'Slip received, awaiting review'));
   const message = (v && v.message)
-    || payment.rejected_reason
+    || tenantRejectedReason(payment.rejected_reason)
     || (status === 'verified'
       ? (th ? 'ระบบตรวจสอบสลิปและอัปเดตบิลแล้ว' : 'The slip was verified and the bill was updated.')
       : status === 'rejected'
@@ -1015,7 +1042,7 @@ function PaymentsView({ locale }) {
             ) : null}
             {p.status === 'rejected' && p.rejected_reason ? (
               <div style={{ marginTop: 6, fontSize: 13, color: 'var(--red)', lineHeight: 1.4 }}>
-                <strong>{t('rejectedReason')}:</strong> {p.rejected_reason}
+                <strong>{t('rejectedReason')}:</strong> {tenantRejectedReason(p.rejected_reason)}
               </div>
             ) : null}
             {p.transaction_ref ? (

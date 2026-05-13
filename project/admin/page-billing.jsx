@@ -362,37 +362,47 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
       setToast && setToast({ kind: 'info', message: 'บิลนี้ยังไม่ได้บันทึกในระบบ ไม่ต้องยกเลิก' });
       return;
     }
-    // Previous version just showed an unhelpful toast ("ต้องทำผ่าน
-    // void/reconcile") and left admin stuck — no way to actually undo
-    // a wrongly-marked-paid bill. Now: prompt for a reason and call
-    // the real /api/bills/:id/void endpoint with force=true (the
-    // server requires force when a verified payment exists, which is
-    // exactly this case). Audit trail preserved on the server side.
+    // Call the unmark-paid endpoint, which reverses the verified payment
+    // and flips the bill back to pending/overdue. The bill stays alive
+    // — that matches the "ยกเลิกชำระ" semantic (admin marked paid by
+    // mistake, the rent is still owed). Previously this called /void
+    // with force=true, which KILLED the bill entirely; admin then had
+    // to re-issue, losing the bill_no and audit chain.
     const reason = window.prompt(
-      `ยกเลิก/void บิล ${bill.dbBillNo || bill.dbBillId} (ห้อง ${bill.roomId})?\n\n`
-      + `บิลจะถูก void และตั้งสถานะใหม่ — เก็บใน audit log\n\n`
-      + `กรุณาระบุเหตุผล (เช่น "ผู้เช่าจ่ายผิดบิล", "บันทึกผิดจำนวน"):`
+      `ยกเลิกการชำระ บิล ${bill.dbBillNo || bill.dbBillId} (ห้อง ${bill.roomId})?\n\n`
+      + `บิลจะกลับเป็น "ยังไม่ชำระ" และ payment ที่ verified จะถูก reject\n`
+      + `(บิลไม่ถูกลบ — ผู้เช่ายังต้องจ่าย)\n\n`
+      + `กรุณาระบุเหตุผล (เช่น "บันทึกผิดบิล", "ผู้เช่าจ่ายเป็นบิลอื่น"):`
     );
     if (reason === null) return; // cancelled
     const trimmed = String(reason || '').trim();
-    if (trimmed.length < 3) {
-      setToast && setToast({ kind: 'error', message: 'กรุณาระบุเหตุผล ≥ 3 ตัวอักษร' });
+    if (trimmed.length < 5) {
+      setToast && setToast({ kind: 'error', message: 'กรุณาระบุเหตุผล ≥ 5 ตัวอักษร' });
       return;
     }
     const apiFetch = window.apiFetch || ((u, o) => fetch(u, { credentials: 'same-origin', ...o }));
     try {
-      const r = await apiFetch(`/api/bills/${bill.dbBillId}/void`, {
-        method: 'PUT',
+      const r = await apiFetch(`/api/bills/${bill.dbBillId}/unmark-paid`, {
+        method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ reason: trimmed, force: true }),
+        body: JSON.stringify({ reason: trimmed }),
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) {
-        setToast && setToast({ kind: 'error', message: d.error || `ยกเลิกบิลไม่สำเร็จ (HTTP ${r.status})` });
+        setToast && setToast({ kind: 'error', message: d.error || `ยกเลิกการชำระไม่สำเร็จ (HTTP ${r.status})` });
         return;
       }
-      setToast && setToast({ kind: 'success', message: `ยกเลิกบิล ${bill.dbBillNo || bill.dbBillId} เรียบร้อย` });
-      addActivity && addActivity({ icon: '↺', text: `ยกเลิก/void บิล ${bill.dbBillNo || bill.dbBillId}: ${trimmed}`, type: 'billing' });
+      const reversedCount = (d.reversedPayments || []).length;
+      setToast && setToast({
+        kind: 'success',
+        message: `ยกเลิกการชำระ บิล ${bill.dbBillNo || bill.dbBillId} เรียบร้อย`
+          + (reversedCount ? ` (reject payment ${reversedCount} รายการ)` : ''),
+      });
+      addActivity && addActivity({
+        icon: '↺',
+        text: `ยกเลิกการชำระบิล ${bill.dbBillNo || bill.dbBillId}: ${trimmed}`,
+        type: 'billing',
+      });
       fetchDbBills();
     } catch (err) {
       setToast && setToast({ kind: 'error', message: err.message || 'เชื่อมต่อเซิร์ฟเวอร์ไม่ได้' });

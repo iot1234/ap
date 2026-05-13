@@ -7,6 +7,28 @@ function fmt(n) {
   });
 }
 
+// Match the same translator in tenant.jsx — keep public pay page from
+// surfacing dev-tagged rejection codes like "superseded_by_*". pay.html
+// is a minimal public bundle that doesn't load api-client.js, so we
+// inline the map here rather than rely on a shared window helper.
+function tenantRejectedReason(raw) {
+  if (!raw) return raw;
+  const s = String(raw);
+  if (s.startsWith('superseded_by_verified_sibling')) {
+    return 'ระบบรับสลิปอีกใบสำหรับบิลนี้ไปแล้ว';
+  }
+  if (s.startsWith('superseded_by_manual_pay')) {
+    return 'แอดมินบันทึกการชำระเงินด้วยช่องทางอื่น (เงินสด/โอน) แล้ว';
+  }
+  if (s.startsWith('superseded_by_void')) {
+    return 'บิลนี้ถูกยกเลิกแล้ว — โปรดติดต่อแอดมิน';
+  }
+  if (s.startsWith('unmark_paid_correction')) {
+    return 'แอดมินยกเลิกการบันทึกชำระ — โปรดติดต่อแอดมิน';
+  }
+  return s;
+}
+
 function fileToDataUrl(file) {
   return new Promise((resolve, reject) => {
     const r = new FileReader();
@@ -92,7 +114,7 @@ function verificationMessage(out, fallbackUpload, building) {
   if (!v) {
     if (payment.status === 'verified') return 'ชำระเงินสำเร็จ ระบบอัปเดตสถานะบิลแล้ว';
     if (payment.status === 'rejected') {
-      return `${payment.rejected_reason || 'สลิปไม่ผ่านการตรวจสอบ'}\n${contactAdminMessage(upload, building)}`;
+      return `${tenantRejectedReason(payment.rejected_reason) || 'สลิปไม่ผ่านการตรวจสอบ'}\n${contactAdminMessage(upload, building)}`;
     }
     return 'อัปโหลดสลิปสำเร็จ รอแอดมินตรวจสอบ';
   }
@@ -307,7 +329,7 @@ function App() {
                 <div style={{ fontWeight: 700 }}>อัปโหลดสลิปแล้ว: {uploadState.used}/{uploadState.max} ครั้ง</div>
                 <div>เหลือ: {uploadState.remaining} ครั้ง</div>
                 {uploadState.latest ? (
-                  <div>สถานะล่าสุด: {uploadState.latest.status}{uploadState.latest.rejected_reason ? ` · ${uploadState.latest.rejected_reason}` : ''}</div>
+                  <div>สถานะล่าสุด: {uploadState.latest.status}{uploadState.latest.rejected_reason ? ` · ${tenantRejectedReason(uploadState.latest.rejected_reason)}` : ''}</div>
                 ) : null}
                 {uploadState.blocked ? <div style={{ marginTop: 4 }}>{blockMessage(uploadState)}</div> : null}
               </div>
