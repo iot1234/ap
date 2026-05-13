@@ -1064,6 +1064,26 @@ test('admin billing selected period drives estimates and bulk generation', () =>
     'bulk generation must not silently switch back to wall-clock month');
 });
 
+test('admin billing UI uses text labels instead of ambiguous icon-only controls', () => {
+  // Operators complained the billing icons were unclear. Keep the billing
+  // page text-first: no IconBtn rows, no icon prop on primary controls/KPIs,
+  // and no emoji-only status text for the main billing workflow.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-billing.jsx'), 'utf8');
+
+  assert.doesNotMatch(src, /\bIconBtn\b/,
+    'billing page should not use icon-only buttons');
+  assert.doesNotMatch(src, /<Btn[\s\S]{0,160}\sicon=/,
+    'billing page buttons should use text labels, not icon props');
+  assert.doesNotMatch(src, /<KpiCard[\s\S]{0,180}\sicon=/,
+    'billing KPI cards should not depend on icons');
+  assert.doesNotMatch(src, /<Pill[\s\S]{0,120}\sicon=/,
+    'billing status pills should use readable words');
+  assert.doesNotMatch(src, /[🔴🟡⚪ℹ🚫⚠✅⏱📤📌💡💵🏦📱📧📥📨📋🔔👁🤖👤🏠✨💰🎉🧾⏳]/u,
+    'billing page should not show ambiguous emoji icons in labels/statuses');
+});
+
 test('tenant bill modal uses bill-owned QR endpoint', () => {
   const fs = require('node:fs');
   const path = require('node:path');
