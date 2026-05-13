@@ -550,7 +550,9 @@ test('/api/bills/:id/pay records offline payments in the payment ledger', () => 
   const route = fs.readFileSync(path.join(__dirname, '..', 'routes', 'bills-extras.js'), 'utf8');
   const idx = route.indexOf("r.post('/:id/pay'");
   assert.ok(idx > 0, 'should find bill manual-pay handler');
-  const body = route.slice(idx, idx + 5000);
+  // 8000 char window — the handler grew when we added optional slip upload
+  // (storage.saveBase64 call + rollback cleanup) ahead of the INSERT.
+  const body = route.slice(idx, idx + 8000);
   assert.match(body, /requireRole\('owner', 'manager'\)/,
     'manual pay must be owner/manager only');
   assert.match(body, /SELECT id, bill_no, period, total, status, tenant_id[\s\S]*FOR UPDATE/,
@@ -1247,8 +1249,8 @@ test('bill payment helpers keep non-null verifier audit values', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'bills-extras.js'), 'utf8');
   assert.match(src, /const verifier = req\.session\?\.user\?\.username \|\| 'admin:unknown'/,
     'bill helpers must fall back to a non-null verifier sentinel');
-  assert.match(src, /verified_by, verified_at[\s\S]{0,600}ref,\s*verifier,\s*JSON\.stringify/,
-    'manual pay insert must use the verifier variable');
+  assert.match(src, /verified_by, verified_at[\s\S]{0,600}ref,\s*slipUrl,\s*verifier,\s*JSON\.stringify/,
+    'manual pay insert must include optional slipUrl column + verifier variable');
   assert.match(src, /UPDATE payments SET status='verified', verified_by=\$1[\s\S]{0,160}\[verifier, pid\]/,
     'verify-slip accept path must use the verifier variable');
   assert.match(src, /UPDATE payments SET status='rejected', verified_by=\$1[\s\S]{0,180}\[verifier, reason, pid\]/,

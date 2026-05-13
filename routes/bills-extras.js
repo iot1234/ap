@@ -14,6 +14,10 @@ const notifier = require('../services/notifier');
 const notifQueue = require('../services/notificationQueue');
 const promptpay = require('../services/promptpay');
 const lineNotify = require('../services/line');
+// Manual mark-paid (POST /api/bills/:id/pay) now accepts an optional slip
+// dataUrl so admin can attach a receipt photo even for cash / external
+// transfers. Same storage path the tenant slip upload uses.
+const storage = require('../services/storage');
 // queryWithRetry retries serialization/deadlock errors (40001, 40P01, 57P03,
 // 53300). bulk-generate inserts ~30+ bills in a tight loop — most likely
 // path to hit a deadlock against the scheduler's auto-gen running parallel.
@@ -326,15 +330,14 @@ module.exports = function buildBillsExtrasRouter(ctx) {
   // round-trips through HTTP. Previously bulk-send self-fetched localhost
   // without admin session/CSRF, so it always enqueued 0.
   //
-  // `opts.debounceMinutes` (default 60) is the minimum gap between two
-  // reminders for the same bill. Pass 0 to bypass the debounce — bulk-send
-  // sets that explicitly because the user already saw the per-bill list
-  // and confirmed intent. The single-bill /:id/send route uses the default
-  // so a double-click within an hour can't spam the tenant.
-  async function enqueueBillNotifications(billId, opts = {}) {
-    const debounceMinutes = Number.isFinite(opts.debounceMinutes)
-      ? Math.max(0, Math.floor(opts.debounceMinutes))
-      : 60;
+  // Earlier version refused a second reminder within 60 minutes via a hard
+  // 409 REMINDER_DEBOUNCED. Admin asked for this to be informational
+  // instead — they want to be able to resend immediately (e.g. tenant
+  // calls saying they didn't see the first message), with only a warning
+  // shown ahead of time. The function still STAMPS last_reminded_at +
+  // bumps reminder_count so the UI can display "ส่งไปแล้ว N ครั้ง · ล่า
+  // สุดเมื่อ X" the next time admin opens the confirm modal.
+  async function enqueueBillNotifications(billId, _opts = {}) {
     // Filter the tenant join on deleted_at AND status — without these we
     // happily pushed bill reminders to soft-deleted tenants (whose
     // line_user_id was still in the row) and to ex-tenants who had
@@ -370,23 +373,12 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         hint: 'ตรวจสอบที่ /admin#payments ว่าใครเป็นคนยืนยัน',
       };
     }
-    // Debounce repeat reminders so admin double-click / accidental bulk
-    // overlap doesn't spam the tenant. `last_reminded_at` is set after
-    // every successful enqueue below; here we just refuse a too-soon repeat.
-    if (debounceMinutes > 0 && billQ.rows[0].last_reminded_at) {
-      const lastMs = new Date(billQ.rows[0].last_reminded_at).getTime();
-      const minutesAgo = (Date.now() - lastMs) / 60_000;
-      if (minutesAgo < debounceMinutes) {
-        const wait = Math.ceil(debounceMinutes - minutesAgo);
-        return {
-          ok: false,
-          error: `เพิ่งส่งเตือนบิลนี้ไปแล้ว — โปรดรออีกประมาณ ${wait} นาทีก่อนส่งซ้ำ`,
-          code: 'REMINDER_DEBOUNCED',
-          lastRemindedAt: billQ.rows[0].last_reminded_at,
-          retryAfterMinutes: wait,
-        };
-      }
-    }
+    // No hard debounce — admin can resend immediately. The send-readiness
+    // endpoint surfaces last_reminded_at + reminder_count so the confirm
+    // modal can show "ส่งไปแล้ว N ครั้ง · ล่าสุด X นาทีก่อน" BEFORE the
+    // admin clicks. Removing the block here means an intentional resend
+    // (tenant called saying they didn't see the first message) works
+    // without forcing admin to wait 60 min.
     const b = billQ.rows[0];
     // Refuse to send when the bill isn't linked to a live tenant. The
     // earlier code reached this state via several silent paths (orphan
@@ -532,13 +524,16 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       });
       enqueued.push({ channel: 'email', id: qid });
     }
-    // Stamp the bill so the next reminder request within debounceMinutes
-    // is refused. Only stamp when we actually enqueued something — a NO-
-    // CHANNEL early return above already short-circuited; here we know at
-    // least one notification was queued.
+    // Stamp last_reminded_at + bump reminder_count so the next time admin
+    // opens the send modal they see "ส่งไปแล้ว N ครั้ง · ล่าสุด ...".
+    // Only stamp when we actually enqueued something — NO_TENANT_CHANNEL
+    // already returned above so we only reach here on a real send.
     if (enqueued.length > 0) {
       await pool.query(
-        `UPDATE bills SET last_reminded_at=NOW() WHERE id=$1`,
+        `UPDATE bills
+           SET last_reminded_at=NOW(),
+               reminder_count = COALESCE(reminder_count, 0) + 1
+         WHERE id=$1`,
         [billId]
       ).catch((err) => console.warn('[enqueueBillNotifications] stamp last_reminded_at failed:', err.message));
     }
@@ -699,7 +694,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       try {
         const billQ = await pool.query(
           `SELECT b.id, b.bill_no, b.room_id, b.period, b.total, b.status, b.due_date,
-                  b.tenant_id, b.last_reminded_at,
+                  b.tenant_id, b.last_reminded_at, b.reminder_count,
                   t.id AS tenant_row_id, t.full_name AS tenant_name, t.phone AS tenant_phone,
                   t.line_user_id, t.line_oa_id, t.email, t.status AS tenant_status,
                   t.current_room_id AS tenant_current_room
@@ -763,27 +758,22 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           }
         }
 
-        // Surface last_reminded_at so the admin's confirm modal can warn
-        // "เพิ่งส่งไปเมื่อ X นาทีก่อน" instead of letting them double-send.
-        // Hint at the 60-minute debounce so admin understands why a second
-        // send within an hour would be rejected.
-        let recentlySent = null;
-        if (b.last_reminded_at) {
-          const ms = Date.now() - new Date(b.last_reminded_at).getTime();
-          const minutes = Math.max(0, Math.round(ms / 60_000));
-          recentlySent = {
-            at: b.last_reminded_at,
-            minutesAgo: minutes,
-            withinDebounce: minutes < 60,
-            debounceMinutes: 60,
+        // Surface previous send history so the admin's confirm modal can
+        // show "ส่งไปแล้ว N ครั้ง · ล่าสุดเมื่อ X นาทีก่อน". The hard
+        // debounce was removed in favor of admin judgment — resend works
+        // immediately if admin confirms.
+        const reminderCount = Number(b.reminder_count) || 0;
+        let sendHistory = null;
+        if (b.last_reminded_at || reminderCount > 0) {
+          const minutesAgo = b.last_reminded_at
+            ? Math.max(0, Math.round((Date.now() - new Date(b.last_reminded_at).getTime()) / 60_000))
+            : null;
+          sendHistory = {
+            count: reminderCount,
+            lastSentAt: b.last_reminded_at,
+            minutesAgo,
+            recently: minutesAgo != null && minutesAgo < 60,
           };
-          if (recentlySent.withinDebounce) {
-            issues.push({
-              sev: 'med', code: 'REMINDER_RECENTLY_SENT',
-              msg: `เพิ่งส่งเตือนบิลนี้ไปเมื่อ ${minutes} นาทีก่อน`,
-              fix: `ระบบกัน double-send อีก ${60 - minutes} นาที — โปรดรอ หรือถ้าเร่งด่วน ส่งทาง LINE OA โดยตรง`,
-            });
-          }
         }
 
         const blockingHigh = issues.filter((i) => i.sev === 'high');
@@ -796,12 +786,13 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             issueCount: issues.length,
             highCount: blockingHigh.length,
             channels,
-            recentlySent,
+            sendHistory,
           },
           bill: {
             id: b.id, billNo: b.bill_no, roomId: b.room_id, period: b.period,
             total: Number(b.total), status: b.status, dueDate: b.due_date,
             lastRemindedAt: b.last_reminded_at,
+            reminderCount,
           },
           tenant: b.tenant_row_id ? {
             id: b.tenant_row_id, name: b.tenant_name, phone: b.tenant_phone,
@@ -876,11 +867,45 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       const methodRaw = String(req.body?.method || 'transfer').toLowerCase();
       const method = ['cash', 'transfer', 'promptpay'].includes(methodRaw) ? methodRaw : 'transfer';
       const ref = String(req.body?.ref || 'admin-manual').slice(0, 200);
+      // Optional slip image — admin attaches a photo of the bank transfer
+      // receipt, a hand-written cash receipt, or any other evidence. Same
+      // base64 data URL format the tenant slip upload uses, so we can
+      // pipe it through the existing storage.saveBase64 helper.
+      const rawSlip = req.body?.slip ? String(req.body.slip) : null;
       // Defensive: requireAuth already gates this, but if session was reaped
       // between the middleware and here, req.session.user could be falsy.
       // Audit trail demands a non-null verifier name — fall back to a
       // sentinel so the INSERT doesn't violate NOT NULL on verified_by.
       const verifier = req.session?.user?.username || 'admin:unknown';
+      // Save the optional slip to storage BEFORE opening the transaction so
+      // a slow R2 upload doesn't hold a DB connection. If it fails, return
+      // a clear error before any DB write happens.
+      let slipUrl = null;
+      let slipUploadId = null;
+      if (rawSlip) {
+        try {
+          const flags = await features.load(pool).catch(() => ({}));
+          const maxBytes = flags?.slipUpload?.maxBytes || 1_500_000;
+          const allowedMimes = flags?.slipUpload?.allowedMimes
+            || ['image/jpeg', 'image/png', 'image/webp'];
+          const saved = await storage.saveBase64({
+            pool,
+            category: 'slip',
+            dataUrl: rawSlip,
+            refId: String(id),
+            uploadedBy: `admin-manual:${verifier}`,
+            maxBytes,
+            allowedMimes,
+          });
+          slipUrl = saved.url;
+          slipUploadId = saved.id;
+        } catch (err) {
+          return res.status(400).json({
+            error: `อัปโหลดสลิปไม่สำเร็จ: ${err.message || 'unknown'}`,
+            code: 'SLIP_UPLOAD_FAILED',
+          });
+        }
+      }
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
@@ -932,9 +957,9 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         }
         const payment = await client.query(
           `INSERT INTO payments
-             (bill_id, tenant_id, amount, method, ref, status,
+             (bill_id, tenant_id, amount, method, ref, slip_url, status,
               verified_by, verified_at, verify_provider, verify_payload)
-           VALUES ($1,$2,$3,$4,$5,'verified',$6,NOW(),'manual',$7::jsonb)
+           VALUES ($1,$2,$3,$4,$5,$6,'verified',$7,NOW(),'manual',$8::jsonb)
            RETURNING *`,
           [
             id,
@@ -942,6 +967,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             billTotal,
             method,
             ref,
+            slipUrl,
             verifier,
             JSON.stringify({ source: 'admin-billing', requestedAmount }),
           ]
@@ -978,6 +1004,12 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       } catch (err) {
         await client.query('ROLLBACK').catch(() => {});
         console.error('bill manual pay error:', err);
+        // If we uploaded a slip before the transaction failed, scrub the
+        // orphan file so R2 doesn't accumulate unattached evidence.
+        if (slipUploadId) {
+          storage.remove(pool, slipUploadId)
+            .catch((e) => console.warn('[bill.pay] orphan slip cleanup failed:', e.message));
+        }
         res.status(500).json({ error: 'internal error', code: 'DB_ERROR' });
       } finally {
         client.release();

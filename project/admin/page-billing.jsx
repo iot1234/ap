@@ -303,25 +303,35 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
       method: 'cash',
       ref: '',
       note: '',
+      // Optional evidence photo — admin can attach the bank-transfer slip
+      // or a photo of the cash receipt so audit trail has a paper trail.
+      // Not required; mark-paid still works without it.
+      slipFile: null,
+      slipDataUrl: null,
       busy: false,
       readinessIssues,
     });
     return true;
   };
 
-  const submitMarkPaid = async ({ bill, method, ref, note }, opts = {}) => {
+  const submitMarkPaid = async ({ bill, method, ref, note, slipDataUrl }, opts = {}) => {
     try {
       const cleanRef = String(ref || '').trim();
       const cleanNote = String(note || '').trim();
       const refToSend = cleanRef
         || (method === 'cash' ? `เงินสด·${bill.dbBillNo || bill.dbBillId}` : `admin-billing:${bill.id}`);
+      const payload = {
+        method,
+        amount: Number(bill.total) || 0,
+        ref: cleanNote ? `${refToSend} — ${cleanNote}` : refToSend,
+      };
+      // Attach the optional evidence photo. Server saves it via storage
+      // service so the receipt lives next to the auto-uploaded tenant
+      // slips in /admin#payments — same image preview path works.
+      if (slipDataUrl) payload.slip = slipDataUrl;
       await window.apiCall(`/api/bills/${bill.dbBillId}/pay`, {
         method: 'POST',
-        body: JSON.stringify({
-          method,
-          amount: Number(bill.total) || 0,
-          ref: cleanNote ? `${refToSend} — ${cleanNote}` : refToSend,
-        }),
+        body: JSON.stringify(payload),
       });
       const methodLabel = ({ cash: 'เงินสด', transfer: 'โอน', promptpay: 'PromptPay' })[method] || method;
       addActivity && addActivity({
@@ -1336,6 +1346,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
                      method: markPaidPrompt.method,
                      ref: markPaidPrompt.ref,
                      note: markPaidPrompt.note,
+                     slipDataUrl: markPaidPrompt.slipDataUrl,
                    });
                    if (ok) setMarkPaidPrompt(null);
                    else setMarkPaidPrompt({ ...markPaidPrompt, busy: false });
@@ -1428,6 +1439,42 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
                 border: `1px solid ${C.border}`, background: C.bg, color: C.ink,
                 fontFamily: 'inherit', fontSize: 13, marginBottom: 12,
               }} />
+
+            <div style={{ fontWeight: 600, marginBottom: 6 }}>
+              แนบรูปสลิป/ใบเสร็จเป็นหลักฐาน (ไม่บังคับ)
+            </div>
+            <input type="file" accept="image/jpeg,image/png,image/webp"
+              disabled={markPaidPrompt.busy}
+              onChange={(e) => {
+                const f = e.target.files && e.target.files[0];
+                if (!f) {
+                  setMarkPaidPrompt({ ...markPaidPrompt, slipFile: null, slipDataUrl: null });
+                  return;
+                }
+                if (f.size > 5 * 1024 * 1024) {
+                  alert('ไฟล์ใหญ่เกินไป (เกิน 5 MB) — โปรดถ่ายใหม่หรือลดขนาดภาพก่อน');
+                  e.target.value = '';
+                  setMarkPaidPrompt({ ...markPaidPrompt, slipFile: null, slipDataUrl: null });
+                  return;
+                }
+                const reader = new FileReader();
+                reader.onload = () => {
+                  setMarkPaidPrompt((prev) => prev ? {
+                    ...prev, slipFile: f, slipDataUrl: reader.result,
+                  } : prev);
+                };
+                reader.onerror = () => {
+                  alert('อ่านไฟล์ไม่สำเร็จ — โปรดเลือกใหม่');
+                };
+                reader.readAsDataURL(f);
+              }}
+              style={{ display: 'block', marginBottom: 6 }} />
+            <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 12 }}>
+              เก็บเป็นหลักฐานในประวัติชำระ ดูได้ที่ /admin#payments · JPG/PNG/WebP · ไม่เกิน 5 MB
+              {markPaidPrompt.slipFile
+                ? ` · ✓ ${markPaidPrompt.slipFile.name} (${Math.ceil(markPaidPrompt.slipFile.size / 1024)} KB)`
+                : ''}
+            </div>
 
             <div style={{
               padding: 10, borderRadius: 8,
@@ -1547,11 +1594,11 @@ function SendReminderConfirmBody({ confirm, C, fmtCurrency }) {
     info: { bg: '#f4f8fc', border: '#cfdde9', accent: '#3a5a78', icon: 'ℹ️' },
   };
 
-  // Surface the "เพิ่งส่งไปแล้ว" warning as a top-of-modal banner so admin
-  // sees it BEFORE they click confirm — not buried in the issues list.
-  // Server returns this when bills.last_reminded_at is within the 60-min
-  // debounce window.
-  const recentlySent = summary.recentlySent;
+  // Show send history as a top-of-modal banner so admin sees it BEFORE
+  // they click confirm — previously buried in the issues list. The hard
+  // debounce was removed (admin asked for resend-anytime), so this is
+  // purely informational: "ส่งไปแล้ว N ครั้ง · ล่าสุด X นาทีก่อน".
+  const sendHistory = summary.sendHistory;
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       {/* Top banner — ready / blocked summary */}
@@ -1576,21 +1623,28 @@ function SendReminderConfirmBody({ confirm, C, fmtCurrency }) {
         </div>
       </div>
 
-      {recentlySent ? (
+      {sendHistory && sendHistory.count > 0 ? (
         <div style={{
           padding: 12, borderRadius: 8,
-          background: recentlySent.withinDebounce ? '#fff5e8' : '#f4f8fc',
-          border: `1px solid ${recentlySent.withinDebounce ? '#f0c47a' : '#cfdde9'}`,
+          background: sendHistory.recently ? '#fff5e8' : '#f4f8fc',
+          border: `1px solid ${sendHistory.recently ? '#f0c47a' : '#cfdde9'}`,
         }}>
           <div style={{ fontWeight: 600, marginBottom: 4 }}>
-            {recentlySent.withinDebounce ? '⏱ เพิ่งส่งไปไม่นาน' : '📤 เคยส่งเตือนมาแล้ว'}
+            {sendHistory.recently ? '⏱ เพิ่งส่งไปไม่นาน' : '📤 เคยส่งเตือนมาแล้ว'}
           </div>
-          <div style={{ fontSize: 12.5, color: C.muted, lineHeight: 1.5 }}>
-            ส่งครั้งล่าสุดเมื่อ <b>{recentlySent.minutesAgo} นาทีก่อน</b>
-            {' '}({new Date(recentlySent.at).toLocaleString('th-TH')})
-            {recentlySent.withinDebounce
-              ? ` — ระบบกัน double-send อีก ${(recentlySent.debounceMinutes || 60) - recentlySent.minutesAgo} นาที ถ้ายืนยันส่ง จะถูกตอบกลับ 409 REMINDER_DEBOUNCED`
-              : ''}
+          <div style={{ fontSize: 12.5, color: C.muted, lineHeight: 1.6 }}>
+            <div>
+              ส่งไปแล้ว <b style={{ color: C.ink }}>{sendHistory.count}</b> ครั้ง
+              {sendHistory.lastSentAt
+                ? ` · ครั้งล่าสุดเมื่อ ${sendHistory.minutesAgo} นาทีก่อน (${new Date(sendHistory.lastSentAt).toLocaleString('th-TH')})`
+                : ''}
+            </div>
+            <div style={{ marginTop: 4 }}>
+              ✓ ส่งซ้ำได้เลย — แต่ระวังผู้เช่ารำคาญถ้าส่งบ่อย
+              {sendHistory.count >= 3
+                ? ' (ส่งไปแล้ว ' + sendHistory.count + ' ครั้ง — ลองโทรหรือทักทาง LINE OA ส่วนตัวแทน)'
+                : ''}
+            </div>
           </div>
         </div>
       ) : null}

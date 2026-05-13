@@ -190,9 +190,14 @@ async function migrate(pool, opts = {}) {
     ALTER TABLE payments ADD COLUMN IF NOT EXISTS verify_provider TEXT;
     ALTER TABLE payments ADD COLUMN IF NOT EXISTS verify_payload  JSONB;
     -- Track when this bill last had a "please pay" reminder sent so the
-    -- admin UI can debounce double-clicks (and a future cron can avoid
-    -- nagging more than once per N hours). NULL = never reminded.
+    -- admin UI can warn ("เพิ่งส่งไปเมื่อ X นาที่ก่อน") + show send
+    -- history. NULL = never reminded.
     ALTER TABLE bills ADD COLUMN IF NOT EXISTS last_reminded_at TIMESTAMPTZ;
+    -- Total reminders ever sent for this bill. Admin uses this to judge
+    -- "ส่งไปแล้ว 3 ครั้ง — เปลี่ยนกลยุทธ์ดีไหม" vs "ยังไม่เคยส่งเลย".
+    -- Previous code refused a second reminder within 60 min; admin
+    -- requested to make it informational (just warn, allow override).
+    ALTER TABLE bills ADD COLUMN IF NOT EXISTS reminder_count INT NOT NULL DEFAULT 0;
     -- Rejected slips should not permanently consume a bank ref/hash: if a
     -- tenant uploaded a valid slip against the wrong bill and admin rejected
     -- it, the same real payment may be re-submitted for the correct bill.
