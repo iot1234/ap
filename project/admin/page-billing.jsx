@@ -24,6 +24,10 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
   // of falling back to ugly window.confirm() native dialogs. null = closed.
   const [sendConfirm, setSendConfirm] = useState(null);
   const [sendingNow, setSendingNow] = useState(false);
+  // justSentAck: friction ack for resends within ~5 minutes. The confirm
+  // button stays disabled until admin explicitly checks "I know they
+  // just got it". Reset whenever the modal opens with a new bill.
+  const [justSentAck, setJustSentAck] = useState(false);
   // batchReadiness maps billId → { canSend, blockCode, blockMsg, channels,
   // warnCode } for every pending/overdue bill in the current period. Fetched
   // once on mount + after fetchDbBills so the bills table can show per-row
@@ -433,6 +437,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
     // endpoint to consult — show a minimal confirm modal explaining
     // this and let admin proceed at their own risk.
     if (b._source !== 'db' || !b.dbBillId) {
+      setJustSentAck(false);
       setSendConfirm({
         bill: b, billId: id,
         readiness: {
@@ -458,6 +463,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         setToast && setToast({ kind: 'error', message: d.error || 'ตรวจสอบความพร้อมไม่สำเร็จ' });
         return;
       }
+      setJustSentAck(false);
       setSendConfirm({ bill: b, billId: id, readiness: d });
     } catch (err) {
       window.toastError ? window.toastError(setToast, err, { action: 'ตรวจสอบความพร้อมส่ง' })
@@ -613,22 +619,132 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
   const doBulkSendNow = async () => {
     setBulkSendingNow(true);
     const apiCall = window.apiCall;
+    const apiFetch = window.apiFetch || ((u, o) => fetch(u, { credentials: 'same-origin', ...o }));
+    const selectedIds = bulkSendPreview?.selectedIds;
     try {
-      const d = await apiCall('/api/bills/bulk-send', { method: 'POST' });
-      setToast && setToast({
-        kind: d.enqueued > 0 ? 'success' : 'info',
-        message: d.enqueued > 0
-          ? `จัดคิวแจ้งเตือน ${d.enqueued}/${d.attempted} ใบ${d.failed ? ` — พลาด ${d.failed} ใบ (ดูใน "คิวแจ้งเตือน")` : ''}`
-          : `ไม่มีบิลค้างที่ต้องแจ้งเตือน`,
-      });
-      addActivity && addActivity({ icon: 'ส่ง', text: `ส่งเตือนทุกบิลค้าง: ${d.enqueued} ใบ`, type: 'system' });
+      // Two paths: scoped (a list of selected dbBillIds from the
+      // multi-select toolbar) vs unscoped (every pending+overdue bill).
+      // Scoped loops client-side so it doesn't accidentally fire bills
+      // the admin didn't select. Unscoped uses the existing bulk-send
+      // endpoint for efficiency.
+      if (Array.isArray(selectedIds) && selectedIds.length > 0) {
+        let okCount = 0, failCount = 0;
+        for (const billId of selectedIds) {
+          try {
+            const r = await apiFetch(`/api/bills/${billId}/send`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({}),
+            });
+            if (r.ok) okCount++; else failCount++;
+          } catch { failCount++; }
+        }
+        setToast && setToast({
+          kind: failCount === 0 ? 'success' : (okCount === 0 ? 'error' : 'info'),
+          message: failCount === 0
+            ? `จัดคิวแจ้งเตือน ${okCount} ใบที่เลือก`
+            : `สำเร็จ ${okCount} · พลาด ${failCount} (ดูใน "คิวแจ้งเตือน")`,
+        });
+        addActivity && addActivity({
+          icon: 'ส่ง',
+          text: `ส่งเตือนบิลที่เลือก ${okCount} ใบ`,
+          type: 'system',
+        });
+        setSelected(new Set());
+      } else {
+        const d = await apiCall('/api/bills/bulk-send', { method: 'POST' });
+        setToast && setToast({
+          kind: d.enqueued > 0 ? 'success' : 'info',
+          message: d.enqueued > 0
+            ? `จัดคิวแจ้งเตือน ${d.enqueued}/${d.attempted} ใบ${d.failed ? ` — พลาด ${d.failed} ใบ (ดูใน "คิวแจ้งเตือน")` : ''}`
+            : `ไม่มีบิลค้างที่ต้องแจ้งเตือน`,
+        });
+        addActivity && addActivity({ icon: 'ส่ง', text: `ส่งเตือนทุกบิลค้าง: ${d.enqueued} ใบ`, type: 'system' });
+      }
       setBulkSendPreview(null);
       fetchBatchReadiness();   // status icons refresh
     } catch (e) {
-      window.toastError(setToast, e, { action: 'ส่งแจ้งเตือนทุกบิล' });
+      window.toastError(setToast, e, { action: 'ส่งแจ้งเตือน' });
     } finally {
       setBulkSendingNow(false);
     }
+  };
+
+  // Selected-only bulk send — opens the same preview modal as the
+  // page-wide bulk-send, but scoped to the rows admin ticked. The modal
+  // shows recent-send warnings so admin doesn't accidentally re-blast
+  // tenants who just got a reminder.
+  //
+  // `selected` is a Set of bills[].id (string "INV-YYYY-MM-ROOM"), NOT
+  // the numeric DB id. We filter against `bills` (the merged estimate +
+  // db view) and pull `dbBillId` from each row when present.
+  const handleBulkSendSelected = async () => {
+    const ids = [...selected];
+    // UI status is normalized to 'paid' / 'unpaid' (see the bills useMemo
+    // — 'overdue' from the DB collapses to 'unpaid'). We use the UI value
+    // here, not the raw DB status, since `bills` is the UI-shaped array.
+    // Also drop voided bills (`dbStatus === 'void'`) which the server
+    // would reject anyway, so admin doesn't get a confusing "failed N"
+    // toast for rows they didn't expect to skip.
+    const targets = bills.filter(
+      (b) => ids.includes(b.id) && b._source === 'db' && b.dbBillId
+             && b.status === 'unpaid' && b.dbStatus !== 'void');
+    if (targets.length === 0) {
+      setToast && setToast({
+        kind: 'info',
+        message: 'ไม่มีบิลที่เลือกเป็นบิลที่ออกแล้วและยังค้างชำระ',
+      });
+      return;
+    }
+    const totalAmount = targets.reduce((s, b) => s + (Number(b.total) || 0), 0);
+    let readiness = batchReadiness;
+    if (!readiness || readiness.period !== currentPeriod) {
+      try {
+        const r = await fetch(
+          `/api/bills/send-readiness-batch?period=${encodeURIComponent(currentPeriod)}`,
+          { credentials: 'same-origin' });
+        const d = await r.json();
+        if (r.ok && d.ok) {
+          readiness = d;
+          setBatchReadiness(d);
+        }
+      } catch { /* fall through with stale data */ }
+    }
+    // Recompute the summary scoped to the selected subset. The raw
+    // batch-readiness summary covers the full period, so feeding it
+    // straight to BulkSendPreviewBody would show "30 ใบทั้งหมด" while
+    // we're only sending 5. Build a new summary from the selected bills
+    // map so headline + counts match what's actually going to send.
+    const bmap = readiness?.bills || {};
+    let scopedCanSend = 0, scopedBlocked = 0;
+    const scopedIssueCounts = {};
+    for (const t of targets) {
+      const r = bmap[t.dbBillId];
+      if (!r) { scopedCanSend++; continue; }   // assume sendable when missing
+      if (r.canSend === false) {
+        scopedBlocked++;
+        if (r.blockCode) {
+          scopedIssueCounts[r.blockCode] = (scopedIssueCounts[r.blockCode] || 0) + 1;
+        }
+      } else {
+        scopedCanSend++;
+      }
+    }
+    const scopedReadiness = readiness ? {
+      ...readiness,
+      summary: {
+        ...(readiness.summary || {}),
+        total: targets.length,
+        canSend: scopedCanSend,
+        blocked: scopedBlocked,
+        issueCounts: scopedIssueCounts,
+      },
+    } : null;
+    setBulkSendPreview({
+      pending: targets,
+      totalAmount,
+      readiness: scopedReadiness,
+      selectedIds: targets.map((b) => b.dbBillId),
+    });
   };
 
   const columns = [
@@ -775,7 +891,11 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
       // Per-bill readiness icon — at a glance shows whether THIS bill can
       // be sent (or why not). Avoids "click 30 bills to find the 3 that
       // fail" pattern. Tooltip on the icon carries the reason.
-      key: 'sendStatus', label: 'พร้อมส่ง', align: 'center', minWidth: 90,
+      //
+      // Below the readiness label we surface a tiny "ส่งแล้ว N×" badge
+      // when the bill has been reminded already — so admin spots the
+      // already-pinged tenants without opening each row's confirm modal.
+      key: 'sendStatus', label: 'พร้อมส่ง', align: 'center', minWidth: 110,
       render: b => {
         if (b._source !== 'db' || !b.dbBillId) {
           return <span style={{ fontSize: 11, color: C.muted }}>—</span>;
@@ -785,28 +905,55 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         }
         const r = batchReadiness && batchReadiness.bills && batchReadiness.bills[b.dbBillId];
         if (!r) return <span style={{ fontSize: 11, color: C.muted }}>…</span>;
+
+        let mainEl;
         if (r.canSend && r.warnCode === 'EMAIL_ONLY') {
-          return (
+          mainEl = (
             <span title="ไม่ผูก LINE — จะส่งทางอีเมล (อาจไปกล่อง spam)"
                   style={{ fontSize: 13, color: '#c08a2a' }}>ส่งทางอีเมล</span>
           );
-        }
-        if (r.canSend) {
-          return (
+        } else if (r.canSend) {
+          mainEl = (
             <span title="LINE + (อีเมลถ้ามี) พร้อม — กดส่งได้เลย"
                   style={{ fontSize: 13, color: '#1f5f3a' }}>พร้อมส่ง</span>
           );
+        } else {
+          mainEl = (
+            <span title={r.blockMsg || r.blockCode || 'block'}
+                  style={{ fontSize: 12, color: '#b94a48', fontWeight: 600 }}>
+              ส่งไม่ได้: {r.blockCode === 'NO_TENANT_CHANNEL' ? 'ไม่มีช่องทาง'
+                : r.blockCode === 'TENANT_MOVED_ROOM' ? 'ย้ายห้อง'
+                : r.blockCode === 'TENANT_NOT_ACTIVE' ? 'ออกแล้ว'
+                : r.blockCode === 'TENANT_DELETED' ? 'ลบแล้ว'
+                : r.blockCode === 'BILL_NOT_LINKED' ? 'ไม่ผูก'
+                : 'ติดปัญหา'}
+            </span>
+          );
         }
+        const count = Number(r.reminderCount) || 0;
+        if (count === 0) return mainEl;
+        const min = r.minutesAgo;
+        const ago = min == null ? ''
+          : min < 60 ? `${min} น.`
+          : min < 1440 ? `${Math.round(min / 60)} ชม.`
+          : `${Math.round(min / 1440)} วัน`;
+        const veryRecent = min != null && min < 5;
         return (
-          <span title={r.blockMsg || r.blockCode || 'block'}
-                style={{ fontSize: 12, color: '#b94a48', fontWeight: 600 }}>
-            ส่งไม่ได้: {r.blockCode === 'NO_TENANT_CHANNEL' ? 'ไม่มีช่องทาง'
-              : r.blockCode === 'TENANT_MOVED_ROOM' ? 'ย้ายห้อง'
-              : r.blockCode === 'TENANT_NOT_ACTIVE' ? 'ออกแล้ว'
-              : r.blockCode === 'TENANT_DELETED' ? 'ลบแล้ว'
-              : r.blockCode === 'BILL_NOT_LINKED' ? 'ไม่ผูก'
-              : 'ติดปัญหา'}
-          </span>
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
+            {mainEl}
+            <span
+              title={r.lastRemindedAt
+                ? `ส่งล่าสุด ${new Date(r.lastRemindedAt).toLocaleString('th-TH')}`
+                : 'เคยส่งมาแล้ว'}
+              style={{
+                fontSize: 10.5, padding: '1px 6px', borderRadius: 10,
+                background: veryRecent ? '#fbeae7' : '#fdf3e0',
+                color: veryRecent ? '#7a2920' : '#7a5a1a',
+                whiteSpace: 'nowrap',
+              }}>
+              ส่งแล้ว {count}× {ago ? `· ${ago}ก่อน` : ''}
+            </span>
+          </div>
         );
       },
     },
@@ -974,43 +1121,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
             เลือกแล้ว {selected.size} รายการ
           </span>
           <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
-            <Btn variant="soft" size="sm" onClick={async () => {
-              const ids = [...selected];
-              const targets = bills.filter((b) => ids.includes(b.id));
-              const apiFetch = window.apiFetch || ((u, o) => fetch(u, { credentials: 'same-origin', ...o }));
-              let okCount = 0, failCount = 0, skip = false;
-              for (const b of targets) {
-                try {
-                  const r = (b._source === 'db' && b.dbBillId)
-                    ? await apiFetch(`/api/bills/${b.dbBillId}/send`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({}),
-                      })
-                    : await apiFetch('/api/notify/bill', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                          billNo: b.id, roomId: b.roomId, tenantName: b.tenant,
-                          period: b.period, total: b.total,
-                        }),
-                      });
-                  if (r.status === 503) { skip = true; break; }
-                  if (r.ok) {
-                    okCount++;
-                    addActivity && addActivity({ icon: 'ส่ง', text: `ส่งเตือนชำระบิล ${b.id}`, type: 'system' });
-                  } else failCount++;
-                } catch { failCount++; }
-              }
-              if (skip) {
-                setToast && setToast({ kind: 'error', message: 'ระบบยังไม่ได้ตั้งค่า LINE — ตั้งค่าก่อนใช้บัลก์' });
-              } else if (failCount === 0) {
-                setToast && setToast({ kind: 'success', message: `ส่งเตือน ${okCount} รายการเรียบร้อย` });
-              } else {
-                setToast && setToast({ kind: 'info', message: `สำเร็จ ${okCount} · ล้มเหลว ${failCount}` });
-              }
-              setSelected(new Set());
-            }}>ส่งเตือนทั้งหมด</Btn>
+            <Btn variant="soft" size="sm" onClick={handleBulkSendSelected}>ส่งเตือนทั้งหมด</Btn>
             <Btn variant="soft" size="sm" onClick={() => {
               const selectedBills = bills.filter(b => selected.has(b.id));
               if (window.exportBillsCSV(selectedBills)) {
@@ -1217,43 +1328,14 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
                 setToast && setToast({ kind: 'error', message: 'ดาวน์โหลดบิลไม่สำเร็จ' });
               }
             }}>ดาวน์โหลด PDF</Btn>
-            <Btn variant="primary" onClick={async () => {
+            <Btn variant="primary" onClick={() => {
+              // Route through the same readiness modal as the row "ส่งเตือน"
+              // button so admin sees send history + monthCount + friction
+              // before firing. Previously this button bypassed the popup
+              // and sent silently.
               const b = previewBill;
-              const apiFetch = window.apiFetch || ((u, o) => fetch(u, { credentials: 'same-origin', ...o }));
-              try {
-                const res = (b._source === 'db' && b.dbBillId)
-                  ? await apiFetch(`/api/bills/${b.dbBillId}/send`, {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({}),
-                    })
-                  : await apiFetch('/api/notify/bill', {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({
-                        billNo: b.id,
-                        roomId: b.roomId,
-                        tenantName: b.tenant,
-                        period: b.period,
-                        total: b.total,
-                      }),
-                    });
-                const data = await res.json().catch(() => ({}));
-                if (res.status === 503) {
-                  setToast && setToast({ kind: 'error', message: 'ระบบยังไม่ได้ตั้งค่า LINE' });
-                  return;
-                }
-                if (!res.ok || !data.ok) {
-                  setToast && setToast({ kind: 'error', message: data.error || 'ส่งแจ้งเตือนไม่สำเร็จ' });
-                  return;
-                }
-                setToast && setToast({ kind: 'success', message: `ส่งบิล ${b.id} ทาง LINE แล้ว` });
-                addActivity && addActivity({ icon: 'ส่ง', text: `ส่งบิล ${b.id} ให้ ${b.tenant}`, type: 'billing' });
-                setPreviewBill(null);
-              } catch (err) {
-                console.error('notify bill failed:', err);
-                setToast && setToast({ kind: 'error', message: 'เชื่อมต่อเซิร์ฟเวอร์ไม่ได้' });
-              }
+              setPreviewBill(null);
+              handleSendReminder(b.id);
             }}>ส่งให้ผู้เช่า</Btn>
           </>
         )}
@@ -1271,28 +1353,45 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         onClose={() => !sendingNow && setSendConfirm(null)}
         title={sendConfirm ? `ส่งเตือนบิล ${sendConfirm.bill.dbBillNo || sendConfirm.billId}` : ''}
         width={520}
-        footer={sendConfirm && (
-          <>
-            <Btn variant="ghost" onClick={() => setSendConfirm(null)} disabled={sendingNow}>
-              ยกเลิก
-            </Btn>
-            {sendConfirm.readiness?.summary?.canSend ? (
-              <Btn variant="primary"
-                onClick={() => doSendReminder(sendConfirm.billId)}
-                disabled={sendingNow}>
-                {sendingNow ? 'กำลังส่ง…' : 'ยืนยันส่ง'}
+        footer={sendConfirm && (() => {
+          const sh = sendConfirm.readiness?.summary?.sendHistory;
+          // Block confirm when admin is about to resend within ~5 min
+          // unless they explicitly tick the friction checkbox.
+          const ackNeeded = !!(sh && sh.veryRecently);
+          const ackBlocking = ackNeeded && !justSentAck;
+          return (
+            <>
+              <Btn variant="ghost" onClick={() => setSendConfirm(null)} disabled={sendingNow}>
+                ยกเลิก
               </Btn>
-            ) : (
-              <Btn variant="primary"
-                onClick={() => setSendConfirm(null)}
-                style={{ background: C.muted }}>
-                เข้าใจแล้ว
-              </Btn>
-            )}
-          </>
-        )}
+              {sendConfirm.readiness?.summary?.canSend ? (
+                <Btn variant="primary"
+                  onClick={() => doSendReminder(sendConfirm.billId)}
+                  disabled={sendingNow || ackBlocking}
+                  title={ackBlocking ? 'ติ๊กยืนยันก่อนว่าเข้าใจว่าผู้เช่าเพิ่งได้รับ' : ''}>
+                  {sendingNow ? 'กำลังส่ง…'
+                    : ackNeeded
+                      ? (justSentAck ? 'ยืนยันส่งซ้ำ' : 'ติ๊กยืนยันก่อน')
+                      : (sh && sh.count > 0 ? 'ยืนยันส่งซ้ำ' : 'ยืนยันส่ง')}
+                </Btn>
+              ) : (
+                <Btn variant="primary"
+                  onClick={() => setSendConfirm(null)}
+                  style={{ background: C.muted }}>
+                  เข้าใจแล้ว
+                </Btn>
+              )}
+            </>
+          );
+        })()}
       >
-        {sendConfirm && <SendReminderConfirmBody confirm={sendConfirm} C={C} fmtCurrency={fmtCurrency} />}
+        {sendConfirm && <SendReminderConfirmBody
+          confirm={sendConfirm}
+          C={C}
+          fmtCurrency={fmtCurrency}
+          justSentAck={justSentAck}
+          setJustSentAck={setJustSentAck}
+        />}
       </Modal>
 
       {/* Bulk-send preflight — replaces the wall-of-text window.confirm()
@@ -1302,10 +1401,21 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
       <Modal
         open={!!bulkSendPreview}
         onClose={() => !bulkSendingNow && setBulkSendPreview(null)}
-        title="ส่งเตือนทุกบิลที่ค้าง"
+        title={bulkSendPreview?.selectedIds
+          ? `ส่งเตือนบิลที่เลือก (${bulkSendPreview.selectedIds.length} ใบ)`
+          : 'ส่งเตือนทุกบิลที่ค้าง'}
         width={560}
         footer={bulkSendPreview && (() => {
-          const ready = bulkSendPreview.readiness?.summary?.canSend ?? bulkSendPreview.pending.length;
+          // When scoped to a selection, count only the selected bills
+          // that are actually sendable per batch readiness. Otherwise use
+          // the page-wide canSend total.
+          let ready;
+          if (Array.isArray(bulkSendPreview.selectedIds)) {
+            const bmap = bulkSendPreview.readiness?.bills || {};
+            ready = bulkSendPreview.selectedIds.filter((id) => bmap[id]?.canSend !== false).length;
+          } else {
+            ready = bulkSendPreview.readiness?.summary?.canSend ?? bulkSendPreview.pending.length;
+          }
           return (
             <>
               <Btn variant="ghost" onClick={() => setBulkSendPreview(null)} disabled={bulkSendingNow}>
@@ -1500,7 +1610,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
 // send, grouped by block code, so the admin sees the picture before
 // firing the pipeline.
 function BulkSendPreviewBody({ preview, C, fmtCurrency }) {
-  const { pending, totalAmount, readiness } = preview;
+  const { pending, totalAmount, readiness, selectedIds } = preview;
   const summary = readiness?.summary || {
     total: pending.length, canSend: pending.length, blocked: 0, issueCounts: {},
   };
@@ -1513,6 +1623,29 @@ function BulkSendPreviewBody({ preview, C, fmtCurrency }) {
   };
   const codes = Object.entries(summary.issueCounts || {}).sort((a, b) => b[1] - a[1]);
   const fmt = (n) => Number(n).toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+  // When the bulk-send is scoped to a selection, surface any selected
+  // bills that were recently reminded so admin can spot accidental
+  // re-blasts before firing. Pulls from batchReadiness (lastRemindedAt
+  // + reminderCount per bill).
+  const billsMap = readiness?.bills || {};
+  const recentlySent = Array.isArray(selectedIds)
+    ? selectedIds
+        .map((id) => {
+          const r = billsMap[id];
+          if (!r || !r.reminderCount) return null;
+          const target = pending.find((b) => b.dbBillId === id);
+          return target ? {
+            id, count: r.reminderCount,
+            minutesAgo: r.minutesAgo,
+            tenant: r.tenantName || target?.tenant || '-',
+            roomId: target?.roomId || '-',
+            veryRecent: r.minutesAgo != null && r.minutesAgo < 60,
+          } : null;
+        })
+        .filter(Boolean)
+        .sort((a, b) => (a.minutesAgo ?? Infinity) - (b.minutesAgo ?? Infinity))
+    : [];
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       {/* Headline summary */}
@@ -1560,6 +1693,43 @@ function BulkSendPreviewBody({ preview, C, fmtCurrency }) {
         </div>
       ) : null}
 
+      {/* Recently-sent warnings — only shown when scoped to a selection.
+          Helps admin spot the bills that were just reminded so they
+          don't double-blast tenants in a single workflow. */}
+      {recentlySent.length > 0 ? (
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>
+            บิลที่เคยส่งมาแล้ว (ระวังส่งซ้ำ):
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {recentlySent.slice(0, 6).map((it) => {
+              const ago = it.minutesAgo == null ? '-'
+                : it.minutesAgo < 60 ? `${it.minutesAgo} นาทีก่อน`
+                : it.minutesAgo < 1440 ? `${Math.round(it.minutesAgo / 60)} ชม.ก่อน`
+                : `${Math.round(it.minutesAgo / 1440)} วันก่อน`;
+              return (
+                <div key={it.id} style={{
+                  padding: 8, borderRadius: 6, fontSize: 12.5,
+                  background: it.veryRecent ? '#fff5e8' : '#fdfaf2',
+                  borderLeft: `3px solid ${it.veryRecent ? '#c08a2a' : '#bcaf95'}`,
+                  display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                }}>
+                  <span>ห้อง {it.roomId} · {it.tenant}</span>
+                  <span style={{ color: C.muted, fontSize: 11.5 }}>
+                    ส่งแล้ว {it.count}× · ล่าสุด {ago}
+                  </span>
+                </div>
+              );
+            })}
+            {recentlySent.length > 6 ? (
+              <div style={{ fontSize: 11.5, color: C.muted, textAlign: 'center' }}>
+                และอีก {recentlySent.length - 6} ใบ
+              </div>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+
       {/* Footnote */}
       <div style={{
         padding: 10, borderRadius: 6, background: '#fdfaf2',
@@ -1576,9 +1746,10 @@ function BulkSendPreviewBody({ preview, C, fmtCurrency }) {
 
 // SendReminderConfirmBody — the modal contents. Renders bill summary,
 // recipient info, channel availability, and a card per readiness issue.
-// Pure component (no hooks beyond what the parent provides) so it can be
-// reasoned about independently.
-function SendReminderConfirmBody({ confirm, C, fmtCurrency }) {
+// Renders send history (this-bill count + this-tenant month count +
+// per-bill timeline) so admin can answer "did this person just hear
+// from us?" before clicking confirm.
+function SendReminderConfirmBody({ confirm, C, fmtCurrency, justSentAck, setJustSentAck }) {
   const { bill, readiness } = confirm;
   const r = readiness || {};
   const summary = r.summary || {};
@@ -1599,6 +1770,18 @@ function SendReminderConfirmBody({ confirm, C, fmtCurrency }) {
   // debounce was removed (admin asked for resend-anytime), so this is
   // purely informational: "ส่งไปแล้ว N ครั้ง · ล่าสุด X นาทีก่อน".
   const sendHistory = summary.sendHistory;
+  const channelLabel = { line: 'LINE', email: 'อีเมล' };
+  const statusLabel = {
+    pending: 'รอส่ง', sent: 'ส่งแล้ว', failed: 'พลาด', skipped: 'ข้าม',
+  };
+  const fmtTime = (iso) => {
+    if (!iso) return '-';
+    const d = new Date(iso);
+    return d.toLocaleString('th-TH', {
+      day: '2-digit', month: 'short',
+      hour: '2-digit', minute: '2-digit',
+    });
+  };
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       {/* Top banner — ready / blocked summary */}
@@ -1623,29 +1806,88 @@ function SendReminderConfirmBody({ confirm, C, fmtCurrency }) {
         </div>
       </div>
 
-      {sendHistory && sendHistory.count > 0 ? (
+      {sendHistory && (sendHistory.count > 0 || (sendHistory.monthCount || 0) > 0) ? (
         <div style={{
           padding: 12, borderRadius: 8,
-          background: sendHistory.recently ? '#fff5e8' : '#f4f8fc',
-          border: `1px solid ${sendHistory.recently ? '#f0c47a' : '#cfdde9'}`,
+          background: sendHistory.veryRecently ? '#fbeae7'
+            : sendHistory.recently ? '#fff5e8' : '#f4f8fc',
+          border: `1px solid ${sendHistory.veryRecently ? '#f5c0b4'
+            : sendHistory.recently ? '#f0c47a' : '#cfdde9'}`,
         }}>
-          <div style={{ fontWeight: 600, marginBottom: 4 }}>
-            {sendHistory.recently ? 'เพิ่งส่งไปไม่นาน' : 'เคยส่งเตือนมาแล้ว'}
+          <div style={{ fontWeight: 600, marginBottom: 6 }}>
+            {sendHistory.veryRecently ? 'เพิ่งส่งไปเมื่อกี้ — ระวังส่งซ้ำ'
+              : sendHistory.recently ? 'เพิ่งส่งไปไม่นาน'
+              : 'เคยส่งเตือนมาแล้ว'}
           </div>
-          <div style={{ fontSize: 12.5, color: C.muted, lineHeight: 1.6 }}>
+          <div style={{ fontSize: 12.5, color: C.muted, lineHeight: 1.7 }}>
             <div>
-              ส่งไปแล้ว <b style={{ color: C.ink }}>{sendHistory.count}</b> ครั้ง
+              บิลใบนี้: ส่งไปแล้ว <b style={{ color: C.ink }}>{sendHistory.count}</b> ครั้ง
               {sendHistory.lastSentAt
-                ? ` · ครั้งล่าสุดเมื่อ ${sendHistory.minutesAgo} นาทีก่อน (${new Date(sendHistory.lastSentAt).toLocaleString('th-TH')})`
+                ? ` · ล่าสุด ${sendHistory.minutesAgo} นาทีก่อน (${fmtTime(sendHistory.lastSentAt)})`
                 : ''}
             </div>
-            <div style={{ marginTop: 4 }}>
-              ส่งซ้ำได้เลย — แต่ระวังผู้เช่ารำคาญถ้าส่งบ่อย
-              {sendHistory.count >= 3
-                ? ' (ส่งไปแล้ว ' + sendHistory.count + ' ครั้ง — ลองโทรหรือทักทาง LINE OA ส่วนตัวแทน)'
-                : ''}
-            </div>
+            {(sendHistory.monthCount || 0) > 0 ? (
+              <div>
+                ผู้เช่าคนนี้เดือนนี้: ได้รับข้อความ <b style={{ color: C.ink }}>{sendHistory.monthCount}</b> ครั้ง
+                {(sendHistory.monthCount > sendHistory.count)
+                  ? ` (รวมบิลใบอื่นด้วย ${sendHistory.monthCount - sendHistory.count} ครั้ง)`
+                  : ''}
+              </div>
+            ) : null}
+            {sendHistory.count >= 3 ? (
+              <div style={{ marginTop: 4, color: '#7a2920' }}>
+                ส่งไปเยอะแล้ว — แนะนำลองโทรหรือทักทาง LINE OA ส่วนตัวแทน
+              </div>
+            ) : null}
           </div>
+
+          {Array.isArray(sendHistory.recentSends) && sendHistory.recentSends.length > 0 ? (
+            <div style={{ marginTop: 10, fontSize: 12, color: C.ink2 }}>
+              <div style={{ fontWeight: 600, marginBottom: 4 }}>ประวัติส่งบิลใบนี้</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                {sendHistory.recentSends.map((s, i) => (
+                  <div key={i} style={{
+                    display: 'flex', justifyContent: 'space-between',
+                    padding: '3px 8px',
+                    background: 'rgba(255,255,255,0.5)',
+                    borderRadius: 4, fontSize: 11.5,
+                  }}>
+                    <span style={{ fontFamily: 'JetBrains Mono, monospace' }}>
+                      {fmtTime(s.at)}
+                    </span>
+                    <span style={{ color: C.muted }}>
+                      {channelLabel[s.channel] || s.channel}
+                      {' · '}
+                      <span style={{
+                        color: s.status === 'sent' ? '#1f5f3a'
+                          : s.status === 'failed' ? '#b94a48' : C.muted,
+                      }}>
+                        {statusLabel[s.status] || s.status}
+                      </span>
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
+          {sendHistory.veryRecently ? (
+            <label style={{
+              display: 'flex', alignItems: 'flex-start', gap: 8,
+              marginTop: 10, padding: 8, borderRadius: 6,
+              background: 'rgba(255,255,255,0.6)', cursor: 'pointer',
+              fontSize: 12.5, lineHeight: 1.5, color: C.ink,
+            }}>
+              <input type="checkbox"
+                checked={!!justSentAck}
+                onChange={(e) => setJustSentAck(e.target.checked)}
+                style={{ marginTop: 2, accentColor: C.accent || '#c08a2a' }} />
+              <span>
+                <b>เข้าใจว่าผู้เช่าเพิ่งได้รับข้อความนี้ไปเมื่อกี้</b>
+                {' '}— ยังต้องการส่งซ้ำเพราะ (เช่น ผู้เช่าโทรมาบอกไม่เห็น)
+              </span>
+            </label>
+          ) : null}
         </div>
       ) : null}
 

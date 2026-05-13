@@ -602,9 +602,12 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       }
       try {
         // One query joining bills + tenants + their move-in room.
+        // last_reminded_at / reminder_count are pulled too so the table
+        // can render per-row "ส่งแล้ว N ครั้ง · X ชม.ก่อน" without an
+        // extra round-trip per bill.
         const { rows } = await pool.query(
           `SELECT b.id, b.bill_no, b.room_id, b.status AS bill_status,
-                  b.tenant_id,
+                  b.tenant_id, b.last_reminded_at, b.reminder_count,
                   t.id AS tenant_row_id, t.full_name AS tenant_name,
                   t.line_user_id, t.email,
                   t.status AS tenant_status, t.current_room_id AS tenant_current_room
@@ -650,6 +653,11 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             line: lineNotify.isLikelyUserId(b.line_user_id),
             email: !!b.email,
           };
+          const reminderCount = Number(b.reminder_count) || 0;
+          const minutesAgo = b.last_reminded_at
+            ? Math.max(0, Math.round(
+                (Date.now() - new Date(b.last_reminded_at).getTime()) / 60_000))
+            : null;
           billsMap[b.id] = {
             canSend: !blockCode,
             blockCode,
@@ -657,6 +665,9 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             channels,
             tenantName: b.tenant_name || null,
             warnCode: !blockCode && !channels.line && channels.email ? 'EMAIL_ONLY' : null,
+            reminderCount,
+            lastRemindedAt: b.last_reminded_at,
+            minutesAgo,
           };
           if (blockCode) {
             blockedCount++;
@@ -762,6 +773,18 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         // show "ส่งไปแล้ว N ครั้ง · ล่าสุดเมื่อ X นาทีก่อน". The hard
         // debounce was removed in favor of admin judgment — resend works
         // immediately if admin confirms.
+        //
+        // Three layers of history are returned so the modal can answer
+        // "did this tenant just hear from us?" at multiple scopes:
+        //   count            — total reminders for THIS bill (all time)
+        //   monthCount       — messages this tenant got THIS calendar
+        //                      month across ALL their bills. Catches the
+        //                      "tenant has 3 overdue bills and admin
+        //                      bulk-resends every day" pattern that a
+        //                      single-bill counter misses.
+        //   recentSends      — last 5 enqueue rows for THIS bill, with
+        //                      channel + status so admin sees the actual
+        //                      timeline (10:30 LINE, 14:20 email, ...).
         const reminderCount = Number(b.reminder_count) || 0;
         let sendHistory = null;
         if (b.last_reminded_at || reminderCount > 0) {
@@ -773,7 +796,89 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             lastSentAt: b.last_reminded_at,
             minutesAgo,
             recently: minutesAgo != null && minutesAgo < 60,
+            veryRecently: minutesAgo != null && minutesAgo < 5,
           };
+        }
+
+        // Cross-bill, this-month count for the tenant. We join the queue
+        // back to bills via payload.billId so the count includes EVERY
+        // enqueue for any of this tenant's bills in the current calendar
+        // month — not just resends of the bill admin is currently looking
+        // at. If the tenant lookup is unresolved (tenant_id null/deleted),
+        // skip the query and leave monthCount=0.
+        //
+        // We count distinct (billId, second) groups instead of raw queue
+        // rows. One admin click that fans out to LINE + email creates 2
+        // queue rows in the same millisecond; counting them as one
+        // "send action" matches what admin actually did and keeps the
+        // number consistent with bills.reminder_count (which bumps per
+        // action, not per channel).
+        if (b.tenant_id) {
+          try {
+            const monthRes = await pool.query(
+              `SELECT COUNT(*)::int AS n,
+                      MAX(t) AS last_at
+                 FROM (
+                   SELECT (q.payload->>'billId') AS bid,
+                          date_trunc('second', q.created_at) AS t
+                     FROM notifications_queue q
+                    WHERE q.created_at >= date_trunc('month', NOW())
+                      AND (q.payload->>'billId') IS NOT NULL
+                      AND (q.payload->>'billId') ~ '^[0-9]+$'
+                      AND (q.payload->>'billId')::bigint IN (
+                        SELECT id FROM bills
+                         WHERE tenant_id = $1
+                           AND deleted_at IS NULL
+                      )
+                    GROUP BY 1, 2
+                 ) g`,
+              [b.tenant_id]
+            );
+            const n = monthRes.rows[0]?.n || 0;
+            if (n > 0) {
+              sendHistory = sendHistory || { count: reminderCount };
+              sendHistory.monthCount = n;
+              sendHistory.monthLastSentAt = monthRes.rows[0].last_at;
+            } else if (sendHistory) {
+              sendHistory.monthCount = 0;
+            }
+          } catch (err) {
+            // notifications_queue might be missing in a fresh schema or
+            // payload->>'billId' could be malformed in legacy rows.
+            // Don't fail readiness — just omit the monthly stat.
+            console.warn('[send-readiness] monthCount query failed:',
+              err.message);
+          }
+        }
+
+        // Per-bill recent timeline — last 5 enqueues so admin sees a real
+        // timeline rather than just one "last sent" timestamp. We pull
+        // from notifications_queue (every channel that was enqueued for
+        // this bill_id gets a row, even if it later failed). The regex
+        // guard prevents the cast from blowing up on legacy payload rows
+        // where billId might be a non-numeric string.
+        try {
+          const recentRes = await pool.query(
+            `SELECT id, channel, created_at, status
+               FROM notifications_queue
+              WHERE (payload->>'billId') IS NOT NULL
+                AND (payload->>'billId') ~ '^[0-9]+$'
+                AND (payload->>'billId')::bigint = $1
+              ORDER BY id DESC
+              LIMIT 5`,
+            [id]
+          );
+          if (recentRes.rows.length > 0) {
+            sendHistory = sendHistory || { count: reminderCount };
+            sendHistory.recentSends = recentRes.rows.map((row) => ({
+              at: row.created_at,
+              channel: row.channel,
+              status: row.status,
+            }));
+          }
+        } catch (err) {
+          console.warn('[send-readiness] recentSends query failed:',
+            err.message);
         }
 
         const blockingHigh = issues.filter((i) => i.sev === 'high');
