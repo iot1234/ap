@@ -4267,6 +4267,13 @@ app.get('/p/bill-qr/:billId', rateLimitQr, async (req, res) => {
     );
     if (!rows.length) return res.status(404).end();
     const bill = rows[0];
+    if (bill.status !== 'pending' && bill.status !== 'overdue') {
+      return res.status(409).json({
+        error: 'bill is not payable',
+        code: 'BILL_NOT_PAYABLE',
+        status: bill.status,
+      });
+    }
     const amount = Number(bill.total);
     if (!Number.isFinite(amount) || amount <= 0 || amount > MAX_AMOUNT) {
       return res.status(409).json({ error: 'invalid bill total' });
@@ -4317,7 +4324,7 @@ app.get('/p/bill-qr/:billId', rateLimitQr, async (req, res) => {
     }
     const rendered = await renderQrWithFallback(paymentBlock.promptpayTarget, amount);
     res.setHeader('Content-Type', rendered.contentType);
-    res.setHeader('Cache-Control', 'public, max-age=3600');   // LINE re-fetches
+    res.setHeader('Cache-Control', 'no-store');
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-QR-Renderer', rendered.renderer);
     return res.end(rendered.body);

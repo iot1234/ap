@@ -727,6 +727,52 @@ test('public bill payment link is tokenized and does not require tenant login', 
     'public token page must not leak the full token URL as cross-origin referer');
 });
 
+test('public bill QR has a token-gated payload fallback and never trusts query target/amount', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const idx = server.indexOf("app.get('/p/bill-qr/:billId'");
+  assert.ok(idx > 0, 'public bill QR endpoint must exist');
+  const end = server.indexOf("app.get('/pay/:billId'", idx);
+  const body = server.slice(idx, end > idx ? end : idx + 4500);
+  assert.match(body, /verifyBillQrToken\(id, token\)/,
+    'public QR fallback must stay behind the signed QR token');
+  assert.match(body, /SELECT id, total, status, tenant_id FROM bills/,
+    'public QR must read the amount from the persisted bill row');
+  assert.match(body, /bill\.status !== 'pending' && bill\.status !== 'overdue'/,
+    'public QR must refuse paid/void/stale bill links');
+  assert.match(body, /format === 'json' \|\| format === 'payload'/,
+    'public QR must expose a JSON/payload fallback for broken images');
+  assert.match(body, /buildPromptPayPayload\(paymentBlock\.promptpayTarget, amount\)/,
+    'payload fallback must be generated from server payment config and DB amount');
+  assert.match(body, /renderQrDataUrl\(paymentBlock\.promptpayTarget, amount\)/,
+    'JSON fallback should still try to return a renderable image');
+  assert.match(body, /renderQrSvg\(paymentBlock\.promptpayTarget, amount\)/,
+    'JSON fallback should have an SVG renderer fallback');
+  assert.match(body, /targetLast4/,
+    'public JSON must avoid sending the full receiver target as a separate field');
+  assert.match(body, /Cache-Control', 'no-store'/,
+    'public QR responses must not be cached after a bill changes status');
+  assert.doesNotMatch(body, /req\.query\.(?:amount|target)/,
+    'public QR must not accept caller-supplied amount or target');
+});
+
+test('public payment page falls back to payload when QR image loading fails', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const pay = fs.readFileSync(path.join(__dirname, '..', 'project', 'pay.jsx'), 'utf8');
+  assert.match(pay, /const \[qrFallback, setQrFallback\]/,
+    'public payment UI must track QR fallback state');
+  assert.match(pay, /appendQuery\(data\.qrUrl, \{ format: 'json' \}\)/,
+    'public payment UI must request the tokenized JSON fallback without corrupting existing query params');
+  assert.match(pay, /onError=\{\(e\) => \{/,
+    'public QR image must detect render/load failures');
+  assert.match(pay, /navigator\.clipboard\.writeText\(qrFallback\.payload\)/,
+    'fallback payload must be copyable for bank-app paste-to-pay');
+  assert.doesNotMatch(pay, /dangerouslySetInnerHTML/,
+    'public QR fallback must not inject SVG as raw HTML');
+});
+
 test('public bill payment upload has retry limit + admin-visible diagnostics', () => {
   const fs = require('node:fs');
   const path = require('node:path');
