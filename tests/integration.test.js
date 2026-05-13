@@ -2968,8 +2968,14 @@ test('quick-invite carries booking photo + marks booking completed', () => {
   // Category + ref_id verification before retargeting (defense in depth)
   assert.match(block,
     /WHERE id=\$1 AND category='citizen_id_image'[\s\S]{0,200}ref_id='public-booking-pending'/);
-  // Booking marked completed
-  assert.match(block, /UPDATE bookings SET status='completed'/);
+  // Booking marked completed — with status guard so rejected/cancelled
+  // bookings can't be silently resurrected as 'completed'. The guard
+  // uses `status = ANY($2::text[])` against the allowedFromForQuickInvite
+  // list (pending/reviewing/approved); the bare SET form was the bug.
+  assert.match(block, /UPDATE bookings[\s\S]{0,80}SET status='completed'/);
+  assert.match(block,
+    /WHERE external_id=\$1[\s\S]{0,80}AND status = ANY\(\$2::text\[\]\)/,
+    'quick-invite UPDATE must guard against forbidden source statuses');
   assert.match(block, /SELECT value FROM app_data WHERE key='baankarn_bookings_v1' FOR UPDATE/,
     'quick-invite must lock the JSONB booking list before marking it completed');
   assert.match(block, /status: 'completed'[\s\S]{0,220}contractId: contract\.id/,

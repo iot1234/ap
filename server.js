@@ -1367,6 +1367,16 @@ app.post('/api/bills/render', sameOrigin, csrfGuard, requireAuth, requireRole('o
         [renderBillId]
       );
       if (!rows.length) return res.status(404).json({ error: 'bill not found' });
+      // Refuse to render PDFs for voided bills. The PromptPay QR in the
+      // rendered PDF is still scannable; a tenant who got the void
+      // notification but didn't read it could pay against a dead bill.
+      // Admin can still download via the source-of-truth payments page.
+      if (rows[0].status === 'void') {
+        return res.status(410).json({
+          error: 'บิลนี้ถูกยกเลิกแล้ว ไม่สามารถสร้าง PDF ได้',
+          code: 'BILL_VOID',
+        });
+      }
       const { config, paymentBlock } = await loadEffectivePaymentBlock();
       bill = buildStoredBillPdfObject(rows[0], config, paymentBlock);
     } catch (err) {
@@ -1468,14 +1478,24 @@ app.post('/api/maintenance', sameOrigin, rateLimitTicket, validateBody(schemas.c
   };
   const ticketNo = makeTicketNo();
   try {
-    // Best-effort tenant linkage: if phone matches an existing tenant row,
-    // stamp tenant_id so the ticket survives a future phone change. Anonymous
-    // submissions (no matching tenant) just leave tenant_id NULL.
+    // Residency-checked tenant linkage: stamp tenant_id ONLY when the
+    // submitter's phone matches an ACTIVE tenant who currently lives
+    // in THIS room. Without the room match, a logged-in tenant A could
+    // file a ticket with `{roomId: B, tenantPhone: B's phone}` and the
+    // system would attribute it to B (and B's portal would show the
+    // rating prompt). The non-matching submissions are still inserted
+    // — anonymous tickets are legitimate (a friend reporting on the
+    // tenant's behalf, walk-in repair request) — but tenant_id stays
+    // NULL so they don't grant any tenant ownership.
     let tenantId = null;
     if (cleaned.tenant_phone) {
       const tr = await pool.query(
-        'SELECT id FROM tenants WHERE phone=$1 AND deleted_at IS NULL ORDER BY id DESC LIMIT 1',
-        [cleaned.tenant_phone]
+        `SELECT id FROM tenants
+           WHERE phone=$1 AND deleted_at IS NULL
+             AND status='active'
+             AND current_room_id=$2
+           ORDER BY id DESC LIMIT 1`,
+        [cleaned.tenant_phone, cleaned.room_id]
       );
       if (tr.rows.length) tenantId = tr.rows[0].id;
     }
@@ -4047,9 +4067,22 @@ async function loadBillPaymentAttemptSummary(db, billId, tenantId) {
     };
   }
   const params = [id, tid];
+  // The "used" count gates the SLIP_UPLOAD_LIMIT_REACHED 3-strikes
+  // limit. We EXCLUDE rows that were rejected by admin cascade
+  // (sibling-rejection on verify/manual-pay, void's payment reversal,
+  // unmark-paid correction). Those rows came from system housekeeping,
+  // not from the tenant attempting again — counting them locks the
+  // tenant out of a bill that was later flipped back to pending.
+  // Pending/verified counts include all rows so the UI still reflects
+  // the current state.
   const counts = await db.query(
     `SELECT
-        COUNT(*)::int AS used,
+        COUNT(*) FILTER (
+          WHERE status<>'rejected'
+             OR rejected_reason IS NULL
+             OR (rejected_reason NOT LIKE 'superseded\\_%' ESCAPE '\\'
+                 AND rejected_reason NOT LIKE 'unmark\\_paid\\_%' ESCAPE '\\')
+        )::int AS used,
         COUNT(*) FILTER (WHERE status='pending')::int AS pending_count,
         COUNT(*) FILTER (WHERE status='rejected')::int AS rejected_count,
         COUNT(*) FILTER (WHERE status='verified')::int AS verified_count
@@ -4984,6 +5017,17 @@ app.get('/api/tenant/bills/:id/pdf', requireTenant, async (req, res) => {
     if (Number(b.tenant_id) !== Number(req.tenant.tenant_id)) {
       return res.status(403).json({ error: 'not your bill' });
     }
+    // Block PDF download for voided bills. Without this guard the PDF
+    // renderer happily generated a full invoice with PromptPay QR for
+    // a void bill — tenant could scan, pay, and the transaction landed
+    // against nothing. The void path already notifies the tenant so
+    // they shouldn't be requesting this PDF; refusing closes the loop.
+    if (b.status === 'void') {
+      return res.status(410).json({
+        error: 'บิลนี้ถูกยกเลิกแล้ว ไม่สามารถดาวน์โหลด PDF ได้',
+        code: 'BILL_VOID',
+      });
+    }
     // Compose the bill object expected by services/pdf.renderBillPdf —
     // the same shape the admin POST /api/bills/render builds. Field
     // name remap: snake_case (DB) → camelCase (PDF renderer).
@@ -5536,6 +5580,19 @@ app.put('/api/bills/:id/void', sameOrigin, csrfGuard, requireAuth, requireRole('
     reversedPayments: result.reversedPayments,
   });
   notifyBillVoided(result.bill, reason, req.session.user.username).catch(() => {});
+  // Notify tenant if their verified payment was reversed by this void.
+  // notifyBillVoided already pushes "bill voided" but doesn't address
+  // the money side — tenant deserves an explicit "your payment is no
+  // longer recorded" message so they can challenge if needed.
+  if (result.bill.tenant_id && result.reversedPayments.length > 0) {
+    for (const p of result.reversedPayments) {
+      notifyTenantOnPayment({
+        tenant_id: result.bill.tenant_id,
+        bill_id: id,
+        amount: p.amount,
+      }, 'reversed', `บิลถูกยกเลิก: ${reason || '(ไม่ระบุ)'}`).catch(() => {});
+    }
+  }
   // Voiding the last overdue bill should flip the room out of 'overdue'
   // — without this cascade the room kept showing 'overdue' until the
   // daily safety-net tick, so admins clicking "void" then expecting
@@ -5644,6 +5701,16 @@ app.post('/api/bills/:id/unmark-paid',
           id: p.id, amount: Number(p.amount), method: p.method, ref: p.ref,
         })),
       });
+      // Notify the tenant of the reversal so they don't first hear
+      // about it via an overdue reminder. Fire-and-forget — a
+      // notification failure doesn't undo the unmark-paid.
+      for (const p of reversed.rows) {
+        notifyTenantOnPayment({
+          tenant_id: row.tenant_id,
+          bill_id: id,
+          amount: p.amount,
+        }, 'reversed', reason).catch(() => {});
+      }
       // Room status may flip back to 'overdue' if this was the bill keeping
       // the room "occupied". Same cascade pattern as /void.
       if (row.room_id) {
@@ -6939,6 +7006,27 @@ async function notifyTenantOnPayment(payment, outcome, reason) {
         ``,
         `${buildingName}`,
       ];
+    } else if (outcome === 'reversed') {
+      // Admin reversed a previously-verified payment (unmark-paid or
+      // bill void with force). Tenant must know — without this push
+      // they would only find out when the next overdue reminder
+      // arrives, which is confusing ("but I already paid?!"). Reason
+      // text comes from the admin's input.
+      subject = '⚠️ การชำระถูกยกเลิก — โปรดติดต่อแอดมิน';
+      lines = [
+        `เรียน คุณ${t.full_name}`,
+        ``,
+        `แอดมินได้ยกเลิกการบันทึกชำระสำหรับบิลด้านล่าง`,
+        ``,
+        `บิล: ${billLabel}${period ? ` (รอบ ${period})` : ''}`,
+        `จำนวน: ฿${amtStr}`,
+        `สถานะ: ยังไม่ชำระ`,
+        reason ? `\nเหตุผล: ${reason}` : null,
+        ``,
+        `📋 ขั้นตอนถัดไป:`,
+        `   1) ตรวจสอบกับแอดมินว่าการชำระไปอยู่บิลใด`,
+        `   2) ถ้าเป็นความเข้าใจผิด ติดต่อ ${buildingName}`,
+      ].filter(Boolean);
     } else {
       // Rejected — surface the reason + concrete next steps so the tenant
       // knows what to do. "ติดต่อเจ้าหน้าที่" alone leaves them stuck.
@@ -7171,7 +7259,24 @@ app.post('/api/bookings/:id/approve-and-assign', sameOrigin, csrfGuard, requireA
     }
 
     let assignedRoomId = null;
-    if (candidate) {
+    if (!candidate) {
+      // Refuse the approval when no vacant room matches the booking's
+      // wanted type/floor. Previously this branch silently completed
+      // the approval with `assignedRoomId=null`, leaving a "phantom
+      // approved" booking that no longer auto-reserves. Admin had to
+      // remember to come back and manually assign — which is the kind
+      // of state that drops through the cracks. Refusing here keeps
+      // the booking at 'pending'/'reviewing' so the next time a room
+      // opens up admin re-tries cleanly.
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        error: 'ไม่มีห้องว่างที่ตรงกับเงื่อนไขการจอง (ประเภท/ชั้น)',
+        code: 'NO_VACANT_ROOM_MATCH',
+        hint: 'รอห้องว่าง หรือเปิด /admin#rooms มอบหมายห้องด้วยตนเอง '
+            + 'หรือใช้ปุ่ม "ปรับสถานะ" ที่หน้า booking',
+      });
+    }
+    {
       assignedRoomId = candidate.id;
       // Apply reservation in the source the candidate came from. If the
       // room exists ONLY in rooms_v2, mirror a minimal rooms blob entry too
@@ -9323,15 +9428,27 @@ app.post('/api/contracts/:id/template', sameOrigin, csrfGuard, requireAuth, requ
           code: 'CONTRACT_LOCKED',
         });
       }
-      // Verify the template exists (when set).
+      // Verify the template exists AND is enabled. Without the
+      // `enabled` check, admin disabled a retired template via the
+      // set-default endpoint (which DOES enforce TEMPLATE_DISABLED),
+      // but could still assign it directly to a contract via this
+      // route. Result: the next PDF render snapshotted the retired
+      // version, often diverging from what admin intended.
       if (templateId != null) {
         const t = await client.query(
-          `SELECT id FROM contract_templates WHERE id=$1 AND deleted_at IS NULL`,
+          `SELECT id, enabled FROM contract_templates WHERE id=$1 AND deleted_at IS NULL`,
           [templateId]
         );
         if (!t.rows.length) {
           await client.query('ROLLBACK');
           return res.status(404).json({ error: 'template not found' });
+        }
+        if (!t.rows[0].enabled) {
+          await client.query('ROLLBACK');
+          return res.status(409).json({
+            error: 'template ถูก disable อยู่ — เปิดใช้งานก่อนกำหนดให้สัญญา',
+            code: 'TEMPLATE_DISABLED',
+          });
         }
       }
       const { rows } = await client.query(
@@ -9799,15 +9916,27 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
           // Mark booking as 'completed' so admin sees it isn't a pending
           // backlog item anymore. Best-effort: pre-migration deploys
           // without the column just skip.
+          //
+          // Status guard: only advance an actually-eligible booking.
+          // Previously this UPDATE had no WHERE-status clause and
+          // happily resurrected `rejected`/`cancelled` bookings as
+          // `completed` — bypassing BOOKING_TRANSITIONS which forbids
+          // those edges. The blob path below mirrors the same guard.
+          const allowedFromForQuickInvite = ['pending', 'reviewing', 'approved'];
           try {
             await client.query(
-              `UPDATE bookings SET status='completed', updated_at=NOW() WHERE external_id=$1`,
-              [bookingId]
+              `UPDATE bookings
+                  SET status='completed', updated_at=NOW()
+                WHERE external_id=$1
+                  AND status = ANY($2::text[])`,
+              [bookingId, allowedFromForQuickInvite]
             );
           } catch (err) {
             if (err.code !== '42703' && err.code !== '42P01') throw err;
           }
-          if (bookingCarryoverList && bookingCarryoverIdx >= 0) {
+          if (bookingCarryoverList && bookingCarryoverIdx >= 0
+              && allowedFromForQuickInvite.includes(
+                   bookingCarryoverList[bookingCarryoverIdx]?.status || 'pending')) {
             bookingCarryoverList[bookingCarryoverIdx] = {
               ...bookingCarryoverList[bookingCarryoverIdx],
               status: 'completed',
@@ -10031,6 +10160,20 @@ app.post('/api/admin/contract-invitations/:id/approve',
           error: `อนุมัติได้เฉพาะ invitation สถานะ submitted (ตอนนี้: ${inv.status})`,
           code: 'BAD_STATUS',
           currentStatus: inv.status,
+        });
+      }
+      // Hard-fail when the invitation has no tenant linked. Without
+      // this, the whole "apply draft → tenant row" block below was
+      // silently skipped: contract still locked, welcome bill still
+      // fired, success/audit pretended to succeed — but address,
+      // emergency contact, citizen ID, and photos all vanished. Admin
+      // saw "approved + locked" with no idea data was dropped.
+      if (!inv.tenant_id) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'invitation นี้ไม่ได้ผูกกับผู้เช่า — ไม่สามารถอนุมัติได้',
+          code: 'TENANT_REQUIRED',
+          hint: 'ลบ invitation เก่าและออกใหม่หลังจากผูก tenant กับ contract',
         });
       }
       const draft = inv.draft || {};

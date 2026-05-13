@@ -369,30 +369,6 @@ async function tickBillGen(pool, flags, now, state) {
       // — manual bill gen at server.js:2287 already does this; scheduler
       // previously didn't, so a one_off charge would re-bill every month
       // forever (real data bug found in May 2026 cross-feature audit).
-      let recurring = [];
-      let usedOneOffIds = [];
-      if (flags.recurringCharges?.enabled) {
-        try {
-          const params = [];
-          const ors = [];
-          if (tenantId) { params.push(tenantId); ors.push(`tenant_id = $${params.length}`); }
-          params.push(room.id); ors.push(`room_id = $${params.length}`);
-          const rc = await pool.query(
-            `SELECT id, label, amount, frequency, start_at, end_at FROM recurring_charges
-               WHERE active = TRUE AND (${ors.join(' OR ')})
-                 AND (start_at IS NULL OR start_at <= CURRENT_DATE)
-                 AND (end_at IS NULL OR end_at >= CURRENT_DATE)`,
-            params
-          );
-          // Honor `frequency` (monthly/quarterly/one_off) so quarterly
-          // charges only fire every 3 months anchored to start_at. Without
-          // this the scheduler kept billing quarterly fees every month.
-          const applicable = rc.rows.filter((r) => billing.isChargeApplicableForPeriod(r, period));
-          recurring = applicable.map((r) => ({ label: r.label, amount: Number(r.amount) }));
-          usedOneOffIds = applicable.filter((r) => r.frequency === 'one_off').map((r) => r.id);
-        } catch { /* table may not exist on older deployments */ }
-      }
-
       // Pull previous overdue bill for late-fee carry-over (matches the
       // manual generate path so totals are identical between both routes).
       let previous = null;
@@ -426,16 +402,44 @@ async function tickBillGen(pool, flags, now, state) {
         );
         if (cq.rows[0]) discountPct = Number(cq.rows[0].discount_pct) || 0;
       } catch { /* legacy deploys without contracts table */ }
-      const bill = billing.buildBill({ room, config, features: flags, previous, recurring, period, dueDate, discountPct });
-      // Transactional bill insert + one_off deactivation. Previously
-      // these were two separate pool queries; a process crash or DB
-      // error between them left one_off charges active=TRUE forever,
-      // and the next bulk run re-billed them. BEGIN/COMMIT keeps the
-      // pair atomic. See the matching block in routes/bills-extras.js
-      // for the manual bulk-generate path.
+      // Transactional bill insert + one_off deactivation. Reading
+      // recurring INSIDE the tx with FOR UPDATE means an admin editing
+      // /deleting a recurring row in another tab waits for our tx to
+      // commit — otherwise admin's PUT could land between our SELECT
+      // and INSERT, and the tenant got billed for the stale amount
+      // while admin thinks their edit took effect. Matches the manual
+      // bulk-generate path in routes/bills-extras.js.
       const billClient = await pool.connect();
+      let recurring = [];
+      let usedOneOffIds = [];
       try {
         await billClient.query('BEGIN');
+        if (flags.recurringCharges?.enabled) {
+          try {
+            const params = [];
+            const ors = [];
+            if (tenantId) { params.push(tenantId); ors.push(`tenant_id = $${params.length}`); }
+            params.push(room.id); ors.push(`room_id = $${params.length}`);
+            const rc = await billClient.query(
+              `SELECT id, label, amount, frequency, start_at, end_at FROM recurring_charges
+                 WHERE active = TRUE AND (${ors.join(' OR ')})
+                   AND (start_at IS NULL OR start_at <= CURRENT_DATE)
+                   AND (end_at IS NULL OR end_at >= CURRENT_DATE)
+                 FOR UPDATE`,
+              params
+            );
+            // Honor `frequency` (monthly/quarterly/one_off) so quarterly
+            // charges only fire every 3 months anchored to start_at. Without
+            // this the scheduler kept billing quarterly fees every month.
+            const applicable = rc.rows.filter((r) => billing.isChargeApplicableForPeriod(r, period));
+            recurring = applicable.map((r) => ({ label: r.label, amount: Number(r.amount) }));
+            usedOneOffIds = applicable.filter((r) => r.frequency === 'one_off').map((r) => r.id);
+          } catch (rcErr) {
+            // table may not exist on older deployments — leave recurring=[]
+            if (rcErr.code !== '42P01') throw rcErr;
+          }
+        }
+        const bill = billing.buildBill({ room, config, features: flags, previous, recurring, period, dueDate, discountPct });
         const otherJson = JSON.stringify(recurring || []);
         const ins = await billClient.query(
           `INSERT INTO bills (bill_no, tenant_id, room_id, period, rent,
