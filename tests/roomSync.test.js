@@ -31,6 +31,13 @@ test('normaliseRoomsObject converts legacy room blob to rooms_v2 rows', () => {
     room_type: 'deluxe',
     status: 'occupied',
     rent_price: 5800,
+    // Override fields (pricing resolver v1): null when admin hasn't set
+    // a per-room override on this room. Bill engine then uses contract
+    // monthly_rent or formula via services/pricing.js.
+    rent_override: null,
+    rent_override_reason: null,
+    rent_override_at: null,
+    rent_override_by: null,
     deposit_price: 11600,
     wifi_fee: 250,
     view_type: 'city',
@@ -42,6 +49,22 @@ test('normaliseRoomsObject converts legacy room blob to rooms_v2 rows', () => {
     bed_count: 1,
     notes: 'near lift',
   });
+});
+
+test('normaliseRoomsObject carries rentOverride from blob → rooms_v2 row', () => {
+  // Admin set a special rate on this room via /admin#rooms. roomSync
+  // must persist the override + reason on the v2 row so the resolver
+  // can read it whichever side the data is loaded from.
+  const { rooms } = roomSync.normaliseRoomsObject({
+    305: {
+      id: '305', floor: 3, no: 5, type: 'studio',
+      rent: 6800,
+      rentOverride: 5500,
+      rentOverrideReason: 'small unit',
+    },
+  });
+  assert.equal(rooms[0].rent_override, 5500);
+  assert.equal(rooms[0].rent_override_reason, 'small unit');
 });
 
 test('rowToBlobRoom emits the legacy shape expected by admin/public UI', () => {
@@ -69,6 +92,26 @@ test('rowToBlobRoom emits the legacy shape expected by admin/public UI', () => {
   assert.equal(blob.tenant, null);
   assert.equal(blob.parking, true);
   assert.equal(blob.kitchen, true);
+  // Override fields propagate back into the blob — admin UI reads them
+  // without joining to rooms_v2.
+  assert.equal(blob.rentOverride, null);
+});
+
+test('rowToBlobRoom carries rent_override back into the blob shape', () => {
+  const blob = roomSync.rowToBlobRoom({
+    room_code: '305', floor: 3, room_no: 5, room_type: 'studio',
+    status: 'vacant', rent_price: 6800,
+    rent_override: 5500,
+    rent_override_reason: 'small unit',
+    rent_override_at: '2026-05-15T10:00:00Z',
+    rent_override_by: 'admin',
+    deposit_price: 11000, wifi_fee: 250,
+    view_type: '', has_balcony: false, has_parking: false,
+    has_kitchen: false, has_ac: true,
+  });
+  assert.equal(blob.rentOverride, 5500);
+  assert.equal(blob.rentOverrideReason, 'small unit');
+  assert.equal(blob.rentOverrideBy, 'admin');
 });
 
 test('upsertRoomsV2FromJsonb dry-run reports inserts/updates without writes', async () => {

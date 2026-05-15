@@ -107,6 +107,16 @@ function normaliseRoomForV2(key, room) {
   const rent = positiveMoney(room.rent ?? room.rentPrice ?? room.monthlyRent, defaults.rent);
   const deposit = nonNegativeMoney(room.deposit ?? room.depositPrice, rent * 2);
   const wifi = nonNegativeMoney(room.wifi ?? room.wifiFee, 0);
+  // Per-room override — set by admin from /admin#rooms when this specific
+  // room needs a non-formula rate. Blob shape uses camelCase rentOverride;
+  // rooms_v2 column is rent_override. Either source feeds the v2 row.
+  const overrideRaw = room.rent_override ?? room.rentOverride;
+  const override = overrideRaw == null || overrideRaw === ''
+    ? null
+    : (Number.isFinite(Number(overrideRaw)) && Number(overrideRaw) > 0 ? Number(Number(overrideRaw).toFixed(2)) : null);
+  const overrideReason = asText(room.rent_override_reason ?? room.rentOverrideReason, 500);
+  const overrideAt = room.rent_override_at ?? room.rentOverrideAt ?? null;
+  const overrideBy = asText(room.rent_override_by ?? room.rentOverrideBy, 64);
 
   return {
     room_code: roomCode,
@@ -115,6 +125,10 @@ function normaliseRoomForV2(key, room) {
     room_type: roomType,
     status: normaliseStatus(room.status),
     rent_price: rent,
+    rent_override: override,
+    rent_override_reason: overrideReason,
+    rent_override_at: overrideAt,
+    rent_override_by: overrideBy,
     deposit_price: deposit,
     wifi_fee: wifi,
     view_type: asText(room.view ?? room.viewType, 64),
@@ -189,16 +203,21 @@ async function upsertRoomsV2FromJsonb(pool, opts = {}) {
       await client.query(
         `INSERT INTO rooms_v2
            (room_code, floor, room_no, room_type, status, rent_price,
+            rent_override, rent_override_reason, rent_override_at, rent_override_by,
             deposit_price, wifi_fee, view_type, has_balcony, has_parking,
             has_kitchen, has_ac, size_sqm, bed_count, notes, deleted_at)
          VALUES
-           ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,NULL)
+           ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,NULL)
          ON CONFLICT (room_code) DO UPDATE SET
            floor=EXCLUDED.floor,
            room_no=EXCLUDED.room_no,
            room_type=EXCLUDED.room_type,
            status=EXCLUDED.status,
            rent_price=EXCLUDED.rent_price,
+           rent_override=EXCLUDED.rent_override,
+           rent_override_reason=EXCLUDED.rent_override_reason,
+           rent_override_at=EXCLUDED.rent_override_at,
+           rent_override_by=EXCLUDED.rent_override_by,
            deposit_price=EXCLUDED.deposit_price,
            wifi_fee=EXCLUDED.wifi_fee,
            view_type=EXCLUDED.view_type,
@@ -213,7 +232,9 @@ async function upsertRoomsV2FromJsonb(pool, opts = {}) {
            updated_at=NOW()`,
         [
           room.room_code, room.floor, room.room_no, room.room_type, room.status,
-          room.rent_price, room.deposit_price, room.wifi_fee, room.view_type,
+          room.rent_price, room.rent_override, room.rent_override_reason,
+          room.rent_override_at, room.rent_override_by,
+          room.deposit_price, room.wifi_fee, room.view_type,
           room.has_balcony, room.has_parking, room.has_kitchen, room.has_ac,
           room.size_sqm, room.bed_count, room.notes,
         ]
@@ -239,6 +260,13 @@ function rowToBlobRoom(row) {
   const defaults = TYPE_DEFAULTS[roomType] || TYPE_DEFAULTS.standard;
   const rent = positiveMoney(row.rent_price, defaults.rent);
   const deposit = nonNegativeMoney(row.deposit_price, rent * 2);
+  // Carry the override forward into the JSONB blob so the legacy admin
+  // UI can read it without joining to rooms_v2. Bill generation reads
+  // either shape via services/pricing.js#resolveBillingRent.
+  const overrideRaw = row.rent_override;
+  const rentOverride = overrideRaw == null || overrideRaw === ''
+    ? null
+    : (Number.isFinite(Number(overrideRaw)) && Number(overrideRaw) > 0 ? Number(overrideRaw) : null);
   return {
     id: row.room_code,
     floor: Number(row.floor),
@@ -246,6 +274,10 @@ function rowToBlobRoom(row) {
     type: roomType,
     status: normaliseStatus(row.status),
     rent,
+    rentOverride,
+    rentOverrideReason: row.rent_override_reason || null,
+    rentOverrideAt: row.rent_override_at || null,
+    rentOverrideBy: row.rent_override_by || null,
     deposit,
     water: 0,
     elec: 0,

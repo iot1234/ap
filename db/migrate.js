@@ -682,6 +682,18 @@ async function migrate(pool, opts = {}) {
     CREATE INDEX IF NOT EXISTS idx_rooms_v2_floor ON rooms_v2(floor) WHERE deleted_at IS NULL;
     CREATE INDEX IF NOT EXISTS idx_rooms_v2_status ON rooms_v2(status) WHERE deleted_at IS NULL;
 
+    -- Per-room price override. NULL = use formula (config.rates +
+    -- premiums) from /admin#pricing. Set when admin needs a special rate
+    -- for THIS room (damaged unit, smaller layout, loyalty deal). Used by
+    -- services/pricing.js#resolveBillingRent for vacant rooms — once a
+    -- contract is signed, the rent is locked in contracts.monthly_rent
+    -- and the override no longer affects bills. Audit fields document
+    -- "why" so a future admin understands the deviation.
+    ALTER TABLE rooms_v2 ADD COLUMN IF NOT EXISTS rent_override NUMERIC(10,2);
+    ALTER TABLE rooms_v2 ADD COLUMN IF NOT EXISTS rent_override_reason TEXT;
+    ALTER TABLE rooms_v2 ADD COLUMN IF NOT EXISTS rent_override_at TIMESTAMPTZ;
+    ALTER TABLE rooms_v2 ADD COLUMN IF NOT EXISTS rent_override_by TEXT;
+
     -- payments(tenant_id) is a frequent filter (server.js: tenant payments
     -- list at GET /api/tenant/payments). Add index to keep the query off a
     -- seq scan as the table grows.

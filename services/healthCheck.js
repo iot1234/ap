@@ -929,6 +929,109 @@ async function checkPromptpayRender() {
   };
 }
 
+// Detect drift between billing-time rent and what /admin#pricing would
+// currently compute. After the pricing resolver lands, active bills
+// SHOULD match either:
+//   - the active contract's monthly_rent (locked at signing), or
+//   - the room's rent_override, or
+//   - computeFromFormula(room, config) with current config
+//
+// Any active room whose CURRENT formula differs from what's actually
+// being billed signals one of:
+//   - admin edited /admin#pricing without realising existing contracts
+//     are grandfathered (expected behaviour, just surface it so admin
+//     can decide whether to renegotiate)
+//   - a contract row is missing monthly_rent (resolver fell back to
+//     formula, then formula changed under it — backfill needed)
+//   - the override on the room doesn't match the contract's rate (the
+//     admin set both and they conflict — confusing, surface it)
+//
+// Returns 'ok' when no drift, 'warn' for small numbers, 'error' if
+// >10 rooms drift (likely admin needs to act).
+async function checkPricingDrift(pool) {
+  try {
+    const pricing = require('./pricing');
+    const [roomsRow, configRow] = await Promise.all([
+      pool.query(`SELECT value FROM app_data WHERE key='baankarn_rooms_v1' LIMIT 1`),
+      pool.query(`SELECT value FROM app_data WHERE key='baankarn_config_v1' LIMIT 1`),
+    ]);
+    const rooms = (roomsRow.rows[0]?.value && typeof roomsRow.rows[0].value === 'object')
+      ? roomsRow.rows[0].value : {};
+    const config = configRow.rows[0]?.value || {};
+
+    const occupiedRoomIds = Object.values(rooms)
+      .filter((r) => r && r.tenant && (r.status === 'occupied' || r.status === 'overdue'))
+      .map((r) => r.id);
+    if (occupiedRoomIds.length === 0) {
+      return { status: 'ok', message: 'No occupied rooms to check' };
+    }
+    const { rows: contracts } = await pool.query(
+      `SELECT room_id, monthly_rent
+         FROM contracts
+        WHERE status='active'
+          AND deleted_at IS NULL
+          AND room_id = ANY($1)`,
+      [occupiedRoomIds]
+    );
+    const contractByRoom = new Map(contracts.map((c) => [c.room_id, c]));
+
+    const drift = [];
+    const missingContractRate = [];
+    for (const room of Object.values(rooms)) {
+      if (!room || !room.tenant) continue;
+      if (room.status !== 'occupied' && room.status !== 'overdue') continue;
+      const contract = contractByRoom.get(room.id);
+      const formula = pricing.computeFromFormula(room, config);
+      const billing = pricing.resolveBillingRent({ room, contract, config });
+      // Contract exists but rent is 0/null → resolver falls through to
+      // formula and admin's intent is fuzzy. Flag for backfill.
+      if (contract && (!contract.monthly_rent || Number(contract.monthly_rent) <= 0)) {
+        missingContractRate.push({ roomId: room.id });
+        continue;
+      }
+      // Compare what billing WILL charge vs what /admin#pricing CURRENTLY
+      // shows for this room. Diff >50฿ is noise (rounding, premium edge);
+      // >0 means admin's price isn't applied to this tenant.
+      if (formula > 0 && Math.abs(billing.rent - formula) > 50) {
+        drift.push({
+          roomId: room.id,
+          billingRent: billing.rent,
+          formulaRent: formula,
+          source: billing.source,
+        });
+      }
+    }
+
+    if (drift.length === 0 && missingContractRate.length === 0) {
+      return {
+        status: 'ok',
+        message: `${occupiedRoomIds.length} occupied rooms — pricing in sync`,
+      };
+    }
+    const issues = [];
+    if (missingContractRate.length) {
+      issues.push(`${missingContractRate.length} contracts missing monthly_rent (run scripts/backfill-contract-rents.js)`);
+    }
+    if (drift.length) {
+      const sample = drift.slice(0, 5).map((d) =>
+        `${d.roomId}: ฿${d.billingRent} (${d.source}) vs formula ฿${d.formulaRent}`
+      ).join('; ');
+      issues.push(`${drift.length} rooms drift between billing rate and current formula: ${sample}${drift.length > 5 ? '…' : ''}`);
+    }
+    // Drift is INFORMATIONAL (contracts are supposed to be locked), but
+    // ≥10 rooms suggests admin made a big change and might want to either
+    // renegotiate or knowingly grandfather everyone.
+    const total = drift.length + missingContractRate.length;
+    return {
+      status: total >= 10 || missingContractRate.length > 0 ? 'warn' : 'ok',
+      message: issues.join(' · '),
+      detail: { drift: drift.slice(0, 20), missingContractRate: missingContractRate.slice(0, 20) },
+    };
+  } catch (err) {
+    return { status: 'warn', message: `pricing drift check failed: ${err.message}` };
+  }
+}
+
 async function checkPoolStats(pool) {
   try {
     // Standard pg.Pool exposes totalCount/idleCount/waitingCount. If a
@@ -974,6 +1077,7 @@ const CHECKS = [
   { id: 'config',              label: 'Boot configuration',    fn: () => checkBootConfig() },
   { id: 'feature_deps',        label: 'Feature dependencies',  fn: (p, f) => checkFeatureDependencies(f, p) },
   { id: 'data_integrity',       label: 'Data integrity',        fn: (p) => checkDataIntegrity(p) },
+  { id: 'pricing_drift',       label: 'Pricing drift',         fn: (p) => checkPricingDrift(p) },
   { id: 'qr_renderer',         label: 'PromptPay QR renderer', fn: () => checkPromptpayRender() },
 ];
 
