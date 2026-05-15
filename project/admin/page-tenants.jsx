@@ -7,10 +7,10 @@
 
 const { useState, useMemo } = React;
 
-function PageTenants({ rooms, setRooms, addActivity, setToast }) {
+function PageTenants({ rooms, setRooms, config, addActivity, setToast }) {
   const C = window.ADMIN_C;
   const ADMIN_ROOM_TYPES = window.ADMIN_ROOM_TYPES;
-  const { fmt, fmtCurrency } = window;
+  const { fmt, fmtCurrency, resolveRoomRent } = window;
   const { Card, Btn, IconBtn, Avatar, Pill, StatusBadge, DataTable, Drawer,
           SearchInput, FilterChip, PageContainer, PageHeader, SectionHeading,
           DefList, Tabs, Modal, Input, Select, Textarea } = window;
@@ -33,14 +33,14 @@ function PageTenants({ rooms, setRooms, addActivity, setToast }) {
         roomId: r.id,
         floor: r.floor,
         type: r.type,
-        rent: r.rent,
+        rent: resolveRoomRent ? resolveRoomRent(r, config).rent : r.rent,
         since: r.since,
         contractEnd: r.contractEnd,
         status: r.status,
         room: r,
       }))
       .sort((a, b) => a.roomId.localeCompare(b.roomId));
-  }, [rooms]);
+  }, [rooms, config]);
 
   const filtered = useMemo(() => tenants.filter(t => {
     if (filter === 'overdue' && t.status !== 'overdue') return false;
@@ -758,7 +758,7 @@ function TabContract({ t, setToast, addActivity, setRooms, onClosed }) {
   const C = window.ADMIN_C;
   const { fmtCurrency } = window;
   const { Card, DefList, Btn, Pill } = window;
-  const apiCall = window.apiCall;
+  const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
   const [contract, setContract] = React.useState(null);
   const [loading, setLoading] = React.useState(true);
   const [tenantDbId, setTenantDbId] = React.useState(null);
@@ -1620,7 +1620,7 @@ function ContractPhotoBox({ label, url, C }) {
 function CheckInModal({ tenantId, tenant, onClose, onDone, onError }) {
   const C = window.ADMIN_C;
   const { Modal, Btn } = window;
-  const apiCall = window.apiCall;
+  const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
   const [form, setForm] = React.useState({
     moveInDate: new Date().toISOString().slice(0, 10),
     monthlyRent: String(tenant.rent || ''),
@@ -1719,7 +1719,7 @@ function CheckInModal({ tenantId, tenant, onClose, onDone, onError }) {
 function ContractQuickEditModal({ contract, onClose, onSaved, onError }) {
   const C = window.ADMIN_C;
   const { Modal, Btn } = window;
-  const apiCall = window.apiCall;
+  const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
   const [form, setForm] = React.useState({
     discountPct: contract.discount_pct != null ? String(contract.discount_pct) : '0',
     termMonths:  contract.term_months  != null ? String(contract.term_months)  : '',

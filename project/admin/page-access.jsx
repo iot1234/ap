@@ -81,7 +81,8 @@ function PageAccess({ setToast }) {
       return;
     }
     try {
-      const r = await window.apiFetch('/api/access/log', {
+      const apiFetch = window.requireApiFetch ? window.requireApiFetch() : window.apiFetch;
+      const r = await apiFetch('/api/access/log', {
         method: 'POST',
         body: JSON.stringify(form),
       });

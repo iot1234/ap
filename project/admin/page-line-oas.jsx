@@ -10,7 +10,7 @@ function PageLineOas({ setToast }) {
   const C = window.ADMIN_C;
   const { Card, Btn, Input, Toggle, Pill, PageContainer, PageHeader,
           SectionHeading, EmptyState, Modal } = window;
-  const apiFetch = window.apiFetch;
+  const apiFetch = window.requireApiFetch ? window.requireApiFetch() : window.apiFetch;
 
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);

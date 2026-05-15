@@ -9,7 +9,7 @@ const { useState, useEffect, useMemo } = React;
 function PageLineBindings({ setToast }) {
   const C = window.ADMIN_C;
   const { Card, SectionHeading, Btn, Pill, PageContainer, PageHeader, EmptyState, Modal } = window;
-  const apiFetch = window.apiFetch;
+  const apiFetch = window.requireApiFetch ? window.requireApiFetch() : window.apiFetch;
   const [items, setItems] = useState([]);
   const [counts, setCounts] = useState({});
   const [filter, setFilter] = useState('actionable');  // actionable | all | bound | blocked

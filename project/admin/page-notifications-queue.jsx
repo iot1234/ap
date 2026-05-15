@@ -13,7 +13,7 @@ const { useState, useEffect } = React;
 function PageNotificationsQueue({ setToast }) {
   const C = window.ADMIN_C;
   const { Card, Pill, PageContainer, PageHeader, EmptyState, Btn } = window;
-  const apiFetch = window.apiFetch;
+  const apiFetch = window.requireApiFetch ? window.requireApiFetch() : window.apiFetch;
   const [items, setItems] = useState([]);
   const [filter, setFilter] = useState('pending');
   const [busy, setBusy] = useState(null);

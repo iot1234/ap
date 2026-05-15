@@ -25,6 +25,20 @@ module.exports = function buildRoomsRouter(ctx) {
     return `${floor}${String(roomNo).padStart(2, '0')}`;
   }
 
+  function rentOverrideFromBody(body, username) {
+    const raw = body?.rentOverride;
+    const rentOverride = raw === undefined || raw === null || raw === ''
+      ? null
+      : Number(raw);
+    const hasOverride = Number.isFinite(rentOverride) && rentOverride > 0;
+    return {
+      rentOverride: hasOverride ? rentOverride : null,
+      rentOverrideReason: hasOverride ? (body.rentOverrideReason || null) : null,
+      rentOverrideAt: hasOverride ? (body.rentOverrideAt || new Date().toISOString()) : null,
+      rentOverrideBy: hasOverride ? (body.rentOverrideBy || username || null) : null,
+    };
+  }
+
   // GET /api/rooms — list (filterable)
   r.get('/', requireAuth, async (req, res) => {
     const params = [];
@@ -93,19 +107,24 @@ module.exports = function buildRoomsRouter(ctx) {
     async (req, res) => {
       const b = req.body;
       const code = b.roomCode || makeRoomCode(b.floor, b.roomNo);
+      const override = rentOverrideFromBody(b, req.session.user.username);
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
         const { rows } = await client.query(
           `INSERT INTO rooms_v2
              (room_code, floor, room_no, room_type, rent_price, deposit_price,
+              rent_override, rent_override_reason, rent_override_at, rent_override_by,
               wifi_fee, view_type, has_balcony, has_parking, has_kitchen, has_ac,
               size_sqm, bed_count, notes)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
            RETURNING *`,
           [
             code, b.floor, b.roomNo, b.roomType,
-            b.rentPrice, b.depositPrice, b.wifiFee || 0,
+            b.rentPrice, b.depositPrice,
+            override.rentOverride, override.rentOverrideReason,
+            override.rentOverrideAt, override.rentOverrideBy,
+            b.wifiFee || 0,
             b.viewType || null,
             !!b.hasBalcony, !!b.hasParking, !!b.hasKitchen, b.hasAc !== false,
             b.sizeSqm || null, b.bedCount || 1,
@@ -147,6 +166,25 @@ module.exports = function buildRoomsRouter(ctx) {
       for (const [k, col] of Object.entries(map)) {
         if (b[k] !== undefined) {
           fields.push(`${col} = $${i++}`); params.push(b[k]);
+        }
+      }
+      if (Object.prototype.hasOwnProperty.call(b, 'rentOverride')) {
+        const override = rentOverrideFromBody(b, req.session.user.username);
+        fields.push(`rent_override = $${i++}`); params.push(override.rentOverride);
+        fields.push(`rent_override_reason = $${i++}`); params.push(override.rentOverrideReason);
+        fields.push(`rent_override_at = $${i++}`); params.push(override.rentOverrideAt);
+        fields.push(`rent_override_by = $${i++}`); params.push(override.rentOverrideBy);
+      } else {
+        const overrideAuditMap = {
+          rentOverrideReason: 'rent_override_reason',
+          rentOverrideAt: 'rent_override_at',
+          rentOverrideBy: 'rent_override_by',
+        };
+        for (const [k, col] of Object.entries(overrideAuditMap)) {
+          if (b[k] !== undefined) {
+            fields.push(`${col} = $${i++}`);
+            params.push(b[k]);
+          }
         }
       }
       if (!fields.length) return res.status(400).json({ error: 'nothing to update' });

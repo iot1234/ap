@@ -10,7 +10,7 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
   const ADMIN_ROOM_TYPES = window.ADMIN_ROOM_TYPES;
   const ADMIN_ROOM_TYPE_KEYS = window.ADMIN_ROOM_TYPE_KEYS;
   const ADMIN_VIEWS = window.ADMIN_VIEWS;
-  const { fmt, fmtCurrency } = window;
+  const { fmt, fmtCurrency, resolveRoomRent } = window;
   const { Card, Btn, IconBtn, Input, Select, Toggle, Textarea, StatusBadge, Pill, DataTable,
           Drawer, Modal, SearchInput, FilterChip, PageContainer, PageHeader, SectionHeading, DefList } = window;
 
@@ -369,7 +369,10 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
     },
     {
       key: 'rent',    label: 'ค่าเช่า',  align: 'right', minWidth: 100,
-      render: r => <span style={{ fontWeight: 600, fontFamily: 'Sora, sans-serif' }}>{fmtCurrency(r.rent)}</span>,
+      render: r => {
+        const info = resolveRoomRent ? resolveRoomRent(r, config) : { rent: r.rent };
+        return <span style={{ fontWeight: 600, fontFamily: 'Sora, sans-serif' }}>{fmtCurrency(info.rent)}</span>;
+      },
     },
     {
       key: 'utilities', label: 'น้ำ/ไฟ', align: 'right', minWidth: 110,
@@ -900,7 +903,7 @@ function RoomEditForm({ room, onUpdate, config }) {
   const ADMIN_ROOM_TYPES = window.ADMIN_ROOM_TYPES;
   const ADMIN_ROOM_TYPE_KEYS = window.ADMIN_ROOM_TYPE_KEYS;
   const ADMIN_VIEWS = window.ADMIN_VIEWS;
-  const { fmt, fmtCurrency, computeRoomRent } = window;
+  const { fmt, fmtCurrency, computeRoomRent, resolveRoomRent } = window;
   const { Input, Select, Toggle, Textarea, SectionHeading, DefList, Pill, Btn } = window;
   const apiFetch = window.requireApiFetch ? window.requireApiFetch() : window.apiFetch;
 
@@ -964,11 +967,48 @@ function RoomEditForm({ room, onUpdate, config }) {
 
   const features = {
     balcony: room.balcony,
-    ac: ADMIN_ROOM_TYPES[room.type].ac,
+    ac: (room.ac ?? room.hasAc ?? room.has_ac) === undefined
+      ? (ADMIN_ROOM_TYPES[room.type] || ADMIN_ROOM_TYPES.standard).ac
+      : !!(room.ac ?? room.hasAc ?? room.has_ac),
     parking: room.parking,
     kitchen: room.kitchen,
   };
   const computedRent = computeRoomRent(room.type, room.floor, room.view, features, config);
+  const rentInfo = resolveRoomRent ? resolveRoomRent(room, config) : {
+    rent: room.rent,
+    source: 'legacy',
+    formula: computedRent,
+    override: room.rentOverride || null,
+  };
+  const effectiveRent = Number(rentInfo.rent) || 0;
+  const overrideRent = rentInfo.override == null ? '' : rentInfo.override;
+
+  const clearRentOverride = () => {
+    onUpdate({
+      rent: computedRent,
+      deposit: computedRent * 2,
+      rentOverride: null,
+      rentOverrideReason: null,
+      rentOverrideAt: null,
+      rentOverrideBy: null,
+    });
+  };
+
+  const setRentOverride = (v) => {
+    const n = Number(v);
+    if (Number.isFinite(n) && n > 0) {
+      onUpdate({
+        rent: n,
+        deposit: n * 2,
+        rentOverride: n,
+        rentOverrideReason: room.rentOverrideReason || 'manual room price',
+        rentOverrideAt: new Date().toISOString(),
+        rentOverrideBy: 'admin-ui',
+      });
+    } else {
+      clearRentOverride();
+    }
+  };
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 22 }}>
@@ -1067,8 +1107,9 @@ function RoomEditForm({ room, onUpdate, config }) {
             { label: 'ชั้น',         value: `ชั้น ${room.floor}` },
             { label: 'ประเภท',     value: ADMIN_ROOM_TYPES[room.type].th },
             { label: 'ขนาด',         value: `${ADMIN_ROOM_TYPES[room.type].size} ตร.ม.` },
-            { label: 'ค่าเช่าปัจจุบัน', value: fmtCurrency(room.rent), bold: true },
+            { label: 'ค่าเช่าปัจจุบัน', value: fmtCurrency(effectiveRent), bold: true },
             { label: 'ราคาตามสูตร',   value: fmtCurrency(computedRent) },
+            { label: 'ที่มาราคา', value: rentInfo.source === 'override' ? 'ราคาพิเศษรายห้อง' : rentInfo.source === 'formula' ? 'สูตรจาก Pricing' : 'ค่าเดิม' },
           ]}
         />
       </div>
@@ -1133,10 +1174,11 @@ function RoomEditForm({ room, onUpdate, config }) {
         <SectionHeading title="ราคาและค่าใช้จ่าย" level={3} style={{ marginBottom: 10 }} />
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
           <Input
-            label="ค่าเช่ารายเดือน" type="number" suffix="บาท"
-            value={room.rent}
-            onChange={(v) => onUpdate({ rent: Number(v), deposit: Number(v) * 2 })}
-            hint="เปลี่ยนแปลงค่าเช่าจะอัพเดทเงินมัดจำอัตโนมัติ"
+            label="ราคาพิเศษรายห้อง" type="number" suffix="บาท"
+            value={overrideRent}
+            placeholder={String(computedRent || '')}
+            onChange={setRentOverride}
+            hint="ปล่อยว่างเพื่อใช้ราคาตามสูตรจากหน้า Pricing"
           />
           <Input
             label="เงินมัดจำ" type="number" suffix="บาท"
@@ -1167,9 +1209,16 @@ function RoomEditForm({ room, onUpdate, config }) {
         }}>
           <span style={{ fontSize: 13, color: C.accentInk }}>รวมค่าใช้จ่ายเดือนนี้</span>
           <span style={{ fontSize: 18, fontWeight: 700, color: C.accentInk, fontFamily: 'Sora, sans-serif' }}>
-            {fmtCurrency(room.rent + (room.water||0) + (room.elec||0) + (room.wifi||0))}
+            {fmtCurrency(effectiveRent + (room.water||0) + (room.elec||0) + (room.wifi||0))}
           </span>
         </div>
+        {rentInfo.source === 'override' ? (
+          <div style={{ marginTop: 10, display: 'flex', justifyContent: 'flex-end' }}>
+            <Btn variant="ghost" size="sm" onClick={clearRentOverride}>
+              ล้างราคาพิเศษ
+            </Btn>
+          </div>
+        ) : null}
       </div>
 
       {/* Tenant info — editable, allows creating new tenant for vacant rooms */}

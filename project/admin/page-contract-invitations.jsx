@@ -14,7 +14,7 @@ const { useState, useEffect, useCallback } = React;
 function PageContractInvitations({ setToast, addActivity }) {
   const C = window.ADMIN_C;
   const { Card, Btn, Modal, Pill, PageContainer, PageHeader } = window;
-  const apiCall = window.apiCall;
+  const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
 
   const [tab, setTab] = useState('submitted');   // submitted | pending | closed
   const [invitations, setInvitations] = useState([]);
@@ -177,7 +177,7 @@ function PageContractInvitations({ setToast, addActivity }) {
 function ReviewModal({ invitation, onClose, onAction, onError }) {
   const C = window.ADMIN_C;
   const { Modal, Btn } = window;
-  const apiCall = window.apiCall;
+  const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
   const [detail, setDetail] = useState(null);
   const [busy, setBusy] = useState(false);
   const [rejectReason, setRejectReason] = useState('');

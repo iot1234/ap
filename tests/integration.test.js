@@ -169,6 +169,10 @@ test('room sync bridges legacy JSONB rooms and rooms_v2 both directions', () => 
     'rooms router must expose the documented bulk migration endpoint');
   assert.match(roomsRoute, /upsertJsonbRoomFromV2/,
     'rooms_v2 create/update/restore must mirror back into the legacy room blob');
+  assert.match(roomsRoute, /rentOverrideFromBody/,
+    'rooms_v2 create/update must preserve per-room rent override fields');
+  assert.match(roomsRoute, /rent_override/,
+    'rooms_v2 SQL must write rent_override so special room prices do not disappear');
   assert.match(roomsRoute, /ROOM_HAS_REFS/,
     'room delete/rename must refuse active references instead of orphaning rows');
 });
@@ -1553,6 +1557,12 @@ test('admin write pages use central CSRF-aware API helpers', () => {
     const src = fs.readFileSync(path.join(adminDir, file), 'utf8');
     assert.doesNotMatch(src, /window\.apiFetch\s*\|\|/,
       `${file} must not fall back to raw fetch when CSRF helper is unavailable`);
+    assert.doesNotMatch(src, /const\s+apiFetch\s*=\s*window\.apiFetch\b/,
+      `${file} must call requireApiFetch() before using apiFetch`);
+    assert.doesNotMatch(src, /const\s+apiCall\s*=\s*window\.apiCall\b/,
+      `${file} must call requireApiCall() before using apiCall`);
+    assert.doesNotMatch(src, /await\s+window\.api(?:Call|Fetch)\(/,
+      `${file} must not call window.apiCall/apiFetch directly`);
   }
 
   const bookings = fs.readFileSync(path.join(adminDir, 'page-bookings.jsx'), 'utf8');
@@ -3233,15 +3243,17 @@ test('contracts quick-invite uses vacant room inventory and auto-fills room pric
   const fs = require('node:fs');
   const path = require('node:path');
   const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-contracts.jsx'), 'utf8');
-  assert.match(src, /function PageContracts\(\{ setToast, addActivity, rooms = \{\} \}\)/,
+  assert.match(src, /function PageContracts\(\{ setToast, addActivity, rooms = \{\}, config \}\)/,
     'contracts page must accept rooms from shell props');
-  assert.match(src, /<QuickInviteModal[\s\S]{0,120}rooms=\{rooms\}/,
+  assert.match(src, /<QuickInviteModal[\s\S]{0,160}rooms=\{rooms\}[\s\S]{0,80}config=\{config\}/,
     'quick-invite modal must receive room inventory');
 
   const start = src.indexOf('function QuickInviteModal');
   assert.ok(start > 0, 'should find QuickInviteModal');
   const modal = src.slice(start, src.indexOf('const lbl =', start));
-  assert.match(modal, /function QuickInviteModal\(\{ rooms = \{\}, onClose, onSaved, onError \}\)/);
+  assert.match(modal, /function QuickInviteModal\(\{ rooms = \{\}, config, onClose, onSaved, onError \}\)/);
+  assert.match(modal, /resolveRoomRent\(room, config\)/,
+    'quick-invite rent must use the same formula-or-override resolver as billing');
   assert.match(modal, /const roomList = useMemo\(\(\) => Object\.values\(rooms \|\| \{\}\)/,
     'modal must derive room list from inventory');
   assert.match(modal, /const availableRooms = useMemo\(\(\) => roomList\.filter/,

@@ -935,7 +935,7 @@ function TabSystem({ onResetAll, rooms, setRooms, config, setConfig, bookings, s
 function SqlBackupSection({ setToast, addActivity }) {
   const C = window.ADMIN_C;
   const { Card, Btn, SectionHeading, Modal } = window;
-  const apiCall = window.apiCall;
+  const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
 
   const [busy, setBusy] = React.useState(false);
   const [list, setList] = React.useState([]);

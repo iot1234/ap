@@ -25,7 +25,7 @@ const GROUP_META = {
 function PageSecrets({ setToast }) {
   const C = window.ADMIN_C;
   const { Card, SectionHeading, Btn, Pill, PageContainer, PageHeader, Modal } = window;
-  const apiFetch = window.apiFetch;
+  const apiFetch = window.requireApiFetch ? window.requireApiFetch() : window.apiFetch;
   const [groups, setGroups] = useState({});
   const [editing, setEditing] = useState({});
   const [drafts, setDrafts] = useState({});

@@ -172,7 +172,8 @@ function PageMeters({ rooms, setToast }) {
       }
     }
     try {
-      const d = await window.apiCall(`/api/meters/${encodeURIComponent(roomId)}/readings`, {
+      const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
+      const d = await apiCall(`/api/meters/${encodeURIComponent(roomId)}/readings`, {
         method: 'POST',
         body: JSON.stringify({ meterType: type, reading: newVal, source: 'manual' }),
       });

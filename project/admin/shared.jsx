@@ -347,14 +347,56 @@ function deepMerge(a, b) {
 
 // --- Computed price for a single room (used by Pricing preview) -----------
 function computeRoomRent(type, floor, view, features, config) {
-  const base    = (config.rates[type] || {}).rent || ADMIN_ROOM_TYPES[type].baseRent;
-  const fp      = config.floorPremium[floor] || 0;
-  const vp      = config.viewPremium[view]   || 0;
-  const balcony = features?.balcony ? (config.featurePremium.balcony || 0) : 0;
-  const ac      = features?.ac      ? (config.featurePremium.ac      || 0) : 0;
-  const parking = features?.parking ? (config.featurePremium.parking || 0) : 0;
-  const kitchen = features?.kitchen ? (config.featurePremium.kitchen || 0) : 0;
+  const cfg = config || DEFAULT_CONFIG || {};
+  const defaults = ADMIN_ROOM_TYPES[type] || ADMIN_ROOM_TYPES.standard;
+  const base    = ((cfg.rates || {})[type] || {}).rent ?? defaults.baseRent;
+  const fp      = (cfg.floorPremium || {})[floor] || 0;
+  const vp      = (cfg.viewPremium || {})[view]   || 0;
+  const premiums = cfg.featurePremium || {};
+  const balcony = features?.balcony ? (premiums.balcony || 0) : 0;
+  const ac      = features?.ac      ? (premiums.ac      || 0) : 0;
+  const parking = features?.parking ? (premiums.parking || 0) : 0;
+  const kitchen = features?.kitchen ? (premiums.kitchen || 0) : 0;
   return base + fp + vp + balcony + ac + parking + kitchen;
+}
+
+function positiveMoneyOrNull(v) {
+  if (v === undefined || v === null || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function resolveRoomRent(room, config) {
+  if (!room || typeof room !== 'object') {
+    return { rent: 0, source: 'legacy', formula: 0, override: null };
+  }
+  const type = room.type || room.room_type || room.roomType || 'standard';
+  const typeDefault = ADMIN_ROOM_TYPES[type] || ADMIN_ROOM_TYPES.standard;
+  const acRaw = room.ac ?? room.hasAc ?? room.has_ac;
+  const features = {
+    balcony: !!(room.balcony || room.hasBalcony || room.has_balcony),
+    ac: acRaw === undefined ? !!typeDefault.ac : !!acRaw,
+    parking: !!(room.parking || room.hasParking || room.has_parking),
+    kitchen: !!(room.kitchen || room.hasKitchen || room.has_kitchen),
+  };
+  const formula = computeRoomRent(
+    type,
+    room.floor,
+    room.view ?? room.viewType ?? room.view_type,
+    features,
+    config
+  );
+  const snakeOverride = positiveMoneyOrNull(room.rent_override);
+  const camelOverride = positiveMoneyOrNull(room.rentOverride);
+  const override = snakeOverride ?? camelOverride;
+  if (override !== null) {
+    return { rent: override, source: 'override', formula, override };
+  }
+  if (Number.isFinite(Number(formula)) && Number(formula) > 0) {
+    return { rent: Number(formula), source: 'formula', formula, override: null };
+  }
+  const legacy = positiveMoneyOrNull(room.rent ?? room.rentPrice ?? room.rent_price) || 0;
+  return { rent: legacy, source: 'legacy', formula, override: null };
 }
 
 // --- Aggregate stats for dashboard ----------------------------------------
@@ -373,7 +415,8 @@ function computeStats(rooms, config) {
       const water = (r.waterUnits || 0) * waterRate;
       const elec  = (r.elecUnits  || 0) * elecRate;
       const wifi  = (r.wifi != null && r.wifi !== 0) ? r.wifi : wifiFee;
-      const t = (r.rent || 0) + water + elec + wifi;
+      const rentInfo = resolveRoomRent(r, config);
+      const t = (rentInfo.rent || 0) + water + elec + wifi;
       revenue += t;
       if (r.status === 'overdue') overdueAmt += t;
     }
@@ -528,7 +571,7 @@ Object.assign(window, {
   loadRooms, saveRooms, loadConfig, saveConfig,
   loadBookings, saveBookings, loadActivities, saveActivities,
   resetAll, deepMerge,
-  computeRoomRent, computeStats,
+  computeRoomRent, resolveRoomRent, computeStats,
   // export/import
   downloadFile, exportCSV, exportJSON, importJSON,
   exportRoomsCSV, exportTenantsCSV, exportBookingsCSV, exportBillsCSV, exportFullBackup,

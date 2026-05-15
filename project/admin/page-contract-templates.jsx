@@ -16,7 +16,7 @@ const { useState, useEffect, useMemo, useCallback } = React;
 function PageContractTemplates({ setToast, addActivity }) {
   const C = window.ADMIN_C;
   const { Card, Btn, Modal, Pill, PageContainer, PageHeader } = window;
-  const apiCall = window.apiCall;
+  const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
 
   const [list, setList] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -227,7 +227,7 @@ function PageContractTemplates({ setToast, addActivity }) {
 function TemplateEditor({ template, defaultClauses, onClose, onSaved, onError }) {
   const C = window.ADMIN_C;
   const { Modal, Btn } = window;
-  const apiCall = window.apiCall;
+  const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
   const isNew = !template;
 
   // Initialize form state from template or defaults.

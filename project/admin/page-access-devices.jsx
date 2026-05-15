@@ -14,7 +14,7 @@ const { useState, useEffect } = React;
 function PageAccessDevices({ setToast }) {
   const C = window.ADMIN_C;
   const { Card, Pill, PageContainer, PageHeader, EmptyState, Btn, Modal } = window;
-  const apiFetch = window.apiFetch;
+  const apiFetch = window.requireApiFetch ? window.requireApiFetch() : window.apiFetch;
   const [devices, setDevices] = useState([]);
   const [showNew, setShowNew] = useState(false);
   const [form, setForm] = useState({ deviceId: '', description: '' });

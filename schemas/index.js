@@ -106,12 +106,29 @@ schemas.checkOut = z.object({
 });
 
 // --- rooms ----------------------------------------------------------------
+const optionalPositiveMoney = z.preprocess(
+  (v) => (v === '' ? null : v),
+  z.coerce.number().positive().max(1_000_000).nullable().optional(),
+);
+const optionalTextOrNull = (max) => z.preprocess(
+  (v) => (v === '' ? null : v),
+  z.string().max(max).nullable().optional(),
+);
+const optionalIsoDateOrNull = z.preprocess(
+  (v) => (v === '' ? null : v),
+  z.string().datetime({ offset: true }).nullable().optional(),
+);
+
 schemas.createRoom = z.object({
   floor: z.coerce.number().int().min(1).max(99),
   roomNo: z.coerce.number().int().min(1).max(999),
   roomCode: z.string().max(32).optional(),
   roomType: z.enum(['standard', 'deluxe', 'suite', 'studio']),
   rentPrice: z.coerce.number().positive().max(1_000_000),
+  rentOverride: optionalPositiveMoney,
+  rentOverrideReason: optionalTextOrNull(500),
+  rentOverrideAt: optionalIsoDateOrNull,
+  rentOverrideBy: optionalTextOrNull(64),
   depositPrice: z.coerce.number().nonnegative().max(1_000_000),
   wifiFee: z.coerce.number().nonnegative().max(10_000).optional(),
   viewType: z.string().max(64).optional(),

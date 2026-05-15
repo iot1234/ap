@@ -27,11 +27,25 @@
 // The function is PURE — no DB, no I/O. Caller assembles the inputs.
 
 const ROOM_TYPE_DEFAULTS = Object.freeze({
-  standard: { rent: 4500 },
-  deluxe:   { rent: 5800 },
-  suite:    { rent: 7500 },
-  studio:   { rent: 6800 },
+  standard: { rent: 4500, ac: false },
+  deluxe:   { rent: 5800, ac: true },
+  suite:    { rent: 7500, ac: true },
+  studio:   { rent: 6800, ac: true },
 });
+
+function roomTypeOf(room) {
+  return String(room?.type || room?.room_type || room?.roomType || 'standard');
+}
+
+function roomViewOf(room) {
+  return room?.view ?? room?.view_type ?? room?.viewType;
+}
+
+function positiveNumberOrNull(v) {
+  if (v === undefined || v === null || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
 
 /**
  * Compute the formula-derived rent for a room from current config.
@@ -45,7 +59,7 @@ const ROOM_TYPE_DEFAULTS = Object.freeze({
 function computeFromFormula(room, config) {
   if (!room || typeof room !== 'object') return 0;
   const cfg = config || {};
-  const type = String(room.type || 'standard');
+  const type = roomTypeOf(room);
   const rates = cfg.rates || {};
   const r = rates[type];
   // Distinguish "admin explicitly set rate (even to 0)" from "type not in
@@ -53,21 +67,29 @@ function computeFromFormula(room, config) {
   // fall back to legacy room.rent if 0 isn't billable). The hardcoded
   // type-default acts as a safety net ONLY when admin hasn't configured
   // this type yet (fresh deploy day 1).
+  const typeDefault = ROOM_TYPE_DEFAULTS[type] || ROOM_TYPE_DEFAULTS.standard;
   const base = r && r.rent != null && Number.isFinite(Number(r.rent))
     ? Number(r.rent)
-    : (ROOM_TYPE_DEFAULTS[type]?.rent ?? ROOM_TYPE_DEFAULTS.standard.rent);
+    : typeDefault.rent;
 
   const floor = (cfg.floorPremium || {})[room.floor] || 0;
-  const view  = (cfg.viewPremium  || {})[room.view]  || 0;
+  const view  = (cfg.viewPremium  || {})[roomViewOf(room)]  || 0;
   const fp    = cfg.featurePremium || {};
 
   // Feature flags can be named either room.balcony (legacy blob) or
   // room.has_balcony (rooms_v2 column) — accept both.
-  const has = (k1, k2) => !!(room[k1] || room[k2]);
-  const balcony = has('balcony', 'has_balcony') ? (Number(fp.balcony) || 0) : 0;
-  const ac      = has('ac',      'has_ac')      ? (Number(fp.ac)      || 0) : 0;
-  const parking = has('parking', 'has_parking') ? (Number(fp.parking) || 0) : 0;
-  const kitchen = has('kitchen', 'has_kitchen') ? (Number(fp.kitchen) || 0) : 0;
+  const has = (...keys) => keys.some((k) => !!room[k]);
+  const firstPresent = (...keys) => {
+    for (const k of keys) {
+      if (room[k] !== undefined && room[k] !== null) return room[k];
+    }
+    return undefined;
+  };
+  const acRaw = firstPresent('ac', 'hasAc', 'has_ac');
+  const balcony = has('balcony', 'hasBalcony', 'has_balcony') ? (Number(fp.balcony) || 0) : 0;
+  const ac      = (acRaw === undefined ? !!typeDefault.ac : !!acRaw) ? (Number(fp.ac) || 0) : 0;
+  const parking = has('parking', 'hasParking', 'has_parking') ? (Number(fp.parking) || 0) : 0;
+  const kitchen = has('kitchen', 'hasKitchen', 'has_kitchen') ? (Number(fp.kitchen) || 0) : 0;
 
   const total = Number(base) + Number(floor) + Number(view) + balcony + ac + parking + kitchen;
   return Math.round(total * 100) / 100;
@@ -99,17 +121,19 @@ function resolveBillingRent({ room, contract, config }) {
   // 2. Per-room override — admin marked this specific room as having a
   //    special rate (damaged, smaller, promo). Used for vacant rooms +
   //    the rate that gets snapshotted into the NEXT contract.
-  if (room && room.rent_override != null && Number(room.rent_override) > 0) {
+  const snakeOverride = positiveNumberOrNull(room?.rent_override);
+  if (snakeOverride !== null) {
     return {
-      rent: Number(room.rent_override),
+      rent: snakeOverride,
       source: 'override',
       reason: room.rent_override_reason || null,
     };
   }
   // Same field, JSONB blob shape (camelCase)
-  if (room && room.rentOverride != null && Number(room.rentOverride) > 0) {
+  const camelOverride = positiveNumberOrNull(room?.rentOverride);
+  if (camelOverride !== null) {
     return {
-      rent: Number(room.rentOverride),
+      rent: camelOverride,
       source: 'override',
       reason: room.rentOverrideReason || null,
     };
@@ -125,8 +149,9 @@ function resolveBillingRent({ room, contract, config }) {
   //    might be a different static rate already in room.rent. This rule
   //    also keeps legacy data (rooms without type from older blobs)
   //    working without surprise: they fall through to the legacy branch.
-  const hasUsableType = room && room.type && typeof room.type === 'string';
-  const hasConfiguredRate = !!(config && config.rates && config.rates[room?.type]);
+  const type = roomTypeOf(room);
+  const hasUsableType = !!(room && (room.type || room.room_type || room.roomType));
+  const hasConfiguredRate = !!(config && config.rates && config.rates[type]);
   if (hasUsableType && hasConfiguredRate) {
     const formula = computeFromFormula(room, config);
     if (formula > 0) {
@@ -142,7 +167,7 @@ function resolveBillingRent({ room, contract, config }) {
   //    Keeps the resolver safe to ship without breaking unmigrated
   //    deployments. If room.rent is also 0 we last-resort the type
   //    default so day-1 deploys don't bill ฿0 by accident.
-  const legacy = room ? Number(room.rent) : 0;
+  const legacy = room ? Number(room.rent ?? room.rentPrice ?? room.rent_price) : 0;
   if (legacy > 0) {
     return { rent: legacy, source: 'legacy' };
   }
@@ -168,10 +193,10 @@ function previewImpact(rooms, oldConfig, newConfig) {
   let unchanged = 0;
   for (const room of list) {
     if (!room || typeof room !== 'object') continue;
-    const oldR = computeFromFormula(room, oldConfig);
-    const newR = computeFromFormula(room, newConfig);
+    const oldR = resolveBillingRent({ room, config: oldConfig }).rent;
+    const newR = resolveBillingRent({ room, config: newConfig }).rent;
     if (oldR !== newR) {
-      willChange.push({ roomId: room.id, oldRent: oldR, newRent: newR });
+      willChange.push({ roomId: room.id || room.room_code || room.roomCode, oldRent: oldR, newRent: newR });
     } else {
       unchanged++;
     }

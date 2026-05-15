@@ -7,11 +7,11 @@
 
 const { useState, useEffect, useMemo } = React;
 
-function PageContracts({ setToast, addActivity, rooms = {} }) {
+function PageContracts({ setToast, addActivity, rooms = {}, config }) {
   const C = window.ADMIN_C;
   const { Card, Btn, Input, Select, Modal, Pill, SectionHeading,
           PageContainer, PageHeader } = window;
-  const apiCall = window.apiCall;
+  const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
 
   const [contracts, setContracts] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -285,6 +285,7 @@ function PageContracts({ setToast, addActivity, rooms = {} }) {
       {quickCreating ? (
         <QuickInviteModal
           rooms={rooms}
+          config={config}
           onClose={() => setQuickCreating(false)}
           onSaved={(payload) => {
             setQuickCreating(false);
@@ -325,7 +326,7 @@ function PageContracts({ setToast, addActivity, rooms = {} }) {
 function InviteTenantModal({ contract, onClose, onSaved, onError }) {
   const C = window.ADMIN_C;
   const { Modal, Btn } = window;
-  const apiCall = window.apiCall;
+  const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
   const [hours, setHours] = useState(168);   // 7 days default
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState(null);
@@ -445,7 +446,7 @@ function InviteTenantModal({ contract, onClose, onSaved, onError }) {
 function SignContractModal({ contract, onClose, onSaved, onError }) {
   const C = window.ADMIN_C;
   const { Modal, Btn } = window;
-  const apiCall = window.apiCall;
+  const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
   const canvasRef = React.useRef(null);
   const [mode, setMode] = useState('draw');   // 'draw' | 'upload'
   const [hasInk, setHasInk] = useState(false);
@@ -647,7 +648,7 @@ function SignContractModal({ contract, onClose, onSaved, onError }) {
 function AssignTemplateModal({ contract, templates, onClose, onSaved, onError, onPreview }) {
   const C = window.ADMIN_C;
   const { Modal, Btn } = window;
-  const apiCall = window.apiCall;
+  const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
   const [tid, setTid] = useState(contract.template_id || '');
   const [busy, setBusy] = useState(false);
 
@@ -731,7 +732,7 @@ function AssignTemplateModal({ contract, templates, onClose, onSaved, onError, o
 function ContractEditModal({ contract, onClose, onSaved, onError }) {
   const C = window.ADMIN_C;
   const { Modal, Btn, Input, Select } = window;
-  const apiCall = window.apiCall;
+  const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
   const [form, setForm] = useState({
     discountPct: contract.discount_pct != null ? String(contract.discount_pct) : '0',
     termMonths:  contract.term_months  != null ? String(contract.term_months)  : '',
@@ -830,10 +831,11 @@ function ContractEditModal({ contract, onClose, onSaved, onError }) {
 // must know up-front (room, rent, deposit, dates) plus the tenant's name
 // + phone so the link can be addressed correctly. Everything else (address,
 // emergency contact, ID photos, signature) the TENANT fills via the link.
-function QuickInviteModal({ rooms = {}, onClose, onSaved, onError }) {
+function QuickInviteModal({ rooms = {}, config, onClose, onSaved, onError }) {
   const C = window.ADMIN_C;
   const { Modal, Btn } = window;
-  const apiCall = window.apiCall;
+  const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
+  const resolveRoomRent = window.resolveRoomRent;
   const roomList = useMemo(() => Object.values(rooms || {})
     .filter(Boolean)
     .sort((a, b) => String(a.id || '').localeCompare(String(b.id || ''), undefined, {
@@ -862,7 +864,8 @@ function QuickInviteModal({ rooms = {}, onClose, onSaved, onError }) {
   const setRoomId = (roomId) => {
     const room = roomList.find((r) => String(r.id) === String(roomId));
     setForm((f) => {
-      const rent = Number(room?.rent);
+      const rentInfo = resolveRoomRent ? resolveRoomRent(room, config) : { rent: room?.rent };
+      const rent = Number(rentInfo.rent);
       const deposit = Number(room?.deposit);
       return {
         ...f,

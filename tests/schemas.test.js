@@ -144,3 +144,25 @@ test('generateBill: manual bill requires positive total and ledger fields', () =
   });
   assert.equal(bad.success, false);
 });
+
+test('rooms schema accepts nullable per-room rent override fields', () => {
+  const base = {
+    floor: 1,
+    roomNo: 1,
+    roomType: 'standard',
+    rentPrice: 4500,
+    depositPrice: 9000,
+  };
+  const withOverride = schemas.createRoom.safeParse({
+    ...base,
+    rentOverride: '4200.50',
+    rentOverrideReason: 'promo',
+  });
+  assert.equal(withOverride.success, true);
+  assert.equal(withOverride.data.rentOverride, 4200.5);
+
+  const cleared = schemas.updateRoom.safeParse({ rentOverride: null, rentOverrideReason: '' });
+  assert.equal(cleared.success, true);
+  assert.equal(cleared.data.rentOverride, null);
+  assert.equal(cleared.data.rentOverrideReason, null);
+});

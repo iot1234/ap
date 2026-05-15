@@ -333,7 +333,8 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
       // service so the receipt lives next to the auto-uploaded tenant
       // slips in /admin#payments — same image preview path works.
       if (slipDataUrl) payload.slip = slipDataUrl;
-      await window.apiCall(`/api/bills/${bill.dbBillId}/pay`, {
+      const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
+      await apiCall(`/api/bills/${bill.dbBillId}/pay`, {
         method: 'POST',
         body: JSON.stringify(payload),
       });
@@ -417,7 +418,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
     const b = bills.find((x) => x.id === id);
     if (!b) return;
     setSendingNow(true);
-    const apiCall = window.apiCall;
+    const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
     try {
       if (b._source === 'db' && b.dbBillId) {
         await apiCall(`/api/bills/${b.dbBillId}/send`, {
@@ -563,7 +564,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
     }
 
     setConfirmGenerate(false);
-    const apiCall = window.apiCall;
+    const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
     try {
       const period = currentPeriod;
       const dueDay = Math.max(1, Math.min(28, Number(config.notify?.dueOnDay) || 7));
@@ -628,7 +629,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
 
   const doBulkSendNow = async () => {
     setBulkSendingNow(true);
-    const apiCall = window.apiCall;
+    const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
     const apiFetch = window.requireApiFetch ? window.requireApiFetch() : window.apiFetch;
     const selectedIds = bulkSendPreview?.selectedIds;
     try {
