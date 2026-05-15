@@ -830,7 +830,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
       // there's still one waiting for review. Clicking the badge jumps to
       // /admin#payments pre-filtered to this bill so admin can act
       // immediately without scanning the queue.
-      key: 'slipStatus', label: 'การชำระ', align: 'center', minWidth: 130,
+      key: 'slipStatus', label: 'การชำระ', align: 'center', minWidth: 160,
       render: b => {
         if (b._source !== 'db' || !b.dbBillId) {
           return <span style={{ fontSize: 11, color: C.muted }}>—</span>;
@@ -858,7 +858,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
                 padding: '3px 8px', borderRadius: 999,
                 background: isAuto ? '#e3f3e8' : '#eaf1fb',
                 color: isAuto ? '#1d4a2c' : '#1d3a5b',
-                fontWeight: 600,
+                fontWeight: 600, whiteSpace: 'nowrap',
               }}
             >
               {isAuto ? `ตรวจอัตโนมัติ: ${providerLabel || 'ระบบ'}` : `อนุมัติโดย: ${paidBy}`}
@@ -874,6 +874,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
                 cursor: 'pointer', fontSize: 12,
                 padding: '3px 8px', borderRadius: 999,
                 background: C.warningSoft, color: C.warningInk, fontWeight: 600,
+                whiteSpace: 'nowrap',
               }}
             >
               รอตรวจสลิป {pend} ใบ
@@ -889,6 +890,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
                 cursor: 'pointer', fontSize: 11.5,
                 padding: '3px 8px', borderRadius: 999,
                 background: C.dangerSoft, color: C.dangerInk, fontWeight: 600,
+                whiteSpace: 'nowrap',
               }}
             >
               สลิปถูกปฏิเสธ {rej} ใบ
@@ -906,7 +908,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
       // Below the readiness label we surface a tiny "ส่งแล้ว N×" badge
       // when the bill has been reminded already — so admin spots the
       // already-pinged tenants without opening each row's confirm modal.
-      key: 'sendStatus', label: 'พร้อมส่ง', align: 'center', minWidth: 110,
+      key: 'sendStatus', label: 'พร้อมส่ง', align: 'center', minWidth: 150,
       render: b => {
         if (b._source !== 'db' || !b.dbBillId) {
           return <span style={{ fontSize: 11, color: C.muted }}>—</span>;
@@ -921,17 +923,17 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         if (r.canSend && r.warnCode === 'EMAIL_ONLY') {
           mainEl = (
             <span title="ไม่ผูก LINE — จะส่งทางอีเมล (อาจไปกล่อง spam)"
-                  style={{ fontSize: 13, color: C.warning }}>ส่งทางอีเมล</span>
+                  style={{ fontSize: 13, color: C.warning, whiteSpace: 'nowrap' }}>ส่งทางอีเมล</span>
           );
         } else if (r.canSend) {
           mainEl = (
             <span title="LINE + (อีเมลถ้ามี) พร้อม — กดส่งได้เลย"
-                  style={{ fontSize: 13, color: C.success }}>พร้อมส่ง</span>
+                  style={{ fontSize: 13, color: C.success, whiteSpace: 'nowrap' }}>พร้อมส่ง</span>
           );
         } else {
           mainEl = (
             <span title={r.blockMsg || r.blockCode || 'block'}
-                  style={{ fontSize: 12, color: C.danger, fontWeight: 600 }}>
+                  style={{ fontSize: 12, color: C.danger, fontWeight: 600, whiteSpace: 'nowrap' }}>
               ส่งไม่ได้: {r.blockCode === 'NO_TENANT_CHANNEL' ? 'ไม่มีช่องทาง'
                 : r.blockCode === 'TENANT_MOVED_ROOM' ? 'ย้ายห้อง'
                 : r.blockCode === 'TENANT_NOT_ACTIVE' ? 'ออกแล้ว'
@@ -969,9 +971,13 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
       },
     },
     {
-      key: 'actions', label: '', align: 'right', minWidth: 130,
+      // Actions column: 3 buttons can total ~240px which won't fit a 130px
+      // cell; we widen to 240 and disable wrap so the table grows horizontally
+      // (DataTable wrapper has overflow-x scroll) instead of clipping or
+      // wrapping individual buttons onto their own lines.
+      key: 'actions', label: '', align: 'right', minWidth: 240,
       render: b => (
-        <div style={{ display: 'inline-flex', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end' }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ display: 'inline-flex', gap: 6, flexWrap: 'nowrap', justifyContent: 'flex-end', whiteSpace: 'nowrap' }} onClick={(e) => e.stopPropagation()}>
           <Btn size="sm" variant="ghost" onClick={() => setPreviewBill(b)}>ดูบิล</Btn>
           {b.status === 'unpaid' && b._source === 'db' && (
             <>

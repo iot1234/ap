@@ -103,6 +103,8 @@ function PageSettings({ rooms, setRooms, config, setConfig, bookings, setBooking
           { value: 'payment',  label: 'การชำระเงิน', icon: '💳' },
           { value: 'notify',   label: 'การแจ้งเตือน', icon: '🔔' },
           { value: 'auto',     label: 'อัตโนมัติ',     icon: '🤖' },
+          { value: 'features', label: 'ฟีเจอร์ระบบ',   icon: '🎛' },
+          { value: 'secrets',  label: 'API / Keys',    icon: '🔐' },
           { value: 'users',    label: 'ผู้ใช้งาน',     icon: '👥' },
           { value: 'audit',    label: 'Audit log',     icon: '📜' },
           { value: 'system',   label: 'ระบบ',           icon: '⚙️' },
@@ -117,6 +119,17 @@ function PageSettings({ rooms, setRooms, config, setConfig, bookings, setBooking
       {tab === 'payment'  && <TabPayment  draft={draft} updatePath={updatePath} />}
       {tab === 'notify'   && <TabNotify   draft={draft} updatePath={updatePath} />}
       {tab === 'auto'     && <TabAuto     />}
+      {/* Features + Secrets used to live as standalone sidebar pages.
+          Consolidated into Settings so admin has ONE place for system
+          config. The original page-features.jsx and page-secrets.jsx
+          still work via hash routes /admin#features and /admin#secrets
+          (legacy URL compat) but the sidebar now shows just one entry. */}
+      {tab === 'features' && window.PageFeatures
+        ? <window.PageFeatures setToast={setToast} embedded />
+        : null}
+      {tab === 'secrets'  && window.PageSecrets
+        ? <window.PageSecrets setToast={setToast} embedded />
+        : null}
       {tab === 'users'    && <TabUsers    setToast={setToast} addActivity={addActivity} />}
       {tab === 'audit'    && <TabAudit    setToast={setToast} />}
       {tab === 'system'   && <TabSystem

@@ -9,9 +9,21 @@
 
 const { useState, useEffect, useMemo } = React;
 
-function PageFeatures({ setToast }) {
+// `embedded` prop lets PageSettings render this component INSIDE one of
+// its tabs without duplicating the outer PageContainer + PageHeader.
+// When embedded=true the wrapper / header are skipped; the page still
+// works standalone at /admin#features for legacy URLs / direct links.
+function PageFeatures({ setToast, embedded = false }) {
   const C = window.ADMIN_C;
   const { Card, SectionHeading, Btn, Pill, PageContainer, PageHeader } = window;
+  // Wrap with PageContainer/PageHeader only when NOT embedded. Inside a
+  // tab the parent already provides the page chrome.
+  const Wrapper = embedded
+    ? ({ children }) => <div>{children}</div>
+    : ({ children }) => <PageContainer>{children}</PageContainer>;
+  const Header = embedded
+    ? () => null
+    : (props) => <PageHeader {...props} />;
   // apiFetch attaches the CSRF token + handles 401 redirects. Without it the
   // PUT to /api/admin/features 403s with "invalid CSRF token", and every
   // toggle on this page silently fails.
@@ -192,10 +204,10 @@ function PageFeatures({ setToast }) {
 
   if (!features) {
     return (
-      <PageContainer>
-        <PageHeader title="ฟีเจอร์ระบบ" subtitle="เปิด/ปิดฟีเจอร์ของระบบ" />
-        <Card>{err || 'กำลังโหลด…'}</Card>
-      </PageContainer>
+      <Wrapper>
+        <Header title="ฟีเจอร์ระบบ" subtitle="เปิด/ปิดฟีเจอร์ของระบบ" />
+        <Card>{err || (window.SkeletonRows ? <window.SkeletonRows count={6} /> : 'กำลังโหลด…')}</Card>
+      </Wrapper>
     );
   }
 
@@ -245,8 +257,8 @@ function PageFeatures({ setToast }) {
   };
 
   return (
-    <PageContainer>
-      <PageHeader title="ฟีเจอร์ระบบ"
+    <Wrapper>
+      <Header title="ฟีเจอร์ระบบ"
         subtitle="เปิด/ปิดฟีเจอร์ของระบบ — รายการที่ปิดจะถูกบล็อกที่ฝั่ง server (503)" />
       {err ? <Card style={{ color: C.danger }}>{err}</Card> : null}
 
@@ -416,7 +428,7 @@ function PageFeatures({ setToast }) {
           <Field id="autoBackup" field="retainDays" label="เก็บไว้ (วัน)" type="number" />
         </Row>
       </Card>
-    </PageContainer>
+    </Wrapper>
   );
 }
 

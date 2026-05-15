@@ -119,8 +119,10 @@ const NAV_GROUPS = [
       { id: 'notifications',       label: 'ประวัติแจ้งเตือน',     icon: '🔔', minRole: 'manager' },
       { id: 'notifications-queue', label: 'คิวแจ้งเตือน',         icon: '📤', minRole: 'manager' },
       { id: 'security-events',     label: 'เหตุการณ์ปลอดภัย',    icon: '🛡️', minRole: 'manager' },
-      { id: 'features',            label: 'ฟีเจอร์ระบบ',         icon: '🎛', minRole: 'owner' },
-      { id: 'secrets',             label: 'ตั้งค่า API/Keys',     icon: '🔐', minRole: 'owner' },
+      // ฟีเจอร์ระบบ + API/Keys ถูกรวมเป็น tabs ใน "ตั้งค่าระบบ" แล้ว
+      // — admin มีจุดเดียวสำหรับ system config. Hash routes
+      // /admin#features และ /admin#secrets ยัง work เพื่อ backward compat
+      // (legacy URLs / bookmarks) ผ่าน PAGE_TITLES + render-by-page-id ด้านล่าง.
       { id: 'settings',            label: 'ตั้งค่าระบบ',          icon: '⚙️' },
     ],
   },

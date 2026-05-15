@@ -22,9 +22,19 @@ const GROUP_META = {
   r2:         { title: 'Cloud Backup (R2/S3)',   icon: '☁️', desc: 'S3-compatible storage สำหรับ backup อัตโนมัติ' },
 };
 
-function PageSecrets({ setToast }) {
+// `embedded` prop lets PageSettings render this component INSIDE one of
+// its tabs without duplicating the outer PageContainer + PageHeader.
+// When embedded=true the wrapper / header are skipped; the page still
+// works standalone at /admin#secrets for legacy URLs.
+function PageSecrets({ setToast, embedded = false }) {
   const C = window.ADMIN_C;
   const { Card, SectionHeading, Btn, Pill, PageContainer, PageHeader, Modal } = window;
+  const Wrapper = embedded
+    ? ({ children }) => <div>{children}</div>
+    : ({ children }) => <PageContainer>{children}</PageContainer>;
+  const Header = embedded
+    ? () => null
+    : (props) => <PageHeader {...props} />;
   const apiFetch = window.requireApiFetch ? window.requireApiFetch() : window.apiFetch;
   const [groups, setGroups] = useState({});
   const [editing, setEditing] = useState({});
@@ -168,8 +178,8 @@ function PageSecrets({ setToast }) {
   }, [ownerClaim?.id]);
 
   return (
-    <PageContainer>
-      <PageHeader title="ตั้งค่า API & Secrets"
+    <Wrapper>
+      <Header title="ตั้งค่า API & Secrets"
         subtitle="ทุกค่าเข้ารหัสด้วย AES-256-GCM ใน DB · env วาง override ได้ตามต้องการ" />
 
       <Card style={{ background: C.warningSoft || '#fff7e0', borderLeft: `4px solid ${C.warning || '#c08a2a'}` }}>
@@ -257,7 +267,7 @@ function PageSecrets({ setToast }) {
           <OwnerClaimBody token={ownerClaim} status={claimStatus} C={C} />
         )}
       </Modal>
-    </PageContainer>
+    </Wrapper>
   );
 }
 

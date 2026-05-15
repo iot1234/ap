@@ -141,6 +141,27 @@
     ::-webkit-scrollbar { width: 6px; height: 6px; }
   }
 
+  /* Tables — let rows scroll horizontally instead of squashing on ANY
+     viewport when columns add up to more than the container width. Without
+     this, tablets and narrow desktops with wide tables (e.g. /admin#billing)
+     silently clip the right-most action buttons. The .data-table-wrap class
+     is applied by ui.jsx DataTable; the inline `overflow:auto` style there
+     used to only kick in on mobile because of mask-image limitations. */
+  .data-table-wrap {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  /* When the table overflows its container, ui.jsx adds `.scrollable` so
+     we can show a subtle right-edge shadow that hints "there's more →".
+     We avoid mask-image on desktop because it dims the right-most button
+     even when fully visible. */
+  .data-table-wrap.scrollable {
+    box-shadow: inset -12px 0 12px -12px rgba(15, 23, 42, 0.18);
+  }
+  .data-table-wrap.scrollable.at-end {
+    box-shadow: none;
+  }
+
   @media (max-width: 640px) {
     .page-padding { padding: 14px 14px 28px; }
     .page-padding-sm { padding: 10px 12px 22px; }
@@ -153,11 +174,9 @@
     /* Toast widens to viewport */
     .toast-floating { min-width: 0 !important; left: 12px !important;
       right: 12px !important; transform: none !important; max-width: none !important; }
-    /* Tables — let the row scroll horizontally instead of squashing.
-       Edge fade hints the user there's more content sideways. */
+    /* Mobile uses a both-edges fade since the user can scroll either way
+       from any starting position. */
     .data-table-wrap {
-      overflow-x: auto !important;
-      -webkit-overflow-scrolling: touch;
       mask-image: linear-gradient(to right, transparent 0, black 6px, black calc(100% - 6px), transparent 100%);
       -webkit-mask-image: linear-gradient(to right, transparent 0, black 6px, black calc(100% - 6px), transparent 100%);
     }

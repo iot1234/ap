@@ -743,6 +743,32 @@ function Modal({ open, onClose, title, children, footer, width = 480 }) {
 // --- DataTable ------------------------------------------------------------
 function DataTable({ columns, rows, onRowClick, empty, density = 'normal', stickyHeader = true }) {
   const padding = density === 'compact' ? '8px 12px' : '12px 14px';
+  // Track horizontal overflow so the wrapper can show an "→ more" affordance
+  // (right-edge inset shadow) only when the table actually overflows, and
+  // drop that affordance when the user has scrolled to the rightmost edge.
+  // Without this, narrow viewports clip the actions column silently — admins
+  // never realise there are more buttons offscreen.
+  const wrapRef = React.useRef(null);
+  React.useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const sync = () => {
+      const overflows = el.scrollWidth - el.clientWidth > 1;
+      el.classList.toggle('scrollable', overflows);
+      const atEnd = el.scrollLeft + el.clientWidth >= el.scrollWidth - 1;
+      el.classList.toggle('at-end', atEnd);
+    };
+    sync();
+    el.addEventListener('scroll', sync, { passive: true });
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(sync) : null;
+    if (ro) ro.observe(el);
+    window.addEventListener('resize', sync);
+    return () => {
+      el.removeEventListener('scroll', sync);
+      if (ro) ro.disconnect();
+      window.removeEventListener('resize', sync);
+    };
+  }, [columns, rows]);
   return (
     <div style={{
       background: C.surface,
@@ -752,10 +778,10 @@ function DataTable({ columns, rows, onRowClick, empty, density = 'normal', stick
       width: '100%',
       maxWidth: '100%',
     }}>
-      {/* data-table-wrap CSS class adds touch momentum + edge fade hint
-          via Admin Dashboard.html breakpoints. Inline styles below are
-          the fallback for browsers without that class. */}
-      <div className="data-table-wrap" style={{
+      {/* data-table-wrap CSS class adds touch momentum + a right-edge
+          shadow hint that appears only when the table overflows. Inline
+          styles below are the fallback for browsers without that class. */}
+      <div ref={wrapRef} className="data-table-wrap" style={{
         overflow: 'auto', maxWidth: '100%',
         WebkitOverflowScrolling: 'touch',
       }}>
