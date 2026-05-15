@@ -309,7 +309,7 @@ function PageReports({ rooms, config, addActivity, setToast }) {
           <SectionHeading title="Top 8 ห้องรายได้สูงสุด" level={3} />
           <DataTable
             columns={[
-              { key: 'id', label: 'ห้อง', minWidth: 60, render: r => <b style={{ fontFamily: 'Sora, sans-serif' }}>{r.id}</b> },
+              { key: 'id', label: 'ห้อง', minWidth: 60, render: r => <b style={{ fontFamily: 'IBM Plex Sans Thai, sans-serif' }}>{r.id}</b> },
               { key: 'name', label: 'ผู้เช่า', minWidth: 120,
                 render: r => <span style={{ fontSize: 12 }}>{r.name}</span> },
               { key: 'type', label: 'ประเภท', minWidth: 100, render: r => <span style={{ fontSize: 12, color: C.muted }}>{r.type}</span> },
@@ -331,7 +331,7 @@ function PageReports({ rooms, config, addActivity, setToast }) {
                   borderRadius: 10,
                 }}>
                   <div style={{ fontSize: 11.5, color: C.muted, fontWeight: 500 }}>{b.range} วัน</div>
-                  <div style={{ fontSize: 22, fontWeight: 600, color: C.ink, fontFamily: 'Sora, sans-serif', marginTop: 4 }}>
+                  <div style={{ fontSize: 22, fontWeight: 600, color: C.ink, fontFamily: 'IBM Plex Sans Thai, sans-serif', marginTop: 4 }}>
                     {fmtCurrency(b.amount)}
                   </div>
                   <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>{b.rooms} ห้อง</div>
@@ -354,7 +354,7 @@ function PageReports({ rooms, config, addActivity, setToast }) {
               ].map((it) => (
                 <div key={it.k} style={{ padding: 12, background: '#fff', border: `1px solid ${C.border}`, borderRadius: 10 }}>
                   <div style={{ fontSize: 11, color: C.muted }}>{it.l}</div>
-                  <div style={{ fontSize: 22, fontWeight: 600, color: it.c, fontFamily: 'Sora, sans-serif', marginTop: 2 }}>
+                  <div style={{ fontSize: 22, fontWeight: 600, color: it.c, fontFamily: 'IBM Plex Sans Thai, sans-serif', marginTop: 2 }}>
                     {liveOverview.counts[it.k] || 0}
                   </div>
                 </div>

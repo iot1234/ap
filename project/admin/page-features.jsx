@@ -256,7 +256,7 @@ function PageFeatures({ setToast }) {
           borderLeft: `4px solid ${C.warning || '#c98a2b'}`,
           marginBottom: 12,
         }}>
-          <div style={{ fontFamily: 'Sora', fontSize: 14, fontWeight: 600, marginBottom: 6 }}>
+          <div style={{ fontFamily: 'IBM Plex Sans Thai', fontSize: 14, fontWeight: 600, marginBottom: 6 }}>
             ⚠️ ความสัมพันธ์ของ flag ที่ต้องตรวจ ({dependencyWarnings.length})
           </div>
           <ul style={{ margin: 0, paddingLeft: 20, fontSize: 13, lineHeight: 1.7, color: C.ink2 }}>

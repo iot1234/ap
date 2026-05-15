@@ -345,7 +345,7 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
             background: ADMIN_ROOM_TYPES[r.type].accent + '18',
             color: ADMIN_ROOM_TYPES[r.type].accent,
             display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-            fontFamily: 'Sora, sans-serif', fontWeight: 700, fontSize: 13,
+            fontFamily: 'IBM Plex Sans Thai, sans-serif', fontWeight: 700, fontSize: 13,
             flexShrink: 0,
           }}>{r.id}</div>
           <div style={{ minWidth: 0 }}>
@@ -371,7 +371,7 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
       key: 'rent',    label: 'ค่าเช่า',  align: 'right', minWidth: 100,
       render: r => {
         const info = resolveRoomRent ? resolveRoomRent(r, config) : { rent: r.rent };
-        return <span style={{ fontWeight: 600, fontFamily: 'Sora, sans-serif' }}>{fmtCurrency(info.rent)}</span>;
+        return <span style={{ fontWeight: 600, fontFamily: 'IBM Plex Sans Thai, sans-serif' }}>{fmtCurrency(info.rent)}</span>;
       },
     },
     {
@@ -1023,7 +1023,7 @@ function RoomEditForm({ room, onUpdate, config }) {
           background: audit.issues.some((i) => i.sev === 'high') ? '#fff5f4' : '#fff7e0',
           border: `1px solid ${audit.issues.some((i) => i.sev === 'high') ? '#f5c0b4' : '#f0e3a7'}`,
         }}>
-          <div style={{ fontFamily: 'Sora', fontWeight: 600, fontSize: 14, marginBottom: 8 }}>
+          <div style={{ fontFamily: 'IBM Plex Sans Thai', fontWeight: 600, fontSize: 14, marginBottom: 8 }}>
             {audit.issues.some((i) => i.sev === 'high') ? '🔴 ห้องนี้มีปัญหา' : '🟡 ห้องนี้มีบิลค้าง'}
           </div>
           {audit.issues.map((it, idx) => (
@@ -1208,7 +1208,7 @@ function RoomEditForm({ room, onUpdate, config }) {
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
         }}>
           <span style={{ fontSize: 13, color: C.accentInk }}>รวมค่าใช้จ่ายเดือนนี้</span>
-          <span style={{ fontSize: 18, fontWeight: 700, color: C.accentInk, fontFamily: 'Sora, sans-serif' }}>
+          <span style={{ fontSize: 18, fontWeight: 700, color: C.accentInk, fontFamily: 'IBM Plex Sans Thai, sans-serif' }}>
             {fmtCurrency(effectiveRent + (room.water||0) + (room.elec||0) + (room.wifi||0))}
           </span>
         </div>

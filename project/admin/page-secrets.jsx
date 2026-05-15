@@ -186,7 +186,7 @@ function PageSecrets({ setToast }) {
           <Card key={group}>
             <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 12 }}>
               <div>
-                <div style={{ fontFamily: 'Sora', fontSize: 16, fontWeight: 600 }}>
+                <div style={{ fontFamily: 'IBM Plex Sans Thai', fontSize: 16, fontWeight: 600 }}>
                   {meta.icon} {meta.title}
                 </div>
                 <div style={{ color: C.muted, fontSize: 13, marginTop: 2 }}>{meta.desc}</div>

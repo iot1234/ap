@@ -338,7 +338,7 @@ function TabRates({ draft, updatePath, floorsForPricing }) {
             display: 'flex', justifyContent: 'space-between', alignItems: 'center',
           }}>
             <span style={{ fontSize: 13, color: '#fff', opacity: 0.9 }}>ราคาเช่ารวม</span>
-            <span style={{ fontFamily: 'Sora, sans-serif', fontSize: 22, fontWeight: 700, color: '#fff' }}>
+            <span style={{ fontFamily: 'IBM Plex Sans Thai, sans-serif', fontSize: 22, fontWeight: 700, color: '#fff' }}>
               {fmtCurrency(previewRent)}
             </span>
           </div>
@@ -470,7 +470,7 @@ function TabUtils({ draft, updatePath }) {
           <div style={{ height: 1, background: C.border, margin: '4px 0' }} />
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '4px 0' }}>
             <span style={{ fontSize: 13, fontWeight: 600, color: C.ink }}>รวม</span>
-            <span style={{ fontFamily: 'Sora, sans-serif', fontSize: 18, fontWeight: 700, color: C.accent }}>
+            <span style={{ fontFamily: 'IBM Plex Sans Thai, sans-serif', fontSize: 18, fontWeight: 700, color: C.accent }}>
               {fmtCurrency(15 * draft.utilities.waterRate + 80 * draft.utilities.elecRate + draft.utilities.wifi + draft.utilities.commonFee)}
             </span>
           </div>

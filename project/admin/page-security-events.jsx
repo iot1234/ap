@@ -134,7 +134,7 @@ function Stat({ label, value, color }) {
   return (
     <div style={{ background: C.bg, border: '1px solid ' + C.border, borderRadius: 8, padding: '12px 14px' }}>
       <div style={{ fontSize: 11, color: C.muted, marginBottom: 4 }}>{label}</div>
-      <div style={{ fontFamily: 'Sora', fontSize: 22, fontWeight: 600, color }}>{value}</div>
+      <div style={{ fontFamily: 'IBM Plex Sans Thai', fontSize: 22, fontWeight: 600, color }}>{value}</div>
     </div>
   );
 }

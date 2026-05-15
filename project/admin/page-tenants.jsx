@@ -157,7 +157,7 @@ function PageTenants({ rooms, setRooms, config, addActivity, setToast }) {
       key: 'roomId', label: 'ห้อง', minWidth: 100,
       render: t => (
         <div>
-          <div style={{ fontSize: 13, fontWeight: 600, color: C.ink, fontFamily: 'Sora, sans-serif' }}>{t.roomId}</div>
+          <div style={{ fontSize: 13, fontWeight: 600, color: C.ink, fontFamily: 'IBM Plex Sans Thai, sans-serif' }}>{t.roomId}</div>
           <div style={{ fontSize: 11, color: C.muted }}>{ADMIN_ROOM_TYPES[t.type].th}</div>
         </div>
       ),
@@ -527,7 +527,7 @@ function TenantHeader({ t }) {
     }}>
       <Avatar name={t.name} size={56} />
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontFamily: 'Sora, sans-serif', fontSize: 16, fontWeight: 600, color: C.ink, marginBottom: 2 }}>
+        <div style={{ fontFamily: 'IBM Plex Sans Thai, sans-serif', fontSize: 16, fontWeight: 600, color: C.ink, marginBottom: 2 }}>
           {t.name}
         </div>
         <div style={{ fontSize: 12.5, color: C.muted, marginBottom: 6 }}>{t.occupation}</div>
@@ -716,7 +716,7 @@ function TabPortal({ t, setToast, addActivity, apiFetch }) {
 
       {/* LINE binding management */}
       <Card style={{ padding: 16 }}>
-        <div style={{ fontFamily: 'Sora, sans-serif', fontSize: 14, fontWeight: 600, marginBottom: 8 }}>
+        <div style={{ fontFamily: 'IBM Plex Sans Thai, sans-serif', fontSize: 14, fontWeight: 600, marginBottom: 8 }}>
           🔗 ผูกบัญชี LINE
         </div>
         <div style={{ fontSize: 12.5, color: C.muted, lineHeight: 1.6, marginBottom: 12 }}>
@@ -1414,12 +1414,12 @@ function ContractPreFlightSummary({ t, C, fmtCurrency }) {
         </Row>
       ) : null}
       <Row icon="💰" label="ค่าเช่า/เดือน">
-        <b style={{ fontFamily: 'Sora, monospace', fontSize: 14 }}>
+        <b style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 14 }}>
           ฿{fmtCurrency(rent)}
         </b>
       </Row>
       <Row icon="🏦" label="เงินมัดจำ">
-        <span style={{ fontFamily: 'Sora, monospace' }}>
+        <span style={{ fontFamily: 'JetBrains Mono, monospace' }}>
           ฿{fmtCurrency(deposit)}
         </span>
         <span style={{ color: C.muted, marginLeft: 6, fontSize: 11, fontWeight: 400 }}>
@@ -1501,7 +1501,7 @@ function ContractReviewPanel({ detail, busy, approveError, onApprove, onReject, 
                   fontSize: 13, borderBottom: '1px solid #f0e9d8' }}>
       <span style={{ color: C.muted }}>{k}</span>
       <span style={{ fontWeight: 500, textAlign: 'right',
-                     fontFamily: mono ? 'Sora, monospace' : 'inherit' }}>{v || '—'}</span>
+                     fontFamily: mono ? 'JetBrains Mono, monospace' : 'inherit' }}>{v || '—'}</span>
     </div>
   );
   const fullCitizenId = formatCitizenId(draft.citizenId);

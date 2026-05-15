@@ -184,7 +184,7 @@ function OverdueView({ rows, C }) {
     <div>
       <div style={{ marginBottom: 16 }}>
         <span style={{ color: C.muted, fontSize: 13 }}>รวมยังเก็บไม่ได้: </span>
-        <strong style={{ fontFamily: 'Sora', fontSize: 22 }}>฿{fmtBaht(total)}</strong>
+        <strong style={{ fontFamily: 'IBM Plex Sans Thai', fontSize: 22 }}>฿{fmtBaht(total)}</strong>
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 1, background: C.border, borderRadius: 6, overflow: 'hidden' }}>
         {rows.map((r) => (
@@ -249,7 +249,7 @@ function Stat({ label, value, color }) {
   return (
     <div style={{ background: C.bg, border: '1px solid ' + C.border, borderRadius: 8, padding: '12px 14px' }}>
       <div style={{ fontSize: 11, color: C.muted, marginBottom: 4 }}>{label}</div>
-      <div style={{ fontFamily: 'Sora', fontSize: 20, fontWeight: 600, color: color || C.ink }}>{value}</div>
+      <div style={{ fontFamily: 'IBM Plex Sans Thai', fontSize: 20, fontWeight: 600, color: color || C.ink }}>{value}</div>
     </div>
   );
 }

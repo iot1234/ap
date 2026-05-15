@@ -40,7 +40,7 @@ function SectionHeading({ title, subtitle, action, level = 2, style = {} }) {
   return (
     <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 16, marginBottom: 16, ...style }}>
       <div>
-        <Tag style={{ margin: 0, fontFamily: 'Sora, sans-serif', fontWeight: 600, color: C.ink, fontSize: level === 2 ? 22 : (level === 3 ? 17 : 15), lineHeight: 1.2 }}>
+        <Tag style={{ margin: 0, fontFamily: 'IBM Plex Sans Thai, sans-serif', fontWeight: 600, color: C.ink, fontSize: level === 2 ? 22 : (level === 3 ? 17 : 15), lineHeight: 1.2 }}>
           {title}
         </Tag>
         {subtitle && <div style={{ fontSize: 13, color: C.muted, marginTop: 4 }}>{subtitle}</div>}
@@ -486,7 +486,7 @@ function KpiCard({ label, value, sub, change, color = 'neutral', icon }) {
           color: cc.icon, fontSize: 16,
         }}>{icon}</div>}
       </div>
-      <div style={{ fontFamily: 'Sora, sans-serif', fontSize: 26, fontWeight: 700, color: C.ink, lineHeight: 1.1, letterSpacing: '-0.01em' }}>
+      <div style={{ fontFamily: 'IBM Plex Sans Thai, sans-serif', fontSize: 26, fontWeight: 700, color: C.ink, lineHeight: 1.1, letterSpacing: '-0.01em' }}>
         {value}
       </div>
       {(sub || change != null) && (
@@ -611,7 +611,7 @@ function Drawer({ open, onClose, title, children, width = 540, footer }) {
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
           background: C.surface, flexShrink: 0,
         }}>
-          <div style={{ fontSize: 16, fontWeight: 600, color: C.ink, fontFamily: 'Sora, sans-serif' }}>
+          <div style={{ fontSize: 16, fontWeight: 600, color: C.ink, fontFamily: 'IBM Plex Sans Thai, sans-serif' }}>
             {title}
           </div>
           <button onClick={onClose} style={{
@@ -685,7 +685,7 @@ function Modal({ open, onClose, title, children, footer, width = 480 }) {
             padding: '16px 22px', borderBottom: `1px solid ${C.border}`,
             display: 'flex', alignItems: 'center', justifyContent: 'space-between',
           }}>
-            <div id={titleId} style={{ fontSize: 15.5, fontWeight: 600, color: C.ink, fontFamily: 'Sora, sans-serif' }}>{title}</div>
+            <div id={titleId} style={{ fontSize: 15.5, fontWeight: 600, color: C.ink, fontFamily: 'IBM Plex Sans Thai, sans-serif' }}>{title}</div>
             <button
               onClick={onClose}
               aria-label="ปิด"
@@ -812,7 +812,7 @@ function Avatar({ name, size = 36, color }) {
       width: size, height: size, borderRadius: '50%',
       background: bg, color: '#fff',
       display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-      fontSize: size * 0.36, fontWeight: 600, fontFamily: 'Sora, sans-serif',
+      fontSize: size * 0.36, fontWeight: 600, fontFamily: 'IBM Plex Sans Thai, sans-serif',
       flexShrink: 0,
       letterSpacing: '-0.02em',
     }}>{initials}</div>
@@ -1153,7 +1153,7 @@ function DonutChart({ segments, size = 180, thickness = 22, centerLabel, centerV
           position: 'absolute', inset: 0, display: 'flex',
           flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
         }}>
-          {centerValue && <div style={{ fontFamily: 'Sora, sans-serif', fontSize: 28, fontWeight: 700, color: C.ink, lineHeight: 1 }}>{centerValue}</div>}
+          {centerValue && <div style={{ fontFamily: 'IBM Plex Sans Thai, sans-serif', fontSize: 28, fontWeight: 700, color: C.ink, lineHeight: 1 }}>{centerValue}</div>}
           {centerLabel && <div style={{ fontSize: 11, color: C.muted, marginTop: 4 }}>{centerLabel}</div>}
         </div>
       )}
@@ -1233,18 +1233,42 @@ function PageContainer({ children, maxWidth = 1240, style = {} }) {
 // --- PageHeader ---------------------------------------------------------
 function PageHeader({ title, subtitle, actions, breadcrumb, tone }) {
   // Tone: category color rail + breadcrumb dot — admin instantly sees
-  // which section they're in. Defaults to overview (slate) if unset.
-  // Accept either a tone key ('rooms'/'finance'/...) or a string label
-  // for legacy callers; the latter falls back to overview tone.
+  // which section they're in. The new design uses 5 categorical hues
+  // (overview/rooms/finance/service/system) keyed by page id.
+  //
+  // None of the existing 28 page-*.jsx callers pass `tone` yet — rather
+  // than diff every page, we auto-resolve from the URL hash via the
+  // window.PAGE_TONE registry in shared.jsx. Pages can still pass
+  // tone explicitly to override (e.g., a finance-domain modal opened
+  // from the rooms page).
   const TONES = window.TONES || {};
-  const toneKey = (tone && TONES[tone]) ? tone : 'overview';
-  const t = TONES[toneKey] || { color: '#475569', soft: '#EEF1F5' };
+  const PAGE_TONE = window.PAGE_TONE || {};
+  let toneKey = tone;
+  if (!toneKey) {
+    // Shell sets window.__adminPage synchronously when routing changes —
+    // prefer this over the URL hash because the hash useEffect can lag
+    // one render behind on first paint after a page-id state change.
+    const fromShell = window.__adminPage;
+    if (fromShell && PAGE_TONE[fromShell]) {
+      toneKey = PAGE_TONE[fromShell];
+    } else {
+      // hash example: '#billing?period=2026-05' → 'billing'
+      const hash = (window.location.hash || '').replace(/^#/, '').split('?')[0].split('/')[0];
+      toneKey = PAGE_TONE[hash];
+    }
+  }
+  if (!toneKey || !TONES[toneKey]) toneKey = 'overview';
+  const t = TONES[toneKey];
 
-  // breadcrumb can be either an array of strings (legacy) or a single
-  // category label (new). Normalise to an array for rendering.
-  const crumbs = Array.isArray(breadcrumb)
-    ? breadcrumb
-    : (breadcrumb ? [breadcrumb] : null);
+  // breadcrumb can be:
+  //   - array of strings (legacy multi-segment)
+  //   - single string (legacy)
+  //   - omitted entirely (new — auto-fill with category label so every
+  //     page header shows which section it belongs to, no per-page work)
+  let crumbs;
+  if (Array.isArray(breadcrumb)) crumbs = breadcrumb;
+  else if (breadcrumb) crumbs = [breadcrumb];
+  else crumbs = t.label ? [t.label] : null;
 
   return (
     <div style={{

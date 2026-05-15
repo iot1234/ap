@@ -250,12 +250,12 @@ function Sidebar({ page, setPage, mobileOpen, setMobileOpen, isMobile, pendingBo
                 width: 38, height: 38, borderRadius: 9,
                 background: `linear-gradient(135deg, ${C.accent} 0%, ${C.accentDark} 100%)`,
                 display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                color: '#fff', fontFamily: 'Sora, sans-serif', fontWeight: 700, fontSize: 18,
+                color: '#fff', fontFamily: 'IBM Plex Sans Thai, sans-serif', fontWeight: 700, fontSize: 18,
                 flexShrink: 0,
               }}>{(shortName[0] || 'บ').toUpperCase()}</div>
             {!isCollapsed && (
               <div style={{ minWidth: 0, flex: 1 }}>
-                <div style={{ fontFamily: 'Sora, sans-serif', fontWeight: 700, fontSize: 14.5, color: '#fff', lineHeight: 1.2,
+                <div style={{ fontFamily: 'IBM Plex Sans Thai, sans-serif', fontWeight: 700, fontSize: 14.5, color: '#fff', lineHeight: 1.2,
                               overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {shortName}
                 </div>
@@ -500,7 +500,7 @@ function TopBar({ page, setPage, onMenuClick, isMobile, search, setSearch, notif
 
       <div style={{ minWidth: 0, flex: '0 1 auto' }}>
         <div style={{ fontSize: 11, color: C.muted, fontWeight: 500 }}>Admin Console</div>
-        <div style={{ fontFamily: 'Sora, sans-serif', fontSize: 16, fontWeight: 600, color: C.ink, lineHeight: 1.2 }}>
+        <div style={{ fontFamily: 'IBM Plex Sans Thai, sans-serif', fontSize: 16, fontWeight: 600, color: C.ink, lineHeight: 1.2 }}>
           {PAGE_TITLES[page] || ''}
         </div>
       </div>
@@ -819,6 +819,11 @@ function App() {
   const [page, setPage] = useState(pageFromHash);
   useEffect(() => {
     if (pageFromHash() !== page) location.hash = page;
+    // Expose current page so PageHeader (and any other deep component)
+    // can auto-resolve the categorical tone via window.PAGE_TONE without
+    // each page having to pass tone explicitly. Hash routing also works
+    // as a fallback inside PageHeader; this is the synchronous path.
+    try { window.__adminPage = page; } catch {}
   }, [page]);
   useEffect(() => {
     const onHash = () => {

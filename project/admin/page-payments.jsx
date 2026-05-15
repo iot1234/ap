@@ -391,7 +391,7 @@ function PagePayments({ setToast }) {
                     {p.tenant_phone || ''} · {new Date(p.created_at).toLocaleString('th-TH')}
                   </div>
                 </div>
-                <div style={{ fontFamily: 'Sora', fontWeight: 600 }}>฿{fmtMoney(p.amount)}</div>
+                <div style={{ fontFamily: 'IBM Plex Sans Thai', fontWeight: 600 }}>฿{fmtMoney(p.amount)}</div>
                 <div style={{ textAlign: 'right' }}>
                   <Pill color={stColor[p.status]}>{paymentStatusLabel(p.status)}</Pill>
                   <div style={{ marginTop: 4, color: p.status === 'rejected' ? C.danger : C.muted, fontSize: 11.5 }}>
@@ -430,7 +430,7 @@ function SlipModal({ payment, busy, onClose, onDecide }) {
         background: C.bg, color: C.ink, borderRadius: 16, padding: 24,
         width: '100%', maxWidth: 560, maxHeight: '90vh', overflow: 'auto',
       }}>
-        <h3 style={{ margin: 0, fontFamily: 'Sora', fontWeight: 600 }}>สลิปชำระเงิน</h3>
+        <h3 style={{ margin: 0, fontFamily: 'IBM Plex Sans Thai', fontWeight: 600 }}>สลิปชำระเงิน</h3>
         <p style={{ color: C.muted, fontSize: 13 }}>
           {payment.tenant_name || ''} · {payment.tenant_phone || ''} · ห้อง {payment.room_id || '-'} · บิล {payment.bill_no || payment.bill_id}
         </p>

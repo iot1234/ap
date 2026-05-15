@@ -777,7 +777,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
     },
     {
       key: 'roomId', label: 'ห้อง', minWidth: 70,
-      render: b => <span style={{ fontWeight: 600, fontFamily: 'Sora, sans-serif' }}>{b.roomId}</span>,
+      render: b => <span style={{ fontWeight: 600, fontFamily: 'IBM Plex Sans Thai, sans-serif' }}>{b.roomId}</span>,
     },
     {
       key: 'tenant', label: 'ผู้เช่า', minWidth: 180,
@@ -796,7 +796,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
       key: 'total', label: 'รวม', align: 'right', minWidth: 120,
       render: b => (
         <div>
-          <div style={{ fontSize: 13.5, fontWeight: 600, color: C.ink, fontFamily: 'Sora, sans-serif' }}>
+          <div style={{ fontSize: 13.5, fontWeight: 600, color: C.ink, fontFamily: 'IBM Plex Sans Thai, sans-serif' }}>
             {fmtCurrency(b.total)}
           </div>
           {b.penalty > 0 && (
@@ -1665,7 +1665,7 @@ function BulkSendPreviewBody({ preview, C, fmtCurrency }) {
         background: summary.blocked === 0 ? '#f0f9f0' : (summary.canSend === 0 ? '#fff5f4' : '#fff7e0'),
         border: `1px solid ${summary.blocked === 0 ? '#bce0bc' : (summary.canSend === 0 ? '#f5c0b4' : '#f0e3a7')}`,
       }}>
-        <div style={{ fontFamily: 'Sora', fontWeight: 600, fontSize: 14.5 }}>
+        <div style={{ fontFamily: 'IBM Plex Sans Thai', fontWeight: 600, fontSize: 14.5 }}>
           {summary.blocked === 0 ? 'ทุกบิลพร้อมส่ง'
             : summary.canSend === 0 ? 'ส่งไม่ได้สักใบ'
             : `ส่งได้ ${summary.canSend} ใบ — ติดปัญหา ${summary.blocked} ใบ`}
@@ -1801,7 +1801,7 @@ function SendReminderConfirmBody({ confirm, C, fmtCurrency, justSentAck, setJust
         background: blocked ? '#fff5f4' : (issues.length > 0 ? '#fff7e0' : '#f0f9f0'),
         border: `1px solid ${blocked ? '#f5c0b4' : (issues.length > 0 ? '#f0e3a7' : '#bce0bc')}`,
       }}>
-        <div style={{ fontFamily: 'Sora', fontWeight: 600, fontSize: 14.5 }}>
+        <div style={{ fontFamily: 'IBM Plex Sans Thai', fontWeight: 600, fontSize: 14.5 }}>
           {blocked
             ? `ส่งไม่ได้ — พบ ${summary.highCount || issues.length} ปัญหาสำคัญ`
             : issues.length > 0
@@ -1910,14 +1910,14 @@ function SendReminderConfirmBody({ confirm, C, fmtCurrency, justSentAck, setJust
         <div style={{ fontSize: 12, color: C.muted, marginBottom: 4 }}>บิลที่จะส่ง</div>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
           <div style={{ minWidth: 0 }}>
-            <div style={{ fontFamily: 'Sora', fontWeight: 600 }}>
+            <div style={{ fontFamily: 'IBM Plex Sans Thai', fontWeight: 600 }}>
               ห้อง {bill.roomId} · รอบ {bill.period || '-'}
             </div>
             <div style={{ fontSize: 12.5, color: C.muted, marginTop: 2 }}>
               เลขที่ {bill.dbBillNo || bill.id} · กำหนด {bill.dueDate || '-'}
             </div>
           </div>
-          <div style={{ fontFamily: 'Sora', fontWeight: 700, fontSize: 18 }}>
+          <div style={{ fontFamily: 'IBM Plex Sans Thai', fontWeight: 700, fontSize: 18 }}>
             ฿{fmtCurrency(bill.total)}
           </div>
         </div>
@@ -1930,7 +1930,7 @@ function SendReminderConfirmBody({ confirm, C, fmtCurrency, justSentAck, setJust
           border: `1px solid ${C.borderSoft || C.border}`,
         }}>
           <div style={{ fontSize: 12, color: C.muted, marginBottom: 4 }}>จะส่งให้</div>
-          <div style={{ fontFamily: 'Sora', fontWeight: 600 }}>{t.name || '-'}</div>
+          <div style={{ fontFamily: 'IBM Plex Sans Thai', fontWeight: 600 }}>{t.name || '-'}</div>
           <div style={{ fontSize: 12.5, color: C.muted, marginTop: 2 }}>
             {t.phone || '-'}{t.email ? ` · ${t.email}` : ''}
           </div>
@@ -2028,7 +2028,7 @@ function BillPreview({ b }) {
           <div style={{ fontSize: 12, color: '#bcaf95' }}>ยอดรวมที่ต้องชำระ</div>
           <div style={{ fontSize: 11, color: '#8a7d6b', marginTop: 2 }}>ครบกำหนด {b.dueDateDisplay || b.dueDate}</div>
         </div>
-        <div style={{ fontFamily: 'Sora, sans-serif', fontSize: 24, fontWeight: 700 }}>
+        <div style={{ fontFamily: 'IBM Plex Sans Thai, sans-serif', fontSize: 24, fontWeight: 700 }}>
           {fmtCurrency(b.total)}
         </div>
       </div>

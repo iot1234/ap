@@ -183,7 +183,7 @@ function ReadinessSummary({ data, severityMap, C, Card }) {
       borderLeft: `4px solid ${ready ? severityMap.ok.color : (s.fail > 0 ? severityMap.fail.color : severityMap.warn.color)}`,
       marginBottom: 16,
     }}>
-      <div style={{ fontFamily: 'Sora, sans-serif', fontSize: 18, fontWeight: 700, marginBottom: 8 }}>
+      <div style={{ fontFamily: 'IBM Plex Sans Thai, sans-serif', fontSize: 18, fontWeight: 700, marginBottom: 8 }}>
         {headline}
       </div>
       <div style={{ fontSize: 13.5, color: C.ink2, lineHeight: 1.6, marginBottom: 12 }}>

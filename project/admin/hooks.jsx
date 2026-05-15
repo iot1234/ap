@@ -471,7 +471,7 @@
         },
       }, [
         React.createElement('div', { key: 'i', style: { fontSize: 28, marginBottom: 10 } }, '...'),
-        React.createElement('div', { key: 'h', style: { fontFamily: 'Sora', fontSize: 16, fontWeight: 600, marginBottom: 4 } },
+        React.createElement('div', { key: 'h', style: { fontFamily: 'IBM Plex Sans Thai', fontSize: 16, fontWeight: 600, marginBottom: 4 } },
           `กำลังตรวจสอบฟีเจอร์ "${label || flag}"`),
         React.createElement('div', { key: 'd', style: { fontSize: 13.5 } },
           'กรุณารอสักครู่'),
@@ -488,7 +488,7 @@
       },
     }, [
       React.createElement('div', { key: 'i', style: { fontSize: 36, marginBottom: 12 } }, '🎛'),
-      React.createElement('div', { key: 'h', style: { fontFamily: 'Sora', fontSize: 16, fontWeight: 600, marginBottom: 4 } },
+      React.createElement('div', { key: 'h', style: { fontFamily: 'IBM Plex Sans Thai', fontSize: 16, fontWeight: 600, marginBottom: 4 } },
         `ฟีเจอร์ "${label || flag}" ปิดอยู่`),
       React.createElement('div', { key: 'd', style: { fontSize: 13.5, marginBottom: 16 } },
         'เปิดได้ที่ ระบบ → ฟีเจอร์ระบบ'),
