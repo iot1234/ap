@@ -984,6 +984,20 @@ test('/api/payments exposes admin queue summary counts', () => {
     'payments list response must include summary');
   assert.match(adminPayments, /const \[summary, setSummary\]/,
     'admin payments page must track queue summary state');
+  assert.match(adminPayments, /const \[filter, setFilter\] = useState\(FILTER_ALL\)/,
+    'admin payments page must open on the all-status queue, not pending-only');
+  assert.match(adminPayments, /const \[search, setSearch\] = useState\(''\)/,
+    'admin payments page must provide local search across the loaded queue');
+  assert.match(adminPayments, /filter === FILTER_ALL \? PAYMENT_STATUS_ORDER : \[filter\]/,
+    'all-status mode must load every payment status instead of hiding verified/rejected rows');
+  assert.match(adminPayments, /Promise\.all\(statuses\.map/,
+    'all-status mode should load status batches together so the queue stays responsive');
+  assert.match(adminPayments, /sortPaymentsNewestFirst\(payments\)/,
+    'admin payments page must normalize ordering with newest slips first');
+  assert.match(adminPayments, /visibleList\.map/,
+    'admin payments page must render the filtered/searched list, not the raw status response');
+  assert.match(adminPayments, /<option value=\{FILTER_ALL\}>/,
+    'admin payments page must expose an all-status filter option');
   assert.match(adminPayments, /countFor\(status\)/,
     'admin payments page must display per-status counts');
   assert.match(adminPayments, /เส้นทางตรวจ:/,

@@ -20,12 +20,56 @@ const BILL_STATUS_LABEL = {
   void: 'ยกเลิก',
 };
 
+const FILTER_ALL = 'all';
+const PAYMENT_STATUS_ORDER = ['pending', 'verified', 'rejected'];
+const PAYMENT_PAGE_LIMIT = 500;
+const FILTER_ALL_LABEL = '\u0e17\u0e31\u0e49\u0e07\u0e2b\u0e21\u0e14';
+
 function paymentStatusLabel(status) {
   return PAYMENT_STATUS_LABEL[status] || status || '-';
 }
 
 function billStatusLabel(status) {
   return BILL_STATUS_LABEL[status] || status || '-';
+}
+
+function paymentFilterLabel(status) {
+  return status === FILTER_ALL ? FILTER_ALL_LABEL : paymentStatusLabel(status);
+}
+
+function paymentStatusTone(C, status) {
+  if (status === 'verified') return { color: C.success, soft: C.successSoft, ink: C.successInk };
+  if (status === 'rejected') return { color: C.danger, soft: C.dangerSoft, ink: C.dangerInk };
+  return { color: C.warning, soft: C.warningSoft, ink: C.warningInk };
+}
+
+function paymentTimestamp(payment) {
+  const ts = Date.parse(payment?.created_at);
+  return Number.isFinite(ts) ? ts : 0;
+}
+
+function sortPaymentsNewestFirst(payments) {
+  return [...(payments || [])].sort((a, b) => {
+    const byDate = paymentTimestamp(b) - paymentTimestamp(a);
+    if (byDate) return byDate;
+    return Number(b?.id || 0) - Number(a?.id || 0);
+  });
+}
+
+function paymentSearchHaystack(payment) {
+  return [
+    payment.id,
+    payment.bill_id,
+    payment.bill_no,
+    payment.room_id,
+    payment.tenant_name,
+    payment.tenant_phone,
+    payment.amount,
+    payment.status,
+    payment.bill_status,
+    paymentStatusLabel(payment.status),
+    billStatusLabel(payment.bill_status),
+  ].map((v) => String(v ?? '').toLowerCase()).join(' ');
 }
 
 function fmtMoney(value) {
@@ -97,7 +141,8 @@ function PagePayments({ setToast }) {
     }, `กำลังเตรียมหน้าสลิปชำระเงิน... (รอ: ${missing})`);
   }
 
-  const [filter, setFilter] = useState('pending');
+  const [filter, setFilter] = useState(FILTER_ALL);
+  const [search, setSearch] = useState('');
   const [list, setList] = useState([]);
   const [summary, setSummary] = useState(null);
   const [open, setOpen] = useState(null);
@@ -116,23 +161,31 @@ function PagePayments({ setToast }) {
     setLoading(true);
     setLoadError(null);
     try {
-      const r = await fetch(`/api/payments?status=${encodeURIComponent(filter)}`, {
-        credentials: 'same-origin',
-        ...(req.signal ? { signal: req.signal } : {}),
-      });
-      const d = await r.json().catch(() => ({}));
-      if (!r.ok) {
+      const statuses = filter === FILTER_ALL ? PAYMENT_STATUS_ORDER : [filter];
+      const batches = await Promise.all(statuses.map(async (status) => {
+        const url = `/api/payments?status=${encodeURIComponent(status)}&limit=${PAYMENT_PAGE_LIMIT}`;
+        const r = await fetch(url, {
+          credentials: 'same-origin',
+          ...(req.signal ? { signal: req.signal } : {}),
+        });
+        const d = await r.json().catch(() => ({}));
+        return { r, d };
+      }));
+      const failed = batches.find((batch) => !batch.r.ok);
+      if (failed) {
         // 503 means slipUpload feature is OFF on the server. Don't surface
         // as an error — FeatureGate already shows the placeholder if the
         // flag is off; if we're rendering at all the gate believed it on.
-        if (r.status !== 503) {
-          setLoadError(d.error || `HTTP ${r.status}`);
+        if (failed.r.status !== 503) {
+          setLoadError(failed.d.error || `HTTP ${failed.r.status}`);
         }
         setList([]);
         setSummary(null);
       } else {
-        setList(Array.isArray(d.payments) ? d.payments : []);
-        setSummary(d.summary || null);
+        const payments = batches.flatMap(({ d }) => Array.isArray(d.payments) ? d.payments : []);
+        setList(sortPaymentsNewestFirst(payments));
+        const withSummary = batches.find(({ d }) => d.summary);
+        setSummary(withSummary?.d?.summary || null);
       }
     } catch (err) {
       if (err.name !== 'AbortError') {
@@ -181,6 +234,8 @@ function PagePayments({ setToast }) {
       // the modal, but keep the page id so the user stays on /admin#payments.
       const cleanHash = String(window.location.hash || '').split('?')[0];
       try { history.replaceState(null, '', cleanHash || '#payments'); } catch {}
+    } else if (filter === FILTER_ALL) {
+      setFilter('pending');
     } else if (filter === 'pending') {
       // Not in the current filter — try verified, then rejected.
       setFilter('verified');
@@ -230,21 +285,38 @@ function PagePayments({ setToast }) {
   }
 
   const stColor = { pending: C.warning, verified: C.success, rejected: C.danger };
+  const searchTerm = search.trim().toLowerCase();
+  const visibleList = useMemo(() => {
+    const sorted = sortPaymentsNewestFirst(list);
+    if (!searchTerm) return sorted;
+    return sorted.filter((payment) => paymentSearchHaystack(payment).includes(searchTerm));
+  }, [list, searchTerm]);
   const countFor = (status) => Number(summary?.[status]?.count || 0);
-  const amountFor = (status) => Number(summary?.[status]?.amount || 0)
+  const amountRawFor = (status) => Number(summary?.[status]?.amount || 0);
+  const amountFor = (status) => amountRawFor(status)
     .toLocaleString('th-TH', { minimumFractionDigits: 2 });
+  const activeFilterLabel = paymentFilterLabel(filter);
 
   return (
     <PageContainer>
       <PageHeader title="สลิปชำระเงิน"
         subtitle="ตรวจสอบและอนุมัติสลิปจากผู้เช่า — ต้องเปิดฟีเจอร์ slipUpload"
         actions={
-          <select value={filter} onChange={(e) => setFilter(e.target.value)}
-            style={{ padding: '6px 10px', borderRadius: 6, border: '1px solid ' + C.border, background: C.bg, color: C.ink }}>
-            <option value="pending">รอตรวจสอบ</option>
-            <option value="verified">อนุมัติแล้ว</option>
-            <option value="rejected">ปฏิเสธ</option>
-          </select>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder={'\u0e04\u0e49\u0e19\u0e2b\u0e32\u0e2b\u0e49\u0e2d\u0e07 / \u0e1a\u0e34\u0e25 / \u0e1c\u0e39\u0e49\u0e40\u0e0a\u0e48\u0e32'}
+              style={{ width: 220, maxWidth: '100%', padding: '6px 10px', borderRadius: 6, border: '1px solid ' + C.border, background: C.bg, color: C.ink }}
+            />
+            <select value={filter} onChange={(e) => setFilter(e.target.value)}
+              style={{ padding: '6px 10px', borderRadius: 6, border: '1px solid ' + C.border, background: C.bg, color: C.ink }}>
+              <option value={FILTER_ALL}>{FILTER_ALL_LABEL}</option>
+              <option value="pending">รอตรวจสอบ</option>
+              <option value="verified">อนุมัติแล้ว</option>
+              <option value="rejected">ปฏิเสธ</option>
+            </select>
+          </div>
         } />
       {summary ? (
         <div style={{
@@ -257,21 +329,42 @@ function PagePayments({ setToast }) {
             ['pending', 'รอตรวจสอบ', C.warning],
             ['verified', 'อนุมัติแล้ว', C.success],
             ['rejected', 'ปฏิเสธ', C.danger],
-          ].map(([status, label, color]) => (
-            <div key={status} style={{
-              padding: '10px 12px',
-              border: '1px solid ' + (C.borderSoft || C.border),
-              borderRadius: 8,
-              background: C.bgSoft || C.bg,
-              color: C.ink,
-            }}>
-              <div style={{ color, fontWeight: 700, fontSize: 18 }}>{countFor(status)}</div>
-              <div style={{ fontSize: 12.5, color: C.muted }}>{label} · ฿{amountFor(status)}</div>
-            </div>
-          ))}
+          ].map(([status, label, color]) => {
+            const selected = filter === status;
+            return (
+              <button key={status} type="button" onClick={() => setFilter(status)} style={{
+                appearance: 'none',
+                textAlign: 'left',
+                fontFamily: 'inherit',
+                cursor: 'pointer',
+                padding: '10px 12px',
+                border: '1px solid ' + (selected ? color : (C.borderSoft || C.border)),
+                borderRadius: 8,
+                background: C.bgSoft || C.bg,
+                color: C.ink,
+              }}>
+                <div style={{ color, fontWeight: 700, fontSize: 18 }}>{countFor(status)}</div>
+                <div style={{ fontSize: 12.5, color: C.muted }}>{label} · ฿{amountFor(status)}</div>
+              </button>
+            );
+          })}
         </div>
       ) : null}
       <Card>
+        <div style={{
+          padding: '10px 16px',
+          borderBottom: '1px solid ' + (C.borderSoft || C.border),
+          background: C.bgSoft || C.bg,
+          color: C.muted,
+          display: 'flex',
+          justifyContent: 'space-between',
+          gap: 10,
+          flexWrap: 'wrap',
+          fontSize: 12.5,
+        }}>
+          <span>{activeFilterLabel} · {visibleList.length}/{list.length} {'\u0e23\u0e32\u0e22\u0e01\u0e32\u0e23'}</span>
+          <span>{'\u0e40\u0e23\u0e35\u0e22\u0e07\u0e25\u0e48\u0e32\u0e2a\u0e38\u0e14\u0e2d\u0e22\u0e39\u0e48\u0e14\u0e49\u0e32\u0e19\u0e1a\u0e19'}</span>
+        </div>
         {loading ? (
           <div style={{ padding: 32, textAlign: 'center', color: C.muted, fontSize: 13.5 }}>
             กำลังโหลด...
@@ -282,11 +375,12 @@ function PagePayments({ setToast }) {
             <div style={{ marginBottom: 12 }}>{loadError}</div>
             <Btn onClick={load}>ลองใหม่</Btn>
           </div>
-        ) : list.length === 0 ? <EmptyState title="ไม่มีรายการ" /> : (
+        ) : visibleList.length === 0 ? <EmptyState title="ไม่มีรายการ" /> : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 1, background: C.border }}>
-            {list.map((p) => (
+            {visibleList.map((p) => (
               <div key={p.id} style={{
                 background: C.bg, padding: '14px 16px', display: 'grid',
+                borderLeft: `4px solid ${paymentStatusTone(C, p.status).color || C.border}`,
                 gridTemplateColumns: '1fr auto auto', gap: 16, alignItems: 'center', cursor: 'pointer',
               }} onClick={() => openPayment(p)}>
                 <div>
