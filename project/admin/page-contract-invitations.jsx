@@ -292,7 +292,7 @@ function ReviewBody({ detail }) {
   const C = window.ADMIN_C;
   const draft = detail.draft || {};
   const Section = ({ title, children }) => (
-    <div style={{ marginBottom: 16, padding: 12, background: '#faf6ee', borderRadius: 8 }}>
+    <div style={{ marginBottom: 16, padding: 12, background: C.surfaceAlt, borderRadius: 8 }}>
       <div style={{ fontWeight: 600, marginBottom: 8, color: C.accent, fontSize: 13 }}>{title}</div>
       {children}
     </div>
@@ -390,10 +390,10 @@ function PhotoBox({ label, url }) {
 
 const th = {
   textAlign: 'left', padding: '10px 14px', fontWeight: 600, fontSize: 12,
-  color: '#5b4f40', borderBottom: '1px solid #ece4d4',
+  color: C.ink2, borderBottom: '1px solid #ece4d4',
 };
 const td = { padding: '10px 14px', verticalAlign: 'top' };
-const lbl = { display: 'block', fontSize: 12, color: '#5b4f40', marginBottom: 4, fontWeight: 500 };
+const lbl = { display: 'block', fontSize: 12, color: C.ink2, marginBottom: 4, fontWeight: 500 };
 const inp = {
   width: '100%', padding: '8px 10px', border: '1px solid #ece4d4',
   borderRadius: 6, fontSize: 13, fontFamily: 'inherit', boxSizing: 'border-box',

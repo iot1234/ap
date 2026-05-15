@@ -9,7 +9,7 @@ const { useState, useEffect, useMemo } = React;
 
 function PageContracts({ setToast, addActivity, rooms = {}, config }) {
   const C = window.ADMIN_C;
-  const { Card, Btn, Input, Select, Modal, Pill, SectionHeading,
+  const { Card, Btn, Input, Select, Modal, Pill, FilterChip, SectionHeading,
           PageContainer, PageHeader } = window;
   const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
 
@@ -116,13 +116,12 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
             { key: 'ended',   label: `สิ้นสุด (${counts.ended})` },
             { key: 'all',     label: `ทั้งหมด (${counts.all})` },
           ].map((t) => (
-            <button key={t.key} onClick={() => setFilter(t.key)}
-              style={{
-                padding: '6px 14px', borderRadius: 18, border: '1px solid ' + (filter === t.key ? C.accent : C.border),
-                background: filter === t.key ? C.accent : C.surface,
-                color: filter === t.key ? '#fff' : C.ink2,
-                cursor: 'pointer', fontSize: 13, fontFamily: 'inherit',
-              }}>{t.label}</button>
+            <FilterChip
+              key={t.key}
+              label={t.label}
+              active={filter === t.key}
+              onClick={() => setFilter(t.key)}
+            />
           ))}
           <input type="search" placeholder="ค้นหา ชื่อ/เบอร์/เลขสัญญา/ห้อง"
             value={search} onChange={(e) => setSearch(e.target.value)}
@@ -133,7 +132,7 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
         </div>
         {counts.expiring > 0 && filter === 'active' ? (
           <div style={{
-            marginTop: 12, padding: 10, background: '#fff7e0',
+            marginTop: 12, padding: 10, background: C.warningSoft,
             border: '1px solid #f1b32d', borderRadius: 8,
             fontSize: 13, color: C.ink2,
           }}>
@@ -144,7 +143,9 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
 
       <Card style={{ padding: 0, marginTop: 12, overflow: 'hidden' }}>
         {loading ? (
-          <div style={{ padding: 30, textAlign: 'center', color: C.muted }}>กำลังโหลด…</div>
+          <div style={{ padding: 20 }}>
+            {window.SkeletonRows ? <window.SkeletonRows count={5} lineHeight={36} /> : <div style={{ padding: 30, textAlign: 'center', color: C.muted }}>กำลังโหลด…</div>}
+          </div>
         ) : filtered.length === 0 ? (
           <div style={{ padding: 30, textAlign: 'center', color: C.muted }}>ไม่มีสัญญา</div>
         ) : (
@@ -176,7 +177,7 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
                     <td style={td}>
                       {fmtDate(c.end_date)}
                       {c.status === 'active' && c.days_left != null && c.days_left <= 30 && c.days_left >= 0 ? (
-                        <div style={{ fontSize: 11, color: '#c46a3e' }}>
+                        <div style={{ fontSize: 11, color: C.accent }}>
                           เหลือ {c.days_left} วัน
                         </div>
                       ) : null}
@@ -393,8 +394,8 @@ function InviteTenantModal({ contract, onClose, onSaved, onError }) {
             หลังจากคุณกดอนุมัติ ลิงก์นี้จะใช้ไม่ได้อีกต่อไป
           </div>
           <div style={{
-            padding: 12, background: '#fff7e0', border: '1px solid #f1b32d',
-            borderRadius: 8, fontSize: 13, color: '#6b4d10', marginBottom: 16,
+            padding: 12, background: C.warningSoft, border: '1px solid #f1b32d',
+            borderRadius: 8, fontSize: 13, color: C.warningInk, marginBottom: 16,
           }}>
             ⚠️ ลิงก์เก่าที่ยังไม่ได้อนุมัติจะถูกยกเลิกอัตโนมัติเมื่อคุณสร้างลิงก์ใหม่
           </div>
@@ -409,8 +410,8 @@ function InviteTenantModal({ contract, onClose, onSaved, onError }) {
         </div>
       ) : (
         <div>
-          <div style={{ padding: 12, background: '#e8f5e8', border: '1px solid #4a8b4a',
-                        borderRadius: 8, fontSize: 13, color: '#2d5a2c', marginBottom: 16 }}>
+          <div style={{ padding: 12, background: C.successSoft, border: '1px solid #4a8b4a',
+                        borderRadius: 8, fontSize: 13, color: C.successInk, marginBottom: 16 }}>
             ✅ สร้างลิงก์เรียบร้อย — ส่งให้ผู้เช่าผ่าน LINE / SMS หรือก็อปแล้วส่งทางอื่นได้เลย
           </div>
           <label style={lbl}>ลิงก์สำหรับผู้เช่า</label>
@@ -425,9 +426,9 @@ function InviteTenantModal({ contract, onClose, onSaved, onError }) {
               hour: '2-digit', minute: '2-digit',
             })}
           </div>
-          <div style={{ marginTop: 16, padding: 12, background: '#fff7e0',
+          <div style={{ marginTop: 16, padding: 12, background: C.warningSoft,
                         border: '1px solid #f1b32d', borderRadius: 8,
-                        fontSize: 12, color: '#6b4d10', lineHeight: 1.6 }}>
+                        fontSize: 12, color: C.warningInk, lineHeight: 1.6 }}>
             🔒 <b>ลิงก์นี้แสดงครั้งเดียว</b> — ปิดหน้าต่างแล้วจะดูซ้ำไม่ได้<br/>
             ตรวจสอบว่าได้ก็อปไว้แล้ว หรือส่งหาผู้เช่าทันที
           </div>
@@ -689,7 +690,7 @@ function AssignTemplateModal({ contract, templates, onClose, onSaved, onError, o
           display: 'flex', gap: 10, alignItems: 'flex-start', padding: 10,
           border: `1px solid ${tid === '' ? C.accent : C.border}`,
           borderRadius: 6, cursor: 'pointer',
-          background: tid === '' ? '#fff7ee' : 'transparent',
+          background: tid === '' ? C.surfaceAlt : 'transparent',
         }}>
           <input type="radio" checked={tid === ''} onChange={() => setTid('')}
             style={{ marginTop: 2 }} />
@@ -705,7 +706,7 @@ function AssignTemplateModal({ contract, templates, onClose, onSaved, onError, o
             display: 'flex', gap: 10, alignItems: 'flex-start', padding: 10,
             border: `1px solid ${tid === String(t.id) || tid === t.id ? C.accent : C.border}`,
             borderRadius: 6, cursor: 'pointer',
-            background: tid === String(t.id) || tid === t.id ? '#fff7ee' : 'transparent',
+            background: tid === String(t.id) || tid === t.id ? C.surfaceAlt : 'transparent',
           }}>
             <input type="radio" checked={tid === String(t.id) || tid === t.id}
               onChange={() => setTid(String(t.id))}
@@ -713,7 +714,7 @@ function AssignTemplateModal({ contract, templates, onClose, onSaved, onError, o
             <div style={{ flex: 1 }}>
               <div style={{ fontSize: 13, fontWeight: 500 }}>
                 {t.name}
-                {t.is_default ? <span style={{ marginLeft: 6, fontSize: 10, color: '#92651a' }}>⭐</span> : null}
+                {t.is_default ? <span style={{ marginLeft: 6, fontSize: 10, color: C.warning }}>⭐</span> : null}
               </div>
               {t.description ? (
                 <div style={{ fontSize: 11, color: C.muted }}>{t.description}</div>
@@ -973,7 +974,7 @@ function QuickInviteModal({ rooms = {}, config, onClose, onSaved, onError }) {
           </div>
 
           <div style={{
-            padding: 12, background: '#faf6ee', borderRadius: 8,
+            padding: 12, background: C.surfaceAlt, borderRadius: 8,
             marginBottom: 16, fontSize: 13, fontWeight: 600, color: C.accent,
           }}>👤 ข้อมูลผู้เช่า (สำหรับส่งลิงก์)</div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
@@ -998,7 +999,7 @@ function QuickInviteModal({ rooms = {}, config, onClose, onSaved, onError }) {
           </div>
 
           <div style={{
-            padding: 12, background: '#faf6ee', borderRadius: 8,
+            padding: 12, background: C.surfaceAlt, borderRadius: 8,
             marginTop: 20, marginBottom: 16, fontSize: 13, fontWeight: 600, color: C.accent,
           }}>📋 ข้อมูลสัญญา</div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
@@ -1020,7 +1021,7 @@ function QuickInviteModal({ rooms = {}, config, onClose, onSaved, onError }) {
                   onChange={(e) => setForm({ ...form, roomId: e.target.value })} />
               )}
               {hasRoomInventory ? (
-                <div style={{ marginTop: 4, fontSize: 11, color: roomAvailable ? C.muted : (C.danger || '#b94a48') }}>
+                <div style={{ marginTop: 4, fontSize: 11, color: roomAvailable ? C.muted : (C.danger || C.danger) }}>
                   {availableRooms.length
                     ? `เลือกได้ ${availableRooms.length} ห้องว่างจากระบบ`
                     : 'ทุกห้องไม่ว่าง/ติดจอง/ซ่อมบำรุง ต้องปลดสถานะห้องก่อนสร้างสัญญา'}
@@ -1077,8 +1078,8 @@ function QuickInviteModal({ rooms = {}, config, onClose, onSaved, onError }) {
       ) : (
         <div>
           <div style={{
-            padding: 12, background: '#e8f5e8', border: '1px solid #4a8b4a',
-            borderRadius: 8, fontSize: 13, color: '#2d5a2c', marginBottom: 16,
+            padding: 12, background: C.successSoft, border: '1px solid #4a8b4a',
+            borderRadius: 8, fontSize: 13, color: C.successInk, marginBottom: 16,
           }}>
             ✅ สร้างสัญญา <b>{result.contract.contract_no}</b> เรียบร้อย —
             ส่งลิงก์ด้านล่างให้ <b>{result.tenant.fullName}</b> กรอกได้เลย
@@ -1097,9 +1098,9 @@ function QuickInviteModal({ rooms = {}, config, onClose, onSaved, onError }) {
             })}
           </div>
           <div style={{
-            marginTop: 16, padding: 12, background: '#fff7e0',
+            marginTop: 16, padding: 12, background: C.warningSoft,
             border: '1px solid #f1b32d', borderRadius: 8,
-            fontSize: 12, color: '#6b4d10', lineHeight: 1.6,
+            fontSize: 12, color: C.warningInk, lineHeight: 1.6,
           }}>
             🔒 <b>ลิงก์นี้แสดงครั้งเดียว</b> — ก๊อปแล้วส่งให้ผู้เช่าทาง LINE/SMS<br/>
             หลังผู้เช่ากรอกเสร็จ คุณจะเห็นในเมนู "ใบเชิญผู้เช่ากรอก" สำหรับตรวจสอบ
@@ -1112,10 +1113,10 @@ function QuickInviteModal({ rooms = {}, config, onClose, onSaved, onError }) {
 
 const th = {
   textAlign: 'left', padding: '10px 14px', fontWeight: 600, fontSize: 12,
-  color: '#5b4f40', borderBottom: '1px solid #ece4d4',
+  color: C.ink2, borderBottom: '1px solid #ece4d4',
 };
 const td = { padding: '10px 14px', verticalAlign: 'top' };
-const lbl = { display: 'block', fontSize: 12, color: '#5b4f40', marginBottom: 4, fontWeight: 500 };
+const lbl = { display: 'block', fontSize: 12, color: C.ink2, marginBottom: 4, fontWeight: 500 };
 const inp = {
   width: '100%', padding: '8px 10px', border: '1px solid #ece4d4',
   borderRadius: 6, fontSize: 13, fontFamily: 'inherit', boxSizing: 'border-box',

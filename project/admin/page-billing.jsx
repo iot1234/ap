@@ -816,7 +816,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
                 style={{
                   fontSize: 10, padding: '1px 6px', borderRadius: 4,
                   background: b._source === 'db' ? (C.successSoft || '#e3f3e8') : (C.warningSoft || '#fef6e0'),
-                  color: b._source === 'db' ? (C.successInk || '#1d4a2c') : (C.warningInk || '#7a5a18'),
+                  color: b._source === 'db' ? (C.successInk || '#1d4a2c') : (C.warningInk || C.warningInk),
                   fontWeight: 600, letterSpacing: '0.02em',
                 }}>
             {b._source === 'db' ? 'ออกแล้ว' : 'ประมาณการ'}
@@ -873,7 +873,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
               style={{
                 cursor: 'pointer', fontSize: 12,
                 padding: '3px 8px', borderRadius: 999,
-                background: '#fff4d4', color: '#7a5a18', fontWeight: 600,
+                background: C.warningSoft, color: C.warningInk, fontWeight: 600,
               }}
             >
               รอตรวจสลิป {pend} ใบ
@@ -888,7 +888,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
               style={{
                 cursor: 'pointer', fontSize: 11.5,
                 padding: '3px 8px', borderRadius: 999,
-                background: '#ffe6e2', color: '#7a2920', fontWeight: 600,
+                background: C.dangerSoft, color: C.dangerInk, fontWeight: 600,
               }}
             >
               สลิปถูกปฏิเสธ {rej} ใบ
@@ -921,17 +921,17 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         if (r.canSend && r.warnCode === 'EMAIL_ONLY') {
           mainEl = (
             <span title="ไม่ผูก LINE — จะส่งทางอีเมล (อาจไปกล่อง spam)"
-                  style={{ fontSize: 13, color: '#c08a2a' }}>ส่งทางอีเมล</span>
+                  style={{ fontSize: 13, color: C.warning }}>ส่งทางอีเมล</span>
           );
         } else if (r.canSend) {
           mainEl = (
             <span title="LINE + (อีเมลถ้ามี) พร้อม — กดส่งได้เลย"
-                  style={{ fontSize: 13, color: '#1f5f3a' }}>พร้อมส่ง</span>
+                  style={{ fontSize: 13, color: C.success }}>พร้อมส่ง</span>
           );
         } else {
           mainEl = (
             <span title={r.blockMsg || r.blockCode || 'block'}
-                  style={{ fontSize: 12, color: '#b94a48', fontWeight: 600 }}>
+                  style={{ fontSize: 12, color: C.danger, fontWeight: 600 }}>
               ส่งไม่ได้: {r.blockCode === 'NO_TENANT_CHANNEL' ? 'ไม่มีช่องทาง'
                 : r.blockCode === 'TENANT_MOVED_ROOM' ? 'ย้ายห้อง'
                 : r.blockCode === 'TENANT_NOT_ACTIVE' ? 'ออกแล้ว'
@@ -959,7 +959,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
               style={{
                 fontSize: 10.5, padding: '1px 6px', borderRadius: 10,
                 background: veryRecent ? '#fbeae7' : '#fdf3e0',
-                color: veryRecent ? '#7a2920' : '#7a5a1a',
+                color: veryRecent ? C.dangerInk : '#7a5a1a',
                 whiteSpace: 'nowrap',
               }}>
               ส่งแล้ว {count}× {ago ? `· ${ago}ก่อน` : ''}
@@ -1054,7 +1054,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
           return (
             <div style={{
               padding: '10px 14px', marginBottom: 14, borderRadius: 8,
-              background: C.warningSoft || '#fef6e0', color: C.warningInk || '#7a5a18',
+              background: C.warningSoft || '#fef6e0', color: C.warningInk || C.warningInk,
               fontSize: 13, display: 'flex', alignItems: 'center', gap: 10,
             }}>
               <span style={{ fontSize: 12, fontWeight: 700 }}>คำเตือน</span>
@@ -1518,7 +1518,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
                     disabled={markPaidPrompt.busy}
                     style={{
                       padding: '10px 8px', textAlign: 'center', cursor: 'pointer',
-                      border: `2px solid ${sel ? (C.accent || '#c08a2a') : C.border}`,
+                      border: `2px solid ${sel ? (C.accent || C.warning) : C.border}`,
                       background: sel ? (C.accentSoft || '#fef6e0') : C.bg,
                       color: C.ink, borderRadius: 8,
                       fontFamily: 'inherit', fontSize: 13, fontWeight: sel ? 600 : 400,
@@ -1662,8 +1662,8 @@ function BulkSendPreviewBody({ preview, C, fmtCurrency }) {
       {/* Headline summary */}
       <div style={{
         padding: 14, borderRadius: 10,
-        background: summary.blocked === 0 ? '#f0f9f0' : (summary.canSend === 0 ? '#fff5f4' : '#fff7e0'),
-        border: `1px solid ${summary.blocked === 0 ? '#bce0bc' : (summary.canSend === 0 ? '#f5c0b4' : '#f0e3a7')}`,
+        background: summary.blocked === 0 ? '#f0f9f0' : (summary.canSend === 0 ? C.dangerSoft : C.warningSoft),
+        border: `1px solid ${summary.blocked === 0 ? '#bce0bc' : (summary.canSend === 0 ? C.danger : '#f0e3a7')}`,
       }}>
         <div style={{ fontFamily: 'IBM Plex Sans Thai', fontWeight: 600, fontSize: 14.5 }}>
           {summary.blocked === 0 ? 'ทุกบิลพร้อมส่ง'
@@ -1685,15 +1685,15 @@ function BulkSendPreviewBody({ preview, C, fmtCurrency }) {
             {codes.map(([code, count]) => (
               <div key={code} style={{
                 padding: 10, borderRadius: 6,
-                background: '#fff5f4',
+                background: C.dangerSoft,
                 borderLeft: '3px solid #b94a48',
                 fontSize: 13,
               }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                  <strong style={{ color: '#7a2920' }}>
+                  <strong style={{ color: C.dangerInk }}>
                     ปัญหา: {blockCodeLabel[code] || code}
                   </strong>
-                  <span style={{ color: '#7a2920', fontWeight: 600 }}>{count} ใบ</span>
+                  <span style={{ color: C.dangerInk, fontWeight: 600 }}>{count} ใบ</span>
                 </div>
               </div>
             ))}
@@ -1721,8 +1721,8 @@ function BulkSendPreviewBody({ preview, C, fmtCurrency }) {
               return (
                 <div key={it.id} style={{
                   padding: 8, borderRadius: 6, fontSize: 12.5,
-                  background: it.veryRecent ? '#fff5e8' : '#fdfaf2',
-                  borderLeft: `3px solid ${it.veryRecent ? '#c08a2a' : '#bcaf95'}`,
+                  background: it.veryRecent ? '#fff5e8' : C.surfaceAlt,
+                  borderLeft: `3px solid ${it.veryRecent ? C.warning : '#bcaf95'}`,
                   display: 'flex', justifyContent: 'space-between', alignItems: 'center',
                 }}>
                   <span>ห้อง {it.roomId} · {it.tenant}</span>
@@ -1743,7 +1743,7 @@ function BulkSendPreviewBody({ preview, C, fmtCurrency }) {
 
       {/* Footnote */}
       <div style={{
-        padding: 10, borderRadius: 6, background: '#fdfaf2',
+        padding: 10, borderRadius: 6, background: C.surfaceAlt,
         border: `1px solid ${C.borderSoft || C.border}`,
         fontSize: 12, color: C.muted, lineHeight: 1.6,
       }}>
@@ -1770,8 +1770,8 @@ function SendReminderConfirmBody({ confirm, C, fmtCurrency, justSentAck, setJust
   const issues = Array.isArray(r.issues) ? r.issues : [];
 
   const sevPalette = {
-    high: { bg: '#fff5f4', border: '#f5c0b4', accent: '#b94a48', label: 'ปัญหาสำคัญ' },
-    med:  { bg: '#fff7e0', border: '#f0e3a7', accent: '#8a6b1a', label: 'ควรตรวจ' },
+    high: { bg: C.dangerSoft, border: C.danger, accent: C.danger, label: 'ปัญหาสำคัญ' },
+    med:  { bg: C.warningSoft, border: '#f0e3a7', accent: '#8a6b1a', label: 'ควรตรวจ' },
     low:  { bg: '#f4f8fc', border: '#cfdde9', accent: '#3a5a78', label: 'ข้อมูล' },
     info: { bg: '#f4f8fc', border: '#cfdde9', accent: '#3a5a78', label: 'ข้อมูล' },
   };
@@ -1798,8 +1798,8 @@ function SendReminderConfirmBody({ confirm, C, fmtCurrency, justSentAck, setJust
       {/* Top banner — ready / blocked summary */}
       <div style={{
         padding: 12, borderRadius: 8,
-        background: blocked ? '#fff5f4' : (issues.length > 0 ? '#fff7e0' : '#f0f9f0'),
-        border: `1px solid ${blocked ? '#f5c0b4' : (issues.length > 0 ? '#f0e3a7' : '#bce0bc')}`,
+        background: blocked ? C.dangerSoft : (issues.length > 0 ? C.warningSoft : '#f0f9f0'),
+        border: `1px solid ${blocked ? C.danger : (issues.length > 0 ? '#f0e3a7' : '#bce0bc')}`,
       }}>
         <div style={{ fontFamily: 'IBM Plex Sans Thai', fontWeight: 600, fontSize: 14.5 }}>
           {blocked
@@ -1822,7 +1822,7 @@ function SendReminderConfirmBody({ confirm, C, fmtCurrency, justSentAck, setJust
           padding: 12, borderRadius: 8,
           background: sendHistory.veryRecently ? '#fbeae7'
             : sendHistory.recently ? '#fff5e8' : '#f4f8fc',
-          border: `1px solid ${sendHistory.veryRecently ? '#f5c0b4'
+          border: `1px solid ${sendHistory.veryRecently ? C.danger
             : sendHistory.recently ? '#f0c47a' : '#cfdde9'}`,
         }}>
           <div style={{ fontWeight: 600, marginBottom: 6 }}>
@@ -1846,7 +1846,7 @@ function SendReminderConfirmBody({ confirm, C, fmtCurrency, justSentAck, setJust
               </div>
             ) : null}
             {sendHistory.count >= 3 ? (
-              <div style={{ marginTop: 4, color: '#7a2920' }}>
+              <div style={{ marginTop: 4, color: C.dangerInk }}>
                 ส่งไปเยอะแล้ว — แนะนำลองโทรหรือทักทาง LINE OA ส่วนตัวแทน
               </div>
             ) : null}
@@ -1870,8 +1870,8 @@ function SendReminderConfirmBody({ confirm, C, fmtCurrency, justSentAck, setJust
                       {channelLabel[s.channel] || s.channel}
                       {' · '}
                       <span style={{
-                        color: s.status === 'sent' ? '#1f5f3a'
-                          : s.status === 'failed' ? '#b94a48' : C.muted,
+                        color: s.status === 'sent' ? C.success
+                          : s.status === 'failed' ? C.danger : C.muted,
                       }}>
                         {statusLabel[s.status] || s.status}
                       </span>
@@ -1892,7 +1892,7 @@ function SendReminderConfirmBody({ confirm, C, fmtCurrency, justSentAck, setJust
               <input type="checkbox"
                 checked={!!justSentAck}
                 onChange={(e) => setJustSentAck(e.target.checked)}
-                style={{ marginTop: 2, accentColor: C.accent || '#c08a2a' }} />
+                style={{ marginTop: 2, accentColor: C.accent || C.warning }} />
               <span>
                 <b>เข้าใจว่าผู้เช่าเพิ่งได้รับข้อความนี้ไปเมื่อกี้</b>
                 {' '}— ยังต้องการส่งซ้ำเพราะ (เช่น ผู้เช่าโทรมาบอกไม่เห็น)
@@ -1937,15 +1937,15 @@ function SendReminderConfirmBody({ confirm, C, fmtCurrency, justSentAck, setJust
           <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
             <span style={{
               fontSize: 11.5, padding: '3px 9px', borderRadius: 999,
-              background: channels.line ? '#e6f4ec' : '#fbeae7',
-              color: channels.line ? '#1f5f3a' : '#7a2920',
+              background: channels.line ? C.successSoft : '#fbeae7',
+              color: channels.line ? C.success : C.dangerInk,
             }}>
               {channels.line ? 'มี LINE' : 'ไม่มี LINE'}
             </span>
             <span style={{
               fontSize: 11.5, padding: '3px 9px', borderRadius: 999,
-              background: channels.email ? '#e6f4ec' : '#fbeae7',
-              color: channels.email ? '#1f5f3a' : '#7a2920',
+              background: channels.email ? C.successSoft : '#fbeae7',
+              color: channels.email ? C.success : C.dangerInk,
             }}>
               {channels.email ? 'มี Email' : 'ไม่มี Email'}
             </span>
@@ -2026,7 +2026,7 @@ function BillPreview({ b }) {
       }}>
         <div>
           <div style={{ fontSize: 12, color: '#bcaf95' }}>ยอดรวมที่ต้องชำระ</div>
-          <div style={{ fontSize: 11, color: '#8a7d6b', marginTop: 2 }}>ครบกำหนด {b.dueDateDisplay || b.dueDate}</div>
+          <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>ครบกำหนด {b.dueDateDisplay || b.dueDate}</div>
         </div>
         <div style={{ fontFamily: 'IBM Plex Sans Thai, sans-serif', fontSize: 24, fontWeight: 700 }}>
           {fmtCurrency(b.total)}

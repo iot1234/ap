@@ -82,7 +82,7 @@ function PageAccessDevices({ setToast }) {
           <Btn variant="primary" onClick={() => setShowNew(true)}>+ ออก token ใหม่</Btn>
         } />
 
-      <Card style={{ background: C.warningSoft || '#fff7e0', borderLeft: `4px solid ${C.warning || '#c08a2a'}` }}>
+      <Card style={{ background: C.warningSoft || C.warningSoft, borderLeft: `4px solid ${C.warning || C.warning}` }}>
         <div style={{ fontSize: 13, lineHeight: 1.6, color: C.ink2 || C.ink }}>
           🔐 <b>ความปลอดภัย:</b> token ใหม่จะแสดงเพียงครั้งเดียวเท่านั้น — ระบบเก็บแค่ SHA-256 hash<br/>
           📡 <b>Hardware ใช้:</b> ส่ง <code>Authorization: Bearer &lt;token&gt;</code> ทุก request<br/>
@@ -106,7 +106,7 @@ function PageAccessDevices({ setToast }) {
                   สร้างเมื่อ {new Date(d.created_at).toLocaleDateString('th-TH')}
                   {d.last_seen && <><br/>ใช้งานล่าสุด {new Date(d.last_seen).toLocaleString('th-TH')}</>}
                 </div>
-                <Pill color={d.enabled ? '#2f8f5b' : '#8a7d6b'}>{d.enabled ? 'ใช้งาน' : 'ปิด'}</Pill>
+                <Pill color={d.enabled ? C.success : C.muted}>{d.enabled ? 'ใช้งาน' : 'ปิด'}</Pill>
                 <Btn size="sm" variant="danger" onClick={() => remove(d.id)}>ลบ</Btn>
               </div>
             ))}
@@ -154,11 +154,11 @@ function PageAccessDevices({ setToast }) {
             <code style={{
               display: 'block', wordBreak: 'break-all',
               fontFamily: 'JetBrains Mono, monospace', fontSize: 12.5,
-              padding: 12, background: C.bgSoft || '#fff7e0',
+              padding: 12, background: C.bgSoft || C.warningSoft,
               borderRadius: 8, border: '1px solid ' + C.border,
               userSelect: 'all',
             }}>{revealed.token}</code>
-            <div style={{ marginTop: 8, padding: 10, background: '#fff5f4', border: '1px solid #f3c2bf', borderRadius: 8, color: '#5a1a13', fontSize: 12.5 }}>
+            <div style={{ marginTop: 8, padding: 10, background: C.dangerSoft, border: '1px solid #f3c2bf', borderRadius: 8, color: C.dangerInk, fontSize: 12.5 }}>
               ⚠️ บันทึก token นี้ไว้ที่ปลอดภัยทันที — ระบบจะไม่แสดงอีกหลังปิดหน้านี้
             </div>
             <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>

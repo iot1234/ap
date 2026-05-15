@@ -717,8 +717,15 @@ function DataTable({ columns, rows, onRowClick, empty, density = 'normal', stick
       borderRadius: 12,
       overflow: 'hidden',
       width: '100%',
+      maxWidth: '100%',
     }}>
-      <div style={{ overflow: 'auto', maxWidth: '100%' }}>
+      {/* data-table-wrap CSS class adds touch momentum + edge fade hint
+          via Admin Dashboard.html breakpoints. Inline styles below are
+          the fallback for browsers without that class. */}
+      <div className="data-table-wrap" style={{
+        overflow: 'auto', maxWidth: '100%',
+        WebkitOverflowScrolling: 'touch',
+      }}>
         <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: columns.reduce((s,c) => s + (c.minWidth || 100), 0) }}>
           <thead>
             <tr style={{ background: C.surfaceAlt, position: stickyHeader ? 'sticky' : 'static', top: 0, zIndex: 1 }}>
@@ -1319,6 +1326,70 @@ function PageHeader({ title, subtitle, actions, breadcrumb, tone }) {
   );
 }
 
+// --- Skeleton ----------------------------------------------------------
+// Placeholder for content that's still loading. Pages should swap text
+// "กำลังโหลด…" for one of these so admin sees the shape of what's
+// coming instead of a flicker. Cheap to render; uses a CSS gradient
+// shimmer (no animation if prefers-reduced-motion is set — that media
+// query in Admin Dashboard.html collapses the transition to ~0).
+function Skeleton({ width = '100%', height = 14, radius = 6, style = {} }) {
+  return (
+    <span
+      aria-hidden="true"
+      style={{
+        display: 'inline-block',
+        width, height,
+        borderRadius: radius,
+        background: 'linear-gradient(90deg, #ECECEC 0%, #F5F5F7 40%, #ECECEC 80%)',
+        backgroundSize: '200% 100%',
+        animation: 'skeletonPulse 1.4s linear infinite',
+        ...style,
+      }}
+    />
+  );
+}
+
+// Compose a few Skeleton lines for common shapes — pages just pick the
+// rows that match the loading content.
+function SkeletonRows({ count = 3, gap = 10, lineHeight = 14, varyWidths = true }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap }}>
+      {Array.from({ length: count }).map((_, i) => (
+        <Skeleton
+          key={i}
+          height={lineHeight}
+          width={varyWidths ? `${65 + ((i * 17) % 25)}%` : '100%'}
+        />
+      ))}
+    </div>
+  );
+}
+
+// Card-shaped skeleton — for KPI grids / tile rows while data fetches.
+function SkeletonCard({ height = 96, style = {} }) {
+  return (
+    <div style={{
+      background: C.surface,
+      border: `1px solid ${C.border}`,
+      borderRadius: 12,
+      padding: 16,
+      ...style,
+    }}>
+      <Skeleton height={11} width="50%" />
+      <div style={{ height: 10 }} />
+      <Skeleton height={24} width="70%" />
+      <div style={{ height: 8 }} />
+      <Skeleton height={10} width="40%" />
+      {height > 110 && (
+        <>
+          <div style={{ height: 12 }} />
+          <Skeleton height={6} width="100%" radius={999} />
+        </>
+      )}
+    </div>
+  );
+}
+
 // --- Expose to window ---------------------------------------------------
 Object.assign(window, {
   Card, SectionHeading, Btn, IconBtn,
@@ -1327,6 +1398,7 @@ Object.assign(window, {
   KpiCard, Tabs, Drawer, Modal,
   DataTable, EmptyState, Avatar,
   SearchInput, FilterChip, Toast, Alert,
+  Skeleton, SkeletonRows, SkeletonCard,
   BarChart, DonutChart, Sparkline, HBar,
   DefList, PageContainer, PageHeader,
 });

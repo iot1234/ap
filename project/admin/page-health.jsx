@@ -12,9 +12,9 @@
 const { useState, useEffect, useRef } = React;
 
 const STATUS_META = {
-  ok:    { color: '#2f8f5b', bg: '#e7f3ec', icon: '✓', label: 'ปกติ' },
-  warn:  { color: '#c08a2a', bg: '#fbf1de', icon: '⚠', label: 'เตือน' },
-  error: { color: '#b94a48', bg: '#fbe7e6', icon: '✗', label: 'ผิดปกติ' },
+  ok:    { color: C.success, bg: C.successSoft, icon: '✓', label: 'ปกติ' },
+  warn:  { color: C.warning, bg: C.warningSoft, icon: '⚠', label: 'เตือน' },
+  error: { color: C.danger, bg: C.dangerSoft, icon: '✗', label: 'ผิดปกติ' },
 };
 
 function PageHealth({ setToast }) {

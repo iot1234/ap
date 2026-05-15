@@ -6,18 +6,18 @@
 const { useState, useEffect, useMemo } = React;
 
 const STATUS_COLUMNS = [
-  { key: 'open',            label: 'เปิดใหม่',     color: '#b54639' },
-  { key: 'assigned',        label: 'มอบหมายแล้ว',  color: '#c98a2b' },
-  { key: 'in_progress',     label: 'กำลังดำเนินการ', color: '#3a6b8a' },
-  { key: 'awaiting_parts',  label: 'รออะไหล่',     color: '#7a4f8a' },
-  { key: 'completed',       label: 'เสร็จสิ้น',    color: '#2e9b6a' },
+  { key: 'open',            label: 'เปิดใหม่',     color: C.danger },
+  { key: 'assigned',        label: 'มอบหมายแล้ว',  color: C.warning },
+  { key: 'in_progress',     label: 'กำลังดำเนินการ', color: C.info },
+  { key: 'awaiting_parts',  label: 'รออะไหล่',     color: C.purple },
+  { key: 'completed',       label: 'เสร็จสิ้น',    color: C.success },
 ];
 
 const PRIORITY_LABEL = {
-  critical: { th: 'วิกฤต', color: '#b54639' },
-  high:     { th: 'สูง',   color: '#c98a2b' },
-  medium:   { th: 'กลาง',  color: '#3a6b8a' },
-  low:      { th: 'ต่ำ',   color: '#5b4f40' },
+  critical: { th: 'วิกฤต', color: C.danger },
+  high:     { th: 'สูง',   color: C.warning },
+  medium:   { th: 'กลาง',  color: C.info },
+  low:      { th: 'ต่ำ',   color: C.ink2 },
 };
 
 const CATEGORY_LABEL = {
@@ -376,11 +376,11 @@ function PageMaintenance({ rooms, setRooms, addActivity, setToast }) {
 
             {selected.rating && (
               <div style={{
-                padding: 14, background: '#fbf1de', borderRadius: 9,
+                padding: 14, background: C.warningSoft, borderRadius: 9,
                 border: '1px solid #ecd9b4',
               }}>
-                <div style={{ fontSize: 11.5, color: '#5a3a0d', marginBottom: 4 }}>คะแนนจากผู้เช่า</div>
-                <div style={{ fontSize: 18, color: '#5a3a0d' }}>
+                <div style={{ fontSize: 11.5, color: C.warningInk, marginBottom: 4 }}>คะแนนจากผู้เช่า</div>
+                <div style={{ fontSize: 18, color: C.warningInk }}>
                   {'★'.repeat(selected.rating)}{'☆'.repeat(5 - selected.rating)}
                 </div>
                 {selected.rating_comment && (

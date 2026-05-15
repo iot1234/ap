@@ -97,6 +97,10 @@
     from { opacity: 0; transform: translateY(4px); }
     to   { opacity: 1; transform: translateY(0); }
   }
+  @keyframes skeletonPulse {
+    0%   { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+  }
   /* ========== Responsive breakpoints ====================================
      Admin Console targets four screen classes:
        - desktop  ≥ 1280px : full sidebar + multi-column content
@@ -149,8 +153,14 @@
     /* Toast widens to viewport */
     .toast-floating { min-width: 0 !important; left: 12px !important;
       right: 12px !important; transform: none !important; max-width: none !important; }
-    /* Tables — let the row scroll horizontally instead of squashing */
-    .data-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    /* Tables — let the row scroll horizontally instead of squashing.
+       Edge fade hints the user there's more content sideways. */
+    .data-table-wrap {
+      overflow-x: auto !important;
+      -webkit-overflow-scrolling: touch;
+      mask-image: linear-gradient(to right, transparent 0, black 6px, black calc(100% - 6px), transparent 100%);
+      -webkit-mask-image: linear-gradient(to right, transparent 0, black 6px, black calc(100% - 6px), transparent 100%);
+    }
     /* Reduce headline size so it fits */
     .page-title { font-size: 19px !important; }
   }
@@ -163,6 +173,37 @@
   @media (max-width: 640px) {
     .responsive-grid { --cols: 1 !important; }
   }
+
+  /* Safety net: any grid that hardcodes "1fr 1fr 1fr" or "repeat(3, 1fr)"
+     becomes single-column on mobile. Pages can opt out by giving the
+     element an explicit class. Without this, narrow phones see content
+     overflow horizontally because cells refuse to shrink below their
+     intrinsic content width. */
+  @media (max-width: 640px) {
+    [style*="grid-template-columns: 1fr 1fr 1fr"],
+    [style*="gridTemplateColumns: '1fr 1fr 1fr'"],
+    [style*="grid-template-columns: repeat(3"],
+    [style*="gridTemplateColumns: 'repeat(3"] {
+      grid-template-columns: 1fr !important;
+    }
+    [style*="grid-template-columns: 1fr 1fr"],
+    [style*="gridTemplateColumns: '1fr 1fr'"] {
+      grid-template-columns: 1fr !important;
+    }
+  }
+  /* Tablet: 3-col grids collapse to 2 */
+  @media (max-width: 900px) and (min-width: 641px) {
+    [style*="grid-template-columns: 1fr 1fr 1fr"],
+    [style*="gridTemplateColumns: '1fr 1fr 1fr'"],
+    [style*="grid-template-columns: repeat(3"] {
+      grid-template-columns: 1fr 1fr !important;
+    }
+  }
+
+  /* Truncation guard — long words / Thai phrases that overflow narrow
+     containers. Pages can opt-in by adding className="truncate". */
+  .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .break-word { word-break: break-word; overflow-wrap: anywhere; }
 
   /* Focus ring — accessible focus outline that respects category tone
      when the focused element has data-tone="..." attribute. Default

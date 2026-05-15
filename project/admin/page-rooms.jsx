@@ -527,10 +527,10 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
 
               {blocked ? (
                 <div style={{
-                  background: C.dangerSoft || '#f9e7e3',
-                  border: `1px solid ${C.danger || '#b94a48'}33`,
+                  background: C.dangerSoft || C.dangerSoft,
+                  border: `1px solid ${C.danger || C.danger}33`,
                   borderRadius: 8, padding: 14,
-                  color: C.dangerInk || '#5a1a13',
+                  color: C.dangerInk || C.dangerInk,
                 }}>
                   <div style={{ fontWeight: 700, marginBottom: 6 }}>🛑 ลบไม่ได้</div>
                   <div style={{ fontSize: 13, lineHeight: 1.6 }}>
@@ -549,10 +549,10 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
                 </div>
               ) : (
                 <div style={{
-                  background: C.warningSoft || '#fbf1de',
-                  border: `1px solid ${C.warning || '#c98a2b'}44`,
+                  background: C.warningSoft || C.warningSoft,
+                  border: `1px solid ${C.warning || C.warning}44`,
                   borderRadius: 8, padding: 14,
-                  color: C.warningInk || '#5a3a0d',
+                  color: C.warningInk || C.warningInk,
                 }}>
                   <div style={{ fontWeight: 700, marginBottom: 4 }}>⚠ การลบห้องเป็นการเปลี่ยนแปลงถาวร</div>
                   <div style={{ fontSize: 12.5, lineHeight: 1.6 }}>
@@ -656,7 +656,7 @@ function BulkAddFloorModal({ open, onClose, onAdd, existingFloors }) {
     >
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         <div style={{
-          padding: 12, background: floorExists ? (C.warningSoft || '#fbf1de') : (C.surfaceAlt || '#faf6ee'),
+          padding: 12, background: floorExists ? (C.warningSoft || C.warningSoft) : (C.surfaceAlt || C.surfaceAlt),
           borderRadius: 8, fontSize: 13, color: C.ink2, lineHeight: 1.6,
         }}>
           {floorExists ? (
@@ -1020,8 +1020,8 @@ function RoomEditForm({ room, onUpdate, config }) {
       {audit && (audit.issues.length > 0 || audit.outstandingBills.length > 0) ? (
         <div style={{
           padding: 14, borderRadius: 10,
-          background: audit.issues.some((i) => i.sev === 'high') ? '#fff5f4' : '#fff7e0',
-          border: `1px solid ${audit.issues.some((i) => i.sev === 'high') ? '#f5c0b4' : '#f0e3a7'}`,
+          background: audit.issues.some((i) => i.sev === 'high') ? C.dangerSoft : C.warningSoft,
+          border: `1px solid ${audit.issues.some((i) => i.sev === 'high') ? C.danger : '#f0e3a7'}`,
         }}>
           <div style={{ fontFamily: 'IBM Plex Sans Thai', fontWeight: 600, fontSize: 14, marginBottom: 8 }}>
             {audit.issues.some((i) => i.sev === 'high') ? '🔴 ห้องนี้มีปัญหา' : '🟡 ห้องนี้มีบิลค้าง'}
@@ -1030,7 +1030,7 @@ function RoomEditForm({ room, onUpdate, config }) {
             <div key={idx} style={{
               padding: 10, marginBottom: 6, borderRadius: 6,
               background: '#fff',
-              borderLeft: `3px solid ${it.sev === 'high' ? '#b94a48' : '#c08a2a'}`,
+              borderLeft: `3px solid ${it.sev === 'high' ? C.danger : C.warning}`,
               fontSize: 13, lineHeight: 1.6,
             }}>
               <div style={{ fontWeight: 500 }}>
@@ -1042,7 +1042,7 @@ function RoomEditForm({ room, onUpdate, config }) {
               {/* Outstanding-bill detail: list each bill with tenant name
                   attached so admin sees exactly whose ค้าง is on this room. */}
               {it.code === 'OUTSTANDING_FROM_MOVED_OUT' && it.detail?.bills ? (
-                <div style={{ marginTop: 8, padding: 8, background: '#faf6ee', borderRadius: 4 }}>
+                <div style={{ marginTop: 8, padding: 8, background: C.surfaceAlt, borderRadius: 4 }}>
                   <div style={{ fontSize: 12, color: C.muted, marginBottom: 4 }}>
                     บิลค้าง ({it.detail.bills.length} ใบ) จาก{' '}
                     <a href={`/admin#tenants/${it.detail.tenantId}`} style={{ color: C.accent, fontWeight: 600 }}>
@@ -1059,7 +1059,7 @@ function RoomEditForm({ room, onUpdate, config }) {
                       <span>
                         {b.billNo} · รอบ {b.period || '-'}
                         {b.daysOverdue > 0 ? (
-                          <span style={{ color: '#b94a48', marginLeft: 6 }}>
+                          <span style={{ color: C.danger, marginLeft: 6 }}>
                             (เกิน {b.daysOverdue} วัน)
                           </span>
                         ) : null}
@@ -1087,8 +1087,8 @@ function RoomEditForm({ room, onUpdate, config }) {
       ) : null}
       {auditErr ? (
         <div style={{
-          padding: 10, borderRadius: 6, background: '#fff5f4',
-          border: '1px solid #f5c0b4', fontSize: 12.5, color: '#7a2920',
+          padding: 10, borderRadius: 6, background: C.dangerSoft,
+          border: '1px solid #f5c0b4', fontSize: 12.5, color: C.dangerInk,
         }}>
           ⚠ ตรวจสอบสถานะห้องไม่สำเร็จ: {auditErr}
         </div>

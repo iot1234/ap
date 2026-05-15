@@ -190,7 +190,9 @@ function PageOverview({ rooms, config, bookings, activities, addActivity, setToa
               : null}
           />
           {revenueRows == null ? (
-            <div style={{ padding: 32, textAlign: 'center', color: C.muted, fontSize: 13 }}>กำลังโหลดข้อมูลรายได้...</div>
+            <div style={{ padding: 16 }}>
+              {window.SkeletonRows ? <window.SkeletonRows count={6} lineHeight={26} varyWidths /> : <div style={{ padding: 16, textAlign: 'center', color: C.muted, fontSize: 13 }}>กำลังโหลดข้อมูลรายได้...</div>}
+            </div>
           ) : revenueTrend.every((m) => !m.value) ? (
             <div style={{ padding: 32, textAlign: 'center', color: C.muted, fontSize: 13.5 }}>
               ยังไม่มีบิลที่ชำระแล้วในช่วง 6 เดือน — ออกบิลและรับชำระเพื่อดูแนวโน้มจริง

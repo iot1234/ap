@@ -186,7 +186,7 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
         const sourceTag = b.source === 'public-form' ? (
           <span style={{
             display: 'inline-block', marginLeft: 6,
-            background: '#fbf1de', color: '#5a3a0d',
+            background: C.warningSoft, color: C.warningInk,
             fontSize: 10, fontWeight: 600,
             padding: '1px 6px', borderRadius: 4,
           }}>หน้าจอง</span>
@@ -334,7 +334,7 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
               <div style={{ marginBottom: 12 }}>
                 {isApprove ? 'อนุมัติการจอง:' : 'ปฏิเสธการจอง:'}
                 <div style={{ marginTop: 6, padding: '8px 12px',
-                              background: C.surfaceAlt || '#faf6ee',
+                              background: C.surfaceAlt || C.surfaceAlt,
                               borderRadius: 8, fontSize: 13.5 }}>
                   <b style={{ color: C.ink }}>{b?.name || confirmAction?.id}</b>
                   {b?.phone && <span style={{ color: C.muted }}> · {b.phone}</span>}
@@ -350,8 +350,8 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
 
               <div style={{
                 padding: '10px 12px',
-                background: isApprove ? (C.successSoft || '#e6f4ec') : (C.warningSoft || '#fbf1de'),
-                borderLeft: `3px solid ${isApprove ? (C.success || '#2e9b6a') : (C.warning || '#c98a2b')}`,
+                background: isApprove ? (C.successSoft || C.successSoft) : (C.warningSoft || C.warningSoft),
+                borderLeft: `3px solid ${isApprove ? (C.success || C.success) : (C.warning || C.warning)}`,
                 borderRadius: 6, fontSize: 12.5, color: C.ink2,
               }}>
                 <div style={{ fontWeight: 600, marginBottom: 4 }}>📌 สิ่งที่จะเกิดขึ้น</div>
@@ -359,7 +359,7 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
                   <>
                     1) ระบบจะหาห้องว่างตรงเงื่อนไขแล้วตั้งเป็น "จองแล้ว" อัตโนมัติ<br/>
                     2) ผู้จองจะได้รับแจ้งเตือนทาง LINE/อีเมล (ถ้ามีข้อมูล)<br/>
-                    3) <b style={{ color: C.warning || '#c98a2b' }}>ขั้นต่อไป:</b> ตรวจเบอร์ผู้เช่า + ผูก LINE ที่หน้า "ผู้เช่า" — ผู้เช่า login portal ด้วยเบอร์ที่ผูกกับห้อง
+                    3) <b style={{ color: C.warning || C.warning }}>ขั้นต่อไป:</b> ตรวจเบอร์ผู้เช่า + ผูก LINE ที่หน้า "ผู้เช่า" — ผู้เช่า login portal ด้วยเบอร์ที่ผูกกับห้อง
                   </>
                 ) : (
                   <>
@@ -424,7 +424,7 @@ function BookingDetail({ b }) {
       </div>
 
       <div style={{
-        padding: 14, background: '#fff8f1',
+        padding: 14, background: C.surfaceAlt,
         border: `1px solid ${C.accent}33`, borderRadius: 10,
       }}>
         <div style={{ fontSize: 13, fontWeight: 600, color: C.accentInk, marginBottom: 6 }}>📌 การดำเนินการ</div>
