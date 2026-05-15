@@ -101,6 +101,7 @@ function PageSettings({ rooms, setRooms, config, setConfig, bookings, setBooking
         items={[
           { value: 'building', label: 'ข้อมูลตึก',     icon: '🏢' },
           { value: 'payment',  label: 'การชำระเงิน', icon: '💳' },
+          { value: 'pricing',  label: 'ตั้งราคา',     icon: '💰' },
           { value: 'notify',   label: 'การแจ้งเตือน', icon: '🔔' },
           { value: 'auto',     label: 'อัตโนมัติ',     icon: '🤖' },
           { value: 'features', label: 'ฟีเจอร์ระบบ',   icon: '🎛' },
@@ -117,6 +118,14 @@ function PageSettings({ rooms, setRooms, config, setConfig, bookings, setBooking
 
       {tab === 'building' && <TabBuilding draft={draft} updatePath={updatePath} />}
       {tab === 'payment'  && <TabPayment  draft={draft} updatePath={updatePath} />}
+      {/* Pricing tab — embeds the full PagePricing flow (rates, premiums,
+          discounts, fees, utilities). Consolidated here so admin has ONE
+          home for everything that writes to baankarn_config_v1. Legacy
+          /admin#pricing URL still works (standalone PageContainer mode). */}
+      {tab === 'pricing'  && window.PagePricing
+        ? <window.PagePricing config={config} setConfig={setConfig} rooms={rooms}
+                              addActivity={addActivity} setToast={setToast} embedded />
+        : null}
       {tab === 'notify'   && <TabNotify   draft={draft} updatePath={updatePath} />}
       {tab === 'auto'     && <TabAuto     />}
       {/* Features + Secrets used to live as standalone sidebar pages.

@@ -96,7 +96,10 @@ const NAV_GROUPS = [
       { id: 'billing',     label: 'บิล/ใบแจ้งหนี้',  icon: '🧾' },
       { id: 'payments',    label: 'สลิป/การชำระ',    icon: '💳' },
       { id: 'slip-verify', label: 'ตรวจสลิปอัตโนมัติ', icon: '🤖', minRole: 'owner' },
-      { id: 'pricing',     label: 'ตั้งราคา',         icon: '💰', minRole: 'manager' },
+      // ตั้งราคา (rates / premiums / utilities / discounts / fees) ถูก
+      // รวมเป็น tab "ตั้งราคา" ใน "ตั้งค่าระบบ" แล้ว — ทุกอย่างที่
+      // writeเข้า baankarn_config_v1 อยู่ใน Settings hub เดียวกัน.
+      // Hash /admin#pricing ยังเปิดได้ (legacy URL / direct link).
       { id: 'recurring',   label: 'ค่าใช้จ่ายประจำ',  icon: '💸', minRole: 'manager' },
       { id: 'reports',     label: 'รายงาน · กราฟ',    icon: '📊' },
       { id: 'reports-v2',  label: 'รายงาน · ตาราง',   icon: '📈', minRole: 'manager' },

@@ -772,15 +772,15 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
       ),
     },
     {
-      key: 'id', label: 'เลขที่', minWidth: 170,
+      key: 'id', label: 'เลขที่', minWidth: 145,
       render: b => <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 12 }}>{b.id}</span>,
     },
     {
-      key: 'roomId', label: 'ห้อง', minWidth: 70,
+      key: 'roomId', label: 'ห้อง', minWidth: 60,
       render: b => <span style={{ fontWeight: 600, fontFamily: 'IBM Plex Sans Thai, sans-serif' }}>{b.roomId}</span>,
     },
     {
-      key: 'tenant', label: 'ผู้เช่า', minWidth: 180,
+      key: 'tenant', label: 'ผู้เช่า', minWidth: 170,
       render: b => (
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <Avatar name={b.tenant} size={28} />
@@ -791,9 +791,9 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         </div>
       ),
     },
-    { key: 'period', label: 'งวด', minWidth: 100, render: b => <span style={{ fontSize: 12.5 }}>{b.periodDisplay || b.period}</span> },
+    { key: 'period', label: 'งวด', minWidth: 90, render: b => <span style={{ fontSize: 12.5 }}>{b.periodDisplay || b.period}</span> },
     {
-      key: 'total', label: 'รวม', align: 'right', minWidth: 120,
+      key: 'total', label: 'รวม', align: 'right', minWidth: 110,
       render: b => (
         <div>
           <div style={{ fontSize: 13.5, fontWeight: 600, color: C.ink, fontFamily: 'IBM Plex Sans Thai, sans-serif' }}>
@@ -806,7 +806,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
       ),
     },
     {
-      key: 'status', label: 'สถานะ', minWidth: 140,
+      key: 'status', label: 'สถานะ', minWidth: 120,
       render: b => (
         <div style={{ display: 'inline-flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start' }}>
           {b.status === 'paid'
@@ -830,7 +830,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
       // there's still one waiting for review. Clicking the badge jumps to
       // /admin#payments pre-filtered to this bill so admin can act
       // immediately without scanning the queue.
-      key: 'slipStatus', label: 'การชำระ', align: 'center', minWidth: 160,
+      key: 'slipStatus', label: 'การชำระ', align: 'center', minWidth: 145,
       render: b => {
         if (b._source !== 'db' || !b.dbBillId) {
           return <span style={{ fontSize: 11, color: C.muted }}>—</span>;
@@ -908,7 +908,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
       // Below the readiness label we surface a tiny "ส่งแล้ว N×" badge
       // when the bill has been reminded already — so admin spots the
       // already-pinged tenants without opening each row's confirm modal.
-      key: 'sendStatus', label: 'พร้อมส่ง', align: 'center', minWidth: 150,
+      key: 'sendStatus', label: 'พร้อมส่ง', align: 'center', minWidth: 135,
       render: b => {
         if (b._source !== 'db' || !b.dbBillId) {
           return <span style={{ fontSize: 11, color: C.muted }}>—</span>;
@@ -971,25 +971,33 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
       },
     },
     {
-      // Actions column: 3 buttons can total ~240px which won't fit a 130px
-      // cell; we widen to 240 and disable wrap so the table grows horizontally
-      // (DataTable wrapper has overflow-x scroll) instead of clipping or
-      // wrapping individual buttons onto their own lines.
-      key: 'actions', label: '', align: 'right', minWidth: 240,
-      render: b => (
-        <div style={{ display: 'inline-flex', gap: 6, flexWrap: 'nowrap', justifyContent: 'flex-end', whiteSpace: 'nowrap' }} onClick={(e) => e.stopPropagation()}>
-          <Btn size="sm" variant="ghost" onClick={() => setPreviewBill(b)}>ดูบิล</Btn>
-          {b.status === 'unpaid' && b._source === 'db' && (
-            <>
-              <Btn size="sm" variant="ghost" onClick={() => handleSendReminder(b.id)}>ส่งเตือน</Btn>
-              <Btn size="sm" variant="ghost" onClick={() => handleMarkPaid(b.id)}>บันทึกชำระ</Btn>
-            </>
-          )}
-          {b.status === 'paid' && b._source === 'db' && (
-            <Btn size="sm" variant="ghost" onClick={() => handleUnmarkPaid(b.id)}>ยกเลิกชำระ</Btn>
-          )}
-        </div>
-      ),
+      // Actions column — short Thai text labels (no icons; per operator
+      // feedback that icons-alone were unclear). Tight padding/font keeps
+      // the 3-button row at ~170px so the whole billing table fits in a
+      // desktop viewport without horizontal scrolling. `title` carries the
+      // long form ("ดูบิล", "ส่งเตือน", "บันทึกชำระ") for screen readers.
+      key: 'actions', label: '', align: 'right', minWidth: 170,
+      render: b => {
+        const compactBtn = {
+          padding: '6px 10px',
+          fontSize: 12,
+          height: 28,
+        };
+        return (
+          <div style={{ display: 'inline-flex', gap: 5, flexWrap: 'nowrap', justifyContent: 'flex-end', whiteSpace: 'nowrap' }} onClick={(e) => e.stopPropagation()}>
+            <Btn size="sm" variant="ghost" style={compactBtn} onClick={() => setPreviewBill(b)}>ดู</Btn>
+            {b.status === 'unpaid' && b._source === 'db' && (
+              <>
+                <Btn size="sm" variant="ghost" style={compactBtn} onClick={() => handleSendReminder(b.id)}>เตือน</Btn>
+                <Btn size="sm" variant="ghost" style={compactBtn} onClick={() => handleMarkPaid(b.id)}>ชำระ</Btn>
+              </>
+            )}
+            {b.status === 'paid' && b._source === 'db' && (
+              <Btn size="sm" variant="ghost" style={compactBtn} onClick={() => handleUnmarkPaid(b.id)}>ยกเลิก</Btn>
+            )}
+          </div>
+        );
+      },
     },
   ];
 

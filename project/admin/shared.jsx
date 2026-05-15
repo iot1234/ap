@@ -249,7 +249,31 @@ function buildAdminRooms() {
 function buildBookings() { return []; }
 function buildActivities() { return []; }
 
-// --- localStorage layer ---------------------------------------------------
+// --- Config surface map (single source of truth) ------------------------
+// Where every "ตั้งค่า X" lives in the admin UI, after the May 2026
+// consolidation. Each row maps a config domain → the admin route that
+// edits it. The goal: ONE place to set anything, no duplicate UIs.
+//
+//   Domain                     UI route                Storage
+//   ----------------------     ------------------      ------------------
+//   ข้อมูลตึก                  /admin#settings (tab)   app_data.baankarn_config_v1.building
+//   วิธีรับเงิน (PromptPay/bank) /admin#settings (tab) app_data.baankarn_config_v1.payment
+//   อัตราค่าเช่า + ส่วนเพิ่ม   /admin#settings (tab)   app_data.baankarn_config_v1.rates+premium+...
+//   เทมเพลตแจ้งเตือน          /admin#settings (tab)   app_data.baankarn_config_v1.notify
+//   ออกบิลอัตโนมัติ            /admin#settings (tab)   app_data.baankarn_features_v1.billAutoGenerate
+//   ฟีเจอร์ระบบ                /admin#settings (tab)   app_data.baankarn_features_v1.*
+//   API / Keys (secrets)       /admin#settings (tab)   secrets table (AES-256-GCM)
+//   ผู้ใช้งาน (admin staff)     /admin#settings (tab)   auth_users
+//   Audit log (read-only)      /admin#settings (tab)   audit_logs
+//   ระบบ (reset / export)      /admin#settings (tab)   utilities, no storage
+//
+// Per-record settings (NOT in Settings hub — context-specific):
+//   ราคาห้องเฉพาะ (override)   /admin#rooms (per room) rooms_v2.rent_override
+//   ผู้เช่าเฉพาะ (PIN/locale)  /admin#tenants (row)    tenants.*
+//   LINE OA channel secret    /admin#line-oas         line_oas.channel_secret_encrypted
+//
+// Legacy hash routes (/admin#pricing, #features, #secrets) still resolve
+// to the standalone page components for bookmarks / external links.
 const STORAGE_KEYS = {
   rooms:      'baankarn_rooms_v1',
   config:     'baankarn_config_v1',

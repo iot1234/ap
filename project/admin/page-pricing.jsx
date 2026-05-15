@@ -29,13 +29,23 @@ function resetPricingSections(config) {
   return next;
 }
 
-function PagePricing({ config, setConfig, rooms, addActivity, setToast }) {
+// `embedded` lets PageSettings host this component inside its
+// "ตั้งราคา" tab without duplicating the outer PageContainer + PageHeader
+// chrome. The standalone route /admin#pricing keeps working for legacy
+// bookmarks / direct links.
+function PagePricing({ config, setConfig, rooms, addActivity, setToast, embedded = false }) {
   const C = window.ADMIN_C;
   const ADMIN_ROOM_TYPES = window.ADMIN_ROOM_TYPES;
   const ADMIN_ROOM_TYPE_KEYS = window.ADMIN_ROOM_TYPE_KEYS;
   const ADMIN_VIEWS = window.ADMIN_VIEWS;
   const { Card, Btn, Input, Select, Toggle, Tabs, Pill, SectionHeading,
           PageContainer, PageHeader, DefList, Modal } = window;
+  const Wrapper = embedded
+    ? ({ children }) => <div>{children}</div>
+    : ({ children }) => <PageContainer>{children}</PageContainer>;
+  const Header = embedded
+    ? () => null
+    : (props) => <PageHeader {...props} />;
 
   const [tab, setTab] = useState('rates');
   const [draft, setDraft] = useState(config);
@@ -93,20 +103,36 @@ function PagePricing({ config, setConfig, rooms, addActivity, setToast }) {
   };
 
   return (
-    <PageContainer>
-      <PageHeader
+    <Wrapper>
+      <Header
         title="ตั้งราคาห้องพัก"
         subtitle="กำหนดราคาฐาน, ค่าน้ำ-ไฟ, ส่วนลด และค่าธรรมเนียมต่างๆ อย่างครบถ้วน"
         actions={
           <>
             <Btn variant="ghost" onClick={() => setConfirmReset(true)}>↺ รีเซ็ต</Btn>
             <Btn variant="secondary" onClick={() => setDraft(config)} disabled={!dirty}>ยกเลิกการแก้ไข</Btn>
-            <Btn variant="primary" icon="✓" onClick={handleSave} disabled={!dirty}>
+            <Btn variant="primary" tone="finance" icon="✓" onClick={handleSave} disabled={!dirty}>
               {dirty ? 'บันทึกการเปลี่ยนแปลง' : 'บันทึกแล้ว'}
             </Btn>
           </>
         }
       />
+      {/* When embedded inside Settings, show an inline action bar at top
+          since the parent Settings header doesn't carry pricing-specific
+          actions (Reset / Cancel / Save). Without this, admin opens the
+          pricing tab and can't see Save/Reset until they scroll. */}
+      {embedded && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 8,
+          flexWrap: 'wrap', marginBottom: 14,
+        }}>
+          <Btn variant="ghost" size="sm" onClick={() => setConfirmReset(true)}>↺ รีเซ็ต</Btn>
+          <Btn variant="secondary" size="sm" onClick={() => setDraft(config)} disabled={!dirty}>ยกเลิกการแก้ไข</Btn>
+          <Btn variant="primary" tone="finance" size="sm" icon="✓" onClick={handleSave} disabled={!dirty}>
+            {dirty ? 'บันทึกการเปลี่ยนแปลง' : 'บันทึกแล้ว'}
+          </Btn>
+        </div>
+      )}
 
       {dirty && (
         <div style={{
@@ -155,7 +181,7 @@ function PagePricing({ config, setConfig, rooms, addActivity, setToast }) {
           คุณแน่ใจหรือไม่?
         </div>
       </Modal>
-    </PageContainer>
+    </Wrapper>
   );
 }
 
