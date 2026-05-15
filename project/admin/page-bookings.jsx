@@ -39,27 +39,12 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
     const before = bookings.find((b) => b.id === id);
     setBookings(prev => prev.map(b => b.id === id ? { ...b, status, ...extra } : b));
     try {
-      let out = null;
-      if (window.apiCall) {
-        out = await window.apiCall(`/api/bookings/${encodeURIComponent(id)}`, {
-          method: 'PUT',
-          body: JSON.stringify({ status, ...extra }),
-        });
-      } else {
-        const r = await fetch(`/api/bookings/${encodeURIComponent(id)}`, {
-          method: 'PUT',
-          credentials: 'same-origin',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ status, ...extra }),
-        });
-        out = await r.json().catch(() => ({}));
-        if (!r.ok) {
-          const err = new Error(out.error || `HTTP ${r.status}`);
-          err.status = r.status;
-          err.body = out;
-          throw err;
-        }
-      }
+      const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
+      if (!apiCall) throw new Error('Admin API helper is not loaded. Refresh the page.');
+      const out = await apiCall(`/api/bookings/${encodeURIComponent(id)}`, {
+        method: 'PUT',
+        body: JSON.stringify({ status, ...extra }),
+      });
       if (out && out.booking) {
         setBookings(prev => prev.map(b => b.id === id ? out.booking : b));
       }
@@ -89,25 +74,19 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
     // reservation + falls through to the next vacant room cleanly.
     let assignedRoomId = null;
     try {
-      const apiCall = window.apiCall;
-      if (apiCall) {
-        const out = await apiCall(`/api/bookings/${encodeURIComponent(id)}/approve-and-assign`, {
-          method: 'POST',
-          body: JSON.stringify({}),
-        });
-        assignedRoomId = out.assignedRoomId;
-        // Mirror the server's mutation into local React state so the table
-        // + drawer reflect "approved" + "reserved" without waiting for the
-        // next /api/data poll.
-        setBookings((prev) => prev.map((b) => b.id === id ? out.booking : b));
-        if (out.room && out.assignedRoomId) {
-          setRooms((prev) => ({ ...prev, [out.assignedRoomId]: out.room }));
-        }
-      } else {
-        // Fallback (apiCall unavailable — shouldn't happen). Fire the
-        // legacy optimistic path so admin isn't blocked, but warn.
-        console.warn('[bookings] apiCall not available, falling back to legacy approve path');
-        updateStatus(id, 'approved');
+      const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
+      if (!apiCall) throw new Error('Admin API helper is not loaded. Refresh the page.');
+      const out = await apiCall(`/api/bookings/${encodeURIComponent(id)}/approve-and-assign`, {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      assignedRoomId = out.assignedRoomId;
+      // Mirror the server's mutation into local React state so the table
+      // + drawer reflect "approved" + "reserved" without waiting for the
+      // next /api/data poll.
+      setBookings((prev) => prev.map((b) => b.id === id ? out.booking : b));
+      if (out.room && out.assignedRoomId) {
+        setRooms((prev) => ({ ...prev, [out.assignedRoomId]: out.room }));
       }
     } catch (err) {
       // Server refused — propagate the error and DON'T touch local state.

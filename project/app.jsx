@@ -1,5 +1,5 @@
 // === Dorm Status Dashboard — Refined ===
-const { useState, useMemo, useEffect, useRef } = React;
+const { useState, useMemo, useEffect } = React;
 
 function useViewport() {
   const [vp, setVp] = useState(() => ({
@@ -394,8 +394,7 @@ function RoomCard({ room, selected, onClick }) {
   );
 }
 
-function DetailPanel({ room, onUpdate, onClose }) {
-  const fileRef = useRef(null);
+function DetailPanel({ room, onClose }) {
   const [tab, setTab] = useState('overview');
 
   if (!room) {
@@ -419,32 +418,6 @@ function DetailPanel({ room, onUpdate, onClose }) {
   const t = ROOM_TYPES[room.type];
   const s = STATUS[room.status];
   const totalMonthly = room.rent + room.water + room.elec + room.wifi;
-
-  function handleFiles(files) {
-    // Per-file 1.5 MB cap. Without this, 12 photos × 4 MB phone-camera JPEGs
-    // plus the 1.33× base64 overhead pushed the rooms blob past 50 MB and
-    // OOM'd the Chrome renderer on /admin#billing the next time it loaded.
-    // shared.jsx now strips any data: URL it sees on load anyway, but the
-    // first line of defense is refusing the oversize file at upload time.
-    const MAX_BYTES = 1_500_000;
-    const arr = Array.from(files).slice(0, 8);
-    const accepted = arr.filter((f) => {
-      if (f.size > MAX_BYTES) {
-        const mb = (f.size / 1_048_576).toFixed(1);
-        try { alert(`ไฟล์ "${f.name}" ใหญ่เกินกำหนด (${mb} MB) — สูงสุด 1.5 MB ต่อภาพ`); } catch {}
-        return false;
-      }
-      return true;
-    });
-    if (!accepted.length) return;
-    Promise.all(accepted.map(f => new Promise(res => {
-      const r = new FileReader();
-      r.onload = e => res(e.target.result);
-      r.readAsDataURL(f);
-    }))).then(urls => onUpdate({ ...room, photos: [...room.photos, ...urls].slice(0, 12) }));
-  }
-  function removePhoto(i) { onUpdate({ ...room, photos: room.photos.filter((_,x) => x !== i) }); }
-  function setStatus(st) { onUpdate({ ...room, status: st }); }
 
   const photos = room.photos.length ? room.photos : [placeholderPhoto(room,0), placeholderPhoto(room,1), placeholderPhoto(room,2)];
 
@@ -487,7 +460,6 @@ function DetailPanel({ room, onUpdate, onClose }) {
           ['overview','รายละเอียด'],
           ['photos', `รูปภาพ${room.photos.length ? ` (${room.photos.length})` : ''}`],
           ['billing','ค่าใช้จ่าย'],
-          ['actions','จัดการ'],
         ].map(([key,label]) => (
           <button key={key} onClick={() => setTab(key)} style={{
             background: 'transparent', border: 'none', padding: '12px 14px',
@@ -605,50 +577,15 @@ function DetailPanel({ room, onUpdate, onClose }) {
 
         {tab === 'photos' && (
           <div>
-            <div
-              onDragOver={(e) => { e.preventDefault(); e.currentTarget.style.background = STATUS.reserved.soft; }}
-              onDragLeave={(e) => { e.currentTarget.style.background = C.surfaceAlt; }}
-              onDrop={(e) => {
-                e.preventDefault();
-                e.currentTarget.style.background = C.surfaceAlt;
-                if (e.dataTransfer.files?.length) handleFiles(e.dataTransfer.files);
-              }}
-              onClick={() => fileRef.current?.click()}
-              style={{
-                border: `1.5px dashed ${C.muted}99`, borderRadius: 10,
-                padding: '24px 16px', background: C.surfaceAlt,
-                textAlign: 'center', cursor: 'pointer', transition: 'background 0.2s',
-              }}>
-              <input ref={fileRef} type="file" accept="image/*" multiple
-                style={{ display: 'none' }} onChange={(e) => handleFiles(e.target.files)}/>
-              <div style={{
-                width: 40, height: 40, borderRadius: 10, background: C.surface,
-                display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                fontSize: 20, color: C.accent, border: `1px solid ${C.border}`,
-              }}>+</div>
-              <div style={{ marginTop: 10, fontSize: 14, color: C.ink, fontWeight: 600 }}>
-                แนบรูปภาพห้อง
-              </div>
-              <div style={{ marginTop: 3, fontSize: 11, color: C.muted }}>
-                ลากไฟล์มาวาง หรือคลิกเพื่อเลือก · สูงสุด 12 รูป
-              </div>
-            </div>
-
-            <div style={{ marginTop: 14, display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8 }}>
-              {(room.photos.length ? room.photos : [placeholderPhoto(room,0), placeholderPhoto(room,1), placeholderPhoto(room,2), placeholderPhoto(room,3)]).map((src, i) => (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8 }}>
+              {photos.map((src, i) => (
                 <div key={i} style={{
                   position: 'relative', aspectRatio: '4/3',
                   borderRadius: 10, overflow: 'hidden', background: C.borderSoft,
                   border: `1px solid ${C.border}`,
                 }}>
                   <img src={src} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }}/>
-                  {room.photos.length > 0 ? (
-                    <button onClick={() => removePhoto(i)} style={{
-                      position: 'absolute', top: 6, right: 6,
-                      background: 'rgba(0,0,0,0.6)', color: '#fff', border: 'none',
-                      borderRadius: 6, width: 24, height: 24, cursor: 'pointer', fontSize: 12,
-                    }}>✕</button>
-                  ) : (
+                  {!room.photos.length && (
                     <div style={{
                       position: 'absolute', bottom: 6, left: 6,
                       fontSize: 10, fontFamily: 'ui-monospace', color: C.ink,
@@ -732,55 +669,6 @@ function DetailPanel({ room, onUpdate, onClose }) {
           </div>
         )}
 
-        {tab === 'actions' && (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
-            <div>
-              <div style={{ fontSize: 11, letterSpacing: 1.6, color: C.muted, fontWeight: 600, marginBottom: 8 }}>
-                เปลี่ยนสถานะห้อง
-              </div>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 6 }}>
-                {Object.entries(STATUS).map(([k,v]) => (
-                  <button key={k} onClick={() => setStatus(k)} style={{
-                    background: room.status === k ? v.soft : C.surface,
-                    border: room.status === k ? `1.5px solid ${v.dot}` : `1px solid ${C.border}`,
-                    borderRadius: 10, padding: '10px 12px', cursor: 'pointer',
-                    display: 'flex', alignItems: 'center', gap: 8, fontFamily: 'inherit',
-                    textAlign: 'left',
-                  }}>
-                    <StatusDot status={k} size={8} ring={false}/>
-                    <span style={{ fontSize: 12, color: C.ink, fontWeight: 500 }}>{v.th}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <button style={{
-                background: C.dark, color: C.surfaceAlt, border: 'none',
-                borderRadius: 10, padding: '12px 16px', fontSize: 13, fontWeight: 600,
-                cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left',
-              }}>ออกใบแจ้งหนี้ค่าน้ำ-ไฟ เดือนนี้</button>
-              {[
-                'บันทึกการชำระเงิน',
-                'แจ้งซ่อมแซม',
-                'พิมพ์สัญญาเช่า',
-              ].map(l => (
-                <button key={l} style={{
-                  background: C.surface, color: C.ink, border: `1px solid ${C.border}`,
-                  borderRadius: 10, padding: '12px 16px', fontSize: 13, fontWeight: 500,
-                  cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left',
-                }}>{l}</button>
-              ))}
-            </div>
-
-            <div style={{
-              background: STATUS.reserved.soft, borderRadius: 10, padding: '12px 14px',
-              fontSize: 11, color: STATUS.reserved.ink, lineHeight: 1.6,
-            }}>
-              <strong>หมายเหตุ:</strong> หน้าจำลอง — ปุ่มจัดการต่างๆ สำหรับสาธิตเท่านั้น
-            </div>
-          </div>
-        )}
       </div>
     </div>
   );
@@ -897,7 +785,7 @@ function TopBar({ search, setSearch, isMobile, onMenu }) {
 function App() {
   // ตอน mount ลองอ่านห้องจาก localStorage (ที่หลังบ้าน admin บันทึกไว้)
   // ถ้าไม่มีให้สร้างใหม่จาก buildRooms()
-  const [rooms, setRooms] = useState(() => {
+  const [rooms] = useState(() => {
     try {
       const raw = localStorage.getItem('baankarn_rooms_v1');
       if (raw) {
@@ -938,18 +826,6 @@ function App() {
       setFloor(above ?? below ?? fs[0]);
     }
   }, [rooms, floor]);
-
-  const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
-    "accentColor": "#c46a3e",
-    "showKpiBar": true
-  }/*EDITMODE-END*/;
-  const [tweaks, setTweak] = useTweaks(TWEAK_DEFAULTS);
-
-  // เซฟทุกการเปลี่ยนแปลงของห้องลง localStorage (sync ระหว่างหน้าบ้าน-หลังบ้าน)
-  useEffect(() => {
-    try { localStorage.setItem('baankarn_rooms_v1', JSON.stringify(rooms)); }
-    catch (e) {}
-  }, [rooms]);
 
   // ESC key dismisses the mobile detail bottom-sheet — keyboard accessibility.
   useEffect(() => {
@@ -994,7 +870,6 @@ function App() {
   const floorVacant = allFloorRooms.filter(r => r.status === 'vacant').length;
   const selected = rooms[selectedId];
 
-  function updateRoom(u) { setRooms(p => ({ ...p, [u.id]: u })); }
   function selectRoom(id) {
     setSelectedId(id);
     const r = rooms[id];
@@ -1054,7 +929,7 @@ function App() {
         </div>
       </div>
 
-      {tweaks.showKpiBar && !isMobile && (
+      {!isMobile && (
         <div style={{ marginBottom: 16 }}>
           <KpiBar totals={totals} isMobile={isMobile}/>
         </div>
@@ -1149,7 +1024,7 @@ function App() {
                   background: '#d9cdb5', zIndex: 2,
                 }}/>
                 <div style={{ paddingTop: 10, flex: 1, overflow: 'hidden', display: 'flex' }}>
-                  <DetailPanel room={selected} onUpdate={updateRoom}
+                  <DetailPanel room={selected}
                     onClose={() => setMobileDetailOpen(false)}/>
                 </div>
               </div>
@@ -1167,20 +1042,12 @@ function App() {
           </div>
           {mainContent}
           <div style={{ borderLeft: `1px solid ${C.border}`, overflow: 'hidden' }}>
-            <DetailPanel room={selected} onUpdate={updateRoom}
+            <DetailPanel room={selected}
               onClose={() => setSelectedId(null)}/>
           </div>
         </div>
       )}
 
-      <TweaksPanel title="Tweaks">
-        <TweakSection title="ลักษณะการแสดงผล">
-          <TweakColor label="สีเน้น (Accent)" value={tweaks.accentColor}
-            onChange={v => setTweak('accentColor', v)}/>
-          <TweakToggle label="แสดงสถิติด้านบน" value={tweaks.showKpiBar}
-            onChange={v => setTweak('showKpiBar', v)}/>
-        </TweakSection>
-      </TweaksPanel>
     </div>
   );
 }

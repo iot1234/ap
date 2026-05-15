@@ -20,7 +20,7 @@ const STATUS_META = {
 function PageHealth({ setToast }) {
   const C = window.ADMIN_C;
   const { Card, Btn, Pill, PageContainer, PageHeader, SectionHeading } = window;
-  const apiFetch = window.apiFetch || ((u, o) => fetch(u, { credentials: 'same-origin', ...o }));
+  const apiFetch = window.requireApiFetch ? window.requireApiFetch() : window.apiFetch;
 
   const [report, setReport] = useState(null);
   const [busy, setBusy]     = useState(false);

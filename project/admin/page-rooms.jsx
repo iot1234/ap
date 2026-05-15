@@ -902,7 +902,7 @@ function RoomEditForm({ room, onUpdate, config }) {
   const ADMIN_VIEWS = window.ADMIN_VIEWS;
   const { fmt, fmtCurrency, computeRoomRent } = window;
   const { Input, Select, Toggle, Textarea, SectionHeading, DefList, Pill, Btn } = window;
-  const apiFetch = window.apiFetch || ((u, o) => fetch(u, { credentials: 'same-origin', ...o }));
+  const apiFetch = window.requireApiFetch ? window.requireApiFetch() : window.apiFetch;
 
   // Server-side audit for this room: cross-checks blob, rooms_v2, contracts,
   // and outstanding bills to surface inconsistencies the rooms-blob UI alone

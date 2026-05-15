@@ -85,13 +85,32 @@ function PageOverview({ rooms, config, bookings, activities, addActivity, setToa
   }, [list, config]);
   const topMax = topRooms[0]?.total || 1;
 
-  // --- Upcoming contract endings (mock based on contractEnd) ----
-  const upcoming = useMemo(() => {
-    return list
-      .filter(r => r.tenant && r.contractEnd)
-      .slice(0, 4)
-      .map(r => ({ room: r.id, name: r.tenant.name, date: r.contractEnd }));
-  }, [list]);
+  // --- Upcoming contract endings from the relational contracts table ----
+  // rooms.contractEnd is a legacy blob field and can drift from the real
+  // contract row after check-in, invitation approval, or checkout. The
+  // dashboard warning must use contracts as the source of truth.
+  const [upcomingContracts, setUpcomingContracts] = React.useState([]);
+  React.useEffect(() => {
+    let cancel = false;
+    fetch('/api/contracts?status=active&expiringInDays=60', { credentials: 'same-origin' })
+      .then(async (r) => (r.ok ? (await r.json()).contracts : []))
+      .then((rows) => {
+        if (cancel) return;
+        const next = (Array.isArray(rows) ? rows : [])
+          .filter((c) => c && c.end_date)
+          .slice(0, 4)
+          .map((c) => ({
+            id: c.id,
+            room: c.room_id,
+            name: c.tenant_name || 'ไม่ระบุผู้เช่า',
+            date: String(c.end_date).slice(0, 10),
+            daysLeft: c.days_left,
+          }));
+        setUpcomingContracts(next);
+      })
+      .catch(() => { if (!cancel) setUpcomingContracts([]); });
+    return () => { cancel = true; };
+  }, []);
 
   const overdueRooms = list.filter(r => r.status === 'overdue');
   const pendingBookings = (bookings || []).filter(b => b.status === 'pending').length;
@@ -289,11 +308,12 @@ function PageOverview({ rooms, config, bookings, activities, addActivity, setToa
                 </div>
               </div>
             )}
-            {upcoming.slice(0, 2).map(u => (
-              <div key={u.room} style={{
+            {upcomingContracts.slice(0, 2).map(u => (
+              <div key={u.id || u.room} onClick={() => { location.hash = 'contracts'; }} style={{
                 padding: 12, background: C.infoSoft, borderRadius: 8,
                 border: `1px solid ${C.info}22`,
                 display: 'flex', alignItems: 'center', gap: 10,
+                cursor: 'pointer',
               }}>
                 <div style={{ fontSize: 18 }}>📄</div>
                 <div style={{ flex: 1, minWidth: 0 }}>
@@ -301,12 +321,12 @@ function PageOverview({ rooms, config, bookings, activities, addActivity, setToa
                     สัญญาห้อง {u.room} ใกล้หมดอายุ
                   </div>
                   <div style={{ fontSize: 12, color: C.infoInk, opacity: 0.8 }}>
-                    {u.name} · {u.date}
+                    {u.name} · {u.date}{Number.isFinite(Number(u.daysLeft)) ? ` · อีก ${u.daysLeft} วัน` : ''}
                   </div>
                 </div>
               </div>
             ))}
-            {overdueRooms.length === 0 && pendingBookings === 0 && upcoming.length === 0 && (
+            {overdueRooms.length === 0 && pendingBookings === 0 && upcomingContracts.length === 0 && (
               <EmptyState icon="✅" title="ไม่มีรายการเร่งด่วน" description="ทุกอย่างเป็นไปตามแผน" />
             )}
           </div>

@@ -14,7 +14,7 @@ function PageTenants({ rooms, setRooms, addActivity, setToast }) {
   const { Card, Btn, IconBtn, Avatar, Pill, StatusBadge, DataTable, Drawer,
           SearchInput, FilterChip, PageContainer, PageHeader, SectionHeading,
           DefList, Tabs, Modal, Input, Select, Textarea } = window;
-  const apiFetch = window.apiFetch || ((u, o) => fetch(u, { credentials: 'same-origin', ...o }));
+  const apiFetch = window.requireApiFetch ? window.requireApiFetch() : window.apiFetch;
 
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState('all');

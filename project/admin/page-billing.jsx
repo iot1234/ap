@@ -380,7 +380,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
       setToast && setToast({ kind: 'error', message: 'กรุณาระบุเหตุผล ≥ 5 ตัวอักษร' });
       return;
     }
-    const apiFetch = window.apiFetch || ((u, o) => fetch(u, { credentials: 'same-origin', ...o }));
+    const apiFetch = window.requireApiFetch ? window.requireApiFetch() : window.apiFetch;
     try {
       const r = await apiFetch(`/api/bills/${bill.dbBillId}/unmark-paid`, {
         method: 'POST',
@@ -629,7 +629,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
   const doBulkSendNow = async () => {
     setBulkSendingNow(true);
     const apiCall = window.apiCall;
-    const apiFetch = window.apiFetch || ((u, o) => fetch(u, { credentials: 'same-origin', ...o }));
+    const apiFetch = window.requireApiFetch ? window.requireApiFetch() : window.apiFetch;
     const selectedIds = bulkSendPreview?.selectedIds;
     try {
       // Two paths: scoped (a list of selected dbBillIds from the
@@ -1310,7 +1310,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
                 total: b.total,
                 building: (config && config.building) || { name: 'บ้านกาญจน์ เรสซิเดนซ์' },
               };
-              const apiFetch = window.apiFetch || ((u, o) => fetch(u, { credentials: 'same-origin', ...o }));
+              const apiFetch = window.requireApiFetch ? window.requireApiFetch() : window.apiFetch;
               try {
                 const res = await apiFetch('/api/bills/render', {
                   method: 'POST',

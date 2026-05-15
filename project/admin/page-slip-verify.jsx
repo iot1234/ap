@@ -30,7 +30,7 @@ function PageSlipVerify({ setToast }) {
   const C = window.ADMIN_C;
   const { Card, SectionHeading, Btn, Pill, PageContainer, PageHeader } = window;
   // apiFetch attaches CSRF + handles 401 redirect. Without it PUT/POST 403.
-  const apiFetch = window.apiFetch || ((u, o) => fetch(u, { credentials: 'same-origin', ...o }));
+  const apiFetch = window.requireApiFetch ? window.requireApiFetch() : window.apiFetch;
 
   const [features, setFeatures] = useState(null);
   const [secrets, setSecrets] = useState({});           // { SLIPOK_API_KEY: {...}, ... }

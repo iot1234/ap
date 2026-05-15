@@ -215,7 +215,7 @@ function PagePayments({ setToast }) {
 
   async function decide(id, accept, reason) {
     setBusy(true);
-    const apiFetch = window.apiFetch || ((u, o) => fetch(u, { credentials: 'same-origin', ...o }));
+    const apiFetch = window.requireApiFetch ? window.requireApiFetch() : window.apiFetch;
     try {
       const r = await apiFetch(`/api/payments/${id}/verify`, {
         method: 'PUT',

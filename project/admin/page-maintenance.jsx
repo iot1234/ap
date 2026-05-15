@@ -90,7 +90,7 @@ function PageMaintenance({ rooms, setRooms, addActivity, setToast }) {
   }, [filtered]);
 
   const updateTicket = async (id, payload) => {
-    const apiFetch = window.apiFetch || ((u, o) => fetch(u, { credentials: 'same-origin', ...o }));
+    const apiFetch = window.requireApiFetch ? window.requireApiFetch() : window.apiFetch;
     try {
       const res = await apiFetch(`/api/maintenance/${id}`, {
         method: 'PUT',

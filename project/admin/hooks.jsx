@@ -323,6 +323,14 @@
     return body;
   }
 
+  function requireApiFetch() {
+    return apiFetch;
+  }
+
+  function requireApiCall() {
+    return apiCall;
+  }
+
   // === Global Esc-to-close modals ========================================
   // Modals across pages call window.useEscClose(open, onClose) to register.
   // The most recently opened modal handles Esc first.
@@ -666,6 +674,8 @@
   // uses internally. Expose it as a global so non-hook callers can reuse it.
   window.apiFetch = apiFetch;
   window.getCsrfToken = getCsrfToken;
+  window.requireApiFetch = requireApiFetch;
+  window.requireApiCall = requireApiCall;
   window.useEscClose = useEscClose;
   window.AdminSkeleton = Skeleton;
   window.toastError = toastError;

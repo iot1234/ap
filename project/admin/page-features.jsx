@@ -15,7 +15,7 @@ function PageFeatures({ setToast }) {
   // apiFetch attaches the CSRF token + handles 401 redirects. Without it the
   // PUT to /api/admin/features 403s with "invalid CSRF token", and every
   // toggle on this page silently fails.
-  const apiFetch = window.apiFetch || ((u, o) => fetch(u, { credentials: 'same-origin', ...o }));
+  const apiFetch = window.requireApiFetch ? window.requireApiFetch() : window.apiFetch;
   const [features, setFeatures] = useState(null);
   const [defaults, setDefaults] = useState(null);
   const [busy, setBusy] = useState(false);

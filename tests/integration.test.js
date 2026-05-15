@@ -1459,6 +1459,58 @@ test('tenant portal exposes payments tab + PDF download button', () => {
     'bill detail must link to PDF endpoint');
 });
 
+test('public room dashboard is read-only, not an admin management surface', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const app = fs.readFileSync(path.join(__dirname, '..', 'project', 'app.jsx'), 'utf8');
+  const shell = fs.readFileSync(path.join(__dirname, '..', 'project', 'Dorm Status Dashboard.html'), 'utf8');
+  assert.doesNotMatch(app, /\['actions'/, 'public dashboard must not expose a management tab');
+  assert.doesNotMatch(app, /function setStatus/, 'public dashboard must not mutate room status');
+  assert.doesNotMatch(app, /type="file"/, 'public dashboard must not upload room photos');
+  assert.doesNotMatch(app, /onUpdate=\{updateRoom\}/, 'public detail panel must not receive mutation callbacks');
+  assert.doesNotMatch(app, /localStorage\.setItem\('baankarn_rooms_v1'/,
+    'public dashboard must not persist room data from the viewer browser');
+  assert.doesNotMatch(app + shell, /TweaksPanel|tweaks-panel/,
+    'public dashboard must not ship the dev tweaks panel');
+});
+
+test('admin overview uses real contracts for upcoming expiry alerts', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const overview = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-overview.jsx'), 'utf8');
+  assert.match(overview, /\/api\/contracts\?status=active&expiringInDays=60/,
+    'overview must query the contracts table for expiring contracts');
+  assert.doesNotMatch(overview, /r\.tenant && r\.contractEnd/,
+    'overview must not derive contract expiry alerts from the legacy rooms blob');
+  assert.match(overview, /location\.hash = 'contracts'/,
+    'expiry alert should take admin to the contracts page');
+});
+
+test('admin write pages use central CSRF-aware API helpers', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const adminDir = path.join(__dirname, '..', 'project', 'admin');
+  const hooks = fs.readFileSync(path.join(adminDir, 'hooks.jsx'), 'utf8');
+  assert.match(hooks, /window\.requireApiFetch = requireApiFetch/,
+    'admin hooks must expose a required CSRF-aware fetch helper');
+  assert.match(hooks, /window\.requireApiCall = requireApiCall/,
+    'admin hooks must expose a required JSON API helper');
+
+  for (const file of fs.readdirSync(adminDir).filter((f) => /^page-.*\.jsx$/.test(f))) {
+    const src = fs.readFileSync(path.join(adminDir, file), 'utf8');
+    assert.doesNotMatch(src, /window\.apiFetch\s*\|\|/,
+      `${file} must not fall back to raw fetch when CSRF helper is unavailable`);
+  }
+
+  const bookings = fs.readFileSync(path.join(adminDir, 'page-bookings.jsx'), 'utf8');
+  assert.match(bookings, /window\.requireApiCall \? window\.requireApiCall\(\) : window\.apiCall/,
+    'booking status changes must use apiCall');
+  assert.equal(bookings.includes('falling back to legacy approve'), false,
+    'booking approval must not fall back to client-only legacy approve');
+  assert.equal(bookings.includes('fetch(`/api/bookings/${encodeURIComponent(id)}`'), false,
+    'booking status changes must not bypass apiCall');
+});
+
 test('SQL backup endpoints exist + restore is gated by confirm: true', () => {
   // The legacy "ส่งออก" UI button only dumped rooms/config/bookings JSONB
   // blobs — bills/payments/tenants/audit_logs were ALL missing. These new

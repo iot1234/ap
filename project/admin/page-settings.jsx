@@ -375,7 +375,7 @@ function TabUsers({ setToast, addActivity }) {
   const C = window.ADMIN_C;
   const { Card, Btn, IconBtn, Avatar, Pill, DataTable, SectionHeading,
           Modal, Input, Select } = window;
-  const fetchApi = window.apiFetch || ((u, o) => fetch(u, { credentials: 'same-origin', ...o }));
+  const fetchApi = window.requireApiFetch ? window.requireApiFetch() : window.apiFetch;
 
   const ROLES = [
     { value: 'owner',    label: 'เจ้าของ' },

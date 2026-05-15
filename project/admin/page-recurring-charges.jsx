@@ -18,7 +18,7 @@ function PageRecurringCharges({ setToast }) {
   const C = window.ADMIN_C;
   const { Card, Btn, Pill, PageContainer, PageHeader, SectionHeading, Modal,
           DataTable, EmptyState } = window;
-  const apiFetch = window.apiFetch || fetch;
+  const apiFetch = window.requireApiFetch ? window.requireApiFetch() : window.apiFetch;
 
   const [items, setItems] = useState([]);
   const [tenants, setTenants] = useState([]);
