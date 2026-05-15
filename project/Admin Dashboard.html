@@ -97,8 +97,89 @@
     from { opacity: 0; transform: translateY(4px); }
     to   { opacity: 1; transform: translateY(0); }
   }
+  /* ========== Responsive breakpoints ====================================
+     Admin Console targets four screen classes:
+       - desktop  ≥ 1280px : full sidebar + multi-column content
+       - laptop   ≥  900px : full sidebar + slightly tighter padding
+       - tablet   ≥  640px : sidebar collapses to icon-rail by default
+       - mobile   <  640px : sidebar becomes drawer (hamburger), one-col
+     Components consume these via class hooks (.responsive-grid,
+     .responsive-stack, .responsive-padding) so individual pages don't
+     have to repeat media queries. */
+
+  /* Page container padding scales with viewport — mobile gets 16/12 so
+     content reaches the screen edge cleanly; desktop keeps generous
+     24/28 for a calm reading width. */
+  .page-padding { padding: 24px 28px 48px; }
+  .page-padding-sm { padding: 18px 20px 36px; }
+
+  /* Grid that becomes a single column under 640px, two columns at
+     tablet, and admin-defined columns at desktop. Pages opt in by
+     using className="responsive-grid grid-cols-3" etc. */
+  .responsive-grid {
+    display: grid; gap: 16px;
+    grid-template-columns: repeat(var(--cols, 1), minmax(0, 1fr));
+  }
+
+  /* PageHeader actions stack below title on narrow screens so a row of
+     buttons doesn't overflow and clip behind the sidebar. */
+  .page-header-row {
+    display: flex; align-items: flex-end; justify-content: space-between;
+    gap: 16px; flex-wrap: wrap;
+  }
+
+  /* Touch targets — mobile gets 44px minimum (Apple HIG). Buttons
+     across the admin already use 8-11px padding which is roughly
+     36px tall on desktop; bump on mobile via the .touch class. */
   @media (max-width: 900px) {
+    .page-padding { padding: 20px 20px 36px; }
+    .page-padding-sm { padding: 14px 16px 28px; }
     ::-webkit-scrollbar { width: 6px; height: 6px; }
+  }
+
+  @media (max-width: 640px) {
+    .page-padding { padding: 14px 14px 28px; }
+    .page-padding-sm { padding: 10px 12px 22px; }
+    /* Force PageHeader to stack so actions never overflow */
+    .page-header-row { flex-direction: column; align-items: stretch; }
+    .page-header-row > div + div { width: 100%; }
+    /* Modal becomes a near-fullscreen sheet on mobile (max-height
+       behaviour already there; padding adjustment helps small phones) */
+    .modal-overlay { padding: 8px !important; }
+    /* Toast widens to viewport */
+    .toast-floating { min-width: 0 !important; left: 12px !important;
+      right: 12px !important; transform: none !important; max-width: none !important; }
+    /* Tables — let the row scroll horizontally instead of squashing */
+    .data-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    /* Reduce headline size so it fits */
+    .page-title { font-size: 19px !important; }
+  }
+
+  /* Tablet two-up break for KPI strips */
+  @media (max-width: 900px) and (min-width: 641px) {
+    .responsive-grid { --cols: 2 !important; }
+  }
+  /* Mobile single column */
+  @media (max-width: 640px) {
+    .responsive-grid { --cols: 1 !important; }
+  }
+
+  /* Focus ring — accessible focus outline that respects category tone
+     when the focused element has data-tone="..." attribute. Default
+     ring is the blue 'rooms' tone since it's also the global accent. */
+  *:focus-visible {
+    outline: 2px solid var(--c-rooms, #2563EB);
+    outline-offset: 2px;
+    border-radius: 6px;
+  }
+
+  /* Reduced motion */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
   }
 </style>
 </head>

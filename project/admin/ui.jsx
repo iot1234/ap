@@ -778,11 +778,15 @@ function Toast({ open, kind = 'success', children, onClose, duration }) {
     return () => clearTimeout(t);
   }, [open, resolvedDuration, onClose]);
   if (!open) return null;
+  // Each kind gets a left-edge category color rail + matching icon,
+  // mirroring the PageHeader pattern so the toast looks like it
+  // belongs to the same system. Background stays high-contrast dark
+  // so the message reads clearly over any page color.
   const colors = {
-    success: { bg: C.successInk, fg: '#fff' },
-    danger:  { bg: C.dangerInk,  fg: '#fff' },
-    info:    { bg: C.dark,       fg: '#fff' },
-    warning: { bg: C.warning,    fg: '#fff' },
+    success: { bg: '#064E3B', rail: '#10B981', icon: '✓' },
+    danger:  { bg: '#7F1D1D', rail: '#EF4444', icon: '!' },
+    warning: { bg: '#78350F', rail: '#F59E0B', icon: '⚠' },
+    info:    { bg: '#1E3A8A', rail: '#3B82F6', icon: 'ℹ' },
   };
   const cc = colors[kind] || colors.info;
 
@@ -805,18 +809,41 @@ function Toast({ open, kind = 'success', children, onClose, duration }) {
       role={isUrgent ? 'alert' : 'status'}
       aria-live={isUrgent ? 'assertive' : 'polite'}
       aria-atomic="true"
+      className="toast-floating"
       style={{
         position: 'fixed', bottom: 24, left: '50%', transform: 'translateX(-50%)',
-        background: cc.bg, color: cc.fg,
-        padding: description ? '12px 16px 12px 18px' : '11px 14px 11px 18px',
+        background: cc.bg, color: '#fff',
+        padding: 0,
         borderRadius: 10,
         fontSize: 13.5, fontWeight: 500,
-        boxShadow: '0 12px 32px -8px rgba(30,20,10,0.42)',
+        boxShadow: '0 16px 40px -8px rgba(11,18,32,0.55), 0 0 0 1px rgba(255,255,255,0.06) inset',
         zIndex: 1200,
         animation: 'slideUp .3s ease',
         maxWidth: 'calc(100vw - 32px)',
         minWidth: 280,
-        display: 'flex', alignItems: description ? 'flex-start' : 'center', gap: 12,
+        display: 'flex', alignItems: 'stretch',
+        overflow: 'hidden',
+      }}>
+      {/* Severity rail — same pattern as PageHeader */}
+      <div style={{ width: 4, background: cc.rail, flexShrink: 0 }} />
+      {/* Icon glyph in a tinted circle */}
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        padding: '0 6px 0 14px',
+      }}>
+        <span style={{
+          width: 24, height: 24, borderRadius: 999,
+          background: cc.rail, color: '#fff',
+          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+          fontSize: 13, fontWeight: 700, lineHeight: 1, flexShrink: 0,
+        }}>{cc.icon}</span>
+      </div>
+      {/* Body */}
+      <div style={{
+        flex: 1, minWidth: 0,
+        padding: description ? '12px 14px 12px 4px' : '11px 14px 11px 4px',
+        display: 'flex', alignItems: description ? 'flex-start' : 'center',
+        gap: 12,
       }}>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ wordBreak: 'break-word' }}>{title}</div>
@@ -854,6 +881,81 @@ function Toast({ open, kind = 'success', children, onClose, duration }) {
           onMouseEnter={(e) => e.currentTarget.style.opacity = 1}
           onMouseLeave={(e) => e.currentTarget.style.opacity = 0.75}>×</button>
       )}
+      </div>{/* body */}
+    </div>
+  );
+}
+
+// --- Alert / Banner ------------------------------------------------------
+// In-page notification surface (the Toast is for transient flashes; this
+// is for things that should stay visible — "1 ห้องราคาผิดปกติ", "บิล 4 ใบ
+// ค้างชำระ", etc.). Uses the same severity colors as Toast so the visual
+// language stays consistent across the admin.
+function Alert({ kind = 'info', title, children, action, onDismiss, icon, style }) {
+  if (kind === 'error') kind = 'danger';
+  const palettes = {
+    success: { rail: '#10B981', soft: '#E3F5EC', ink: '#064E3B', icon: '✓' },
+    danger:  { rail: '#EF4444', soft: '#FCE7E7', ink: '#7F1D1D', icon: '!' },
+    warning: { rail: '#F59E0B', soft: '#FCEFDB', ink: '#78350F', icon: '⚠' },
+    info:    { rail: '#3B82F6', soft: '#E8F0FE', ink: '#1E3A8A', icon: 'ℹ' },
+  };
+  const p = palettes[kind] || palettes.info;
+  return (
+    <div
+      role={kind === 'danger' || kind === 'warning' ? 'alert' : 'status'}
+      style={{
+        background: p.soft, color: p.ink,
+        borderRadius: 10,
+        border: `1px solid ${p.rail}33`,
+        padding: 0,
+        display: 'flex', alignItems: 'stretch',
+        overflow: 'hidden',
+        ...style,
+      }}>
+      <div style={{ width: 4, background: p.rail, flexShrink: 0 }} />
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '12px 14px', flex: 1, minWidth: 0 }}>
+        <span style={{
+          width: 22, height: 22, borderRadius: 999,
+          background: p.rail, color: '#fff',
+          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+          fontSize: 12, fontWeight: 700, lineHeight: 1, flexShrink: 0,
+          marginTop: 1,
+        }}>{icon || p.icon}</span>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          {title && (
+            <div style={{ fontSize: 13.5, fontWeight: 600, marginBottom: children ? 3 : 0 }}>
+              {title}
+            </div>
+          )}
+          {children && (
+            <div style={{ fontSize: 12.5, lineHeight: 1.55, opacity: 0.95 }}>{children}</div>
+          )}
+          {action && action.label && (
+            <button
+              onClick={action.onClick}
+              style={{
+                marginTop: 8,
+                background: p.rail, color: '#fff', border: 'none',
+                fontSize: 12.5, fontWeight: 600,
+                padding: '6px 12px', borderRadius: 6,
+                cursor: 'pointer', fontFamily: 'inherit',
+              }}>{action.label}</button>
+          )}
+        </div>
+        {onDismiss && (
+          <button
+            onClick={onDismiss}
+            aria-label="ปิด"
+            style={{
+              background: 'transparent', border: 'none',
+              color: p.ink, opacity: 0.55, fontSize: 16, lineHeight: 1,
+              padding: 2, cursor: 'pointer', flexShrink: 0,
+              fontFamily: 'inherit',
+            }}
+            onMouseEnter={(e) => e.currentTarget.style.opacity = 1}
+            onMouseLeave={(e) => e.currentTarget.style.opacity = 0.55}>×</button>
+        )}
+      </div>
     </div>
   );
 }
@@ -988,8 +1090,11 @@ function DefList({ items, columns = 1, dense = false }) {
 
 // --- Page wrapper (consistent padding + max-width) ----------------------
 function PageContainer({ children, maxWidth = 1240, style = {} }) {
+  // page-padding class scales padding responsively (CSS in
+  // Admin Dashboard.html) — 24/28 desktop → 14/14 mobile. Inline `style`
+  // still overrides anything callers pass.
   return (
-    <div style={{ maxWidth, margin: '0 auto', padding: '24px 28px 48px', ...style }}>
+    <div className="page-padding" style={{ maxWidth, margin: '0 auto', ...style }}>
       {children}
     </div>
   );
@@ -1024,10 +1129,7 @@ function PageHeader({ title, subtitle, actions, breadcrumb, tone }) {
         position: 'absolute', left: 0, top: 0, bottom: 0,
         width: 3, background: t.color,
       }} />
-      <div style={{
-        display: 'flex', alignItems: 'flex-end',
-        justifyContent: 'space-between', gap: 16, flexWrap: 'wrap',
-      }}>
+      <div className="page-header-row">
         <div style={{ minWidth: 0 }}>
           {crumbs && crumbs.length > 0 && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
@@ -1041,7 +1143,7 @@ function PageHeader({ title, subtitle, actions, breadcrumb, tone }) {
               </span>
             </div>
           )}
-          <h1 style={{
+          <h1 className="page-title" style={{
             margin: 0,
             fontFamily: '"IBM Plex Sans Thai", "IBM Plex Sans", system-ui, sans-serif',
             fontSize: 22, fontWeight: 700,
@@ -1070,7 +1172,7 @@ Object.assign(window, {
   StatusDot, StatusBadge, Pill,
   KpiCard, Tabs, Drawer, Modal,
   DataTable, EmptyState, Avatar,
-  SearchInput, FilterChip, Toast,
+  SearchInput, FilterChip, Toast, Alert,
   BarChart, DonutChart, Sparkline, HBar,
   DefList, PageContainer, PageHeader,
 });
