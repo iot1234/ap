@@ -4,59 +4,106 @@
 // ===========================================================================
 
 // --- Color palette --------------------------------------------------------
+// Updated 2026-05 to match the Admin Console redesign:
+//   - cool surfaces (was warm beige) with clean white cards
+//   - blue accent (was orange) sourced from the 'rooms' category hue
+//   - dark navy sidebar (was dark brown)
+//   - status colors from the same lightness/chroma family so the UI
+//     feels unified instead of one tone fighting another
+// Key NAMES are unchanged so the 31 pages that consume ADMIN_C continue
+// to render without edits — only the values shift.
 const ADMIN_C = {
-  bg:          '#f5efe3',
-  surface:     '#ffffff',
-  surfaceAlt:  '#faf6ee',
-  surfaceMuted:'#f7f0e1',
-  ink:         '#2c241b',
-  ink2:        '#5b4f40',
-  muted:       '#8a7d6b',
-  border:      '#ece4d4',
-  borderSoft:  '#f3ece0',
-  borderStrong:'#dccfb6',
-  accent:      '#c46a3e',
-  accentDark:  '#a4542d',
-  accentSoft:  '#f8e8db',
-  accentInk:   '#7a3a1a',
-  dark:        '#2c241b',
+  bg:          '#F5F6FA',
+  surface:     '#FFFFFF',
+  surfaceAlt:  '#F9FAFC',
+  surfaceMuted:'#F0F2F7',
+  ink:         '#0B1220',
+  ink2:        '#2A3142',
+  muted:       '#6B7280',
+  border:      '#E5E8EF',
+  borderSoft:  '#EFF1F6',
+  borderStrong:'#CFD3DE',
+  accent:      '#2563EB',
+  accentDark:  '#1D4ED8',
+  accentSoft:  '#E8F0FE',
+  accentInk:   '#1E3A8A',
+  dark:        '#0B1220',
 
-  // Sidebar (dark theme)
-  navBg:       '#1f1813',
-  navBgAlt:    '#181210',
-  navInk:      '#ebe1cc',
-  navInkSoft:  '#bcaf95',
-  navMuted:    '#7a6e58',
-  navBorder:   '#2d231a',
-  navHover:    '#2a201a',
-  navActive:   '#3a2d20',
-  navAccent:   '#e08a5a',
+  // Sidebar (dark navy theme — was dark brown)
+  navBg:       '#0B1220',
+  navBgAlt:    '#131B2C',
+  navInk:      '#E8EBF0',
+  navInkSoft:  '#B5BCC9',
+  navMuted:    '#6F7787',
+  navBorder:   'rgba(255,255,255,0.07)',
+  navHover:    'rgba(255,255,255,0.045)',
+  navActive:   'rgba(37,99,235,0.18)',
+  navAccent:   '#2563EB',
 
-  // Status semantic
-  success:     '#2e9b6a', successSoft: '#e6f4ec', successInk: '#0e3a25',
-  warning:     '#c98a2b', warningSoft: '#fbf1de', warningInk: '#5a3a0d',
-  danger:      '#b54639', dangerSoft:  '#f9e7e3', dangerInk:  '#5a1a13',
-  info:        '#3a6b8a', infoSoft:    '#e3edf5', infoInk:    '#1c3850',
-  neutral:     '#5b4f40', neutralSoft: '#eef1f5', neutralInk: '#1f2937',
-  purple:      '#7a4f8a', purpleSoft:  '#efe6f3', purpleInk:  '#3a1d44',
+  // Status semantic — pulled from same family as category palette
+  success:     '#059669', successSoft: '#E3F5EC', successInk: '#064E3B',
+  warning:     '#D97706', warningSoft: '#FCEFDB', warningInk: '#78350F',
+  danger:      '#DC2626', dangerSoft:  '#FCE7E7', dangerInk:  '#7F1D1D',
+  info:        '#2563EB', infoSoft:    '#E8F0FE', infoInk:    '#1E3A8A',
+  neutral:     '#475569', neutralSoft: '#EEF1F5', neutralInk: '#1F2937',
+  purple:      '#7C3AED', purpleSoft:  '#EFE7FB', purpleInk:  '#4C1D95',
+};
+
+// --- Categorical tone tokens ----------------------------------------------
+// Each admin section maps to ONE category. Components that take a `tone`
+// prop pull color + soft from here so the whole page (header rail, badge,
+// active button, list dot) shares a single hue. Unified palette →
+// admin instantly knows which area they're in without reading labels.
+const TONES = {
+  overview: { color: '#475569', soft: '#EEF1F5', label: 'ภาพรวม' },
+  rooms:    { color: '#2563EB', soft: '#E8F0FE', label: 'ห้องพัก & ผู้เช่า' },
+  finance:  { color: '#059669', soft: '#E3F5EC', label: 'การเงิน' },
+  service:  { color: '#D97706', soft: '#FCEFDB', label: 'บริการ' },
+  system:   { color: '#7C3AED', soft: '#EFE7FB', label: 'ระบบ' },
+};
+
+// Single source of truth: page id → category tone.
+// Pages added in the future should be registered here too.
+const PAGE_TONE = {
+  // Overview
+  overview: 'overview', health: 'overview', 'production-readiness': 'overview',
+  // Rooms & tenants
+  rooms: 'rooms', tenants: 'rooms', bookings: 'rooms',
+  contracts: 'rooms', 'contract-templates': 'rooms', 'contract-invitations': 'rooms',
+  'line-bindings': 'rooms', 'line-oas': 'rooms',
+  // Finance
+  billing: 'finance', payments: 'finance', 'slip-verify': 'finance',
+  pricing: 'finance', 'recurring-charges': 'finance',
+  reports: 'finance', 'reports-v2': 'finance',
+  // Service
+  maintenance: 'service', meters: 'service',
+  access: 'service', 'access-devices': 'service',
+  // System
+  notifications: 'system', 'notifications-queue': 'system',
+  'security-events': 'system',
+  features: 'system', secrets: 'system', settings: 'system',
 };
 
 // --- Status definitions ---------------------------------------------------
+// Colors updated to match the redesign palette — same family as ADMIN_C
+// status tokens so badges, dots, and inks stay coherent.
 const ADMIN_STATUS = {
-  vacant:     { th: 'ว่าง',       en: 'Vacant',      dot: '#2e9b6a', soft: '#e6f4ec', ink: '#0e3a25' },
-  occupied:   { th: 'มีผู้เช่า',  en: 'Occupied',    dot: '#475569', soft: '#eef1f5', ink: '#1f2937' },
-  reserved:   { th: 'จองแล้ว',    en: 'Reserved',    dot: '#c98a2b', soft: '#fbf1de', ink: '#5a3a0d' },
-  overdue:    { th: 'ค้างชำระ',  en: 'Overdue',     dot: '#b54639', soft: '#f9e7e3', ink: '#5a1a13' },
-  maintenance:{ th: 'ปรับปรุง',  en: 'Maintenance', dot: '#7a6c54', soft: '#efeae0', ink: '#3a3326' },
+  vacant:     { th: 'ว่าง',       en: 'Vacant',      dot: '#059669', soft: '#E3F5EC', ink: '#064E3B' },
+  occupied:   { th: 'มีผู้เช่า',  en: 'Occupied',    dot: '#2563EB', soft: '#E8F0FE', ink: '#1E3A8A' },
+  reserved:   { th: 'จองแล้ว',    en: 'Reserved',    dot: '#D97706', soft: '#FCEFDB', ink: '#78350F' },
+  overdue:    { th: 'ค้างชำระ',  en: 'Overdue',     dot: '#DC2626', soft: '#FCE7E7', ink: '#7F1D1D' },
+  maintenance:{ th: 'ปรับปรุง',  en: 'Maintenance', dot: '#7C3AED', soft: '#EFE7FB', ink: '#4C1D95' },
 };
 const ADMIN_STATUS_KEYS = ['vacant', 'occupied', 'reserved', 'overdue', 'maintenance'];
 
 // --- Room types -----------------------------------------------------------
+// Accent colors map to the category palette so room-type chips read as
+// part of the same system, not random colors.
 const ADMIN_ROOM_TYPES = {
-  standard: { th: 'ห้องมาตรฐาน',     size: 24, baseRent: 4500, beds: 1, ac: false, accent: '#9c8970' },
-  deluxe:   { th: 'ห้องดีลักซ์',      size: 28, baseRent: 5800, beds: 1, ac: true,  accent: '#c46a3e' },
-  suite:    { th: 'ห้องสวีท',           size: 36, baseRent: 7500, beds: 2, ac: true,  accent: '#7a4f8a' },
-  studio:   { th: 'สตูดิโอพรีเมียม',  size: 32, baseRent: 6800, beds: 1, ac: true,  accent: '#3a6b8a' },
+  standard: { th: 'ห้องมาตรฐาน',     size: 24, baseRent: 4500, beds: 1, ac: false, accent: '#475569' },
+  deluxe:   { th: 'ห้องดีลักซ์',      size: 28, baseRent: 5800, beds: 1, ac: true,  accent: '#2563EB' },
+  suite:    { th: 'ห้องสวีท',           size: 36, baseRent: 7500, beds: 2, ac: true,  accent: '#7C3AED' },
+  studio:   { th: 'สตูดิโอพรีเมียม',  size: 32, baseRent: 6800, beds: 1, ac: true,  accent: '#059669' },
 };
 const ADMIN_ROOM_TYPE_KEYS = ['standard', 'deluxe', 'suite', 'studio'];
 
@@ -562,7 +609,8 @@ function printPage() { try { window.print(); return true; } catch (e) { return f
 // stopped every page-*.jsx file below from registering window.PageX, so
 // every admin route showed skeleton-forever instead of its component.
 Object.assign(window, {
-  ADMIN_C, ADMIN_STATUS, ADMIN_STATUS_KEYS,
+  ADMIN_C, TONES, PAGE_TONE,
+  ADMIN_STATUS, ADMIN_STATUS_KEYS,
   ADMIN_ROOM_TYPES, ADMIN_ROOM_TYPE_KEYS,
   ADMIN_VIEWS,
   DEFAULT_CONFIG, STORAGE_KEYS,

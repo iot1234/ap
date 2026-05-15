@@ -996,27 +996,68 @@ function PageContainer({ children, maxWidth = 1240, style = {} }) {
 }
 
 // --- PageHeader ---------------------------------------------------------
-function PageHeader({ title, subtitle, actions, breadcrumb }) {
+function PageHeader({ title, subtitle, actions, breadcrumb, tone }) {
+  // Tone: category color rail + breadcrumb dot — admin instantly sees
+  // which section they're in. Defaults to overview (slate) if unset.
+  // Accept either a tone key ('rooms'/'finance'/...) or a string label
+  // for legacy callers; the latter falls back to overview tone.
+  const TONES = window.TONES || {};
+  const toneKey = (tone && TONES[tone]) ? tone : 'overview';
+  const t = TONES[toneKey] || { color: '#475569', soft: '#EEF1F5' };
+
+  // breadcrumb can be either an array of strings (legacy) or a single
+  // category label (new). Normalise to an array for rendering.
+  const crumbs = Array.isArray(breadcrumb)
+    ? breadcrumb
+    : (breadcrumb ? [breadcrumb] : null);
+
   return (
-    <div style={{ marginBottom: 24 }}>
-      {breadcrumb && (
-        <div style={{ fontSize: 12, color: C.muted, marginBottom: 8 }}>
-          {breadcrumb.map((b, i) => (
-            <span key={i}>
-              {i > 0 && <span style={{ margin: '0 6px' }}>/</span>}
-              {b}
-            </span>
-          ))}
-        </div>
-      )}
-      <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
-        <div>
-          <h1 style={{ margin: 0, fontFamily: 'Sora, sans-serif', fontSize: 26, fontWeight: 700, color: C.ink, letterSpacing: '-0.01em' }}>
+    <div style={{
+      background: 'var(--surface, #FFFFFF)',
+      borderBottom: `1px solid var(--border, ${C.border})`,
+      padding: '20px 28px 18px',
+      margin: '-24px -24px 24px', // bleed to page edge inside PageContainer
+      position: 'relative',
+    }}>
+      {/* Category color rail — left edge */}
+      <div style={{
+        position: 'absolute', left: 0, top: 0, bottom: 0,
+        width: 3, background: t.color,
+      }} />
+      <div style={{
+        display: 'flex', alignItems: 'flex-end',
+        justifyContent: 'space-between', gap: 16, flexWrap: 'wrap',
+      }}>
+        <div style={{ minWidth: 0 }}>
+          {crumbs && crumbs.length > 0 && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+              <span style={{
+                display: 'inline-flex', alignItems: 'center', gap: 6,
+                fontSize: 11.5, fontWeight: 600, letterSpacing: '0.06em',
+                textTransform: 'uppercase', color: t.color, whiteSpace: 'nowrap',
+              }}>
+                <span style={{ width: 6, height: 6, borderRadius: 999, background: t.color }} />
+                {crumbs.join(' · ')}
+              </span>
+            </div>
+          )}
+          <h1 style={{
+            margin: 0,
+            fontFamily: '"IBM Plex Sans Thai", "IBM Plex Sans", system-ui, sans-serif',
+            fontSize: 22, fontWeight: 700,
+            color: C.ink, letterSpacing: '-0.01em', lineHeight: 1.2,
+          }}>
             {title}
           </h1>
-          {subtitle && <div style={{ fontSize: 13.5, color: C.muted, marginTop: 6 }}>{subtitle}</div>}
+          {subtitle && (
+            <div style={{ fontSize: 13.5, color: C.muted, marginTop: 4 }}>{subtitle}</div>
+          )}
         </div>
-        {actions && <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>{actions}</div>}
+        {actions && (
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            {actions}
+          </div>
+        )}
       </div>
     </div>
   );

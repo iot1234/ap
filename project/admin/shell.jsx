@@ -66,15 +66,19 @@ function PageBoundary({ pageKey, children }) {
 // `minRole` — the sidebar hides it if the current user's role is below.
 // ROLE_RANK: owner > manager > staff > readonly.
 const ROLE_RANK = { owner: 4, manager: 3, staff: 2, readonly: 1 };
+// Nav groups + tone — each maps to the categorical color from the redesign
+// palette in shared.jsx#TONES (overview/rooms/finance/service/system).
+// The tone drives the dot in the group header, the active-page rail color,
+// and the page-header breadcrumb tint, so admin instantly sees which area.
 const NAV_GROUPS = [
   {
-    title: 'ภาพรวม',
+    title: 'ภาพรวม', tone: 'overview',
     items: [
       { id: 'overview', label: 'แดชบอร์ด', icon: '◫' },
     ],
   },
   {
-    title: 'ห้องพัก & ผู้เช่า',
+    title: 'ห้องพัก & ผู้เช่า', tone: 'rooms',
     items: [
       { id: 'rooms',         label: 'ห้องพัก',     icon: '🏠' },
       { id: 'tenants',       label: 'ผู้เช่า',     icon: '👥' },
@@ -87,7 +91,7 @@ const NAV_GROUPS = [
     ],
   },
   {
-    title: 'การเงิน',
+    title: 'การเงิน', tone: 'finance',
     items: [
       { id: 'billing',     label: 'บิล/ใบแจ้งหนี้',  icon: '🧾' },
       { id: 'payments',    label: 'สลิป/การชำระ',    icon: '💳' },
@@ -99,7 +103,7 @@ const NAV_GROUPS = [
     ],
   },
   {
-    title: 'บริการ',
+    title: 'บริการ', tone: 'service',
     items: [
       { id: 'maintenance',     label: 'แจ้งซ่อม',          icon: '🛠' },
       { id: 'meters',          label: 'มิเตอร์',           icon: '⚡' },
@@ -108,7 +112,7 @@ const NAV_GROUPS = [
     ],
   },
   {
-    title: 'ระบบ',
+    title: 'ระบบ', tone: 'system',
     items: [
       { id: 'health',              label: 'สถานะระบบ',           icon: '🩺', minRole: 'manager' },
       { id: 'production-readiness', label: 'ตรวจความพร้อม',       icon: '🚦', minRole: 'owner' },
@@ -228,7 +232,7 @@ function Sidebar({ page, setPage, mobileOpen, setMobileOpen, isMobile, pendingBo
           }}
         />
       )}
-      <aside id="admin-sidebar" style={sidebarStyle}>
+      <aside id="admin-sidebar" className="sidebar" style={sidebarStyle}>
         {/* Logo + collapse toggle (desktop only) */}
         <div style={{
           padding: isCollapsed ? '20px 8px 18px' : '20px 20px 18px',
@@ -299,42 +303,65 @@ function Sidebar({ page, setPage, mobileOpen, setMobileOpen, isMobile, pendingBo
           )}
         </div>
 
-        {/* Nav — role-aware */}
+        {/* Nav — role-aware. Each group renders a category dot in its
+            header so the section break is visible at a glance. Active
+            page rail uses the same category color so the whole sidebar
+            reads as five distinct sections, not one stack of links. */}
         <nav style={{ flex: 1, overflowY: 'auto', padding: '14px 0' }}>
-          {filterNavByRole(NAV_GROUPS, currentUser?.role).map(group => (
+          {filterNavByRole(NAV_GROUPS, currentUser?.role).map(group => {
+            const TONES = window.TONES || {};
+            const t = TONES[group.tone] || TONES.overview || { color: '#475569', soft: '#EEF1F5' };
+            return (
             <div key={group.title} style={{ marginBottom: isCollapsed ? 8 : 18 }}>
               {!isCollapsed && (
                 <div style={{
+                  display: 'flex', alignItems: 'center', gap: 8,
                   padding: '4px 22px', fontSize: 10.5, color: C.navMuted,
                   textTransform: 'uppercase', letterSpacing: '0.1em', fontWeight: 600,
                   marginBottom: 6,
-                }}>{group.title}</div>
+                }}>
+                  <span style={{
+                    width: 6, height: 6, borderRadius: 999,
+                    background: t.color, flexShrink: 0,
+                    boxShadow: `0 0 0 3px ${t.color}22`,
+                  }} />
+                  <span style={{ whiteSpace: 'nowrap' }}>{group.title}</span>
+                </div>
               )}
               {isCollapsed && (
-                // Subtle separator between groups when label is hidden, so the
-                // structure is still visible without text.
-                <div style={{
-                  height: 1, background: C.navBorder, margin: '6px 14px 6px',
-                  opacity: 0.4,
-                }} />
+                // Tiny category dot acts as group separator when label hidden.
+                <div style={{ padding: '6px 0', display: 'flex', justifyContent: 'center' }}>
+                  <span style={{
+                    width: 6, height: 6, borderRadius: 999, background: t.color,
+                    boxShadow: `0 0 0 2px ${t.color}33`,
+                  }} title={group.title} />
+                </div>
               )}
               {group.items.map(it => {
                 const active = page === it.id;
                 let badge = null;
                 if (it.id === 'bookings' && pendingBookings > 0) badge = pendingBookings;
                 if (it.id === 'billing'  && overdueRooms > 0)    badge = overdueRooms;
+                // Active item uses category color for the rail + soft tint
+                // for the background, mirroring the page-header tone.
+                const itemStyle = navItemStyle(active);
+                const activeStyle = active ? {
+                  ...itemStyle,
+                  background: `${t.color}1F`,         // 12% tinted
+                  color: '#fff',
+                } : itemStyle;
                 return (
                   <button
                     key={it.id}
                     onClick={() => { setPage(it.id); if (isMobile) setMobileOpen(false); }}
                     title={isCollapsed ? it.label : null}
                     aria-label={it.label}
-                    style={navItemStyle(active)}>
+                    style={activeStyle}>
                     <span style={{ fontSize: 15, width: 18, textAlign: 'center', flexShrink: 0 }}>{it.icon}</span>
                     {!isCollapsed && <span style={{ flex: 1 }}>{it.label}</span>}
                     {badge != null && (
                       <span style={{
-                        background: it.id === 'billing' ? C.danger : C.accent,
+                        background: it.id === 'billing' ? C.danger : t.color,
                         color: '#fff', fontSize: isCollapsed ? 9 : 10, fontWeight: 700,
                         padding: isCollapsed ? '0 4px' : '1px 7px',
                         borderRadius: 999,
@@ -348,14 +375,15 @@ function Sidebar({ page, setPage, mobileOpen, setMobileOpen, isMobile, pendingBo
                     {active && (
                       <span style={{
                         position: 'absolute', left: 0, top: '50%', transform: 'translateY(-50%)',
-                        width: 3, height: 18, background: C.navAccent, borderRadius: '0 2px 2px 0',
+                        width: 3, height: 18, background: t.color, borderRadius: '0 2px 2px 0',
                       }} />
                     )}
                   </button>
                 );
               })}
             </div>
-          ))}
+            );
+          })}
         </nav>
 
         {/* Footer */}

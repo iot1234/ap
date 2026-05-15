@@ -6,23 +6,76 @@
 <title>Admin Console · บ้านกาญจน์ เรสซิเดนซ์</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
-<link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700&family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"/>
 <style>
+  /* Design tokens — sourced from the Admin Console redesign brief.
+     5 category colors map to admin sections (overview/rooms/finance/
+     service/system). All share same lightness so the system feels
+     unified; each category gets one distinct hue. */
+  :root {
+    --bg:           #F5F6FA;
+    --surface:      #FFFFFF;
+    --surface-2:    #F9FAFC;
+    --surface-3:    #F0F2F7;
+    --ink:          #0B1220;
+    --ink-2:        #2A3142;
+    --muted:        #6B7280;
+    --muted-2:      #9AA0AC;
+    --border:       #E5E8EF;
+    --border-soft:  #EFF1F6;
+
+    --nav-bg:       #0B1220;
+    --nav-bg-alt:   #131B2C;
+    --nav-border:   rgba(255,255,255,0.07);
+    --nav-ink:      #E8EBF0;
+    --nav-ink-soft: #B5BCC9;
+    --nav-muted:    #6F7787;
+
+    --c-overview:   #475569;   --c-overview-soft:  #EEF1F5;
+    --c-rooms:      #2563EB;   --c-rooms-soft:     #E8F0FE;
+    --c-finance:    #059669;   --c-finance-soft:   #E3F5EC;
+    --c-service:    #D97706;   --c-service-soft:   #FCEFDB;
+    --c-system:     #7C3AED;   --c-system-soft:    #EFE7FB;
+
+    --success: #059669; --success-soft: #E3F5EC;
+    --warn:    #D97706; --warn-soft:    #FCEFDB;
+    --danger:  #DC2626; --danger-soft:  #FCE7E7;
+    --info:    #2563EB; --info-soft:    #E8F0FE;
+  }
+
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; }
   body {
-    font-family: "IBM Plex Sans Thai", "Sora", system-ui, sans-serif;
-    background: #f5efe3;
-    color: #2c241b;
+    font-family: "IBM Plex Sans Thai", "IBM Plex Sans", system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    font-size: 14px;
+    line-height: 1.5;
     -webkit-font-smoothing: antialiased;
   }
   ::-webkit-scrollbar { width: 10px; height: 10px; }
-  ::-webkit-scrollbar-thumb { background: #d9cdb5; border-radius: 6px; border: 2px solid #f5efe3; }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(15,22,35,0.12); border-radius: 999px;
+    border: 2px solid var(--bg);
+  }
+  ::-webkit-scrollbar-thumb:hover { background: rgba(15,22,35,0.22); }
   ::-webkit-scrollbar-track { background: transparent; }
+  /* Dark sidebar scrollbar */
+  aside.sidebar ::-webkit-scrollbar-thumb {
+    background: rgba(255,255,255,0.08); border-color: var(--nav-bg);
+  }
+  /* Sidebar background radial accents (subtle) */
+  aside.sidebar {
+    background:
+      radial-gradient(800px 400px at -10% -10%, rgba(37,99,235,0.10), transparent 60%),
+      radial-gradient(700px 500px at 110% 110%, rgba(124,58,237,0.08), transparent 60%),
+      var(--nav-bg) !important;
+  }
   button { font-family: inherit; }
   button:hover { filter: brightness(0.98); }
   button:active { transform: translateY(1px); }
   input, textarea, select { font-family: inherit; }
+  ::selection { background: rgba(37,99,235,0.18); }
   @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
   @keyframes slideUp {
     from { transform: translate(-50%, 100%); opacity: 0; }
@@ -39,6 +92,10 @@
   @keyframes growBar {
     from { transform: scaleY(0); opacity: 0; }
     to { transform: scaleY(1); opacity: 1; }
+  }
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(4px); }
+    to   { opacity: 1; transform: translateY(0); }
   }
   @media (max-width: 900px) {
     ::-webkit-scrollbar { width: 6px; height: 6px; }
