@@ -205,6 +205,29 @@
   .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .break-word { word-break: break-word; overflow-wrap: anywhere; }
 
+  /* Tabs that horizontally scroll without showing an ugly scrollbar.
+     Used by ui.jsx Tabs (both pills + underline variants). */
+  .tabs-scroll {
+    scrollbar-width: none;            /* Firefox */
+    -ms-overflow-style: none;         /* IE/Edge */
+  }
+  .tabs-scroll::-webkit-scrollbar { display: none; }
+
+  /* Page header actions row — already wraps at mobile via class. On
+     very narrow phones (<480px) actions go full-width single column
+     so the "Save" / "Export" / "Send all" buttons stack rather than
+     trying to fit three on one row. */
+  @media (max-width: 480px) {
+    .page-header-row > div:nth-child(2) { width: 100%; flex-direction: column; }
+    .page-header-row > div:nth-child(2) > * { width: 100%; }
+  }
+
+  /* KPI value scales down on narrow screens so big currency values
+     ("฿1,234,567") don't break the card layout. */
+  @media (max-width: 640px) {
+    .kpi-value { font-size: 20px !important; }
+  }
+
   /* Focus ring — accessible focus outline that respects category tone
      when the focused element has data-tone="..." attribute. Default
      ring is the blue 'rooms' tone since it's also the global accent. */

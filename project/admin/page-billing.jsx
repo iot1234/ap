@@ -994,35 +994,56 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         subtitle={`เดือน ${fmtMonthTH(currentPeriodDate)} · ${bills.length} ใบ`}
         actions={
           <>
+            {/* Period picker — segmented control with arrows + "เดือนนี้"
+                shortcut. Stays as a single inline element on desktop;
+                wraps to its own row on mobile thanks to the page-header-row
+                flex-wrap. */}
             <div style={{
-              display: 'inline-flex', alignItems: 'center', gap: 6,
-              padding: '4px 6px', border: `1px solid ${C.border}`,
-              borderRadius: 8, background: C.bg, color: C.ink,
+              display: 'inline-flex', alignItems: 'center',
+              padding: 2, border: `1px solid ${C.border}`,
+              borderRadius: 9, background: C.surface,
+              height: 38, overflow: 'hidden',
             }}>
               <button
                 type="button"
                 aria-label="เดือนก่อนหน้า"
                 onClick={() => setPeriodOffset((x) => x - 1)}
-                style={{ border: 0, background: 'transparent', color: C.ink, cursor: 'pointer', fontSize: 16 }}
+                style={{
+                  width: 32, height: 32, border: 0, borderRadius: 6,
+                  background: 'transparent', color: C.ink, cursor: 'pointer',
+                  fontSize: 17, fontFamily: 'inherit', display: 'inline-flex',
+                  alignItems: 'center', justifyContent: 'center',
+                }}
               >‹</button>
-              <span style={{ minWidth: 76, textAlign: 'center', fontSize: 12.5, fontWeight: 600 }}>{currentPeriod}</span>
+              <span style={{
+                minWidth: 80, padding: '0 4px',
+                textAlign: 'center', fontSize: 13, fontWeight: 600, color: C.ink,
+                fontFamily: 'JetBrains Mono, monospace', letterSpacing: '0.02em',
+              }}>{currentPeriod}</span>
               <button
                 type="button"
                 aria-label="เดือนถัดไป"
                 disabled={periodOffset >= 0}
                 onClick={() => setPeriodOffset((x) => Math.min(x + 1, 0))}
                 style={{
-                  border: 0, background: 'transparent',
+                  width: 32, height: 32, border: 0, borderRadius: 6,
+                  background: 'transparent',
                   color: periodOffset >= 0 ? C.muted : C.ink,
                   cursor: periodOffset >= 0 ? 'not-allowed' : 'pointer',
-                  fontSize: 16,
+                  fontSize: 17, fontFamily: 'inherit',
+                  display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
                 }}
               >›</button>
               {periodOffset !== 0 ? (
                 <button
                   type="button"
                   onClick={() => setPeriodOffset(0)}
-                  style={{ border: 0, background: 'transparent', color: C.accent || C.ink, cursor: 'pointer', fontSize: 12 }}
+                  style={{
+                    border: 0, padding: '0 10px', height: 32,
+                    marginLeft: 2, borderLeft: `1px solid ${C.borderSoft}`,
+                    background: 'transparent', color: C.accent,
+                    cursor: 'pointer', fontSize: 12, fontWeight: 600, fontFamily: 'inherit',
+                  }}
                 >เดือนนี้</button>
               ) : null}
             </div>
@@ -1032,10 +1053,10 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
                 setToast && setToast({ kind: 'success', message: `ดาวน์โหลด CSV ${bills.length} ใบเรียบร้อย` });
               }
             }}>ส่งออก CSV</Btn>
-            <Btn variant="primary" onClick={() => setConfirmGenerate(true)}>
+            <Btn variant="primary" tone="finance" onClick={() => setConfirmGenerate(true)}>
               ออกบิลรายเดือน
             </Btn>
-            <Btn onClick={handleBulkSend}>
+            <Btn variant="soft" tone="finance" onClick={handleBulkSend}>
               ส่งเตือนทั้งหมด
             </Btn>
           </>
@@ -1044,61 +1065,53 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
 
       {/* Real-vs-estimate banner. Tells admin at a glance whether what
           they're seeing came from issued bills (DB) or is just a forecast
-          built from rooms × rate. Without this, the previous version
-          showed a perfect-looking estimate even when 0 bills had been
-          issued for the period — false reassurance. */}
+          built from rooms × rate. Uses the unified Alert component so
+          the visual language matches every other banner in the admin
+          (rail + icon glyph + soft tinted bg). */}
       {dbBills != null && (() => {
+        const Alert = window.Alert;
         const dbCount = dbBills.length;
         const estCount = bills.filter((b) => b._source === 'estimate').length;
+        if (!Alert) return null;
         if (dbCount === 0 && estCount > 0) {
           return (
-            <div style={{
-              padding: '10px 14px', marginBottom: 14, borderRadius: 8,
-              background: C.warningSoft || '#fef6e0', color: C.warningInk || C.warningInk,
-              fontSize: 13, display: 'flex', alignItems: 'center', gap: 10,
-            }}>
-              <span style={{ fontSize: 12, fontWeight: 700 }}>คำเตือน</span>
-              <span><strong>ยังไม่ได้ออกบิลรอบ {currentPeriod}</strong> — ตารางด้านล่างเป็นการประมาณการจากข้อมูลห้อง กดปุ่ม "ออกบิลเดือนนี้" เพื่อบันทึกเข้า DB</span>
+            <div style={{ marginBottom: 14 }}>
+              <Alert kind="warning"
+                title={`ยังไม่ได้ออกบิลรอบ ${currentPeriod}`}>
+                ตารางด้านล่างเป็นการประมาณการจากข้อมูลห้อง — กดปุ่ม "ออกบิลเดือนนี้" เพื่อบันทึกเข้า DB จริง
+              </Alert>
             </div>
           );
         }
         if (dbCount > 0 && estCount > 0) {
           return (
-            <div style={{
-              padding: '10px 14px', marginBottom: 14, borderRadius: 8,
-              background: C.infoSoft || '#e3eef7', color: C.infoInk || '#1d3b5a',
-              fontSize: 13, display: 'flex', alignItems: 'center', gap: 10,
-            }}>
-              <span style={{ fontSize: 12, fontWeight: 700 }}>ข้อมูล</span>
-              <span>ออกบิลแล้ว {dbCount} ใบ (รอบ {currentPeriod}) · เหลือห้องที่ยังไม่ออก {estCount} ห้อง — กด "ออกบิลเดือนนี้" เพื่อออกบิลส่วนที่เหลือ</span>
+            <div style={{ marginBottom: 14 }}>
+              <Alert kind="info"
+                title={`ออกบิลแล้ว ${dbCount} ใบ · เหลือ ${estCount} ห้อง`}>
+                รอบ {currentPeriod} — กด "ออกบิลเดือนนี้" เพื่อออกบิลส่วนที่เหลือ
+              </Alert>
             </div>
           );
         }
         if (dbCount > 0 && estCount === 0) {
           return (
-            <div style={{
-              padding: '10px 14px', marginBottom: 14, borderRadius: 8,
-              background: C.successSoft || '#e3f3e8', color: C.successInk || '#1d4a2c',
-              fontSize: 13, display: 'flex', alignItems: 'center', gap: 10,
-            }}>
-              <span style={{ fontSize: 12, fontWeight: 700 }}>สำเร็จ</span>
-              <span>ออกบิลครบทุกห้องแล้วสำหรับรอบ {currentPeriod} ({dbCount} ใบ)</span>
+            <div style={{ marginBottom: 14 }}>
+              <Alert kind="success"
+                title={`ออกบิลครบทุกห้อง · ${dbCount} ใบ`}>
+                รอบ {currentPeriod} ออกบิลครบถ้วนแล้ว
+              </Alert>
             </div>
           );
         }
         return null;
       })()}
-      {dbBillsErr && (
-        <div style={{
-          padding: '10px 14px', marginBottom: 14, borderRadius: 8,
-          background: C.dangerSoft || '#fff1f0', color: C.danger || '#a23',
-          fontSize: 13,
-        }}>
-          โหลดข้อมูลบิลจาก DB ไม่สำเร็จ: {dbBillsErr} — แสดงประมาณการจากข้อมูลห้อง
-          {' '}<button onClick={fetchDbBills} style={{
-            border: 0, background: 'transparent', color: 'inherit',
-            textDecoration: 'underline', cursor: 'pointer', fontFamily: 'inherit',
-          }}>ลองใหม่</button>
+      {dbBillsErr && window.Alert && (
+        <div style={{ marginBottom: 14 }}>
+          <window.Alert kind="danger"
+            title="โหลดข้อมูลบิลจาก DB ไม่สำเร็จ"
+            action={{ label: 'ลองใหม่', onClick: fetchDbBills }}>
+            {dbBillsErr} — แสดงประมาณการจากข้อมูลห้องแทน
+          </window.Alert>
         </div>
       )}
 

@@ -456,19 +456,22 @@ function Pill({ children, color = 'neutral', size = 'md', icon }) {
 
 // --- KpiCard --------------------------------------------------------------
 function KpiCard({ label, value, sub, change, color = 'neutral', icon }) {
+  // Colors mapped to design palette. Each preset has a tinted left
+  // border rail so admin can scan a KPI strip and see the severity
+  // mix at a glance without reading the numbers.
   const colors = {
-    neutral: { bg: C.surface,       border: C.border,       icon: C.ink2  },
-    accent:  { bg: '#fff8f1',       border: '#f3d8c2',      icon: C.accent },
-    success: { bg: '#f1faf5',       border: '#d4eddf',      icon: C.success },
-    warning: { bg: '#fdf6e9',       border: '#f0dfb8',      icon: C.warning },
-    danger:  { bg: '#fcefec',       border: '#f0cfc7',      icon: C.danger },
-    info:    { bg: '#eff5fa',       border: '#cfdfeb',      icon: C.info },
-    purple:  { bg: '#f6effa',       border: '#dbcce0',      icon: C.purple },
+    neutral: { bg: C.surface,      border: C.border,       icon: C.ink2,    rail: C.muted },
+    accent:  { bg: C.accentSoft,   border: '#C7DBFA',      icon: C.accent,  rail: C.accent },
+    success: { bg: C.successSoft,  border: '#BDE5CF',      icon: C.success, rail: C.success },
+    warning: { bg: C.warningSoft,  border: '#F1D6A6',      icon: C.warning, rail: C.warning },
+    danger:  { bg: C.dangerSoft,   border: '#F5BEBE',      icon: C.danger,  rail: C.danger },
+    info:    { bg: C.infoSoft,     border: '#C7DBFA',      icon: C.info,    rail: C.info },
+    purple:  { bg: C.purpleSoft,   border: '#D6C2EF',      icon: C.purple,  rail: C.purple },
   };
   const cc = colors[color] || colors.neutral;
   const positive = change && change > 0;
   return (
-    <div style={{
+    <div className="kpi-card" style={{
       background: cc.bg,
       border: `1px solid ${cc.border}`,
       borderRadius: 14,
@@ -477,16 +480,31 @@ function KpiCard({ label, value, sub, change, color = 'neutral', icon }) {
       flexDirection: 'column',
       gap: 8,
       minWidth: 0,
+      position: 'relative',
+      overflow: 'hidden',
     }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div style={{ fontSize: 12.5, color: C.muted, fontWeight: 500, lineHeight: 1.3 }}>{label}</div>
+      {/* Severity color rail on the left edge — same pattern as
+          PageHeader / Toast / Alert so KPI cards feel like part of
+          the same visual language. */}
+      <div style={{
+        position: 'absolute', left: 0, top: 0, bottom: 0,
+        width: 3, background: cc.rail, opacity: color === 'neutral' ? 0 : 0.85,
+      }} />
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+        <div style={{ fontSize: 12.5, color: C.muted, fontWeight: 500, lineHeight: 1.3, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</div>
         {icon && <div style={{
-          width: 32, height: 32, borderRadius: 8,
-          background: '#ffffffaa', display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+          width: 32, height: 32, borderRadius: 8, flexShrink: 0,
+          background: 'rgba(255,255,255,0.7)',
+          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
           color: cc.icon, fontSize: 16,
         }}>{icon}</div>}
       </div>
-      <div style={{ fontFamily: 'IBM Plex Sans Thai, sans-serif', fontSize: 26, fontWeight: 700, color: C.ink, lineHeight: 1.1, letterSpacing: '-0.01em' }}>
+      <div className="kpi-value" style={{
+        fontFamily: 'IBM Plex Sans Thai, sans-serif',
+        fontSize: 26, fontWeight: 700, color: C.ink,
+        lineHeight: 1.1, letterSpacing: '-0.01em',
+        overflowWrap: 'break-word', wordBreak: 'break-word',
+      }}>
         {value}
       </div>
       {(sub || change != null) && (
@@ -508,10 +526,21 @@ function KpiCard({ label, value, sub, change, color = 'neutral', icon }) {
 }
 
 // --- Tabs -----------------------------------------------------------------
+// On narrow viewports the row of tabs would overflow horizontally and
+// clip behind the page edge. Wrap in a scrollable container with
+// momentum scroll + edge mask so admin can scroll the row instead of
+// missing tabs. data-tabs-scroll class lets Admin Dashboard.html add
+// the touch + mask styles.
 function Tabs({ items, value, onChange, variant = 'underline', style = {} }) {
   if (variant === 'pills') {
     return (
-      <div style={{ display: 'inline-flex', gap: 4, padding: 4, background: C.surfaceAlt, borderRadius: 10, ...style }}>
+      <div className="tabs-scroll" style={{
+        display: 'inline-flex', gap: 4, padding: 4,
+        background: C.surfaceAlt, borderRadius: 10,
+        maxWidth: '100%', overflowX: 'auto',
+        WebkitOverflowScrolling: 'touch',
+        ...style,
+      }}>
         {items.map(it => {
           const active = it.value === value;
           return (
@@ -551,7 +580,11 @@ function Tabs({ items, value, onChange, variant = 'underline', style = {} }) {
   }
   // Underline variant
   return (
-    <div style={{ display: 'flex', gap: 4, borderBottom: `1px solid ${C.border}`, ...style }}>
+    <div className="tabs-scroll" style={{
+      display: 'flex', gap: 4, borderBottom: `1px solid ${C.border}`,
+      overflowX: 'auto', WebkitOverflowScrolling: 'touch',
+      ...style,
+    }}>
       {items.map(it => {
         const active = it.value === value;
         return (
