@@ -116,7 +116,7 @@ function PageSettings({ rooms, setRooms, config, setConfig, bookings, setBooking
       {tab === 'building' && <TabBuilding draft={draft} updatePath={updatePath} />}
       {tab === 'payment'  && <TabPayment  draft={draft} updatePath={updatePath} />}
       {tab === 'notify'   && <TabNotify   draft={draft} updatePath={updatePath} />}
-      {tab === 'auto'     && <TabAuto     draft={draft} updatePath={updatePath} />}
+      {tab === 'auto'     && <TabAuto     />}
       {tab === 'users'    && <TabUsers    setToast={setToast} addActivity={addActivity} />}
       {tab === 'audit'    && <TabAudit    setToast={setToast} />}
       {tab === 'system'   && <TabSystem
@@ -299,14 +299,34 @@ function TabPayment({ draft, updatePath }) {
 // ============================================================
 function TabNotify({ draft, updatePath }) {
   const C = window.ADMIN_C;
-  const { Card, Input, Toggle, SectionHeading } = window;
+  const { Card, Btn, Input, Toggle, SectionHeading, Pill } = window;
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 800 }}>
       <Card>
-        <SectionHeading title="กำหนดการบิล" subtitle="ออกบิลอัตโนมัติทุกเดือน" level={3} />
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-          <Input label="ออกบิลวันที่"    type="number" suffix="ของเดือน" value={draft.notify.billOnDay} onChange={(v) => updatePath('notify.billOnDay', Number(v))} />
-          <Input label="ครบกำหนดวันที่" type="number" suffix="ของเดือน" value={draft.notify.dueOnDay}  onChange={(v) => updatePath('notify.dueOnDay', Number(v))} />
+        <SectionHeading
+          title="กำหนดการบิล"
+          subtitle="ค่าเริ่มต้นสำหรับการออกบิลด้วยมือจากหน้าบิล"
+          level={3}
+          action={<Pill color="neutral">Manual billing</Pill>}
+        />
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12, alignItems: 'end' }}>
+          <Input
+            label="ครบกำหนดชำระเริ่มต้น"
+            type="number"
+            suffix="ของเดือน"
+            value={draft.notify.dueOnDay}
+            onChange={(v) => updatePath('notify.dueOnDay', Number(v))}
+            hint="ใช้เป็น dueDay ตอนกดออกบิลด้วยมือ"
+          />
+          <div style={{ fontSize: 13, color: C.ink2, lineHeight: 1.6 }}>
+            วันที่ออกบิลอัตโนมัติและกำหนดชำระของ scheduler ตั้งค่าที่หน้า
+            <b> ฟีเจอร์ระบบ</b> เพื่อให้ backend ใช้ค่าเดียวกับ UI
+            <div style={{ marginTop: 8 }}>
+              <Btn variant="secondary" onClick={() => { window.location.hash = 'features'; }}>
+                ไปตั้งค่า billAutoGenerate
+              </Btn>
+            </div>
+          </div>
         </div>
       </Card>
 
@@ -330,37 +350,36 @@ function TabNotify({ draft, updatePath }) {
 }
 
 // ============================================================
-function TabAuto({ draft, updatePath }) {
+function TabAuto() {
   const C = window.ADMIN_C;
-  const { Card, Toggle, Input, SectionHeading, Pill } = window;
+  const { Card, Btn, SectionHeading, Pill } = window;
+  const goFeatures = () => { window.location.hash = 'features'; };
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 800 }}>
       <Card>
-        <SectionHeading title="ระบบอัตโนมัติ" subtitle="ลดงาน manual ที่ต้องทำซ้ำๆ" level={3} />
-        <Toggle label="ออกบิลอัตโนมัติ"      hint={`ออกบิลทุกวันที่ ${draft.notify.billOnDay} ของเดือน`}             checked={draft.automation.autoBill}        onChange={(v) => updatePath('automation.autoBill', v)} />
-        <Toggle label="แจ้งเตือนอัตโนมัติ" hint="ส่งเตือนก่อน/หลังครบกำหนดตามช่องทางที่ตั้งไว้"      checked={draft.automation.autoReminder}    onChange={(v) => updatePath('automation.autoReminder', v)} />
-        <Toggle label="ค่าปรับอัตโนมัติ"     hint="คำนวณค่าปรับชำระล่าช้าให้อัตโนมัติ"                    checked={draft.automation.autoLatePenalty} onChange={(v) => updatePath('automation.autoLatePenalty', v)} />
+        <SectionHeading
+          title="ระบบอัตโนมัติ"
+          subtitle="ตั้งค่าจากฟีเจอร์ระบบเพื่อให้หน้าเว็บและ scheduler ใช้ค่าเดียวกัน"
+          level={3}
+          action={<Pill color="info">Features</Pill>}
+        />
+        <div style={{ fontSize: 13, color: C.ink2, lineHeight: 1.7, marginBottom: 14 }}>
+          การออกบิลอัตโนมัติ, recurring charges, VAT, late fee และ backup รายวัน
+          ใช้ source of truth เดียวกันที่หน้า <b>ฟีเจอร์ระบบ</b>
+          เพื่อป้องกันการตั้งค่าซ้ำซ้อนแล้ว backend ทำงานด้วยค่าอีกชุดหนึ่ง
+        </div>
+        <Btn variant="primary" onClick={goFeatures}>ไปตั้งค่าที่หน้า Features</Btn>
       </Card>
 
       <Card>
         <SectionHeading title="สำรองข้อมูล" level={3}
-          action={<Pill color="success" icon="✓">ทำงานปกติ</Pill>} />
-        <Toggle label="สำรองข้อมูลรายวัน"  hint="สำรองอัตโนมัติทุกวันตามเวลาที่กำหนด" checked={draft.automation.autoBackup} onChange={(v) => updatePath('automation.autoBackup', v)} />
-        {draft.automation.autoBackup && (
-          <div style={{ marginTop: 12, maxWidth: 240 }}>
-            <Input
-              label="เวลาสำรองข้อมูล"
-              type="number"
-              suffix=":00 น."
-              value={draft.automation.backupHour}
-              onChange={(v) => updatePath('automation.backupHour', Number(v))}
-              hint="แนะนำเวลากลางคืนที่มีการใช้งานน้อย"
-            />
-          </div>
-        )}
-        <div style={{ marginTop: 12, padding: 10, background: C.surfaceAlt, borderRadius: 8, fontSize: 12.5, color: C.muted }}>
-          📂 สำรองข้อมูลล่าสุด: <b style={{ color: C.ink }}>เมื่อวาน 03:00 น.</b> · ขนาด 2.4 MB
+          action={<Pill color="neutral">autoBackup</Pill>} />
+        <div style={{ fontSize: 13, color: C.ink2, lineHeight: 1.7, marginBottom: 14 }}>
+          backup ที่ใช้งานจริงอ่านค่าจาก <code>features.autoBackup.enabled</code>,
+          <code>features.autoBackup.hourUtc</code> และการตั้งค่า R2 ในหน้า Secrets
+          ไม่ใช้ค่า legacy ใน Settings อีกต่อไป
         </div>
+        <Btn variant="secondary" onClick={goFeatures}>ไปตั้งค่า autoBackup</Btn>
       </Card>
     </div>
   );

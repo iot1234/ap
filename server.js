@@ -5302,7 +5302,7 @@ app.post('/api/bills', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 
     if (Array.isArray(b.recurring) && !Array.isArray(b.other)) {
       otherForStorage = recurringList;
     }
-    if (flags.recurringCharges?.enabled && !b.recurring) {
+    if (flags.recurringCharges?.enabled && flags.recurringCharges?.autoIncludeOnBillGen !== false && !b.recurring) {
       let tid = b.tenantId || null;
       if (!tid) {
         try {
@@ -5326,21 +5326,27 @@ app.post('/api/bills', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 
       // Only deactivate one_off charges that actually got billed this period.
       usedOneOffIds = applicable.filter((r) => r.frequency === 'one_off').map((r) => r.id);
     }
-    // Resolve the active contract's discount_pct so the contract-length
-    // discount the admin configured at check-in actually shows up on the
-    // bill. Best-effort: no contract → no discount (rent-as-is).
+    // Resolve the active contract for BOTH discount_pct (legacy: contract-
+    // length discount) AND monthly_rent (NEW: locked rate from signing —
+    // services/pricing.js prefers this over room.rent/formula so admin
+    // changing /admin#pricing mid-contract doesn't break existing tenants).
     let discountPct = 0;
+    let activeContract = null;
     try {
       const cq = await pool.query(
-        `SELECT discount_pct FROM contracts
+        `SELECT id, monthly_rent, discount_pct, status
+           FROM contracts
            WHERE room_id=$1 AND status='active' AND deleted_at IS NULL
            ORDER BY start_date DESC LIMIT 1`,
         [b.roomId]
       );
-      if (cq.rows[0]) discountPct = Number(cq.rows[0].discount_pct) || 0;
+      if (cq.rows[0]) {
+        activeContract = cq.rows[0];
+        discountPct = Number(cq.rows[0].discount_pct) || 0;
+      }
     } catch { /* contracts may be empty on legacy deploys */ }
     computed = billing.buildBill({
-      room, config, features: flags,
+      room, contract: activeContract, config, features: flags,
       previous,
       recurring: recurringList,
       period: b.period, dueDate: b.dueDate,

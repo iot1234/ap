@@ -255,15 +255,26 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           // Match the manual + scheduler paths: pull discount_pct from the
           // active contract so bulk-generate honors the contract-length
           // discount the admin recorded at check-in.
+          // Pull the active contract for this room. Used for BOTH:
+          //   - discount_pct (legacy: contract-length discount honored)
+          //   - monthly_rent (NEW: locked rate from signing — bill engine
+          //     prefers this over room.rent/formula so admin changing
+          //     /admin#pricing mid-contract doesn't break existing tenants)
+          // See services/pricing.js#resolveBillingRent for the priority.
           let discountPct = 0;
+          let activeContract = null;
           try {
             const cq = await pool.query(
-              `SELECT discount_pct FROM contracts
+              `SELECT id, monthly_rent, discount_pct, status
+                 FROM contracts
                  WHERE room_id=$1 AND status='active' AND deleted_at IS NULL
                  ORDER BY start_date DESC LIMIT 1`,
               [room.id]
             );
-            if (cq.rows[0]) discountPct = Number(cq.rows[0].discount_pct) || 0;
+            if (cq.rows[0]) {
+              activeContract = cq.rows[0];
+              discountPct = Number(cq.rows[0].discount_pct) || 0;
+            }
           } catch { /* legacy deploys */ }
           // Single transaction per room: lock+read recurring_charges,
           // INSERT bill, deactivate one_offs. Reading recurring INSIDE
@@ -283,30 +294,32 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           let usedOneOffIds = [];
           try {
             await billClient.query('BEGIN');
-            try {
-              const params = [];
-              const ors = [];
-              if (tenantIdForRoom) { params.push(tenantIdForRoom); ors.push(`tenant_id = $${params.length}`); }
-              params.push(room.id); ors.push(`room_id = $${params.length}`);
-              const rc = await billClient.query(
-                `SELECT id, label, amount, frequency, start_at, end_at FROM recurring_charges
-                   WHERE active = TRUE AND (${ors.join(' OR ')})
-                     AND (start_at IS NULL OR start_at <= CURRENT_DATE)
-                     AND (end_at IS NULL OR end_at >= CURRENT_DATE)
-                   FOR UPDATE`,
-                params
-              );
-              // Honor `frequency` — quarterly charges only fire every 3 months
-              // anchored to start_at. Without this the bulk-generate path
-              // re-billed quarterly fees every month.
-              const applicable = rc.rows.filter((x) => billing.isChargeApplicableForPeriod(x, period));
-              recurring = applicable.map((x) => ({ label: x.label, amount: Number(x.amount) }));
-              usedOneOffIds = applicable.filter((x) => x.frequency === 'one_off').map((x) => x.id);
-            } catch (rcErr) {
-              // table may not exist on older deployments — leave recurring=[]
-              if (rcErr.code !== '42P01') throw rcErr;
+            if (flags.recurringCharges?.enabled && flags.recurringCharges?.autoIncludeOnBillGen !== false) {
+              try {
+                const params = [];
+                const ors = [];
+                if (tenantIdForRoom) { params.push(tenantIdForRoom); ors.push(`tenant_id = $${params.length}`); }
+                params.push(room.id); ors.push(`room_id = $${params.length}`);
+                const rc = await billClient.query(
+                  `SELECT id, label, amount, frequency, start_at, end_at FROM recurring_charges
+                     WHERE active = TRUE AND (${ors.join(' OR ')})
+                       AND (start_at IS NULL OR start_at <= CURRENT_DATE)
+                       AND (end_at IS NULL OR end_at >= CURRENT_DATE)
+                     FOR UPDATE`,
+                  params
+                );
+                // Honor `frequency` — quarterly charges only fire every 3 months
+                // anchored to start_at. Without this the bulk-generate path
+                // re-billed quarterly fees every month.
+                const applicable = rc.rows.filter((x) => billing.isChargeApplicableForPeriod(x, period));
+                recurring = applicable.map((x) => ({ label: x.label, amount: Number(x.amount) }));
+                usedOneOffIds = applicable.filter((x) => x.frequency === 'one_off').map((x) => x.id);
+              } catch (rcErr) {
+                // table may not exist on older deployments — leave recurring=[]
+                if (rcErr.code !== '42P01') throw rcErr;
+              }
             }
-            const bill = billing.buildBill({ room, config, features: flags, previous, recurring, period, dueDate, discountPct });
+            const bill = billing.buildBill({ room, contract: activeContract, config, features: flags, previous, recurring, period, dueDate, discountPct });
             const otherJson = JSON.stringify(recurring || []);
             const ins = await billClient.query(
               `INSERT INTO bills

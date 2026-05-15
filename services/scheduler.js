@@ -393,14 +393,25 @@ async function tickBillGen(pool, flags, now, state) {
       // every auto-generated bill billed full rent regardless of the
       // discount the admin recorded at check-in.
       let discountPct = 0;
+      // Pull the active contract for this room. Used for BOTH:
+      //   - discount_pct (contract-length discount honored)
+      //   - monthly_rent (locked rate from signing — bill engine prefers
+      //     this over room.rent/formula via services/pricing.js so admin
+      //     changing /admin#pricing mid-contract doesn't break existing
+      //     tenants)
+      let activeContract = null;
       try {
         const cq = await pool.query(
-          `SELECT discount_pct FROM contracts
+          `SELECT id, monthly_rent, discount_pct, status
+             FROM contracts
              WHERE room_id=$1 AND status='active' AND deleted_at IS NULL
              ORDER BY start_date DESC LIMIT 1`,
           [room.id]
         );
-        if (cq.rows[0]) discountPct = Number(cq.rows[0].discount_pct) || 0;
+        if (cq.rows[0]) {
+          activeContract = cq.rows[0];
+          discountPct = Number(cq.rows[0].discount_pct) || 0;
+        }
       } catch { /* legacy deploys without contracts table */ }
       // Transactional bill insert + one_off deactivation. Reading
       // recurring INSIDE the tx with FOR UPDATE means an admin editing
@@ -414,7 +425,7 @@ async function tickBillGen(pool, flags, now, state) {
       let usedOneOffIds = [];
       try {
         await billClient.query('BEGIN');
-        if (flags.recurringCharges?.enabled) {
+        if (flags.recurringCharges?.enabled && flags.recurringCharges?.autoIncludeOnBillGen !== false) {
           try {
             const params = [];
             const ors = [];
@@ -439,7 +450,7 @@ async function tickBillGen(pool, flags, now, state) {
             if (rcErr.code !== '42P01') throw rcErr;
           }
         }
-        const bill = billing.buildBill({ room, config, features: flags, previous, recurring, period, dueDate, discountPct });
+        const bill = billing.buildBill({ room, contract: activeContract, config, features: flags, previous, recurring, period, dueDate, discountPct });
         const otherJson = JSON.stringify(recurring || []);
         const ins = await billClient.query(
           `INSERT INTO bills (bill_no, tenant_id, room_id, period, rent,

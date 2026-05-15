@@ -185,6 +185,59 @@ test('billing.buildBill respects feature flags', () => {
   assert.ok(b.vat > 0);
 });
 
+test('pricing reset only resets pricing sections', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-pricing.jsx'), 'utf8');
+  assert.match(src, /PRICING_CONFIG_KEYS/);
+  assert.match(src, /function resetPricingSections/);
+  assert.match(src, /resetPricingSections\(config\)/);
+  assert.doesNotMatch(src, /setConfig\(DEFAULT_CONFIG\)/,
+    'Pricing reset must not overwrite unrelated Settings/Features config');
+  assert.doesNotMatch(src, /setDraft\(DEFAULT_CONFIG\)/,
+    'Pricing draft reset must not wipe unrelated config sections');
+});
+
+test('settings automation tab defers scheduler controls to feature flags', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-settings.jsx'), 'utf8');
+  assert.match(src, /window\.location\.hash = 'features'/,
+    'Settings automation tab should send admins to the actual feature flag controls');
+  assert.match(src, /features\.autoBackup\.hourUtc/,
+    'UI copy should point to the scheduler-backed autoBackup setting');
+  assert.doesNotMatch(src, /updatePath\('automation\./,
+    'legacy Settings automation keys are not read by services/scheduler.js');
+  assert.doesNotMatch(src, /draft\.automation\./,
+    'the tab must not render toggles backed by the legacy automation object');
+});
+
+test('settings bill schedule does not expose dead auto-bill date control', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-settings.jsx'), 'utf8');
+  assert.doesNotMatch(src, /notify\.billOnDay/,
+    'bill issue date is controlled by features.billAutoGenerate, not legacy notify.billOnDay');
+  assert.match(src, /billAutoGenerate/,
+    'Settings should point admins to the scheduler-backed billAutoGenerate controls');
+  assert.match(src, /notify\.dueOnDay/,
+    'manual bill due-day default remains editable for the Billing page');
+});
+
+test('bill generation honors recurringCharges.autoIncludeOnBillGen', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const scheduler = fs.readFileSync(path.join(__dirname, '..', 'services', 'scheduler.js'), 'utf8');
+  const extras = fs.readFileSync(path.join(__dirname, '..', 'routes', 'bills-extras.js'), 'utf8');
+  assert.match(server, /recurringCharges\?\.enabled && flags\.recurringCharges\?\.autoIncludeOnBillGen !== false && !b\.recurring/,
+    'single bill create must not auto-load recurring rows when autoIncludeOnBillGen is false');
+  assert.match(scheduler, /recurringCharges\?\.enabled && flags\.recurringCharges\?\.autoIncludeOnBillGen !== false/,
+    'scheduler auto bill generation must respect autoIncludeOnBillGen');
+  assert.match(extras, /recurringCharges\?\.enabled && flags\.recurringCharges\?\.autoIncludeOnBillGen !== false/,
+    'bulk-generate must respect autoIncludeOnBillGen');
+});
+
 test('migrate.js creates composite index on payments(status, created_at)', async () => {
   // Pins the index added to defend the slip-queue listing query against
   // a full sort on every page load. If this test fails because the index

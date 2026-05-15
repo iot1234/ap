@@ -3,26 +3,44 @@
 // Schema produced here is what /api/bills/render expects and what we now
 // also persist in the bills table.
 
+const pricing = require('./pricing');
+
 /**
  * Build a bill from room + meter readings + config + features.
  *
+ * Rent resolution priority (services/pricing.js#resolveBillingRent):
+ *   1. contract.monthly_rent (active contract → locked rate)
+ *   2. room.rent_override / room.rentOverride (per-room special rate)
+ *   3. computeFromFormula(room, config) (config.rates + premiums)
+ *   4. room.rent (legacy fallback)
+ *
+ * Callers should pass `contract` whenever the room is occupied. Without
+ * it, the resolver falls back to formula → legacy room.rent. Existing
+ * code paths that don't pass `contract` keep working unchanged.
+ *
  * @param {object} opts
- * @param {object} opts.room       - { id, rent, tenant?, waterUnits?, elecUnits?, ... }
- * @param {object} opts.config     - { utilities: { waterRate, elecRate, wifi }, building: { ... } }
+ * @param {object} opts.room       - { id, rent, tenant?, waterUnits?, elecUnits?, type?, floor?, view?, rent_override? }
+ * @param {object} opts.config     - { utilities: { waterRate, elecRate, wifi }, building, rates, floorPremium, viewPremium, featurePremium }
  * @param {object} opts.features   - feature flag map (lateFee, vat, recurringCharges)
+ * @param {object} [opts.contract] - active contract row (id, status, monthly_rent, discount_pct)
  * @param {object} [opts.previous] - previous bill for late-fee calc { paidAt, dueDate, total, status }
  * @param {Array}  [opts.recurring] - extra line items [{ label, amount }]
  * @param {string} [opts.period]   - "2026-05" or human-readable
  * @param {string} [opts.dueDate]  - ISO date "YYYY-MM-DD"
- * @returns {object} bill ready for PDF rendering or DB insert
+ * @returns {object} bill ready for PDF rendering or DB insert. Adds
+ *                   rentSource ('contract'|'override'|'formula'|'legacy')
+ *                   so admin can audit-log why a bill came out at a given price.
  */
-function buildBill({ room, config, features, previous = null, recurring = [], period, dueDate, discountPct = 0, isFirstBill = false }) {
+function buildBill({ room, contract = null, config, features, previous = null, recurring = [], period, dueDate, discountPct = 0, isFirstBill = false }) {
   const u = (config && config.utilities) || {};
   const waterRate = Number(u.waterRate ?? 18);
   const elecRate  = Number(u.elecRate  ?? 8);
   const wifiFee   = Number(u.wifi      ?? 0);
 
-  const rentBase = Number(room.rent) || 0;
+  // Resolver picks the right rent source. See services/pricing.js for
+  // priority + rationale.
+  const resolved = pricing.resolveBillingRent({ room, contract, config });
+  const rentBase = Number(resolved.rent) || 0;
   const waterUnits = Number(room.waterUnits) || 0;
   const elecUnits  = Number(room.elecUnits)  || 0;
   const waterAmount = waterUnits * waterRate;
@@ -124,6 +142,15 @@ function buildBill({ room, config, features, previous = null, recurring = [], pe
     vat,
     lateFee,
     total,
+    // Pricing audit trail — tells admin / future-you why this bill came
+    // out at this price. 'contract' = locked at signing; 'override' =
+    // admin special; 'formula' = current config; 'legacy' = pre-resolver
+    // fallback. Used by /admin#billing to flag mismatch between bill price
+    // and current formula (helpful when admin asks "why is this bill
+    // different from what I see in /admin#pricing?").
+    rentSource: resolved.source,
+    rentSourceContractId: resolved.contractId || null,
+    rentSourceReason: resolved.reason || null,
     building: (config && config.building) || {},
     ...buildPaymentBlock(config),
   };

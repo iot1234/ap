@@ -5,12 +5,35 @@
 
 const { useState, useMemo } = React;
 
+const PRICING_CONFIG_KEYS = [
+  'rates',
+  'floorPremium',
+  'viewPremium',
+  'featurePremium',
+  'utilities',
+  'discounts',
+  'fees',
+];
+
+function clonePricingValue(value) {
+  try { return JSON.parse(JSON.stringify(value)); }
+  catch { return value; }
+}
+
+function resetPricingSections(config) {
+  const defaults = window.DEFAULT_CONFIG || {};
+  const next = { ...(config || {}) };
+  for (const key of PRICING_CONFIG_KEYS) {
+    next[key] = clonePricingValue(defaults[key]);
+  }
+  return next;
+}
+
 function PagePricing({ config, setConfig, rooms, addActivity, setToast }) {
   const C = window.ADMIN_C;
   const ADMIN_ROOM_TYPES = window.ADMIN_ROOM_TYPES;
   const ADMIN_ROOM_TYPE_KEYS = window.ADMIN_ROOM_TYPE_KEYS;
   const ADMIN_VIEWS = window.ADMIN_VIEWS;
-  const { fmt, fmtCurrency, computeRoomRent, DEFAULT_CONFIG, deepMerge } = window;
   const { Card, Btn, Input, Select, Toggle, Tabs, Pill, SectionHeading,
           PageContainer, PageHeader, DefList, Modal } = window;
 
@@ -61,8 +84,9 @@ function PagePricing({ config, setConfig, rooms, addActivity, setToast }) {
     setToast && setToast({ kind: 'success', message: 'บันทึกการตั้งราคาเรียบร้อย' });
   };
   const handleReset = () => {
-    setDraft(DEFAULT_CONFIG);
-    setConfig(DEFAULT_CONFIG);
+    const next = resetPricingSections(config);
+    setDraft(next);
+    setConfig(next);
     setConfirmReset(false);
     addActivity && addActivity({ icon: '↺', text: 'รีเซ็ตการตั้งราคาเป็นค่าเริ่มต้น', type: 'system' });
     setToast && setToast({ kind: 'info', message: 'รีเซ็ตเป็นค่าเริ่มต้นแล้ว' });
