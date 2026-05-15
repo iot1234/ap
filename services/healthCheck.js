@@ -1032,6 +1032,48 @@ async function checkPricingDrift(pool) {
   }
 }
 
+// Surface obviously-broken config values (rent=1, utility=0 etc.) before
+// admin discovers them via mis-priced bills. Companion to the PUT-time
+// validation in server.js — that one BLOCKS new bad writes, this probe
+// CATCHES existing bad data sitting in DB from before validation landed.
+async function checkConfigSanity(pool) {
+  try {
+    const { rows } = await pool.query(
+      `SELECT value FROM app_data WHERE key='baankarn_config_v1' LIMIT 1`
+    );
+    if (!rows.length) {
+      return { status: 'warn', message: 'baankarn_config_v1 not in app_data — admin has not configured pricing yet' };
+    }
+    const cfg = rows[0].value || {};
+    const issues = [];
+    const MIN_RENT = 100;
+    const rates = cfg.rates || {};
+    for (const [type, r] of Object.entries(rates)) {
+      if (!r || typeof r !== 'object') continue;
+      const rent = Number(r.rent);
+      if (Number.isFinite(rent) && rent > 0 && rent < MIN_RENT) {
+        issues.push(`rates.${type}.rent=${rent} (น่าจะพิมพ์ผิด — ค่าเช่าจริงควร ≥ ${MIN_RENT}฿)`);
+      }
+    }
+    const u = cfg.utilities || {};
+    if (Number(u.waterRate) === 0 || u.waterRate == null) issues.push('utilities.waterRate ไม่ได้ตั้ง — บิลค่าน้ำจะเป็น 0');
+    if (Number(u.elecRate)  === 0 || u.elecRate  == null) issues.push('utilities.elecRate ไม่ได้ตั้ง — บิลค่าไฟจะเป็น 0');
+    if (issues.length === 0) {
+      return { status: 'ok', message: 'pricing config sane' };
+    }
+    // Warn (not error) — the resolver's contract-lock still protects
+    // existing tenants. New contracts / vacant rooms ARE at risk though,
+    // so admin should see this in /admin#health and fix.
+    return {
+      status: 'warn',
+      message: `${issues.length} suspicious config value(s): ${issues.join('; ')}`,
+      detail: { issues },
+    };
+  } catch (err) {
+    return { status: 'warn', message: `config sanity check failed: ${err.message}` };
+  }
+}
+
 async function checkPoolStats(pool) {
   try {
     // Standard pg.Pool exposes totalCount/idleCount/waitingCount. If a
@@ -1078,6 +1120,7 @@ const CHECKS = [
   { id: 'feature_deps',        label: 'Feature dependencies',  fn: (p, f) => checkFeatureDependencies(f, p) },
   { id: 'data_integrity',       label: 'Data integrity',        fn: (p) => checkDataIntegrity(p) },
   { id: 'pricing_drift',       label: 'Pricing drift',         fn: (p) => checkPricingDrift(p) },
+  { id: 'config_sanity',       label: 'Pricing config sanity', fn: (p) => checkConfigSanity(p) },
   { id: 'qr_renderer',         label: 'PromptPay QR renderer', fn: () => checkPromptpayRender() },
 ];
 

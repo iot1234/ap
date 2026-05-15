@@ -687,6 +687,66 @@ app.put('/api/data/:key', sameOrigin, csrfGuard, requireAuth, requireRole('owner
     });
     serialised = JSON.stringify(value);
   }
+  // === Semantic validation for baankarn_config_v1 ==========================
+  // Real-world bug found in prod (May 2026): admin accidentally typed
+  // rates.standard.rent=1 (probably meant 4500). The system happily
+  // accepted it; only the pricing resolver's contract-lock prevented
+  // existing tenants from being billed ฿200 instead of ฿4500. This guard
+  // rejects obvious typos at the server layer so the same mistake can't
+  // happen again.
+  //
+  // MIN_SENSIBLE_RENT: lower bound for "looks like real money". A real
+  // Thai dorm rent is at least a few thousand baht; anything under 100฿
+  // is almost certainly a typo. Admin can still set 0 (interpreted as
+  // "type not configured yet") — we reject only POSITIVE-but-implausible
+  // values.
+  if (key === 'baankarn_config_v1') {
+    const MIN_SENSIBLE_RENT = 100;
+    const MIN_SENSIBLE_DEPOSIT = 100;
+    const MIN_SENSIBLE_UTILITY = 1;
+    const issues = [];
+    const rates = value.rates && typeof value.rates === 'object' ? value.rates : {};
+    for (const [type, r] of Object.entries(rates)) {
+      if (!r || typeof r !== 'object') continue;
+      const rent = Number(r.rent);
+      if (Number.isFinite(rent) && rent > 0 && rent < MIN_SENSIBLE_RENT) {
+        issues.push(`rates.${type}.rent = ${rent} (ต่ำผิดปกติ — ค่าเช่าจริงควร ≥ ${MIN_SENSIBLE_RENT}฿; ถ้าตั้งใจให้ต่ำขนาดนี้ตั้ง = 0 แทน)`);
+      }
+      const dep = Number(r.deposit);
+      if (Number.isFinite(dep) && dep > 0 && dep < MIN_SENSIBLE_DEPOSIT) {
+        issues.push(`rates.${type}.deposit = ${dep} (ต่ำผิดปกติ — ถ้าตั้งใจไม่เก็บมัดจำตั้ง = 0)`);
+      }
+    }
+    const u = value.utilities && typeof value.utilities === 'object' ? value.utilities : {};
+    for (const k of ['waterRate', 'elecRate']) {
+      const v = Number(u[k]);
+      if (Number.isFinite(v) && v > 0 && v < MIN_SENSIBLE_UTILITY) {
+        issues.push(`utilities.${k} = ${v} (ต่ำผิดปกติ — อัตราจริงต่อหน่วยควร ≥ ${MIN_SENSIBLE_UTILITY}฿)`);
+      }
+    }
+    // floorPremium / viewPremium / featurePremium are ADDITIVE deltas —
+    // they can legitimately be 0, but negative values can't be intended
+    // unless admin really wants a "discount per floor" which we don't
+    // support yet. Block negatives outright.
+    for (const k of ['floorPremium', 'viewPremium', 'featurePremium']) {
+      const obj = value[k];
+      if (!obj || typeof obj !== 'object') continue;
+      for (const [name, raw] of Object.entries(obj)) {
+        const n = Number(raw);
+        if (Number.isFinite(n) && n < 0) {
+          issues.push(`${k}.${name} = ${n} (ลบ — ยังไม่รองรับส่วนลดต่อชั้น/วิว/ฟีเจอร์)`);
+        }
+      }
+    }
+    if (issues.length) {
+      return res.status(400).json({
+        error: 'ค่า config ไม่ผ่านการตรวจสอบ',
+        code: 'INVALID_CONFIG',
+        issues,
+        hint: 'แก้ค่าที่หน้า /admin#pricing แล้วบันทึกใหม่ — ส่ง force=true เพื่อ override (ไม่แนะนำ)',
+      });
+    }
+  }
   try {
     await pool.query(
       `INSERT INTO app_data (key, value, updated_by)
@@ -12420,6 +12480,29 @@ migrate()
         else if (oc.n === 1 && oc.u === 'admin') {
           issues.push('🟡 มี owner คนเดียว (default username "admin") — แนะนำสร้างคนที่สอง');
         }
+        // Pricing config sanity — surface broken rate values (typo
+        // rate=1 etc.) at boot so admin sees it on every restart, not
+        // only when they navigate to /admin#health. Doesn't block boot;
+        // the resolver's contract-lock still protects existing tenants,
+        // and admin can fix via /admin#pricing.
+        try {
+          const MIN_RENT = 100;
+          const rates = (cfg && cfg.rates) || {};
+          for (const [type, r] of Object.entries(rates)) {
+            if (!r || typeof r !== 'object') continue;
+            const rent = Number(r.rent);
+            if (Number.isFinite(rent) && rent > 0 && rent < MIN_RENT) {
+              issues.push(`🔴 rates.${type}.rent=${rent} (น่าจะพิมพ์ผิด — แก้ที่ /admin#pricing)`);
+            }
+          }
+          const u = (cfg && cfg.utilities) || {};
+          if (Number(u.waterRate) === 0 || u.waterRate == null) {
+            issues.push('🟡 utilities.waterRate ไม่ได้ตั้ง — บิลค่าน้ำจะเป็น 0');
+          }
+          if (Number(u.elecRate) === 0 || u.elecRate == null) {
+            issues.push('🟡 utilities.elecRate ไม่ได้ตั้ง — บิลค่าไฟจะเป็น 0');
+          }
+        } catch { /* defensive: don't block boot on parse errors */ }
         if (issues.length) {
           console.warn('[boot] production-readiness issues:');
           for (const i of issues) console.warn('  ' + i);
