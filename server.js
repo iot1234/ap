@@ -12095,6 +12095,27 @@ app.get('/api/admin/health', requireAuth, requireRole('owner', 'manager'), async
   }
 });
 
+// Anomaly scan — data-level "this looks wrong" report grouped by domain
+// (pricing, bill, tenant, contract, room, payment, utility). Read-only,
+// fail-soft per detector so one bad query doesn't blank the whole report.
+// Companion to /api/admin/health: health probes are about subsystems
+// (DB, LINE, SMTP, etc.); anomalies are about the DATA inside them
+// (typo'd rent, orphan tenant, stuck slip, expired contract still active).
+//
+// Each item has a stable `id` code admin UI can use for filter / dedup
+// across scans, plus a Thai `message` for the badge and `fix` hint
+// pointing at the admin page that can resolve it.
+app.get('/api/admin/anomalies', requireAuth, requireRole('owner', 'manager'), async (_req, res) => {
+  try {
+    const anomalyScanner = require('./services/anomalyScanner');
+    const report = await anomalyScanner.scan(pool);
+    res.json({ ok: true, ...report });
+  } catch (err) {
+    console.error('admin anomalies error:', err.message);
+    res.status(500).json({ ok: false, error: 'anomaly scan failed', message: err.message });
+  }
+});
+
 // Returns 200 when db is reachable, 503 when degraded so Railway/upstream
 // LBs can route around bad replicas.
 app.get('/health', async (_req, res) => {
