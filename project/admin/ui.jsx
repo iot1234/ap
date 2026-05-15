@@ -51,7 +51,22 @@ function SectionHeading({ title, subtitle, action, level = 2, style = {} }) {
 }
 
 // --- Btn ------------------------------------------------------------------
-function Btn({ children, variant = 'primary', size = 'md', icon, iconRight, onClick, disabled, type = 'button', style = {}, fullWidth = false, danger = false }) {
+// Btn variants — 8 distinct visual treatments mapped to common admin intents:
+//   primary    Dark, high-contrast confirm action ("Save", "Approve")
+//   accent     Blue accent, used for navigation / "Open" / sub-confirms
+//   secondary  White on border, neutral support action ("Cancel", "Edit")
+//   ghost      Transparent, low-emphasis ("More", "Back")
+//   soft       Light-tinted, casual action ("Filter", "Export")
+//   danger     Red, destructive ("Delete", "Void")
+//   success    Green, positive confirm ("Mark paid")
+//   warning    Amber, caution ("Force generate", "Bypass check")
+//
+// `tone` (optional, overrides variant when set) — uses the categorical
+// palette from shared.jsx#TONES so a "ออกบิล" button on the finance page
+// can take tone='finance' and inherit the emerald color without picking
+// the wrong-flavored variant. Useful for primary actions inside a
+// category page (PageHeader's color rail color matches Btn's tone color).
+function Btn({ children, variant = 'primary', tone, size = 'md', icon, iconRight, onClick, disabled, type = 'button', style = {}, fullWidth = false, danger = false }) {
   const base = {
     sm: { padding: '6px 12px',  fontSize: 12.5, height: 30, gap: 6  },
     md: { padding: '9px 16px',  fontSize: 13.5, height: 38, gap: 8  },
@@ -59,21 +74,37 @@ function Btn({ children, variant = 'primary', size = 'md', icon, iconRight, onCl
   }[size] || { padding: '9px 16px', fontSize: 13.5, height: 38, gap: 8 };
 
   const variants = {
-    primary: { background: danger ? C.danger : C.dark, color: '#fff',   border: '1px solid transparent' },
-    accent:  { background: C.accent,                   color: '#fff',   border: '1px solid transparent' },
-    secondary: { background: C.surface,                color: C.ink,   border: `1px solid ${C.border}` },
-    ghost:   { background: 'transparent',              color: C.ink2,   border: '1px solid transparent' },
-    soft:    { background: C.surfaceAlt,                color: C.ink,   border: `1px solid ${C.borderSoft}` },
-    danger:  { background: C.danger,                    color: '#fff',  border: '1px solid transparent' },
-    success: { background: C.success,                   color: '#fff',  border: '1px solid transparent' },
+    primary:   { background: danger ? C.danger : C.dark, color: '#fff', border: '1px solid transparent' },
+    accent:    { background: C.accent,                   color: '#fff', border: '1px solid transparent' },
+    secondary: { background: C.surface,                  color: C.ink,  border: `1px solid ${C.border}` },
+    ghost:     { background: 'transparent',              color: C.ink2, border: '1px solid transparent' },
+    soft:      { background: C.accentSoft,               color: C.accentInk, border: `1px solid ${C.accentSoft}` },
+    danger:    { background: C.danger,                   color: '#fff', border: '1px solid transparent' },
+    success:   { background: C.success,                  color: '#fff', border: '1px solid transparent' },
+    warning:   { background: C.warning,                  color: '#fff', border: '1px solid transparent' },
   };
-  const v = variants[variant] || variants.primary;
+  let v = variants[variant] || variants.primary;
+
+  // tone override — for category-specific primary actions. Picks the
+  // category color from window.TONES (rooms = blue, finance = emerald,
+  // service = amber, system = violet, overview = slate).
+  const T = window.TONES;
+  if (tone && T && T[tone]) {
+    const t = T[tone];
+    if (variant === 'soft') {
+      v = { background: t.soft, color: t.color, border: `1px solid ${t.color}33` };
+    } else {
+      v = { background: t.color, color: '#fff', border: '1px solid transparent' };
+    }
+  }
 
   return (
     <button
       type={type}
       disabled={disabled}
       onClick={onClick}
+      data-variant={variant}
+      data-tone={tone || undefined}
       style={{
         ...v,
         ...base,
@@ -87,8 +118,18 @@ function Btn({ children, variant = 'primary', size = 'md', icon, iconRight, onCl
         fontFamily: 'inherit',
         whiteSpace: 'nowrap',
         width: fullWidth ? '100%' : 'auto',
-        transition: 'background .15s, transform .08s, border-color .15s',
+        transition: 'background .15s, transform .08s, border-color .15s, box-shadow .15s, filter .15s',
         ...style,
+      }}
+      onMouseEnter={(e) => {
+        if (disabled) return;
+        // Filter brightness shift gives every variant a consistent hover
+        // feel; darker variants brighten slightly, lighter ones darken.
+        e.currentTarget.style.filter = 'brightness(0.95)';
+      }}
+      onMouseLeave={(e) => {
+        if (disabled) return;
+        e.currentTarget.style.filter = '';
       }}>
       {icon && <span style={{ display: 'inline-flex', alignItems: 'center', fontSize: base.fontSize + 1 }}>{icon}</span>}
       {children}
@@ -98,23 +139,52 @@ function Btn({ children, variant = 'primary', size = 'md', icon, iconRight, onCl
 }
 
 // --- IconBtn (small square, icon-only) -----------------------------------
-function IconBtn({ icon, onClick, label, active, danger }) {
+// Hover/active states tinted with the rooms tone (blue) by default; pages
+// can pass tone='finance'|'service'|'system' for tonal grouping. `danger`
+// flag overrides everything for destructive actions (delete, void, etc.).
+function IconBtn({ icon, onClick, label, active, danger, tone, disabled }) {
+  const T = window.TONES;
+  const t = (tone && T && T[tone]) ? T[tone] : { color: '#2563EB', soft: '#E8F0FE' };
+  const baseColor = danger ? '#DC2626' : (active ? t.color : C.ink2);
+  const baseBg = danger ? '#FCE7E7' : (active ? t.soft : 'transparent');
+  const baseBorder = danger ? '#DC2626' : (active ? t.color : C.borderSoft);
+
   return (
     <button
       type="button"
       onClick={onClick}
+      disabled={disabled}
       title={label}
       aria-label={label}
       style={{
         width: 36, height: 36,
         display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-        background: active ? C.accentSoft : 'transparent',
-        color: danger ? C.danger : (active ? C.accentInk : C.ink2),
-        border: `1px solid ${active ? C.accent : C.borderSoft}`,
+        background: baseBg,
+        color: baseColor,
+        border: `1px solid ${baseBorder}`,
         borderRadius: 9,
-        cursor: 'pointer',
+        cursor: disabled ? 'not-allowed' : 'pointer',
+        opacity: disabled ? 0.5 : 1,
         fontSize: 15,
-        transition: 'background .15s, border-color .15s, color .15s',
+        transition: 'background .15s, border-color .15s, color .15s, filter .15s',
+        fontFamily: 'inherit',
+      }}
+      onMouseEnter={(e) => {
+        if (disabled) return;
+        if (!active && !danger) {
+          e.currentTarget.style.background = t.soft;
+          e.currentTarget.style.borderColor = `${t.color}66`;
+          e.currentTarget.style.color = t.color;
+        } else {
+          e.currentTarget.style.filter = 'brightness(0.95)';
+        }
+      }}
+      onMouseLeave={(e) => {
+        if (disabled) return;
+        e.currentTarget.style.background = baseBg;
+        e.currentTarget.style.borderColor = baseBorder;
+        e.currentTarget.style.color = baseColor;
+        e.currentTarget.style.filter = '';
       }}>
       {icon}
     </button>
@@ -264,8 +334,49 @@ function Textarea({ label, value, onChange, rows = 4, placeholder, hint }) {
 }
 
 // --- StatusDot ------------------------------------------------------------
+// Status registry beyond rooms — bill/ticket/tenant/payment domains.
+// StatusDot + StatusBadge look up here first, then fall through to
+// ADMIN_STATUS (room statuses), then to vacant as last-resort default.
+// Each entry has: th (Thai label), dot (color), soft (background), ink (text).
+const EXTRA_STATUS = {
+  // Bill lifecycle
+  pending:      { th: 'รอชำระ',     dot: '#D97706', soft: '#FCEFDB', ink: '#78350F' },
+  paid:         { th: 'ชำระแล้ว',   dot: '#059669', soft: '#E3F5EC', ink: '#064E3B' },
+  void:         { th: 'ยกเลิก',     dot: '#6B7280', soft: '#F0F2F7', ink: '#1F2937' },
+  // Maintenance ticket lifecycle
+  open:         { th: 'เปิดใหม่',   dot: '#2563EB', soft: '#E8F0FE', ink: '#1E3A8A' },
+  in_progress:  { th: 'กำลังซ่อม',  dot: '#D97706', soft: '#FCEFDB', ink: '#78350F' },
+  completed:    { th: 'เสร็จสิ้น',  dot: '#059669', soft: '#E3F5EC', ink: '#064E3B' },
+  cancelled:    { th: 'ยกเลิก',     dot: '#6B7280', soft: '#F0F2F7', ink: '#1F2937' },
+  // Payment slip lifecycle
+  verified:     { th: 'ยืนยันแล้ว', dot: '#059669', soft: '#E3F5EC', ink: '#064E3B' },
+  rejected:     { th: 'ปฏิเสธ',     dot: '#DC2626', soft: '#FCE7E7', ink: '#7F1D1D' },
+  // Tenant lifecycle
+  active:       { th: 'ใช้งาน',     dot: '#059669', soft: '#E3F5EC', ink: '#064E3B' },
+  moved_out:    { th: 'ย้ายออก',    dot: '#6B7280', soft: '#F0F2F7', ink: '#1F2937' },
+  blacklisted:  { th: 'แบล็คลิสต์', dot: '#DC2626', soft: '#FCE7E7', ink: '#7F1D1D' },
+  // Contract lifecycle
+  signed:       { th: 'เซ็นแล้ว',   dot: '#059669', soft: '#E3F5EC', ink: '#064E3B' },
+  draft:        { th: 'ฉบับร่าง',   dot: '#6B7280', soft: '#F0F2F7', ink: '#1F2937' },
+  ended:        { th: 'สิ้นสุด',    dot: '#6B7280', soft: '#F0F2F7', ink: '#1F2937' },
+  // Notification queue
+  sent:         { th: 'ส่งแล้ว',    dot: '#059669', soft: '#E3F5EC', ink: '#064E3B' },
+  failed:       { th: 'ล้มเหลว',    dot: '#DC2626', soft: '#FCE7E7', ink: '#7F1D1D' },
+  processing:   { th: 'กำลังส่ง',   dot: '#2563EB', soft: '#E8F0FE', ink: '#1E3A8A' },
+  // Health probe severity
+  ok:           { th: 'ปกติ',       dot: '#059669', soft: '#E3F5EC', ink: '#064E3B' },
+  warn:         { th: 'เตือน',      dot: '#D97706', soft: '#FCEFDB', ink: '#78350F' },
+  error:        { th: 'ผิดพลาด',    dot: '#DC2626', soft: '#FCE7E7', ink: '#7F1D1D' },
+};
+
+function _resolveStatus(status) {
+  if (!status) return ADMIN_STATUS.vacant;
+  const key = String(status).toLowerCase();
+  return ADMIN_STATUS[key] || EXTRA_STATUS[key] || ADMIN_STATUS.vacant;
+}
+
 function StatusDot({ status, size = 8 }) {
-  const s = ADMIN_STATUS[status] || ADMIN_STATUS.vacant;
+  const s = _resolveStatus(status);
   return (
     <span style={{
       display: 'inline-block', width: size, height: size, borderRadius: '50%',
@@ -276,8 +387,10 @@ function StatusDot({ status, size = 8 }) {
 }
 
 // --- StatusBadge ----------------------------------------------------------
-function StatusBadge({ status, size = 'md' }) {
-  const s = ADMIN_STATUS[status] || ADMIN_STATUS.vacant;
+// Pill with a status dot in front. Pass `label` to override the auto-Thai
+// label (e.g., `<StatusBadge status="paid" label="จ่ายแล้ว ฿4500" />`).
+function StatusBadge({ status, size = 'md', label }) {
+  const s = _resolveStatus(status);
   const isSm = size === 'sm';
   return (
     <span style={{
@@ -291,22 +404,39 @@ function StatusBadge({ status, size = 'md' }) {
       fontSize: isSm ? 11 : 12,
       fontWeight: 600,
       whiteSpace: 'nowrap',
+      border: `1px solid ${s.dot}1A`,    // 10% tinted border keeps badges crisp on light surface
     }}>
-      <StatusDot status={status} size={isSm ? 6 : 7} />
-      {s.th}
+      <span style={{
+        width: isSm ? 6 : 7, height: isSm ? 6 : 7, borderRadius: '50%',
+        background: s.dot, flexShrink: 0,
+      }} />
+      {label || s.th}
     </span>
   );
 }
 
 // --- Pill -----------------------------------------------------------------
+// Now supports 11 color keys: 6 semantic + 5 categorical (overview/rooms/
+// finance/service/system) + legacy aliases (gray/accent). Same compact
+// pill shape — picks bg/fg from the design palette so the page-header
+// breadcrumb, sidebar dot, and inline Pill all use the same hue when
+// they're describing the same category.
 function Pill({ children, color = 'neutral', size = 'md', icon }) {
   const map = {
-    neutral: { bg: C.surfaceAlt,    fg: C.ink2 },
-    accent:  { bg: C.accentSoft,    fg: C.accentInk },
-    success: { bg: C.successSoft,   fg: C.successInk },
-    warning: { bg: C.warningSoft,   fg: C.warningInk },
-    danger:  { bg: C.dangerSoft,    fg: C.dangerInk },
-    info:    { bg: C.infoSoft,      fg: C.infoInk },
+    neutral: { bg: '#F0F2F7',   fg: '#1F2937' },
+    gray:    { bg: '#F0F2F7',   fg: '#1F2937' },   // legacy alias
+    accent:  { bg: C.accentSoft,fg: C.accentInk },
+    success: { bg: C.successSoft, fg: C.successInk },
+    warning: { bg: C.warningSoft, fg: C.warningInk },
+    danger:  { bg: C.dangerSoft,  fg: C.dangerInk },
+    info:    { bg: C.infoSoft,    fg: C.infoInk },
+    // Categorical tones — for badges that signal which admin section a
+    // record belongs to (e.g., "การเงิน" pill on a finance-domain item).
+    overview:{ bg: '#EEF1F5',     fg: '#1F2937' },
+    rooms:   { bg: '#E8F0FE',     fg: '#1E3A8A' },
+    finance: { bg: '#E3F5EC',     fg: '#064E3B' },
+    service: { bg: '#FCEFDB',     fg: '#78350F' },
+    system:  { bg: '#EFE7FB',     fg: '#4C1D95' },
   };
   const c = map[color] || map.neutral;
   const isSm = size === 'sm';
