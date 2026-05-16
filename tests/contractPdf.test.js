@@ -250,9 +250,15 @@ test('DEFAULT_CLAUSES: covers the standard Thai dorm contract topics', () => {
   // Pin the list of essential topics so a refactor can't accidentally
   // drop e.g. "deposit" or "termination".
   const ids = new Set(contractPdf.DEFAULT_CLAUSES.map((c) => c.id));
+  assert.ok(contractPdf.DEFAULT_CLAUSES.length >= 20,
+    'default dorm contract must be complete enough for a real baseline template');
   for (const required of ['rental', 'rent_payment', 'deposit', 'term',
                           'utilities', 'usage', 'maintenance', 'noise',
-                          'visitors', 'termination', 'return']) {
+                          'visitors', 'termination', 'return',
+                          'occupancy', 'alteration', 'condition_inventory',
+                          'inspection_entry', 'keys_access', 'safety',
+                          'cleanliness', 'parking_common_area',
+                          'pets_smoking', 'notices_data', 'breach']) {
     assert.ok(ids.has(required), `default clauses must cover ${required}`);
   }
 });

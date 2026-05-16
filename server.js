@@ -7529,7 +7529,7 @@ app.post('/api/contracts/:id/sign', sameOrigin, csrfGuard, requireAuth, requireR
 //   - is_default: at most one row at a time (partial unique enforces)
 //   - enabled: deactivate a template without deleting it
 //
-// Default clauses (12 standard Thai dorm rules) live in services/contractPdf.js
+// Default clauses (standard Thai dorm rules) live in services/contractPdf.js
 // as DEFAULT_CLAUSES — resolveClauses() composes them with each template.
 
 // Validate + normalise a template payload from req.body. Throws on invalid

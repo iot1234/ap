@@ -4591,6 +4591,30 @@ test('admin UI: contract-templates page registered + script-loaded', () => {
   assert.match(page, /lessorName[\s\S]{0,80}tenantName[\s\S]{0,80}roomId/);
 });
 
+test('admin UI: contract templates can be opened in read-only detail view', () => {
+  // Admin asked to click and inspect what a dorm contract template contains
+  // before editing/setting default. The list row needs an explicit view
+  // action and a modal that displays the resolved clauses from the GET
+  // single-template endpoint.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const page = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-contract-templates.jsx'), 'utf8');
+  assert.match(page, /const \[viewing, setViewing\]/,
+    'page must track the template detail modal state');
+  assert.match(page, /const openDetails = async \(tpl\)/,
+    'page must load template details on demand');
+  assert.match(page, /\/api\/admin\/contract-templates\/\$\{tpl\.id\}/,
+    'detail action must call the single-template endpoint');
+  assert.match(page, /function TemplateDetailsModal/,
+    'read-only detail modal must exist');
+  assert.match(page, /const resolvedClauseCount = \(tpl\)/,
+    'template list must show effective clause count, not only custom clauses');
+  assert.match(page, /ข้อสัญญาที่ใช้จริง/,
+    'detail modal must show the resolved clause list admin will actually use');
+  assert.match(page, /onClick=\{\(\) => openDetails\(t\)\}>ดู<\/Btn>/,
+    'template list must expose a visible ดู button');
+});
+
 test('admin UI: page-contracts gains PDF + sign + assign-template actions', () => {
   const fs = require('node:fs');
   const path = require('node:path');
@@ -4629,6 +4653,22 @@ test('contract_templates table + auto-import sentinel migration', () => {
     'sentinel must prevent re-import on every boot');
   assert.match(src, /auto-migrated from system_settings/,
     'description must record provenance');
+});
+
+test('migration seeds a visible standard dorm contract template', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'db', 'migrate.js'), 'utf8');
+  assert.match(src, /require\('\.\.\/services\/contractPdf'\)/,
+    'migration must reuse the canonical DEFAULT_CLAUSES');
+  assert.match(src, /สัญญาหอพักมาตรฐาน/,
+    'standard dorm contract template must be seeded');
+  assert.match(src, /JSON\.stringify\(contractPdf\.DEFAULT_CLAUSES\)/,
+    'seeded template must contain the full baseline clauses, not an empty default-mode row');
+  assert.match(src, /created_by='system'/,
+    'seed must be idempotent by system-created standard row');
+  assert.match(src, /promoted standard dorm contract template to default/,
+    'if no default exists, migration must promote the standard template');
 });
 
 test('contract-templates CRUD endpoints exist + validate input', () => {

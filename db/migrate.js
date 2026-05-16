@@ -5,6 +5,7 @@
 // migrations without spinning up an HTTP server.
 
 const bcrypt = require('bcryptjs');
+const contractPdf = require('../services/contractPdf');
 
 async function migrate(pool, opts = {}) {
   const ADMIN_USERNAME = opts.adminUsername || process.env.ADMIN_USERNAME || 'admin';
@@ -948,6 +949,58 @@ async function migrate(pool, opts = {}) {
     }
   } catch (err) {
     console.warn('[db] contract template auto-migrate skipped:', err.message);
+  }
+
+  // Ensure every deployment has a visible, editable dormitory contract
+  // template in contract_templates. DEFAULT_CLAUSES alone are only a renderer
+  // fallback; this row lets admins click "ดูรายละเอียด", edit clauses, set
+  // it as default, or clone its wording into a custom template.
+  try {
+    const standardName = 'สัญญาหอพักมาตรฐาน';
+    const existing = await pool.query(
+      `SELECT id, is_default FROM contract_templates
+        WHERE name=$1 AND created_by='system' AND deleted_at IS NULL
+        LIMIT 1`,
+      [standardName]
+    );
+    const defaultQ = await pool.query(
+      `SELECT id FROM contract_templates
+        WHERE is_default=TRUE AND deleted_at IS NULL
+        LIMIT 1`
+    );
+    if (!existing.rows.length) {
+      await pool.query(
+        `INSERT INTO contract_templates
+            (name, description, mode, clauses, sections, variables,
+             is_default, enabled, created_by)
+         VALUES ($1, $2, 'override', $3::jsonb, $4::jsonb, '{}'::jsonb,
+                 $5, TRUE, 'system')`,
+        [
+          standardName,
+          'เทมเพลตพื้นฐานสำหรับสัญญาเช่าห้องพัก มีหัวข้อค่าเช่า มัดจำ ค่าสาธารณูปโภค การใช้ห้อง การซ่อมบำรุง การยกเลิก และการคืนห้อง',
+          JSON.stringify(contractPdf.DEFAULT_CLAUSES),
+          JSON.stringify({
+            showWitnesses: true,
+            showEmergencyContact: true,
+            showPropertyDetails: true,
+            showFinancialTable: true,
+            showRoomAmenities: true,
+          }),
+          defaultQ.rows.length ? false : true,
+        ]
+      );
+      console.log('[db] seeded standard dorm contract template');
+    } else if (!defaultQ.rows.length) {
+      await pool.query(
+        `UPDATE contract_templates
+            SET is_default=TRUE, enabled=TRUE, updated_at=NOW()
+          WHERE id=$1`,
+        [existing.rows[0].id]
+      );
+      console.log('[db] promoted standard dorm contract template to default');
+    }
+  } catch (err) {
+    console.warn('[db] standard contract template seed skipped:', err.message);
   }
 
   // === One-time: unify dueDay (manual + scheduler) =========================

@@ -21,6 +21,7 @@ function PageContractTemplates({ setToast, addActivity }) {
   const [list, setList] = useState([]);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(null);   // template object or 'new'
+  const [viewing, setViewing] = useState(null);   // GET detail payload for read-only preview
   const [includeDisabled, setIncludeDisabled] = useState(false);
   const [defaultClauses, setDefaultClauses] = useState([]);
 
@@ -81,12 +82,29 @@ function PageContractTemplates({ setToast, addActivity }) {
       setToast && setToast({ kind: 'danger', message: err.message });
     }
   };
+  const openDetails = async (tpl) => {
+    setViewing({ loading: true, template: tpl, resolved: [] });
+    try {
+      const d = await apiCall(`/api/admin/contract-templates/${tpl.id}`);
+      setViewing(d);
+    } catch (err) {
+      setViewing(null);
+      setToast && setToast({ kind: 'danger', message: 'โหลดรายละเอียด template ล้มเหลว: ' + err.message });
+    }
+  };
+  const defaultCount = defaultClauses.length || 0;
+  const resolvedClauseCount = (tpl) => {
+    const own = Number(tpl.clause_count ?? (tpl.clauses ? tpl.clauses.length : 0)) || 0;
+    if (tpl.mode === 'default') return defaultCount;
+    if (tpl.mode === 'append') return defaultCount + own;
+    return own;
+  };
 
   return (
     <PageContainer>
       <PageHeader
         title="เทมเพลตสัญญา"
-        subtitle={`${list.length} เทมเพลตในระบบ · ใช้ default 12 ข้อบังคับมาตรฐานก็ได้`}
+        subtitle={`${list.length} เทมเพลตในระบบ · มีข้อสัญญาพื้นฐาน ${defaultCount} ข้อให้ใช้ได้ทันที`}
         actions={
           <>
             <Btn variant="ghost" onClick={refresh}>↻ รีเฟรช</Btn>
@@ -115,7 +133,7 @@ function PageContractTemplates({ setToast, addActivity }) {
           <div style={{ padding: 30, textAlign: 'center', color: C.muted }}>กำลังโหลด…</div>
         ) : list.length === 0 ? (
           <div style={{ padding: 30, textAlign: 'center', color: C.muted }}>
-            ยังไม่มี template — กด <b>"+ สร้าง template"</b> เพื่อเริ่ม หรือใช้ default 12 ข้อมาตรฐาน
+            ยังไม่มี template — กด <b>"+ สร้าง template"</b> เพื่อเริ่ม หรือใช้ข้อสัญญาพื้นฐานของระบบ
           </div>
         ) : (
           <div style={{ overflowX: 'auto' }}>
@@ -160,8 +178,13 @@ function PageContractTemplates({ setToast, addActivity }) {
                     </td>
                     <td style={td}>
                       <span style={{ fontFamily: 'monospace', fontSize: 12 }}>
-                        {t.clause_count ?? (t.clauses ? t.clauses.length : 0)} ข้อ
+                        {resolvedClauseCount(t)} ข้อ
                       </span>
+                      {t.mode === 'append' ? (
+                        <div style={{ fontSize: 10, color: C.muted }}>
+                          รวมข้อพื้นฐาน + เพิ่มเอง
+                        </div>
+                      ) : null}
                     </td>
                     <td style={td}>
                       <Pill color={t.enabled ? 'success' : 'gray'}>
@@ -178,6 +201,7 @@ function PageContractTemplates({ setToast, addActivity }) {
                       <div style={{ fontSize: 11, color: C.muted }}>โดย {t.created_by || '-'}</div>
                     </td>
                     <td style={{ ...td, whiteSpace: 'nowrap' }}>
+                      <Btn size="sm" variant="ghost" onClick={() => openDetails(t)}>ดู</Btn>
                       <Btn size="sm" variant="ghost" onClick={() => setEditing(t)}>แก้ไข</Btn>
                       {!t.is_default && t.enabled ? (
                         <Btn size="sm" variant="ghost" onClick={() => setDefault(t)}
@@ -199,6 +223,17 @@ function PageContractTemplates({ setToast, addActivity }) {
         )}
       </Card>
 
+      {viewing ? (
+        <TemplateDetailsModal
+          data={viewing}
+          onClose={() => setViewing(null)}
+          onEdit={(tpl) => {
+            setViewing(null);
+            setEditing(tpl);
+          }}
+        />
+      ) : null}
+
       {editing ? (
         <TemplateEditor
           template={editing === 'new' ? null : editing}
@@ -217,6 +252,126 @@ function PageContractTemplates({ setToast, addActivity }) {
         />
       ) : null}
     </PageContainer>
+  );
+}
+
+function TemplateDetailsModal({ data, onClose, onEdit }) {
+  const C = window.ADMIN_C;
+  const { Modal, Btn, Pill } = window;
+  const loading = !!data.loading;
+  const template = data.template || {};
+  const resolved = Array.isArray(data.resolved) ? data.resolved : [];
+  const defaults = Array.isArray(data.defaults) ? data.defaults : [];
+  const sections = template.sections || {};
+  const variables = template.variables && typeof template.variables === 'object'
+    ? Object.entries(template.variables) : [];
+  const modeLabel = {
+    default: `ใช้ข้อพื้นฐาน ${defaults.length || 'ทั้งหมด'} ข้อ`,
+    append: `ข้อพื้นฐาน ${defaults.length || 'ทั้งหมด'} ข้อ + ข้อที่เพิ่มเอง`,
+    override: 'ใช้ข้อความใน template นี้แทนข้อพื้นฐาน',
+  }[template.mode] || template.mode || '-';
+
+  return (
+    <Modal
+      open={true}
+      onClose={onClose}
+      width={820}
+      title={loading ? 'กำลังโหลดรายละเอียด template…' : `ดูรายละเอียด: ${template.name || '-'}`}
+      footer={
+        <>
+          <Btn variant="ghost" onClick={onClose}>ปิด</Btn>
+          {!loading ? (
+            <Btn variant="primary" onClick={() => onEdit && onEdit(template)}>แก้ไข template นี้</Btn>
+          ) : null}
+        </>
+      }
+    >
+      {loading ? (
+        <div style={{ padding: 28, textAlign: 'center', color: C.muted }}>กำลังโหลด…</div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1.3fr 1fr', gap: 12 }}>
+            <div style={{ padding: 12, border: `1px solid ${C.border}`, borderRadius: 8 }}>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                <b>{template.name}</b>
+                {template.is_default ? <Pill color="warning">DEFAULT</Pill> : null}
+                <Pill color={template.enabled ? 'success' : 'gray'}>
+                  {template.enabled ? 'เปิดใช้งาน' : 'ปิดใช้งาน'}
+                </Pill>
+              </div>
+              <div style={{ marginTop: 6, fontSize: 12, color: C.muted, lineHeight: 1.5 }}>
+                {template.description || 'ไม่มีคำอธิบาย'}
+              </div>
+            </div>
+            <div style={{ padding: 12, border: `1px solid ${C.border}`, borderRadius: 8, fontSize: 12, lineHeight: 1.6 }}>
+              <div><b>โหมด:</b> {modeLabel}</div>
+              <div><b>จำนวนข้อที่ใช้จริง:</b> {resolved.length} ข้อ</div>
+              <div><b>สร้างโดย:</b> {template.created_by || '-'}</div>
+            </div>
+          </div>
+
+          <div style={{ padding: 12, background: C.infoSoft || '#eef6ff', borderRadius: 8,
+                        color: C.infoInk || C.ink2, fontSize: 12, lineHeight: 1.6 }}>
+            รายการด้านล่างคือข้อความสัญญาที่ระบบจะใช้จริงหลังรวมข้อพื้นฐานกับข้อที่ admin ตั้งไว้แล้ว
+            ก่อนนำไปแสดงใน PDF หรือสัญญาที่ส่งให้ผู้เช่า
+          </div>
+
+          <div>
+            <div style={{ fontWeight: 600, marginBottom: 8 }}>ข้อสัญญาที่ใช้จริง</div>
+            <div style={{ maxHeight: 420, overflow: 'auto', border: `1px solid ${C.border}`, borderRadius: 8 }}>
+              {resolved.map((cl, i) => (
+                <div key={`${cl.id || 'clause'}-${i}`} style={{
+                  padding: 12,
+                  borderBottom: i === resolved.length - 1 ? 'none' : `1px solid ${C.border}`,
+                  background: i % 2 === 0 ? '#fff' : C.surfaceAlt,
+                }}>
+                  <div style={{ fontWeight: 600, fontSize: 13 }}>
+                    ข้อ {i + 1}. {cl.title || '-'}
+                  </div>
+                  <div style={{ marginTop: 5, fontSize: 12, color: C.ink2, lineHeight: 1.65, whiteSpace: 'pre-wrap' }}>
+                    {cl.body || '-'}
+                  </div>
+                </div>
+              ))}
+              {!resolved.length ? (
+                <div style={{ padding: 24, textAlign: 'center', color: C.muted }}>
+                  ไม่มีข้อสัญญาที่ resolve ได้
+                </div>
+              ) : null}
+            </div>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+            <div style={{ padding: 12, border: `1px solid ${C.border}`, borderRadius: 8 }}>
+              <div style={{ fontWeight: 600, marginBottom: 6 }}>ส่วนที่แสดงใน PDF</div>
+              {[
+                ['showPropertyDetails', 'รายละเอียดห้อง'],
+                ['showRoomAmenities', 'สิ่งอำนวยความสะดวก'],
+                ['showFinancialTable', 'ตารางการเงิน'],
+                ['showEmergencyContact', 'ผู้ติดต่อฉุกเฉิน'],
+                ['showWitnesses', 'ช่องลงนามพยาน'],
+              ].map(([key, label]) => (
+                <div key={key} style={{ fontSize: 12, color: C.muted, lineHeight: 1.7 }}>
+                  {sections[key] === false ? 'ปิด' : 'เปิด'} · {label}
+                </div>
+              ))}
+            </div>
+            <div style={{ padding: 12, border: `1px solid ${C.border}`, borderRadius: 8 }}>
+              <div style={{ fontWeight: 600, marginBottom: 6 }}>ตัวแปร custom</div>
+              {variables.length ? variables.map(([key, value]) => (
+                <div key={key} style={{ fontSize: 12, color: C.muted, lineHeight: 1.7 }}>
+                  <code>{`{{${key}}}`}</code> = {String(value)}
+                </div>
+              )) : (
+                <div style={{ fontSize: 12, color: C.muted }}>
+                  ไม่มีตัวแปร custom ใช้เฉพาะตัวแปรระบบ
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </Modal>
   );
 }
 
@@ -252,6 +407,7 @@ function TemplateEditor({ template, defaultClauses, onClose, onSaved, onError })
   }));
   const [tab, setTab] = useState('basic');     // basic | clauses | sections | variables
   const [busy, setBusy] = useState(false);
+  const defaultCount = defaultClauses.length || 0;
 
   function normaliseClause(c) {
     return {
@@ -309,11 +465,11 @@ function TemplateEditor({ template, defaultClauses, onClose, onSaved, onError })
   };
 
   const importDefaults = () => {
-    // Append the 12 built-in clauses into the editor so admin can edit them
+    // Append the built-in clauses into the editor so admin can edit them
     // line by line. Useful for "I want to keep most defaults but tweak 2-3"
     // which is common — they'd otherwise have to retype everything.
     if (form.clauses.length > 0) {
-      if (!confirm('นำ default 12 ข้อมาแทนที่ clauses ปัจจุบัน?')) return;
+      if (!confirm(`นำข้อพื้นฐาน ${defaultCount} ข้อมาแทนที่ clauses ปัจจุบัน?`)) return;
     }
     setForm({ ...form, mode: 'override',
       clauses: defaultClauses.map((c) => ({ id: c.id, title: c.title, body: c.body })) });
@@ -370,12 +526,12 @@ function TemplateEditor({ template, defaultClauses, onClose, onSaved, onError })
               placeholder="ใช้กับใครเมื่อไหร่ — เพื่อให้ทีมงานคนอื่นเลือกใช้ได้ถูก" />
           </div>
           <div>
-            <label style={lbl}>โหมด — clauses จะถูกประกอบกับ default 12 ข้อมาตรฐานยังไง</label>
+            <label style={lbl}>โหมด — clauses จะถูกประกอบกับข้อพื้นฐาน {defaultCount} ข้อมาตรฐานยังไง</label>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               {[
-                { v: 'default',  label: 'ใช้ default 12 ข้อเท่านั้น',
-                  hint: 'ไม่ต้องเขียน clauses เพิ่ม — สำหรับโรงแรมที่กฎมาตรฐานพอแล้ว' },
-                { v: 'append',   label: 'default 12 ข้อ + clauses ของฉันต่อท้าย',
+                { v: 'default',  label: `ใช้ข้อพื้นฐาน ${defaultCount} ข้อเท่านั้น`,
+                  hint: 'ไม่ต้องเขียน clauses เพิ่ม — สำหรับหอพักที่ใช้กฎมาตรฐานได้ทันที' },
+                { v: 'append',   label: `ข้อพื้นฐาน ${defaultCount} ข้อ + clauses ของฉันต่อท้าย`,
                   hint: 'เพิ่มกฎเฉพาะ เช่น ข้อบังคับสัตว์เลี้ยง ค่าใช้พื้นที่ส่วนกลาง' },
                 { v: 'override', label: 'ใช้ clauses ของฉันแทน default ทั้งหมด',
                   hint: 'ต้องมีอย่างน้อย 1 ข้อ — สำหรับสัญญาเฉพาะที่ต่างจากปกติ' },
@@ -423,7 +579,7 @@ function TemplateEditor({ template, defaultClauses, onClose, onSaved, onError })
               })}
             >+ เพิ่ม clause</Btn>
             <Btn size="sm" variant="ghost" onClick={importDefaults}>
-              📋 นำ default 12 ข้อมา + override
+              📋 นำข้อพื้นฐาน {defaultCount} ข้อมา + override
             </Btn>
             <div style={{ flex: 1 }} />
             <div style={{ fontSize: 12, color: C.muted }}>
@@ -435,8 +591,8 @@ function TemplateEditor({ template, defaultClauses, onClose, onSaved, onError })
                           border: `1px dashed ${C.border}`, borderRadius: 8 }}>
               ยังไม่มี clauses<br/>
               {form.mode === 'default'
-                ? 'โหมดนี้ใช้ default 12 ข้อ — ไม่ต้องเขียนเพิ่ม'
-                : 'กด "+ เพิ่ม clause" เพื่อเริ่ม หรือ "นำ default มา"'}
+                ? `โหมดนี้ใช้ข้อพื้นฐาน ${defaultCount} ข้อ — ไม่ต้องเขียนเพิ่ม`
+                : 'กด "+ เพิ่ม clause" เพื่อเริ่ม หรือ "นำข้อพื้นฐานมา"'}
             </div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
