@@ -5863,7 +5863,7 @@ app.post('/api/uploads', sameOrigin, csrfGuard, requireAuth, requireRole('owner'
 // === v2: Meter readings ===================================================
 app.post('/api/meters/:roomId/readings', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager', 'staff'), features.requireFeature('meterIot'), async (req, res) => {
   const roomId = String(req.params.roomId).slice(0, 32);
-  const { meterType, reading, source } = req.body || {};
+  const { meterType, reading, period } = req.body || {};
   try {
     const row = await meter.record(pool, {
       roomId, meterType, reading,
@@ -5872,6 +5872,7 @@ app.post('/api/meters/:roomId/readings', sameOrigin, csrfGuard, requireAuth, req
       // (those come from scheduler / device endpoints with bearer auth).
       source: 'manual',
       createdBy: req.session.user.username,
+      period,
     });
     // A2 — anomaly detection is fail-soft: if features not loaded for any
     // reason, default sigmas=3 and still notify. The notifier is already
@@ -5900,10 +5901,25 @@ app.post('/api/meters/:roomId/readings', sameOrigin, csrfGuard, requireAuth, req
         z: anomaly.z, sigmas, mean: anomaly.mean,
       });
     }
-    audit(req, 'meter.record', 'meter', String(row.id), { meterType: row.meter_type, reading: row.reading });
+    audit(req, 'meter.record', 'meter', String(row.id), { meterType: row.meter_type, reading: row.reading, period: row.period || null });
     res.json({ ok: true, reading: row, anomaly });
   } catch (err) {
     res.status(400).json({ error: err.message });
+  }
+});
+
+app.get('/api/meters/period-summary', requireAuth, features.requireFeature('meterIot'), async (req, res) => {
+  try {
+    const period = meter.normalisePeriod(req.query.period);
+    if (!period) return res.status(400).json({ error: 'period required (YYYY-MM)', code: 'INVALID_PERIOD' });
+    const { rows } = await pool.query(`SELECT value FROM app_data WHERE key='baankarn_rooms_v1' LIMIT 1`);
+    const rooms = rows[0]?.value || {};
+    const summary = await meter.buildPeriodSummary(pool, rooms, period);
+    res.json({ ok: true, period, rooms: summary });
+  } catch (err) {
+    const status = /invalid period/.test(String(err.message || '')) ? 400 : 500;
+    if (status === 500) console.error('meter period summary error:', err);
+    res.status(status).json({ error: err.message || 'internal error' });
   }
 });
 

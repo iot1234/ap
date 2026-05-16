@@ -181,8 +181,6 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
           const rentIdx     = header.findIndex(h => /ค่าเช่า|^rent$/i.test(h));
           const statusIdx   = header.findIndex(h => /^สถานะ$|^status$/i.test(h));
           const notesIdx    = header.findIndex(h => /หมายเหตุ|notes/i.test(h));
-          const waterIdx    = header.findIndex(h => /หน่วย.*น้ำ|water.*units|^น้ำ\(หน่วย\)$/i.test(h));
-          const elecIdx     = header.findIndex(h => /หน่วย.*ไฟ|elec.*units|^ไฟ\(หน่วย\)$/i.test(h));
           const statusMap = {}; for (const k of Object.keys(window.ADMIN_STATUS)) statusMap[window.ADMIN_STATUS[k].th] = k;
           // DRY-RUN FIRST: parse the file without mutating state, gather a
           // diff (matched rooms, skipped rows, columns being applied), and
@@ -207,13 +205,11 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
               // else: ignore — don't let bad CSV poison status values.
             }
             if (notesIdx > -1)                    patch.notes = row[notesIdx] || '';
-            if (waterIdx > -1 && row[waterIdx])   patch.waterUnits = Number(row[waterIdx]);
-            if (elecIdx > -1 && row[elecIdx])     patch.elecUnits  = Number(row[elecIdx]);
+            // Monthly water/electric usage belongs to /admin#meters by period.
+            // Keep room CSV import limited to room attributes/config.
             // Reject NaN values silently — happens when the CSV cell is
             // empty or has trailing characters from a different format.
             if (patch.rent != null && !Number.isFinite(patch.rent)) delete patch.rent;
-            if (patch.waterUnits != null && !Number.isFinite(patch.waterUnits)) delete patch.waterUnits;
-            if (patch.elecUnits != null && !Number.isFinite(patch.elecUnits)) delete patch.elecUnits;
             if (Object.keys(patch).length === 0) {
               skippedNoChange.push(id);
             } else {
@@ -230,8 +226,6 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
             rentIdx > -1 && 'ค่าเช่า',
             statusIdx > -1 && 'สถานะ',
             notesIdx > -1 && 'หมายเหตุ',
-            waterIdx > -1 && 'น้ำ(หน่วย)',
-            elecIdx > -1 && 'ไฟ(หน่วย)',
           ].filter(Boolean).join(', ');
           if (willUpdate.length === 0) {
             setToast && setToast({
@@ -1325,6 +1319,18 @@ function RoomEditForm({ room, originalRoom, onUpdate, onServerPatch, config }) {
       {/* Pricing */}
       <div>
         <SectionHeading title="ราคาและค่าใช้จ่าย" level={3} style={{ marginBottom: 10 }} />
+        <div style={{
+          padding: 10, background: C.infoSoft || C.surfaceAlt,
+          border: `1px solid ${(C.info || C.accent)}33`, borderRadius: 8,
+          fontSize: 12.5, color: C.infoInk || C.ink2, lineHeight: 1.55,
+          marginBottom: 10,
+        }}>
+          หน้านี้ใช้ตั้งค่าอัตรา/โหมดประจำห้องเท่านั้น. หน่วยค่าน้ำและค่าไฟของแต่ละเดือนต้องบันทึกที่หน้า มิเตอร์
+          เพื่อให้บิลดึงเลขตามรอบเดือนที่ออกจริง.
+          <div style={{ marginTop: 8 }}>
+            <Btn variant="secondary" onClick={() => { window.location.hash = 'meters'; }}>ไปหน้ามิเตอร์</Btn>
+          </div>
+        </div>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
           <Input
             label="ราคาพิเศษรายห้อง" type="number" suffix="บาท"
@@ -1363,26 +1369,33 @@ function RoomEditForm({ room, originalRoom, onUpdate, onServerPatch, config }) {
               </label>
             </div>
             {room.waterMode === 'flat' ? (
-              <Input
-                label="ค่าน้ำเหมา" type="number" step="0.01" suffix="บาท/เดือน"
-                value={room.waterFlatAmount == null ? '' : room.waterFlatAmount}
-                onChange={(v) => onUpdate({
-                  waterFlatAmount: v === '' ? null : Number(v),
-                  water: v === '' ? 0 : Number(v),
-                })}
-                hint="ค่าน้ำเดือนละเท่าไรไม่นับตามเลขมิเตอร์"
-              />
+              <React.Fragment>
+                <Input
+                  label="ค่าน้ำเหมา" type="number" step="0.01" suffix="บาท/เดือน"
+                  value={room.waterFlatAmount == null ? '' : room.waterFlatAmount}
+                  onChange={(v) => onUpdate({
+                    waterFlatAmount: v === '' ? null : Number(v),
+                    water: v === '' ? 0 : Number(v),
+                  })}
+                  hint="ค่าน้ำเดือนละเท่าไรไม่นับตามเลขมิเตอร์"
+                />
+                {(room.waterFlatAmount == null || Number(room.waterFlatAmount) <= 0) ? (
+                  <div style={{
+                    marginTop: 8, padding: 10, borderRadius: 8,
+                    background: '#FEF3C7', border: '1px solid #F2C84B',
+                    fontSize: 12.5, color: '#7A5A0F', lineHeight: 1.5,
+                  }}>
+                    ⚠ เลือก "เหมา" แต่ยังไม่กรอกจำนวน — บิลที่ออกจะกลับไปคิดตามมิเตอร์ (fallback) จนกว่าจะกรอก
+                  </div>
+                ) : null}
+              </React.Fragment>
             ) : (
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
                 <Input
-                  label="ค่าน้ำ (หน่วย)" type="number" suffix="หน่วย"
+                  label="ค่าน้ำ (หน่วยล่าสุด)" type="number" suffix="หน่วย"
                   value={room.waterUnits}
-                  onChange={(v) => onUpdate({
-                    waterUnits: Number(v),
-                    water: Number(v) * (Number(room.waterRateOverride) > 0
-                      ? Number(room.waterRateOverride)
-                      : config.utilities.waterRate),
-                  })}
+                  disabled
+                  hint="บันทึกหน่วยรายเดือนที่หน้า มิเตอร์ โดยเลือกรอบเดือนก่อนออกบิล"
                 />
                 <Input
                   label="อัตราพิเศษ" type="number" step="0.01" suffix="บาท/หน่วย"
@@ -1420,26 +1433,33 @@ function RoomEditForm({ room, originalRoom, onUpdate, onServerPatch, config }) {
               </label>
             </div>
             {room.elecMode === 'flat' ? (
-              <Input
-                label="ค่าไฟเหมา" type="number" step="0.01" suffix="บาท/เดือน"
-                value={room.elecFlatAmount == null ? '' : room.elecFlatAmount}
-                onChange={(v) => onUpdate({
-                  elecFlatAmount: v === '' ? null : Number(v),
-                  elec: v === '' ? 0 : Number(v),
-                })}
-                hint="ค่าไฟเดือนละเท่าไรไม่นับตามเลขมิเตอร์"
-              />
+              <React.Fragment>
+                <Input
+                  label="ค่าไฟเหมา" type="number" step="0.01" suffix="บาท/เดือน"
+                  value={room.elecFlatAmount == null ? '' : room.elecFlatAmount}
+                  onChange={(v) => onUpdate({
+                    elecFlatAmount: v === '' ? null : Number(v),
+                    elec: v === '' ? 0 : Number(v),
+                  })}
+                  hint="ค่าไฟเดือนละเท่าไรไม่นับตามเลขมิเตอร์"
+                />
+                {(room.elecFlatAmount == null || Number(room.elecFlatAmount) <= 0) ? (
+                  <div style={{
+                    marginTop: 8, padding: 10, borderRadius: 8,
+                    background: '#FEF3C7', border: '1px solid #F2C84B',
+                    fontSize: 12.5, color: '#7A5A0F', lineHeight: 1.5,
+                  }}>
+                    ⚠ เลือก "เหมา" แต่ยังไม่กรอกจำนวน — บิลที่ออกจะกลับไปคิดตามมิเตอร์ (fallback) จนกว่าจะกรอก
+                  </div>
+                ) : null}
+              </React.Fragment>
             ) : (
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
                 <Input
-                  label="ค่าไฟ (หน่วย)" type="number" suffix="หน่วย"
+                  label="ค่าไฟ (หน่วยล่าสุด)" type="number" suffix="หน่วย"
                   value={room.elecUnits}
-                  onChange={(v) => onUpdate({
-                    elecUnits: Number(v),
-                    elec: Number(v) * (Number(room.elecRateOverride) > 0
-                      ? Number(room.elecRateOverride)
-                      : config.utilities.elecRate),
-                  })}
+                  disabled
+                  hint="บันทึกเลขไฟของรอบเดือนที่หน้า มิเตอร์ ไม่กรอกในหน้าห้องพัก"
                 />
                 <Input
                   label="อัตราพิเศษ" type="number" step="0.01" suffix="บาท/หน่วย"

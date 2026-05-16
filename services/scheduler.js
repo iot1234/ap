@@ -453,7 +453,7 @@ async function tickBillGen(pool, flags, now, state) {
             if (rcErr.code !== '42P01') throw rcErr;
           }
         }
-        const roomForBilling = await meter.attachLatestBillingReadings(billClient, room);
+        const roomForBilling = await meter.attachBillingReadingsForPeriod(billClient, room, period);
         const bill = billing.buildBill({ room: roomForBilling, contract: activeContract, config, features: flags, previous, recurring, period, dueDate, discountPct });
         const otherJson = JSON.stringify(recurring || []);
         const ins = await billClient.query(

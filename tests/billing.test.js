@@ -377,6 +377,59 @@ test('buildBill: default mode (no field) → metered (backward compat)', () => {
   assert.equal(bill.elecMode, 'metered');
 });
 
+// --- Flat-mode stored-bill round-trip --------------------------------------
+// New bills are generated through buildBill (which has direct access to the
+// mode flag), but admin / tenant later VIEW the same bill from the DB row.
+// The bills table doesn't carry a `mode` column; the renderer must infer
+// flat from value shape (amount > 0, rate = 0, units = 0, no readings) so
+// stored flat bills render with the same "ค่าเหมา" message as freshly-
+// generated ones.
+
+test('buildUtilityItem: stored flat bill (no readings, rate=0, units=0, amount>0) renders เหมา', () => {
+  const usage = billing.resolveUtilityUsageFromBillRow({
+    water_units: 0,
+    water_rate: 0,
+    water_prev_reading: null,
+    water_current_reading: null,
+  }, 'water');
+  const item = billing.buildUtilityItem('ค่าน้ำ', usage, 0, 300);
+  assert.match(item.detail, /ค่าเหมารายเดือน/);
+  assert.equal(item.qty, '1 เดือน');
+  assert.equal(item.amount, 300);
+});
+
+test('buildUtilityItem: zero-amount + zero-everything still says "ไม่มีการใช้งาน" not "เหมา"', () => {
+  // Critical distinction: amount=0 means no charge (legitimately no usage).
+  // Only amount > 0 with the rest at zero indicates flat mode.
+  const usage = { units: 0, prevReading: null, currentReading: null, hasReadings: false };
+  const item = billing.buildUtilityItem('ค่าน้ำ', usage, 0, 0);
+  assert.equal(item.detail, 'ไม่มีการใช้งาน');
+  assert.doesNotMatch(item.detail, /เหมา/);
+});
+
+test('buildUtilityItem: metered bill with readings is not misclassified as flat', () => {
+  // amount > 0 + rate > 0 + readings present → metered, never flat.
+  const usage = { units: 5, prevReading: 100, currentReading: 105, hasReadings: true };
+  const item = billing.buildUtilityItem('ค่าน้ำ', usage, 18, 90);
+  assert.doesNotMatch(item.detail, /เหมา/);
+  assert.match(item.detail, /เลขก่อน 100/);
+});
+
+test('buildBill: flat amount + late fee + VAT all compose into the right total', () => {
+  // Integration check: flat row participates in subtotal so VAT / late-fee
+  // computations downstream see the right total. Without flat in subtotal
+  // a tenant on a 300฿ water-flat + VAT 7% deal would underpay by ~21฿.
+  const flags = { lateFee: { enabled: false }, vat: { enabled: true, ratePct: 7 } };
+  const room = { ...baseRoom, waterMode: 'flat', waterFlatAmount: 300, elecUnits: 0, waterUnits: 0 };
+  const cfg = { ...baseConfig, utilities: { waterRate: 0, elecRate: 0, wifi: 0 } };
+  const bill = billing.buildBill({ room, config: cfg, features: flags });
+  // rent 5000 + water flat 300 + elec 0 = subtotal 5300
+  assert.equal(bill.subtotal, 5300);
+  // VAT 7% on 5300 = 371
+  assert.equal(bill.vat, 371);
+  assert.equal(bill.total, 5671);
+});
+
 test('isChargeApplicableForPeriod: rejects YYYY-13 / YYYY-00 outside 01-12', () => {
   // Bill period must be a real Gregorian month. The matching regex in
   // /api/bills/bulk-generate accepts only digit count, so the recurring

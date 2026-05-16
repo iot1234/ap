@@ -1237,7 +1237,7 @@ test('admin billing selected period drives estimates and bulk generation', () =>
   // recurring_charges merge the server does — admin sees the same line
   // items pre- and post-issue. The deps must include it so the memo
   // re-runs when a row is added/removed mid-session.
-  assert.match(billsBlock, /\[rooms, config, realBillsByRoom, currentPeriod, currentPeriodDate, activeRecurring\]/,
+  assert.match(billsBlock, /\[rooms, config, realBillsByRoom, currentPeriod, currentPeriodDate, activeRecurring(,\s*\w+)*\]/,
     'estimate must recompute after period changes + when recurring charges refresh');
 
   const genIdx = src.indexOf('const handleGenerate = async');
@@ -1502,6 +1502,48 @@ test('feature-gated modules fail closed with structured errors', () => {
     'meter read API must be gated, not only meter write API');
   assert.match(server, /app\.get\('\/api\/access\/logs', requireAuth, features\.requireFeature\('accessControl'\)/,
     'access log read API must be gated with the accessControl flag');
+});
+
+test('monthly meter readings drive billing period instead of room edit units', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const meterSvc = fs.readFileSync(path.join(__dirname, '..', 'services', 'meter.js'), 'utf8');
+  const routes = fs.readFileSync(path.join(__dirname, '..', 'routes', 'bills-extras.js'), 'utf8');
+  const scheduler = fs.readFileSync(path.join(__dirname, '..', 'services', 'scheduler.js'), 'utf8');
+  const roomsPage = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-rooms.jsx'), 'utf8');
+  const metersPage = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-meters.jsx'), 'utf8');
+  const billingPage = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-billing.jsx'), 'utf8');
+  const migration = fs.readFileSync(path.join(__dirname, '..', 'db', 'migrate.js'), 'utf8');
+
+  assert.match(migration, /ALTER TABLE meter_readings ADD COLUMN IF NOT EXISTS period TEXT/,
+    'meter readings need an explicit billing period column');
+  assert.match(meterSvc, /function normalisePeriod\(period\)/,
+    'meter service must validate YYYY-MM periods');
+  assert.match(meterSvc, /ON CONFLICT \(room_id, meter_type, period\)/,
+    'saving a monthly reading must update that room/type/month instead of creating duplicates');
+  assert.match(meterSvc, /async function attachBillingReadingsForPeriod/,
+    'billing must be able to read the meter pair for a selected period');
+  assert.match(server, /period-summary/,
+    'admin UI needs a month-scoped meter summary endpoint');
+  assert.match(server, /const \{ meterType, reading, period \} = req\.body/,
+    'meter write endpoint must accept period from the monthly entry page');
+  assert.match(routes, /attachBillingReadingsForPeriod\(pool, room, b\.period\)/,
+    'single bill generation must use the requested bill period');
+  assert.match(routes, /attachBillingReadingsForPeriod\(billClient, room, period\)/,
+    'bulk bill generation must use the selected period');
+  assert.match(scheduler, /attachBillingReadingsForPeriod\(billClient, room, period\)/,
+    'scheduler auto-billing must use the period it is generating');
+  assert.match(metersPage, /type="month"/,
+    'meter page must let admin choose the billing month');
+  assert.match(metersPage, /JSON\.stringify\(\{ meterType: type, reading: newVal, source: 'manual', period \}\)/,
+    'meter page must submit the selected period');
+  assert.match(billingPage, /\/api\/meters\/period-summary\?period=/,
+    'billing preview must read meter values for the selected month');
+  assert.match(roomsPage, /label="ค่าไฟ \(หน่วยล่าสุด\)"[\s\S]{0,180}disabled/,
+    'room edit must not be the monthly electricity input surface');
+  assert.match(roomsPage, /window\.location\.hash = 'meters'/,
+    'room edit should route admins to the correct meter page');
 });
 
 test('healthCheck flags meterIot.mode = "mqtt" as unimplemented', () => {

@@ -369,7 +369,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           discountPct = Number(cq.rows[0].discount_pct) || 0;
         }
       } catch { /* contracts may be empty on legacy deploys */ }
-      const roomForBilling = await meter.attachLatestBillingReadings(pool, room);
+      const roomForBilling = await meter.attachBillingReadingsForPeriod(pool, room, b.period);
       computed = billing.buildBill({
         room: roomForBilling, contract: activeContract, config, features: flags,
         previous,
@@ -1182,7 +1182,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
                 if (rcErr.code !== '42P01') throw rcErr;
               }
             }
-            const roomForBilling = await meter.attachLatestBillingReadings(billClient, room);
+            const roomForBilling = await meter.attachBillingReadingsForPeriod(billClient, room, period);
             const bill = billing.buildBill({ room: roomForBilling, contract: activeContract, config, features: flags, previous, recurring, period, dueDate, discountPct });
             const otherJson = JSON.stringify(recurring || []);
             const ins = await billClient.query(

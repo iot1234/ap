@@ -49,6 +49,9 @@ function PageMeters({ rooms, setToast }) {
   const [reading, setReading] = useState('');
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState(null);
+  const nowForMonth = new Date();
+  const currentMonth = `${nowForMonth.getFullYear()}-${String(nowForMonth.getMonth() + 1).padStart(2, '0')}`;
+  const [period, setPeriod] = useState(currentMonth);
 
   // Track the in-flight load() so a rapid roomId/type switch can't pile up
   // overlapping fetches that resolve out of order and overwrite fresh state
@@ -111,7 +114,7 @@ function PageMeters({ rooms, setToast }) {
       });
       return;
     }
-    if (!reading) {
+    if (reading === '') {
       setToast && setToast({
         kind: 'warning',
         message: { title: 'กรุณากรอกค่ามิเตอร์', description: 'ค่ามิเตอร์ต้องเป็นตัวเลข ≥ 0' },
@@ -175,7 +178,7 @@ function PageMeters({ rooms, setToast }) {
       const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
       const d = await apiCall(`/api/meters/${encodeURIComponent(roomId)}/readings`, {
         method: 'POST',
-        body: JSON.stringify({ meterType: type, reading: newVal, source: 'manual' }),
+        body: JSON.stringify({ meterType: type, reading: newVal, source: 'manual', period }),
       });
       setReading('');
       // Anomaly is NOT a save failure — it's a successful save with a
@@ -196,7 +199,7 @@ function PageMeters({ rooms, setToast }) {
           },
         });
       } else {
-        setToast && setToast({ kind: 'success', message: `บันทึก${type === 'water' ? 'ค่าน้ำ' : 'ค่าไฟ'}ห้อง ${roomId} แล้ว` });
+        setToast && setToast({ kind: 'success', message: `บันทึก${type === 'water' ? 'ค่าน้ำ' : 'ค่าไฟ'}ห้อง ${roomId} รอบ ${period} แล้ว` });
       }
       load();
     } catch (e2) {
@@ -206,9 +209,23 @@ function PageMeters({ rooms, setToast }) {
 
   return (
     <PageContainer>
-      <PageHeader title="มิเตอร์" subtitle="บันทึกค่าน้ำ/ไฟรายห้อง · ตรวจจับค่าผิดปกติ (3σ)" />
+      <PageHeader title="มิเตอร์" subtitle="บันทึกค่าน้ำ/ไฟแยกตามรอบเดือน · Billing จะใช้รอบเดือนที่เลือก ไม่ใช้ค่าจากหน้าห้องพัก" />
       <Card>
+        <div style={{
+          padding: 10, marginBottom: 12, borderRadius: 8,
+          background: C.infoSoft || '#eef6ff',
+          border: `1px solid ${(C.info || '#3b82f6')}33`,
+          color: C.infoInk || C.ink2,
+          fontSize: 12.5, lineHeight: 1.55,
+        }}>
+          กรอกเลขมิเตอร์ของรอบบิลที่นี่ เช่น รอบ 2026-05 ให้กรอกเลขท้ายเดือนพฤษภาคม.
+          หน้าห้องพักใช้ตั้งค่าโหมด/อัตราพิเศษเท่านั้น ไม่ใช่จุดกรอกหน่วยรายเดือน.
+        </div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(140px,1fr))', gap: 12, marginBottom: 16 }}>
+          <label style={lblStyle(C)}>
+            รอบเดือน
+            <input type="month" value={period} onChange={(e) => setPeriod(e.target.value || currentMonth)} style={selStyle(C)} />
+          </label>
           <label style={lblStyle(C)}>
             ห้อง
             <select value={roomId} onChange={(e) => setRoomId(e.target.value)} style={selStyle(C)}>
@@ -226,7 +243,7 @@ function PageMeters({ rooms, setToast }) {
           </label>
           <form onSubmit={record} style={{ display: 'flex', alignItems: 'flex-end', gap: 8 }}>
             <label style={{ ...lblStyle(C), flex: 1 }}>
-              ค่ามิเตอร์ใหม่
+              ค่ามิเตอร์รอบนี้
               <input type="number" step="0.01" value={reading} onChange={(e) => setReading(e.target.value)} style={selStyle(C)} />
             </label>
             <Btn type="submit" variant="primary" disabled={!roomId}>บันทึก</Btn>
@@ -260,7 +277,12 @@ function PageMeters({ rooms, setToast }) {
                   background: C.bg, padding: '10px 14px', display: 'flex',
                   justifyContent: 'space-between', alignItems: 'center', fontSize: 13.5,
                 }}>
-                  <span>{new Date(x.reading_at).toLocaleString('th-TH')} <span style={{ color: C.muted, marginLeft: 8 }}>({x.source})</span></span>
+                  <span>
+                    {new Date(x.reading_at).toLocaleString('th-TH')}
+                    <span style={{ color: C.muted, marginLeft: 8 }}>
+                      ({x.period || 'latest'} · {x.source})
+                    </span>
+                  </span>
                   <strong>{Number(x.reading).toLocaleString('th-TH', { minimumFractionDigits: 2 })}</strong>
                 </div>
               ))}

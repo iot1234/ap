@@ -158,10 +158,25 @@ function billUtilityDetail(bill, prefix, locale) {
   const units = Number.isFinite(rawUnits) ? Math.max(0, rawUnits) : 0;
   const rawRate = Number(bill?.[`${prefix}_rate`]);
   const rate = Number.isFinite(rawRate) ? Math.max(0, rawRate) : 0;
+  const rawAmount = Number(bill?.[`${prefix}_amount`]);
+  const amount = Number.isFinite(rawAmount) ? rawAmount : 0;
   const isEn = locale === 'en';
   const unitsLabel = isEn ? 'units' : 'หน่วย';
   const fr = (v) => v == null ? '—' : fmtQty(v);
   const rateTail = rate > 0 ? ` × ${fmtQty(rate)}` : '';
+
+  // Flat (เหมา) mode detection — no readings + no units + no rate but
+  // amount > 0 can only mean a flat-mode bill. The bill row doesn't store
+  // a `mode` column; this combination is unreachable from the metered
+  // path (amount = units × rate, so amount > 0 requires either units or
+  // rate > 0). Showing "ค่าเหมา" instead of "ไม่มีการใช้งาน" stops the
+  // tenant disputing "why charged X when nothing was used".
+  const isFlat = prev == null && current == null && units === 0 && rate === 0 && amount > 0;
+  if (isFlat) {
+    return isEn
+      ? `Flat monthly rate (no metering)`
+      : `ค่าเหมารายเดือน — ไม่นับตามเลขมิเตอร์`;
+  }
 
   if (prev == null && current == null) {
     if (units <= 0) return isEn ? 'No usage' : 'ไม่มีการใช้งาน';

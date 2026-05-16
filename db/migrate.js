@@ -305,9 +305,14 @@ async function migrate(pool, opts = {}) {
       reading     NUMERIC(10,2) NOT NULL,
       source      TEXT DEFAULT 'manual',
       created_by  TEXT,
+      period      TEXT,
       reading_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+    ALTER TABLE meter_readings ADD COLUMN IF NOT EXISTS period TEXT;
     CREATE INDEX IF NOT EXISTS idx_meter_room_at ON meter_readings(room_id, meter_type, reading_at DESC);
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_meter_room_type_period
+      ON meter_readings(room_id, meter_type, period)
+      WHERE period IS NOT NULL;
 
     CREATE TABLE IF NOT EXISTS access_logs (
       id           BIGSERIAL PRIMARY KEY,

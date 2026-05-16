@@ -4,6 +4,29 @@
 
 const ALLOWED_TYPES = new Set(['water', 'elec']);
 
+function normalisePeriod(period) {
+  if (period == null || period === '') return null;
+  const s = String(period).slice(0, 7);
+  const m = /^(\d{4})-(\d{2})$/.exec(s);
+  if (!m) throw new Error('invalid period');
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  if (year < 2020 || year > 2100 || month < 1 || month > 12) {
+    throw new Error('invalid period');
+  }
+  return s;
+}
+
+function periodBangkokBounds(period) {
+  const p = normalisePeriod(period);
+  if (!p) return null;
+  const [year, month] = p.split('-').map(Number);
+  const start = new Date(Date.UTC(year, month - 1, 0, 17, 0, 0, 0));
+  const nextStart = new Date(Date.UTC(year, month, 0, 17, 0, 0, 0));
+  const readingAt = new Date(nextStart.getTime() - 1);
+  return { start, nextStart, readingAt };
+}
+
 /**
  * Insert a reading. Also computes the delta from the previous reading and
  * patches `app_data['baankarn_rooms_v1'][roomId][elecUnits|waterUnits]` so
@@ -12,17 +35,28 @@ const ALLOWED_TYPES = new Set(['water', 'elec']);
  *
  * Returns the inserted row, augmented with `delta` (consumption since prev).
  */
-async function record(pool, { roomId, meterType, reading, source = 'manual', createdBy = null }) {
+async function record(pool, { roomId, meterType, reading, source = 'manual', createdBy = null, period = null }) {
   if (!ALLOWED_TYPES.has(String(meterType))) throw new Error('invalid meter type');
   const r = Number(reading);
   if (!Number.isFinite(r) || r < 0) throw new Error('invalid reading');
   const safeRoom = String(roomId).slice(0, 32);
+  const safePeriod = normalisePeriod(period);
+  const bounds = safePeriod ? periodBangkokBounds(safePeriod) : null;
 
-  const prev = await latest(pool, safeRoom, meterType);
+  const prev = safePeriod
+    ? await latestBeforePeriod(pool, safeRoom, meterType, safePeriod)
+    : await latest(pool, safeRoom, meterType);
   const { rows } = await pool.query(
-    `INSERT INTO meter_readings (room_id, meter_type, reading, source, created_by)
-     VALUES ($1,$2,$3,$4,$5) RETURNING *`,
-    [safeRoom, meterType, r, source, createdBy]
+    `INSERT INTO meter_readings (room_id, meter_type, reading, source, created_by, period, reading_at)
+     VALUES ($1,$2,$3,$4,$5,$6,COALESCE($7::timestamptz, NOW()))
+     ON CONFLICT (room_id, meter_type, period) WHERE period IS NOT NULL
+     DO UPDATE SET
+       reading = EXCLUDED.reading,
+       source = EXCLUDED.source,
+       created_by = EXCLUDED.created_by,
+       reading_at = EXCLUDED.reading_at
+     RETURNING *`,
+    [safeRoom, meterType, r, source, createdBy, safePeriod, bounds ? bounds.readingAt.toISOString() : null]
   );
   const delta = prev ? Math.max(0, r - Number(prev.reading)) : 0;
 
@@ -31,7 +65,7 @@ async function record(pool, { roomId, meterType, reading, source = 'manual', cre
   // consumption without manual entry, and keep before/after readings for the
   // bill preview/PDF. Fail-soft: if rooms key is missing or the room id isn't
   // there, jsonb_set is a no-op and we still return the row.
-  {
+  if (!safePeriod) {
     const col = meterType === 'elec' ? 'elecUnits' : 'waterUnits';
     const prevCol = meterType === 'elec' ? 'elecPrevReading' : 'waterPrevReading';
     const currentCol = meterType === 'elec' ? 'elecCurrentReading' : 'waterCurrentReading';
@@ -69,6 +103,42 @@ async function latest(pool, roomId, meterType) {
     [roomId, meterType]
   );
   return rows[0] || null;
+}
+
+async function latestBeforePeriod(pool, roomId, meterType, period) {
+  const safePeriod = normalisePeriod(period);
+  const bounds = periodBangkokBounds(safePeriod);
+  const { rows } = await pool.query(
+    `SELECT * FROM meter_readings
+       WHERE room_id=$1 AND meter_type=$2
+         AND (
+           (period IS NOT NULL AND period < $3)
+           OR (period IS NULL AND reading_at < $4::timestamptz)
+         )
+       ORDER BY COALESCE(period, '0000-00') DESC, reading_at DESC
+       LIMIT 1`,
+    [roomId, meterType, safePeriod, bounds.start.toISOString()]
+  );
+  return rows[0] || null;
+}
+
+async function readingPairForPeriod(pool, roomId, meterType, period) {
+  const safePeriod = normalisePeriod(period);
+  const bounds = periodBangkokBounds(safePeriod);
+  const currentQ = await pool.query(
+    `SELECT * FROM meter_readings
+       WHERE room_id=$1 AND meter_type=$2
+         AND (
+           period=$3
+           OR (period IS NULL AND reading_at >= $4::timestamptz AND reading_at < $5::timestamptz)
+         )
+       ORDER BY (period=$3) DESC, reading_at DESC
+       LIMIT 1`,
+    [roomId, meterType, safePeriod, bounds.start.toISOString(), bounds.nextStart.toISOString()]
+  );
+  const current = currentQ.rows[0] || null;
+  const prev = await latestBeforePeriod(pool, roomId, meterType, safePeriod);
+  return { current, prev };
 }
 
 /**
@@ -120,6 +190,55 @@ async function attachLatestBillingReadings(pool, room) {
     }
   }
   return next;
+}
+
+async function attachBillingReadingsForPeriod(pool, room, period) {
+  if (!room || !room.id) return room;
+  let safePeriod;
+  try {
+    safePeriod = normalisePeriod(period);
+  } catch {
+    return attachLatestBillingReadings(pool, room);
+  }
+  if (!safePeriod) return attachLatestBillingReadings(pool, room);
+
+  const safeRoom = String(room.id).slice(0, 32);
+  const next = { ...room };
+  try {
+    for (const meterType of ['water', 'elec']) {
+      const { current, prev } = await readingPairForPeriod(pool, safeRoom, meterType, safePeriod);
+      if (!current) continue;
+      const prefix = meterType === 'elec' ? 'elec' : 'water';
+      next[`${prefix}CurrentReading`] = Number(current.reading);
+      if (prev) {
+        next[`${prefix}PrevReading`] = Number(prev.reading);
+        next[`${prefix}Units`] = consumption(prev, current);
+      }
+    }
+  } catch (err) {
+    if (err.code !== '42P01' && err.code !== '42703') throw err;
+    return room;
+  }
+  return next;
+}
+
+async function buildPeriodSummary(pool, rooms, period) {
+  const safePeriod = normalisePeriod(period);
+  const out = {};
+  for (const room of Object.values(rooms || {})) {
+    if (!room || !room.id) continue;
+    const withReadings = await attachBillingReadingsForPeriod(pool, room, safePeriod);
+    out[String(room.id)] = {
+      roomId: String(room.id),
+      waterPrevReading: withReadings.waterPrevReading ?? null,
+      waterCurrentReading: withReadings.waterCurrentReading ?? null,
+      waterUnits: withReadings.waterUnits ?? room.waterUnits ?? 0,
+      elecPrevReading: withReadings.elecPrevReading ?? null,
+      elecCurrentReading: withReadings.elecCurrentReading ?? null,
+      elecUnits: withReadings.elecUnits ?? room.elecUnits ?? 0,
+    };
+  }
+  return out;
 }
 
 /**
@@ -194,8 +313,12 @@ async function detectAnomaly(pool, roomId, meterType, sigmas = 3) {
 module.exports = {
   record,
   latest,
+  latestBeforePeriod,
   attachLatestBillingReadings,
+  attachBillingReadingsForPeriod,
+  buildPeriodSummary,
   consumption,
   detectAnomaly,
+  normalisePeriod,
   ALLOWED_TYPES,
 };

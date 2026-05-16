@@ -351,6 +351,22 @@ function buildUtilityItem(label, usage, rate, amount) {
     ? `${fmtQty(safeUnits)} หน่วย × ${fmtQty(safeRate)}`
     : `${fmtQty(safeUnits)} หน่วย`;
 
+  // Flat-mode inference for stored bills — the bills table doesn't carry a
+  // `mode` column, so we detect flat from the value shape: amount > 0 with
+  // rate = 0 + units = 0 + no readings is unreachable from the metered
+  // path (metered amount = units × rate, both > 0). New bills get this
+  // shape from buildBill's flatItem helper; stored bills round-trip through
+  // resolveUtilityUsageFromBillRow which preserves the same shape.
+  const isFlat = prev == null && current == null && safeUnits === 0 && safeRate === 0 && safeAmount > 0;
+  if (isFlat) {
+    return {
+      label,
+      qty: '1 เดือน',
+      amount: safeAmount,
+      detail: 'ค่าเหมารายเดือน — ไม่นับตามเลขมิเตอร์',
+    };
+  }
+
   // Detail line — ALWAYS present (this is the key fix). Earlier versions
   // omitted detail when readings were missing, which left the tenant with
   // no idea where the unit count came from. Four cases:

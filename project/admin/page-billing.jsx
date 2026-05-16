@@ -37,6 +37,15 @@ function utilityDetailFromBill(b, prefix) {
   const current = numOrNull(b?.[`${prefix}CurrentReading`]);
   const rawUnits = Number(b?.[`${prefix}Units`]);
   const units = Number.isFinite(rawUnits) ? Math.max(0, rawUnits) : 0;
+  const rawRate = Number(b?.[`${prefix}Rate`]);
+  const rate = Number.isFinite(rawRate) ? Math.max(0, rawRate) : 0;
+  // Flat-mode inference matches services/billing.js: amount > 0 with
+  // rate=0 + units=0 + no readings is unreachable from the metered path
+  // (amount = units × rate) — only a flat bill produces this shape.
+  const rawAmount = Number(b?.[`${prefix}Amount`] ?? b?.[prefix]);
+  const amount = Number.isFinite(rawAmount) ? rawAmount : 0;
+  const isFlat = prev == null && current == null && units === 0 && rate === 0 && amount > 0;
+  if (isFlat) return 'ค่าเหมารายเดือน — ไม่นับตามเลขมิเตอร์';
   const fr = (v) => v == null ? '—' : fmtQty(v);
   if (prev == null && current == null) {
     if (units <= 0) return 'ไม่มีการใช้งาน';
@@ -158,6 +167,25 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
   }, [currentPeriod]);
   React.useEffect(() => fetchBatchReadiness(), [fetchBatchReadiness, dbBills]);
 
+  // Month-scoped meter readings. Rooms store room configuration; water/elec
+  // usage belongs to the selected bill period.
+  const [periodMeters, setPeriodMeters] = React.useState(null);
+  React.useEffect(() => {
+    let cancel = false;
+    setPeriodMeters(null);
+    fetch(`/api/meters/period-summary?period=${encodeURIComponent(currentPeriod)}`, {
+      credentials: 'same-origin',
+    })
+      .then(async (r) => {
+        const d = await r.json().catch(() => ({}));
+        if (cancel) return;
+        if (r.ok && d.ok) setPeriodMeters(d.rooms || {});
+        else setPeriodMeters({});
+      })
+      .catch(() => { if (!cancel) setPeriodMeters({}); });
+    return () => { cancel = true; };
+  }, [currentPeriod]);
+
   // Active recurring charges keyed by roomId. Tenant-scoped rows are resolved
   // through /api/tenants?status=active so the preview matches the server's
   // loadRecurringFor({ tenantId, roomId }) behaviour during real bill create.
@@ -249,22 +277,26 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         // 'flat' and amount > 0, bill the flat number and zero out
         // units/rate so the table doesn't show "5 หน่วย × 18" alongside
         // the flat amount.
-        const waterFlat = Number(r.waterFlatAmount);
-        const elecFlat  = Number(r.elecFlatAmount);
-        const waterFlatActive = String(r.waterMode || '').toLowerCase() === 'flat'
+        const meterForPeriod = periodMeters && periodMeters[String(r.id)]
+          ? periodMeters[String(r.id)]
+          : null;
+        const rr = meterForPeriod ? { ...r, ...meterForPeriod } : r;
+        const waterFlat = Number(rr.waterFlatAmount);
+        const elecFlat  = Number(rr.elecFlatAmount);
+        const waterFlatActive = String(rr.waterMode || '').toLowerCase() === 'flat'
           && Number.isFinite(waterFlat) && waterFlat > 0;
-        const elecFlatActive  = String(r.elecMode || '').toLowerCase() === 'flat'
+        const elecFlatActive  = String(rr.elecMode || '').toLowerCase() === 'flat'
           && Number.isFinite(elecFlat)  && elecFlat  > 0;
-        const waterUnits = waterFlatActive ? 0 : unitsFromReadingsOrFallback(r, 'water');
-        const elecUnits  = elecFlatActive  ? 0 : unitsFromReadingsOrFallback(r, 'elec');
-        const waterPair = readingPair(r, 'water');
-        const elecPair = readingPair(r, 'elec');
-        const waterRate = waterFlatActive ? 0 : overrideOrFallback(r.waterRateOverride, globalWaterRate);
-        const elecRate  = elecFlatActive  ? 0 : overrideOrFallback(r.elecRateOverride,  globalElecRate);
+        const waterUnits = waterFlatActive ? 0 : unitsFromReadingsOrFallback(rr, 'water');
+        const elecUnits  = elecFlatActive  ? 0 : unitsFromReadingsOrFallback(rr, 'elec');
+        const waterPair = readingPair(rr, 'water');
+        const elecPair = readingPair(rr, 'elec');
+        const waterRate = waterFlatActive ? 0 : overrideOrFallback(rr.waterRateOverride, globalWaterRate);
+        const elecRate  = elecFlatActive  ? 0 : overrideOrFallback(rr.elecRateOverride,  globalElecRate);
         const water = waterFlatActive ? waterFlat : waterUnits * waterRate;
         const elec  = elecFlatActive  ? elecFlat  : elecUnits * elecRate;
         // Honor wifi=0 as a real override (free wifi), not "use global".
-        const wifiRaw = r.wifiOverride ?? r.wifi;
+        const wifiRaw = rr.wifiOverride ?? rr.wifi;
         const wifi = (wifiRaw != null && wifiRaw !== '' && Number.isFinite(Number(wifiRaw)))
           ? Math.max(0, Number(wifiRaw))
           : globalWifiFee;
@@ -276,7 +308,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         // ignored — those rows never made it onto real bills.
         const charges = activeRecurring[r.id] || [];
         const chargesTotal = charges.reduce((s, c) => s + (Number(c.amount) || 0), 0);
-        const rentInfo = resolveRoomRent ? resolveRoomRent(r, config) : { rent: r.rent, source: 'legacy' };
+        const rentInfo = resolveRoomRent ? resolveRoomRent(rr, config) : { rent: rr.rent, source: 'legacy' };
         const previewRent = Number(rentInfo.rent) || 0;
         const total = previewRent + water + elec + wifi + chargesTotal;
         const overdue = r.status === 'overdue';
@@ -364,7 +396,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
           latestPaidAt: real.latest_paid_at || null,
         };
       });
-  }, [rooms, config, realBillsByRoom, currentPeriod, currentPeriodDate, activeRecurring]);
+  }, [rooms, config, realBillsByRoom, currentPeriod, currentPeriodDate, activeRecurring, periodMeters]);
 
   const filtered = useMemo(() => {
     if (tab === 'current') return bills;

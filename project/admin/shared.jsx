@@ -559,8 +559,8 @@ function exportRoomsCSV(rooms) {
     { key: 'tenantEmail', label: 'อีเมล',     get: r => r.tenant?.email || '' },
     { key: 'since',       label: 'เข้าพัก' },
     { key: 'contractEnd', label: 'สิ้นสุดสัญญา' },
-    { key: 'waterUnits',  label: 'น้ำ(หน่วย)' },
-    { key: 'elecUnits',   label: 'ไฟ(หน่วย)' },
+    { key: 'waterUnits',  label: 'น้ำ(หน่วยล่าสุด)' },
+    { key: 'elecUnits',   label: 'ไฟ(หน่วยล่าสุด)' },
     { key: 'wifi',        label: 'wifi' },
     { key: 'notes',       label: 'หมายเหตุ' },
   ]);
