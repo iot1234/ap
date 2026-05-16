@@ -569,7 +569,6 @@ function maskConfigPublic(cfg) {
   if (cfg.payment && typeof cfg.payment === 'object') {
     out.payment = {
       promptpayDisplayName: cfg.payment.promptpayDisplayName || cfg.payment.bankName,
-      promptpayTarget: cfg.payment.promptpay || cfg.payment.promptpayTarget,
     };
   }
   // Pricing fields are visible on the public booking form, so let them through.
@@ -10748,15 +10747,9 @@ app.get('/files/:id', async (req, res) => {
     // Stream-of-bytes path supports both local disk and R2 transparently
     // (storage.readFile picks the backend). Local: still an in-memory read,
     // but slip/photo limits cap at ~1.5MB so this is fine.
-    if (f.storage === 's3') {
-      const buf = await storage.readFile(f);
-      if (!buf) return res.status(404).end();
-      return res.end(buf);
-    }
-    const fp = path.join(storage.rootPath(), f.category, f.filename);
-    res.sendFile(fp, (err) => {
-      if (err && !res.headersSent) res.status(404).end();
-    });
+    const buf = await storage.readFile(f);
+    if (!buf) return res.status(404).end();
+    return res.end(buf);
   } catch (err) {
     console.error('files proxy error:', err);
     if (!res.headersSent) res.status(500).end();

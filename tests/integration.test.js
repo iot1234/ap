@@ -2756,6 +2756,43 @@ test('storage._safeLocalPath blocks traversal at read time', () => {
   assert.ok(usages.length >= 2, 'readFile + remove must both call _safeLocalPath');
 });
 
+test('/files route delegates all local and S3 reads through storage.readFile', () => {
+  // A tampered file_uploads row must not bypass storage._safeLocalPath by
+  // joining category/filename directly in server.js.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const idx = src.indexOf("app.get('/files/:id'");
+  assert.ok(idx > 0, '/files route must exist');
+  const end = src.indexOf("app.get('/',", idx);
+  const route = src.slice(idx, end);
+  assert.match(route, /storage\.readFile\(f\)/,
+    '/files must use the storage service read guard');
+  assert.doesNotMatch(route, /path\.join\(storage\.rootPath\(\), f\.category, f\.filename\)/,
+    '/files must not rebuild local paths directly');
+  assert.doesNotMatch(route, /res\.sendFile\(fp/,
+    '/files must not send unchecked local paths');
+});
+
+test('public config mask does not expose raw PromptPay targets', () => {
+  // Public room-board config only needs display metadata. The real target can
+  // be a phone number or citizen ID and must stay behind tenant/admin payment
+  // endpoints that already enforce session/token checks.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const idx = src.indexOf('function maskConfigPublic');
+  assert.ok(idx > 0, 'maskConfigPublic must exist');
+  const end = src.indexOf("app.get('/api/data/:key'", idx);
+  const fn = src.slice(idx, end);
+  assert.match(fn, /promptpayDisplayName/,
+    'public config may expose payment display name');
+  assert.doesNotMatch(fn, /promptpayTarget\s*:/,
+    'public config must not expose the raw PromptPay target');
+  assert.doesNotMatch(fn, /cfg\.payment\.(?:promptpayTarget|promptpay)\b/,
+    'public mask must not copy raw PromptPay fields');
+});
+
 test('storage notifies owner when R2 upload fails', () => {
   // Silent local fallback used to lose slips on Railway redeploy. Now
   // alerts the owner on every R2 failure (fire-and-forget).
