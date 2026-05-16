@@ -224,9 +224,18 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
   // showing room.rent, was a STALE snapshot that didn't track pricing edits
   // at all.
   const bills = useMemo(() => {
-    const waterRate = config.utilities?.waterRate ?? 18;
-    const elecRate  = config.utilities?.elecRate  ?? 8;
-    const wifiFee   = config.utilities?.wifi      ?? 250;
+    const globalWaterRate = config.utilities?.waterRate ?? 18;
+    const globalElecRate  = config.utilities?.elecRate  ?? 8;
+    const globalWifiFee   = config.utilities?.wifi      ?? 250;
+    // Preview mirrors services/billing.js per-room override pattern so
+    // admin's /admin#rooms rate edits show up in /admin#billing immediately.
+    // Negative / NaN slip back to the global rate so a typo doesn't credit
+    // the tenant.
+    const overrideOrFallback = (raw, fallback) => {
+      if (raw == null || raw === '') return fallback;
+      const n = Number(raw);
+      return Number.isFinite(n) && n >= 0 ? n : fallback;
+    };
     // Keep client estimates aligned with the period selected in the toolbar.
     // If admin is looking at a back-filled month, preview rows and bulk issue
     // payloads must not fall back to the wall-clock month.
@@ -240,9 +249,15 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         const elecUnits = unitsFromReadingsOrFallback(r, 'elec');
         const waterPair = readingPair(r, 'water');
         const elecPair = readingPair(r, 'elec');
+        const waterRate = overrideOrFallback(r.waterRateOverride, globalWaterRate);
+        const elecRate  = overrideOrFallback(r.elecRateOverride,  globalElecRate);
         const water = waterUnits * waterRate;
         const elec  = elecUnits * elecRate;
-        const wifi  = (r.wifi != null && r.wifi !== 0) ? r.wifi : wifiFee;
+        // Honor wifi=0 as a real override (free wifi), not "use global".
+        const wifiRaw = r.wifiOverride ?? r.wifi;
+        const wifi = (wifiRaw != null && wifiRaw !== '' && Number.isFinite(Number(wifiRaw)))
+          ? Math.max(0, Number(wifiRaw))
+          : globalWifiFee;
         // Bill line items come from /api/recurring-charges (active rows).
         // Server's bulk-generate merges these via services/billing.js, so
         // mirroring them here keeps the preview totals in sync with what

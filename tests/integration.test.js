@@ -177,6 +177,34 @@ test('room sync bridges legacy JSONB rooms and rooms_v2 both directions', () => 
     'room delete/rename must refuse active references instead of orphaning rows');
 });
 
+test('rooms edit drawer stages type/feature changes and explains pricing impact', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const roomsPage = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-rooms.jsx'), 'utf8');
+  const shared = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'shared.jsx'), 'utf8');
+
+  assert.match(roomsPage, /const \[editDraft, setEditDraft\]/,
+    'room edit drawer must stage edits in a draft instead of mutating rooms immediately');
+  assert.match(roomsPage, /function RoomEditForm\(\{ room, originalRoom, onUpdate, onServerPatch, config \}\)/,
+    'RoomEditForm must receive originalRoom for before/after pricing impact');
+  assert.match(roomsPage, /disabled=\{!editDirty\}/,
+    'save button must only commit when the draft changed');
+  assert.match(roomsPage, /ทิ้งการแก้ไขที่ยังไม่ได้บันทึก/,
+    'closing/cancel should warn before discarding unsaved room edits');
+  assert.match(roomsPage, /ประเภท\/วิว\/คุณสมบัติใช้คำนวณราคาตามสูตร/,
+    'type/view/feature controls must tell admin what they are used for');
+  assert.match(roomsPage, /ราคาตามสูตร: \{fmtCurrency\(originalComputedRent\)\} →/,
+    'UI must show before/after formula rent when toggles move the number');
+  assert.match(roomsPage, /Toggle label="แอร์"/,
+    'rooms UI must expose the AC feature because pricing has featurePremium.ac');
+  assert.match(roomsPage, /ac: !!data\.ac/,
+    'new rooms and bulk-added rooms must persist the AC feature flag');
+  assert.match(roomsPage, /onServerPatch\(patch\)/,
+    'server-side reconcile must still update real room state while normal edits stay staged');
+  assert.match(shared, /label: 'แอร์'/,
+    'room CSV export must include AC so feature flags are not hidden outside the drawer');
+});
+
 test('billing.buildBill respects feature flags', () => {
   const billing = require('../services/billing');
   const room = { id: '101', rent: 5000, waterUnits: 5, elecUnits: 100, tenant: { name: 'T' } };

@@ -33,9 +33,38 @@ const pricing = require('./pricing');
  */
 function buildBill({ room, contract = null, config, features, previous = null, recurring = [], period, dueDate, discountPct = 0, isFirstBill = false }) {
   const u = (config && config.utilities) || {};
-  const waterRate = Number(u.waterRate ?? 18);
-  const elecRate  = Number(u.elecRate  ?? 8);
-  const wifiFee   = Number(u.wifi      ?? 0);
+  // Rate resolution: each utility prefers a per-room override (room blob
+  // accepts both camelCase + snake_case to match rooms_v2 columns) then
+  // falls back to the building-wide rate. Pattern parallels rent_override
+  // in services/pricing.js so admin can run two pricing tiers in the same
+  // building (e.g. older units on cheaper meter contract) without forking
+  // the global rate.
+  //
+  // Guard: per-room values must be finite + non-negative. Negative or
+  // NaN slip back to the global rate so a typo in /admin#rooms can't
+  // accidentally credit the tenant.
+  const positiveRateOrFallback = (overrideValue, fallback) => {
+    if (overrideValue == null || overrideValue === '') return fallback;
+    const n = Number(overrideValue);
+    return Number.isFinite(n) && n >= 0 ? n : fallback;
+  };
+  const globalWaterRate = Number(u.waterRate ?? 18);
+  const globalElecRate  = Number(u.elecRate  ?? 8);
+  const globalWifiFee   = Number(u.wifi      ?? 0);
+  const r = room || {};
+  const waterRate = positiveRateOrFallback(r.waterRateOverride ?? r.water_rate_override, globalWaterRate);
+  const elecRate  = positiveRateOrFallback(r.elecRateOverride  ?? r.elec_rate_override,  globalElecRate);
+  // Wifi already had a quasi-override (room.wifi) on the client preview
+  // path — make it authoritative on the server too so /admin#billing
+  // preview and the actual generated bill agree. Honor wifi=0 as a real
+  // override (free wifi for this unit), not as "use global".
+  const wifiOverrideRaw = r.wifiOverride ?? r.wifi_override ?? r.wifi;
+  const wifiFee = wifiOverrideRaw != null && wifiOverrideRaw !== '' && Number.isFinite(Number(wifiOverrideRaw))
+    ? Math.max(0, Number(wifiOverrideRaw))
+    : globalWifiFee;
+  const waterRateSource = waterRate !== globalWaterRate ? 'override' : 'global';
+  const elecRateSource  = elecRate  !== globalElecRate  ? 'override' : 'global';
+  const wifiFeeSource   = wifiFee   !== globalWifiFee   ? 'override' : 'global';
 
   // Resolver picks the right rent source. See services/pricing.js for
   // priority + rationale.
@@ -45,8 +74,8 @@ function buildBill({ room, contract = null, config, features, previous = null, r
   const elecUsage = resolveUtilityUsage(room, 'elec');
   const waterUnits = waterUsage.units;
   const elecUnits  = elecUsage.units;
-  const waterAmount = waterUnits * waterRate;
-  const elecAmount  = elecUnits  * elecRate;
+  const waterAmount = round2(waterUnits * waterRate);
+  const elecAmount  = round2(elecUnits  * elecRate);
 
   // Contract-length discount applies only to the rent portion (utilities
   // are pass-through cost — discounting kWh would underbill). discountPct
@@ -138,12 +167,15 @@ function buildBill({ room, contract = null, config, features, previous = null, r
     items,
     rent, rentBase, discountPct: safePct, discountAmount,
     waterUnits, waterRate, waterAmount,
+    waterRateSource,    // 'override' | 'global' — admin can audit which
     waterPrevReading: waterUsage.prevReading,
     waterCurrentReading: waterUsage.currentReading,
     elecUnits, elecRate, elecAmount,
+    elecRateSource,
     elecPrevReading: elecUsage.prevReading,
     elecCurrentReading: elecUsage.currentReading,
     wifi: wifiFee,
+    wifiFeeSource,
     subtotal: round2(subtotal),
     vat,
     lateFee,

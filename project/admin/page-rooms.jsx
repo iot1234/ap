@@ -19,6 +19,7 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
   const [filterFloor, setFFloor]   = useState('all');
   const [filterType, setFType]     = useState('all');
   const [editId, setEditId]        = useState(null);
+  const [editDraft, setEditDraft]  = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [addOpen, setAddOpen]      = useState(false);
   const [bulkAddOpen, setBulkAddOpen] = useState(false);
@@ -59,6 +60,78 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
 
   const updateRoom = (id, patch) => {
     setRooms(prev => ({ ...prev, [id]: { ...prev[id], ...patch } }));
+  };
+
+  const cloneRoom = (room) => {
+    try { return JSON.parse(JSON.stringify(room || null)); }
+    catch { return room ? { ...room } : null; }
+  };
+
+  React.useEffect(() => {
+    setEditDraft(editId && rooms[editId] ? cloneRoom(rooms[editId]) : null);
+    // Reset only when switching rooms/opening the drawer. While editing, the
+    // draft must not be overwritten by its own keystrokes or by background
+    // localStorage hydration.
+  }, [editId]);
+
+  const editing = editId ? rooms[editId] : null;
+  const editingRoom = editDraft || editing;
+  const editDirty = !!(editing && editDraft
+    && JSON.stringify(editDraft) !== JSON.stringify(editing));
+
+  const updateEditDraft = (patch) => {
+    setEditDraft(prev => ({ ...(prev || editing || {}), ...patch }));
+  };
+
+  const applyRoomServerPatch = (patch) => {
+    if (!editId) return;
+    updateRoom(editId, patch);
+    setEditDraft(prev => ({ ...(prev || editing || {}), ...patch }));
+  };
+
+  const closeEditDrawer = () => {
+    if (editDirty) {
+      const ok = window.confirm('ทิ้งการแก้ไขที่ยังไม่ได้บันทึก?');
+      if (!ok) return;
+    }
+    setEditId(null);
+    setEditDraft(null);
+  };
+
+  const roomPricingChanged = (before, after) => {
+    const keys = ['type', 'view', 'balcony', 'ac', 'parking', 'kitchen', 'rentOverride'];
+    return keys.some((k) => String(before?.[k] ?? '') !== String(after?.[k] ?? ''));
+  };
+
+  const saveRoomEdit = () => {
+    if (!editId || !editing || !editDraft) return;
+    const before = editing;
+    const after = cloneRoom(editDraft);
+    const beforeRent = resolveRoomRent ? resolveRoomRent(before, config) : { rent: before.rent, source: 'legacy' };
+    const afterRent = resolveRoomRent ? resolveRoomRent(after, config) : { rent: after.rent, source: 'legacy' };
+    setRooms(prev => ({ ...prev, [editId]: after }));
+    addActivity && addActivity({ icon: '✏️', text: `แก้ไขข้อมูลห้อง ${editId}`, type: 'system' });
+
+    const lines = [];
+    if (Number(beforeRent.rent) !== Number(afterRent.rent)) {
+      lines.push(`ค่าเช่าที่ระบบจะใช้เปลี่ยนจาก ${fmtCurrency(beforeRent.rent)} เป็น ${fmtCurrency(afterRent.rent)}`);
+    }
+    if (roomPricingChanged(before, after)) {
+      lines.push('ประเภท/วิว/คุณสมบัติใช้คำนวณราคาตามสูตรและใช้กับสัญญาใหม่หรือห้องว่าง');
+      lines.push('สัญญาที่ lock แล้วและบิลที่ออกไปแล้วจะไม่ถูกแก้ย้อนหลัง');
+    }
+    if (afterRent.source === 'override') {
+      lines.push('ห้องนี้ยังใช้ราคาพิเศษรายห้องอยู่ จึงไม่ตามสูตรจนกว่าจะล้างราคาพิเศษ');
+    }
+    setToast && setToast({
+      kind: 'success',
+      message: {
+        title: `บันทึกห้อง ${editId} เรียบร้อย`,
+        description: lines.join('\n') || 'บันทึกข้อมูลห้องแล้ว',
+      },
+    });
+    setEditId(null);
+    setEditDraft(null);
   };
 
   const handleExportCSV = () => {
@@ -226,7 +299,8 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
       tenant: null, since: null, contractEnd: null,
       water: 0, elec: 0, waterUnits: 0, elecUnits: 0, wifi: config.utilities.wifi || 250,
       photos: [], notes: '',
-      view: data.view, balcony: !!data.balcony, parking: !!data.parking, kitchen: !!data.kitchen,
+      view: data.view, ac: !!data.ac,
+      balcony: !!data.balcony, parking: !!data.parking, kitchen: !!data.kitchen,
       lastCleaned: window.fmtDateTH(new Date()),
       lastBillDate: null, billStatus: 'none', overdueDays: 0,
     };
@@ -272,6 +346,7 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
           wifi: config.utilities.wifi || 250,
           photos: [], notes: '',
           view: data.view || 'วิวสวน',
+          ac: !!data.ac,
           balcony: !!data.balcony, parking: !!data.parking, kitchen: !!data.kitchen,
           lastCleaned: window.fmtDateTH(new Date()),
           lastBillDate: null, billStatus: 'none', overdueDays: 0,
@@ -331,8 +406,6 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
     setConfirmDelete(null);
     if (editId === id) setEditId(null);
   };
-
-  const editing = editId ? rooms[editId] : null;
 
   // --- Table columns -----
   const columns = [
@@ -466,22 +539,26 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
 
       {/* Edit Drawer */}
       <Drawer
-        open={!!editing}
-        onClose={() => setEditId(null)}
-        title={editing ? `ห้อง ${editing.id} · ${ADMIN_ROOM_TYPES[editing.type].th}` : ''}
+        open={!!editingRoom}
+        onClose={closeEditDrawer}
+        title={editingRoom ? `ห้อง ${editingRoom.id} · ${ADMIN_ROOM_TYPES[editingRoom.type].th}` : ''}
         width={580}
-        footer={editing && (
+        footer={editingRoom && (
           <>
-            <Btn variant="ghost" onClick={() => setEditId(null)}>ยกเลิก</Btn>
-            <Btn variant="primary" icon="✓" onClick={() => {
-              addActivity && addActivity({ icon: '✏️', text: `แก้ไขข้อมูลห้อง ${editing.id}`, type: 'system' });
-              setToast && setToast({ kind: 'success', message: `บันทึกห้อง ${editing.id} เรียบร้อย` });
-              setEditId(null);
-            }}>บันทึกการเปลี่ยนแปลง</Btn>
+            <Btn variant="ghost" onClick={closeEditDrawer}>ยกเลิก</Btn>
+            <Btn variant="primary" icon="✓" onClick={saveRoomEdit} disabled={!editDirty}>
+              {editDirty ? 'บันทึกการเปลี่ยนแปลง' : 'บันทึกแล้ว'}
+            </Btn>
           </>
         )}
       >
-        {editing && <RoomEditForm room={editing} onUpdate={(patch) => updateRoom(editing.id, patch)} config={config} />}
+        {editingRoom && <RoomEditForm
+          room={editingRoom}
+          originalRoom={editing}
+          onUpdate={updateEditDraft}
+          onServerPatch={applyRoomServerPatch}
+          config={config}
+        />}
       </Drawer>
 
       {/* Delete confirm — preview the actual room state so admin doesn't
@@ -608,6 +685,7 @@ function BulkAddFloorModal({ open, onClose, onAdd, existingFloors }) {
     type: 'standard',
     rent: ADMIN_ROOM_TYPES.standard.baseRent,
     view: 'วิวสวน',
+    ac: ADMIN_ROOM_TYPES.standard.ac,
     balcony: false, parking: false, kitchen: false,
   });
   React.useEffect(() => {
@@ -619,6 +697,7 @@ function BulkAddFloorModal({ open, onClose, onAdd, existingFloors }) {
         type: 'standard',
         rent: ADMIN_ROOM_TYPES.standard.baseRent,
         view: 'วิวสวน',
+        ac: ADMIN_ROOM_TYPES.standard.ac,
         balcony: false, parking: false, kitchen: false,
       });
     }
@@ -628,7 +707,10 @@ function BulkAddFloorModal({ open, onClose, onAdd, existingFloors }) {
   const update = (k, v) => {
     setForm(p => {
       const next = { ...p, [k]: v };
-      if (k === 'type') next.rent = ADMIN_ROOM_TYPES[v].baseRent;
+      if (k === 'type') {
+        next.rent = ADMIN_ROOM_TYPES[v].baseRent;
+        next.ac = ADMIN_ROOM_TYPES[v].ac;
+      }
       return next;
     });
   };
@@ -692,6 +774,7 @@ function BulkAddFloorModal({ open, onClose, onAdd, existingFloors }) {
           <div style={{ fontSize: 12, color: C.muted, marginBottom: 6 }}>
             คุณสมบัติพิเศษ (ติดทุกห้องที่สร้าง — แก้ทีหลังรายห้องได้)
           </div>
+          <Toggle label="แอร์" checked={form.ac} onChange={(v) => update('ac', v)} />
           <Toggle label="มีระเบียง"  checked={form.balcony} onChange={(v) => update('balcony', v)} />
           <Toggle label="ที่จอดรถ"   checked={form.parking} onChange={(v) => update('parking', v)} />
           <Toggle label="ครัวในห้อง" checked={form.kitchen} onChange={(v) => update('kitchen', v)} />
@@ -771,7 +854,9 @@ function AddRoomModal({ open, onClose, onAdd, existingIds }) {
 
   const [form, setForm] = React.useState({
     id: '', floor: 1, no: 1, type: 'standard',
-    rent: 4500, view: 'วิวสวน', balcony: false, parking: false, kitchen: false,
+    rent: 4500, view: 'วิวสวน',
+    ac: ADMIN_ROOM_TYPES.standard.ac,
+    balcony: false, parking: false, kitchen: false,
   });
 
   // Suggest the next-available room id based on what's ALREADY in the
@@ -836,6 +921,7 @@ function AddRoomModal({ open, onClose, onAdd, existingIds }) {
       floor: Number(id.match(/^(\d{1,2})/)[1]),
       no: Number(id.slice(-2)),
       rent: ADMIN_ROOM_TYPES.standard.baseRent,
+      ac: ADMIN_ROOM_TYPES.standard.ac,
     }));
   }, [open]);
 
@@ -844,7 +930,10 @@ function AddRoomModal({ open, onClose, onAdd, existingIds }) {
   const update = (k, v) => {
     setForm(p => {
       const next = { ...p, [k]: v };
-      if (k === 'type')  next.rent = ADMIN_ROOM_TYPES[v].baseRent;
+      if (k === 'type') {
+        next.rent = ADMIN_ROOM_TYPES[v].baseRent;
+        next.ac = ADMIN_ROOM_TYPES[v].ac;
+      }
       if (k === 'floor') next.id = `${v}${String(p.no).padStart(2,'0')}`;
       if (k === 'no')    next.id = `${p.floor}${String(v).padStart(2,'0')}`;
       return next;
@@ -887,6 +976,7 @@ function AddRoomModal({ open, onClose, onAdd, existingIds }) {
                value={form.rent} onChange={(v) => update('rent', Number(v))} />
         <div style={{ padding: 10, background: C.surfaceAlt, borderRadius: 8 }}>
           <div style={{ fontSize: 12, color: C.muted, marginBottom: 6 }}>คุณสมบัติพิเศษ</div>
+          <Toggle label="แอร์" checked={form.ac} onChange={(v) => update('ac', v)} />
           <Toggle label="มีระเบียง"  checked={form.balcony} onChange={(v) => update('balcony', v)} />
           <Toggle label="ที่จอดรถ"   checked={form.parking} onChange={(v) => update('parking', v)} />
           <Toggle label="ครัวในห้อง" checked={form.kitchen} onChange={(v) => update('kitchen', v)} />
@@ -897,7 +987,7 @@ function AddRoomModal({ open, onClose, onAdd, existingIds }) {
 }
 
 // --- Edit form (sub-component) -------------------------------------------
-function RoomEditForm({ room, onUpdate, config }) {
+function RoomEditForm({ room, originalRoom, onUpdate, onServerPatch, config }) {
   const C = window.ADMIN_C;
   const ADMIN_STATUS = window.ADMIN_STATUS;
   const ADMIN_ROOM_TYPES = window.ADMIN_ROOM_TYPES;
@@ -959,7 +1049,9 @@ function RoomEditForm({ room, onUpdate, config }) {
       // hook into the parent state, but it expects a patch object. Pass
       // the reconciled state so the rooms grid updates immediately
       // without a full /api/data refetch.
-      onUpdate({ tenant: null, status: 'vacant', since: null, contractEnd: null });
+      const patch = { tenant: null, status: 'vacant', since: null, contractEnd: null };
+      if (onServerPatch) onServerPatch(patch);
+      else onUpdate(patch);
     } catch (e) {
       window.toast && window.toast({ kind: 'danger', message: 'Reconcile ล้มเหลว: ' + (e.message || e) });
     } finally { setReconciling(false); }
@@ -974,6 +1066,17 @@ function RoomEditForm({ room, onUpdate, config }) {
     kitchen: room.kitchen,
   };
   const computedRent = computeRoomRent(room.type, room.floor, room.view, features, config);
+  const originalFeatures = originalRoom ? {
+    balcony: !!(originalRoom.balcony || originalRoom.hasBalcony || originalRoom.has_balcony),
+    ac: (originalRoom.ac ?? originalRoom.hasAc ?? originalRoom.has_ac) === undefined
+      ? (ADMIN_ROOM_TYPES[originalRoom.type] || ADMIN_ROOM_TYPES.standard).ac
+      : !!(originalRoom.ac ?? originalRoom.hasAc ?? originalRoom.has_ac),
+    parking: !!(originalRoom.parking || originalRoom.hasParking || originalRoom.has_parking),
+    kitchen: !!(originalRoom.kitchen || originalRoom.hasKitchen || originalRoom.has_kitchen),
+  } : features;
+  const originalComputedRent = originalRoom
+    ? computeRoomRent(originalRoom.type, originalRoom.floor, originalRoom.view, originalFeatures, config)
+    : computedRent;
   const rentInfo = resolveRoomRent ? resolveRoomRent(room, config) : {
     rent: room.rent,
     source: 'legacy',
@@ -982,6 +1085,14 @@ function RoomEditForm({ room, onUpdate, config }) {
   };
   const effectiveRent = Number(rentInfo.rent) || 0;
   const overrideRent = rentInfo.override == null ? '' : rentInfo.override;
+  const pricingControlChanged = !!(originalRoom && (
+    String(originalRoom.type || '') !== String(room.type || '') ||
+    String(originalRoom.view || '') !== String(room.view || '') ||
+    !!originalFeatures.balcony !== !!features.balcony ||
+    !!originalFeatures.ac !== !!features.ac ||
+    !!originalFeatures.parking !== !!features.parking ||
+    !!originalFeatures.kitchen !== !!features.kitchen
+  ));
 
   const clearRentOverride = () => {
     onUpdate({
@@ -1148,6 +1259,15 @@ function RoomEditForm({ room, onUpdate, config }) {
       {/* Type & view */}
       <div>
         <SectionHeading title="ประเภทและตำแหน่ง" level={3} style={{ marginBottom: 10 }} />
+        <div style={{
+          padding: 10, background: C.infoSoft, border: `1px solid ${C.info}33`,
+          borderRadius: 8, fontSize: 12.5, color: C.infoInk,
+          lineHeight: 1.55, marginBottom: 10,
+        }}>
+          ใช้กำหนด “ลักษณะจริงของห้อง” เพื่อแสดงผลในหน้าห้อง/หน้าจอง และคำนวณค่าเช่าตามสูตร
+          จากหน้า Pricing. การเปลี่ยนตรงนี้มีผลกับห้องว่างและสัญญาใหม่เท่านั้น;
+          สัญญาที่ lock แล้วกับบิลเดิมไม่ถูกแก้ย้อนหลัง.
+        </div>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
           <Select
             label="ประเภทห้อง"
@@ -1163,9 +1283,42 @@ function RoomEditForm({ room, onUpdate, config }) {
           />
         </div>
         <div style={{ marginTop: 12, padding: 12, background: C.surfaceAlt, borderRadius: 8 }}>
-          <Toggle label="มีระเบียง"  checked={room.balcony} onChange={(v) => onUpdate({ balcony: v })} />
-          <Toggle label="ที่จอดรถ"   checked={room.parking} onChange={(v) => onUpdate({ parking: v })} />
-          <Toggle label="ครัวในห้อง" checked={room.kitchen} onChange={(v) => onUpdate({ kitchen: v })} />
+          <div style={{ fontSize: 12, color: C.muted, marginBottom: 4 }}>
+            คุณสมบัติพิเศษที่ใช้ในสูตรราคา
+          </div>
+          <Toggle
+            label="แอร์"
+            checked={features.ac}
+            onChange={(v) => onUpdate({ ac: v })}
+            hint="ถ้าเปิด ระบบจะบวกพรีเมียมแอร์ตามหน้า Pricing; ถ้าปิด จะไม่บวกแม้ประเภทห้องปกติมีแอร์"
+          />
+          <Toggle label="มีระเบียง"  checked={!!room.balcony} onChange={(v) => onUpdate({ balcony: v })} />
+          <Toggle label="ที่จอดรถ"   checked={!!room.parking} onChange={(v) => onUpdate({ parking: v })} />
+          <Toggle label="ครัวในห้อง" checked={!!room.kitchen} onChange={(v) => onUpdate({ kitchen: v })} />
+        </div>
+        <div style={{
+          marginTop: 10, padding: 10,
+          background: pricingControlChanged ? C.warningSoft : C.surfaceAlt,
+          border: `1px solid ${pricingControlChanged ? '#f0c36a' : C.border}`,
+          borderRadius: 8, fontSize: 12.5, color: pricingControlChanged ? C.warningInk : C.muted,
+          lineHeight: 1.6,
+        }}>
+          <div style={{ fontWeight: 600, color: pricingControlChanged ? C.warningInk : C.ink2 }}>
+            ผลต่อราคา
+          </div>
+          <div>
+            ราคาตามสูตร: {fmtCurrency(originalComputedRent)} → <b>{fmtCurrency(computedRent)}</b>
+          </div>
+          {rentInfo.source === 'override' ? (
+            <div>
+              ห้องนี้มีราคาพิเศษรายห้องอยู่ ราคาที่ใช้จริงยังเป็น <b>{fmtCurrency(effectiveRent)}</b>
+              จนกว่าจะกด “ล้างราคาพิเศษ”
+            </div>
+          ) : (
+            <div>
+              ราคาที่ใช้สำหรับห้องว่าง/สัญญาใหม่ตอนนี้คือ <b>{fmtCurrency(effectiveRent)}</b>
+            </div>
+          )}
         </div>
       </div>
 
@@ -1188,17 +1341,51 @@ function RoomEditForm({ room, onUpdate, config }) {
           <Input
             label="ค่าน้ำ (หน่วย)" type="number" suffix="หน่วย"
             value={room.waterUnits}
-            onChange={(v) => onUpdate({ waterUnits: Number(v), water: Number(v) * config.utilities.waterRate })}
+            onChange={(v) => onUpdate({
+              waterUnits: Number(v),
+              water: Number(v) * (Number(room.waterRateOverride) > 0
+                ? Number(room.waterRateOverride)
+                : config.utilities.waterRate),
+            })}
           />
           <Input
             label="ค่าไฟ (หน่วย)" type="number" suffix="หน่วย"
             value={room.elecUnits}
-            onChange={(v) => onUpdate({ elecUnits: Number(v), elec: Number(v) * config.utilities.elecRate })}
+            onChange={(v) => onUpdate({
+              elecUnits: Number(v),
+              elec: Number(v) * (Number(room.elecRateOverride) > 0
+                ? Number(room.elecRateOverride)
+                : config.utilities.elecRate),
+            })}
           />
           <Input
             label="ค่า Wi-Fi" type="number" suffix="บาท/เดือน"
             value={room.wifi}
             onChange={(v) => onUpdate({ wifi: Number(v) })}
+            hint="ใส่ 0 เพื่อไม่คิด (free wifi) — ปล่อยว่างเพื่อใช้ค่ากลางจาก Pricing"
+          />
+          {/* Per-room rate overrides — same fallback pattern as rent_override.
+              Empty / 0 / negative → falls back to config.utilities.{waterRate,
+              elecRate}. Server-side billing engine reads room.waterRateOverride
+              or snake_case water_rate_override, so the saved value flows to
+              the actual generated bill (not just the preview). */}
+          <Input
+            label="อัตราค่าน้ำพิเศษ (บาท/หน่วย)" type="number" step="0.01" suffix="บาท/หน่วย"
+            value={room.waterRateOverride == null ? '' : room.waterRateOverride}
+            placeholder={String(config.utilities.waterRate ?? 18)}
+            onChange={(v) => onUpdate({
+              waterRateOverride: v === '' ? null : Number(v),
+            })}
+            hint="ปล่อยว่างเพื่อใช้อัตรากลางจาก Pricing"
+          />
+          <Input
+            label="อัตราค่าไฟพิเศษ (บาท/หน่วย)" type="number" step="0.01" suffix="บาท/หน่วย"
+            value={room.elecRateOverride == null ? '' : room.elecRateOverride}
+            placeholder={String(config.utilities.elecRate ?? 8)}
+            onChange={(v) => onUpdate({
+              elecRateOverride: v === '' ? null : Number(v),
+            })}
+            hint="ปล่อยว่างเพื่อใช้อัตรากลางจาก Pricing"
           />
         </div>
         <div style={{

@@ -221,6 +221,87 @@ test('resolveUtilityUsageFromBillRow: NaN/missing fields → defensive zero-shap
   assert.equal(u3.units, 0);
 });
 
+// --- Per-room utility rate override ----------------------------------------
+// Each room may set its own water/elec rate (and wifi fee) — useful when
+// admin runs two tariff tiers in the same building. Override priority:
+// room.{water,elec}RateOverride / room.wifiOverride (or snake_case) → falls
+// back to config.utilities. Negative / NaN / empty strings slip back to
+// global so a typo can't accidentally credit the tenant.
+
+test('buildBill: per-room waterRateOverride beats config.utilities.waterRate', () => {
+  const flags = { lateFee: { enabled: false }, vat: { enabled: false } };
+  const room = { ...baseRoom, waterRateOverride: 25 };  // global=18
+  const bill = billing.buildBill({ room, config: baseConfig, features: flags });
+  // 5 units × 25 = 125 (not 5 × 18 = 90)
+  assert.equal(bill.waterRate, 25);
+  assert.equal(bill.waterAmount, 125);
+  assert.equal(bill.waterRateSource, 'override');
+});
+
+test('buildBill: per-room elecRateOverride beats config.utilities.elecRate', () => {
+  const flags = { lateFee: { enabled: false }, vat: { enabled: false } };
+  const room = { ...baseRoom, elecRateOverride: 12 };
+  const bill = billing.buildBill({ room, config: baseConfig, features: flags });
+  // 100 units × 12 = 1200
+  assert.equal(bill.elecRate, 12);
+  assert.equal(bill.elecAmount, 1200);
+  assert.equal(bill.elecRateSource, 'override');
+});
+
+test('buildBill: per-room wifi override honors zero (free wifi for this unit)', () => {
+  const flags = { lateFee: { enabled: false }, vat: { enabled: false } };
+  const room = { ...baseRoom, wifi: 0 };  // explicit 0 = free wifi
+  const bill = billing.buildBill({ room, config: baseConfig, features: flags });
+  assert.equal(bill.wifi, 0);
+  assert.equal(bill.wifiFeeSource, 'override');
+  // wifi=0 → no line item on the bill (preserves prior behaviour)
+  assert.equal(bill.items.find((it) => it.label === 'ค่าอินเทอร์เน็ต'), undefined);
+});
+
+test('buildBill: per-room wifi override accepts higher number', () => {
+  const flags = { lateFee: { enabled: false }, vat: { enabled: false } };
+  const room = { ...baseRoom, wifi: 500 };  // global=250
+  const bill = billing.buildBill({ room, config: baseConfig, features: flags });
+  assert.equal(bill.wifi, 500);
+  assert.equal(bill.wifiFeeSource, 'override');
+});
+
+test('buildBill: negative/NaN override falls back to global rate (no typo discount)', () => {
+  const flags = { lateFee: { enabled: false }, vat: { enabled: false } };
+  // Negative → fallback to global
+  const r1 = { ...baseRoom, waterRateOverride: -5 };
+  const b1 = billing.buildBill({ room: r1, config: baseConfig, features: flags });
+  assert.equal(b1.waterRate, 18, 'negative override must fall back to global');
+  assert.equal(b1.waterRateSource, 'global');
+  // NaN → fallback
+  const r2 = { ...baseRoom, elecRateOverride: 'not-a-number' };
+  const b2 = billing.buildBill({ room: r2, config: baseConfig, features: flags });
+  assert.equal(b2.elecRate, 8);
+  assert.equal(b2.elecRateSource, 'global');
+  // Empty string → fallback
+  const r3 = { ...baseRoom, waterRateOverride: '' };
+  const b3 = billing.buildBill({ room: r3, config: baseConfig, features: flags });
+  assert.equal(b3.waterRate, 18);
+});
+
+test('buildBill: snake_case override keys also work (rooms_v2 column shape)', () => {
+  const flags = { lateFee: { enabled: false }, vat: { enabled: false } };
+  const room = { ...baseRoom, water_rate_override: 20, elec_rate_override: 10 };
+  const bill = billing.buildBill({ room, config: baseConfig, features: flags });
+  assert.equal(bill.waterRate, 20);
+  assert.equal(bill.elecRate, 10);
+});
+
+test('buildBill: no override → both source = global, rates match config', () => {
+  const flags = { lateFee: { enabled: false }, vat: { enabled: false } };
+  const bill = billing.buildBill({ room: baseRoom, config: baseConfig, features: flags });
+  assert.equal(bill.waterRate, 18);
+  assert.equal(bill.elecRate, 8);
+  assert.equal(bill.waterRateSource, 'global');
+  assert.equal(bill.elecRateSource, 'global');
+  assert.equal(bill.wifiFeeSource, 'global');
+});
+
 test('isChargeApplicableForPeriod: rejects YYYY-13 / YYYY-00 outside 01-12', () => {
   // Bill period must be a real Gregorian month. The matching regex in
   // /api/bills/bulk-generate accepts only digit count, so the recurring
