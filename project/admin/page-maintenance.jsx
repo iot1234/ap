@@ -163,7 +163,10 @@ function PageMaintenance({ rooms, setRooms, addActivity, setToast }) {
           value={search}
           onChange={setSearch}
           fullWidth={false}
-          style={{ width: 320 }}
+          /* flex:1 lets the input grow on desktop while minWidth keeps
+             the placeholder readable, and maxWidth caps it so the row
+             of filters doesn't all collapse onto one giant field. */
+          style={{ flex: 1, minWidth: 220, maxWidth: 360 }}
         />
         <Select
           value={filterPriority}
@@ -176,7 +179,7 @@ function PageMaintenance({ rooms, setRooms, addActivity, setToast }) {
             { value: 'low', label: 'ต่ำ' },
           ]}
           fullWidth={false}
-          style={{ width: 180 }}
+          style={{ minWidth: 140, flex: '0 0 auto' }}
         />
       </div>
 

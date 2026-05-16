@@ -267,6 +267,26 @@
 </style>
 </head>
 <body>
+<!-- Preload hints: the <script type="text/babel"> tags below execute
+     sequentially (Babel needs them in order to register window.PageX
+     before shell.jsx mounts React). But the BYTES can download in
+     parallel — these preload hints kick off the network fetches early
+     so by the time Babel reaches each script, the body is already in
+     the browser cache. Without this, Babel waits ~50-300ms per script
+     on a cold load. With it, total download time approaches the slowest
+     single file rather than the sum. crossorigin="anonymous" matches
+     what <script> uses by default for same-origin static assets. -->
+<link rel="preload" as="script" href="/api-client.js">
+<link rel="preload" as="script" href="/admin/shared.jsx">
+<link rel="preload" as="script" href="/admin/ui.jsx">
+<link rel="preload" as="script" href="/admin/hooks.jsx">
+<link rel="preload" as="script" href="/admin/shell.jsx">
+<!-- The 28 page-*.jsx files don't all need to preload — only the
+     foundation files + shell.jsx are critical-path. Pages load on demand
+     after the foundation registers their parent components. We
+     intentionally DON'T preload every page file here to avoid wasting
+     mobile bandwidth on routes the user never visits. -->
+
 <div id="root"></div>
 
 <!-- API client: hydrates localStorage from server before React mounts -->

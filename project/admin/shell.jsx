@@ -188,6 +188,22 @@ function Sidebar({ page, setPage, mobileOpen, setMobileOpen, isMobile, pendingBo
   const isCollapsed = !isMobile && collapsed;
   const railWidth = isCollapsed ? 64 : 260;
 
+  // Mobile drawer UX: pressing Escape closes the drawer, and the body
+  // scroll is locked while the drawer is open so swiping inside the
+  // drawer doesn't accidentally scroll the page behind it (which made
+  // the drawer feel "stuck" on iOS Safari).
+  useEffect(() => {
+    if (!isMobile || !mobileOpen) return;
+    const onKey = (e) => { if (e.key === 'Escape') setMobileOpen(false); };
+    window.addEventListener('keydown', onKey);
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      document.body.style.overflow = prevOverflow;
+    };
+  }, [isMobile, mobileOpen, setMobileOpen]);
+
   const sidebarStyle = {
     width: railWidth,
     background: C.navBg,
