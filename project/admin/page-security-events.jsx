@@ -113,13 +113,31 @@ function PageSecurityEvents({ setToast }) {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 1, background: C.border, borderRadius: 8, overflow: 'hidden', maxHeight: 480, overflowY: 'auto' }}>
             {data.failed.map((ev) => (
               <div key={ev.id} style={{
-                background: C.bg, padding: '8px 14px', display: 'grid',
-                gridTemplateColumns: '140px 130px 1fr 100px', gap: 8, fontSize: 12, alignItems: 'center',
+                background: C.bg, padding: '10px 14px',
+                fontSize: 12,
               }}>
-                <span style={{ color: C.muted }}>{new Date(ev.created_at).toLocaleString('th-TH', { hour12: false })}</span>
-                <Pill color={ev.action.includes('locked') ? '#b94a48' : '#c08a2a'}>{ev.action.replace('auth.', '').replace('tenant.', '')}</Pill>
-                <code style={{ fontFamily: 'JetBrains Mono, monospace' }}>{ev.user_id || '—'}</code>
-                <span style={{ color: C.muted, fontFamily: 'JetBrains Mono, monospace', fontSize: 11 }}>{ev.ip || '—'}</span>
+                {/* Header row: timestamp + action pill — wraps on narrow */}
+                <div style={{
+                  display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
+                  marginBottom: 4,
+                }}>
+                  <span style={{ color: C.muted }}>
+                    {new Date(ev.created_at).toLocaleString('th-TH', { hour12: false })}
+                  </span>
+                  <Pill color={ev.action.includes('locked') ? 'danger' : 'warning'} size="sm">
+                    {ev.action.replace('auth.', '').replace('tenant.', '')}
+                  </Pill>
+                </div>
+                {/* User + IP row — wraps gracefully on mobile */}
+                <div style={{
+                  display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap',
+                  fontFamily: 'JetBrains Mono, monospace', fontSize: 11.5,
+                }}>
+                  <code style={{ wordBreak: 'break-all' }}>{ev.user_id || '—'}</code>
+                  <span style={{ color: C.muted, wordBreak: 'break-all', marginLeft: 'auto' }}>
+                    {ev.ip || '—'}
+                  </span>
+                </div>
               </div>
             ))}
           </div>

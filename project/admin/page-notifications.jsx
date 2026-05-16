@@ -7,7 +7,7 @@ const { useState, useEffect } = React;
 
 function PageNotifications() {
   const C = window.ADMIN_C;
-  const { Card, Pill, PageContainer, PageHeader, EmptyState } = window;
+  const { Card, Pill, StatusBadge, PageContainer, PageHeader, EmptyState } = window;
   const [list, setList] = useState([]);
   const [filter, setFilter] = useState('');
 
@@ -41,18 +41,23 @@ function PageNotifications() {
         {shown.length === 0 ? <EmptyState title="ยังไม่มีบันทึก" /> : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 1, background: C.border, maxHeight: 600, overflow: 'auto' }}>
             {shown.map((x) => (
-              <div key={x.id} style={{
-                background: C.bg, padding: '12px 14px', display: 'grid',
-                gridTemplateColumns: '160px 80px 90px 1fr 80px', gap: 12, fontSize: 13.5, alignItems: 'center',
+              <div key={x.id} className="notif-row" style={{
+                background: C.bg, padding: '12px 14px',
+                fontSize: 13.5,
               }}>
-                <span style={{ color: C.muted, fontSize: 12 }}>{new Date(x.created_at).toLocaleString('th-TH')}</span>
-                <Pill color={x.status === 'sent' ? C.success : C.danger}>{x.status}</Pill>
-                <span>{x.channel}</span>
-                <div>
-                  <div>{x.subject || x.body?.slice(0, 80)}</div>
-                  {x.error ? <div style={{ color: C.danger, fontSize: 12 }}>{x.error}</div> : null}
+                {/* Top row — status pill + meta (always one line on
+                    desktop, stacks under message on phones via CSS). */}
+                <div className="notif-meta" style={{
+                  display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
+                  marginBottom: 4,
+                }}>
+                  <span style={{ color: C.muted, fontSize: 12 }}>{new Date(x.created_at).toLocaleString('th-TH')}</span>
+                  <StatusBadge status={x.status} size="sm" />
+                  <span style={{ color: C.muted, fontSize: 12 }}>· {x.channel}</span>
+                  <span style={{ color: C.muted, fontSize: 12, marginLeft: 'auto' }}>{x.recipient}</span>
                 </div>
-                <span style={{ color: C.muted, fontSize: 12 }}>{x.recipient}</span>
+                <div style={{ wordBreak: 'break-word' }}>{x.subject || x.body?.slice(0, 80)}</div>
+                {x.error ? <div style={{ color: C.danger, fontSize: 12, marginTop: 4, wordBreak: 'break-word' }}>{x.error}</div> : null}
               </div>
             ))}
           </div>

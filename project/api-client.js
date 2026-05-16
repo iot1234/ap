@@ -52,19 +52,50 @@
   const origRemoveItem = window.localStorage.removeItem.bind(window.localStorage);
 
   // --- Hydrate localStorage from API once on first load --------------------
+  // Helper: fetch with a hard timeout so a slow/hanging API doesn't
+  // block React mount indefinitely. Without this, hydrate() awaits the
+  // GET /api/data forever and the admin sees a white screen until they
+  // refresh. AbortController cancels the in-flight request after `ms`
+  // so we fall through to "no hydrate" and let React render with
+  // localStorage's existing values.
+  async function fetchWithTimeout(url, opts, ms) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), ms);
+    try {
+      return await fetch(url, { ...opts, signal: controller.signal });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async function hydrate() {
     isHydrating = true;
     try {
       // First, find out if we're authenticated. If not, skip writes silently.
+      // 4s timeout — generous for a JSON 200 OK but bounded so a hung
+      // session middleware doesn't freeze the entire admin shell.
       try {
-        const meRes = await fetch('/api/auth/me', { credentials: 'include' });
+        const meRes = await fetchWithTimeout('/api/auth/me', { credentials: 'include' }, 4000);
         if (meRes.ok) {
           const me = await meRes.json();
           isAuthenticated = !!(me && me.user);
         }
-      } catch {}
+      } catch (e) {
+        // AbortError or network — treat as "not authenticated" and
+        // continue. React will mount + a 401 will redirect to /login
+        // on the next privileged request anyway.
+        if (e && e.name !== 'AbortError') console.warn('[api-client] auth check error', e.message || e);
+      }
 
-      const res = await fetch('/api/data', { credentials: 'include' });
+      // 8s timeout on /api/data — it can be larger (rooms + bookings +
+      // activities) so we give it more room than auth/me but still cap.
+      let res;
+      try {
+        res = await fetchWithTimeout('/api/data', { credentials: 'include' }, 8000);
+      } catch (e) {
+        console.warn('[api-client] hydrate /api/data timed out — using existing localStorage:', e.message || e);
+        return;
+      }
       if (!res.ok) {
         console.warn('[api-client] hydrate failed', res.status);
         return;
