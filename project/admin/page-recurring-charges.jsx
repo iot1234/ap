@@ -346,23 +346,25 @@ function RecurringForm({ initial, tenants, tenantLoadWarning, onReloadTenants, o
           </label>
         </div>
         {scope === 'tenant' ? (
-          <select value={form.tenant_id} onChange={(e) => setForm({ ...form, tenant_id: e.target.value })}
-            style={inp}>
-            <option value="">— เลือกผู้เช่า —</option>
-            {tenants.map((t) => (
-              <option key={t.id} value={t.id}>{t.full_name} · {t.phone}{t.current_room_id ? ` · ห้อง ${t.current_room_id}` : ''}</option>
-            ))}
-          </select>
-          {tenantLoadWarning ? (
-            <div style={{
-              marginTop: 8, padding: 10, borderRadius: 8,
-              background: C.warningSoft, color: C.warningInk, fontSize: 12.5,
-              display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'space-between',
-            }}>
-              <span>รายชื่อผู้เช่ายังโหลดไม่ครบ เลือกรีเฟรชหรือผูกกับห้องแทน</span>
-              <Btn size="sm" variant="secondary" type="button" onClick={onReloadTenants} disabled={busy}>รีเฟรช</Btn>
-            </div>
-          ) : null}
+          <React.Fragment>
+            <select value={form.tenant_id} onChange={(e) => setForm({ ...form, tenant_id: e.target.value })}
+              style={inp}>
+              <option value="">— เลือกผู้เช่า —</option>
+              {tenants.map((t) => (
+                <option key={t.id} value={t.id}>{t.full_name} · {t.phone}{t.current_room_id ? ` · ห้อง ${t.current_room_id}` : ''}</option>
+              ))}
+            </select>
+            {tenantLoadWarning ? (
+              <div style={{
+                marginTop: 8, padding: 10, borderRadius: 8,
+                background: C.warningSoft, color: C.warningInk, fontSize: 12.5,
+                display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'space-between',
+              }}>
+                <span>รายชื่อผู้เช่ายังโหลดไม่ครบ เลือกรีเฟรชหรือผูกกับห้องแทน</span>
+                <Btn size="sm" variant="secondary" type="button" onClick={onReloadTenants} disabled={busy}>รีเฟรช</Btn>
+              </div>
+            ) : null}
+          </React.Fragment>
         ) : (
           <input value={form.room_id} onChange={(e) => setForm({ ...form, room_id: e.target.value })}
             placeholder="เช่น 1A" maxLength={32} style={inp} />

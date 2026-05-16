@@ -2052,6 +2052,32 @@ test('recurring charges page fails soft instead of hanging on tenant-list load',
     'page should use apiCall so errors/timeouts are normalized');
 });
 
+test('recurring charges form wraps multi-sibling ternary in a Fragment (no babel crash)', () => {
+  // Earlier shape had `{scope === 'tenant' ? (<select/>...{warn})...` —
+  // multiple JSX siblings inside a ternary branch without a Fragment
+  // wrapper. Babel-standalone parses this fine in isolation but the live
+  // page fails to render with no actionable error, so admin sees a blank
+  // /admin#recurring panel. The fix is `<React.Fragment>` (or `<>`).
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(
+    path.join(__dirname, '..', 'project', 'admin', 'page-recurring-charges.jsx'), 'utf8'
+  );
+  const scopeBranch = src.match(/scope === 'tenant' \? \(([\s\S]+?)\) : \(/);
+  assert.ok(scopeBranch, 'tenant scope ternary must exist');
+  // The truthy branch must either be a single root element OR wrap its
+  // siblings in <React.Fragment>...</React.Fragment> (or <>...</>).
+  // Reject the case where a <select>...</select> is followed by another
+  // sibling JSX expression (`{...}`) without a fragment.
+  const branchBody = scopeBranch[1];
+  const hasFragment = /React\.Fragment|<>[\s\S]*<\/>/.test(branchBody);
+  const hasMultipleRoots = /<\/select>\s*\{/.test(branchBody);
+  if (hasMultipleRoots) {
+    assert.ok(hasFragment,
+      'multi-sibling ternary branch must be wrapped in React.Fragment to avoid silent JSX parse failure');
+  }
+});
+
 test('admin shell canonicalizes legacy recurring charges hash route', () => {
   const fs = require('node:fs');
   const path = require('node:path');
