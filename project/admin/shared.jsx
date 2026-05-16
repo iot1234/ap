@@ -133,11 +133,7 @@ const DEFAULT_CONFIG = {
   },
   discounts: {
     sixMonth: 5, twelveMonth: 10, twentyFourMonth: 15,
-    firstMonth: 0, referral: 500, loyaltyPerYear: 200,
-  },
-  fees: {
-    contract: 500, cleaning: 1500, latePenaltyPerDay: 50,
-    rekey: 300, parkingMonthly: 0,
+    firstMonth: 0,
   },
   building: {
     name:    'บ้านกาญจน์ เรสซิเดนซ์',

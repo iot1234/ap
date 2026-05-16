@@ -327,22 +327,22 @@ function TabNotify({ draft, updatePath }) {
       <Card>
         <SectionHeading
           title="กำหนดการบิล"
-          subtitle="ค่าเริ่มต้นสำหรับการออกบิลด้วยมือจากหน้าบิล"
+          subtitle="ค่ากำหนดชำระสำหรับทั้งการออกบิลด้วยมือ และ scheduler ที่ออกบิลอัตโนมัติ"
           level={3}
-          action={<Pill color="neutral">Manual billing</Pill>}
+          action={<Pill color="neutral">Single source</Pill>}
         />
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12, alignItems: 'end' }}>
           <Input
-            label="ครบกำหนดชำระเริ่มต้น"
+            label="ครบกำหนดชำระ"
             type="number"
             suffix="ของเดือน"
             value={draft.notify.dueOnDay}
             onChange={(v) => updatePath('notify.dueOnDay', Number(v))}
-            hint="ใช้เป็น dueDay ตอนกดออกบิลด้วยมือ"
+            hint="ใช้ทั้ง dueDay ตอนกดออกบิลด้วยมือ และ scheduler billAutoGenerate"
           />
           <div style={{ fontSize: 13, color: C.ink2, lineHeight: 1.6 }}>
-            วันที่ออกบิลอัตโนมัติและกำหนดชำระของ scheduler ตั้งค่าที่หน้า
-            <b> ฟีเจอร์ระบบ</b> เพื่อให้ backend ใช้ค่าเดียวกับ UI
+            เปิด/ปิด scheduler และเลือกวันที่ออกบิลอัตโนมัติได้ที่หน้า
+            <b> ฟีเจอร์ระบบ → ออกบิลอัตโนมัติทุกเดือน</b>
             <div style={{ marginTop: 8 }}>
               <Btn variant="secondary" onClick={() => { window.location.hash = 'features'; }}>
                 ไปตั้งค่า billAutoGenerate

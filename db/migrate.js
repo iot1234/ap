@@ -938,6 +938,75 @@ async function migrate(pool, opts = {}) {
     console.warn('[db] contract template auto-migrate skipped:', err.message);
   }
 
+  // === One-time: unify dueDay (manual + scheduler) =========================
+  // billAutoGenerate.dueDay (features blob) and notify.dueOnDay (config blob)
+  // used to be two separate writes for the same logical "default due day".
+  // Scheduler now reads config.notify.dueOnDay only. Pull any non-default
+  // dueDay value from the features blob into config (if config doesn't have
+  // its own setting yet), then drop the obsolete key so future blob dumps
+  // don't show the dead field. Idempotent: removing a missing JSON key is a
+  // no-op.
+  try {
+    const feats = await pool.query(
+      `SELECT value FROM app_data WHERE key='baankarn_features_v1'`
+    );
+    const dueDayLegacy = feats.rows[0]?.value?.billAutoGenerate?.dueDay;
+    if (Number.isFinite(Number(dueDayLegacy))) {
+      // Only seed config.notify.dueOnDay if it's missing — never overwrite
+      // an operator's explicit value.
+      await pool.query(
+        `UPDATE app_data
+            SET value = jsonb_set(
+              COALESCE(value, '{}'::jsonb),
+              '{notify,dueOnDay}',
+              to_jsonb($1::int),
+              true
+            )
+          WHERE key='baankarn_config_v1'
+            AND (value->'notify'->>'dueOnDay') IS NULL`,
+        [Math.max(1, Math.min(28, Number(dueDayLegacy)))]
+      );
+      // Drop the legacy key from the features blob.
+      await pool.query(
+        `UPDATE app_data
+            SET value = value #- '{billAutoGenerate,dueDay}'
+          WHERE key='baankarn_features_v1'
+            AND value->'billAutoGenerate' ? 'dueDay'`
+      );
+      console.log(`[db] unified dueDay: moved features.billAutoGenerate.dueDay=${dueDayLegacy} → config.notify.dueOnDay (if absent)`);
+    }
+  } catch (err) {
+    console.warn('[db] dueDay unify skipped:', err.message);
+  }
+
+  // === One-time: strip dead pricing/fee keys from config blob =============
+  // Earlier rounds removed the UI inputs for discounts.referral,
+  // discounts.loyaltyPerYear, and the whole fees.{contract,cleaning,rekey,
+  // parkingMonthly,latePenaltyPerDay} object — no backend code reads them.
+  // Old DB rows still carry the values, so pgquery/pgdump output is noisy
+  // and a future operator might "fix" a number that does nothing. Strip
+  // them once so the blob matches the active schema.
+  try {
+    const r = await pool.query(
+      `UPDATE app_data
+          SET value = (value
+            #- '{discounts,referral}'
+            #- '{discounts,loyaltyPerYear}'
+            #- '{fees}')
+        WHERE key='baankarn_config_v1'
+          AND (
+               value->'discounts' ? 'referral'
+            OR value->'discounts' ? 'loyaltyPerYear'
+            OR value ? 'fees'
+          )`
+    );
+    if (r.rowCount > 0) {
+      console.log(`[db] stripped dead pricing/fee keys from baankarn_config_v1`);
+    }
+  } catch (err) {
+    console.warn('[db] config blob cleanup skipped:', err.message);
+  }
+
   // === One-time role backfill =============================================
   // The auth_users.role column was originally `TEXT DEFAULT 'admin'`. The
   // RBAC system later switched to a 4-tier ladder (owner/manager/staff/

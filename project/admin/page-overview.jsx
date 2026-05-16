@@ -15,14 +15,14 @@ function PageOverview({ rooms, config, bookings, activities, addActivity, setToa
 
   // --- Real revenue trend from DB. Pulls 12 months of bills, slices to last
   // 6 for the dashboard chart. Falls back to an empty series if the endpoint
-  // is unreachable (manager+ role required by /api/reports2/revenue) so the
+  // is unreachable (manager+ role required by /api/reports/revenue) so the
   // page still renders. The previous Math.sin formula fabricated numbers
   // unrelated to the actual `bills` table — see audit, May 2026.
   const [revenueRows, setRevenueRows] = React.useState(null);  // null = loading, [] = error/empty
   React.useEffect(() => {
     let cancel = false;
     const year = new Date().getFullYear();
-    fetch(`/api/reports2/revenue?year=${year}`, { credentials: 'same-origin' })
+    fetch(`/api/reports/revenue?year=${year}`, { credentials: 'same-origin' })
       .then(async (r) => (r.ok ? (await r.json()).rows : []))
       .then((rows) => { if (!cancel) setRevenueRows(Array.isArray(rows) ? rows : []); })
       .catch(() => { if (!cancel) setRevenueRows([]); });

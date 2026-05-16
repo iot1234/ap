@@ -133,7 +133,7 @@ const DEFAULTS = Object.freeze({
   billAutoGenerate: {
     enabled: false,
     dayOfMonth: 1,               // run on the 1st of each month
-    dueDay: 15,                   // due on the 15th
+    // dueDay lives in config.notify.dueOnDay so manual + auto share it.
   },
   // Tenancy contract / identity capture defaults. These describe the
   // safety guards admin can tune from the Features page — none of them

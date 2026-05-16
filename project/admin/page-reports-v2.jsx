@@ -1,9 +1,9 @@
 // === admin/page-reports-v2.jsx =============================================
-// Real reports backed by /api/reports2/* endpoints (DB-aggregated, not the
+// Real reports backed by /api/reports/* endpoints (DB-aggregated, not the
 // localStorage-derived numbers in the legacy page-reports.jsx).
 //
 // Tabs: Revenue · Occupancy · Overdue · Maintenance · Cashflow
-// Each tab supports CSV / XLSX export (calls /api/reports2/<x>?format=…).
+// Each tab supports CSV / XLSX export (calls /api/reports/<x>?format=…).
 // ===========================================================================
 
 const { useState, useEffect, useMemo } = React;
@@ -29,11 +29,11 @@ function PageReportsV2({ setToast, embedded = false }) {
     setBusy(true);
     try {
       let url;
-      if (tab === 'revenue')      url = `/api/reports2/revenue?year=${year}`;
-      else if (tab === 'occupancy') url = `/api/reports2/occupancy?year=${year}`;
-      else if (tab === 'overdue')   url = `/api/reports2/overdue`;
-      else if (tab === 'maintenance') url = `/api/reports2/maintenance/stats`;
-      else if (tab === 'cashflow')  url = `/api/reports2/cashflow?months=12`;
+      if (tab === 'revenue')      url = `/api/reports/revenue?year=${year}`;
+      else if (tab === 'occupancy') url = `/api/reports/occupancy?year=${year}`;
+      else if (tab === 'overdue')   url = `/api/reports/overdue`;
+      else if (tab === 'maintenance') url = `/api/reports/maintenance/stats`;
+      else if (tab === 'cashflow')  url = `/api/reports/cashflow?months=12`;
       const r = await fetch(url, { credentials: 'same-origin' });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || 'load failed');
@@ -46,11 +46,11 @@ function PageReportsV2({ setToast, embedded = false }) {
   useEffect(() => { load(); }, [tab, year]);
 
   function exportAs(format) {
-    const url = tab === 'revenue' ? `/api/reports2/revenue?year=${year}&format=${format}`
-      : tab === 'occupancy' ? `/api/reports2/occupancy?year=${year}&format=${format}`
-      : tab === 'overdue' ? `/api/reports2/overdue?format=${format}`
-      : tab === 'maintenance' ? `/api/reports2/maintenance/stats?format=${format}`
-      : tab === 'cashflow' ? `/api/reports2/cashflow?months=12&format=${format}`
+    const url = tab === 'revenue' ? `/api/reports/revenue?year=${year}&format=${format}`
+      : tab === 'occupancy' ? `/api/reports/occupancy?year=${year}&format=${format}`
+      : tab === 'overdue' ? `/api/reports/overdue?format=${format}`
+      : tab === 'maintenance' ? `/api/reports/maintenance/stats?format=${format}`
+      : tab === 'cashflow' ? `/api/reports/cashflow?months=12&format=${format}`
       : null;
     if (!url) {
       setToast && setToast({ kind: 'info', message: 'หน้านี้ไม่รองรับการส่งออก' });

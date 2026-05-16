@@ -231,10 +231,12 @@ test('settings bill schedule does not expose dead auto-bill date control', () =>
 test('bill generation honors recurringCharges.autoIncludeOnBillGen', () => {
   const fs = require('node:fs');
   const path = require('node:path');
-  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   const scheduler = fs.readFileSync(path.join(__dirname, '..', 'services', 'scheduler.js'), 'utf8');
   const extras = fs.readFileSync(path.join(__dirname, '..', 'routes', 'bills-extras.js'), 'utf8');
-  assert.match(server, /recurringCharges\?\.enabled && flags\.recurringCharges\?\.autoIncludeOnBillGen !== false && !b\.recurring/,
+  // Single-bill POST /api/bills now lives in routes/bills-extras.js (was in
+  // server.js before the bills surface was consolidated). Both POST / and
+  // POST /bulk-generate gate on the same flag in the same file.
+  assert.match(extras, /recurringCharges\?\.enabled && flags\.recurringCharges\?\.autoIncludeOnBillGen !== false && !b\.recurring/,
     'single bill create must not auto-load recurring rows when autoIncludeOnBillGen is false');
   assert.match(scheduler, /recurringCharges\?\.enabled && flags\.recurringCharges\?\.autoIncludeOnBillGen !== false/,
     'scheduler auto bill generation must respect autoIncludeOnBillGen');
@@ -627,10 +629,13 @@ test('/api/bills/:id/pay records offline payments in the payment ledger', () => 
 test('/api/bills create validates input and refuses to mutate paid/verified ledger rows', () => {
   const fs = require('node:fs');
   const path = require('node:path');
-  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
-  const idx = server.indexOf("app.post('/api/bills',");
+  // POST /api/bills moved into routes/bills-extras.js when the bill surface
+  // was consolidated. Look for the router declaration there rather than the
+  // old `app.post(...)` form that used to live in server.js.
+  const route = fs.readFileSync(path.join(__dirname, '..', 'routes', 'bills-extras.js'), 'utf8');
+  const idx = route.indexOf("r.post('/', sameOrigin");
   assert.ok(idx > 0, 'should find bill create handler');
-  const body = server.slice(idx, idx + 12000);
+  const body = route.slice(idx, idx + 12000);
   assert.match(body, /validateBody\(schemas\.generateBill\)/,
     'bill create must use request schema validation');
   assert.match(body, /WHERE bills\.status IN \('pending','overdue'\)/,
@@ -664,8 +669,12 @@ test('tenant drawer send-message button calls real tenant notify endpoint', () =
   // resolves the active tenant and dispatches via notifier.notifyTenant.
   const fs = require('node:fs');
   const path = require('node:path');
-  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
-  const route = server.match(/app\.post\('\/api\/tenants\/notify'[\s\S]+?\/\/ --- Bills:/)[0];
+  // The /api/tenants surface lives in routes/tenant-ops.js (round 9 consolidation).
+  // Extract the notify handler block via the next router declaration as the
+  // upper bound so we don't accidentally pick up assertions from neighbouring
+  // routes.
+  const ops = fs.readFileSync(path.join(__dirname, '..', 'routes', 'tenant-ops.js'), 'utf8');
+  const route = ops.match(/r\.post\('\/notify'[\s\S]+?r\.(get|post|put|delete)\(/)[0];
   assert.match(route, /requireRole\('owner', 'manager', 'staff'\)/,
     'tenant message endpoint must be role-gated');
   assert.match(route, /status='active'/,
@@ -1145,10 +1154,13 @@ test('GET /api/tenant/bills/:id/qr uses DB bill total, not browser query amount'
 test('/api/bills/render is owner-manager and rebuilds persisted bills server-side', () => {
   const fs = require('node:fs');
   const path = require('node:path');
-  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
-  const idx = server.indexOf("app.post('/api/bills/render'");
+  // POST /api/bills/render moved into routes/bills-extras.js alongside the
+  // other /api/bills/* endpoints. Helpers getRenderBillId +
+  // buildStoredBillPdfObject travelled with it.
+  const route = fs.readFileSync(path.join(__dirname, '..', 'routes', 'bills-extras.js'), 'utf8');
+  const idx = route.indexOf("r.post('/render'");
   assert.ok(idx > 0, 'should find admin bill PDF render handler');
-  const body = server.slice(idx, idx + 5000);
+  const body = route.slice(idx, idx + 5000);
   assert.match(body, /requireRole\('owner', 'manager'\)/,
     'bill PDF render must not allow staff');
   assert.match(body, /getRenderBillId\(req, bill\)/,
@@ -2057,10 +2069,12 @@ test('maintenance report aggregate FILTER syntax is PostgreSQL-valid', () => {
   // The wrong order only fails against a real DB, so pin it statically.
   const fs = require('node:fs');
   const path = require('node:path');
-  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
-  assert.doesNotMatch(server, /AVG\(cost\)::numeric\([^)]*\)\s+FILTER/i);
-  assert.match(server, /\(AVG\(cost\) FILTER \(WHERE cost > 0\)\)::numeric\(10,2\)/);
-  assert.match(server, /\(SUM\(cost\) FILTER \(WHERE status='completed'\)\)::numeric\(12,2\)/);
+  const reportsRoute = fs.readFileSync(
+    path.join(__dirname, '..', 'routes', 'reports.js'), 'utf8'
+  );
+  assert.doesNotMatch(reportsRoute, /AVG\(cost\)::numeric\([^)]*\)\s+FILTER/i);
+  assert.match(reportsRoute, /\(AVG\(cost\) FILTER \(WHERE cost > 0\)\)::numeric\(10,2\)/);
+  assert.match(reportsRoute, /\(SUM\(cost\) FILTER \(WHERE status='completed'\)\)::numeric\(12,2\)/);
 });
 
 test('reports v2 maintenance tab exports CSV and Excel', () => {
@@ -2073,7 +2087,7 @@ test('reports v2 maintenance tab exports CSV and Excel', () => {
     path.join(__dirname, '..', 'routes', 'reports.js'), 'utf8'
   );
 
-  assert.match(reportsUi, /tab === 'maintenance' \? `\/api\/reports2\/maintenance\/stats\?format=\$\{format\}`/,
+  assert.match(reportsUi, /tab === 'maintenance' \? `\/api\/reports\/maintenance\/stats\?format=\$\{format\}`/,
     'maintenance tab export buttons must call the maintenance stats endpoint');
   assert.doesNotMatch(reportsUi, /tab !== 'maintenance'/,
     'maintenance tab must not hide CSV/Excel buttons');
@@ -2633,9 +2647,10 @@ test('tenant POST/PUT normalise phone (strip dashes/spaces)', () => {
   // Three-way phone drift between admin-create / schemas.phoneStr /
   // tenant-login was the root cause of "tenant typed 081-234-5678 and
   // can't log in". Both admin endpoints now normalise.
+  // (Endpoints moved to routes/tenant-ops.js in round 9.)
   const fs = require('node:fs');
   const path = require('node:path');
-  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'tenant-ops.js'), 'utf8');
   // POST normalisation
   assert.match(src,
     /const phone = rawPhone\.replace\(\/\[\\s-\]\/g, ''\)/,
@@ -2790,10 +2805,12 @@ test('migration adds bookings + contracts + file_uploads identity columns', () =
 });
 
 test('/api/tenants/:id/identity endpoint exists + validates checksum + dedups by hash', () => {
+  // Endpoint lives in routes/tenant-ops.js (round 9). The router mounts at
+  // /api/tenants, so the local path is /:id/identity.
   const fs = require('node:fs');
   const path = require('node:path');
-  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
-  assert.match(src, /app\.post\('\/api\/tenants\/:id\/identity'/,
+  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'tenant-ops.js'), 'utf8');
+  assert.match(src, /r\.post\('\/:id\/identity'/,
     'identity endpoint must be registered');
   assert.match(src, /INVALID_CHECKSUM/, 'must reject invalid Thai checksum');
   assert.match(src, /CITIZEN_ID_DUPLICATE/, 'must surface dedup as a clean code');
@@ -2864,9 +2881,10 @@ test('contract sign endpoint exists + rejects already-signed without force', () 
 });
 
 test('admin tenant create validates Thai checksum + dedup hash', () => {
+  // POST /api/tenants moved to routes/tenant-ops.js in round 9.
   const fs = require('node:fs');
   const path = require('node:path');
-  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'tenant-ops.js'), 'utf8');
   assert.match(src, /thaiId\.validateChecksum/, 'admin create must run checksum');
   assert.match(src, /citizen_id_hash/, 'admin create must persist hash');
   assert.match(src, /CITIZEN_ID_DUPLICATE/, 'admin create must surface dedup');
@@ -3713,9 +3731,10 @@ test('citizen-ID dedup pre-flight checks tail when hash is NULL', () => {
   // Pre-fix, tenant B with same plaintext ID would slip past pre-flight
   // (looking only at hash) AND past the partial unique (A has hash NULL).
   // Now pre-flight falls back to citizen_id_tail when hash lookup misses.
+  // (POST /api/tenants moved to routes/tenant-ops.js in round 9.)
   const fs = require('node:fs');
   const path = require('node:path');
-  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'tenant-ops.js'), 'utf8');
   assert.match(src,
     /WHERE citizen_id_tail=\$1 AND deleted_at IS NULL AND status='active'/,
     'tail-fallback dedup query must exist');
@@ -3730,10 +3749,12 @@ test('tenant create with room atomically claims room in tenants + room stores', 
   // must not leave tenants.current_room_id set while rooms_v2 / the legacy
   // rooms blob still say the room is vacant, or booking/contract flows can
   // double-assign the room after reload.
+  // (Endpoints moved to routes/tenant-ops.js in round 9; pattern adapted
+  // to the router form r.post('/') ... r.put('/:id') with mount path stripped.)
   const fs = require('node:fs');
   const path = require('node:path');
-  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
-  const block = src.match(/app\.post\('\/api\/tenants'[\s\S]+?app\.put\('\/api\/tenants\/:id'/)[0];
+  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'tenant-ops.js'), 'utf8');
+  const block = src.match(/r\.post\('\/'[\s\S]+?r\.put\('\/:id'/)[0];
   assert.match(block, /pg_advisory_xact_lock\(\$1::int, \$2::int\)/,
     'room assignment must be serialized per room');
   assert.match(block,
@@ -4092,10 +4113,11 @@ test('contract PDF embeds online signature when available', () => {
 });
 
 test('GET /api/tenants/:id/history returns combined view (works on moved_out)', () => {
+  // Moved to routes/tenant-ops.js in round 9.
   const fs = require('node:fs');
   const path = require('node:path');
-  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
-  assert.match(src, /app\.get\('\/api\/tenants\/:id\/history'/,
+  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'tenant-ops.js'), 'utf8');
+  assert.match(src, /r\.get\('\/:id\/history'/,
     'history endpoint must exist');
   // Soft-deleted tenants are EXCLUDED but moved-out are INCLUDED. The
   // tenant SELECT must NOT filter on deleted_at IS NULL (we want to allow
@@ -4110,12 +4132,16 @@ test('GET /api/tenants/:id/history returns combined view (works on moved_out)', 
 });
 
 test('GET /api/tenants/lookup-by-citizen-id finds active and moved_out records', () => {
+  // Endpoint moved to routes/tenant-ops.js in round 9. The /:id(\d+) numeric
+  // constraint still guarantees /lookup-by-citizen-id can't be swallowed
+  // by the param route — express also respects the route registration
+  // order, and we registered /lookup-by-citizen-id BEFORE /:id(\d+).
   const fs = require('node:fs');
   const path = require('node:path');
-  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
-  assert.match(src, /app\.get\('\/api\/tenants\/lookup-by-citizen-id'/,
+  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'tenant-ops.js'), 'utf8');
+  assert.match(src, /r\.get\('\/lookup-by-citizen-id'/,
     'lookup endpoint must exist');
-  assert.match(src, /app\.get\('\/api\/tenants\/:id\(\\\\d\+\)'/,
+  assert.match(src, /r\.get\('\/:id\(\\\\d\+\)'/,
     'numeric tenant detail route must not swallow /lookup-by-citizen-id');
   // Must be hash-first, fall back to tail (legacy data without hash).
   assert.match(src, /matchedByHash/, 'must surface high-confidence hash matches');
@@ -4137,9 +4163,10 @@ test('checkout deactivates tenant-scoped recurring_charges', () => {
 });
 
 test('identity endpoint cleans up old file when admin replaces a side', () => {
+  // Identity endpoint moved to routes/tenant-ops.js in round 9.
   const fs = require('node:fs');
   const path = require('node:path');
-  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'tenant-ops.js'), 'utf8');
   assert.match(src,
     /existingFrontId && existingFrontId !== frontFile\.id[\s\S]{0,300}storage\.remove\(pool, existingFrontId\)/,
     'old front file must be removed on replace');
@@ -4149,10 +4176,13 @@ test('identity endpoint cleans up old file when admin replaces a side', () => {
 });
 
 test('identity + contract sign owner-notify (legal trail)', () => {
+  // Identity endpoint lives in routes/tenant-ops.js; contract sign stays
+  // in server.js. Assert each against its home file.
   const fs = require('node:fs');
   const path = require('node:path');
+  const ops = fs.readFileSync(path.join(__dirname, '..', 'routes', 'tenant-ops.js'), 'utf8');
   const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
-  assert.match(src, /📇 บันทึกบัตรประชาชน[\s\S]{0,200}tenant id=/,
+  assert.match(ops, /📇 บันทึกบัตรประชาชน[\s\S]{0,200}tenant id=/,
     'identity upload must owner-notify');
   assert.match(src, /✍️ ลงนามสัญญา /,
     'contract sign must owner-notify');
@@ -4183,9 +4213,10 @@ test('GET /api/bookings/:id surfaces the citizen-ID photo URL when present', () 
 });
 
 test('POST /api/tenants accepts bookingId to carry over the citizen-ID photo', () => {
+  // POST /api/tenants moved to routes/tenant-ops.js in round 9.
   const fs = require('node:fs');
   const path = require('node:path');
-  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'tenant-ops.js'), 'utf8');
   assert.match(src, /b\.bookingId/, 'tenant create must accept a bookingId');
   assert.match(src,
     /UPDATE tenants SET citizen_id_image_front_id=\$1[\s\S]{0,200}UPDATE file_uploads SET ref_id=\$1/,
@@ -4221,18 +4252,21 @@ test('backup script paginates large tables to avoid OOM', () => {
 });
 
 test('LINE notifications validate userId shape before push or queue retry', () => {
+  // INVALID_LINE_USER_ID was raised by POST/PUT /api/tenants in server.js;
+  // those endpoints moved to routes/tenant-ops.js in round 9, so we assert
+  // the code surface there.
   const fs = require('node:fs');
   const path = require('node:path');
   const line = fs.readFileSync(path.join(__dirname, '..', 'services', 'line.js'), 'utf8');
   const notifier = fs.readFileSync(path.join(__dirname, '..', 'services', 'notifier.js'), 'utf8');
   const queue = fs.readFileSync(path.join(__dirname, '..', 'services', 'notificationQueue.js'), 'utf8');
-  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const tenantOps = fs.readFileSync(path.join(__dirname, '..', 'routes', 'tenant-ops.js'), 'utf8');
   const scheduler = fs.readFileSync(path.join(__dirname, '..', 'services', 'scheduler.js'), 'utf8');
   assert.match(line, /function isLikelyUserId/);
   assert.match(line, /if \(!isLikelyUserId\(userId\)\) return false/);
   assert.match(notifier, /invalid owner LINE userId shape/);
   assert.match(notifier, /invalid LINE userId shape/);
   assert.match(queue, /invalid LINE recipient/);
-  assert.match(server, /INVALID_LINE_USER_ID/);
+  assert.match(tenantOps, /INVALID_LINE_USER_ID/);
   assert.match(scheduler, /lineNotify\.isLikelyUserId\(t\.line_user_id\)/);
 });

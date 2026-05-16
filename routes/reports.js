@@ -75,12 +75,200 @@ function send(req, res, rows, sheetName) {
 module.exports = function buildReportsRouter(ctx) {
   const { pool, requireAuth, requireRole } = ctx;
   const r = express.Router();
-  // All financial endpoints below require manager+. Same rationale as the
-  // legacy /api/reports/* routes: revenue and cashflow numbers are
-  // commercially sensitive and shouldn't be visible to staff or readonly
-  // accounts. Maintenance stats are kept open since they're needed for
-  // day-to-day work.
+  // All financial endpoints below require manager+. Revenue and cashflow
+  // numbers are commercially sensitive and shouldn't be visible to staff or
+  // readonly accounts. Maintenance stats are kept open since they're needed
+  // for day-to-day work.
   const managerOrOwner = requireRole ? requireRole('owner', 'manager') : (_req, _res, next) => next();
+
+  // GET /api/reports/overview — high-level counts/revenue snapshot from the
+  // rooms + bookings blobs. Used by the admin overview page.
+  r.get('/overview', requireAuth, managerOrOwner, async (_req, res) => {
+    try {
+      const [roomsRow, bookingsRow] = await Promise.all([
+        pool.query(`SELECT value FROM app_data WHERE key='baankarn_rooms_v1'`),
+        pool.query(`SELECT value FROM app_data WHERE key='baankarn_bookings_v1'`),
+      ]);
+      // Defensive parse: a corrupted JSONB blob (e.g. a debug write stored a
+      // string instead of an object) would crash Object.values otherwise.
+      const rawRooms = roomsRow.rows.length ? roomsRow.rows[0].value : {};
+      const roomsObj = rawRooms && typeof rawRooms === 'object' && !Array.isArray(rawRooms)
+        ? rawRooms : {};
+      const bookings = bookingsRow.rows.length && Array.isArray(bookingsRow.rows[0].value)
+        ? bookingsRow.rows[0].value : [];
+      const rooms = Object.values(roomsObj);
+      const occupied = rooms.filter((x) => x.status === 'occupied').length;
+      const overdue = rooms.filter((x) => x.status === 'overdue').length;
+      const reserved = rooms.filter((x) => x.status === 'reserved').length;
+      const vacant = rooms.filter((x) => x.status === 'vacant').length;
+      const maintenance = rooms.filter((x) => x.status === 'maintenance').length;
+      const totalRent = rooms.reduce((s, x) => s + (Number(x.rent) || 0), 0);
+      const occupiedRevenue = rooms
+        .filter((x) => x.status === 'occupied' || x.status === 'overdue')
+        .reduce((s, x) => s + (Number(x.rent) || 0), 0);
+      const pendingBookings = bookings.filter((b) => b.status === 'pending').length;
+      res.json({
+        ok: true,
+        counts: { occupied, overdue, reserved, vacant, maintenance, total: rooms.length },
+        revenue: { potential: totalRent, occupied: occupiedRevenue },
+        bookings: { pending: pendingBookings, total: bookings.length },
+      });
+    } catch (err) {
+      console.error('reports overview error:', err);
+      res.status(500).json({ error: 'internal error' });
+    }
+  });
+
+  // GET /api/reports/aged-receivable — buckets overdue rooms by days late
+  // using the overdueDays field already maintained in the rooms blob.
+  r.get('/aged-receivable', requireAuth, managerOrOwner, async (_req, res) => {
+    try {
+      const { rows } = await pool.query(
+        `SELECT value FROM app_data WHERE key='baankarn_rooms_v1'`
+      );
+      const roomsObj = rows.length ? rows[0].value : {};
+      const buckets = {
+        'current': { range: '0-30', rooms: 0, amount: 0 },
+        'late_30': { range: '31-60', rooms: 0, amount: 0 },
+        'late_60': { range: '61-90', rooms: 0, amount: 0 },
+        'late_90': { range: '90+',   rooms: 0, amount: 0 },
+      };
+      Object.values(roomsObj || {}).forEach((rm) => {
+        if (rm.status !== 'overdue') return;
+        const days = Number(rm.overdueDays) || 0;
+        const amt = Number(rm.rent) || 0;
+        let key = 'current';
+        if (days > 90)      key = 'late_90';
+        else if (days > 60) key = 'late_60';
+        else if (days > 30) key = 'late_30';
+        buckets[key].rooms += 1;
+        buckets[key].amount += amt;
+      });
+      res.json({ ok: true, buckets: Object.values(buckets) });
+    } catch (err) {
+      console.error('reports aged-receivable error:', err);
+      res.status(500).json({ error: 'internal error' });
+    }
+  });
+
+  // GET /api/reports/bills.xlsx — current-month bill estimate workbook.
+  r.get('/bills.xlsx', requireAuth, managerOrOwner, async (_req, res) => {
+    let ExcelJS;
+    try { ExcelJS = require('exceljs'); }
+    catch { return res.status(500).json({ error: 'exceljs not installed' }); }
+    try {
+      const [roomsRow, configRow] = await Promise.all([
+        pool.query(`SELECT value FROM app_data WHERE key='baankarn_rooms_v1'`),
+        pool.query(`SELECT value FROM app_data WHERE key='baankarn_config_v1'`),
+      ]);
+      const rooms = Object.values(roomsRow.rows.length ? roomsRow.rows[0].value : {});
+      const config = configRow.rows.length ? configRow.rows[0].value : {};
+      const waterRate = config?.utilities?.waterRate ?? 18;
+      const elecRate  = config?.utilities?.elecRate  ?? 8;
+      const wifiFee   = config?.utilities?.wifi      ?? 250;
+
+      const wb = new ExcelJS.Workbook();
+      wb.creator = config?.building?.name || 'บ้านกาญจน์ เรสซิเดนซ์';
+      wb.created = new Date();
+      const ws = wb.addWorksheet('บิลรอบนี้');
+      ws.columns = [
+        { header: 'ห้อง', key: 'room', width: 8 },
+        { header: 'ผู้เช่า', key: 'tenant', width: 28 },
+        { header: 'สถานะ', key: 'status', width: 12 },
+        { header: 'ค่าเช่า', key: 'rent', width: 12, style: { numFmt: '#,##0.00' } },
+        { header: 'ค่าน้ำ', key: 'water', width: 12, style: { numFmt: '#,##0.00' } },
+        { header: 'ค่าไฟ', key: 'elec', width: 12, style: { numFmt: '#,##0.00' } },
+        { header: 'Wi-Fi', key: 'wifi', width: 10, style: { numFmt: '#,##0.00' } },
+        { header: 'รวม', key: 'total', width: 14, style: { numFmt: '#,##0.00' } },
+      ];
+      ws.getRow(1).font = { bold: true };
+      ws.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFAF6EE' } };
+      ws.views = [{ state: 'frozen', ySplit: 1 }];
+
+      rooms
+        .sort((a, b) => String(a.id).localeCompare(String(b.id)))
+        .forEach((rm) => {
+          const water = (Number(rm.waterUnits) || 0) * waterRate;
+          const elec  = (Number(rm.elecUnits)  || 0) * elecRate;
+          const total = (Number(rm.rent) || 0) + water + elec + wifiFee;
+          ws.addRow({
+            room: rm.id,
+            tenant: rm.tenant?.name || '—',
+            status: rm.status || '—',
+            rent: Number(rm.rent) || 0,
+            water,
+            elec,
+            wifi: wifiFee,
+            total,
+          });
+        });
+
+      res.setHeader(
+        'Content-Type',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+      );
+      res.setHeader('Content-Disposition', `attachment; filename="bills-${new Date().toISOString().slice(0,10)}.xlsx"`);
+      await wb.xlsx.write(res);
+      res.end();
+    } catch (err) {
+      console.error('reports xlsx error:', err);
+      if (!res.headersSent) res.status(500).json({ error: 'internal error' });
+    }
+  });
+
+  // GET /api/reports/maintenance — ticket counts/cost aggregates. Optional
+  // ?period=YYYY-MM. Open to staff (day-to-day visibility).
+  r.get('/maintenance', requireAuth, async (req, res) => {
+    // The regex below already constrains period to YYYY-MM (no SQL metachars
+    // can pass), but we still parameterise so any future regex relaxation
+    // doesn't silently open an injection vector.
+    const period = String(req.query.period || '').match(/^\d{4}-\d{2}$/) ? req.query.period : null;
+    const where = period ? `WHERE to_char(created_at, 'YYYY-MM') = $1` : '';
+    const params = period ? [period] : [];
+    try {
+      const [byStatus, ratings, costs, byCategory] = await Promise.all([
+        pool.query(`SELECT status, COUNT(*) AS n FROM maintenance_tickets ${where} GROUP BY status`, params),
+        pool.query(
+          `SELECT AVG(rating)::numeric(3,2) AS avg_rating, COUNT(rating) AS rated
+             FROM maintenance_tickets ${period ? where + ' AND ' : 'WHERE '} rating IS NOT NULL`,
+          params
+        ),
+        pool.query(`SELECT
+                      SUM(cost)::numeric(12,2) AS total_cost,
+                      (AVG(cost) FILTER (WHERE cost > 0))::numeric(10,2) AS avg_cost,
+                      COUNT(*) FILTER (WHERE cost > 0) AS billed_count,
+                      (SUM(cost) FILTER (WHERE status='completed'))::numeric(12,2) AS completed_cost
+                    FROM maintenance_tickets ${where}`, params),
+        pool.query(
+          `SELECT category, COUNT(*) AS n, SUM(cost)::numeric(12,2) AS cost_total
+             FROM maintenance_tickets ${where} GROUP BY category ORDER BY n DESC`,
+          params
+        ),
+      ]);
+      const counts = {};
+      byStatus.rows.forEach((x) => { counts[x.status] = Number(x.n); });
+      const c = costs.rows[0] || {};
+      res.json({
+        ok: true,
+        period: period || 'all',
+        counts,
+        avgRating: ratings.rows[0]?.avg_rating != null ? Number(ratings.rows[0].avg_rating) : null,
+        ratedCount: Number(ratings.rows[0]?.rated || 0),
+        cost: {
+          total: Number(c.total_cost || 0),
+          avg: Number(c.avg_cost || 0),
+          billedCount: Number(c.billed_count || 0),
+          completedTotal: Number(c.completed_cost || 0),
+        },
+        byCategory: byCategory.rows.map((x) => ({
+          category: x.category, count: Number(x.n), cost: Number(x.cost_total || 0),
+        })),
+      });
+    } catch (err) {
+      console.error('reports maintenance error:', err);
+      res.status(500).json({ error: 'internal error' });
+    }
+  });
 
   // GET /api/reports/revenue?year=2026&month=5
   // Sum of paid bills per period. If month omitted → 12-month series for the year.

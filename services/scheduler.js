@@ -333,7 +333,10 @@ async function tickBillGen(pool, flags, now, state) {
       return;
     }
 
-    const dueDay = Number(flags.billAutoGenerate.dueDay || 15);
+    // Single source of truth: config.notify.dueOnDay. The manual-bill flow
+    // in page-billing.jsx reads the same key, so admin sees one value drive
+    // both the "Generate bills" modal default and the scheduler's bill day.
+    const dueDay = Number(config?.notify?.dueOnDay || 15);
     // Build YYYY-MM-DD from local year/month + dueDay directly — Date()→
     // toISOString() round-trip subtracts the timezone offset and on
     // Asia/Bangkok (UTC+7) returns the previous day, so bills issued on

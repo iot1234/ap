@@ -351,9 +351,8 @@ function PageFeatures({ setToast, embedded = false }) {
         </Row>
         <Row id="billAutoGenerate"
           title="ออกบิลอัตโนมัติทุกเดือน"
-          desc="cron จะออกบิลตามวันที่กำหนด">
+          desc="cron จะออกบิลตามวันที่กำหนด · กำหนดชำระตั้งที่ ตั้งค่าระบบ → แจ้งเตือน (ใช้ค่าเดียวกับการออกบิลด้วยมือ)">
           <Field id="billAutoGenerate" field="dayOfMonth" label="วันที่ออกบิล" type="number" />
-          <Field id="billAutoGenerate" field="dueDay" label="กำหนดชำระ (วัน)" type="number" />
         </Row>
       </Card>
 

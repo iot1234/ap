@@ -20,7 +20,7 @@ module.exports = function mountRoutes(app, ctx) {
 
   app.use('/api/rooms', rooms);
   app.use('/api/settings', settings);
-  app.use('/api/reports2', reports);  // /api/reports2 to avoid clobbering legacy
+  app.use('/api/reports', reports);
   app.use('/api/tenants', tenantOps);
   app.use('/api/bills', billsExtras);
   app.use('/api/recurring-charges', recurring);

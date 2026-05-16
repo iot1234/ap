@@ -21,7 +21,7 @@ function PageReports({ rooms, config, addActivity, setToast }) {
   const [range, setRange] = useState('6m');
   const [liveOverview, setLiveOverview] = React.useState(null);
   const [agedReceivable, setAgedReceivable] = React.useState(null);
-  // Real revenue + occupancy series from /api/reports2/{revenue,occupancy}.
+  // Real revenue + occupancy series from /api/reports/{revenue,occupancy}.
   // Spans the full year (12 months); the chart slices to `range` below.
   // Replaced Math.sin fabrications — see audit, May 2026.
   const [revRows, setRevRows] = React.useState(null);   // null=loading
@@ -37,8 +37,8 @@ function PageReports({ rooms, config, addActivity, setToast }) {
         const [oRes, aRes, revRes, occRes] = await Promise.all([
           fetch('/api/reports/overview', { credentials: 'include' }),
           fetch('/api/reports/aged-receivable', { credentials: 'include' }),
-          fetch(`/api/reports2/revenue?year=${year}`, { credentials: 'include' }),
-          fetch(`/api/reports2/occupancy?year=${year}`, { credentials: 'include' }),
+          fetch(`/api/reports/revenue?year=${year}`, { credentials: 'include' }),
+          fetch(`/api/reports/occupancy?year=${year}`, { credentials: 'include' }),
         ]);
         if (cancel) return;
         if (oRes.ok)   setLiveOverview(await oRes.json());
@@ -57,7 +57,7 @@ function PageReports({ rooms, config, addActivity, setToast }) {
   const stats = useMemo(() => computeStats(rooms, config), [rooms, config]);
   const list = useMemo(() => Object.values(rooms), [rooms]);
 
-  // Revenue trend — slice the year-long /api/reports2/revenue series down to
+  // Revenue trend — slice the year-long /api/reports/revenue series down to
   // the selected range (3 / 6 / 12 months). Each row carries paid_amount;
   // unbilled months show as 0 so the operator can see the gap.
   const revenue = useMemo(() => {

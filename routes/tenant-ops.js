@@ -1,7 +1,27 @@
 // routes/tenant-ops.js
-// Multi-step tenant operations that need a DB transaction:
-//   - checkIn:  create tenant (or use existing) + flip room to occupied + draft welcome bill
-//   - checkOut: close tenant + flip room to vacant + finalize bill (pro-rate)
+// Every /api/tenants/* endpoint lives here. The Wave 1 refactor moved
+// /api/bills extras + reports out of server.js; this round consolidates
+// the tenants surface so the CRUD, history, identity, citizen-id lookup,
+// notify, checkin, and checkout endpoints all sit in one file.
+//
+// Endpoints (mounted at /api/tenants in routes/index.js):
+//   - POST   /notify                       — send admin-composed message to tenant
+//   - GET    /                             — list tenants (filters: q, status)
+//   - GET    /:id(\d+)                     — read tenant by id (admin)
+//   - GET    /lookup-by-citizen-id         — pre-create dedup lookup
+//   - GET    /:id/history                  — full audit/history view
+//   - POST   /                             — create tenant (admin)
+//   - PUT    /:id                          — update tenant fields
+//   - DELETE /:id                          — soft (or hard) delete
+//   - POST   /:id/identity                 — upload citizen-ID images + encrypted #
+//   - GET    /:id/identity                 — read identity image links
+//   - POST   /:id/checkin                  — atomic check-in (legacy from this file)
+//   - POST   /:id/checkout                 — atomic check-out (legacy from this file)
+//
+// Specific routes (/notify, /lookup-by-citizen-id) are registered BEFORE
+// /:id(\d+) so Express's router doesn't swallow them as ids. The numeric
+// constraint on :id ensures /lookup-by-citizen-id can't match the catch-all
+// either (test integration.test.js#4128 enforces both invariants).
 
 const express = require('express');
 const { schemas } = require('../schemas');
@@ -9,10 +29,1326 @@ const { validateBody } = require('../middleware/validate');
 const billing = require('../services/billing');
 const features = require('../services/features');
 const notifier = require('../services/notifier');
+const cryptoSvc = require('../services/crypto');
+const lineNotify = require('../services/line');
+const storage = require('../services/storage');
+
+// === Internal helpers =====================================================
+// VALID_TENANT_STATUS + maskTenantOut were defined in server.js but used
+// only by tenant endpoints — moved here so the file is self-contained.
+const VALID_TENANT_STATUS = new Set(['active', 'moved_out', 'blacklist']);
+
+function maskTenantOut(t) {
+  if (!t) return t;
+  const out = { ...t };
+  if (out.citizen_id_encrypted) {
+    delete out.citizen_id_encrypted;
+    out.citizen_id_masked = out.citizen_id_tail ? `***-${out.citizen_id_tail}` : '***';
+  }
+  delete out.pin_hash;
+  return out;
+}
 
 module.exports = function buildTenantOpsRouter(ctx) {
   const { pool, requireAuth, requireRole, sameOrigin, csrfGuard, audit } = ctx;
   const r = express.Router();
+
+  // === POST /api/tenants/notify ===========================================
+  // Admin-composed message to a tenant by phone OR roomId. Used by the
+  // admin UI's "ส่งข้อความ" button. Picks the best channel via notifier
+  // (LINE → email fallback). 409 NO_TENANT_CHANNEL surfaces when no
+  // reachable channel exists so admin sees a clear error instead of a
+  // silent drop.
+  r.post('/notify', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager', 'staff'), async (req, res) => {
+    const b = req.body || {};
+    const phone = String(b.phone || '').replace(/[\s-]/g, '').slice(0, 32);
+    const roomId = String(b.roomId || '').slice(0, 32).trim();
+    const message = String(b.message || '').trim().slice(0, 1000);
+    if (!message || message.length < 2) {
+      return res.status(400).json({ error: 'message required', code: 'MESSAGE_REQUIRED' });
+    }
+    if (!phone && !roomId) {
+      return res.status(400).json({ error: 'phone or roomId required', code: 'TENANT_TARGET_REQUIRED' });
+    }
+    try {
+      const params = [];
+      const where = [`deleted_at IS NULL`, `status='active'`];
+      if (phone) { params.push(phone); where.push(`phone=$${params.length}`); }
+      if (roomId) { params.push(roomId); where.push(`current_room_id=$${params.length}`); }
+      const { rows } = await pool.query(
+        `SELECT id, full_name, phone, email, line_user_id, line_oa_id,
+                current_room_id, status
+           FROM tenants
+          WHERE ${where.join(' AND ')}
+          ORDER BY updated_at DESC
+          LIMIT 1`,
+        params
+      );
+      if (!rows.length) {
+        return res.status(404).json({
+          error: 'active tenant not found for this room/phone',
+          code: 'TENANT_NOT_FOUND',
+        });
+      }
+      const tenant = rows[0];
+      const flags = await features.load(pool);
+      const subject = String(b.subject || 'ข้อความจากหอพัก').slice(0, 200);
+      const text = [
+        subject,
+        `ผู้เช่า: ${tenant.full_name || '-'}`,
+        tenant.current_room_id ? `ห้อง: ${tenant.current_room_id}` : null,
+        '',
+        message,
+      ].filter((x) => x !== null).join('\n');
+      const out = await notifier.notifyTenant({ pool, features: flags }, tenant, {
+        subject,
+        text,
+      });
+      audit(req, 'tenant.notify', 'tenant', String(tenant.id), {
+        roomId: tenant.current_room_id,
+        channel: out.channel,
+        ok: out.ok,
+        queued: !!out.queued,
+      });
+      if (!out.ok && !out.queued) {
+        return res.status(409).json({
+          error: 'tenant has no reachable notification channel',
+          code: 'NO_TENANT_CHANNEL',
+          channel: out.channel,
+          reason: out.reason || null,
+        });
+      }
+      return res.json({
+        ok: true,
+        tenantId: tenant.id,
+        channel: out.channel,
+        queued: !!out.queued,
+      });
+    } catch (err) {
+      console.error('tenant notify error:', err.message);
+      return res.status(500).json({ error: 'internal error' });
+    }
+  });
+
+  // === GET /api/tenants ===================================================
+  // List tenants (admin). Filters: q (substring on name/phone/email),
+  // status (active/moved_out/blacklist). Soft-deleted rows excluded.
+  r.get('/', requireAuth, async (req, res) => {
+    try {
+      const q = String(req.query.q || '').trim().toLowerCase();
+      const status = req.query.status;
+      const params = [];
+      const where = ['deleted_at IS NULL'];
+      if (status && VALID_TENANT_STATUS.has(String(status))) {
+        params.push(status); where.push(`status = $${params.length}`);
+      }
+      if (q) {
+        params.push(`%${q}%`);
+        where.push(`(LOWER(full_name) LIKE $${params.length} OR phone LIKE $${params.length} OR LOWER(COALESCE(email,'')) LIKE $${params.length})`);
+      }
+      const { rows } = await pool.query(
+        `SELECT id, full_name, phone, email, line_user_id, current_room_id, status,
+                citizen_id_tail, locale, created_at
+           FROM tenants
+           WHERE ${where.join(' AND ')}
+           ORDER BY created_at DESC LIMIT 500`,
+        params
+      );
+      res.json({ ok: true, tenants: rows });
+    } catch (err) {
+      console.error('tenants list error:', err);
+      res.status(500).json({ error: 'internal error' });
+    }
+  });
+
+  // === GET /api/tenants/lookup-by-citizen-id ==============================
+  // Admin types a 13-digit citizen ID before creating a new tenant. We hash
+  // it the same way as on tenant create + return any existing record
+  // matching the hash — even moved_out / blacklist tenants. Use case: a
+  // person who lived here last year wants to re-rent a room. Without this
+  // lookup admin would create a duplicate row and the partial unique index
+  // would block them; with it, admin sees the prior record + can reactivate.
+  //
+  // Owner / manager only — citizen ID is sensitive even at a hash level.
+  // MUST be registered BEFORE /:id(\d+) so the param route doesn't swallow
+  // it — the numeric \d+ constraint also blocks the collision, but ordering
+  // is the belt + braces.
+  r.get('/lookup-by-citizen-id', requireAuth, requireRole('owner', 'manager'),
+    async (req, res) => {
+      const raw = String(req.query.citizenId || '').trim();
+      if (!raw) return res.status(400).json({ error: 'citizenId required' });
+      const thaiId = require('../services/thaiId');
+      const norm = thaiId.normalize(raw);
+      if (!norm) return res.status(400).json({ error: 'เลขบัตรประชาชนต้องเป็น 13 หลัก', code: 'INVALID_CITIZEN_ID' });
+      if (!thaiId.validateChecksum(norm)) {
+        // Don't 400 here — admin might be looking up a legacy record that
+        // failed the checksum at creation. Surface a hint instead.
+        console.warn('[lookup] caller queried with checksum-invalid ID');
+      }
+      const hash = thaiId.hashForLookup(norm);
+      if (!hash) return res.status(400).json({ error: 'cannot hash input' });
+      try {
+        // Match by hash AND by tail — if the operator's deploy predates the
+        // hash rollout, prior tenants may have only a tail saved. Tail-only
+        // match is widened on purpose so admin still sees a hit (with a
+        // confidence flag the UI can show).
+        const byHash = await pool.query(
+          `SELECT id, full_name, phone, status, current_room_id,
+                  citizen_id_tail, created_at, updated_at, deleted_at
+             FROM tenants
+            WHERE citizen_id_hash=$1
+            ORDER BY (status='active') DESC, updated_at DESC LIMIT 5`,
+          [hash]
+        ).catch((err) => {
+          if (err.code === '42703') return { rows: [] };  // pre-migration
+          throw err;
+        });
+        const byTail = await pool.query(
+          `SELECT id, full_name, phone, status, current_room_id,
+                  citizen_id_tail, created_at, updated_at, deleted_at
+             FROM tenants
+            WHERE citizen_id_tail=$1 AND deleted_at IS NULL
+              AND id NOT IN (
+                SELECT id FROM tenants WHERE citizen_id_hash=$2
+              )
+            ORDER BY (status='active') DESC, updated_at DESC LIMIT 5`,
+          [norm.slice(-4), hash]
+        ).catch(() => ({ rows: [] }));
+        audit(req, 'tenant.citizen_lookup', 'tenant', null,
+          { tail: norm.slice(-4), hashHits: byHash.rows.length, tailHits: byTail.rows.length });
+        res.json({
+          ok: true,
+          // High-confidence: hash matches.
+          matchedByHash: byHash.rows.map((row) => ({ ...row, matchType: 'hash' })),
+          // Lower-confidence: tail matches (legacy data without hash).
+          matchedByTailOnly: byTail.rows.map((row) => ({ ...row, matchType: 'tail-only' })),
+          checksumValid: thaiId.validateChecksum(norm),
+        });
+      } catch (err) {
+        console.error('citizen lookup error:', err);
+        res.status(500).json({ error: 'internal error' });
+      }
+    });
+
+  // === GET /api/tenants/:id(\d+) ==========================================
+  // Admin tenant detail. Numeric :id constraint prevents this catching the
+  // sibling /lookup-by-citizen-id (and any future /<word> route). Decrypts
+  // the citizen ID only when query includeCitizen=1 AND the caller is
+  // owner/manager (sibling endpoint /api/tenants/lookup-by-citizen-id is
+  // already owner/manager — this gate matches that surface).
+  r.get('/:id(\\d+)', requireAuth, async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+    try {
+      // Pull every tenant column the admin UI needs in one round-trip,
+      // including the new identity / address / emergency contact fields.
+      // Older deploys without those columns get a SELECT * fallback so the
+      // endpoint keeps working mid-migration.
+      let rows;
+      try {
+        ({ rows } = await pool.query(
+          `SELECT id, full_name, phone, email, line_user_id, line_oa_id,
+                  current_room_id, status,
+                  citizen_id_encrypted, citizen_id_tail, citizen_id_hash,
+                  citizen_id_image_front_id, citizen_id_image_back_id,
+                  address, emergency_contact_name, emergency_contact_phone,
+                  emergency_contact_relation,
+                  notes, locale, blacklist_reason,
+                  created_at, updated_at
+             FROM tenants WHERE id=$1 AND deleted_at IS NULL`,
+          [id]
+        ));
+      } catch (err) {
+        if (err.code !== '42703') throw err;  // pre-migration deploy
+        ({ rows } = await pool.query(
+          `SELECT id, full_name, phone, email, line_user_id, current_room_id, status,
+                  citizen_id_encrypted, citizen_id_tail, notes, locale, blacklist_reason,
+                  created_at, updated_at
+             FROM tenants WHERE id=$1 AND deleted_at IS NULL`,
+          [id]
+        ));
+      }
+      if (!rows.length) return res.status(404).json({ error: 'not found' });
+      const flags = await features.load(pool);
+      const out = maskTenantOut(rows[0]);
+      // Don't echo the hash either — it's internal dedup state.
+      delete out.citizen_id_hash;
+      // Decrypt for admin if encryption is on AND the request asks.
+      // Role-gated: only owner/manager can pull the cleartext citizen ID,
+      // because the route itself is requireAuth (so staff + readonly can
+      // browse tenant cards) — but the sibling identity endpoint at
+      // /api/tenants/lookup-by-citizen-id already requires owner/manager,
+      // and this decryption path was missed. ROLE_RANK: manager=3, owner=4.
+      if (req.query.includeCitizen === '1') {
+        const role = req.session.user && req.session.user.role;
+        const rank = ({ owner: 4, manager: 3, staff: 2, readonly: 1 })[role] || 0;
+        if (rank < 3) {
+          return res.status(403).json({
+            error: 'forbidden — citizen ID requires owner or manager role',
+            code: 'FORBIDDEN_CITIZEN_ID',
+          });
+        }
+        if (flags.citizenIdEncryption && flags.citizenIdEncryption.enabled
+            && rows[0].citizen_id_encrypted) {
+          try { out.citizen_id = cryptoSvc.decryptString(rows[0].citizen_id_encrypted); }
+          catch (_e) { out.citizen_id = null; }
+        }
+      }
+      res.json({ ok: true, tenant: out });
+    } catch (err) {
+      console.error('tenant get error:', err);
+      res.status(500).json({ error: 'internal error' });
+    }
+  });
+
+  // === GET /api/tenants/:id/history =======================================
+  // One-stop view of every record tied to a tenant — works on active OR
+  // moved-out tenants. Used by the admin "history" tab so legal / audit
+  // queries don't have to fan out to multiple endpoints.
+  //
+  // Returns: tenant row + all contracts + all bills + all payments +
+  // maintenance tickets + access cards + identity images + recent audit
+  // log entries. Soft-deleted rows are EXCLUDED so accidentally-removed
+  // data doesn't leak — admin can still inspect via the audit log.
+  r.get('/:id/history', requireAuth, requireRole('owner', 'manager'),
+    async (req, res) => {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+      try {
+        // Allow even soft-deleted tenants here so admin can audit a deleted
+        // record. The masking still hides citizen_id_encrypted and any legacy
+        // credential hash columns that may exist on older deployments.
+        const tQ = await pool.query(
+          `SELECT * FROM tenants WHERE id=$1`,
+          [id]
+        );
+        if (!tQ.rows.length) return res.status(404).json({ error: 'tenant not found' });
+        const tenant = maskTenantOut(tQ.rows[0]);
+        delete tenant.citizen_id_hash;
+
+        // Contracts (active + ended + expired). Ordered by most recent so
+        // the current contract is first. Soft-deleted excluded.
+        const contracts = await pool.query(
+          `SELECT id, contract_no, room_id, start_date, end_date, term_months,
+                  monthly_rent, deposit, deposit_returned, deposit_returned_at,
+                  deposit_return_reason, discount_pct, status, signed_at,
+                  signature_image_id, agreed_terms_at, agreed_terms_version,
+                  created_at
+             FROM contracts
+            WHERE tenant_id=$1 AND deleted_at IS NULL
+            ORDER BY start_date DESC, created_at DESC`,
+          [id]
+        ).catch(async (err) => {
+          if (err.code !== '42703') throw err;
+          // Pre-migration fallback
+          return await pool.query(
+            `SELECT id, contract_no, room_id, start_date, end_date,
+                    monthly_rent, deposit, status, signed_at, created_at
+               FROM contracts WHERE tenant_id=$1 AND deleted_at IS NULL
+               ORDER BY start_date DESC, created_at DESC`,
+            [id]
+          );
+        });
+
+        // Bills (every status, soft-deleted excluded). Latest first.
+        const bills = await pool.query(
+          `SELECT id, bill_no, room_id, period, total, due_date, paid_at, status,
+                  rent, water_amount, elec_amount, wifi, late_fee, vat,
+                  created_at
+             FROM bills
+            WHERE tenant_id=$1 AND deleted_at IS NULL
+            ORDER BY created_at DESC LIMIT 200`,
+          [id]
+        );
+
+        // Payments (joined to bill_no for display).
+        const payments = await pool.query(
+          `SELECT p.id, p.bill_id, b.bill_no, p.amount, p.method, p.ref,
+                  p.status, p.verified_by, p.verified_at, p.verify_provider,
+                  p.created_at
+             FROM payments p
+             LEFT JOIN bills b ON b.id = p.bill_id
+            WHERE p.tenant_id=$1
+            ORDER BY p.created_at DESC LIMIT 200`,
+          [id]
+        );
+
+        // Maintenance tickets — owned by this tenant (tenant_id stamped at
+        // create time, or matched via phone for legacy public submissions).
+        const tickets = await pool.query(
+          `SELECT id, ticket_no, room_id, category, priority, status, title,
+                  rating, rating_comment, created_at, completed_at
+             FROM maintenance_tickets
+            WHERE tenant_id=$1
+            ORDER BY created_at DESC LIMIT 100`,
+          [id]
+        );
+
+        // Access cards (active + revoked, gives a complete history).
+        const cards = await pool.query(
+          `SELECT id, card_id, room_id, status, issued_at, revoked_at, revoke_reason
+             FROM access_cards
+            WHERE tenant_id=$1
+            ORDER BY issued_at DESC`,
+          [id]
+        );
+
+        // Identity images URL (front+back) — same shape as /identity GET.
+        const identity = await pool.query(
+          `SELECT t.citizen_id_tail,
+                  t.citizen_id_image_front_id, t.citizen_id_image_back_id,
+                  ff.url AS front_url, bf.url AS back_url,
+                  ff.uploaded_at AS front_uploaded_at, bf.uploaded_at AS back_uploaded_at
+             FROM tenants t
+             LEFT JOIN file_uploads ff ON ff.id = t.citizen_id_image_front_id
+             LEFT JOIN file_uploads bf ON bf.id = t.citizen_id_image_back_id
+            WHERE t.id=$1`,
+          [id]
+        ).catch((err) => {
+          if (err.code === '42703') return { rows: [{ citizen_id_tail: tenant.citizen_id_tail }] };
+          throw err;
+        });
+
+        // Recent audit log entries that mention this tenant. Last 100 events.
+        // (Local variable renamed `auditEntries` to avoid shadowing the outer
+        // `audit(...)` helper which is in scope here.)
+        const auditEntries = await pool.query(
+          `SELECT id, user_id, action, entity_type, entity_id, detail, created_at
+             FROM audit_logs
+            WHERE (entity_type='tenant' AND entity_id=$1)
+               OR (action LIKE 'tenant.%' AND entity_id=$1)
+               OR (action LIKE 'contract.%' AND entity_id IN (
+                   SELECT id::text FROM contracts WHERE tenant_id=$2 AND deleted_at IS NULL
+                 ))
+               OR (action LIKE 'bill.%' AND entity_id IN (
+                   SELECT id::text FROM bills WHERE tenant_id=$2 AND deleted_at IS NULL
+                 ))
+            ORDER BY created_at DESC LIMIT 100`,
+          [String(id), id]
+        );
+
+        // Aggregate totals so admin sees the bottom line at a glance.
+        const totals = {
+          contracts: contracts.rows.length,
+          bills: bills.rows.length,
+          billsPaid: bills.rows.filter((b) => b.status === 'paid').length,
+          billsOutstanding: bills.rows
+            .filter((b) => b.status === 'pending' || b.status === 'overdue')
+            .reduce((s, b) => s + Number(b.total || 0), 0),
+          payments: payments.rows.length,
+          paymentsTotal: payments.rows
+            .filter((p) => p.status === 'verified')
+            .reduce((s, p) => s + Number(p.amount || 0), 0),
+          tickets: tickets.rows.length,
+          ticketsOpen: tickets.rows.filter((t) => t.status !== 'completed' && t.status !== 'cancelled').length,
+          accessCardsActive: cards.rows.filter((c) => c.status === 'active').length,
+          accessCardsRevoked: cards.rows.filter((c) => c.status === 'revoked').length,
+        };
+
+        res.json({
+          ok: true,
+          tenant,
+          identity: identity.rows[0] || {},
+          contracts: contracts.rows,
+          bills: bills.rows,
+          payments: payments.rows,
+          tickets: tickets.rows,
+          accessCards: cards.rows,
+          auditLog: auditEntries.rows,
+          totals,
+        });
+      } catch (err) {
+        console.error('tenant history error:', err);
+        res.status(500).json({ error: 'internal error', code: 'DB_ERROR' });
+      }
+    });
+
+  // === POST /api/tenants ==================================================
+  // Admin creates a new tenant row. When roomId is supplied the row is
+  // atomically also linked to that room (claimRoomForTenant runs an
+  // advisory lock + SELECT FOR UPDATE against other active rows for the
+  // room). Citizen-ID handling: optional but when present must pass the
+  // mod-11 checksum, with a force=true escape hatch for legacy data.
+  r.post('/', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'), async (req, res) => {
+    const b = req.body || {};
+    const str = (v, max) => (typeof v === 'string' ? v.slice(0, max) : '');
+    const fullName = str(b.fullName, 200).trim();
+    // Normalise phone the same way schemas.phoneStr does (strip dashes +
+    // spaces) so admin-entered "081-234-5678" matches the tenant-typed
+    // "0812345678" at login. Three-way drift between admin-create (raw),
+    // schemas.phoneStr (stripped), and tenant-login (raw) was the root
+    // cause of "tenant can't log in even though admin created the row".
+    const rawPhone = str(b.phone, 32).trim();
+    const phone = rawPhone.replace(/[\s-]/g, '');
+    if (!fullName || !phone) {
+      return res.status(400).json({ error: 'fullName and phone required' });
+    }
+    // Reject obvious junk after normalisation so we don't store "abcdef" as a
+    // phone number (matches the schemas.phoneStr regex shape).
+    if (!/^[\d+]{8,20}$/.test(phone)) {
+      return res.status(400).json({ error: 'เบอร์โทรไม่ถูกต้อง', code: 'INVALID_PHONE' });
+    }
+    const flags = await features.load(pool);
+    const thaiId = require('../services/thaiId');
+    // Normalise + validate Thai citizen ID. The mod-11 checksum catches typo
+    // errors at create-time so admin doesn't end up with a row that can never
+    // match anyone (and that the dedup index can't compare against). When
+    // checksum fails AND the operator passes `force: true` we accept the
+    // value but skip the hash (no dedup possible) — this preserves the
+    // legacy edge case where existing data was entered without a check
+    // digit but is otherwise meaningful.
+    const citizenIdNorm = thaiId.normalize(str(b.citizenId, 32));
+    let citizenEnc = null, citizenTail = null, citizenHash = null;
+    if (b.citizenId && !citizenIdNorm) {
+      return res.status(400).json({
+        error: 'เลขบัตรประชาชนต้องเป็น 13 หลัก (ใส่ขีดได้)',
+        code: 'INVALID_CITIZEN_ID',
+      });
+    }
+    if (citizenIdNorm) {
+      if (!thaiId.validateChecksum(citizenIdNorm) && b.force !== true) {
+        return res.status(400).json({
+          error: 'เลขบัตรประชาชนไม่ผ่านการตรวจสอบ check digit (mod-11)',
+          code: 'INVALID_CHECKSUM',
+          hint: 'ตรวจดูเลขที่ป้อนอีกครั้ง หรือส่ง { force: true } ถ้ายืนยัน (audit-logged)',
+        });
+      }
+      citizenTail = citizenIdNorm.slice(-4);
+      citizenHash = thaiId.validateChecksum(citizenIdNorm)
+        ? thaiId.hashForLookup(citizenIdNorm)
+        : null;  // skip hash if checksum failed but force=true (no dedup)
+      if (flags.citizenIdEncryption && flags.citizenIdEncryption.enabled) {
+        try { citizenEnc = cryptoSvc.encryptString(citizenIdNorm); }
+        catch (e) {
+          return res.status(500).json({ error: 'crypto unavailable: ' + e.message });
+        }
+      } else {
+        citizenEnc = citizenIdNorm; // plaintext — not recommended
+      }
+    }
+    // Pre-flight dedup check. Two cohorts to look at:
+    //   1. citizen_id_hash matches (high confidence) — the partial unique
+    //      index catches this at INSERT time too, but a 409 with the prior
+    //      tenant's id is more actionable than a generic 23505.
+    //   2. citizen_id_tail matches BUT hash is NULL on the prior row. This
+    //      catches the dedup escape where tenant A was created with a
+    //      checksum-invalid id + force=true (we set hash=NULL there to
+    //      preserve the legacy data path), and tenant B comes along with a
+    //      valid id whose tail matches A. Without this check, B would slip
+    //      past pre-flight + the partial unique because A's hash is NULL.
+    if (citizenIdNorm && b.force !== true) {
+      try {
+        let dup = null;
+        if (citizenHash) {
+          const dr = await pool.query(
+            `SELECT id, full_name, status FROM tenants
+               WHERE citizen_id_hash=$1 AND deleted_at IS NULL AND status='active' LIMIT 1`,
+            [citizenHash]
+          );
+          dup = dr.rows[0] || null;
+        }
+        if (!dup) {
+          const dr = await pool.query(
+            `SELECT id, full_name, status FROM tenants
+               WHERE citizen_id_tail=$1 AND deleted_at IS NULL AND status='active' LIMIT 1`,
+            [citizenTail]
+          );
+          dup = dr.rows[0] || null;
+        }
+        if (dup) {
+          return res.status(409).json({
+            error: 'เลขบัตรนี้ถูกบันทึกในระบบแล้วกับผู้เช่ารายอื่น',
+            code: 'CITIZEN_ID_DUPLICATE',
+            conflict: dup,
+            hint: 'ส่ง { force: true } ถ้ายืนยันว่าเป็นคนเดิม (audit-logged)',
+          });
+        }
+      } catch (err) {
+        // Older deploys without the column fall through silently.
+        if (err.code !== '42703') console.warn('[tenant create] dedup check skipped:', err.message);
+      }
+    }
+    // Optional address + emergency contact (admin can leave blank — the
+    // checkin endpoint enforces presence when generating contracts).
+    const address = str(b.address, 500) || null;
+    const ecName    = str(b.emergencyContactName, 200) || null;
+    const ecPhone   = str(b.emergencyContactPhone, 32) || null;
+    const ecRel     = str(b.emergencyContactRelation, 64) || null;
+    // Normalise emergency phone the same way as primary phone.
+    const ecPhoneNorm = ecPhone ? ecPhone.trim().replace(/[\s-]/g, '') : null;
+    if (ecPhoneNorm && !/^[\d+]{8,20}$/.test(ecPhoneNorm)) {
+      return res.status(400).json({
+        error: 'เบอร์โทรผู้ติดต่อฉุกเฉินไม่ถูกต้อง',
+        code: 'INVALID_EMERGENCY_PHONE',
+      });
+    }
+    const lineUserId = str(b.lineUserId, 64).trim() || null;
+    if (lineUserId && !lineNotify.isLikelyUserId(lineUserId)) {
+      return res.status(400).json({
+        error: 'invalid LINE userId',
+        code: 'INVALID_LINE_USER_ID',
+      });
+    }
+    const requestedRoomId = str(b.roomId, 32).trim() || null;
+    const tenantStatus = requestedRoomId
+      ? 'active'
+      : (VALID_TENANT_STATUS.has(b.status) ? b.status : 'active');
+    const roomLockKey = (rid) => {
+      let h = 0x811c9dc5;
+      const s = String(rid || '');
+      for (let j = 0; j < s.length; j++) {
+        h ^= s.charCodeAt(j);
+        h = Math.imul(h, 0x01000193);
+      }
+      return (h >>> 0) & 0x7fffffff;
+    };
+    const httpErr = (status, code, error, extra = {}) =>
+      Object.assign(new Error(error), { httpStatus: status, publicCode: code, publicError: error, extra });
+
+    async function insertTenantRow(db, useSavepoint = false) {
+      if (useSavepoint) {
+        await db.query('SAVEPOINT tenant_insert_schema');
+      }
+      try {
+        const { rows } = await db.query(
+          `INSERT INTO tenants
+            (full_name, phone, citizen_id_encrypted, citizen_id_tail, citizen_id_hash,
+             email, line_user_id, current_room_id, status, notes, locale,
+             address, emergency_contact_name, emergency_contact_phone, emergency_contact_relation)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+           RETURNING id, full_name, phone, email, current_room_id, status, created_at`,
+          [
+            fullName, phone, citizenEnc, citizenTail, citizenHash,
+            str(b.email, 200) || null,
+            lineUserId,
+            requestedRoomId,
+            tenantStatus,
+            str(b.notes, 1000) || null,
+            ['th', 'en'].includes(b.locale) ? b.locale : 'th',
+            address, ecName, ecPhoneNorm, ecRel,
+          ]
+        );
+        if (useSavepoint) {
+          await db.query('RELEASE SAVEPOINT tenant_insert_schema');
+        }
+        return rows;
+      } catch (err) {
+        if (err.code === '23505' && err.constraint === 'uq_tenants_citizen_id_hash_active') {
+          throw httpErr(409, 'CITIZEN_ID_DUPLICATE',
+            'เลขบัตรนี้ผูกกับผู้เช่ารายอื่นแล้ว (race)');
+        }
+        // Older deploys without the new columns fall back to the legacy INSERT.
+        if (err.code === '42703') {
+          if (useSavepoint) {
+            await db.query('ROLLBACK TO SAVEPOINT tenant_insert_schema');
+          }
+          const { rows } = await db.query(
+            `INSERT INTO tenants
+              (full_name, phone, citizen_id_encrypted, citizen_id_tail, email, line_user_id,
+               current_room_id, status, notes, locale)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+             RETURNING id, full_name, phone, email, current_room_id, status, created_at`,
+            [
+              fullName, phone, citizenEnc, citizenTail,
+              str(b.email, 200) || null,
+              lineUserId,
+              requestedRoomId,
+              tenantStatus,
+              str(b.notes, 1000) || null,
+              ['th', 'en'].includes(b.locale) ? b.locale : 'th',
+            ]
+          );
+          if (useSavepoint) {
+            await db.query('RELEASE SAVEPOINT tenant_insert_schema');
+          }
+          return rows;
+        }
+        throw err;
+      }
+    }
+
+    async function claimRoomForTenant(client, roomId, tenantRow) {
+      await client.query(
+        'SELECT pg_advisory_xact_lock($1::int, $2::int)',
+        [0x54454e54, roomLockKey(roomId)] // "TENT": tenant assignment namespace
+      );
+
+      const occupants = await client.query(
+        `SELECT id, full_name FROM tenants
+           WHERE current_room_id=$1 AND status='active' AND deleted_at IS NULL
+             AND id <> $2
+           LIMIT 1
+           FOR UPDATE`,
+        [roomId, tenantRow.id]
+      );
+      if (occupants.rows.length) {
+        throw httpErr(409, 'ROOM_OCCUPIED',
+          `ห้อง ${roomId} มีผู้เช่ารายอื่นอยู่แล้ว`,
+          { occupant: occupants.rows[0], roomId });
+      }
+
+      await client.query(
+        `INSERT INTO app_data (key, value, updated_by)
+         VALUES ('baankarn_rooms_v1', '{}'::jsonb, 'system')
+         ON CONFLICT (key) DO NOTHING`
+      );
+      const roomBlob = await client.query(
+        `SELECT value FROM app_data WHERE key='baankarn_rooms_v1' FOR UPDATE`
+      );
+      const roomsObj = roomBlob.rows[0]?.value && typeof roomBlob.rows[0].value === 'object'
+        ? roomBlob.rows[0].value
+        : {};
+      const blobRoom = roomsObj[roomId] || null;
+      let roomV2 = null;
+      try {
+        const v2 = await client.query(
+          `SELECT room_code, status FROM rooms_v2
+             WHERE room_code=$1 AND deleted_at IS NULL
+             FOR UPDATE`,
+          [roomId]
+        );
+        roomV2 = v2.rows[0] || null;
+      } catch (err) {
+        if (err.code !== '42P01') throw err;
+      }
+
+      if (!blobRoom && !roomV2) {
+        throw httpErr(404, 'ROOM_NOT_FOUND',
+          `ไม่พบห้อง ${roomId} ในระบบ`, { roomId });
+      }
+      const blockingStatus = [blobRoom?.status, roomV2?.status]
+        .filter(Boolean)
+        .find((s) => s !== 'vacant');
+      if (blockingStatus) {
+        throw httpErr(409,
+          blockingStatus === 'occupied' ? 'ROOM_OCCUPIED' : 'ROOM_UNAVAILABLE',
+          `ห้อง ${roomId} ไม่พร้อมใช้งาน (${blockingStatus})`,
+          { roomId, currentStatus: blockingStatus });
+      }
+
+      const today = new Date().toISOString().slice(0, 10);
+      const blobTenant = {
+        name: tenantRow.full_name || fullName,
+        phone: tenantRow.phone || phone,
+        email: tenantRow.email || '',
+        occupation: str(b.occupation, 200) || '',
+        score: 'A',
+        tenantId: tenantRow.id,
+        since: today,
+      };
+      await client.query(
+        `UPDATE app_data
+            SET value = value || jsonb_build_object(
+                          $1::text,
+                          COALESCE(value->$1, '{}'::jsonb)
+                            || jsonb_build_object(
+                                 'id', $1,
+                                 'status', 'occupied',
+                                 'tenant', $2::jsonb,
+                                 'since', $3::text
+                               )
+                        ),
+                updated_at=NOW(),
+                updated_by=$4
+          WHERE key='baankarn_rooms_v1'`,
+        [roomId, JSON.stringify(blobTenant), today, req.session.user.username]
+      );
+      try {
+        await client.query(
+          `UPDATE rooms_v2 SET status='occupied', updated_at=NOW()
+             WHERE room_code=$1 AND deleted_at IS NULL`,
+          [roomId]
+        );
+      } catch (err) {
+        if (err.code !== '42P01') throw err;
+      }
+    }
+    try {
+      let rows;
+      if (requestedRoomId) {
+        const client = await pool.connect();
+        try {
+          await client.query('BEGIN');
+          rows = await insertTenantRow(client, true);
+          await claimRoomForTenant(client, requestedRoomId, rows[0]);
+          await client.query('COMMIT');
+        } catch (err) {
+          await client.query('ROLLBACK').catch(() => {});
+          throw err;
+        } finally {
+          client.release();
+        }
+      } else {
+        rows = await insertTenantRow(pool);
+      }
+      // Optional: carry over the citizen ID photo from a public booking the
+      // applicant submitted earlier. Without this hand-off the photo would
+      // sit in file_uploads with refId='public-booking-pending' forever +
+      // admin would have to re-take it at the office. With bookingId set,
+      // we re-target the file row + link it on the new tenant.
+      if (b.bookingId) {
+        try {
+          const bookingId = String(b.bookingId).slice(0, 64);
+          let fid = null;
+          try {
+            const bk = await pool.query(
+              `SELECT citizen_id_image_front_id FROM bookings WHERE external_id=$1 LIMIT 1`,
+              [bookingId]
+            );
+            fid = bk.rows[0] && bk.rows[0].citizen_id_image_front_id;
+          } catch (err) {
+            // 42703 = pre-migration column absent. 42P01 = bookings table
+            // missing entirely (legacy deploy). Both are expected on older
+            // installs — skip carry-over silently. Anything else is a real
+            // error that should be visible.
+            if (err.code !== '42703' && err.code !== '42P01') throw err;
+          }
+          if (fid) {
+            // Verify the file is actually a citizen-ID image with the
+            // public-booking-pending placeholder ref_id we wrote at upload
+            // time. Without this, a corrupted booking row pointing at the
+            // wrong file_uploads.id (e.g. an unrelated contract_signature)
+            // would get re-targeted onto the tenant's identity FK column.
+            const fileQ = await pool.query(
+              `SELECT id FROM file_uploads
+                 WHERE id=$1 AND category='citizen_id_image'
+                   AND (ref_id='public-booking-pending' OR ref_id IS NULL)
+                 LIMIT 1`,
+              [fid]
+            );
+            if (fileQ.rows.length) {
+              await pool.query(
+                `UPDATE tenants SET citizen_id_image_front_id=$1, updated_at=NOW() WHERE id=$2`,
+                [fid, rows[0].id]
+              );
+              await pool.query(
+                `UPDATE file_uploads SET ref_id=$1 WHERE id=$2 AND category='citizen_id_image'`,
+                [String(rows[0].id), fid]
+              );
+            } else {
+              console.warn('[tenant.create] booking photo skipped — wrong category or ref_id');
+            }
+          }
+        } catch (err) {
+          console.warn('[tenant.create] booking photo link skipped:', err.message);
+        }
+      }
+      audit(req, 'tenant.create', 'tenant', String(rows[0].id),
+        { hasIdentity: !!(b.citizenIdImageFront || b.citizenIdImageBack),
+          linkedFromBooking: b.bookingId || null, force: b.force === true });
+      res.json({
+        ok: true, tenant: rows[0],
+        // Hint to UI: if citizen ID images were sent in the same payload,
+        // POST them to /identity now using the returned id. Keeping the
+        // upload separate avoids 3MB-per-tenant-create payloads.
+        identityUploadHint: (b.citizenIdImageFront || b.citizenIdImageBack)
+          ? `POST /api/tenants/${rows[0].id}/identity` : null,
+      });
+    } catch (err) {
+      if (err && err.httpStatus) {
+        return res.status(err.httpStatus).json({
+          error: err.publicError || err.message,
+          code: err.publicCode || 'TENANT_CREATE_FAILED',
+          ...(err.extra || {}),
+        });
+      }
+      console.error('tenant create error:', err);
+      res.status(500).json({ error: 'internal error' });
+    }
+  });
+
+  // === PUT /api/tenants/:id ===============================================
+  // Patch tenant fields. Optimistic locking via b.version (= last
+  // updated_at). The status='moved_out' path is BLOCKED unless force=true
+  // when the tenant still has live links (room/contract/cards) — that
+  // cascade belongs in POST /:id/checkout. Without this guard, admin's
+  // "edit tenant → change status dropdown" left orphan contracts.
+  r.put('/:id', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'), async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+    const b = req.body || {};
+    const fields = [];
+    const params = [];
+    let i = 1;
+    const set = (col, val) => { fields.push(`${col} = $${i++}`); params.push(val); };
+    if (b.fullName !== undefined) set('full_name', String(b.fullName).slice(0, 200));
+    if (b.phone !== undefined) {
+      // Normalise on update too — without this, admin's "fix the phone format"
+      // edit silently re-introduces dashes that block tenant login.
+      const normPhone = String(b.phone).slice(0, 32).trim().replace(/[\s-]/g, '');
+      if (!/^[\d+]{8,20}$/.test(normPhone)) {
+        return res.status(400).json({ error: 'เบอร์โทรไม่ถูกต้อง', code: 'INVALID_PHONE' });
+      }
+      set('phone', normPhone);
+    }
+    if (b.email !== undefined) set('email', b.email ? String(b.email).slice(0, 200) : null);
+    if (b.lineUserId !== undefined) {
+      const lineUserId = b.lineUserId ? String(b.lineUserId).slice(0, 64).trim() : null;
+      if (lineUserId && !lineNotify.isLikelyUserId(lineUserId)) {
+        return res.status(400).json({ error: 'invalid LINE userId', code: 'INVALID_LINE_USER_ID' });
+      }
+      set('line_user_id', lineUserId);
+    }
+    if (b.roomId !== undefined) set('current_room_id', b.roomId ? String(b.roomId).slice(0, 32) : null);
+    if (b.status !== undefined) {
+      if (!VALID_TENANT_STATUS.has(String(b.status))) return res.status(400).json({ error: 'invalid status' });
+      // Block direct flip to moved_out when the tenant still has live links
+      // (active contract / active access cards / room assignment). Bare PUT
+      // can only update the tenants row — it doesn't cascade to close the
+      // contract, free the room, revoke cards, or deactivate recurring
+      // charges. Admin using "edit tenant → change status dropdown" was
+      // leaving contracts in status='active' tied to a moved-out tenant,
+      // which broke /api/rooms (still occupied), recurring billing (kept
+      // generating bills), and access control (cards still valid).
+      // Force admin to the dedicated POST /api/tenants/:id/checkout
+      // endpoint which runs the atomic cascade. `force:true` keeps a
+      // migration/cleanup escape hatch (audit-logged) for ghost rows.
+      if (b.status === 'moved_out' && b.force !== true) {
+        try {
+          const cur = await pool.query(
+            `SELECT t.status AS tenant_status, t.current_room_id,
+                    (SELECT COUNT(*)::int FROM contracts
+                       WHERE tenant_id=t.id AND status='active' AND deleted_at IS NULL) AS active_contracts,
+                    (SELECT COUNT(*)::int FROM access_cards
+                       WHERE tenant_id=t.id AND status='active') AS active_cards
+               FROM tenants t
+              WHERE t.id=$1 AND t.deleted_at IS NULL`,
+            [id]
+          );
+          const row = cur.rows[0];
+          if (row && row.tenant_status === 'active'
+              && (row.current_room_id || row.active_contracts > 0 || row.active_cards > 0)) {
+            return res.status(409).json({
+              error: 'ผู้เช่ายัง active อยู่ (ห้อง/สัญญา/บัตร) — ใช้ POST /api/tenants/:id/checkout เพื่อปิดสัญญา + คืนห้อง + เพิกถอนบัตรพร้อมกัน',
+              code: 'USE_CHECKOUT_ENDPOINT',
+              checkoutUrl: `/api/tenants/${id}/checkout`,
+              detail: {
+                currentRoom: row.current_room_id,
+                activeContracts: row.active_contracts,
+                activeCards: row.active_cards,
+              },
+              hint: 'ถ้าต้องการเปลี่ยน status เฉพาะข้อมูล (เช่น migrate / cleanup ghost) ส่ง { force: true } พร้อม audit log',
+            });
+          }
+        } catch (err) {
+          // If the dependency check fails (DB blip, missing table on legacy
+          // deploy), fall closed: refuse the change so we never silently
+          // create the inconsistency the cascade is meant to prevent.
+          console.error('[tenant.put] checkout precheck failed:', err.message);
+          return res.status(500).json({
+            error: 'ตรวจสถานะปัจจุบันไม่สำเร็จ — ลองใหม่หรือใช้ /checkout endpoint',
+            code: 'CHECKOUT_PRECHECK_FAILED',
+          });
+        }
+      }
+      set('status', b.status);
+      if (b.status === 'blacklist' && b.blacklistReason) set('blacklist_reason', String(b.blacklistReason).slice(0, 500));
+    }
+    if (b.notes !== undefined) set('notes', b.notes ? String(b.notes).slice(0, 1000) : null);
+    if (b.locale !== undefined && ['th', 'en'].includes(b.locale)) set('locale', b.locale);
+    if (b.citizenId !== undefined) {
+      const thaiId = require('../services/thaiId');
+      const norm = thaiId.normalize(b.citizenId || '');
+      if (b.citizenId && !norm) {
+        return res.status(400).json({ error: 'เลขบัตรประชาชนต้องเป็น 13 หลัก', code: 'INVALID_CITIZEN_ID' });
+      }
+      if (norm) {
+        if (!thaiId.validateChecksum(norm) && b.force !== true) {
+          return res.status(400).json({
+            error: 'เลขบัตรประชาชนไม่ผ่าน check digit (mod-11)',
+            code: 'INVALID_CHECKSUM',
+          });
+        }
+        const flags = await features.load(pool);
+        try {
+          const enc = (flags.citizenIdEncryption && flags.citizenIdEncryption.enabled)
+            ? cryptoSvc.encryptString(norm) : norm;
+          set('citizen_id_encrypted', enc);
+          set('citizen_id_tail', norm.slice(-4));
+          // Recompute hash on update so dedup index reflects the new value.
+          // Skip when checksum failed but operator forced — same policy as create.
+          if (thaiId.validateChecksum(norm)) {
+            const newHash = thaiId.hashForLookup(norm);
+            // Pre-flight dup check (advisory unless force=true).
+            if (newHash && b.force !== true) {
+              const dup = await pool.query(
+                `SELECT id, full_name FROM tenants
+                   WHERE citizen_id_hash=$1 AND id<>$2 AND deleted_at IS NULL AND status='active' LIMIT 1`,
+                [newHash, id]
+              ).catch(() => ({ rows: [] }));
+              if (dup.rows.length) {
+                return res.status(409).json({
+                  error: 'เลขบัตรนี้ผูกกับผู้เช่ารายอื่นแล้ว',
+                  code: 'CITIZEN_ID_DUPLICATE',
+                  conflict: dup.rows[0],
+                });
+              }
+            }
+            set('citizen_id_hash', newHash);
+          } else {
+            set('citizen_id_hash', null);  // checksum forced — drop dedup
+          }
+        } catch (e) { return res.status(500).json({ error: 'crypto: ' + e.message }); }
+      } else {
+        set('citizen_id_encrypted', null);
+        set('citizen_id_tail', null);
+        set('citizen_id_hash', null);
+      }
+    }
+    // Address + emergency contact updates. All optional; empty string clears.
+    if (b.address !== undefined) {
+      set('address', b.address ? String(b.address).slice(0, 500) : null);
+    }
+    if (b.emergencyContactName !== undefined) {
+      set('emergency_contact_name', b.emergencyContactName ? String(b.emergencyContactName).slice(0, 200) : null);
+    }
+    if (b.emergencyContactPhone !== undefined) {
+      const ec = b.emergencyContactPhone
+        ? String(b.emergencyContactPhone).slice(0, 32).trim().replace(/[\s-]/g, '') : null;
+      if (ec && !/^[\d+]{8,20}$/.test(ec)) {
+        return res.status(400).json({ error: 'เบอร์โทรผู้ติดต่อฉุกเฉินไม่ถูกต้อง', code: 'INVALID_EMERGENCY_PHONE' });
+      }
+      set('emergency_contact_phone', ec);
+    }
+    if (b.emergencyContactRelation !== undefined) {
+      set('emergency_contact_relation', b.emergencyContactRelation ? String(b.emergencyContactRelation).slice(0, 64) : null);
+    }
+    if (!fields.length) return res.status(400).json({ error: 'nothing to update' });
+    fields.push('updated_at = NOW()');
+    // Optimistic locking: if the client sent a `version` (= server's last
+    // updated_at), we add it to the WHERE clause. Two concurrent edits → the
+    // second UPDATE returns 0 rows → 409 with the current state so the UI
+    // can prompt the user to reload before retrying. Without `version` we
+    // fall back to last-write-wins (preserves backwards compat).
+    let lockClause = '';
+    if (b.version) {
+      params.push(b.version);
+      lockClause = ` AND updated_at = $${params.length}`;
+    }
+    params.push(id);
+    try {
+      const { rows } = await pool.query(
+        `UPDATE tenants SET ${fields.join(', ')}
+           WHERE id=$${params.length} AND deleted_at IS NULL${lockClause}
+           RETURNING id, updated_at`,
+        params
+      );
+      if (!rows.length) {
+        if (b.version) {
+          // Either the row is gone or the version is stale. Look up to tell apart.
+          const cur = await pool.query(
+            `SELECT id, full_name, phone, email, current_room_id, status, updated_at
+               FROM tenants WHERE id=$1 AND deleted_at IS NULL`,
+            [id]
+          );
+          if (cur.rows.length) {
+            return res.status(409).json({
+              error: 'ผู้ใช้อื่นแก้ไขข้อมูลนี้ไปแล้ว — โปรดโหลดข้อมูลใหม่ก่อนแก้ไข',
+              code: 'VERSION_CONFLICT',
+              current: cur.rows[0],
+            });
+          }
+        }
+        return res.status(404).json({ error: 'not found', code: 'NOT_FOUND' });
+      }
+      if (b.status === 'moved_out' || b.status === 'blacklist') {
+        await pool.query(`DELETE FROM tenant_sessions WHERE tenant_id=$1`, [id]).catch((err) => {
+          console.warn('[tenant.update] session cleanup failed:', err.message);
+        });
+      }
+      // Audit the change. Include a 'forced' flag when admin bypassed the
+      // checkout cascade — that's the breadcrumb if a moved_out tenant later
+      // shows up with an orphan contract because of this PUT.
+      audit(req, 'tenant.update', 'tenant', String(id), {
+        fields: Object.keys(b),
+        forcedMovedOut: b.status === 'moved_out' && b.force === true ? true : undefined,
+      });
+      res.json({ ok: true, id, updated_at: rows[0].updated_at });
+    } catch (err) {
+      console.error('tenant update error:', err);
+      res.status(500).json({ error: 'internal error' });
+    }
+  });
+
+  // === DELETE /api/tenants/:id ============================================
+  // Owner-only. Soft-delete when the softDelete feature is on; otherwise a
+  // hard DELETE which surfaces FK-blocked references as a 409 TENANT_HAS_REFS
+  // instead of a generic 500.
+  r.delete('/:id', sameOrigin, csrfGuard, requireAuth, requireRole('owner'), async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+    try {
+      const flags = await features.load(pool);
+      if (flags.softDelete && flags.softDelete.enabled) {
+        await pool.query(`UPDATE tenants SET deleted_at=NOW() WHERE id=$1`, [id]);
+      } else {
+        // Hard delete is dangerous: tenants(id) has FK references from bills,
+        // contracts, payments, access_cards, line_bindings (CASCADE),
+        // recurring_charges (CASCADE), tenant_sessions (NOT NULL).
+        // Most FKs are ON DELETE NO ACTION → the DELETE fails with 23503 and
+        // the tenant stays orphaned. Surface that as a clear 409 instead of
+        // a generic 500 so admin knows to use soft-delete (or clean refs first).
+        try {
+          await pool.query(`DELETE FROM tenants WHERE id=$1`, [id]);
+        } catch (err) {
+          if (err.code === '23503') {
+            return res.status(409).json({
+              error: 'ลบไม่ได้ — ผู้เช่ายังมีบิล/สัญญา/บัตรเข้า-ออกเชื่อมโยง โปรดเปิด softDelete หรือลบข้อมูลที่เชื่อมโยงก่อน',
+              code: 'TENANT_HAS_REFS',
+            });
+          }
+          throw err;
+        }
+      }
+      audit(req, 'tenant.delete', 'tenant', String(id));
+      res.json({ ok: true });
+    } catch (err) {
+      console.error('tenant delete error:', err);
+      res.status(500).json({ error: 'internal error' });
+    }
+  });
+
+  // === POST /api/tenants/:id/identity =====================================
+  // Upload citizen-ID images (front/back) + optionally the cleartext number.
+  // The number, if supplied, is encrypted via cryptoSvc when the feature
+  // flag is on; the hash is stored for the partial-unique dedup index.
+  // Photo storage is sequential so we can roll back the first if the second
+  // fails (avoids half-linked records). Owner-notify on success creates the
+  // legal trail (see test integration.test.js#4161).
+  r.post('/:id/identity', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'),
+    features.requireFeature('photoUpload'),
+    async (req, res) => {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+      const b = req.body || {};
+      const front = b.frontDataUrl;
+      const back  = b.backDataUrl;
+      const citizenIdRaw = b.citizenId != null ? String(b.citizenId) : null;
+      if (!front && !back && !citizenIdRaw) {
+        return res.status(400).json({
+          error: 'ต้องส่งภาพหน้าหรือหลังของบัตรอย่างน้อย 1 ด้าน หรือเลขบัตร 13 หลัก',
+          code: 'NOTHING_TO_SAVE',
+        });
+      }
+
+      // Optional Thai citizen-ID validation. If supplied, MUST pass checksum —
+      // typing 13 random digits should fail loudly rather than silently store.
+      const thaiId = require('../services/thaiId');
+      let citizenId = null;
+      let citizenTail = null;
+      let citizenEnc = null;
+      let citizenHash = null;
+      if (citizenIdRaw) {
+        const norm = thaiId.normalize(citizenIdRaw);
+        if (!norm) {
+          return res.status(400).json({
+            error: 'เลขบัตรประชาชนต้องเป็น 13 หลัก',
+            code: 'INVALID_CITIZEN_ID',
+          });
+        }
+        if (!thaiId.validateChecksum(norm)) {
+          return res.status(400).json({
+            error: 'เลขบัตรประชาชนไม่ผ่านการตรวจสอบ check digit (mod-11)',
+            code: 'INVALID_CHECKSUM',
+          });
+        }
+        citizenId = norm;
+        citizenTail = norm.slice(-4);
+        citizenHash = thaiId.hashForLookup(norm);
+        // Encrypt under the configured citizen-ID encryption flag (matches
+        // the existing POST /api/tenants behaviour).
+        try {
+          const flags = await features.load(pool);
+          if (flags.citizenIdEncryption && flags.citizenIdEncryption.enabled) {
+            citizenEnc = cryptoSvc.encryptString(norm);
+          } else {
+            citizenEnc = norm;  // plaintext fallback (not recommended)
+          }
+        } catch (e) {
+          return res.status(500).json({ error: 'crypto unavailable: ' + e.message });
+        }
+      }
+
+      // Verify the tenant exists BEFORE storing the photos so we don't leave
+      // orphan file_uploads on a 404. Pull existing image FK ids too so we can
+      // remove them when the admin replaces a side (otherwise old files leak
+      // on disk + bloat file_uploads).
+      const t = await pool.query(
+        `SELECT id, citizen_id_image_front_id, citizen_id_image_back_id
+           FROM tenants WHERE id=$1 AND deleted_at IS NULL`,
+        [id]
+      );
+      if (!t.rows.length) return res.status(404).json({ error: 'tenant not found' });
+      const existingFrontId = t.rows[0].citizen_id_image_front_id;
+      const existingBackId  = t.rows[0].citizen_id_image_back_id;
+
+      // Pre-flight dedup check on citizen_id_hash so admin sees a clear
+      // duplicate-detected response instead of a 23505 from the partial
+      // unique index. Advisory only when force=true is set in the body.
+      if (citizenHash) {
+        const dup = await pool.query(
+          `SELECT id, full_name, status FROM tenants
+             WHERE citizen_id_hash=$1 AND deleted_at IS NULL AND status='active' AND id<>$2
+             LIMIT 1`,
+          [citizenHash, id]
+        );
+        if (dup.rows.length && b.force !== true) {
+          return res.status(409).json({
+            error: 'เลขบัตรนี้ถูกบันทึกในระบบแล้วกับผู้เช่ารายอื่น',
+            code: 'CITIZEN_ID_DUPLICATE',
+            conflict: dup.rows[0],
+            hint: 'ส่ง { force: true } ถ้ายืนยันว่าเป็นคนเดิมและต้องการอัปเดตข้อมูล (audit-logged)',
+          });
+        }
+      }
+
+      const maxBytes = (req.features.photoUpload && req.features.photoUpload.maxBytes) || 1_500_000;
+      const username = req.session.user.username;
+
+      // Photos are saved sequentially so a failure mid-flight leaves the
+      // tenant row consistent (we only commit the FK update once we know
+      // both successful uploads landed).
+      let frontFile = null, backFile = null;
+      try {
+        if (front) {
+          frontFile = await storage.saveBase64({
+            pool, category: 'citizen_id_image',
+            dataUrl: front, refId: String(id), uploadedBy: username,
+            maxBytes, side: 'front',
+          });
+        }
+        if (back) {
+          backFile = await storage.saveBase64({
+            pool, category: 'citizen_id_image',
+            dataUrl: back, refId: String(id), uploadedBy: username,
+            maxBytes, side: 'back',
+          });
+        }
+      } catch (err) {
+        // Roll back any successful upload so we don't leave a half-linked record.
+        if (frontFile) await storage.remove(pool, frontFile.id).catch(() => {});
+        if (backFile)  await storage.remove(pool, backFile.id).catch(() => {});
+        return res.status(400).json({ error: err.message || 'upload failed', code: 'UPLOAD_FAILED' });
+      }
+
+      // Link to tenant + write citizen ID fields if provided. All in ONE
+      // statement so the partial unique index runs against a coherent row.
+      const sets = []; const params = [];
+      let i = 1;
+      if (frontFile) { sets.push(`citizen_id_image_front_id=$${i++}`); params.push(frontFile.id); }
+      if (backFile)  { sets.push(`citizen_id_image_back_id=$${i++}`);  params.push(backFile.id); }
+      if (citizenEnc != null) { sets.push(`citizen_id_encrypted=$${i++}`); params.push(citizenEnc); }
+      if (citizenTail != null) { sets.push(`citizen_id_tail=$${i++}`); params.push(citizenTail); }
+      if (citizenHash != null) { sets.push(`citizen_id_hash=$${i++}`); params.push(citizenHash); }
+      if (sets.length) {
+        sets.push('updated_at = NOW()');
+        params.push(id);
+        try {
+          await pool.query(
+            `UPDATE tenants SET ${sets.join(', ')} WHERE id=$${i}`,
+            params
+          );
+        } catch (err) {
+          // 23505 = race against another concurrent identity write hitting
+          // the same hash. Tear down photos so the next attempt isn't
+          // double-storing.
+          if (frontFile) await storage.remove(pool, frontFile.id).catch(() => {});
+          if (backFile)  await storage.remove(pool, backFile.id).catch(() => {});
+          if (err.code === '23505') {
+            return res.status(409).json({
+              error: 'เลขบัตรนี้ผูกกับผู้เช่ารายอื่นแล้ว (race)',
+              code: 'CITIZEN_ID_DUPLICATE',
+            });
+          }
+          throw err;
+        }
+      }
+
+      // After successful link, remove the OLD files (if admin is replacing).
+      // Best-effort — failure here doesn't fail the request because the new
+      // file is already linked; the orphan would just sit around.
+      if (frontFile && existingFrontId && existingFrontId !== frontFile.id) {
+        await storage.remove(pool, existingFrontId).catch((err) => {
+          console.warn('[identity] old front cleanup failed:', err.message);
+        });
+      }
+      if (backFile && existingBackId && existingBackId !== backFile.id) {
+        await storage.remove(pool, existingBackId).catch((err) => {
+          console.warn('[identity] old back cleanup failed:', err.message);
+        });
+      }
+
+      audit(req, 'tenant.identity', 'tenant', String(id), {
+        hasFront: !!frontFile, hasBack: !!backFile,
+        citizenTail, force: b.force === true,
+        replacedFrontId: existingFrontId !== frontFile?.id ? existingFrontId : null,
+        replacedBackId: existingBackId !== backFile?.id ? existingBackId : null,
+      });
+      // Owner notify so a third party sees identity-capture activity. Reduces
+      // inside-job risk where a single admin could fabricate tenant records;
+      // the owner gets a paper trail in LINE/email.
+      try {
+        const flags = await features.load(pool);
+        const sides = [
+          frontFile ? 'หน้า' : null,
+          backFile ? 'หลัง' : null,
+        ].filter(Boolean).join('+');
+        notifier.notifyOwner({ pool, features: flags }, {
+          subject: `📇 บันทึกบัตรประชาชน — tenant id=${id}`,
+          text: `admin ${req.session.user.username} บันทึกภาพบัตร${sides ? ' (' + sides + ')' : ''}`
+            + (citizenTail ? `\nหมายเลข: ***-${citizenTail}` : '')
+            + (b.force === true ? '\n⚠️ ใช้ force=true bypass dedup' : ''),
+        }).catch(() => {});
+      } catch { /* notify failure must not break the request */ }
+      res.json({
+        ok: true,
+        tenantId: id,
+        front: frontFile ? { id: frontFile.id, url: frontFile.url, side: 'front' } : null,
+        back:  backFile  ? { id: backFile.id,  url: backFile.url,  side: 'back'  } : null,
+        citizenIdHashSet: !!citizenHash,
+        replacedFrontId: existingFrontId && frontFile && existingFrontId !== frontFile.id ? existingFrontId : null,
+        replacedBackId: existingBackId && backFile && existingBackId !== backFile.id ? existingBackId : null,
+      });
+    });
+
+  // === GET /api/tenants/:id/identity ======================================
+  // Return the current image links + masked citizen ID. Owner/manager only —
+  // staff has read on tenant rows but not citizen ID; we explicitly gate
+  // this endpoint.
+  r.get('/:id/identity', requireAuth, requireRole('owner', 'manager'), async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+    try {
+      const { rows } = await pool.query(
+        `SELECT t.id, t.full_name, t.citizen_id_tail,
+                t.citizen_id_image_front_id, t.citizen_id_image_back_id,
+                ff.url AS front_url, bf.url AS back_url,
+                ff.uploaded_at AS front_uploaded_at, bf.uploaded_at AS back_uploaded_at
+           FROM tenants t
+           LEFT JOIN file_uploads ff ON ff.id = t.citizen_id_image_front_id
+           LEFT JOIN file_uploads bf ON bf.id = t.citizen_id_image_back_id
+          WHERE t.id=$1 AND t.deleted_at IS NULL LIMIT 1`,
+        [id]
+      );
+      if (!rows.length) return res.status(404).json({ error: 'tenant not found' });
+      const row = rows[0];
+      res.json({
+        ok: true,
+        tenantId: row.id,
+        fullName: row.full_name,
+        citizenIdTail: row.citizen_id_tail,  // last 4 only
+        front: row.citizen_id_image_front_id ? {
+          id: row.citizen_id_image_front_id, url: row.front_url, uploadedAt: row.front_uploaded_at,
+        } : null,
+        back: row.citizen_id_image_back_id ? {
+          id: row.citizen_id_image_back_id, url: row.back_url, uploadedAt: row.back_uploaded_at,
+        } : null,
+      });
+    } catch (err) {
+      console.error('identity get error:', err);
+      res.status(500).json({ error: 'internal error' });
+    }
+  });
 
   // === checkIn ============================================================
   // POST /api/tenants/:id/checkin
@@ -650,7 +1986,7 @@ module.exports = function buildTenantOpsRouter(ctx) {
         audit(req, 'tenant.checkout', 'tenant', String(id),
           { oldRoom, reason, refund,
             cardsRevoked: revokedCards.rows.map((c) => c.card_id),
-            recurringDeactivated: deactivatedRecurring.rows.map((r) => r.label),
+            recurringDeactivated: deactivatedRecurring.rows.map((rc) => rc.label),
             closingBill: closingBill ? closingBill.bill_no : null });
 
         // Fire-and-forget notify so the tenant knows their access has been
@@ -694,7 +2030,7 @@ module.exports = function buildTenantOpsRouter(ctx) {
       } catch (err) {
         await client.query('ROLLBACK').catch(() => {});
         console.error('checkout error:', err);
-        res.status(500).json({ error: 'internal error', code: 'DB_ERROR' });
+        res.status(500).json({ error: 'internal error' });
       } finally {
         client.release();
       }

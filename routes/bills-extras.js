@@ -1,11 +1,31 @@
 // routes/bills-extras.js
-// Bulk bill operations + send-via-LINE + slip verification helpers that
-// extend the existing /api/bills routes in server.js.
+// Every /api/bills/* endpoint, in one place. Previously most of these
+// lived inline in server.js (GET list, POST create, /render, /void,
+// /unmark-paid) while the bulk + send + slip helpers lived here — the
+// split made it hard to see which path a bill takes from creation to
+// payment to void. They're consolidated here so search-by-route lands
+// in the same file every time.
 //
-//   POST /api/bills/bulk-generate   — generate bills for every occupied room
-//   POST /api/bills/bulk-send       — enqueue notifications for every pending/overdue bill
-//   POST /api/bills/:id/send        — enqueue notification for one bill
-//   POST /api/bills/:id/verify-slip — admin marks slip as verified
+// Endpoints (mount = '/api/bills' from routes/index.js):
+//   GET  /                         — admin list (+ optional withPayments)
+//   POST /                         — admin create (compute or persist)
+//   POST /render                   — admin PDF render
+//   PUT  /:id/void                 — admin voids a bill (reverses verified)
+//   POST /:id/unmark-paid          — admin reverses a paid → pending/overdue
+//   POST /:id/pay                  — admin records offline payment
+//   POST /:id/send                 — enqueue LINE/email for one bill
+//   POST /:id/verify-slip          — admin verifies/rejects latest slip
+//   GET  /:id/send-readiness       — preflight (issues + history)
+//   GET  /send-readiness-batch     — bulk preflight by period
+//   POST /bulk-generate            — generate bills for occupied rooms
+//   POST /bulk-send                — enqueue notifications for all overdue
+//
+// Helpers that travelled with the moved endpoints: getRenderBillId,
+// buildStoredBillPdfObject, numOrNull, storedUtilityUsage,
+// loadRecurringFor, notifyBillVoided. Cross-file helpers
+// (acquirePdfSlot, loadEffectivePaymentBlock, sanitizeError) are wired
+// in via ctx so we don't duplicate them — server.js still uses the same
+// originals for tenant-side PDFs, QR endpoints, and config fetches.
 
 const express = require('express');
 const billing = require('../services/billing');
@@ -14,6 +34,7 @@ const meter = require('../services/meter');
 const notifier = require('../services/notifier');
 const notifQueue = require('../services/notificationQueue');
 const promptpay = require('../services/promptpay');
+const { MAX_AMOUNT } = promptpay;
 const lineNotify = require('../services/line');
 // Manual mark-paid (POST /api/bills/:id/pay) now accepts an optional slip
 // dataUrl so admin can attach a receipt photo even for cash / external
@@ -23,10 +44,835 @@ const storage = require('../services/storage');
 // 53300). bulk-generate inserts ~30+ bills in a tight loop — most likely
 // path to hit a deadlock against the scheduler's auto-gen running parallel.
 const { queryWithRetry } = require('../db/pool');
+const { renderBillPdf } = require('../services/pdf');
+const { schemas } = require('../schemas');
+const { validateBody } = require('../middleware/validate');
+const billPayments = require('../services/billPayments');
+
+// ---- Small helpers that only POST /render + GET /:id (PDF rebuild) use --
+function numOrNull(value) {
+  if (value == null || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function storedUtilityUsage(b, prefix) {
+  const unitsKey = `${prefix}_units`;
+  const prevKey = `${prefix}_prev_reading`;
+  const currentKey = `${prefix}_current_reading`;
+  const prevReading = numOrNull(b[prevKey]);
+  const currentReading = numOrNull(b[currentKey]);
+  return {
+    units: Number(b[unitsKey]) || 0,
+    prevReading,
+    currentReading,
+    hasReadings: prevReading != null && currentReading != null,
+  };
+}
+
+function getRenderBillId(req, bill) {
+  const candidates = [
+    req.body?.billId,
+    req.body?.dbBillId,
+    bill?.dbBillId,
+    bill?.billId,
+  ];
+  for (const value of candidates) {
+    const id = Number(value);
+    if (Number.isInteger(id) && id > 0) return id;
+  }
+  return null;
+}
+
+function buildStoredBillPdfObject(b, config, paymentBlock) {
+  const items = [
+    { label: 'ค่าเช่าห้องพัก', qty: '1 เดือน', amount: Number(b.rent) || 0 },
+    billing.buildUtilityItem('ค่าน้ำ', storedUtilityUsage(b, 'water'), Number(b.water_rate) || 0, Number(b.water_amount) || 0),
+    billing.buildUtilityItem('ค่าไฟฟ้า', storedUtilityUsage(b, 'elec'), Number(b.elec_rate) || 0, Number(b.elec_amount) || 0),
+  ];
+  if (Number(b.wifi) > 0) {
+    items.push({ label: 'ค่าอินเทอร์เน็ต', qty: '1 เดือน', amount: Number(b.wifi) });
+  }
+  let otherList = Array.isArray(b.other) ? b.other : [];
+  if (!Array.isArray(b.other) && typeof b.other === 'string') {
+    try {
+      const parsed = JSON.parse(b.other);
+      if (Array.isArray(parsed)) otherList = parsed;
+    } catch { /* keep empty */ }
+  }
+  for (const it of otherList) {
+    const amt = Number(it.amount) || 0;
+    if (amt > 0) items.push({ label: String(it.label || 'อื่นๆ'), qty: '', amount: amt });
+  }
+  if (Number(b.late_fee) > 0) {
+    items.push({ label: 'ค่าปรับชำระล่าช้า', qty: '', amount: Number(b.late_fee) });
+  }
+  if (Number(b.vat) > 0) {
+    items.push({ label: 'ภาษีมูลค่าเพิ่ม', qty: '', amount: Number(b.vat) });
+  }
+  return {
+    billNo: b.bill_no,
+    roomId: b.room_id,
+    tenantName: b.tenant_name || '',
+    tenantPhone: b.tenant_phone || '',
+    period: b.period,
+    dueDate: b.due_date,
+    items,
+    rent: Number(b.rent) || 0,
+    waterUnits: Number(b.water_units) || 0,
+    waterRate: Number(b.water_rate) || 0,
+    waterAmount: Number(b.water_amount) || 0,
+    waterPrevReading: numOrNull(b.water_prev_reading),
+    waterCurrentReading: numOrNull(b.water_current_reading),
+    elecUnits: Number(b.elec_units) || 0,
+    elecRate: Number(b.elec_rate) || 0,
+    elecAmount: Number(b.elec_amount) || 0,
+    elecPrevReading: numOrNull(b.elec_prev_reading),
+    elecCurrentReading: numOrNull(b.elec_current_reading),
+    wifi: Number(b.wifi) || 0,
+    subtotal: Number(b.subtotal) || 0,
+    vat: Number(b.vat) || 0,
+    lateFee: Number(b.late_fee) || 0,
+    total: Number(b.total) || 0,
+    status: b.status,
+    paidAt: b.paid_at,
+    building: (config && config.building) || {},
+    ...paymentBlock,
+  };
+}
+
+// Helper used by bill generation (manual + scheduler) to load active
+// charges that apply to a given (tenantId, roomId) combo. one_off charges
+// are returned only if they haven't been billed yet (we mark them
+// inactive after their first inclusion — see POST / below).
+async function loadRecurringFor(pool, { tenantId, roomId }) {
+  const params = [];
+  const where = ['active = TRUE'];
+  const ors = [];
+  if (tenantId) { params.push(tenantId); ors.push(`tenant_id = $${params.length}`); }
+  if (roomId)   { params.push(roomId);   ors.push(`room_id = $${params.length}`); }
+  if (!ors.length) return [];
+  where.push(`(${ors.join(' OR ')})`);
+  where.push(`(start_at IS NULL OR start_at <= CURRENT_DATE)`);
+  where.push(`(end_at IS NULL OR end_at >= CURRENT_DATE)`);
+  const { rows } = await pool.query(
+    `SELECT id, label, amount, frequency FROM recurring_charges
+       WHERE ${where.join(' AND ')} ORDER BY created_at ASC`,
+    params
+  );
+  return rows;
+}
 
 module.exports = function buildBillsExtrasRouter(ctx) {
-  const { pool, requireAuth, requireRole, sameOrigin, csrfGuard, audit, signBillQrToken, signBillPayToken } = ctx;
+  const {
+    pool, requireAuth, requireRole, sameOrigin, csrfGuard, audit,
+    signBillQrToken, signBillPayToken,
+    // Server-side singletons handed through ctx so we don't duplicate
+    // the PDF concurrency latch or the payment-block builder.
+    acquirePdfSlot, releasePdfSlot,
+    loadBillingConfig, loadEffectivePaymentBlock, buildEffectivePaymentBlock,
+    sanitizeError,
+  } = ctx;
   const r = express.Router();
+
+  // notifyBillVoided lives in the closure (not module scope) because it
+  // captures `pool` via the ctx pattern — keeping it here avoids passing
+  // pool to a stand-alone helper. Sole caller: PUT /:id/void below.
+  async function notifyBillVoided(bill, reason, actor) {
+    if (!bill) return;
+    const flags = await features.load(pool);
+    const amount = Number(bill.total);
+    const amountText = Number.isFinite(amount)
+      ? amount.toLocaleString('th-TH', { minimumFractionDigits: 2 })
+      : '-';
+    const lines = [
+      `Bill voided: ${bill.bill_no || bill.id}`,
+      `Room: ${bill.room_id || '-'}`,
+      bill.period ? `Period: ${bill.period}` : null,
+      `Amount: THB ${amountText}`,
+      reason ? `Reason: ${reason}` : null,
+      actor ? `By: ${actor}` : null,
+    ].filter(Boolean);
+
+    if (bill.tenant_id) {
+      const { rows } = await pool.query(
+        `SELECT id, full_name, phone, email, line_user_id, line_oa_id, status
+           FROM tenants
+          WHERE id=$1 AND deleted_at IS NULL
+          LIMIT 1`,
+        [bill.tenant_id]
+      );
+      if (rows.length) {
+        await notifier.notifyTenant({ pool, features: flags }, rows[0], {
+          subject: 'Bill cancelled',
+          text: [
+            `Dear ${rows[0].full_name || 'tenant'},`,
+            '',
+            ...lines,
+            '',
+            'Please ignore the cancelled bill. Contact the office if you already paid or have questions.',
+          ].join('\n'),
+          force: true,
+        });
+      }
+    }
+
+    await notifier.notifyOwner({ pool, features: flags }, {
+      subject: 'Bill voided',
+      text: lines.join('\n'),
+    });
+  }
+
+  // GET /api/bills — admin list. Filters by status / roomId / period and
+  // paginates. `withPayments=1` joins a small per-bill slip summary so the
+  // admin billing page can render badges without a second round-trip.
+  r.get('/', requireAuth, async (req, res) => {
+    const status = req.query.status;
+    const params = [];
+    const where = ['b.deleted_at IS NULL'];
+    if (status && ['pending', 'paid', 'overdue', 'void'].includes(String(status))) {
+      params.push(status); where.push(`b.status=$${params.length}`);
+    }
+    if (req.query.roomId) {
+      params.push(String(req.query.roomId).slice(0, 32));
+      where.push(`b.room_id=$${params.length}`);
+    }
+    if (req.query.period) {
+      params.push(String(req.query.period).slice(0, 16));
+      where.push(`b.period=$${params.length}`);
+    }
+    // Pagination so admins working with > 500 historical bills can page
+    // through them. Default 200/page; max 500 (preserves the previous cap).
+    const limit = Math.min(Math.max(Number(req.query.limit) || 200, 1), 500);
+    const offset = Math.max(Number(req.query.offset) || 0, 0);
+    params.push(limit, offset);
+    // Opt-in payment summary so the admin billing page can show per-row
+    // "📥 สลิปรอตรวจ" / "🤖 ออโต้" / "👤 admin" badges without firing a
+    // second request per row. Off by default for backward compat — older
+    // callers (reports, exports, CSV) still get the bare bills shape.
+    const withPayments = String(req.query.withPayments || '').toLowerCase() === '1'
+                       || String(req.query.withPayments || '').toLowerCase() === 'true';
+    try {
+      const sql = withPayments
+        ? `SELECT b.*,
+                  COUNT(p.id) FILTER (WHERE p.status='pending')::int  AS pending_slip_count,
+                  COUNT(p.id) FILTER (WHERE p.status='verified')::int AS verified_slip_count,
+                  COUNT(p.id) FILTER (WHERE p.status='rejected')::int AS rejected_slip_count,
+                  (
+                    SELECT verified_by FROM payments
+                     WHERE bill_id=b.id AND status='verified'
+                     ORDER BY verified_at DESC LIMIT 1
+                  ) AS latest_paid_by,
+                  (
+                    SELECT verified_at FROM payments
+                     WHERE bill_id=b.id AND status='verified'
+                     ORDER BY verified_at DESC LIMIT 1
+                  ) AS latest_paid_at,
+                  (
+                    SELECT verify_provider FROM payments
+                     WHERE bill_id=b.id AND status='verified' AND verify_provider IS NOT NULL
+                     ORDER BY verified_at DESC LIMIT 1
+                  ) AS latest_paid_provider
+             FROM bills b
+             LEFT JOIN payments p ON p.bill_id = b.id
+            WHERE ${where.join(' AND ')}
+            GROUP BY b.id
+            ORDER BY b.created_at DESC
+            LIMIT $${params.length - 1} OFFSET $${params.length}`
+        : `SELECT b.* FROM bills b WHERE ${where.join(' AND ')}
+            ORDER BY b.created_at DESC
+            LIMIT $${params.length - 1} OFFSET $${params.length}`;
+      const { rows } = await pool.query(sql, params);
+      res.json({ ok: true, bills: rows, limit, offset });
+    } catch (err) {
+      console.error('bills list error:', err);
+      res.status(500).json({ error: 'internal error' });
+    }
+  });
+
+  // POST /api/bills — admin create/upsert. Two modes:
+  //   1. `compute:true` with roomId → server reads rooms+config+contract,
+  //      pulls recurring rows, runs billing.buildBill, then inserts.
+  //   2. fully-formed bill → strict validation then INSERT.
+  // The ON CONFLICT path only updates pending/overdue bills with NO
+  // verified payments — anything paid/void/locked is refused with
+  // BILL_LOCKED_FOR_LEDGER so admin can't silently overwrite a ledger row.
+  r.post('/', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'),
+    validateBody(schemas.generateBill), async (req, res) => {
+    const b = req.body || {};
+    const flags = await features.load(pool);
+    // Admin sends either a fully-formed bill, or roomId+period and we compute it.
+    let computed = b;
+    // Track which one_off recurring rows we used so we can deactivate them
+    // after a successful insert (so they don't appear on next month's bill).
+    let usedOneOffIds = [];
+    let otherForStorage = Array.isArray(b.other) ? b.other : [];
+    if (b.compute && b.roomId) {
+      const [roomsRow, configRow] = await Promise.all([
+        pool.query(`SELECT value FROM app_data WHERE key='baankarn_rooms_v1'`),
+        pool.query(`SELECT value FROM app_data WHERE key='baankarn_config_v1'`),
+      ]);
+      const roomsObj = roomsRow.rows.length ? roomsRow.rows[0].value : {};
+      const config = configRow.rows.length ? configRow.rows[0].value : {};
+      const room = roomsObj[b.roomId] || (Object.values(roomsObj || {}).find((r) => r.id === b.roomId));
+      if (!room) return res.status(404).json({ error: 'room not found' });
+      let previous = null;
+      try {
+        const prev = await pool.query(
+          `SELECT total, due_date, paid_at, status FROM bills
+             WHERE room_id=$1 AND status IN ('pending','overdue') AND deleted_at IS NULL
+             ORDER BY created_at DESC LIMIT 1`,
+          [b.roomId]
+        );
+        previous = prev.rows[0] ? { total: Number(prev.rows[0].total), dueDate: prev.rows[0].due_date, status: prev.rows[0].status } : null;
+      } catch {}
+      // B1 — auto-load recurring charges if recurringCharges flag on and the
+      // caller didn't explicitly pass `recurring`. Resolve the active tenant
+      // first so per-tenant charges (parking, cleaning) match the right person.
+      let recurringList = Array.isArray(b.recurring) ? b.recurring : [];
+      if (Array.isArray(b.recurring) && !Array.isArray(b.other)) {
+        otherForStorage = recurringList;
+      }
+      if (flags.recurringCharges?.enabled && flags.recurringCharges?.autoIncludeOnBillGen !== false && !b.recurring) {
+        let tid = b.tenantId || null;
+        if (!tid) {
+          try {
+            const tq = await pool.query(
+              `SELECT id FROM tenants WHERE current_room_id=$1 AND status='active' AND deleted_at IS NULL
+                 ORDER BY updated_at DESC LIMIT 1`,
+              [b.roomId]
+            );
+            if (tq.rows.length) tid = tq.rows[0].id;
+          } catch { /* ignore */ }
+        }
+        const dbRecurring = await loadRecurringFor(pool, { tenantId: tid, roomId: b.roomId });
+        // Honor `frequency` so quarterly charges only land on bills for the
+        // appropriate quarter (every 3 months from start_at) — previously
+        // every recurring row was added every month regardless of frequency,
+        // silently overcharging tenants with quarterly fees.
+        const periodForFilter = b.period || billing.formatPeriodNow();
+        const applicable = dbRecurring.filter((r) => billing.isChargeApplicableForPeriod(r, periodForFilter));
+        recurringList = applicable.map((r) => ({ label: r.label, amount: Number(r.amount) }));
+        otherForStorage = recurringList;
+        // Only deactivate one_off charges that actually got billed this period.
+        usedOneOffIds = applicable.filter((r) => r.frequency === 'one_off').map((r) => r.id);
+      }
+      // Resolve the active contract for BOTH discount_pct (legacy: contract-
+      // length discount) AND monthly_rent (NEW: locked rate from signing —
+      // services/pricing.js prefers this over room.rent/formula so admin
+      // changing /admin#pricing mid-contract doesn't break existing tenants).
+      let discountPct = 0;
+      let activeContract = null;
+      try {
+        const cq = await pool.query(
+          `SELECT id, monthly_rent, discount_pct, status
+             FROM contracts
+             WHERE room_id=$1 AND status='active' AND deleted_at IS NULL
+             ORDER BY start_date DESC LIMIT 1`,
+          [b.roomId]
+        );
+        if (cq.rows[0]) {
+          activeContract = cq.rows[0];
+          discountPct = Number(cq.rows[0].discount_pct) || 0;
+        }
+      } catch { /* contracts may be empty on legacy deploys */ }
+      const roomForBilling = await meter.attachLatestBillingReadings(pool, room);
+      computed = billing.buildBill({
+        room: roomForBilling, contract: activeContract, config, features: flags,
+        previous,
+        recurring: recurringList,
+        period: b.period, dueDate: b.dueDate,
+        discountPct,
+      });
+    }
+    const totalAmount = Number(computed.total);
+    const subtotalAmount = computed.subtotal == null ? totalAmount : Number(computed.subtotal);
+    if (!computed.billNo || !computed.roomId || !computed.period || !computed.dueDate
+        || !Number.isFinite(totalAmount) || totalAmount <= 0 || totalAmount > MAX_AMOUNT
+        || !Number.isFinite(subtotalAmount) || subtotalAmount < 0) {
+      return res.status(400).json({
+        error: 'billNo, roomId, period, dueDate and a positive total are required',
+        code: 'INVALID_BILL_TOTAL',
+      });
+    }
+    const amountFields = [
+      'rent', 'waterUnits', 'waterRate', 'waterAmount',
+      'elecUnits', 'elecRate', 'elecAmount', 'wifi',
+      'vat', 'lateFee',
+    ];
+    for (const field of amountFields) {
+      const n = Number(computed[field] || 0);
+      if (!Number.isFinite(n) || n < 0) {
+        return res.status(400).json({
+          error: `invalid nonnegative bill field: ${field}`,
+          code: 'INVALID_BILL_AMOUNT',
+        });
+      }
+    }
+    for (const field of ['waterPrevReading', 'waterCurrentReading', 'elecPrevReading', 'elecCurrentReading']) {
+      if (computed[field] == null || computed[field] === '') continue;
+      const n = Number(computed[field]);
+      if (!Number.isFinite(n) || n < 0) {
+        return res.status(400).json({
+          error: `invalid nonnegative bill field: ${field}`,
+          code: 'INVALID_BILL_AMOUNT',
+        });
+      }
+    }
+    // Auto-link to tenant: if caller didn't pass tenantId explicitly, look up
+    // the active tenant currently in this room. This is what makes bills
+    // visible in the tenant portal — without it tenant_id stays NULL.
+    let tenantId = b.tenantId || null;
+    if (!tenantId && computed.roomId) {
+      try {
+        const t = await pool.query(
+          `SELECT id FROM tenants
+              WHERE current_room_id=$1 AND status='active' AND deleted_at IS NULL
+              ORDER BY updated_at DESC LIMIT 1`,
+          [computed.roomId]
+        );
+        if (t.rows.length) tenantId = t.rows[0].id;
+      } catch (err) {
+        console.warn('[bill] tenant lookup failed:', err.message);
+      }
+    }
+    try {
+      const { rows } = await pool.query(
+        `INSERT INTO bills
+         (bill_no, tenant_id, room_id, period, rent,
+          water_prev_reading, water_current_reading, water_units, water_rate, water_amount,
+          elec_prev_reading, elec_current_reading, elec_units, elec_rate, elec_amount,
+          wifi, other, subtotal, vat, late_fee, total, due_date, status)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::jsonb,$18,$19,$20,$21,$22,'pending')
+         ON CONFLICT (bill_no) DO UPDATE SET
+           tenant_id=COALESCE(EXCLUDED.tenant_id, bills.tenant_id),
+           rent=EXCLUDED.rent,
+           water_prev_reading=EXCLUDED.water_prev_reading,
+           water_current_reading=EXCLUDED.water_current_reading,
+           water_units=EXCLUDED.water_units, water_rate=EXCLUDED.water_rate,
+           water_amount=EXCLUDED.water_amount,
+           elec_prev_reading=EXCLUDED.elec_prev_reading,
+           elec_current_reading=EXCLUDED.elec_current_reading,
+           elec_units=EXCLUDED.elec_units,
+           elec_rate=EXCLUDED.elec_rate, elec_amount=EXCLUDED.elec_amount,
+           wifi=EXCLUDED.wifi, other=EXCLUDED.other,
+           subtotal=EXCLUDED.subtotal, vat=EXCLUDED.vat, late_fee=EXCLUDED.late_fee,
+           total=EXCLUDED.total, due_date=EXCLUDED.due_date
+         WHERE bills.status IN ('pending','overdue')
+           AND bills.deleted_at IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM payments p
+              WHERE p.bill_id=bills.id AND p.status='verified'
+           )
+         RETURNING *`,
+        [
+          computed.billNo, tenantId, computed.roomId, computed.period,
+          computed.rent || 0,
+          computed.waterPrevReading, computed.waterCurrentReading,
+          computed.waterUnits || 0, computed.waterRate || 0, computed.waterAmount || 0,
+          computed.elecPrevReading, computed.elecCurrentReading,
+          computed.elecUnits || 0, computed.elecRate || 0, computed.elecAmount || 0,
+          computed.wifi || 0,
+          JSON.stringify(otherForStorage || []),
+          subtotalAmount, computed.vat || 0, computed.lateFee || 0,
+          totalAmount, computed.dueDate,
+        ]
+      );
+      if (!rows.length) {
+        const locked = await pool.query(
+          `SELECT b.id, b.status,
+                  EXISTS (
+                    SELECT 1 FROM payments p
+                     WHERE p.bill_id=b.id AND p.status='verified'
+                     LIMIT 1
+                  ) AS has_verified_payment
+             FROM bills b
+            WHERE b.bill_no=$1
+            LIMIT 1`,
+          [computed.billNo]
+        );
+        const current = locked.rows[0] || {};
+        return res.status(409).json({
+          error: 'existing bill is locked because it is paid, void, deleted, or has a verified payment',
+          code: 'BILL_LOCKED_FOR_LEDGER',
+          billId: current.id,
+          billStatus: current.status,
+          hasVerifiedPayment: !!current.has_verified_payment,
+        });
+      }
+      audit(req, 'bill.create', 'bill', String(rows[0].id), { tenantId, autoLinked: !b.tenantId && tenantId });
+      // B1 — mark consumed one_off recurring charges inactive so they don't
+      // appear on next month's bill. Best-effort; failure here doesn't unwind
+      // the bill insert (the charges line items are already in `other`).
+      if (usedOneOffIds.length) {
+        try {
+          await pool.query(
+            `UPDATE recurring_charges SET active=FALSE, updated_at=NOW() WHERE id = ANY($1::bigint[])`,
+            [usedOneOffIds]
+          );
+        } catch (err) {
+          console.warn('[bill] one_off deactivate failed:', err.message);
+        }
+      }
+      res.json({ ok: true, bill: rows[0], computed });
+    } catch (err) {
+      // A7 — translate the partial-unique constraint into a clear 409 so
+      // the admin UI can show "already generated" instead of a generic 500.
+      if (err.code === '23505' && /uq_bills_room_period_active/.test(err.constraint || '')) {
+        return res.status(409).json({
+          error: 'มีบิลของรอบนี้อยู่แล้ว — ทำการ void ก่อนถ้าต้องการสร้างใหม่',
+          code: 'BILL_DUPLICATE',
+        });
+      }
+      console.error('bill create error:', err);
+      res.status(500).json({ error: 'internal error' });
+    }
+  });
+
+  // POST /api/bills/render — owner/manager PDF rendering. Prefer a persisted
+  // billId so amount and payment details come from DB + server config.
+  r.post('/render', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'),
+    async (req, res) => {
+    let bill = req.body && req.body.bill ? req.body.bill : req.body;
+    const renderBillId = getRenderBillId(req, bill);
+    if (renderBillId) {
+      try {
+        const { rows } = await pool.query(
+          `SELECT b.*, t.full_name AS tenant_name, t.phone AS tenant_phone
+             FROM bills b
+             LEFT JOIN tenants t ON t.id = b.tenant_id
+            WHERE b.id=$1 AND b.deleted_at IS NULL`,
+          [renderBillId]
+        );
+        if (!rows.length) return res.status(404).json({ error: 'bill not found' });
+        // Refuse to render PDFs for voided bills. The PromptPay QR in the
+        // rendered PDF is still scannable; a tenant who got the void
+        // notification but didn't read it could pay against a dead bill.
+        // Admin can still download via the source-of-truth payments page.
+        if (rows[0].status === 'void') {
+          return res.status(410).json({
+            error: 'บิลนี้ถูกยกเลิกแล้ว ไม่สามารถสร้าง PDF ได้',
+            code: 'BILL_VOID',
+          });
+        }
+        const { config, paymentBlock } = await loadEffectivePaymentBlock();
+        bill = buildStoredBillPdfObject(rows[0], config, paymentBlock);
+      } catch (err) {
+        console.error(`[${req.id}] bill render load error:`, sanitizeError(err));
+        return res.status(500).json({ error: 'internal error', code: 'DB_ERROR' });
+      }
+    }
+    if (!bill || !bill.tenantName || bill.total == null) {
+      return res.status(400).json({ error: 'bill.tenantName and bill.total required' });
+    }
+    const billTotal = Number(bill.total);
+    if (!Number.isFinite(billTotal) || billTotal <= 0 || billTotal > MAX_AMOUNT) {
+      return res.status(400).json({
+        error: 'bill.total must be greater than 0 and within PromptPay limit',
+        code: 'INVALID_BILL_TOTAL',
+      });
+    }
+    if (!renderBillId) {
+      const storedConfig = await loadBillingConfig().catch(() => ({}));
+      const requestConfig = req.body && req.body.config ? req.body.config : {};
+      const config = Object.keys(storedConfig || {}).length ? storedConfig : requestConfig;
+      const paymentBlock = buildEffectivePaymentBlock(config);
+      bill = {
+        ...bill,
+        total: Math.round(billTotal * 100) / 100,
+        building: (config && config.building) || bill.building || {},
+        promptpayTarget: paymentBlock.promptpayTarget,
+        promptpayName: paymentBlock.promptpayName,
+        bankInfo: paymentBlock.bankInfo,
+        paymentMethods: paymentBlock.paymentMethods,
+      };
+    }
+    // Client-supplied payment fields are never trusted. Estimates are rendered
+    // with server-side payment config, and persisted bills are rebuilt from DB.
+    let acquired = false;
+    try {
+      await acquirePdfSlot();
+      acquired = true;
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader(
+        'Content-Disposition',
+        `inline; filename="bill-${(bill.billNo || 'invoice').replace(/[^A-Za-z0-9_-]/g, '')}.pdf"`
+      );
+      await renderBillPdf(bill, res);
+    } catch (err) {
+      console.error(`[${req.id}] bill render error:`, sanitizeError(err));
+      if (!res.headersSent) {
+        const code = String(err.message || '').includes('PDF queue timeout') ? 503 : 500;
+        res.status(code).json({ error: 'pdf render failed', code: code === 503 ? 'BUSY' : 'PDF_ERROR' });
+      }
+    } finally {
+      if (acquired) releasePdfSlot();
+    }
+  });
+
+  // PUT /api/bills/:id/void — admin voids a bill. Single transaction with
+  // FOR UPDATE locks: previously the "any verified payment?" check and the
+  // UPDATE-to-void ran as two separate pool queries. A concurrent /pay or
+  // slip /verify could land a verified payment row between the two queries
+  // — admin's force:true then voided a bill that had just been paid,
+  // leaving a verified payments row pointing at a void bill (accounting
+  // drift: money received, no live bill). Now we hold a row lock on the
+  // bill across the whole flow and re-read the verified-payments list
+  // under the lock, then atomically void the bill AND mark the verified
+  // payments as rejected (reason: superseded_by_void) AND clear paid_at so
+  // the bill is no longer treated as paid for stats.
+  r.put('/:id/void', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'),
+    async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+    const reason = String(req.body?.reason || '').slice(0, 500);
+    const force = req.body && req.body.force === true;
+    const client = await pool.connect();
+    let result;
+    try {
+      await client.query('BEGIN');
+      const billLock = await client.query(
+        `SELECT id, status, room_id, paid_at FROM bills
+          WHERE id=$1 AND deleted_at IS NULL
+          FOR UPDATE`,
+        [id]
+      );
+      if (!billLock.rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'not found' });
+      }
+      if (billLock.rows[0].status === 'void') {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ error: 'already void', code: 'BILL_ALREADY_VOID' });
+      }
+      const verified = await client.query(
+        `SELECT id, amount FROM payments
+          WHERE bill_id=$1 AND status='verified'
+          FOR UPDATE`,
+        [id]
+      );
+      if (verified.rows.length && !force) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'บิลนี้มีสลิปที่ยืนยันแล้ว — โปรดยืนยันการ void ก่อนทำต่อ',
+          code: 'BILL_HAS_VERIFIED_PAYMENT',
+          verifiedPaymentId: verified.rows[0].id,
+          verifiedAmount: Number(verified.rows[0].amount),
+          hint: 'ส่ง { force: true } เพื่อยืนยันการ void ทั้งที่มีการชำระแล้ว',
+        });
+      }
+      // Reject the verified payment(s) in the same tx. We use status='rejected'
+      // with a structured rejected_reason so the audit trail makes clear this
+      // wasn't an admin reviewing a slip — it was a forced reversal driven by
+      // the bill void. Refund handling (if money has to be returned) is a
+      // business decision outside the DB; this just makes the ledger consistent.
+      let reversedPayments = [];
+      if (verified.rows.length) {
+        // Stamp verified_by/verified_at to the voider so a future "show
+        // me all verifies by Alice" report doesn't count this row as a
+        // successful verification by Alice. The original verifier remains
+        // in audit_logs (action='payment.verify'); we don't lose history,
+        // we just stop counting reversed payments as verifications. This
+        // matches the standard reject pattern used elsewhere in the file
+        // (one actor column repurposed for "who decided", with the
+        // decision encoded by status + rejected_reason).
+        const voider = req.session?.user?.username || 'admin:unknown';
+        const reversed = await client.query(
+          `UPDATE payments
+              SET status='rejected',
+                  verified_by=$3,
+                  verified_at=NOW(),
+                  rejected_reason=$2
+            WHERE bill_id=$1 AND status='verified'
+          RETURNING id, amount`,
+          [id, `superseded_by_void: ${reason || '(no reason)'}`, voider]
+        );
+        reversedPayments = reversed.rows.map((p) => ({
+          id: p.id, amount: Number(p.amount),
+        }));
+      }
+      const voided = await client.query(
+        `UPDATE bills
+            SET status='void',
+                void_reason=$1,
+                paid_at=NULL
+          WHERE id=$2
+        RETURNING *`,
+        [reason, id]
+      );
+      if (!voided.rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'not found' });
+      }
+      await client.query('COMMIT');
+      result = { bill: voided.rows[0], reversedPayments };
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      console.error('bill void error:', err);
+      return res.status(500).json({ error: 'internal error' });
+    } finally {
+      client.release();
+    }
+    audit(req, 'bill.void', 'bill', String(id), {
+      reason,
+      force: !!force,
+      reversedPayments: result.reversedPayments,
+    });
+    notifyBillVoided(result.bill, reason, req.session.user.username).catch(() => {});
+    // Notify tenant if their verified payment was reversed by this void.
+    // notifyBillVoided already pushes "bill voided" but doesn't address
+    // the money side — tenant deserves an explicit "your payment is no
+    // longer recorded" message so they can challenge if needed.
+    if (result.bill.tenant_id && result.reversedPayments.length > 0) {
+      for (const p of result.reversedPayments) {
+        billPayments.notifyTenantOnPayment({ pool }, {
+          tenant_id: result.bill.tenant_id,
+          bill_id: id,
+          amount: p.amount,
+        }, 'reversed', `บิลถูกยกเลิก: ${reason || '(ไม่ระบุ)'}`).catch(() => {});
+      }
+    }
+    // Voiding the last overdue bill should flip the room out of 'overdue'
+    // — without this cascade the room kept showing 'overdue' until the
+    // daily safety-net tick, so admins clicking "void" then expecting
+    // the room to free up immediately saw stale state.
+    if (result.bill.room_id) {
+      require('../services/roomStatus').syncRoom(pool, result.bill.room_id, { reason: 'bill-void' })
+        .catch((err) => console.warn(`[bill.void] room sync failed:`, err.message));
+    }
+    res.json({ ok: true, bill: result.bill, reversedPayments: result.reversedPayments });
+  });
+
+  // POST /api/bills/:id/unmark-paid — admin correction path: undo a "paid"
+  // decision when admin recorded the payment in error (typo, wrong bill,
+  // duplicate receipt). Reverses the most recent verified payment AND
+  // flips the bill back to pending. We require an explicit reason and
+  // capture it in the audit log so the trail explains why a paid bill
+  // un-paid. Refund of actual money to the tenant is a business action
+  // outside the DB; this only fixes the ledger state so future operations
+  // work correctly.
+  //
+  // NOT a refund endpoint — for a true refund (money sent back) a separate
+  // payment row with negative amount would be the right model. This is
+  // strictly for clerical-error corrections within the office.
+  r.post('/:id/unmark-paid',
+    sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'),
+    async (req, res) => {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id < 1) {
+        return res.status(400).json({ error: 'invalid id' });
+      }
+      const reason = String(req.body?.reason || '').trim().slice(0, 500);
+      if (reason.length < 5) {
+        return res.status(400).json({
+          error: 'ต้องระบุเหตุผลอย่างน้อย 5 ตัวอักษร',
+          code: 'REASON_REQUIRED',
+        });
+      }
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        const bill = await client.query(
+          `SELECT id, bill_no, room_id, total, status, due_date, tenant_id
+             FROM bills
+            WHERE id=$1 AND deleted_at IS NULL
+            FOR UPDATE`,
+          [id]
+        );
+        if (!bill.rows.length) {
+          await client.query('ROLLBACK');
+          return res.status(404).json({ error: 'bill not found' });
+        }
+        const row = bill.rows[0];
+        if (row.status !== 'paid') {
+          await client.query('ROLLBACK');
+          return res.status(409).json({
+            error: `บิลนี้ยังไม่ได้สถานะ "ชำระแล้ว" — ปัจจุบันคือ "${row.status}"`,
+            code: 'BILL_NOT_PAID',
+            billStatus: row.status,
+          });
+        }
+        const payments = await client.query(
+          `SELECT id, amount, method, ref FROM payments
+            WHERE bill_id=$1 AND status='verified'
+            FOR UPDATE`,
+          [id]
+        );
+        if (!payments.rows.length) {
+          // Bill is paid with no verified payment row — that's a data anomaly
+          // (legacy mark-paid before audit hooks?). Allow the flip but log it.
+          console.warn(`[bill.unmark-paid] bill #${id} is paid but has no verified payment row`);
+        }
+        // See void path: stamp the unmarker as the new verified_by so
+        // counts of "verifications by X" don't double-count reversed rows.
+        // Original verifier is still in audit_logs.
+        const unmarker = req.session?.user?.username || 'admin:unknown';
+        const reversed = payments.rows.length
+          ? await client.query(
+              `UPDATE payments
+                  SET status='rejected',
+                      verified_by=$3,
+                      verified_at=NOW(),
+                      rejected_reason=$2
+                WHERE bill_id=$1 AND status='verified'
+              RETURNING id, amount, method, ref`,
+              [id, `unmark_paid_correction: ${reason}`, unmarker]
+            )
+          : { rows: [] };
+        // Restore the bill status. Pick 'overdue' vs 'pending' based on
+        // due_date so the resulting state is consistent with what the
+        // daily overdue tick would set.
+        const now = new Date();
+        const dueDate = row.due_date ? new Date(row.due_date) : null;
+        const restoredStatus = dueDate && dueDate < now ? 'overdue' : 'pending';
+        const restored = await client.query(
+          `UPDATE bills
+              SET status=$2,
+                  paid_at=NULL
+            WHERE id=$1
+          RETURNING *`,
+          [id, restoredStatus]
+        );
+        await client.query('COMMIT');
+        audit(req, 'bill.unmark_paid', 'bill', String(id), {
+          reason,
+          restoredStatus,
+          reversedPayments: reversed.rows.map((p) => ({
+            id: p.id, amount: Number(p.amount), method: p.method, ref: p.ref,
+          })),
+        });
+        // Notify the tenant of the reversal so they don't first hear
+        // about it via an overdue reminder. Fire-and-forget — a
+        // notification failure doesn't undo the unmark-paid.
+        for (const p of reversed.rows) {
+          billPayments.notifyTenantOnPayment({ pool }, {
+            tenant_id: row.tenant_id,
+            bill_id: id,
+            amount: p.amount,
+          }, 'reversed', reason).catch(() => {});
+        }
+        // Room status may flip back to 'overdue' if this was the bill keeping
+        // the room "occupied". Same cascade pattern as /void.
+        if (row.room_id) {
+          require('../services/roomStatus')
+            .syncRoom(pool, row.room_id, { reason: 'bill-unmark-paid' })
+            .catch((err) => console.warn(`[bill.unmark-paid] room sync failed:`, err.message));
+        }
+        res.json({
+          ok: true,
+          bill: restored.rows[0],
+          reversedPayments: reversed.rows.map((p) => ({
+            id: p.id, amount: Number(p.amount), method: p.method, ref: p.ref,
+          })),
+        });
+      } catch (err) {
+        await client.query('ROLLBACK').catch(() => {});
+        console.error('bill unmark-paid error:', err);
+        res.status(500).json({ error: 'internal error', code: 'DB_ERROR' });
+      } finally {
+        client.release();
+      }
+    });
 
   // Compose the LINE Messages array for a bill notification. Two messages:
   //   1. Flex bubble: bill summary header + QR image + bank info card + button
