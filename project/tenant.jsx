@@ -75,8 +75,10 @@ const TR = {
     paymentVerified: 'ยืนยันแล้ว', paymentPending: 'รอตรวจสอบ', paymentRejected: 'ไม่ผ่าน',
     paymentDate: 'วันที่ส่ง', paymentMethod: 'ช่องทาง',
     rejectedReason: 'เหตุผลที่ปฏิเสธ', transRef: 'เลขที่อ้างอิง',
-    colBill: 'บิล', colDate: 'วันที่ส่ง', colMethod: 'ช่องทาง', colAmount: 'ยอด',
+    colBill: 'บิล', colDate: 'วันที่ส่ง', colMethod: 'ช่องทาง', colAmount: 'ยอด', colAction: 'การจัดการ',
     noPayments: 'ยังไม่มีประวัติการชำระเงิน',
+    viewSlip: 'ดูสลิป', reuploadSlip: 'อัปโหลดสลิปใหม่',
+    filterAll: 'ทั้งหมด',
 
     // Contract
     myContract: 'สัญญาเช่าของฉัน', contractNo: 'เลขที่',
@@ -193,8 +195,10 @@ const TR = {
     paymentVerified: 'Verified', paymentPending: 'Pending', paymentRejected: 'Rejected',
     paymentDate: 'Submitted', paymentMethod: 'Method',
     rejectedReason: 'Rejected reason', transRef: 'Reference',
-    colBill: 'Bill', colDate: 'Submitted', colMethod: 'Method', colAmount: 'Amount',
+    colBill: 'Bill', colDate: 'Submitted', colMethod: 'Method', colAmount: 'Amount', colAction: 'Actions',
     noPayments: 'No payment history yet',
+    viewSlip: 'View slip', reuploadSlip: 'Re-upload slip',
+    filterAll: 'All',
 
     myContract: 'My lease', contractNo: 'No.',
     noContract: 'No active lease contract yet',
@@ -319,13 +323,54 @@ function deriveFloor(roomId) {
   return null;
 }
 
+// Translate server-stamped reject reasons + raw 3rd-party verifier strings
+// into tenant-friendly Thai. log.md #2 — the upstream slip provider was
+// leaking English error messages (e.g. "Please provide either a payload
+// string, a image file, a base64 encoded image, or a image URL") into the
+// payment-history list. We intercept those upstream-shaped messages here
+// and convert them to actionable Thai before they reach the tenant.
 function tenantRejectedReason(raw) {
   if (!raw) return raw;
   const s = String(raw);
+
+  // Server-side audit codes (structured, prefix-matched).
   if (s.startsWith('superseded_by_verified_sibling')) return 'ระบบรับสลิปอีกใบสำหรับบิลนี้ไปแล้ว';
   if (s.startsWith('superseded_by_manual_pay'))       return 'แอดมินบันทึกการชำระเงินด้วยช่องทางอื่น (เงินสด/โอน) แล้ว';
   if (s.startsWith('superseded_by_void'))             return 'บิลนี้ถูกยกเลิกแล้ว — โปรดติดต่อแอดมิน';
   if (s.startsWith('unmark_paid_correction'))         return 'แอดมินยกเลิกการบันทึกชำระ — โปรดติดต่อแอดมิน';
+
+  // Verifier upstream — EasySlip / SlipOK / Slip2Go return free-form
+  // English on validation errors. Map the families we actually see in
+  // production to a Thai message that tells the tenant what to do.
+  const lower = s.toLowerCase();
+  if (/(payload string|image file|base64|image url|invalid image)/i.test(s)) {
+    return 'ไม่พบรูปสลิปหรือสลิปอ่านไม่ออก กรุณาอัปโหลดสลิปใหม่ที่ชัดเจน';
+  }
+  if (/invalid (api|signature|key|token)/i.test(s) || /unauthor/i.test(lower)) {
+    return 'ระบบตรวจสลิปเชื่อมต่อไม่สำเร็จ — โปรดติดต่อแอดมินเพื่อตรวจการตั้งค่า';
+  }
+  if (/quota|rate.?limit|too many|429/i.test(s)) {
+    return 'ระบบตรวจสลิปใช้งานเกินโควต้า — รบกวนติดต่อแอดมิน';
+  }
+  if (/duplicate|already (used|verified)/i.test(s)) {
+    return 'สลิปนี้ถูกใช้แล้ว — กรุณาอัปโหลดสลิปของรายการโอนใหม่';
+  }
+  if (/amount|number/i.test(s) && /mismatch|not match|differ|incorrect/i.test(s)) {
+    return 'ยอดในสลิปไม่ตรงกับยอดบิล กรุณาตรวจสอบและอัปโหลดสลิปใหม่';
+  }
+  if (/receiver|target|account|destination/i.test(s) && /mismatch|not match|differ|incorrect/i.test(s)) {
+    return 'บัญชีปลายทางในสลิปไม่ใช่ของหอพัก — กรุณาตรวจสอบบัญชีผู้รับ';
+  }
+  if (/network|timeout|econnreset|fetch failed|connect/i.test(lower)) {
+    return 'เชื่อมต่อระบบตรวจสลิปไม่สำเร็จ ลองอัปโหลดใหม่หรือแจ้งแอดมิน';
+  }
+
+  // English-looking free text → generic friendly fallback. We detect
+  // "looks English" by the presence of ASCII letters AND the absence of
+  // any Thai letters; anything Thai is already actionable.
+  if (/[A-Za-z]/.test(s) && !/[฀-๿]/.test(s)) {
+    return 'การตรวจสอบไม่ผ่าน ลองอัปโหลดสลิปใหม่หรือแจ้งแอดมิน';
+  }
   return s;
 }
 window.tenantRejectedReason = tenantRejectedReason;
@@ -720,11 +765,35 @@ function SyncBanner({ errors = [], syncing, onRetry, locale }) {
   );
 }
 
+// Stable ID counter for aria-labelledby — useId isn't on every supported
+// React build, and a plain counter is fine since the value just needs to
+// be unique inside the same document.
+let _modalIdCounter = 0;
+
+// Focusable selector for the focus trap. Same set as Dialog/Floating UI.
+const FOCUSABLE_SEL = [
+  'a[href]', 'button:not([disabled])', 'textarea:not([disabled])',
+  'input:not([disabled]):not([type="hidden"])', 'select:not([disabled])',
+  '[tabindex]:not([tabindex="-1"])',
+].join(',');
+
 function Modal({ open, onClose, children, title, size = 'md' }) {
+  // log.md #1 — Every view wraps content in <div class="anim-in"> which
+  // applies a CSS transform. When an ancestor has `transform != none`,
+  // CSS pins `position: fixed` descendants to that ancestor instead of
+  // the viewport — so the overlay used to shrink to 312×319 inside the
+  // view container. Solve by Portal-ing into document.body, where there
+  // is no transform ancestor.
+  const panelRef = useRef(null);
+  const previouslyFocused = useRef(null);
+  const titleIdRef = useRef(null);
+  if (titleIdRef.current == null) titleIdRef.current = `modal-title-${++_modalIdCounter}`;
+
   useEffect(() => {
     if (!open) return undefined;
+    previouslyFocused.current = document.activeElement;
     // Lock body scroll while preserving position — iOS Safari's naive
-    // `overflow: hidden` resets the visual viewport which makes the page
+    // `overflow: hidden` resets the visual viewport, which makes the page
     // appear to jump on close. On phones we freeze with `position: fixed`
     // at the current scroll Y, then restore on unmount.
     const scrollY = window.scrollY || window.pageYOffset || 0;
@@ -741,7 +810,32 @@ function Modal({ open, onClose, children, title, size = 'md' }) {
       document.body.style.top = `-${scrollY}px`;
       document.body.style.width = '100%';
     }
-    const onKey = (e) => { if (e.key === 'Escape') onClose?.(); };
+    // Defer focus until the next tick so the animated panel is fully
+    // attached. Prefer the first focusable that isn't the close (×)
+    // button so the user lands on real content, not the exit affordance.
+    const focusTimer = window.setTimeout(() => {
+      const panel = panelRef.current;
+      if (!panel) return;
+      const focusables = panel.querySelectorAll(FOCUSABLE_SEL);
+      const first = Array.from(focusables).find((el) => !el.dataset.modalClose) || focusables[0];
+      (first || panel).focus({ preventScroll: true });
+    }, 0);
+
+    const onKey = (e) => {
+      if (e.key === 'Escape') { onClose?.(); return; }
+      if (e.key !== 'Tab') return;
+      // Focus trap: wrap Tab inside the panel so keyboard users don't
+      // fall through into the locked page underneath.
+      const panel = panelRef.current;
+      if (!panel) return;
+      const focusables = Array.from(panel.querySelectorAll(FOCUSABLE_SEL))
+        .filter((el) => el.offsetParent !== null || el === document.activeElement);
+      if (focusables.length === 0) { e.preventDefault(); panel.focus(); return; }
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    };
     window.addEventListener('keydown', onKey);
     return () => {
       document.body.style.overflow = prev.overflow;
@@ -749,12 +843,20 @@ function Modal({ open, onClose, children, title, size = 'md' }) {
       document.body.style.top = prev.top;
       document.body.style.width = prev.width;
       if (isMobile && scrollY) window.scrollTo(0, scrollY);
+      window.clearTimeout(focusTimer);
       window.removeEventListener('keydown', onKey);
+      // Restore focus to the original trigger so keyboard/SR users don't
+      // get stranded at <body>.
+      const prevEl = previouslyFocused.current;
+      if (prevEl && typeof prevEl.focus === 'function') {
+        try { prevEl.focus({ preventScroll: true }); } catch { /* ignore */ }
+      }
     };
   }, [open, onClose]);
+
   if (!open) return null;
   const widths = { sm: 420, md: 560, lg: 760 };
-  return (
+  const ui = (
     <div className="modal-overlay" onClick={onClose} style={{
       position: 'fixed', inset: 0, background: 'rgba(28,18,8,0.45)',
       backdropFilter: 'blur(6px)', WebkitBackdropFilter: 'blur(6px)',
@@ -767,32 +869,50 @@ function Modal({ open, onClose, children, title, size = 'md' }) {
       overflowY: 'auto', overflowX: 'hidden',
       WebkitOverflowScrolling: 'touch',
     }}>
-      <div className="modal-panel" onClick={(e) => e.stopPropagation()} style={{
-        background: 'var(--surface)', color: 'var(--ink)',
-        width: '100%', maxWidth: widths[size],
-        borderRadius: 22, boxShadow: 'var(--shadow-lg)',
-        // 100dvh tracks mobile UI chrome / on-screen keyboards; 100vh
-        // fallback keeps the cap working on browsers without dvh support.
-        maxHeight: 'min(calc(100vh - 80px), calc(100dvh - 80px))',
-        overflow: 'hidden', display: 'flex', flexDirection: 'column',
-        animation: 'slide-up .26s cubic-bezier(.2,.8,.2,1)',
-        margin: 'auto',
-      }}>
+      <div
+        ref={panelRef}
+        className="modal-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={title ? titleIdRef.current : undefined}
+        tabIndex={-1}
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: 'var(--surface)', color: 'var(--ink)',
+          width: '100%',
+          // log.md #3 — keep dialogs off the screen edge even on the
+          // widest panel size; 92vw is enough breathing room on phones.
+          maxWidth: `min(${widths[size]}px, 92vw)`,
+          borderRadius: 22, boxShadow: 'var(--shadow-lg)',
+          // 100dvh tracks mobile UI chrome / on-screen keyboards; 100vh
+          // fallback keeps the cap working on browsers without dvh support.
+          maxHeight: 'min(calc(100vh - 80px), calc(100dvh - 80px))',
+          overflow: 'hidden', display: 'flex', flexDirection: 'column',
+          animation: 'slide-up .26s cubic-bezier(.2,.8,.2,1)',
+          margin: 'auto', outline: 'none',
+        }}>
         {title || onClose ? (
           <div style={{
             display: 'flex', alignItems: 'center', gap: 12, flex: '0 0 auto',
             padding: '18px 22px 14px', borderBottom: '1px solid var(--line)',
           }}>
-            <div style={{
-              flex: 1, minWidth: 0, fontFamily: 'var(--font-display)',
-              fontWeight: 600, fontSize: 17,
-              whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-            }}>{title}</div>
-            <button onClick={onClose} aria-label="close" style={{
-              width: 36, height: 36, borderRadius: 10, border: 0, cursor: 'pointer',
-              background: 'var(--surface-2)', color: 'var(--ink-2)',
-              display: 'grid', placeItems: 'center', flex: '0 0 auto',
-            }}><Icon name="close" size={18} /></button>
+            <div
+              id={titleIdRef.current}
+              style={{
+                flex: 1, minWidth: 0, fontFamily: 'var(--font-display)',
+                fontWeight: 600, fontSize: 'var(--fs-lg)',
+                whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+              }}
+            >{title}</div>
+            <button
+              onClick={onClose}
+              aria-label="ปิด"
+              data-modal-close="true"
+              style={{
+                width: 36, height: 36, borderRadius: 10, border: 0, cursor: 'pointer',
+                background: 'var(--surface-2)', color: 'var(--ink-2)',
+                display: 'grid', placeItems: 'center', flex: '0 0 auto',
+              }}><Icon name="close" size={18} /></button>
           </div>
         ) : null}
         <div className="modal-body" style={{
@@ -803,6 +923,13 @@ function Modal({ open, onClose, children, title, size = 'md' }) {
       </div>
     </div>
   );
+  // Render into document.body — bypasses any ancestor transform / filter
+  // that would otherwise CSS-contain the position:fixed overlay (see the
+  // root-cause note at the top of this component).
+  if (typeof document !== 'undefined' && ReactDOM && ReactDOM.createPortal) {
+    return ReactDOM.createPortal(ui, document.body);
+  }
+  return ui;
 }
 
 function Toggle({ on, onClick }) {
@@ -1453,6 +1580,21 @@ function BillDetailBody({ bill, locale, refresh, slipFeature }) {
       message: locale === 'th' ? 'ระบบกำลังอัปโหลดและส่งสลิปไปตรวจสอบ' : 'Uploading and verifying the slip.' });
     try {
       const dataUrl = await fileToDataUrl(file);
+      // Defensive: catch zero-byte / non-image reads BEFORE we POST.
+      // Without this guard, the upstream slip-verify provider returns
+      // English error like "Please provide either a payload string…"
+      // which leaks into the tenant's payment history (log.md #2).
+      if (typeof dataUrl !== 'string' || !/^data:image\/(png|jpe?g|webp);base64,[A-Za-z0-9+/=]{100,}/.test(dataUrl)) {
+        setNotice({
+          kind: 'error',
+          title: locale === 'th' ? 'อ่านไฟล์สลิปไม่สำเร็จ' : 'Could not read slip file',
+          message: locale === 'th'
+            ? 'รูปสลิปอาจเสียหายหรือว่างเปล่า กรุณาเลือกรูปใหม่ที่ชัดเจน'
+            : 'The slip image is empty or corrupted. Please choose a clear image.',
+        });
+        setBusy(false);
+        return;
+      }
       const out = await api('/api/tenant/payments', {
         method: 'POST',
         body: JSON.stringify({ billId: bill.id, amount: Number(amount), slip: dataUrl }),
@@ -1705,61 +1847,112 @@ function PaymentNotice({ notice }) {
 }
 
 // =========================================================== PaymentsView =
-function PaymentsView({ locale, payments, syncErrors }) {
+function PaymentsView({ locale, payments, syncErrors, goto }) {
   const t = (k) => tr(locale, k);
   const items = payments || [];
+  const [filter, setFilter] = useState('all');
   const paymentError = (syncErrors || []).find((e) => e.key === 'payments');
   const statusLabel = (s) => s === 'verified' ? t('paymentVerified')
                            : s === 'pending' ? t('paymentPending')
                            : s === 'rejected' ? t('paymentRejected')
                            : s;
+  const filtered = useMemo(() => {
+    if (filter === 'all') return items;
+    return items.filter((p) => p.status === filter);
+  }, [filter, items]);
+  const counts = useMemo(() => ({
+    all:      items.length,
+    verified: items.filter((p) => p.status === 'verified').length,
+    pending:  items.filter((p) => p.status === 'pending').length,
+    rejected: items.filter((p) => p.status === 'rejected').length,
+  }), [items]);
+  const filters = [
+    { id: 'all',      label: t('filterAll'),         count: counts.all },
+    { id: 'verified', label: t('paymentVerified'),   count: counts.verified },
+    { id: 'pending',  label: t('paymentPending'),    count: counts.pending },
+    { id: 'rejected', label: t('paymentRejected'),   count: counts.rejected },
+  ];
+  // Server returns absolute storage URLs in p.slip_url (admin storage
+  // endpoint, gated by the same tenant cookie). Open in a new tab.
+  const openSlip = (url) => {
+    if (!url) return;
+    try { window.open(String(url), '_blank', 'noopener,noreferrer'); }
+    catch { /* popup-blocker — best-effort */ }
+  };
   return (
     <div className="anim-in">
       <SectionHeader title={t('paymentHistory')} subtitle={t('paymentHistorySub')} />
-      {items.length === 0 ? <Empty icon="payments" title={paymentError ? t('nothingHere') : t('noPayments')} />
+      {items.length > 0 ? (
+        <div className="no-scrollbar" style={{ display: 'flex', gap: 8, marginBottom: 'var(--sp-4)', overflowX: 'auto' }}>
+          {filters.map((f) => (
+            <button key={f.id} onClick={() => setFilter(f.id)} style={{
+              padding: '8px 14px', borderRadius: 999, fontFamily: 'inherit',
+              border: '1px solid ' + (filter === f.id ? 'var(--ink)' : 'var(--line-2)'),
+              background: filter === f.id ? 'var(--ink)' : 'var(--surface)',
+              color: filter === f.id ? 'var(--bg)' : 'var(--ink-2)',
+              fontSize: 'var(--fs-sm)', fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap',
+            }}>{f.label} <span style={{ opacity: 0.6, marginLeft: 4 }}>{f.count}</span></button>
+          ))}
+        </div>
+      ) : null}
+      {filtered.length === 0 ? <Empty icon="payments" title={paymentError ? t('nothingHere') : t('noPayments')} />
         : (
         <Card pad={0}>
           <div className="pay-head" style={{
-            display: 'grid', gridTemplateColumns: '1.4fr 1fr 1fr 1fr',
+            display: 'grid', gridTemplateColumns: '1.4fr 0.9fr 0.9fr 0.8fr 1.1fr',
             padding: '14px 22px', borderBottom: '1px solid var(--line)',
-            color: 'var(--muted)', fontSize: 12, fontWeight: 600,
+            color: 'var(--muted)', fontSize: 'var(--fs-xs)', fontWeight: 600,
             letterSpacing: '.04em', textTransform: 'uppercase',
           }}>
-            <div>{t('colBill')}</div><div>{t('colDate')}</div>
-            <div>{t('colMethod')}</div><div style={{ textAlign: 'right' }}>{t('colAmount')}</div>
+            <div>{t('colBill')}</div>
+            <div>{t('colDate')}</div>
+            <div>{t('colMethod')}</div>
+            <div style={{ textAlign: 'right' }}>{t('colAmount')}</div>
+            <div style={{ textAlign: 'right' }}>{t('colAction')}</div>
           </div>
-          {items.map((p, i) => (
+          {filtered.map((p, i) => (
             <div key={p.id} className="pay-row" style={{
-              display: 'grid', gridTemplateColumns: '1.4fr 1fr 1fr 1fr',
+              display: 'grid', gridTemplateColumns: '1.4fr 0.9fr 0.9fr 0.8fr 1.1fr',
               padding: '18px 22px', borderTop: i === 0 ? 0 : '1px solid var(--line)',
               alignItems: 'center', gap: 14,
             }}>
               <div style={{ minWidth: 0 }}>
-                <div style={{ fontWeight: 600, fontSize: 14.5 }}>{p.bill_no || `#${p.bill_id || '—'}`}</div>
-                {p.period ? <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 2 }}>{fmtPeriod(p.period, locale)}</div> : null}
+                <div style={{ fontWeight: 600, fontSize: 'var(--fs-md)' }}>{p.bill_no || `#${p.bill_id || '—'}`}</div>
+                {p.period ? <div style={{ fontSize: 'var(--fs-xs)', color: 'var(--muted)', marginTop: 2 }}>{fmtPeriod(p.period, locale)}</div> : null}
                 {p.status === 'rejected' && p.rejected_reason ? (
-                  <div style={{ marginTop: 4, fontSize: 12, color: 'var(--red)' }}>
+                  <div style={{ marginTop: 4, fontSize: 'var(--fs-xs)', color: 'var(--red)', lineHeight: 1.5, wordBreak: 'break-word' }}>
                     {tenantRejectedReason(p.rejected_reason)}
                   </div>
                 ) : null}
               </div>
-              <div style={{ fontSize: 13 }}>{fmtDateTime(p.created_at, locale)}</div>
-              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+              <div style={{ fontSize: 'var(--fs-sm)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                {fmtDateTime(p.created_at, locale)}
+              </div>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', minWidth: 0 }}>
                 <Pill tone={STATUS_TONE[p.status]}>{statusLabel(p.status)}</Pill>
-                {p.method ? <span style={{ fontSize: 12.5, color: 'var(--muted)' }}>{p.method}</span> : null}
+                {p.method ? <span style={{ fontSize: 'var(--fs-xs)', color: 'var(--muted)' }}>{p.method}</span> : null}
               </div>
               <div style={{ textAlign: 'right', fontFamily: 'var(--font-display)', fontWeight: 600 }}>฿{fmtMoney(p.amount)}</div>
+              <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
+                {p.slip_url ? (
+                  <Button size="sm" variant="ghost" onClick={() => openSlip(p.slip_url)}>{t('viewSlip')}</Button>
+                ) : null}
+                {p.status === 'rejected' && p.bill_id && goto ? (
+                  <Button size="sm" variant="soft" onClick={() => goto('bills', p.bill_id)}>{t('reuploadSlip')}</Button>
+                ) : null}
+              </div>
             </div>
           ))}
         </Card>
       )}
       <style>{`@media (max-width: 768px){
         .pay-head{display:none!important}
-        .pay-row{grid-template-columns:1fr auto!important;grid-template-areas:"name amt" "date method"!important}
+        .pay-row{grid-template-columns:1fr auto!important;grid-template-areas:"name amt" "date method" "act act"!important;gap:8px!important}
         .pay-row > *:nth-child(1){grid-area:name}
         .pay-row > *:nth-child(2){grid-area:date;color:var(--muted);font-size:var(--fs-xs)!important}
         .pay-row > *:nth-child(3){grid-area:method;justify-self:start}
-        .pay-row > *:nth-child(4){grid-area:amt}
+        .pay-row > *:nth-child(4){grid-area:amt;align-self:start}
+        .pay-row > *:nth-child(5){grid-area:act;justify-content:flex-start!important;margin-top:4px}
       }`}</style>
     </div>
   );
@@ -2022,7 +2215,12 @@ function MaintenanceForm({ tenant, locale, onDone, onCancel }) {
               display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6,
               cursor: 'pointer', fontSize: 'var(--fs-xs)', fontWeight: 600,
               minHeight: 72,
-            }}><span style={{ fontSize: 22 }}>{c.icon}</span>{t('cat_' + c.id)}</button>
+              // log.md #3 — long Thai labels like "เครื่องใช้ไฟฟ้า" used
+              // to overflow horizontally. wrap & balance keeps each cell
+              // self-contained inside its 108px minmax track.
+              textAlign: 'center', lineHeight: 1.25,
+              wordBreak: 'break-word', overflowWrap: 'anywhere',
+            }}><span style={{ fontSize: 22, lineHeight: 1 }}>{c.icon}</span>{t('cat_' + c.id)}</button>
           ))}
         </div>
       </div>
@@ -2384,43 +2582,76 @@ function BottomNav({ page, setPage, locale, unpaidCount }) {
 
 function DrawerNav({ open, onClose, page, setPage, locale, onLogout, unpaidCount }) {
   const t = (k) => tr(locale, k);
+  const panelRef = useRef(null);
+  const previouslyFocused = useRef(null);
   useEffect(() => {
     if (!open) return undefined;
+    previouslyFocused.current = document.activeElement;
     const prevOverflow = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
-    const onKey = (e) => { if (e.key === 'Escape') onClose?.(); };
+    const onKey = (e) => {
+      if (e.key === 'Escape') { onClose?.(); return; }
+      if (e.key !== 'Tab') return;
+      // Focus trap inside the drawer.
+      const panel = panelRef.current;
+      if (!panel) return;
+      const focusables = Array.from(panel.querySelectorAll(FOCUSABLE_SEL))
+        .filter((el) => el.offsetParent !== null || el === document.activeElement);
+      if (!focusables.length) { e.preventDefault(); panel.focus(); return; }
+      const first = focusables[0], last = focusables[focusables.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    };
     window.addEventListener('keydown', onKey);
+    const focusTimer = window.setTimeout(() => {
+      const panel = panelRef.current;
+      if (panel) {
+        const first = panel.querySelector(FOCUSABLE_SEL);
+        (first || panel).focus({ preventScroll: true });
+      }
+    }, 0);
     return () => {
       document.body.style.overflow = prevOverflow;
+      window.clearTimeout(focusTimer);
       window.removeEventListener('keydown', onKey);
+      const prevEl = previouslyFocused.current;
+      if (prevEl && typeof prevEl.focus === 'function') {
+        try { prevEl.focus({ preventScroll: true }); } catch { /* ignore */ }
+      }
     };
   }, [open, onClose]);
   if (!open) return null;
-  return (
+  const ui = (
     <div onClick={onClose} style={{
       position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(28,18,8,0.42)',
       backdropFilter: 'blur(4px)', WebkitBackdropFilter: 'blur(4px)',
       animation: 'fade-in .2s ease',
     }}>
-      <div onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" style={{
-        position: 'absolute', top: 0, left: 0, bottom: 0,
-        width: 'min(280px, 86vw)', maxWidth: 280,
-        background: 'var(--surface)',
-        padding: `18px 14px calc(env(safe-area-inset-bottom, 0px) + 18px)`,
-        display: 'flex', flexDirection: 'column',
-        // Slide in from the left edge — replaces the old slide-up which
-        // barely registered (12px) on a side drawer.
-        animation: 'drawer-in .25s cubic-bezier(.2,.8,.2,1)',
-        overflowY: 'auto', WebkitOverflowScrolling: 'touch',
-        boxShadow: 'var(--shadow-lg)',
-      }}>
+      <div
+        ref={panelRef}
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label={tr(locale, 'portal')}
+        tabIndex={-1}
+        style={{
+          position: 'absolute', top: 0, left: 0, bottom: 0,
+          width: 'min(280px, 86vw)', maxWidth: 280,
+          background: 'var(--surface)',
+          padding: `18px 14px calc(env(safe-area-inset-bottom, 0px) + 18px)`,
+          display: 'flex', flexDirection: 'column',
+          // Slide in from the left edge.
+          animation: 'drawer-in .25s cubic-bezier(.2,.8,.2,1)',
+          overflowY: 'auto', WebkitOverflowScrolling: 'touch',
+          boxShadow: 'var(--shadow-lg)', outline: 'none',
+        }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '6px 6px 18px', flex: '0 0 auto' }}>
           <LogoMark size={36} />
           <div style={{ minWidth: 0 }}>
-            <div style={{ fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 14 }}>บ้านกาญจน์</div>
-            <div style={{ color: 'var(--muted)', fontSize: 11.5 }}>Tenant Portal</div>
+            <div style={{ fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 'var(--fs-base)' }}>บ้านกาญจน์</div>
+            <div style={{ color: 'var(--muted)', fontSize: 'var(--fs-xs)' }}>Tenant Portal</div>
           </div>
-          <button onClick={onClose} aria-label="close" style={{
+          <button onClick={onClose} aria-label="ปิด" style={{
             marginLeft: 'auto', width: 32, height: 32, borderRadius: 8,
             border: 0, background: 'var(--surface-2)', cursor: 'pointer',
             display: 'grid', placeItems: 'center', color: 'var(--ink-2)', flex: '0 0 auto',
@@ -2435,14 +2666,14 @@ function DrawerNav({ open, onClose, page, setPage, locale, onLogout, unpaidCount
                 borderRadius: 12, border: 0, cursor: 'pointer', fontFamily: 'inherit',
                 background: active ? 'var(--accent-soft)' : 'transparent',
                 color: active ? 'var(--accent-2)' : 'var(--ink-2)',
-                fontWeight: active ? 600 : 500, fontSize: 14, textAlign: 'left',
+                fontWeight: active ? 600 : 500, fontSize: 'var(--fs-base)', textAlign: 'left',
               }}>
                 <Icon name={n.icon} size={18} />
                 <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>{t(n.label)}</span>
                 {n.id === 'bills' && unpaidCount > 0 ? (
                   <span style={{
                     background: 'var(--accent)', color: '#fff', borderRadius: 999,
-                    padding: '2px 8px', fontSize: 11, fontWeight: 700,
+                    padding: '2px 8px', fontSize: 'var(--fs-xs)', fontWeight: 700,
                   }}>{unpaidCount}</span>
                 ) : null}
               </button>
@@ -2460,6 +2691,11 @@ function DrawerNav({ open, onClose, page, setPage, locale, onLogout, unpaidCount
       `}</style>
     </div>
   );
+  // Same Portal escape from any ancestor transform as Modal.
+  if (typeof document !== 'undefined' && ReactDOM && ReactDOM.createPortal) {
+    return ReactDOM.createPortal(ui, document.body);
+  }
+  return ui;
 }
 
 // =============================================================== App ====
@@ -2636,7 +2872,7 @@ function App() {
               refresh={triggerRefresh} slipFeature={features?.slipUpload}
               openId={openBillId} setOpenId={setOpenBillId} />}
             {page === 'payments'    && <PaymentsView locale={locale} payments={payments}
-              syncErrors={syncErrors} />}
+              syncErrors={syncErrors} goto={goto} />}
             {page === 'contract'    && <ContractView locale={locale} tenant={tenant}
               contract={contract} />}
             {page === 'maintenance' && <MaintenanceView locale={locale} tenant={tenant}
@@ -2675,6 +2911,15 @@ function App() {
         @media (max-width: 640px) {
           .bottom-nav { display: flex !important; }
           .home-grid { grid-template-columns: 1fr !important; }
+          /* log.md #5 — section header action (e.g. "แจ้งซ่อมใหม่") no
+             longer overlaps the title on narrow screens; it stacks under
+             the title and grows full-width so the tap target stays large. */
+          .section-header {
+            flex-direction: column !important;
+            align-items: stretch !important;
+            gap: var(--sp-3) !important;
+          }
+          .section-header > :last-child button { width: 100% !important; }
           .tenant-main {
             padding: var(--sp-4) var(--sp-3)
               calc(env(safe-area-inset-bottom,0px) + var(--bottomnav-h) + var(--sp-5)) !important;
