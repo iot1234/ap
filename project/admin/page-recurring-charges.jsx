@@ -12,38 +12,64 @@
 //   active     - on/off; one_off auto-flips to inactive after first inclusion
 // ===========================================================================
 
-const { useState, useEffect, useMemo } = React;
+const { useState, useEffect, useMemo, useRef } = React;
 
 function PageRecurringCharges({ setToast }) {
   const C = window.ADMIN_C;
   const { Card, Btn, Pill, PageContainer, PageHeader, SectionHeading, Modal,
           DataTable, EmptyState } = window;
-  const apiFetch = window.requireApiFetch ? window.requireApiFetch() : window.apiFetch;
+  const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
 
   const [items, setItems] = useState([]);
   const [tenants, setTenants] = useState([]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
+  const [tenantLoadWarning, setTenantLoadWarning] = useState('');
   const [form, setForm] = useState(null);   // null = closed; object = editing/creating
   const [filter, setFilter] = useState('active');
+  const loadSeqRef = useRef(0);
+
+  function errorText(e, fallback) {
+    if (e && e.code === 'TIMEOUT') return 'คำขอใช้เวลานานเกินกำหนด กรุณาลองใหม่';
+    return (e && (e.error || e.message)) || fallback;
+  }
 
   async function load() {
-    setBusy(true); setErr('');
+    const seq = ++loadSeqRef.current;
+    setBusy(true); setErr(''); setTenantLoadWarning('');
     try {
       const params = new URLSearchParams();
       if (filter === 'active')   params.set('active', 'true');
       if (filter === 'inactive') params.set('active', 'false');
-      const [r1, r2] = await Promise.all([
-        apiFetch('/api/recurring-charges' + (params.toString() ? '?' + params : '')),
-        apiFetch('/api/tenants'),
+      const query = params.toString();
+      const [chargesResult, tenantsResult] = await Promise.allSettled([
+        apiCall('/api/recurring-charges' + (query ? '?' + query : ''), { timeoutMs: 12_000 }),
+        apiCall('/api/tenants?status=active', { timeoutMs: 12_000 }),
       ]);
-      const d1 = await r1.json();
-      const d2 = await r2.json();
-      if (!r1.ok) throw new Error(d1.error || 'load failed');
-      setItems(d1.charges || []);
-      setTenants(d2.tenants || []);
-    } catch (e) { setErr(e.message); }
-    finally { setBusy(false); }
+      if (seq !== loadSeqRef.current) return;
+
+      if (chargesResult.status === 'rejected') throw chargesResult.reason;
+      const chargePayload = chargesResult.value || {};
+      setItems(Array.isArray(chargePayload.charges) ? chargePayload.charges : []);
+
+      if (tenantsResult.status === 'fulfilled') {
+        const tenantPayload = tenantsResult.value || {};
+        setTenants(Array.isArray(tenantPayload.tenants) ? tenantPayload.tenants : []);
+      } else {
+        setTenants([]);
+        setTenantLoadWarning(
+          errorText(tenantsResult.reason, 'โหลดรายชื่อผู้เช่าไม่สำเร็จ') +
+          ' — ยังดู/แก้รายการค่าใช้จ่ายได้ แต่การเลือกผู้เช่าจะไม่ครบจนกว่าจะรีเฟรช'
+        );
+      }
+    } catch (e) {
+      if (seq !== loadSeqRef.current) return;
+      setErr(errorText(e, 'โหลดค่าใช้จ่ายประจำไม่สำเร็จ'));
+      if (window.toastError) window.toastError(setToast, e, { action: 'โหลดค่าใช้จ่ายประจำ' });
+    }
+    finally {
+      if (seq === loadSeqRef.current) setBusy(false);
+    }
   }
   useEffect(() => { load(); }, [filter]);
 
@@ -52,17 +78,18 @@ function PageRecurringCharges({ setToast }) {
     try {
       const isUpdate = !!payload.id;
       const url = isUpdate ? `/api/recurring-charges/${payload.id}` : '/api/recurring-charges';
-      const r = await apiFetch(url, {
+      await apiCall(url, {
         method: isUpdate ? 'PUT' : 'POST',
         body: JSON.stringify(payload),
+        timeoutMs: 12_000,
       });
-      const d = await r.json();
-      if (!r.ok) throw new Error(d.error || 'save failed');
       setToast && setToast({ kind: 'success', message: isUpdate ? 'อัปเดตแล้ว' : 'เพิ่มรายการแล้ว' });
       setForm(null);
       await load();
     } catch (e) {
-      setToast && setToast({ kind: 'error', message: e.message });
+      window.toastError
+        ? window.toastError(setToast, e, { action: payload.id ? 'บันทึกค่าใช้จ่ายประจำ' : 'เพิ่มค่าใช้จ่ายประจำ' })
+        : setToast && setToast({ kind: 'error', message: errorText(e, 'save failed') });
     } finally { setBusy(false); }
   }
 
@@ -97,15 +124,17 @@ function PageRecurringCharges({ setToast }) {
       'ดำเนินการต่อ?',
     ];
     if (!window.confirm(lines.join('\n'))) return;
+    setBusy(true);
     try {
-      const r = await apiFetch(`/api/recurring-charges/${id}`, { method: 'DELETE' });
-      if (!r.ok) throw new Error('delete failed');
+      await apiCall(`/api/recurring-charges/${id}`, { method: 'DELETE', timeoutMs: 12_000 });
       setToast && setToast({ kind: 'success', message: `ลบ "${it.label}" แล้ว` });
       await load();
     } catch (e) {
       window.toastError
         ? window.toastError(setToast, e, { action: 'ลบรายการประจำ' })
         : setToast && setToast({ kind: 'danger', message: e.message });
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -156,7 +185,28 @@ function PageRecurringCharges({ setToast }) {
       <PageHeader title="ค่าใช้จ่ายประจำ"
         subtitle="parking / internet add-on / cleaning ฯลฯ — ผูกกับผู้เช่าหรือห้อง" />
 
-      {err ? <Card style={{ color: C.danger }}>{err}</Card> : null}
+      {err ? (
+        <Card style={{ color: C.danger, display: 'flex', gap: 12, alignItems: 'center', justifyContent: 'space-between' }}>
+          <div>
+            <div style={{ fontWeight: 700 }}>โหลดค่าใช้จ่ายประจำไม่สำเร็จ</div>
+            <div style={{ fontSize: 13, marginTop: 4 }}>{err}</div>
+          </div>
+          <Btn size="sm" variant="secondary" onClick={load} disabled={busy}>ลองใหม่</Btn>
+        </Card>
+      ) : null}
+
+      {tenantLoadWarning ? (
+        <Card style={{
+          background: C.warningSoft, color: C.warningInk, border: '1px solid ' + C.warning,
+          display: 'flex', gap: 12, alignItems: 'center', justifyContent: 'space-between',
+        }}>
+          <div>
+            <div style={{ fontWeight: 700 }}>โหลดรายชื่อผู้เช่าไม่ครบ</div>
+            <div style={{ fontSize: 13, marginTop: 4 }}>{tenantLoadWarning}</div>
+          </div>
+          <Btn size="sm" variant="secondary" onClick={load} disabled={busy}>รีเฟรช</Btn>
+        </Card>
+      ) : null}
 
       <Card>
         <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center' }}>
@@ -168,12 +218,22 @@ function PageRecurringCharges({ setToast }) {
             <option value="all">ทั้งหมด</option>
           </select>
           <div style={{ flex: 1 }} />
+          <Btn size="sm" variant="secondary" onClick={load} disabled={busy}>
+            {busy ? 'กำลังโหลด...' : 'รีเฟรช'}
+          </Btn>
           <Btn icon="+" variant="primary" onClick={() => setForm({})} disabled={busy}>
             เพิ่มรายการ
           </Btn>
         </div>
 
-        {items.length === 0 ? (
+        {busy && items.length === 0 && !err ? (
+          <div role="status" aria-live="polite" style={{
+            padding: 28, textAlign: 'center', border: '1px dashed ' + C.borderStrong,
+            borderRadius: 10, background: C.surfaceAlt, color: C.muted, fontSize: 13,
+          }}>
+            กำลังโหลดค่าใช้จ่ายประจำ...
+          </div>
+        ) : items.length === 0 ? (
           <EmptyState icon="💸" title="ยังไม่มีรายการ"
             description="เพิ่มรายการแรกเพื่อให้ระบบรวมเข้าบิลทุกเดือนอัตโนมัติ" />
         ) : (
@@ -185,6 +245,8 @@ function PageRecurringCharges({ setToast }) {
         <RecurringForm
           initial={form}
           tenants={tenants}
+          tenantLoadWarning={tenantLoadWarning}
+          onReloadTenants={load}
           onCancel={() => setForm(null)}
           onSave={save}
           busy={busy}
@@ -194,7 +256,7 @@ function PageRecurringCharges({ setToast }) {
   );
 }
 
-function RecurringForm({ initial, tenants, onCancel, onSave, busy }) {
+function RecurringForm({ initial, tenants, tenantLoadWarning, onReloadTenants, onCancel, onSave, busy }) {
   const C = window.ADMIN_C;
   const { Modal, Btn } = window;
   const isUpdate = !!initial.id;
@@ -218,6 +280,10 @@ function RecurringForm({ initial, tenants, onCancel, onSave, busy }) {
     if (!form.label.trim()) { alert('ใส่ชื่อรายการ'); return; }
     const amt = Number(form.amount);
     if (!Number.isFinite(amt) || amt < 0) { alert('จำนวนเงินไม่ถูกต้อง'); return; }
+    if (scope === 'tenant' && tenantLoadWarning && tenants.length === 0) {
+      alert('รายชื่อผู้เช่ายังโหลดไม่สำเร็จ กดรีเฟรชหรือเลือกผูกกับห้องแทน');
+      return;
+    }
     const payload = {
       ...(isUpdate ? { id: initial.id } : {}),
       label: form.label.trim(),
@@ -287,6 +353,16 @@ function RecurringForm({ initial, tenants, onCancel, onSave, busy }) {
               <option key={t.id} value={t.id}>{t.full_name} · {t.phone}{t.current_room_id ? ` · ห้อง ${t.current_room_id}` : ''}</option>
             ))}
           </select>
+          {tenantLoadWarning ? (
+            <div style={{
+              marginTop: 8, padding: 10, borderRadius: 8,
+              background: C.warningSoft, color: C.warningInk, fontSize: 12.5,
+              display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'space-between',
+            }}>
+              <span>รายชื่อผู้เช่ายังโหลดไม่ครบ เลือกรีเฟรชหรือผูกกับห้องแทน</span>
+              <Btn size="sm" variant="secondary" type="button" onClick={onReloadTenants} disabled={busy}>รีเฟรช</Btn>
+            </div>
+          ) : null}
         ) : (
           <input value={form.room_id} onChange={(e) => setForm({ ...form, room_id: e.target.value })}
             placeholder="เช่น 1A" maxLength={32} style={inp} />

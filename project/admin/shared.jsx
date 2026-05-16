@@ -73,7 +73,7 @@ const PAGE_TONE = {
   'line-bindings': 'rooms', 'line-oas': 'rooms',
   // Finance
   billing: 'finance', payments: 'finance', 'slip-verify': 'finance',
-  pricing: 'finance', 'recurring-charges': 'finance',
+  pricing: 'finance', recurring: 'finance', 'recurring-charges': 'finance',
   reports: 'finance', 'reports-v2': 'finance',
   // Service
   maintenance: 'service', meters: 'service',

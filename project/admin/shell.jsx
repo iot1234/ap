@@ -178,6 +178,13 @@ const PAGE_TITLES = {
   'production-readiness': 'ตรวจความพร้อม Production',
 };
 
+const PAGE_ALIASES = {
+  'recurring-charges': 'recurring',
+};
+function canonicalPageId(id) {
+  return PAGE_ALIASES[id] || id;
+}
+
 // ---------- Sidebar -------------------------------------------------------
 // Width modes:
 //   - 260px (expanded, default) — full labels + section headings
@@ -839,9 +846,11 @@ function App() {
   const pageFromHash = () => {
     const raw = location.hash.replace('#', '');
     const base = raw.split('?')[0].split('/')[0];
-    return PAGE_TITLES[base] ? base : 'overview';
+    const pageId = canonicalPageId(base);
+    return PAGE_TITLES[pageId] ? pageId : 'overview';
   };
-  const [page, setPage] = useState(pageFromHash);
+  const [page, setPageState] = useState(pageFromHash);
+  const setPage = (next) => setPageState(canonicalPageId(next));
   useEffect(() => {
     if (pageFromHash() !== page) location.hash = page;
     // Expose current page so PageHeader (and any other deep component)

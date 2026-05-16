@@ -2029,6 +2029,45 @@ test('admin booking-to-contract handoff preserves booking reservation context', 
     'check-in UI must match the server termMonths cap');
 });
 
+test('recurring charges page fails soft instead of hanging on tenant-list load', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(
+    path.join(__dirname, '..', 'project', 'admin', 'page-recurring-charges.jsx'), 'utf8'
+  );
+
+  assert.match(src, /Promise\.allSettled/,
+    'charges list must not be blocked by tenant-list failure');
+  assert.match(src, /apiCall\('\/api\/recurring-charges'[\s\S]{0,160}timeoutMs:\s*12_000/,
+    'charges load must use the structured API helper with a bounded timeout');
+  assert.match(src, /apiCall\('\/api\/tenants\?status=active'[\s\S]{0,160}timeoutMs:\s*12_000/,
+    'tenant lookup must be bounded and scoped to active tenants');
+  assert.match(src, /tenantLoadWarning/,
+    'tenant-list failure must be surfaced without hiding existing charges');
+  assert.match(src, /role="status"[\s\S]{0,520}กำลังโหลดค่าใช้จ่ายประจำ/,
+    'initial load must show an explicit loading state');
+  assert.doesNotMatch(src, /Promise\.all\(\[/,
+    'one slow side request must not freeze the entire page');
+  assert.doesNotMatch(src, /apiFetch\(/,
+    'page should use apiCall so errors/timeouts are normalized');
+});
+
+test('admin shell canonicalizes legacy recurring charges hash route', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const shell = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'shell.jsx'), 'utf8');
+  const shared = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'shared.jsx'), 'utf8');
+
+  assert.match(shell, /const PAGE_ALIASES = \{[\s\S]{0,120}'recurring-charges': 'recurring'/,
+    'old #recurring-charges links must land on the current recurring page');
+  assert.match(shell, /const pageId = canonicalPageId\(base\)[\s\S]{0,120}PAGE_TITLES\[pageId\]/,
+    'hash parser must resolve aliases before checking page titles');
+  assert.match(shell, /const \[page, setPageState\] = useState\(pageFromHash\)[\s\S]{0,160}const setPage = \(next\) => setPageState\(canonicalPageId\(next\)\)/,
+    'programmatic navigation must also canonicalize page ids');
+  assert.match(shared, /pricing: 'finance', recurring: 'finance', 'recurring-charges': 'finance'/,
+    'recurring page must keep the finance tone after route rename');
+});
+
 test('slip upload re-validates bill.tenant_id under FOR UPDATE lock (BILL_REASSIGNED)', () => {
   // The outside SELECT (line 2592) checks bill.tenant_id matches the
   // session, but admin could change tenant_id during the 5-10s slipVerifier
