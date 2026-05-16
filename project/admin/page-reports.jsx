@@ -12,6 +12,12 @@ function PageReports({ rooms, config, addActivity, setToast }) {
   const { Card, Btn, Tabs, KpiCard, BarChart, DonutChart, HBar, Sparkline, Pill,
           PageContainer, PageHeader, SectionHeading, DataTable, Select } = window;
 
+  // Top-level view switch: "ภาพรวม (กราฟ)" — KPI cards + charts (this file)
+  // vs "รายละเอียด (ตาราง · ส่งออก)" — embedded PageReportsV2 with DB-backed
+  // tables + CSV/XLSX export. Consolidated into one sidebar entry so admin
+  // doesn't see two confusing "รายงาน" rows. Hash /admin#reports-v2 still
+  // works for direct deep-links.
+  const [view, setView] = useState('charts');
   const [range, setRange] = useState('6m');
   const [liveOverview, setLiveOverview] = React.useState(null);
   const [agedReceivable, setAgedReceivable] = React.useState(null);
@@ -177,7 +183,7 @@ function PageReports({ rooms, config, addActivity, setToast }) {
       <PageHeader
         title="รายงานและการวิเคราะห์"
         subtitle="ภาพรวมประสิทธิภาพการเช่า, รายได้ และการเข้าพัก"
-        actions={
+        actions={view === 'charts' ? (
           <>
             <Select
               value={range}
@@ -200,8 +206,25 @@ function PageReports({ rooms, config, addActivity, setToast }) {
               addActivity && addActivity({ icon: '📊', text: 'ดาวน์โหลดบิลทั้งหอเป็น Excel', type: 'system' });
             }}>Excel บิลทั้งหอ</Btn>
           </>
-        }
+        ) : null}
       />
+
+      <Tabs
+        items={[
+          { value: 'charts', label: 'ภาพรวม · กราฟ',      icon: '📊' },
+          { value: 'tables', label: 'รายละเอียด · ตาราง', icon: '📈' },
+        ]}
+        value={view}
+        onChange={setView}
+        variant="pills"
+        style={{ marginBottom: 20 }}
+      />
+
+      {view === 'tables' && window.PageReportsV2 && (
+        <window.PageReportsV2 setToast={setToast} embedded />
+      )}
+
+      {view === 'charts' && (<>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 14, marginBottom: 20 }}>
         <KpiCard label="รายได้รวม"  value={fmtCurrency(stats.revenue)} change={revChangePct} sub="เดือนนี้" color="accent" icon="💰" />
@@ -363,6 +386,8 @@ function PageReports({ rooms, config, addActivity, setToast }) {
           </Card>
         )}
       </div>
+
+      </>)}
     </PageContainer>
   );
 }

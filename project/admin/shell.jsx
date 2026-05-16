@@ -101,8 +101,10 @@ const NAV_GROUPS = [
       // writeเข้า baankarn_config_v1 อยู่ใน Settings hub เดียวกัน.
       // Hash /admin#pricing ยังเปิดได้ (legacy URL / direct link).
       { id: 'recurring',   label: 'ค่าใช้จ่ายประจำ',  icon: '💸', minRole: 'manager' },
-      { id: 'reports',     label: 'รายงาน · กราฟ',    icon: '📊' },
-      { id: 'reports-v2',  label: 'รายงาน · ตาราง',   icon: '📈', minRole: 'manager' },
+      // รายงาน · กราฟ + รายงาน · ตาราง รวมเป็น "รายงาน" หน้าเดียวพร้อม
+      // top-level tabs (charts/tables). Legacy hash /admin#reports-v2
+      // ยังเปิดได้ตรงๆ ผ่าน PAGE_TITLES + render-by-page-id ด้านล่าง.
+      { id: 'reports',     label: 'รายงาน',           icon: '📊' },
     ],
   },
   {
@@ -110,8 +112,10 @@ const NAV_GROUPS = [
     items: [
       { id: 'maintenance',     label: 'แจ้งซ่อม',          icon: '🛠' },
       { id: 'meters',          label: 'มิเตอร์',           icon: '⚡' },
+      // เข้า-ออก + Hardware tokens รวมเป็น "เข้า-ออก" หน้าเดียวพร้อม
+      // top-level tabs (logs/devices). Legacy hash /admin#access-devices
+      // ยังเปิดได้ตรงๆ ผ่าน PAGE_TITLES + render-by-page-id ด้านล่าง.
       { id: 'access',          label: 'เข้า-ออก',          icon: '🔑', minRole: 'manager' },
-      { id: 'access-devices',  label: 'Hardware tokens', icon: '📡', minRole: 'owner' },
     ],
   },
   {

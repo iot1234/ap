@@ -34,6 +34,13 @@ function PageAccess({ setToast }) {
     }, `กำลังเตรียมหน้าเข้า-ออก... (รอ: ${missing})`);
   }
 
+  // Top-level view switch: "logs" (this file's existing UI) vs "devices"
+  // (embedded PageAccessDevices — API token management for hardware).
+  // Consolidated into one sidebar entry so admins manage tokens + see the
+  // resulting log entries without switching pages. Hash /admin#access-devices
+  // still works as a direct deep-link via shell.jsx's render-by-page-id.
+  const Tabs = window.Tabs;
+  const [view, setView] = useState('logs');
   const [list, setList] = useState([]);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState(null);
@@ -99,7 +106,28 @@ function PageAccess({ setToast }) {
   return (
     <PageContainer>
       <PageHeader title="เข้า-ออก"
-        subtitle="บันทึก log การเข้า-ออก · hardware (RFID/BLE) สามารถ POST /api/access/log โดยตรง" />
+        subtitle={view === 'logs'
+          ? 'บันทึก log การเข้า-ออก · hardware (RFID/BLE) สามารถ POST /api/access/log โดยตรง'
+          : 'ออก Bearer token ให้ฮาร์ดแวร์ใช้ POST /api/access/log โดยไม่ต้องมี session admin'} />
+
+      {Tabs ? (
+        <Tabs
+          items={[
+            { value: 'logs',    label: 'บันทึก Log',  icon: '🪪' },
+            { value: 'devices', label: 'API Tokens',  icon: '📡' },
+          ]}
+          value={view}
+          onChange={setView}
+          variant="pills"
+          style={{ marginBottom: 20 }}
+        />
+      ) : null}
+
+      {view === 'devices' && window.PageAccessDevices && (
+        <window.PageAccessDevices setToast={setToast} embedded />
+      )}
+
+      {view === 'logs' && (<>
       <Card>
         <form onSubmit={submit} style={{
           display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(120px,1fr))',
@@ -165,6 +193,7 @@ function PageAccess({ setToast }) {
           </div>
         )}
       </Card>
+      </>)}
     </PageContainer>
   );
 }

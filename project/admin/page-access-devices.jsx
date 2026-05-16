@@ -11,9 +11,20 @@
 
 const { useState, useEffect } = React;
 
-function PageAccessDevices({ setToast }) {
+// `embedded` prop lets PageAccess host this as a tab without rendering its
+// own PageContainer + PageHeader. Standalone /admin#access-devices still
+// works for legacy URLs / bookmarks.
+function PageAccessDevices({ setToast, embedded = false }) {
   const C = window.ADMIN_C;
   const { Card, Pill, PageContainer, PageHeader, EmptyState, Btn, Modal } = window;
+  const Wrapper = embedded
+    ? ({ children }) => <div>{children}</div>
+    : ({ children }) => <PageContainer>{children}</PageContainer>;
+  const Header = embedded
+    ? ({ actions }) => actions
+      ? <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>{actions}</div>
+      : null
+    : (props) => <PageHeader {...props} />;
   const apiFetch = window.requireApiFetch ? window.requireApiFetch() : window.apiFetch;
   const [devices, setDevices] = useState([]);
   const [showNew, setShowNew] = useState(false);
@@ -75,8 +86,8 @@ function PageAccessDevices({ setToast }) {
   }
 
   return (
-    <PageContainer>
-      <PageHeader title="API Tokens สำหรับ Hardware"
+    <Wrapper>
+      <Header title="API Tokens สำหรับ Hardware"
         subtitle="ออก Bearer token ให้ RFID reader / ESP32 ใช้ POST /api/access/log โดยไม่ต้องมี session"
         actions={
           <Btn variant="primary" onClick={() => setShowNew(true)}>+ ออก token ใหม่</Btn>
@@ -168,7 +179,7 @@ function PageAccessDevices({ setToast }) {
           </div>
         )}
       </Modal>
-    </PageContainer>
+    </Wrapper>
   );
 }
 

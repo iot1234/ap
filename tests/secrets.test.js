@@ -74,13 +74,13 @@ test('set rejects unknown keys', async () => {
 test('listMetadata reports source + masked value', async () => {
   process.env.LINE_CHANNEL_ACCESS_TOKEN = 'super-long-test-token-abcdef1234';
   const fakePool = {
-    query: async () => ({ rows: [{ key: 'PROMPTPAY_TARGET' }] }),
+    query: async () => ({ rows: [{ key: 'SMTP_HOST' }] }),
   };
-  // First put a DB-only secret in the cache
+  // Put a DB-only secret in the cache (use a non-hidden key)
   await secrets.set(
     { query: async () => ({ rowCount: 1 }) },
-    'PROMPTPAY_TARGET',
-    '0987654321',
+    'SMTP_HOST',
+    'smtp.example.com',
     't'
   );
   const items = await secrets.listMetadata(fakePool);
@@ -88,10 +88,28 @@ test('listMetadata reports source + masked value', async () => {
   assert.equal(lineRow.source, 'env');
   assert.equal(lineRow.readOnly, true);   // env-managed → readOnly
   assert.match(lineRow.maskedTail, /••••....$/);
-  const ppRow = items.find((i) => i.key === 'PROMPTPAY_TARGET');
-  assert.equal(ppRow.source, 'db');
-  assert.equal(ppRow.readOnly, false);
+  const smtpRow = items.find((i) => i.key === 'SMTP_HOST');
+  assert.equal(smtpRow.source, 'db');
+  assert.equal(smtpRow.readOnly, false);
   delete process.env.LINE_CHANNEL_ACCESS_TOKEN;
+});
+
+test('listMetadata hides PROMPTPAY_TARGET from the secrets UI', async () => {
+  // PromptPay is set ONLY via Settings → Payment tab. Backend resolver
+  // still reads secrets.get('PROMPTPAY_TARGET') as a fallback (env + legacy
+  // DB rows), but the admin secrets page must not surface it as a writable
+  // row — that's the duplicate-write-path bug this guards against.
+  const fakePool = { query: async () => ({ rows: [] }) };
+  const items = await secrets.listMetadata(fakePool);
+  assert.equal(items.find((i) => i.key === 'PROMPTPAY_TARGET'), undefined,
+    'PROMPTPAY_TARGET must not appear in listMetadata output');
+});
+
+test('PROMPTPAY_TARGET still usable via get() (env-fallback path)', () => {
+  process.env.PROMPTPAY_TARGET = '0899999999';
+  assert.equal(secrets.get('PROMPTPAY_TARGET'), '0899999999',
+    'env-override of hidden key must still resolve so ops can pin via Railway Variables');
+  delete process.env.PROMPTPAY_TARGET;
 });
 
 test('maskValue hides full secret', () => {

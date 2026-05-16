@@ -251,7 +251,7 @@ function TabPayment({ draft, updatePath }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 800 }}>
       <Card>
-        <SectionHeading title="พร้อมเพย์ (PromptPay)" subtitle="ช่องทางหลักสำหรับรับชำระบิล" level={3}
+        <SectionHeading title="พร้อมเพย์ (PromptPay)" subtitle="ช่องทางหลักสำหรับรับชำระบิล · ที่นี่คือจุดเดียวที่ตั้งค่า PromptPay" level={3}
           action={
             ppCheck.ok && !isDemoPp
               ? <Pill color="success" icon="✓">พร้อมใช้งาน</Pill>

@@ -40,8 +40,17 @@ const CATALOG = Object.freeze([
   { key: 'OWNER_EMAIL', group: 'smtp', label: 'Owner Email (fallback)', description: 'รับ system notifications เมื่อ LINE ส่งไม่ได้', kind: 'text' },
 
   // --- PromptPay --------------------------------------------------------
+  // PromptPay target is canonical at Settings → การชำระเงิน tab
+  // (config.payment.promptpay). The CATALOG entry stays so:
+  //   - env-override (process.env.PROMPTPAY_TARGET) still works for
+  //     env-managed deploys via secrets.get()
+  //   - legacy DB rows continue to load on preload() and feed the resolver
+  //     fallback chain (cfg.payment.promptpay → secrets.get(PROMPTPAY_TARGET))
+  // The `hidden: true` flag causes listMetadata() to skip it so the secrets
+  // page no longer renders a writable "PromptPay" group — preventing the
+  // two-write-paths confusion that used to exist.
   { key: 'PROMPTPAY_TARGET', group: 'promptpay', label: 'Target',
-    description: 'เบอร์โทร 10 หลัก หรือ เลขบัตร ปชช. 13 หลัก', kind: 'text' },
+    description: 'เบอร์โทร 10 หลัก หรือ เลขบัตร ปชช. 13 หลัก', kind: 'text', hidden: true },
 
   // --- Sentry (error tracking) -----------------------------------------
   { key: 'SENTRY_DSN', group: 'sentry', label: 'Sentry DSN',
@@ -190,7 +199,10 @@ async function listMetadata(pool) {
     for (const r of rows) dbRows.add(r.key);
   } catch { /* ignore */ }
 
-  return CATALOG.map((c) => {
+  // Skip entries flagged `hidden` — their values still resolve via get()
+  // (env override or preloaded DB row), but they don't appear in the admin
+  // UI because the canonical write surface is somewhere else (e.g. Settings).
+  return CATALOG.filter((c) => !c.hidden).map((c) => {
     const env = process.env[c.key];
     const inEnv = env !== undefined && env !== '';
     const inDb = dbRows.has(c.key);
