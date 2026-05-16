@@ -219,6 +219,16 @@ function TabRates({ draft, updatePath, floorsForPricing }) {
   return (
     <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 2fr) minmax(0, 1fr)', gap: 16, alignItems: 'start' }}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 16, minWidth: 0 }}>
+        <Card style={{ background: '#FFF8E6', border: '1px solid #F2C84B' }}>
+          <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start', fontSize: 13, color: '#7A5A0F', lineHeight: 1.6 }}>
+            <span style={{ fontSize: 16, lineHeight: 1 }}>ℹ️</span>
+            <div>
+              <b>ราคาที่ตั้งใหม่จะมีผลกับ</b>: ห้องว่าง / สัญญาที่เซ็นหลังจากนี้.
+              ผู้เช่าที่มีสัญญาอยู่แล้วจะยังจ่ายตามอัตราในสัญญา (locked-at-signing) จนกว่าจะหมดสัญญาหรือต่อสัญญาใหม่
+              — เป็นไปตามข้อกำหนดสิทธิผู้เช่า. หากต้องการเปลี่ยนเฉพาะห้อง ให้ใช้ <b>Rent Override</b> ที่หน้าห้องพักแทน.
+            </div>
+          </div>
+        </Card>
         <Card>
           <SectionHeading title="ราคาตามประเภทห้อง" subtitle="ราคาเช่าพื้นฐานและเงินมัดจำของแต่ละประเภท" level={3} />
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>

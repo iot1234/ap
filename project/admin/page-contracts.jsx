@@ -242,7 +242,7 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
                         title="ดู PDF (ใช้ template ที่ผูกไว้ หรือ default)">📄 PDF</Btn>
                       <Btn size="sm" variant="ghost" onClick={() => openPdf(c, { download: 1 })}
                         title="ดาวน์โหลด PDF เพื่อ print">⬇</Btn>
-                      {c.status === 'active' && !c.signed_at ? (
+                      {c.status === 'active' && !c.signed_at && !c.locked_at ? (
                         <Btn size="sm" variant="ghost" onClick={() => setSigning(c)}
                           title="ลงนามออนไลน์">✍️ เซ็น</Btn>
                       ) : null}
@@ -759,6 +759,13 @@ function ContractEditModal({ contract, onClose, onSaved, onError }) {
   const C = window.ADMIN_C;
   const { Modal, Btn, Input, Select } = window;
   const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
+  const isLocked = !!contract.locked_at;
+  const original = {
+    discountPct: Number(contract.discount_pct ?? 0),
+    termMonths: contract.term_months == null ? null : Number(contract.term_months),
+    endDate: contract.end_date ? String(contract.end_date).slice(0, 10) : null,
+    status: contract.status || 'active',
+  };
   const [form, setForm] = useState({
     discountPct: contract.discount_pct != null ? String(contract.discount_pct) : '0',
     termMonths:  contract.term_months  != null ? String(contract.term_months)  : '',
@@ -766,18 +773,33 @@ function ContractEditModal({ contract, onClose, onSaved, onError }) {
     status:      contract.status || 'active',
   });
   const [busy, setBusy] = useState(false);
+  const formPct = Number(form.discountPct);
+  const formTerm = form.termMonths === '' ? null : Number(form.termMonths);
+  const formEndDate = form.endDate || null;
+  const materialChanged = (Number.isFinite(formPct) && formPct !== original.discountPct)
+    || formTerm !== original.termMonths
+    || formEndDate !== original.endDate;
+  const statusChanged = form.status !== original.status;
+  const canSave = statusChanged || (!isLocked && materialChanged);
 
   const submit = async (e) => {
     e.preventDefault();
     setBusy(true);
     try {
       const payload = {};
-      const pct = Number(form.discountPct);
-      if (Number.isFinite(pct)) payload.discountPct = pct;
-      if (form.termMonths === '') payload.termMonths = null;
-      else if (form.termMonths != null) payload.termMonths = Number(form.termMonths);
-      payload.endDate = form.endDate || null;
-      payload.status = form.status;
+      if (!isLocked) {
+        const pct = Number(form.discountPct);
+        if (Number.isFinite(pct) && pct !== original.discountPct) payload.discountPct = pct;
+        const term = form.termMonths === '' ? null : Number(form.termMonths);
+        if (term !== original.termMonths) payload.termMonths = term;
+        const endDate = form.endDate || null;
+        if (endDate !== original.endDate) payload.endDate = endDate;
+      }
+      if (form.status !== original.status) payload.status = form.status;
+      if (!Object.keys(payload).length) {
+        onError && onError('ไม่มีข้อมูลที่เปลี่ยนแปลง');
+        return;
+      }
       const d = await apiCall(`/api/contracts/${contract.id}`, {
         method: 'PUT',
         body: JSON.stringify(payload),
@@ -796,7 +818,7 @@ function ContractEditModal({ contract, onClose, onSaved, onError }) {
       footer={
         <>
           <Btn variant="ghost" onClick={onClose} disabled={busy}>ยกเลิก</Btn>
-          <Btn variant="primary" onClick={submit} disabled={busy}>
+          <Btn variant="primary" onClick={submit} disabled={busy || !canSave}>
             {busy ? '…' : 'บันทึก'}
           </Btn>
         </>
@@ -808,17 +830,28 @@ function ContractEditModal({ contract, onClose, onSaved, onError }) {
           <br />
           ค่าเช่า/เดือน: ฿{Number(contract.monthly_rent).toLocaleString('th-TH', { minimumFractionDigits: 2 })}
         </div>
+        {isLocked ? (
+          <div style={{
+            padding: 10, background: C.warningSoft, borderRadius: 6,
+            fontSize: 12, color: C.warningInk || C.ink2, lineHeight: 1.5,
+          }}>
+            🔒 สัญญานี้ถูก lock แล้ว แก้ไขค่าเช่า ส่วนลด ระยะสัญญา หรือวันสิ้นสุดไม่ได้
+            แต่ยังเปลี่ยนสถานะเป็น “สิ้นสุด” หรือ “หมดอายุ” เพื่อปิดสัญญาและปล่อยห้องได้
+          </div>
+        ) : null}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
           <div>
             <label style={lbl}>ส่วนลด (%) — สูงสุด 50</label>
             <input type="number" step="0.1" min="0" max="50" value={form.discountPct}
               onChange={(e) => setForm({ ...form, discountPct: e.target.value })}
+              disabled={isLocked || busy}
               style={inp} />
           </div>
           <div>
             <label style={lbl}>ระยะสัญญา (เดือน)</label>
             <input type="number" step="1" min="1" max="120" value={form.termMonths}
               onChange={(e) => setForm({ ...form, termMonths: e.target.value })}
+              disabled={isLocked || busy}
               style={inp} placeholder="เปิด-ไม่จำกัด" />
           </div>
         </div>
@@ -827,12 +860,14 @@ function ContractEditModal({ contract, onClose, onSaved, onError }) {
             <label style={lbl}>วันสิ้นสุด</label>
             <input type="date" value={form.endDate}
               onChange={(e) => setForm({ ...form, endDate: e.target.value })}
+              disabled={isLocked || busy}
               style={inp} />
           </div>
           <div>
             <label style={lbl}>สถานะ</label>
             <select value={form.status}
               onChange={(e) => setForm({ ...form, status: e.target.value })}
+              disabled={busy}
               style={inp}>
               <option value="active">มีผล</option>
               <option value="expired">หมดอายุ</option>

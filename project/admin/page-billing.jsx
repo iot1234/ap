@@ -40,7 +40,7 @@ function utilityDetailFromBill(b, prefix) {
 function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
   const C = window.ADMIN_C;
   const ADMIN_ROOM_TYPES = window.ADMIN_ROOM_TYPES;
-  const { fmt, fmtCurrency, fmtMonthTH } = window;
+  const { fmt, fmtCurrency, fmtMonthTH, resolveRoomRent } = window;
   const { Card, Btn, Avatar, Pill, KpiCard, DataTable, Modal, Toggle,
           PageContainer, PageHeader, SectionHeading, DefList, Tabs, EmptyState } = window;
 
@@ -185,7 +185,17 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
   }, [dbBills]);
 
   // Generate bills from rooms — recompute with CURRENT config rates so
-  // changes in Pricing engine reflect immediately in this month's bills
+  // changes in Pricing engine reflect immediately in this month's bills.
+  // Uses resolveRoomRent (override > formula > legacy) instead of the static
+  // room.rent snapshot so admin's pricing edits show up in the preview
+  // without waiting for someone to "Save" each room. For occupied rooms
+  // with an active contract, the server-side bill engine still bills the
+  // contract.monthly_rent locked at signing (see services/pricing.js); we
+  // can't see contracts here client-side, so existing tenants will preview
+  // formula but get billed the locked rate. That's a UX gap (preview != bill
+  // for occupied rooms) but it's the lesser of two evils — the alternative,
+  // showing room.rent, was a STALE snapshot that didn't track pricing edits
+  // at all.
   const bills = useMemo(() => {
     const waterRate = config.utilities?.waterRate ?? 18;
     const elecRate  = config.utilities?.elecRate  ?? 8;
@@ -214,7 +224,9 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         // ignored — those rows never made it onto real bills.
         const charges = activeRecurring[r.id] || [];
         const chargesTotal = charges.reduce((s, c) => s + (Number(c.amount) || 0), 0);
-        const total = r.rent + water + elec + wifi + chargesTotal;
+        const rentInfo = resolveRoomRent ? resolveRoomRent(r, config) : { rent: r.rent, source: 'legacy' };
+        const previewRent = Number(rentInfo.rent) || 0;
+        const total = previewRent + water + elec + wifi + chargesTotal;
         const overdue = r.status === 'overdue';
         // Late fee is computed server-side at bill-gen time using
         // features.lateFee.ratePctPerMonth + gracePeriodDays (the canonical
@@ -233,7 +245,8 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
           phone: r.tenant.phone,
           period: periodIso,            // for API
           periodDisplay,                 // for UI
-          rent: r.rent,
+          rent: previewRent,
+          rentSource: rentInfo.source,
           water, elec, wifi,
           waterUnits,
           waterRate,

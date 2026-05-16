@@ -3692,6 +3692,29 @@ test('contracts page displays server-side contract warnings', () => {
   assert.match(src, /w\.consequence/);
 });
 
+test('contracts edit modal keeps locked contracts closable without material edits', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-contracts.jsx'), 'utf8');
+  const block = src.match(/function ContractEditModal[\s\S]+?function QuickInviteModal/);
+  assert.ok(block, 'ContractEditModal must exist');
+  assert.match(block[0], /const isLocked = !!contract\.locked_at/);
+  assert.match(block[0], /if \(!isLocked\) \{[\s\S]{0,500}payload\.discountPct/);
+  assert.match(block[0], /if \(form\.status !== original\.status\) payload\.status = form\.status/);
+  assert.match(block[0], /disabled=\{isLocked \|\| busy\}/,
+    'locked contracts must disable material term inputs');
+  assert.match(block[0], /disabled=\{busy \|\| !canSave\}/,
+    'save button should be disabled until a valid change is present');
+});
+
+test('contracts page hides manual signing for locked contracts', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-contracts.jsx'), 'utf8');
+  assert.match(src, /c\.status === 'active' && !c\.signed_at && !c\.locked_at[\s\S]{0,120}setSigning\(c\)/,
+    'locked contracts must not offer manual signature replacement');
+});
+
 test('public contract-fill HTML page exists + has expected steps', () => {
   const fs = require('node:fs');
   const path = require('node:path');

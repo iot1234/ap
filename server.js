@@ -508,11 +508,31 @@ const PUBLIC_KEYS = new Set(['baankarn_rooms_v1', 'baankarn_config_v1']);
 // Strip every tenant-PII field from a rooms object. The home page only needs
 // status/floor/type/rent to render the building grid, so we drop name, phone,
 // email, citizen ID, occupation, photos, contract end, etc.
-function maskRoomsPublic(roomsObj) {
+//
+// The rent shown publicly is run through the formula resolver so admin
+// pricing edits in /admin#pricing reflect on the homepage immediately
+// (without waiting for someone to re-save each room blob). Falls back to
+// the static room.rent snapshot when no config is supplied — that path is
+// only hit on the GET-all endpoint where the caller hasn't loaded config
+// yet; the per-key GET path always passes config.
+function maskRoomsPublic(roomsObj, config) {
   if (!roomsObj || typeof roomsObj !== 'object') return roomsObj;
+  const pricing = require('./services/pricing');
   const out = {};
   for (const [id, r] of Object.entries(roomsObj)) {
     if (!r || typeof r !== 'object') continue;
+    // Use the same resolver the bill engine uses (minus contract, since
+    // contracts are admin-only data and we don't want to leak them publicly).
+    // Result: vacant rooms show formula-derived rent, occupied rooms show
+    // override or formula — never a stale legacy snapshot from a save weeks
+    // ago. Public visitors see "what would I pay if I rented this today".
+    let resolvedRent = r.rent;
+    if (config) {
+      try {
+        const { rent } = pricing.resolveBillingRent({ room: r, config });
+        if (Number.isFinite(rent) && rent > 0) resolvedRent = rent;
+      } catch { /* fall back to legacy */ }
+    }
     out[id] = {
       id: r.id,
       floor: r.floor,
@@ -520,7 +540,7 @@ function maskRoomsPublic(roomsObj) {
       type: r.type,
       view: r.view,
       status: r.status,
-      rent: r.rent,
+      rent: resolvedRent,
       // Keep tenant truthy so existing UI conditions still work, but every
       // PII field is replaced with a masked placeholder.
       tenant: r.tenant ? { name: 'มีผู้เช่า', occupation: '', masked: true } : null,
@@ -572,7 +592,18 @@ app.get('/api/data/:key', async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT value FROM app_data WHERE key=$1', [key]);
     let value = rows.length ? rows[0].value : null;
-    if (!isAuth && key === 'baankarn_rooms_v1')  value = maskRoomsPublic(value);
+    if (!isAuth && key === 'baankarn_rooms_v1') {
+      // Load config so the public rent reflects the current pricing formula
+      // (admin's /admin#pricing edits show up here without waiting for a
+      // per-room re-save). One extra query per public room load — cached
+      // would be nice but the row is small.
+      let cfg = null;
+      try {
+        const c = await pool.query(`SELECT value FROM app_data WHERE key='baankarn_config_v1'`);
+        cfg = c.rows[0]?.value || null;
+      } catch { /* fall back to legacy r.rent inside maskRoomsPublic */ }
+      value = maskRoomsPublic(value, cfg);
+    }
     if (!isAuth && key === 'baankarn_config_v1') value = maskConfigPublic(value);
     res.json({ key, value });
   } catch (err) {
@@ -590,9 +621,16 @@ app.get('/api/data', async (req, res) => {
       [keys]
     );
     const out = {};
+    // For unauth callers we need to mask rooms AGAINST the (also-masked)
+    // config so the public rent runs through the same formula resolver as
+    // the admin bill engine. Pre-resolve the raw config row before iterating.
+    const rawConfigRow = !isAuth
+      ? rows.find((x) => x.key === 'baankarn_config_v1')
+      : null;
+    const rawConfigForRooms = rawConfigRow ? rawConfigRow.value : null;
     for (const r of rows) {
       let v = r.value;
-      if (!isAuth && r.key === 'baankarn_rooms_v1')  v = maskRoomsPublic(v);
+      if (!isAuth && r.key === 'baankarn_rooms_v1')  v = maskRoomsPublic(v, rawConfigForRooms);
       if (!isAuth && r.key === 'baankarn_config_v1') v = maskConfigPublic(v);
       out[r.key] = v;
     }
