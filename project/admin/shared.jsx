@@ -192,6 +192,55 @@ function fmtMonthTH(d) {
   const months = ['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.','ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'];
   return `${months[dt.getMonth()]} ${dt.getFullYear() + 543}`;
 }
+function contractTodayYmd() {
+  const dt = new Date();
+  dt.setMinutes(dt.getMinutes() - dt.getTimezoneOffset());
+  return dt.toISOString().slice(0, 10);
+}
+function addContractMonths(startYmd, months) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(startYmd || ''));
+  const n = Number(months);
+  if (!m || !Number.isInteger(n) || n < 1) return '';
+  const sy = Number(m[1]);
+  const sm = Number(m[2]);
+  const sd = Number(m[3]);
+  const totalMonths = (sy * 12 + (sm - 1)) + n;
+  const ey = Math.floor(totalMonths / 12);
+  const em = (totalMonths % 12) + 1;
+  const lastDom = new Date(Date.UTC(ey, em, 0)).getUTCDate();
+  const ed = Math.min(sd, lastDom);
+  return `${ey}-${String(em).padStart(2, '0')}-${String(ed).padStart(2, '0')}`;
+}
+function estimateContractMonths(startYmd, endYmd, maxMonths = 120) {
+  const sm = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(startYmd || ''));
+  const em = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(endYmd || ''));
+  const max = Math.max(1, Math.min(240, Number(maxMonths) || 120));
+  if (!sm || !em || String(endYmd) < String(startYmd)) return null;
+  for (let i = 1; i <= max; i += 1) {
+    if (addContractMonths(startYmd, i) === endYmd) return i;
+  }
+  const sy = Number(sm[1]);
+  const sMonth = Number(sm[2]);
+  const sd = Number(sm[3]);
+  const ey = Number(em[1]);
+  const eMonth = Number(em[2]);
+  const ed = Number(em[3]);
+  let diff = (ey - sy) * 12 + (eMonth - sMonth);
+  if (ed < sd) diff -= 1;
+  return diff >= 1 && diff <= max ? diff : null;
+}
+function contractDateSummary(startYmd, termMonths, endYmd) {
+  const term = Number(termMonths);
+  const computedEnd = endYmd || addContractMonths(startYmd, term);
+  if (!startYmd || !computedEnd) return 'ระบุวันเริ่มและระยะสัญญาเพื่อให้ระบบคำนวณวันสิ้นสุด';
+  if (computedEnd < startYmd) return 'วันสิ้นสุดต้องไม่ก่อนวันเริ่มสัญญา';
+  const months = Number.isInteger(term) && term > 0
+    ? term
+    : estimateContractMonths(startYmd, computedEnd);
+  return months
+    ? `เริ่ม ${fmtDateTH(startYmd)} ถึง ${fmtDateTH(computedEnd)} (${months} เดือน)`
+    : `เริ่ม ${fmtDateTH(startYmd)} ถึง ${fmtDateTH(computedEnd)}`;
+}
 function relTime(iso) {
   const dt = new Date(iso);
   const diffMs = Date.now() - dt.getTime();
@@ -635,6 +684,7 @@ Object.assign(window, {
   ADMIN_VIEWS,
   DEFAULT_CONFIG, STORAGE_KEYS,
   fmt, fmtCurrency, fmtPercent, fmtDateTH, fmtMonthTH, relTime, seedRand,
+  contractTodayYmd, addContractMonths, estimateContractMonths, contractDateSummary,
   buildAdminRooms, buildBookings, buildActivities,
   loadRooms, saveRooms, loadConfig, saveConfig,
   loadBookings, saveBookings, loadActivities, saveActivities,

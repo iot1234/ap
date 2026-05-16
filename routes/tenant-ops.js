@@ -49,6 +49,34 @@ function maskTenantOut(t) {
   return out;
 }
 
+function addContractMonths(startYmd, months) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(startYmd || ''));
+  const n = Number(months);
+  if (!m || !Number.isInteger(n) || n < 1) return null;
+  const sy = Number(m[1]);
+  const sm = Number(m[2]);
+  const sd = Number(m[3]);
+  const totalMonths = (sy * 12 + (sm - 1)) + n;
+  const ey = Math.floor(totalMonths / 12);
+  const em = (totalMonths % 12) + 1;
+  const lastDom = new Date(Date.UTC(ey, em, 0)).getUTCDate();
+  const ed = Math.min(sd, lastDom);
+  return `${ey}-${String(em).padStart(2, '0')}-${String(ed).padStart(2, '0')}`;
+}
+
+function estimateContractMonths(startYmd, endYmd, maxMonths = 60) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(startYmd || ''))
+      || !/^\d{4}-\d{2}-\d{2}$/.test(String(endYmd || ''))
+      || String(endYmd) < String(startYmd)) {
+    return null;
+  }
+  const max = Math.max(1, Math.min(120, Number(maxMonths) || 60));
+  for (let i = 1; i <= max; i += 1) {
+    if (addContractMonths(startYmd, i) === endYmd) return i;
+  }
+  return null;
+}
+
 module.exports = function buildTenantOpsRouter(ctx) {
   const { pool, requireAuth, requireRole, sameOrigin, csrfGuard, audit } = ctx;
   const r = express.Router();
@@ -1361,9 +1389,30 @@ module.exports = function buildTenantOpsRouter(ctx) {
       const id = Number(req.params.id);
       if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
       const { roomId, moveInDate, depositAmount, monthlyRent,
-              termMonths, discountPct: explicitDiscount,
+              termMonths, endDate: explicitEndDate, discountPct: explicitDiscount,
               agreedTermsVersion, force } = req.body;
       const isForced = force === true;
+      const requestedEndDate = explicitEndDate || null;
+      if (requestedEndDate && requestedEndDate < moveInDate) {
+        return res.status(400).json({
+          error: 'วันสิ้นสุดสัญญาต้องไม่ก่อนวันที่เข้าพัก',
+          code: 'INVALID_END_DATE',
+          moveInDate,
+          endDate: requestedEndDate,
+        });
+      }
+      const maxEndDate = addContractMonths(moveInDate, 60);
+      if (requestedEndDate && maxEndDate && requestedEndDate > maxEndDate) {
+        return res.status(400).json({
+          error: 'วันสิ้นสุดสัญญาเกิน 60 เดือนจากวันที่เข้าพัก',
+          code: 'END_DATE_TOO_FAR',
+          moveInDate,
+          endDate: requestedEndDate,
+          maxEndDate,
+        });
+      }
+      const effectiveTermMonths = termMonths
+        || (requestedEndDate ? estimateContractMonths(moveInDate, requestedEndDate, 60) : null);
 
       // ============================ SAFETY GUARDS ===========================
       // Each guard surfaces a structured error code so the admin UI can show
@@ -1417,17 +1466,17 @@ module.exports = function buildTenantOpsRouter(ctx) {
       let resolvedDiscountPct = 0;
       if (explicitDiscount != null) {
         resolvedDiscountPct = Number(explicitDiscount) || 0;
-      } else if (termMonths) {
+      } else if (effectiveTermMonths) {
         try {
           const { rows: cfgRows } = await pool.query(
             `SELECT value FROM app_data WHERE key='baankarn_config_v1' LIMIT 1`
           );
           const discounts = cfgRows[0]?.value?.discounts || {};
-          if (termMonths >= 24 && Number(discounts.twentyFourMonth) > 0) {
+          if (effectiveTermMonths >= 24 && Number(discounts.twentyFourMonth) > 0) {
             resolvedDiscountPct = Number(discounts.twentyFourMonth);
-          } else if (termMonths >= 12 && Number(discounts.twelveMonth) > 0) {
+          } else if (effectiveTermMonths >= 12 && Number(discounts.twelveMonth) > 0) {
             resolvedDiscountPct = Number(discounts.twelveMonth);
-          } else if (termMonths >= 6 && Number(discounts.sixMonth) > 0) {
+          } else if (effectiveTermMonths >= 6 && Number(discounts.sixMonth) > 0) {
             resolvedDiscountPct = Number(discounts.sixMonth);
           }
         } catch { /* config blob missing — leave at 0 */ }
@@ -1442,26 +1491,9 @@ module.exports = function buildTenantOpsRouter(ctx) {
       // + 1 month → Mar 3 (because Feb 31 doesn't exist, JS adds the
       // overflow days). Fix by clamping the day-of-month to the last valid
       // day of the target month so Jan 31 + 1mo → Feb 28/29.
-      let endDate = null;
-      if (termMonths) {
-        // Parse YYYY-MM-DD as components rather than relying on Date()
-        // timezone parsing which interprets the bare string as UTC and
-        // can shift one day on Asia/Bangkok.
-        const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(moveInDate);
-        if (m) {
-          const sy = Number(m[1]);
-          const sm = Number(m[2]);
-          const sd = Number(m[3]);
-          // Add termMonths to (year, month). Compute target month using
-          // 0-indexed math, then clamp day to the last day of that month.
-          const totalMonths = (sy * 12 + (sm - 1)) + Number(termMonths);
-          const ey = Math.floor(totalMonths / 12);
-          const em = (totalMonths % 12) + 1;  // 1..12
-          // Last day of (ey, em) — day 0 of the NEXT month.
-          const lastDom = new Date(Date.UTC(ey, em, 0)).getUTCDate();
-          const ed = Math.min(sd, lastDom);
-          endDate = `${ey}-${String(em).padStart(2, '0')}-${String(ed).padStart(2, '0')}`;
-        }
+      let endDate = requestedEndDate;
+      if (!endDate && effectiveTermMonths) {
+        endDate = addContractMonths(moveInDate, Number(effectiveTermMonths));
       }
 
       const client = await pool.connect();
@@ -1660,7 +1692,7 @@ module.exports = function buildTenantOpsRouter(ctx) {
                      CASE WHEN $10::text IS NOT NULL THEN NOW() ELSE NULL END, $10)
              ON CONFLICT (contract_no) DO NOTHING`,
             [contractNo, id, roomId, moveInDate, endDate,
-             monthlyRent, depositAmount, termMonths || null, resolvedDiscountPct,
+             monthlyRent, depositAmount, effectiveTermMonths || null, resolvedDiscountPct,
              termsVersion]
           );
         } catch (err) {
@@ -1671,7 +1703,7 @@ module.exports = function buildTenantOpsRouter(ctx) {
              VALUES ($1, $2, $3, $4::date, $5::date, $6, $7, 'active', $8, $9)
              ON CONFLICT (contract_no) DO NOTHING`,
             [contractNo, id, roomId, moveInDate, endDate,
-             monthlyRent, depositAmount, termMonths || null, resolvedDiscountPct]
+             monthlyRent, depositAmount, effectiveTermMonths || null, resolvedDiscountPct]
           );
         }
 

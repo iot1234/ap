@@ -68,6 +68,9 @@ schemas.checkIn = z.object({
   // Cap at 60 months (5 years) — the previous 120-month cap let admins
   // accidentally type "120 years" and get a contract ending in 2146.
   termMonths: z.coerce.number().int().min(1).max(60).optional(),
+  // Optional explicit end date. If supplied without termMonths, server keeps
+  // the date and stores term_months only when it exactly matches a month span.
+  endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'วันสิ้นสุดต้องเป็น YYYY-MM-DD').optional(),
   discountPct: z.coerce.number().nonnegative().max(50).optional(),
   // Legal trail: client surfaces the terms-and-conditions text version so
   // we can store WHICH wording the tenant agreed to. Optional in the

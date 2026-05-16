@@ -2961,6 +2961,76 @@ test('tenant checkin endDate respects month-rollover (Jan31 + 1mo → Feb28/29)'
     'must clamp source day to last valid day');
 });
 
+test('contract date helpers support month count and explicit end-date modes', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const shared = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'shared.jsx'), 'utf8');
+  assert.match(shared, /function contractTodayYmd\(\)/,
+    'admin UI must use local today for contract default start date');
+  assert.match(shared, /function addContractMonths\(startYmd, months\)/,
+    'admin UI must expose a reusable month-to-end-date helper');
+  assert.match(shared, /new Date\(Date\.UTC\(ey, em, 0\)\)\.getUTCDate\(\)/,
+    'helper must clamp end-of-month dates');
+  assert.match(shared, /function estimateContractMonths\(startYmd, endYmd/,
+    'admin UI must infer month count when admin edits endDate directly');
+  assert.match(shared, /contractTodayYmd, addContractMonths, estimateContractMonths, contractDateSummary/,
+    'helpers must be exported to page-contracts and page-tenants');
+});
+
+test('contract admin UIs auto-calculate endDate and send it to the APIs', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const contracts = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-contracts.jsx'), 'utf8');
+  const tenants = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-tenants.jsx'), 'utf8');
+  const quickInvite = contracts.match(/function QuickInviteModal[\s\S]+?<\/Modal>\s*\);\s*\}/)[0];
+  assert.match(quickInvite, /endDate: addContractMonths\(initialStartDate, 12\)/,
+    'quick-invite must default endDate from 12 months');
+  assert.match(quickInvite, /const setMoveInDate = \(value\)[\s\S]{0,180}addContractMonths\(value, Number\(f\.termMonths\)\)/,
+    'changing start date must recompute endDate');
+  assert.match(quickInvite, /const setEndDate = \(value\)[\s\S]{0,220}estimateContractMonths\(f\.moveInDate, value, 60\)/,
+    'editing endDate must infer termMonths when possible');
+  assert.match(quickInvite, /endDate: form\.endDate \|\| null/,
+    'quick-invite API payload must include explicit endDate');
+
+  const checkin = tenants.match(/function CheckInModal[\s\S]+?function ContractQuickEditModal/)[0];
+  assert.match(checkin, /endDate: addContractMonths\(initialStartDate, 12\)/,
+    'tenant check-in modal must default endDate from 12 months');
+  assert.match(checkin, /if \(form\.endDate\) payload\.endDate = form\.endDate/,
+    'tenant check-in must send endDate to the server');
+
+  const quickEdit = tenants.match(/function ContractQuickEditModal[\s\S]+?const inLbl/)[0];
+  assert.match(quickEdit, /const contractStartDate = contract\.start_date/,
+    'quick contract editor must calculate against immutable start_date');
+  assert.match(quickEdit, /setTermMonths[\s\S]{0,260}addContractMonths\(contractStartDate, Number\(value\)\)/,
+    'quick contract editor must recompute endDate from termMonths');
+});
+
+test('contract APIs validate explicit endDate and keep term_months/end_date consistent', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const schema = fs.readFileSync(path.join(__dirname, '..', 'schemas', 'index.js'), 'utf8');
+  const tenantOps = fs.readFileSync(path.join(__dirname, '..', 'routes', 'tenant-ops.js'), 'utf8');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(schema, /endDate: z\.string\(\)\.regex\(/,
+    'checkin schema must accept an explicit contract endDate');
+  assert.match(tenantOps, /endDate: explicitEndDate/,
+    'tenant checkin must read endDate from the request');
+  assert.match(tenantOps, /const effectiveTermMonths = termMonths[\s\S]{0,160}estimateContractMonths\(moveInDate, requestedEndDate, 60\)/,
+    'tenant checkin must infer termMonths from explicit endDate when exact');
+  assert.match(tenantOps, /END_DATE_TOO_FAR/,
+    'tenant checkin must reject accidental far-future end dates');
+  const quickInvite = server.match(/app\.post\('\/api\/contracts\/quick-invite'[\s\S]+?app\.post\('\/api\/contracts\/:id\/invite-tenant'/)[0];
+  assert.match(quickInvite, /const requestedEndDate = b\.endDate/,
+    'quick-invite must accept explicit endDate');
+  assert.match(quickInvite, /effectiveTermMonths \|\| null/,
+    'quick-invite must persist inferred term_months');
+  const edit = server.match(/app\.put\('\/api\/contracts\/:id'[\s\S]+?app\.post\('\/api\/contracts\/:id\/sign'/)[0];
+  assert.match(edit, /addContractMonths\(startDateYmd, Number\(b\.termMonths\)\)/,
+    'contract edit endpoint must derive end_date when only termMonths changes');
+  assert.match(edit, /estimateContractMonths\(startDateYmd, String\(b\.endDate\), 120\)/,
+    'contract edit endpoint must derive term_months when only endDate changes');
+});
+
 test('booking-approve resolves vacant rooms from rooms_v2 too (not just JSONB blob)', () => {
   // Rooms created via POST /api/rooms only land in rooms_v2. Without a
   // dual-source query, NO_VACANT_ROOM_MATCH was returned even when v2

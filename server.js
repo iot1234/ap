@@ -6684,6 +6684,34 @@ function normalizeContractCloseType(body, status) {
   return status === 'expired' ? 'natural_expiry' : 'early_move_out';
 }
 
+function addContractMonths(startYmd, months) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(startYmd || ''));
+  const n = Number(months);
+  if (!m || !Number.isInteger(n) || n < 1) return null;
+  const sy = Number(m[1]);
+  const sm = Number(m[2]);
+  const sd = Number(m[3]);
+  const totalMonths = (sy * 12 + (sm - 1)) + n;
+  const ey = Math.floor(totalMonths / 12);
+  const em = (totalMonths % 12) + 1;
+  const lastDom = new Date(Date.UTC(ey, em, 0)).getUTCDate();
+  const ed = Math.min(sd, lastDom);
+  return `${ey}-${String(em).padStart(2, '0')}-${String(ed).padStart(2, '0')}`;
+}
+
+function estimateContractMonths(startYmd, endYmd, maxMonths = 120) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(startYmd || ''))
+      || !/^\d{4}-\d{2}-\d{2}$/.test(String(endYmd || ''))
+      || String(endYmd) < String(startYmd)) {
+    return null;
+  }
+  const max = Math.max(1, Math.min(240, Number(maxMonths) || 120));
+  for (let i = 1; i <= max; i += 1) {
+    if (addContractMonths(startYmd, i) === endYmd) return i;
+  }
+  return null;
+}
+
 function contractInvitationDeliveryText(contract, url, expiresAt) {
   const expires = expiresAt ? new Date(expiresAt).toLocaleString('th-TH', {
     timeZone: 'Asia/Bangkok',
@@ -7008,7 +7036,6 @@ app.put('/api/contracts/:id', sameOrigin, csrfGuard, requireAuth, requireRole('o
     // (the new contracts.updated_at column has DEFAULT NOW() only on INSERT,
     // so we have to push it on every UPDATE for the timestamp to be useful).
     fields.push('updated_at=NOW()');
-    params.push(id);
 
     // When admin manually flips status to 'ended' or 'expired', the
     // tenant is effectively moving out — sync tenant.status='moved_out'
@@ -7062,6 +7089,47 @@ app.put('/api/contracts/:id', sameOrigin, csrfGuard, requireAuth, requireRole('o
           code: 'CONTRACT_LOCKED',
         });
       }
+      const startDateYmd = current.start_date ? String(current.start_date).slice(0, 10) : null;
+      if (!isClosingContract && b.endDate !== undefined && b.endDate !== null && startDateYmd) {
+        const requestedEndDate = String(b.endDate);
+        const maxEndDate = addContractMonths(startDateYmd, 120);
+        if (requestedEndDate < startDateYmd) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({
+            error: 'endDate must not be before contract start_date',
+            code: 'INVALID_END_DATE',
+            startDate: startDateYmd,
+            endDate: requestedEndDate,
+          });
+        }
+        if (maxEndDate && requestedEndDate > maxEndDate) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({
+            error: 'endDate must be within 120 months from contract start_date',
+            code: 'END_DATE_TOO_FAR',
+            startDate: startDateYmd,
+            endDate: requestedEndDate,
+            maxEndDate,
+          });
+        }
+      }
+      if (!isClosingContract && b.termMonths !== undefined && b.termMonths !== null
+          && b.endDate === undefined && startDateYmd) {
+        const computedEndDate = addContractMonths(startDateYmd, Number(b.termMonths));
+        if (computedEndDate) {
+          fields.push(`end_date=$${i++}::date`);
+          params.push(computedEndDate);
+        }
+      }
+      if (!isClosingContract && b.endDate !== undefined && b.endDate !== null
+          && b.termMonths === undefined && startDateYmd) {
+        const estimatedMonths = estimateContractMonths(startDateYmd, String(b.endDate), 120);
+        if (estimatedMonths) {
+          fields.push(`term_months=$${i++}`);
+          params.push(estimatedMonths);
+        }
+      }
+      params.push(id);
       const { rows } = await client.query(
         `UPDATE contracts SET ${fields.join(', ')} WHERE id=$${i} AND deleted_at IS NULL RETURNING *`,
         params
@@ -7919,12 +7987,36 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
     // Optional
     const tenantEmail = b.tenantEmail ? String(b.tenantEmail).slice(0, 200).trim() : null;
     const termMonths = b.termMonths != null ? Number(b.termMonths) : null;
+    const requestedEndDate = b.endDate ? String(b.endDate).slice(0, 16).trim() : null;
     const discountPct = b.discountPct != null ? Number(b.discountPct) : 0;
     const expiresInHours = Number(b.expiresInHours) || 168;
     const bookingIdForRoom = b.bookingId ? String(b.bookingId).slice(0, 64) : null;
     if (termMonths != null && (!Number.isInteger(termMonths) || termMonths < 1 || termMonths > 60)) {
       return res.status(400).json({ error: 'termMonths must be 1-60', code: 'INVALID_TERM' });
     }
+    if (requestedEndDate && !/^\d{4}-\d{2}-\d{2}$/.test(requestedEndDate)) {
+      return res.status(400).json({ error: 'endDate ต้องเป็น YYYY-MM-DD', code: 'INVALID_END_DATE' });
+    }
+    if (requestedEndDate && requestedEndDate < moveInDate) {
+      return res.status(400).json({
+        error: 'วันสิ้นสุดสัญญาต้องไม่ก่อนวันเริ่มเช่า',
+        code: 'INVALID_END_DATE',
+        moveInDate,
+        endDate: requestedEndDate,
+      });
+    }
+    const maxEndDate = addContractMonths(moveInDate, 60);
+    if (requestedEndDate && maxEndDate && requestedEndDate > maxEndDate) {
+      return res.status(400).json({
+        error: 'วันสิ้นสุดสัญญาเกิน 60 เดือนจากวันเริ่มเช่า',
+        code: 'END_DATE_TOO_FAR',
+        moveInDate,
+        endDate: requestedEndDate,
+        maxEndDate,
+      });
+    }
+    const effectiveTermMonths = termMonths
+      || (requestedEndDate ? estimateContractMonths(moveInDate, requestedEndDate, 60) : null);
     if (!Number.isFinite(discountPct) || discountPct < 0 || discountPct > 50) {
       return res.status(400).json({ error: 'discountPct must be 0-50', code: 'INVALID_DISCOUNT' });
     }
@@ -7973,20 +8065,12 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
       }
     }
 
-    // Compute end_date if termMonths supplied (clamp last-day-of-month to
-    // avoid Date.setMonth rollover bug). Same logic as tenant-ops checkin.
-    let endDate = null;
-    if (termMonths) {
-      const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(moveInDate);
-      if (m) {
-        const sy = Number(m[1]); const sm = Number(m[2]); const sd = Number(m[3]);
-        const totalMonths = (sy * 12 + (sm - 1)) + termMonths;
-        const ey = Math.floor(totalMonths / 12);
-        const em = (totalMonths % 12) + 1;
-        const lastDom = new Date(Date.UTC(ey, em, 0)).getUTCDate();
-        const ed = Math.min(sd, lastDom);
-        endDate = `${ey}-${String(em).padStart(2, '0')}-${String(ed).padStart(2, '0')}`;
-      }
+    // Compute end_date from either explicit endDate or termMonths. The
+    // helper clamps end-of-month dates (Jan 31 + 1mo => Feb 28/29), matching
+    // the checkin flow so both contract entry points store identical dates.
+    let endDate = requestedEndDate;
+    if (!endDate && effectiveTermMonths) {
+      endDate = addContractMonths(moveInDate, Number(effectiveTermMonths));
     }
 
     const client = await pool.connect();
@@ -8335,7 +8419,7 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
          RETURNING id, contract_no, tenant_id, room_id, start_date, end_date,
                    monthly_rent, deposit, status`,
         [contractNo, tenantId, roomId, moveInDate, endDate,
-         monthlyRent, deposit, termMonths || null, discountPct]
+         monthlyRent, deposit, effectiveTermMonths || null, discountPct]
       );
       const contract = cIns.rows[0];
 

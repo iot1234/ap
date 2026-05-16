@@ -1635,18 +1635,69 @@ function CheckInModal({ tenantId, tenant, onClose, onDone, onError }) {
   const C = window.ADMIN_C;
   const { Modal, Btn } = window;
   const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
+  const contractTodayYmd = window.contractTodayYmd || (() => new Date().toISOString().slice(0, 10));
+  const addContractMonths = window.addContractMonths || (() => '');
+  const estimateContractMonths = window.estimateContractMonths || (() => null);
+  const contractDateSummary = window.contractDateSummary || (() => '');
+  const initialStartDate = contractTodayYmd();
   const [form, setForm] = React.useState({
-    moveInDate: new Date().toISOString().slice(0, 10),
+    moveInDate: initialStartDate,
     monthlyRent: String(tenant.rent || ''),
     depositAmount: String((tenant.rent || 0) * 2),
     termMonths: '12',
+    endDate: addContractMonths(initialStartDate, 12),
     discountPct: '',  // empty → resolved from termMonths + config.discounts
   });
   const [busy, setBusy] = React.useState(false);
+  const termNumber = Number(form.termMonths);
+  const termValid = form.termMonths === ''
+    || (Number.isInteger(termNumber) && termNumber >= 1 && termNumber <= 60);
+  const maxEndDate = form.moveInDate ? addContractMonths(form.moveInDate, 60) : '';
+  const endDateValid = !form.endDate
+    || (/^\d{4}-\d{2}-\d{2}$/.test(form.endDate)
+      && form.endDate >= form.moveInDate
+      && (!maxEndDate || form.endDate <= maxEndDate));
+  const endDateErrorText = form.endDate && form.endDate < form.moveInDate
+    ? 'วันสิ้นสุดต้องไม่ก่อนวันที่เข้าพัก'
+    : (form.endDate && maxEndDate && form.endDate > maxEndDate
+      ? 'วันสิ้นสุดต้องไม่เกิน 60 เดือนจากวันที่เข้าพัก'
+      : 'วันที่สัญญาไม่ถูกต้อง');
+  const setMoveInDate = (value) => {
+    setForm((f) => ({
+      ...f,
+      moveInDate: value,
+      endDate: f.termMonths ? (addContractMonths(value, Number(f.termMonths)) || f.endDate) : f.endDate,
+    }));
+  };
+  const setTermMonths = (value) => {
+    setForm((f) => ({
+      ...f,
+      termMonths: value,
+      endDate: value ? (addContractMonths(f.moveInDate, Number(value)) || f.endDate) : '',
+    }));
+  };
+  const setEndDate = (value) => {
+    setForm((f) => {
+      const estimated = value ? estimateContractMonths(f.moveInDate, value, 60) : null;
+      return {
+        ...f,
+        endDate: value,
+        termMonths: estimated ? String(estimated) : '',
+      };
+    });
+  };
   const submit = async (e) => {
     e.preventDefault();
     if (!tenant.roomId) {
       onError && onError('ไม่พบห้องของผู้เช่า — กำหนดห้องที่หน้ารายชื่อก่อน');
+      return;
+    }
+    if (!termValid) {
+      onError && onError('ระยะสัญญาต้องเป็นจำนวนเต็ม 1-60 เดือน หรือเว้นว่างสำหรับสัญญาไม่จำกัดเวลา');
+      return;
+    }
+    if (!endDateValid) {
+      onError && onError(endDateErrorText);
       return;
     }
     setBusy(true);
@@ -1658,6 +1709,7 @@ function CheckInModal({ tenantId, tenant, onClose, onDone, onError }) {
         depositAmount: Number(form.depositAmount),
       };
       if (form.termMonths) payload.termMonths = Number(form.termMonths);
+      if (form.endDate) payload.endDate = form.endDate;
       if (form.discountPct !== '') payload.discountPct = Number(form.discountPct);
       await apiCall(`/api/tenants/${tenantId}/checkin`, {
         method: 'POST',
@@ -1673,7 +1725,7 @@ function CheckInModal({ tenantId, tenant, onClose, onDone, onError }) {
       footer={
         <>
           <Btn variant="ghost" onClick={onClose} disabled={busy}>ยกเลิก</Btn>
-          <Btn variant="primary" onClick={submit} disabled={busy}>
+          <Btn variant="primary" onClick={submit} disabled={busy || !termValid || !endDateValid}>
             {busy ? '…' : 'บันทึก + สร้างสัญญา'}
           </Btn>
         </>
@@ -1687,13 +1739,13 @@ function CheckInModal({ tenantId, tenant, onClose, onDone, onError }) {
           <div>
             <label style={inLbl}>วันที่เข้าพัก</label>
             <input type="date" value={form.moveInDate}
-              onChange={(e) => setForm({ ...form, moveInDate: e.target.value })}
+              onChange={(e) => setMoveInDate(e.target.value)}
               required style={inInp} />
           </div>
           <div>
-            <label style={inLbl}>ระยะสัญญา (เดือน)</label>
+            <label style={inLbl}>ระยะสัญญา (เดือนนับจากวันที่เข้าพัก)</label>
             <input type="number" min="1" max="60" value={form.termMonths}
-              onChange={(e) => setForm({ ...form, termMonths: e.target.value })}
+              onChange={(e) => setTermMonths(e.target.value)}
               placeholder="12" style={inInp} />
           </div>
         </div>
@@ -1712,10 +1764,29 @@ function CheckInModal({ tenantId, tenant, onClose, onDone, onError }) {
           </div>
         </div>
         <div>
+          <label style={inLbl}>วันสิ้นสุดสัญญา (คำนวณอัตโนมัติ/แก้เองได้)</label>
+          <input type="date" value={form.endDate}
+            onChange={(e) => setEndDate(e.target.value)}
+            style={inInp} />
+        </div>
+        <div>
           <label style={inLbl}>ส่วนลด % (เว้นว่างเพื่อใช้จาก config.discounts ตามระยะสัญญา)</label>
           <input type="number" step="0.1" min="0" max="50" value={form.discountPct}
             onChange={(e) => setForm({ ...form, discountPct: e.target.value })}
             placeholder="ปล่อยว่าง = auto" style={inInp} />
+        </div>
+        <div style={{
+          padding: 10,
+          background: endDateValid ? C.infoSoft : C.dangerSoft,
+          border: `1px solid ${endDateValid ? C.border : '#f5c0b4'}`,
+          borderRadius: 6,
+          fontSize: 12,
+          color: endDateValid ? (C.infoInk || C.muted) : (C.dangerInk || '#8a2f2b'),
+          lineHeight: 1.5,
+        }}>
+          {endDateValid
+            ? contractDateSummary(form.moveInDate, form.termMonths, form.endDate)
+            : `${endDateErrorText} ระบบจะยังไม่ให้เช็คอิน`}
         </div>
         <div style={{
           padding: 10, background: C.surfaceAlt, borderRadius: 6,
@@ -1734,14 +1805,58 @@ function ContractQuickEditModal({ contract, onClose, onSaved, onError }) {
   const C = window.ADMIN_C;
   const { Modal, Btn } = window;
   const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
+  const addContractMonths = window.addContractMonths || (() => '');
+  const estimateContractMonths = window.estimateContractMonths || (() => null);
+  const contractDateSummary = window.contractDateSummary || (() => '');
+  const contractStartDate = contract.start_date ? String(contract.start_date).slice(0, 10) : '';
   const [form, setForm] = React.useState({
     discountPct: contract.discount_pct != null ? String(contract.discount_pct) : '0',
     termMonths:  contract.term_months  != null ? String(contract.term_months)  : '',
     endDate:     contract.end_date ? String(contract.end_date).slice(0, 10) : '',
   });
   const [busy, setBusy] = React.useState(false);
+  const termNumber = Number(form.termMonths);
+  const termValid = form.termMonths === ''
+    || (Number.isInteger(termNumber) && termNumber >= 1 && termNumber <= 120);
+  const maxEndDate = contractStartDate ? addContractMonths(contractStartDate, 120) : '';
+  const endDateValid = !form.endDate || !contractStartDate
+    || (form.endDate >= contractStartDate && (!maxEndDate || form.endDate <= maxEndDate));
+  const endDateErrorText = form.endDate && contractStartDate && form.endDate < contractStartDate
+    ? 'วันสิ้นสุดต้องไม่ก่อนวันเริ่มสัญญา'
+    : (form.endDate && maxEndDate && form.endDate > maxEndDate
+      ? 'วันสิ้นสุดต้องไม่เกิน 120 เดือนจากวันเริ่มสัญญา'
+      : 'วันที่สัญญาไม่ถูกต้อง');
+  const setTermMonths = (value) => {
+    setForm((f) => ({
+      ...f,
+      termMonths: value,
+      endDate: value && contractStartDate
+        ? (addContractMonths(contractStartDate, Number(value)) || f.endDate)
+        : '',
+    }));
+  };
+  const setEndDate = (value) => {
+    setForm((f) => {
+      const estimated = value && contractStartDate
+        ? estimateContractMonths(contractStartDate, value, 120)
+        : null;
+      return {
+        ...f,
+        endDate: value,
+        termMonths: estimated ? String(estimated) : '',
+      };
+    });
+  };
   const submit = async (e) => {
     e.preventDefault();
+    if (!termValid) {
+      onError && onError('ระยะสัญญาต้องเป็นจำนวนเต็ม 1-120 เดือน หรือเว้นว่างสำหรับสัญญาไม่จำกัดเวลา');
+      return;
+    }
+    if (!endDateValid) {
+      onError && onError(endDateErrorText);
+      return;
+    }
     setBusy(true);
     try {
       const payload = {};
@@ -1762,13 +1877,16 @@ function ContractQuickEditModal({ contract, onClose, onSaved, onError }) {
       footer={
         <>
           <Btn variant="ghost" onClick={onClose} disabled={busy}>ยกเลิก</Btn>
-          <Btn variant="primary" onClick={submit} disabled={busy}>
+          <Btn variant="primary" onClick={submit} disabled={busy || !termValid || !endDateValid}>
             {busy ? '…' : 'บันทึก'}
           </Btn>
         </>
       }
     >
       <form onSubmit={submit} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <div style={{ fontSize: 12, color: C.muted, lineHeight: 1.5 }}>
+          วันเริ่มสัญญา: <b>{contractStartDate ? window.fmtDateTH(contractStartDate) : '-'}</b>
+        </div>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
           <div>
             <label style={inLbl}>ส่วนลด %</label>
@@ -1779,15 +1897,28 @@ function ContractQuickEditModal({ contract, onClose, onSaved, onError }) {
           <div>
             <label style={inLbl}>ระยะสัญญา (เดือน)</label>
             <input type="number" min="1" max="120" value={form.termMonths}
-              onChange={(e) => setForm({ ...form, termMonths: e.target.value })}
+              onChange={(e) => setTermMonths(e.target.value)}
               style={inInp} />
           </div>
         </div>
         <div>
           <label style={inLbl}>วันสิ้นสุด</label>
           <input type="date" value={form.endDate}
-            onChange={(e) => setForm({ ...form, endDate: e.target.value })}
+            onChange={(e) => setEndDate(e.target.value)}
             style={inInp} />
+        </div>
+        <div style={{
+          padding: 10,
+          background: endDateValid ? C.infoSoft : C.dangerSoft,
+          border: `1px solid ${endDateValid ? C.border : '#f5c0b4'}`,
+          borderRadius: 6,
+          fontSize: 12,
+          color: endDateValid ? (C.infoInk || C.muted) : (C.dangerInk || '#8a2f2b'),
+          lineHeight: 1.5,
+        }}>
+          {endDateValid
+            ? contractDateSummary(contractStartDate, form.termMonths, form.endDate)
+            : `${endDateErrorText} ระบบจะยังไม่ให้บันทึก`}
         </div>
       </form>
     </Modal>

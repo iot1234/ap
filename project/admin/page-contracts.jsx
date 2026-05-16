@@ -794,7 +794,11 @@ function ContractEditModal({ contract, onClose, onSaved, onError }) {
   const C = window.ADMIN_C;
   const { Modal, Btn, Input, Select } = window;
   const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
+  const addContractMonths = window.addContractMonths || (() => '');
+  const estimateContractMonths = window.estimateContractMonths || (() => null);
+  const contractDateSummary = window.contractDateSummary || (() => '');
   const isLocked = !!contract.locked_at;
+  const contractStartDate = contract.start_date ? String(contract.start_date).slice(0, 10) : '';
   const closeTypes = [
     { value: 'early_move_out', label: 'ผู้เช่าออกก่อนกำหนด' },
     { value: 'mutual_cancel', label: 'ยกเลิกตามตกลง' },
@@ -828,13 +832,57 @@ function ContractEditModal({ contract, onClose, onSaved, onError }) {
   const closingRequested = original.status === 'active' && ['ended', 'expired'].includes(form.status);
   const closeReasonReady = !closingRequested || form.closeReason.trim().length >= 5;
   const materialDisabled = isLocked || busy || lifecycleClosed || closingRequested;
+  const termValid = form.termMonths === ''
+    || (Number.isInteger(Number(form.termMonths)) && Number(form.termMonths) >= 1 && Number(form.termMonths) <= 120);
+  const maxContractEndDate = contractStartDate ? addContractMonths(contractStartDate, 120) : '';
+  const dateRangeValid = !form.endDate || !contractStartDate
+    || (form.endDate >= contractStartDate && (!maxContractEndDate || form.endDate <= maxContractEndDate));
+  const dateErrorText = form.endDate && contractStartDate && form.endDate < contractStartDate
+    ? 'วันสิ้นสุดต้องไม่ก่อนวันเริ่มสัญญา'
+    : (form.endDate && maxContractEndDate && form.endDate > maxContractEndDate
+      ? 'วันสิ้นสุดต้องไม่เกิน 120 เดือนจากวันเริ่มสัญญา'
+      : 'วันที่สัญญาไม่ถูกต้อง');
   const canSave = !lifecycleClosed && closeReasonReady
+    && termValid && dateRangeValid
     && (statusChanged || (!isLocked && !closingRequested && materialChanged));
+
+  const setContractTermMonths = (value) => {
+    setForm((f) => {
+      const computedEnd = value && contractStartDate
+        ? addContractMonths(contractStartDate, Number(value))
+        : '';
+      return {
+        ...f,
+        termMonths: value,
+        endDate: computedEnd || (value ? f.endDate : ''),
+      };
+    });
+  };
+  const setContractEndDate = (value) => {
+    setForm((f) => {
+      const estimated = value && contractStartDate
+        ? estimateContractMonths(contractStartDate, value, 120)
+        : null;
+      return {
+        ...f,
+        endDate: value,
+        termMonths: estimated ? String(estimated) : '',
+      };
+    });
+  };
 
   const submit = async (e) => {
     e.preventDefault();
     setBusy(true);
     try {
+      if (!termValid) {
+        onError && onError('ระยะสัญญาต้องเป็นจำนวนเต็ม 1-120 เดือน หรือเว้นว่างสำหรับสัญญาไม่จำกัดเวลา');
+        return;
+      }
+      if (!dateRangeValid) {
+        onError && onError(dateErrorText);
+        return;
+      }
       const payload = {};
       if (!isLocked && !closingRequested) {
         const pct = Number(form.discountPct);
@@ -886,6 +934,8 @@ function ContractEditModal({ contract, onClose, onSaved, onError }) {
         <div style={{ fontSize: 13, color: C.muted, lineHeight: 1.6 }}>
           ผู้เช่า: <b>{contract.tenant_name || '-'}</b> · ห้อง <b>{contract.room_id || '-'}</b>
           <br />
+          วันเริ่มสัญญา: <b>{contractStartDate ? window.fmtDateTH(contractStartDate) : '-'}</b>
+          <br />
           ค่าเช่า/เดือน: ฿{Number(contract.monthly_rent).toLocaleString('th-TH', { minimumFractionDigits: 2 })}
         </div>
         {isLocked ? (
@@ -925,7 +975,7 @@ function ContractEditModal({ contract, onClose, onSaved, onError }) {
           <div>
             <label style={lbl}>ระยะสัญญา (เดือน)</label>
             <input type="number" step="1" min="1" max="120" value={form.termMonths}
-              onChange={(e) => setForm({ ...form, termMonths: e.target.value })}
+              onChange={(e) => setContractTermMonths(e.target.value)}
               disabled={materialDisabled}
               style={inp} placeholder="เปิด-ไม่จำกัด" />
           </div>
@@ -934,7 +984,7 @@ function ContractEditModal({ contract, onClose, onSaved, onError }) {
           <div>
             <label style={lbl}>วันสิ้นสุด</label>
             <input type="date" value={form.endDate}
-              onChange={(e) => setForm({ ...form, endDate: e.target.value })}
+              onChange={(e) => setContractEndDate(e.target.value)}
               disabled={materialDisabled}
               style={inp} />
           </div>
@@ -955,6 +1005,21 @@ function ContractEditModal({ contract, onClose, onSaved, onError }) {
             </select>
           </div>
         </div>
+        {!closingRequested ? (
+          <div style={{
+            padding: 10,
+            background: dateRangeValid ? C.infoSoft : C.dangerSoft,
+            border: `1px solid ${dateRangeValid ? C.border : '#f5c0b4'}`,
+            borderRadius: 6,
+            fontSize: 12,
+            color: dateRangeValid ? (C.infoInk || C.ink2) : (C.dangerInk || '#8a2f2b'),
+            lineHeight: 1.5,
+          }}>
+            {dateRangeValid
+              ? contractDateSummary(contractStartDate, form.termMonths, form.endDate)
+              : `${dateErrorText} ระบบจะยังไม่ให้บันทึก`}
+          </div>
+        ) : null}
         {closingRequested ? (
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
             <div>
@@ -1004,6 +1069,11 @@ function QuickInviteModal({ rooms = {}, config, onClose, onSaved, onError }) {
   const { Modal, Btn } = window;
   const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
   const resolveRoomRent = window.resolveRoomRent;
+  const contractTodayYmd = window.contractTodayYmd || (() => new Date().toISOString().slice(0, 10));
+  const addContractMonths = window.addContractMonths || (() => '');
+  const estimateContractMonths = window.estimateContractMonths || (() => null);
+  const contractDateSummary = window.contractDateSummary || (() => '');
+  const initialStartDate = contractTodayYmd();
   const roomList = useMemo(() => Object.values(rooms || {})
     .filter(Boolean)
     .sort((a, b) => String(a.id || '').localeCompare(String(b.id || ''), undefined, {
@@ -1021,8 +1091,9 @@ function QuickInviteModal({ rooms = {}, config, onClose, onSaved, onError }) {
     roomId: '',
     monthlyRent: '',
     deposit: '',
-    moveInDate: new Date().toISOString().slice(0, 10),
+    moveInDate: initialStartDate,
     termMonths: '12',
+    endDate: addContractMonths(initialStartDate, 12),
     discountPct: '0',
     expiresInHours: 168,
   });
@@ -1058,6 +1129,30 @@ function QuickInviteModal({ rooms = {}, config, onClose, onSaved, onError }) {
         : f.deposit,
     }));
   };
+  const setMoveInDate = (value) => {
+    setForm((f) => ({
+      ...f,
+      moveInDate: value,
+      endDate: f.termMonths ? (addContractMonths(value, Number(f.termMonths)) || f.endDate) : f.endDate,
+    }));
+  };
+  const setTermMonths = (value) => {
+    setForm((f) => ({
+      ...f,
+      termMonths: value,
+      endDate: value ? (addContractMonths(f.moveInDate, Number(value)) || f.endDate) : '',
+    }));
+  };
+  const setEndDate = (value) => {
+    setForm((f) => {
+      const estimated = value ? estimateContractMonths(f.moveInDate, value, 60) : null;
+      return {
+        ...f,
+        endDate: value,
+        termMonths: estimated ? String(estimated) : '',
+      };
+    });
+  };
 
   const submit = async () => {
     setBusy(true);
@@ -1073,6 +1168,7 @@ function QuickInviteModal({ rooms = {}, config, onClose, onSaved, onError }) {
           deposit: Number(form.deposit) || 0,
           moveInDate: form.moveInDate,
           termMonths: form.termMonths ? Number(form.termMonths) : null,
+          endDate: form.endDate || null,
           discountPct: Number(form.discountPct) || 0,
           expiresInHours: Number(form.expiresInHours) || 168,
         }),
@@ -1106,12 +1202,27 @@ function QuickInviteModal({ rooms = {}, config, onClose, onSaved, onError }) {
   const roomAvailable = !hasRoomInventory || availableRooms.some((r) =>
     String(r.id) === String(form.roomId).trim()
   );
+  const termNumber = Number(form.termMonths);
+  const termValid = form.termMonths === ''
+    || (Number.isInteger(termNumber) && termNumber >= 1 && termNumber <= 60);
+  const maxEndDate = form.moveInDate ? addContractMonths(form.moveInDate, 60) : '';
+  const endDateValid = !form.endDate
+    || (/^\d{4}-\d{2}-\d{2}$/.test(form.endDate)
+      && form.endDate >= form.moveInDate
+      && (!maxEndDate || form.endDate <= maxEndDate));
+  const endDateErrorText = form.endDate && form.endDate < form.moveInDate
+    ? 'วันสิ้นสุดต้องไม่ก่อนวันเริ่มเช่า'
+    : (form.endDate && maxEndDate && form.endDate > maxEndDate
+      ? 'วันสิ้นสุดต้องไม่เกิน 60 เดือนจากวันเริ่มเช่า'
+      : 'วันที่สัญญาไม่ถูกต้อง');
   const valid = form.tenantName.trim()
     && /^[\d+\s-]{8,20}$/.test(form.tenantPhone.trim())
     && form.roomId.trim()
     && roomAvailable
     && Number(form.monthlyRent) > 0
-    && /^\d{4}-\d{2}-\d{2}$/.test(form.moveInDate);
+    && /^\d{4}-\d{2}-\d{2}$/.test(form.moveInDate)
+    && termValid
+    && endDateValid;
 
   return (
     <Modal
@@ -1208,19 +1319,27 @@ function QuickInviteModal({ rooms = {}, config, onClose, onSaved, onError }) {
                 onChange={(e) => setForm({ ...form, deposit: e.target.value })} />
             </div>
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12, marginTop: 8 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 8 }}>
             <div>
               <label style={lbl}>วันเริ่มเช่า *</label>
               <input style={inp} type="date"
                 value={form.moveInDate}
-                onChange={(e) => setForm({ ...form, moveInDate: e.target.value })} />
+                onChange={(e) => setMoveInDate(e.target.value)} />
             </div>
             <div>
-              <label style={lbl}>ระยะเวลา (เดือน)</label>
+              <label style={lbl}>ระยะเวลา (เดือนนับจากวันเริ่ม)</label>
               <input style={inp} type="number" step="1" min="1" max="60"
                 placeholder="เปิด-ไม่จำกัด"
                 value={form.termMonths}
-                onChange={(e) => setForm({ ...form, termMonths: e.target.value })} />
+                onChange={(e) => setTermMonths(e.target.value)} />
+            </div>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 8 }}>
+            <div>
+              <label style={lbl}>วันสิ้นสุด (คำนวณอัตโนมัติ/แก้เองได้)</label>
+              <input style={inp} type="date"
+                value={form.endDate}
+                onChange={(e) => setEndDate(e.target.value)} />
             </div>
             <div>
               <label style={lbl}>ส่วนลด (%)</label>
@@ -1228,6 +1347,20 @@ function QuickInviteModal({ rooms = {}, config, onClose, onSaved, onError }) {
                 value={form.discountPct}
                 onChange={(e) => setForm({ ...form, discountPct: e.target.value })} />
             </div>
+          </div>
+          <div style={{
+            marginTop: 8,
+            padding: 10,
+            background: endDateValid ? C.infoSoft : C.dangerSoft,
+            border: `1px solid ${endDateValid ? C.border : '#f5c0b4'}`,
+            borderRadius: 6,
+            fontSize: 12,
+            color: endDateValid ? (C.infoInk || C.ink2) : (C.dangerInk || '#8a2f2b'),
+            lineHeight: 1.5,
+          }}>
+            {endDateValid
+              ? contractDateSummary(form.moveInDate, form.termMonths, form.endDate)
+              : `${endDateErrorText} ระบบจะยังไม่ให้สร้างสัญญา`}
           </div>
 
           <div style={{ marginTop: 16 }}>
