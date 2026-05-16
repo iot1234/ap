@@ -1914,6 +1914,8 @@ test('healthCheck surfaces data integrity and failed notification backlog', () =
     'data integrity probe must flag stale reservations without booking or draft contract hold');
   assert.match(hc, /rooms_reserved_by_ghost_contract/,
     'data integrity probe must flag reservations pointing at inactive/missing contracts');
+  assert.match(hc, /stranded_occupied_rooms/,
+    'data integrity probe must flag stale room.tenant snapshots with no active current tenant');
   assert.match(hc, /SELECT rec\.key AS room_code/,
     'JSONB room scan must qualify rec.key so app_data.key is not ambiguous in PostgreSQL');
   assert.match(hc, /legacy rooms exist but rooms_v2 is empty/,
@@ -3870,6 +3872,58 @@ test('checkout removes room.tenant from blob (no notification leak)', () => {
     /\(\(value->\$1\) - 'tenant'\) \|\| jsonb_build_object\('status', 'vacant'\)/,
     'checkout must drop the tenant key alongside flipping status; (value->$1) '
     + 'must be parenthesised so the JSONB arrow binds tighter than the - operator');
+});
+
+test('roomStatus never resurrects a moved-out tenant after final bill payment', () => {
+  const { computeRoomStatus } = require('../services/roomStatus');
+  assert.strictEqual(computeRoomStatus({
+    currentStatus: 'overdue',
+    hasBlobTenant: true,
+    hasActiveTenant: false,
+    hasCurrentLease: false,
+    hasOverdueBill: false,
+    hasActiveReservation: false,
+  }), 'vacant');
+  assert.strictEqual(computeRoomStatus({
+    currentStatus: 'occupied',
+    hasBlobTenant: false,
+    hasActiveTenant: false,
+    hasCurrentLease: true,
+    hasOverdueBill: true,
+    hasActiveReservation: false,
+  }), 'vacant');
+  assert.strictEqual(computeRoomStatus({
+    currentStatus: 'occupied',
+    hasBlobTenant: true,
+    hasActiveTenant: true,
+    hasCurrentLease: true,
+    hasOverdueBill: true,
+    hasActiveReservation: false,
+  }), 'overdue');
+});
+
+test('roomStatus sync scrubs stale room.tenant and trusts active current_room_id', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'roomStatus.js'), 'utf8');
+  assert.match(src,
+    /FROM tenants[\s\S]{0,220}current_room_id=\$1[\s\S]{0,120}status='active'/,
+    'occupancy must be derived from an active tenant currently assigned to this room');
+  assert.match(src,
+    /JOIN tenants t ON t\.id=c\.tenant_id[\s\S]{0,420}t\.status='active'[\s\S]{0,120}t\.current_room_id=\$1/,
+    'active contracts must be scoped to that same active current tenant');
+  assert.match(src, /cleanupStaleTenant = facts\.hasBlobTenant && !activeTenantForBlob/,
+    'syncRoom must remove blob tenant snapshots when no active tenant remains');
+  assert.match(src, /- CASE WHEN \$3::boolean THEN 'tenant'/,
+    'syncRoom must drop stale room.tenant from the JSONB card');
+  assert.match(src, /status IS DISTINCT FROM \$2/,
+    'syncRoom must repair rooms_v2 drift even when the JSONB status already matches');
+  assert.match(src, /tenant_id IS NULL OR tenant_id=\$2/,
+    'old tenant bills must not make a newly assigned tenant room overdue');
+  assert.match(src, /UNION[\s\S]{0,120}SELECT room_code FROM v2_rooms/,
+    'bulk room reconcile must scan rooms_v2-only rooms, not only legacy JSONB rooms');
+  assert.match(src, /c\.locked_at IS NULL/,
+    'locked active contracts are occupancy, not reservation holds');
 });
 
 test('rooms-blob tenant-key drop never expands to "text - unknown" 42883', () => {

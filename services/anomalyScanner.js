@@ -311,6 +311,42 @@ async function detectRoomAnomalies(pool) {
       fix: '/admin#rooms',
     });
   }
+  // Legacy JSONB room card still has a tenant snapshot, but no active tenant
+  // currently points at that room. This is the exact "moved out, paid final
+  // bill, but rooms still shows old tenant data" drift.
+  const blobGhostTenant = await pool.query(`
+    WITH blob_rooms AS (
+      SELECT rec.key AS room_code, rec.val AS room
+        FROM app_data ad
+        CROSS JOIN LATERAL jsonb_each(ad.value) AS rec(key, val)
+       WHERE ad.key='baankarn_rooms_v1'
+         AND jsonb_typeof(ad.value)='object'
+    )
+    SELECT br.room_code, br.room->>'status' AS status
+      FROM blob_rooms br
+     WHERE br.room ? 'tenant'
+       AND br.room->'tenant' IS NOT NULL
+       AND br.room->'tenant' <> 'null'::jsonb
+       AND br.room->'tenant' <> '{}'::jsonb
+       AND NOT EXISTS (
+         SELECT 1 FROM tenants t
+          WHERE t.deleted_at IS NULL
+            AND t.status='active'
+            AND t.current_room_id=br.room_code
+       )
+     LIMIT 20`);
+  if (blobGhostTenant.rows.length) {
+    items.push({
+      id: 'ROOM_BLOB_STALE_TENANT',
+      severity: 'warn',
+      domain: 'room',
+      message: `${blobGhostTenant.rows.length} room card(s) still show stale tenant data`,
+      detail: 'The room JSONB card has room.tenant, but no active tenant currently points at that room. Run room reconcile; payment/checkout sync now scrubs this automatically.',
+      count: blobGhostTenant.rows.length,
+      items: blobGhostTenant.rows.slice(0, 10).map((r) => ({ id: r.room_code, label: `room ${r.room_code} status=${r.status || '-'}` })),
+      fix: '/admin#rooms',
+    });
+  }
   return items;
 }
 

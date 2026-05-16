@@ -671,7 +671,7 @@ async function checkDataIntegrity(pool) {
                 )
                 THEN 1 ELSE 0 END)::int AS missing_default_contract_template,
         -- Rooms whose legacy JSONB blob shows a tenant attached but no
-        -- contract is active for that room. This is the "ห้องยังขึ้นมีคน
+        -- active tenant currently points at that room. This is the "ห้องยังขึ้นมีคน
         -- หลังย้ายออก" symptom — the rooms page reads from the blob so
         -- it lies until reconciled. Fix via
          -- POST /api/admin/rooms/:roomId/reconcile.
@@ -686,11 +686,12 @@ async function checkDataIntegrity(pool) {
           WHERE br.room ? 'tenant'
             AND br.room->'tenant' IS NOT NULL
             AND br.room->'tenant' <> 'null'::jsonb
+            AND br.room->'tenant' <> '{}'::jsonb
             AND NOT EXISTS (
-              SELECT 1 FROM contracts c
-               WHERE c.room_id = br.room_code
-                 AND c.status = 'active'
-                 AND c.deleted_at IS NULL
+              SELECT 1 FROM tenants t
+               WHERE t.current_room_id = br.room_code
+                 AND t.status = 'active'
+                 AND t.deleted_at IS NULL
             )
         ) AS stranded_occupied_rooms,
         -- Rooms reserved by "contract:N" where N is no longer an active
@@ -924,7 +925,7 @@ async function checkDataIntegrity(pool) {
     }
     if (detail.counts.stranded_occupied_rooms > 0) {
       errors.push(
-        `${detail.counts.stranded_occupied_rooms} room(s) show occupied in the rooms blob but have no active contract — ` +
+        `${detail.counts.stranded_occupied_rooms} room(s) show tenant data in the rooms blob but have no active current tenant - ` +
         `run POST /api/admin/rooms/:roomId/reconcile for each (admin UI shows a "Reconcile" button on the room card)`
       );
     }

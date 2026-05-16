@@ -32,7 +32,8 @@ const VALID_ROOM_STATUSES = new Set([
  *
  * @param {object} facts
  * @param {string} [facts.currentStatus]    Current room.status from the blob (used to honor manual 'maintenance')
- * @param {boolean} facts.hasActiveContract Active contract on this room
+ * @param {boolean} facts.hasActiveTenant   Active tenant currently assigned to this room
+ * @param {boolean} facts.hasCurrentLease   Active contract for that active tenant in this room
  * @param {boolean} facts.hasBlobTenant     Blob's room.tenant is set
  * @param {boolean} facts.hasOverdueBill    At least one bill with status='overdue' (or pending past due_date)
  * @param {boolean} facts.hasActiveReservation reservedBy pointer is still live (booking pending OR contract draft)
@@ -43,16 +44,36 @@ function computeRoomStatus(facts) {
   // Manual override — admin chose 'maintenance' for a reason (cleaning,
   // repair). Never auto-overwrite; admin must clear it themselves.
   if (cur === 'maintenance') return 'maintenance';
-  if (facts.hasActiveContract && facts.hasBlobTenant) {
+  // A stale contract row or stale JSONB room.tenant is not enough to mark a
+  // room occupied. The authoritative signal is an active tenant whose
+  // current_room_id still points at this room. This prevents checkout +
+  // later bill payment from resurrecting a moved-out tenant in /rooms.
+  if (facts.hasActiveTenant) {
     return facts.hasOverdueBill ? 'overdue' : 'occupied';
-  }
-  if (facts.hasActiveContract && !facts.hasBlobTenant) {
-    // Contract exists but tenant hasn't actually moved into the blob slot
-    // yet — invitation phase. Treat as reserved so admin can't double-book.
-    return 'reserved';
   }
   if (facts.hasActiveReservation) return 'reserved';
   return 'vacant';
+}
+
+function buildBlobTenant(row) {
+  if (!row) return null;
+  return {
+    tenantId: String(row.id),
+    name: row.full_name || '',
+    phone: row.phone || '',
+    email: row.email || '',
+  };
+}
+
+function blobTenantMatchesActive(blobTenant, activeTenant) {
+  if (!blobTenant || !activeTenant) return false;
+  const blobId = String(blobTenant.tenantId || blobTenant.id || '').trim();
+  if (blobId && blobId !== String(activeTenant.tenantId)) return false;
+  const blobPhone = String(blobTenant.phone || '').replace(/[\s-]/g, '');
+  const activePhone = String(activeTenant.phone || '').replace(/[\s-]/g, '');
+  if (blobPhone && activePhone && blobPhone !== activePhone) return false;
+  if (String(blobTenant.name || '') !== String(activeTenant.name || '')) return false;
+  return true;
 }
 
 /**
@@ -79,30 +100,69 @@ async function syncRoom(dbOrClient, roomId, opts = {}) {
     const facts = await deriveFacts(client, roomId);
     const before = facts.currentStatus;
     const after = computeRoomStatus(facts);
+    const activeTenantForBlob = buildBlobTenant(facts.activeTenant);
+    const cleanupStaleTenant = facts.hasBlobTenant && !activeTenantForBlob;
+    const refreshBlobTenant = !!activeTenantForBlob
+      && !blobTenantMatchesActive(facts.blobTenant, activeTenantForBlob);
+    const cleanupStaleReservation = !!facts.reservedBy
+      && facts.reservationChecked
+      && !facts.hasActiveReservation;
+    const shouldPatchBlob = after !== before
+      || cleanupStaleTenant
+      || refreshBlobTenant
+      || cleanupStaleReservation;
     let changed = false;
-    if (after !== before) {
+    if (shouldPatchBlob) {
       // Update the legacy blob — primary admin UI source.
       await client.query(
         `UPDATE app_data
-            SET value = jsonb_set(value, ARRAY[$1::text], COALESCE(value->$1, '{}'::jsonb)
-                                                          || jsonb_build_object('status', $2::text)),
+            SET value = jsonb_set(
+                  value,
+                  ARRAY[$1::text],
+                  (
+                    COALESCE(value->$1, '{}'::jsonb)
+                    - CASE WHEN $3::boolean THEN 'tenant' ELSE '__room_status_noop__' END
+                    - CASE WHEN $3::boolean THEN 'since' ELSE '__room_status_noop__' END
+                    - CASE WHEN $3::boolean THEN 'contractEnd' ELSE '__room_status_noop__' END
+                    - CASE WHEN $4::boolean THEN 'reservedBy' ELSE '__room_status_noop__' END
+                    - CASE WHEN $4::boolean THEN 'reservedAt' ELSE '__room_status_noop__' END
+                    - CASE WHEN $4::boolean THEN 'sourceBookingId' ELSE '__room_status_noop__' END
+                  )
+                  || jsonb_build_object('status', $2::text)
+                  || CASE WHEN $5::jsonb IS NULL
+                          THEN '{}'::jsonb
+                          ELSE jsonb_build_object('tenant', $5::jsonb)
+                     END,
+                  true
+                ),
                 updated_at = NOW()
           WHERE key='baankarn_rooms_v1' AND value ? $1`,
+        [roomId, after, cleanupStaleTenant, cleanupStaleReservation,
+          activeTenantForBlob ? JSON.stringify(activeTenantForBlob) : null]
+      );
+      changed = true;
+      const notes = [];
+      if (cleanupStaleTenant) notes.push('cleared stale tenant');
+      if (refreshBlobTenant) notes.push('refreshed tenant snapshot');
+      if (cleanupStaleReservation) notes.push('cleared stale reservation');
+      console.log(`[roomStatus] ${roomId}: ${before || '(empty)'} -> ${after}${opts.reason ? ` (${opts.reason})` : ''}${notes.length ? `; ${notes.join(', ')}` : ''}`);
+    }
+    // Mirror to rooms_v2 even when the JSONB status was already correct;
+    // otherwise a stale rooms_v2 row can keep /api/rooms?status=occupied
+    // wrong until the next manual edit.
+    try {
+      const v2 = await client.query(
+        `UPDATE rooms_v2 SET status=$2, updated_at=NOW()
+          WHERE room_code=$1 AND deleted_at IS NULL
+            AND status IS DISTINCT FROM $2`,
         [roomId, after]
       );
-      // Mirror to rooms_v2 — soft-deletion safe + tolerates missing table on
-      // legacy deploys (42P01 = relation undefined).
-      try {
-        await client.query(
-          `UPDATE rooms_v2 SET status=$2, updated_at=NOW()
-            WHERE room_code=$1 AND deleted_at IS NULL`,
-          [roomId, after]
-        );
-      } catch (err) {
-        if (err.code !== '42P01') throw err;
-      }
-      changed = true;
-      console.log(`[roomStatus] ${roomId}: ${before || '(empty)'} → ${after}${opts.reason ? ` (${opts.reason})` : ''}`);
+      if (v2.rowCount > 0) changed = true;
+    } catch (err) {
+      if (err.code !== '42P01') throw err;
+    }
+    if (changed && !shouldPatchBlob) {
+      console.log(`[roomStatus] ${roomId}: ${before || '(empty)'} -> ${after}${opts.reason ? ` (${opts.reason})` : ''}`);
     }
     if (ownClient) await client.query('COMMIT');
     return { roomId, before, after, changed };
@@ -129,13 +189,41 @@ async function syncAllRooms(pool, opts = {}) {
   let roomCodes;
   try {
     const { rows } = await pool.query(
-      `SELECT jsonb_object_keys(value) AS room_code
-         FROM app_data WHERE key='baankarn_rooms_v1' LIMIT 1`
+      `WITH blob_rooms AS (
+         SELECT rec.key AS room_code
+           FROM app_data ad
+           CROSS JOIN LATERAL jsonb_each(ad.value) AS rec(key, val)
+          WHERE ad.key='baankarn_rooms_v1'
+            AND jsonb_typeof(ad.value)='object'
+       ),
+       v2_rooms AS (
+         SELECT room_code
+           FROM rooms_v2
+          WHERE deleted_at IS NULL
+       )
+       SELECT room_code FROM blob_rooms
+       UNION
+       SELECT room_code FROM v2_rooms`
     );
     roomCodes = rows.map((r) => r.room_code);
   } catch (err) {
-    console.error('[roomStatus] syncAll list failed:', err.message);
-    return summary;
+    if (err.code !== '42P01') {
+      console.error('[roomStatus] syncAll list failed:', err.message);
+      return summary;
+    }
+    try {
+      const { rows } = await pool.query(
+        `SELECT rec.key AS room_code
+           FROM app_data ad
+           CROSS JOIN LATERAL jsonb_each(ad.value) AS rec(key, val)
+          WHERE ad.key='baankarn_rooms_v1'
+            AND jsonb_typeof(ad.value)='object'`
+      );
+      roomCodes = rows.map((r) => r.room_code);
+    } catch (fallbackErr) {
+      console.error('[roomStatus] syncAll list failed:', fallbackErr.message);
+      return summary;
+    }
   }
   for (const roomId of roomCodes) {
     summary.scanned++;
@@ -154,6 +242,7 @@ async function deriveFacts(client, roomId) {
   // (1) Current blob status — needed for 'maintenance' precedence + change detection.
   const blobQ = await client.query(
     `SELECT value->$1->>'status' AS status,
+            value->$1->'tenant' AS tenant,
             value->$1->'tenant' IS NOT NULL
               AND value->$1->'tenant' <> 'null'::jsonb
               AND value->$1->'tenant' <> '{}'::jsonb AS has_tenant,
@@ -162,16 +251,44 @@ async function deriveFacts(client, roomId) {
     [roomId]
   );
   const blob = blobQ.rows[0] || {};
-  // (2) Active contract for this room.
-  let hasActiveContract = false;
+  // (2) Active tenant currently assigned to this room. This is the
+  // authoritative occupancy signal; old contracts/bills must not resurrect
+  // a moved-out tenant.
+  let activeTenant = null;
   try {
-    const cQ = await client.query(
-      `SELECT 1 FROM contracts
-        WHERE room_id=$1 AND status='active' AND deleted_at IS NULL
+    const tQ = await client.query(
+      `SELECT id, full_name, phone, email
+         FROM tenants
+        WHERE current_room_id=$1
+          AND status='active'
+          AND deleted_at IS NULL
+        ORDER BY id ASC
         LIMIT 1`,
       [roomId]
     );
-    hasActiveContract = cQ.rows.length > 0;
+    activeTenant = tQ.rows[0] || null;
+  } catch (err) {
+    if (err.code !== '42P01') throw err;
+  }
+  // (3) Active contract for the active tenant currently in this room. A
+  // moved_out tenant with an active old contract is a data anomaly, not
+  // occupancy.
+  let hasCurrentLease = false;
+  try {
+    const cQ = await client.query(
+      `SELECT 1
+         FROM contracts c
+         JOIN tenants t ON t.id=c.tenant_id
+        WHERE c.room_id=$1
+          AND c.status='active'
+          AND c.deleted_at IS NULL
+          AND t.deleted_at IS NULL
+          AND t.status='active'
+          AND t.current_room_id=$1
+        LIMIT 1`,
+      [roomId]
+    );
+    hasCurrentLease = cQ.rows.length > 0;
   } catch (err) {
     if (err.code !== '42P01') throw err;
   }
@@ -183,10 +300,11 @@ async function deriveFacts(client, roomId) {
     const bQ = await client.query(
       `SELECT 1 FROM bills
         WHERE room_id=$1 AND deleted_at IS NULL
+          AND ($2::bigint IS NULL OR tenant_id IS NULL OR tenant_id=$2)
           AND (status='overdue'
                OR (status='pending' AND due_date < CURRENT_DATE))
         LIMIT 1`,
-      [roomId]
+      [roomId, activeTenant ? String(activeTenant.id) : null]
     );
     hasOverdueBill = bQ.rows.length > 0;
   } catch (err) {
@@ -195,17 +313,35 @@ async function deriveFacts(client, roomId) {
   // (4) Active reservation pointer — booking or contract draft.
   const reservedBy = blob.reserved_by || null;
   let hasActiveReservation = false;
+  let reservationChecked = !reservedBy;
   if (reservedBy) {
     if (reservedBy.startsWith('contract:')) {
       const cid = Number(reservedBy.slice('contract:'.length));
       if (Number.isInteger(cid)) {
         try {
           const r = await client.query(
-            `SELECT 1 FROM contracts WHERE id=$1 AND status IN ('active','draft','pending') AND deleted_at IS NULL LIMIT 1`,
+            `SELECT 1
+               FROM contracts c
+               LEFT JOIN tenants t ON t.id=c.tenant_id AND t.deleted_at IS NULL
+              WHERE c.id=$1
+                AND c.deleted_at IS NULL
+                AND (
+                  c.status IN ('draft','pending')
+                  OR (
+                    c.status='active'
+                    AND c.locked_at IS NULL
+                    AND COALESCE(t.status, 'active') <> 'moved_out'
+                  )
+                )
+              LIMIT 1`,
             [cid]
           );
           hasActiveReservation = r.rows.length > 0;
-        } catch (err) { if (err.code !== '42P01') throw err; }
+          reservationChecked = true;
+        } catch (err) {
+          if (err.code === '42P01' || err.code === '42703') reservationChecked = false;
+          else throw err;
+        }
       }
     } else {
       // Booking-id pointer — check the bookings blob.
@@ -231,14 +367,20 @@ async function deriveFacts(client, roomId) {
           const status = bk.rows[0]?.booking?.status;
           hasActiveReservation = !['cancelled', 'rejected', 'completed'].includes(status);
         }
-      } catch { /* tolerate jsonb-path errors on old PG */ }
+        reservationChecked = true;
+      } catch { reservationChecked = false; /* tolerate jsonb-path errors on old PG */ }
     }
   }
   return {
     currentStatus: blob.status || null,
+    blobTenant: blob.tenant || null,
     hasBlobTenant: blob.has_tenant === true,
-    hasActiveContract,
+    activeTenant,
+    hasActiveTenant: !!activeTenant,
+    hasCurrentLease,
     hasOverdueBill,
+    reservedBy,
+    reservationChecked,
     hasActiveReservation,
   };
 }

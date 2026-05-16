@@ -224,6 +224,20 @@ test('detector: override without reason → ROOM_OVERRIDE_NO_REASON', async () =
   assert.strictEqual(a.severity, 'info');
 });
 
+test('detector: stale JSONB room tenant -> ROOM_BLOB_STALE_TENANT', async () => {
+  const pool = stubPool({
+    "br.room ? 'tenant'": [
+      { room_code: '305', status: 'occupied' },
+    ],
+    'baankarn_config_v1': [{ value: { rates: { standard: { rent: 4500 } }, utilities: { waterRate: 18, elecRate: 8 } } }],
+  });
+  const out = await scanner.scan(pool);
+  const a = out.items.find((i) => i.id === 'ROOM_BLOB_STALE_TENANT');
+  assert.ok(a);
+  assert.strictEqual(a.severity, 'warn');
+  assert.strictEqual(a.fix, '/admin#rooms');
+});
+
 // === payment detector =====================================================
 
 test('detector: stuck pending payment → PAYMENT_STUCK_PENDING', async () => {
