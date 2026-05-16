@@ -111,6 +111,38 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
     return () => { cancel = true; };
   }, [currentPeriod]);
   React.useEffect(() => fetchBatchReadiness(), [fetchBatchReadiness, dbBills]);
+
+  // Active recurring charges keyed by roomId. The server's bulk-generate
+  // path automatically merges these into the actual bill (services/billing.js
+  // appends each `recurring[].amount` as a line item), and one_off rows
+  // auto-deactivate after first inclusion. We mirror that here so the
+  // CLIENT preview shows the same charges admin will see on the issued
+  // bill — eliminates the old drift where r.pendingCharges showed in
+  // preview but the generated bill silently omitted it.
+  const [activeRecurring, setActiveRecurring] = React.useState({});
+  React.useEffect(() => {
+    let cancel = false;
+    fetch('/api/recurring-charges?active=true', { credentials: 'same-origin' })
+      .then(async (r) => {
+        const d = await r.json().catch(() => ({}));
+        if (cancel || !r.ok) return;
+        const byRoom = {};
+        for (const c of (d.charges || [])) {
+          const rid = c.room_id || c.roomId;
+          if (!rid) continue;
+          (byRoom[rid] = byRoom[rid] || []).push({
+            label: c.label,
+            amount: Number(c.amount) || 0,
+            frequency: c.frequency,
+          });
+        }
+        setActiveRecurring(byRoom);
+      })
+      .catch(() => { /* preview falls back to empty charges — bill generation
+                        still pulls authoritative rows server-side */ });
+    return () => { cancel = true; };
+  }, [currentPeriod, dbBills]);
+
   // Map room_id → real DB bill so the in-memory estimate can adopt the
   // real status / total for any room that's already been billed this month.
   const realBillsByRoom = useMemo(() => {
@@ -137,9 +169,13 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         const water = (r.waterUnits || 0) * waterRate;
         const elec  = (r.elecUnits  || 0) * elecRate;
         const wifi  = (r.wifi != null && r.wifi !== 0) ? r.wifi : wifiFee;
-        // Pending charges are tickets-completed-with-cost that haven't been
-        // settled yet. Each charge becomes a line on this month's bill.
-        const charges = Array.isArray(r.pendingCharges) ? r.pendingCharges : [];
+        // Bill line items come from /api/recurring-charges (active rows).
+        // Server's bulk-generate merges these via services/billing.js, so
+        // mirroring them here keeps the preview totals in sync with what
+        // the tenant will actually see on the issued bill. Legacy
+        // r.pendingCharges from old maintenance-ticket flow is intentionally
+        // ignored — those rows never made it onto real bills.
+        const charges = activeRecurring[r.id] || [];
         const chargesTotal = charges.reduce((s, c) => s + (Number(c.amount) || 0), 0);
         const total = r.rent + water + elec + wifi + chargesTotal;
         const overdue = r.status === 'overdue';
@@ -208,7 +244,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
           latestPaidAt: real.latest_paid_at || null,
         };
       });
-  }, [rooms, config, realBillsByRoom, currentPeriod, currentPeriodDate]);
+  }, [rooms, config, realBillsByRoom, currentPeriod, currentPeriodDate, activeRecurring]);
 
   const filtered = useMemo(() => {
     if (tab === 'current') return bills;

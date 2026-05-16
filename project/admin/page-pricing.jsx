@@ -552,15 +552,12 @@ function TabDiscount({ draft, updatePath }) {
                  value={draft.discounts.firstMonth}
                  onChange={(v) => updatePath('discounts.firstMonth', Number(v))}
                  hint="ส่วนลดเฉพาะเดือนแรกเท่านั้น" />
-          <Input label="ส่วนลดแนะนำเพื่อน" type="number" suffix="บาท (เครดิต)"
-                 value={draft.discounts.referral}
-                 onChange={(v) => updatePath('discounts.referral', Number(v))}
-                 hint="ผู้เช่าเดิมแนะนำคนใหม่ ได้รับเครดิต" />
-          <Input label="ส่วนลดสำหรับผู้เช่าระยะยาว" type="number" suffix="บาท / ปี"
-                 value={draft.discounts.loyaltyPerYear}
-                 onChange={(v) => updatePath('discounts.loyaltyPerYear', Number(v))}
-                 hint="ลดต่อปีที่อยู่ครบ เช่น 200/ปี → ปีที่ 3 ลด 600" />
         </div>
+        {/* `discounts.referral` and `discounts.loyaltyPerYear` inputs lived
+            here but services/billing.js never read them — they were a
+            config-tab tease that did nothing to actual bills. Removed so
+            admin doesn't waste time tuning a number with no effect.
+            Re-add only when the corresponding apply-credit logic ships. */}
       </Card>
 
       <Card style={{ background: C.surfaceAlt }}>
@@ -571,7 +568,6 @@ function TabDiscount({ draft, updatePath }) {
         <ul style={{ margin: 0, paddingLeft: 20, fontSize: 13, color: C.ink2, lineHeight: 1.7 }}>
           <li>สัญญา 12 เดือนควรมีส่วนลดประมาณ <Pill color="success" size="sm">8-12%</Pill> เพื่อสมดุลระหว่างผลกำไรและความน่าสนใจ</li>
           <li>ส่วนลดเดือนแรก 50% เป็นกลยุทธ์ดึงผู้เช่าในช่วงโปรโมชั่นเปิดตึก</li>
-          <li>ส่วนลดแนะนำเพื่อน <Pill color="accent" size="sm">฿500</Pill> เป็นที่นิยมในตลาด</li>
         </ul>
       </Card>
     </div>
@@ -587,27 +583,25 @@ function TabFees({ draft, updatePath }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 900 }}>
-      <Card>
-        <SectionHeading title="ค่าธรรมเนียมเริ่มต้น" subtitle="เก็บครั้งเดียวเมื่อทำสัญญา" level={3} />
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12 }}>
-          <Input label="ค่าทำสัญญา" type="number" suffix="บาท"
-                 value={draft.fees.contract}
-                 onChange={(v) => updatePath('fees.contract', Number(v))}
-                 hint="ค่าจัดทำเอกสารและดำเนินการ" />
-          <Input label="ค่าทำกุญแจ" type="number" suffix="บาท / ครั้ง"
-                 value={draft.fees.rekey}
-                 onChange={(v) => updatePath('fees.rekey', Number(v))}
-                 hint="กรณีทำหาย หรือต้องการสำเนา" />
-        </div>
-      </Card>
-
-      <Card>
-        <SectionHeading title="ค่าธรรมเนียมเมื่อย้ายออก" level={3} />
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12 }}>
-          <Input label="ค่าทำความสะอาด" type="number" suffix="บาท"
-                 value={draft.fees.cleaning}
-                 onChange={(v) => updatePath('fees.cleaning', Number(v))}
-                 hint="หักจากเงินมัดจำเมื่อสิ้นสุดสัญญา" />
+      {/* `fees.contract`, `fees.rekey`, `fees.cleaning` inputs lived here
+          but services/billing.js / routes/* read none of them — they
+          shipped as cosmetic settings. Removed so the admin doesn't tune
+          numbers with no bill-level effect. Any one-off charge (cleaning
+          fee at move-out, lost-key fee, etc.) is now entered as a
+          one_off row in /admin#recurring so the server's bill generator
+          auto-includes it via the recurring_charges path. */}
+      <Card style={{ background: C.surfaceAlt }}>
+        <SectionHeading title="ค่าธรรมเนียมแบบครั้งเดียว" level={3} />
+        <div style={{ fontSize: 13, color: C.ink2, lineHeight: 1.6 }}>
+          ค่าทำสัญญา / ค่าทำกุญแจ / ค่าทำความสะอาด และค่าธรรมเนียมครั้งเดียวอื่นๆ
+          ใช้ผ่านหน้า <b>ค่าใช้จ่ายประจำ</b> โดยเลือก frequency = <code>one_off</code>
+          — ระบบจะแนบเข้าบิลรอบถัดไปอัตโนมัติแล้วปิด row ทันทีเพื่อกันคิดซ้ำ.
+          <div style={{ marginTop: 10 }}>
+            <a href="/admin#recurring" style={{
+              padding: '6px 12px', borderRadius: 6, background: C.accent,
+              color: '#fff', textDecoration: 'none', fontSize: 12.5, fontWeight: 500,
+            }}>ไปจัดการค่าใช้จ่ายประจำ →</a>
+          </div>
         </div>
       </Card>
 

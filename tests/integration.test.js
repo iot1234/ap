@@ -1172,8 +1172,12 @@ test('admin billing selected period drives estimates and bulk generation', () =>
     'estimate due date must be inside selected period');
   assert.match(billsBlock, /const periodIso = currentPeriod;/,
     'estimate bill id/API period must use selected period');
-  assert.match(billsBlock, /\[rooms, config, realBillsByRoom, currentPeriod, currentPeriodDate\]/,
-    'estimate must recompute after period changes');
+  // activeRecurring was added so the client preview mirrors the same
+  // recurring_charges merge the server does — admin sees the same line
+  // items pre- and post-issue. The deps must include it so the memo
+  // re-runs when a row is added/removed mid-session.
+  assert.match(billsBlock, /\[rooms, config, realBillsByRoom, currentPeriod, currentPeriodDate, activeRecurring\]/,
+    'estimate must recompute after period changes + when recurring charges refresh');
 
   const genIdx = src.indexOf('const handleGenerate = async');
   assert.ok(genIdx > 0, 'should find handleGenerate');

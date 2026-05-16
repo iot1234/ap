@@ -104,33 +104,58 @@ function PageMaintenance({ rooms, setRooms, addActivity, setToast }) {
       setTickets((prev) => prev.map((t) => (t.id === id ? data.ticket : t)));
       if (selected && selected.id === id) setSelected(data.ticket);
 
-      // When a ticket transitions to 'completed' AND has a cost > 0, push the
-      // cost onto the room's pendingCharges array so it shows up on the next
-      // bill. Idempotent — keyed by ticket_no, so completing twice doesn't
-      // double-charge.
+      // When a ticket transitions to 'completed' AND has a cost > 0, file
+      // the cost as a one_off recurring_charges row so the next bulk-
+      // generate pass picks it up server-side (services/billing.js merges
+      // active recurring rows into bills). The old behaviour wrote to
+      // room.pendingCharges (a JSONB blob nothing on the server reads),
+      // which meant the admin saw the cost in the bill preview but the
+      // generated bill silently dropped it — the tenant was never charged.
+      //
+      // Dedup: scan existing active one_off rows for this room and bail
+      // if one already references this ticket_no in its `notes`. Without
+      // this guard, re-saving a completed ticket would double-charge.
       if (
         data.ticket.status === 'completed' &&
         Number(data.ticket.cost) > 0 &&
-        setRooms && rooms && rooms[data.ticket.room_id]
+        data.ticket.room_id
       ) {
-        setRooms((prev) => {
-          const r = prev[data.ticket.room_id];
-          if (!r) return prev;
-          const charges = Array.isArray(r.pendingCharges) ? [...r.pendingCharges] : [];
-          if (charges.find((c) => c.refId === data.ticket.ticket_no)) return prev;
-          charges.push({
-            refId: data.ticket.ticket_no,
-            label: `ค่าซ่อม ${data.ticket.title || data.ticket.ticket_no}`,
-            amount: Number(data.ticket.cost),
-            createdAt: new Date().toISOString(),
+        try {
+          const ticketRef = `ticket:${data.ticket.ticket_no}`;
+          const listRes = await fetch(
+            `/api/recurring-charges?roomId=${encodeURIComponent(data.ticket.room_id)}&active=true`,
+            { credentials: 'same-origin' }
+          );
+          const listJson = listRes.ok ? await listRes.json() : { charges: [] };
+          const already = (listJson.charges || []).some(
+            (c) => typeof c.notes === 'string' && c.notes.includes(ticketRef)
+          );
+          if (!already) {
+            await apiFetch('/api/recurring-charges', {
+              method: 'POST',
+              body: JSON.stringify({
+                roomId: data.ticket.room_id,
+                label: `ค่าซ่อม ${data.ticket.title || data.ticket.ticket_no}`,
+                amount: Number(data.ticket.cost),
+                frequency: 'one_off',
+                notes: ticketRef,
+              }),
+            });
+            addActivity && addActivity({
+              icon: '💰',
+              text: `เพิ่มค่าซ่อม ${data.ticket.cost} บาท (one_off) เข้าบิลห้อง ${data.ticket.room_id}`,
+              type: 'maintenance',
+            });
+          }
+        } catch (chargeErr) {
+          // Don't fail the ticket update if recurring-charges insert
+          // hiccups — admin can manually add the row from /admin#recurring.
+          console.warn('[maintenance] file one_off charge failed:', chargeErr);
+          setToast && setToast({
+            kind: 'warning',
+            message: 'อัปเดต ticket สำเร็จ แต่บันทึกค่าซ่อมเข้าบิลไม่สำเร็จ — เพิ่มเองที่ /admin#recurring',
           });
-          return { ...prev, [data.ticket.room_id]: { ...r, pendingCharges: charges } };
-        });
-        addActivity && addActivity({
-          icon: '💰',
-          text: `เพิ่มค่าซ่อม ${data.ticket.cost} บาทเข้าบิลห้อง ${data.ticket.room_id}`,
-          type: 'maintenance',
-        });
+        }
       }
       return data.ticket;
     } catch (err) {
