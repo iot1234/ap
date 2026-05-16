@@ -20,11 +20,18 @@ function PageAccessDevices({ setToast, embedded = false }) {
   const Wrapper = embedded
     ? ({ children }) => <div>{children}</div>
     : ({ children }) => <PageContainer>{children}</PageContainer>;
+  // When embedded, the parent (PageAccess) already renders the title/subtitle
+  // in its own PageHeader — we only need to surface the action button.
   const Header = embedded
-    ? ({ actions }) => actions
-      ? <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>{actions}</div>
-      : null
-    : (props) => <PageHeader {...props} />;
+    ? function EmbeddedHeader({ actions }) {
+        if (!actions) return null;
+        return (
+          <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
+            {actions}
+          </div>
+        );
+      }
+    : function StandaloneHeader(props) { return <PageHeader {...props} />; };
   const apiFetch = window.requireApiFetch ? window.requireApiFetch() : window.apiFetch;
   const [devices, setDevices] = useState([]);
   const [showNew, setShowNew] = useState(false);
