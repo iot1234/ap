@@ -987,7 +987,32 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       const now = new Date();
       const period = String(req.body?.period
         || `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`).slice(0, 7);
-      const dueDay = Number(req.body?.dueDay || 15);
+      // Strict period validation — the regex `^\d{4}-\d{2}$` matches
+      // "2026-13" and "2026-00" since it only checks digit count, so we
+      // also clamp the month range. Without this the bill_no string is
+      // valid but the SQL DATE cast on dueDate (`2026-13-15`::date) blows
+      // up the transaction halfway through bulk-generate — the operator
+      // gets a 500 instead of a clean 400. Year range guards typos like
+      // 9999-12 / 0001-01.
+      const periodMatch = /^(\d{4})-(\d{2})$/.exec(period);
+      if (!periodMatch) {
+        return res.status(400).json({
+          error: 'period must be YYYY-MM',
+          code: 'INVALID_PERIOD',
+        });
+      }
+      const periodYear = Number(periodMatch[1]);
+      const periodMonth = Number(periodMatch[2]);
+      if (periodMonth < 1 || periodMonth > 12 || periodYear < 2020 || periodYear > 2100) {
+        return res.status(400).json({
+          error: 'period month must be 01-12 and year 2020-2100',
+          code: 'INVALID_PERIOD',
+          period,
+        });
+      }
+      const rawDueDay = Number(req.body?.dueDay);
+      const dueDay = Number.isFinite(rawDueDay) && rawDueDay >= 1 && rawDueDay <= 28
+        ? rawDueDay : 15;
       const force = req.body?.force === true;
       try {
         const flags = await features.load(pool);
@@ -1056,10 +1081,8 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         // back-filled bills (admin generates April from May 5th) carry the
         // intended month, not the wallclock month. Match scheduler.tickBillGen
         // by using formatYMD directly so Asia/Bangkok timezone offset can't
-        // shift the day back via toISOString().
-        const periodMatch = /^(\d{4})-(\d{2})$/.exec(period);
-        const periodYear = periodMatch ? Number(periodMatch[1]) : now.getFullYear();
-        const periodMonth = periodMatch ? Number(periodMatch[2]) : (now.getMonth() + 1);
+        // shift the day back via toISOString(). periodYear/Month validated
+        // at the top of this handler.
         const dueDate = billing.formatYMD(periodYear, periodMonth, dueDay);
         let made = 0, skipped = 0;
         for (const room of rooms) {

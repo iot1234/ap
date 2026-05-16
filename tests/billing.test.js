@@ -221,6 +221,17 @@ test('resolveUtilityUsageFromBillRow: NaN/missing fields → defensive zero-shap
   assert.equal(u3.units, 0);
 });
 
+test('isChargeApplicableForPeriod: rejects YYYY-13 / YYYY-00 outside 01-12', () => {
+  // Bill period must be a real Gregorian month. The matching regex in
+  // /api/bills/bulk-generate accepts only digit count, so the recurring
+  // filter is the last line of defence — reject 2026-13 / 2026-00 here
+  // so quarterly anchor math doesn't wrap silently.
+  const charge = { frequency: 'monthly' };
+  assert.equal(billing.isChargeApplicableForPeriod(charge, '2026-13'), false);
+  assert.equal(billing.isChargeApplicableForPeriod(charge, '2026-00'), false);
+  assert.equal(billing.isChargeApplicableForPeriod(charge, '2026-05'), true);
+});
+
 test('buildPaymentBlock: payment.promptpay (form key) wins over legacy promptpayTarget', () => {
   const block = billing.buildPaymentBlock({ payment: { promptpay: '0801234567', promptpayTarget: '0900000000' } });
   assert.equal(block.promptpayTarget, '0801234567');
