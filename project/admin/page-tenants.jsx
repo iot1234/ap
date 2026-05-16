@@ -904,7 +904,7 @@ function TabContract({ t, setToast, addActivity, setRooms, onClosed }) {
         type: 'contract' });
       reload();
     } catch (err) {
-      const body = err && err.body ? err.body : {};
+      const body = err && (err.raw || err.body) ? (err.raw || err.body) : {};
       setToast && setToast({
         kind: 'danger',
         message: body.code === 'ROOM_RESERVED'
@@ -912,6 +912,11 @@ function TabContract({ t, setToast, addActivity, setRooms, onClosed }) {
               title: 'ห้องนี้ถูกจองอยู่แล้ว',
               description: 'ถ้าเป็น booking ที่เพิ่งอนุมัติ ให้เปิดจากรายการจองหรือ refresh แล้วลองสร้างสัญญาอีกครั้ง',
             }
+          : body.hint
+            ? {
+                title: 'สร้างสัญญาล้มเหลว',
+                description: `${err.message}${body.code ? ` (${body.code})` : ''} — ${body.hint}`,
+              }
           : 'สร้างสัญญาล้มเหลว: ' + err.message,
       });
     } finally { setBusy(false); }

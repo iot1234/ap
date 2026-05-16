@@ -5220,17 +5220,11 @@ app.get('/api/bookings/:id', requireAuth, async (req, res) => {
 
 const BOOKING_STATUSES = new Set(['pending', 'reviewing', 'approved', 'rejected', 'cancelled', 'completed']);
 const BOOKING_TRANSITIONS = {
-  // pending → approved is allowed since 5534b48 introduced the new
-  // POST /api/bookings/:id/approve-and-assign endpoint that runs the
-  // verification checklist via a context-rich confirm modal showing
-  // applicant details + tells admin about the follow-up steps (portal phone
-  // access, LINE binding) — the "force admin to first click reviewing"
-  // gate became redundant once the approve action itself surfaced the
-  // applicant data. Keeping reviewing as an optional intermediate
-  // state for cases where admin wants to mark "I've started looking"
-  // separately from "I've decided to approve".
-  pending:   ['reviewing', 'approved', 'rejected', 'cancelled'],
-  reviewing: ['approved', 'rejected', 'cancelled'],
+  // Direct PUT transitions are intentionally NOT allowed to approve a
+  // booking. Approval must go through POST /approve-and-assign so the room
+  // reservation is created under the same lock as the status change.
+  pending:   ['reviewing', 'rejected', 'cancelled'],
+  reviewing: ['rejected', 'cancelled'],
   // 'completed' is set by /api/contracts/quick-invite when admin converts
   // an approved booking into a contract+invitation. Admin can still cancel
   // after that (tenant backs out) so the exit edge stays open.
@@ -5590,6 +5584,14 @@ app.put('/api/bookings/:id', sameOrigin, csrfGuard, requireAuth, requireRole('ow
     }
     const before = list[idx];
     if (b.status && b.status !== before.status) {
+      if (b.status === 'approved') {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'การอนุมัติ booking ต้องทำผ่านปุ่มอนุมัติที่จองห้องพร้อมกันเท่านั้น',
+          code: 'APPROVAL_REQUIRES_ASSIGNMENT_FLOW',
+          hint: 'ใช้ POST /api/bookings/:id/approve-and-assign เพื่อให้สถานะ booking และสถานะห้องถูกล็อกพร้อมกัน',
+        });
+      }
       const allowed = BOOKING_TRANSITIONS[before.status || 'pending'] || [];
       if (!allowed.includes(b.status)) {
         await client.query('ROLLBACK');
@@ -8127,6 +8129,7 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
 
       let bookingCarryoverList = null;
       let bookingCarryoverIdx = -1;
+      let bookingForInvite = null;
       if (bookingIdForRoom) {
         const bookingBlobQ = await client.query(
           `SELECT value FROM app_data WHERE key='baankarn_bookings_v1' FOR UPDATE`
@@ -8135,6 +8138,35 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
           ? bookingBlobQ.rows[0].value
           : [];
         bookingCarryoverIdx = bookingCarryoverList.findIndex((x) => x && x.id === bookingIdForRoom);
+        if (bookingCarryoverIdx < 0) {
+          await client.query('ROLLBACK');
+          return res.status(404).json({
+            error: `ไม่พบ booking ${bookingIdForRoom} สำหรับสร้างสัญญา`,
+            code: 'BOOKING_NOT_FOUND',
+            hint: 'กลับไปหน้า booking แล้วเริ่มจากปุ่มอนุมัติ/สร้างสัญญาใหม่',
+          });
+        }
+        bookingForInvite = bookingCarryoverList[bookingCarryoverIdx] || {};
+        if (bookingForInvite.status !== 'approved') {
+          await client.query('ROLLBACK');
+          return res.status(409).json({
+            error: `booking ${bookingIdForRoom} ยังไม่พร้อมสร้างสัญญา (สถานะ: ${bookingForInvite.status || 'pending'})`,
+            code: 'BOOKING_NOT_APPROVED',
+            currentStatus: bookingForInvite.status || 'pending',
+            hint: 'ต้องอนุมัติ booking ให้ระบบจองห้องก่อน แล้วค่อยสร้าง/ส่งลิงก์สัญญา',
+          });
+        }
+        const bookedRoomId = String(bookingForInvite.assignedRoomId || bookingForInvite.roomId || '').trim();
+        if (!bookedRoomId || bookedRoomId !== roomId) {
+          await client.query('ROLLBACK');
+          return res.status(409).json({
+            error: `booking ${bookingIdForRoom} ไม่ได้จองห้อง ${roomId}`,
+            code: 'BOOKING_ROOM_MISMATCH',
+            bookingRoomId: bookedRoomId || null,
+            requestedRoomId: roomId,
+            hint: 'เปิดจาก booking ที่อนุมัติแล้ว หรือเลือกห้องที่ booking นั้นจองไว้',
+          });
+        }
       }
 
       const roomBlobQ = await client.query(
@@ -8189,6 +8221,16 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
       }
       const currentReservationOwner = blobRoom?.reservedBy ? String(blobRoom.reservedBy) : null;
       const reservationOwnerOk = currentReservationOwner && currentReservationOwner === bookingIdForRoom;
+      if (bookingIdForRoom && !reservationOwnerOk) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: `ห้อง ${roomId} ไม่ได้ถูกจองโดย booking ${bookingIdForRoom}`,
+          code: 'BOOKING_ROOM_NOT_RESERVED',
+          currentStatus: roomState,
+          reservedBy: currentReservationOwner,
+          hint: 'อนุมัติ booking ใหม่ให้ระบบจองห้องก่อน หรือ reconcile ห้องถ้าข้อมูลเก่าค้าง',
+        });
+      }
       if (roomState === 'reserved' && !reservationOwnerOk) {
         await client.query('ROLLBACK');
         return res.status(409).json({
@@ -8347,7 +8389,7 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
           // happily resurrected `rejected`/`cancelled` bookings as
           // `completed` — bypassing BOOKING_TRANSITIONS which forbids
           // those edges. The blob path below mirrors the same guard.
-          const allowedFromForQuickInvite = ['pending', 'reviewing', 'approved'];
+          const allowedFromForQuickInvite = ['approved'];
           try {
             await client.query(
               `UPDATE bookings

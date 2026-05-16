@@ -2015,6 +2015,10 @@ test('admin booking-to-contract handoff preserves booking reservation context', 
 
   assert.match(bookings, /#tenants\?room=\$\{encodeURIComponent\(assignedRoomId\)\}&tab=contract&booking=/,
     'approve toast must deep-link to the tenant contract tab for the assigned room');
+  assert.match(bookings, /active\.status === 'approved'[\s\S]{0,500}สร้างสัญญา/,
+    'approved booking drawer must keep a visible create-contract next step');
+  assert.match(bookings, /#tenants\?room=\$\{encodeURIComponent\(roomId\)\}&tab=contract&booking=\$\{encodeURIComponent\(active\.id\)\}/,
+    'approved booking create-contract button must preserve booking context');
   assert.match(shell, /raw\.split\('\?'\)\[0\]\.split\('\/'\)\[0\]/,
     'hash router must preserve query params such as room/tab/booking');
   assert.match(tenants, /const bookingId = reservedBy && !reservedBy\.startsWith\('contract:'\) \? reservedBy : null/,
@@ -3085,7 +3089,7 @@ test('quick-invite locks the requested room before creating a draft contract', (
     'must reject unknown room ids instead of creating phantom rooms in the blob');
   assert.match(block, /roomStatuses\.includes\('occupied'\)[\s\S]{0,160}roomStatuses\.includes\('reserved'\)/,
     'rooms_v2 occupied/reserved state must override stale vacant JSONB');
-  assert.match(block, /SELECT value FROM app_data WHERE key='baankarn_bookings_v1' FOR UPDATE[\s\S]{0,400}SELECT value FROM app_data WHERE key='baankarn_rooms_v1' FOR UPDATE/,
+  assert.match(block, /SELECT value FROM app_data WHERE key='baankarn_bookings_v1' FOR UPDATE[\s\S]{0,3000}SELECT value FROM app_data WHERE key='baankarn_rooms_v1' FOR UPDATE/,
     'must lock booking blob before room blob to keep the app_data lock order stable');
   assert.match(block, /reservedBy: `contract:\$\{contract\.id\}`/,
     'draft contract must own the room reservation');
@@ -3185,7 +3189,7 @@ test('approve ROOM_OCCUPIED + CITIZEN_ID_DUPLICATE return nextActions for self-r
     'CITIZEN_ID_DUPLICATE must point admin at the lookup endpoint');
 });
 
-test('BOOKING_STATUSES + BOOKING_TRANSITIONS include "completed" terminal state', () => {
+test('booking status machine forces approve-and-assign before contract handoff', () => {
   // Pre-fix: quick-invite UPDATE bookings SET status='completed' but
   // PUT /api/bookings/:id rejected it (BOOKING_STATUSES set didn't list
   // 'completed'). Admin couldn't edit completed bookings.
@@ -3195,8 +3199,17 @@ test('BOOKING_STATUSES + BOOKING_TRANSITIONS include "completed" terminal state'
   assert.match(src,
     /BOOKING_STATUSES = new Set\(\[[\s\S]{0,200}'completed'\]\)/,
     'BOOKING_STATUSES must include completed');
-  // Transitions: approved → completed allowed (quick-invite path);
-  // completed → cancelled allowed (admin lets tenant back out).
+  // Direct PUT must not approve a booking, because approval has to reserve
+  // a room in the same transaction via /approve-and-assign.
+  assert.doesNotMatch(src, /pending:\s*\[[^\]]*'approved'/,
+    'pending → approved must not be a direct PUT transition');
+  assert.doesNotMatch(src, /reviewing:\s*\[[^\]]*'approved'/,
+    'reviewing → approved must not be a direct PUT transition');
+  assert.match(src, /APPROVAL_REQUIRES_ASSIGNMENT_FLOW/,
+    'direct approval attempts must return an actionable error code');
+  // Transitions after the locked approval step: approved → completed is
+  // allowed only from quick-invite; completed → cancelled remains open for
+  // tenant backs-out cases where no active contract remains.
   assert.match(src, /approved:\s*\['completed', 'cancelled'\]/,
     'approved must allow → completed (quick-invite handoff)');
   assert.match(src, /completed: \['cancelled'\]/,
@@ -3217,9 +3230,9 @@ test('bookings admin UI handles terminal statuses and uses valid reopen/cancel t
     'cancelled must have a status pill');
   assert.match(src, /const meta = statusMap\[b\.status\] \|\|/,
     'unknown/legacy booking statuses must not crash the table or drawer');
-  assert.match(src, /active\.status === 'approved'[\s\S]{0,260}updateStatus\(active\.id, 'cancelled'\)/,
+  assert.match(src, /active\.status === 'approved'[\s\S]{0,900}updateStatus\(active\.id, 'cancelled'\)/,
     'approved booking button must cancel/release, not return to pending');
-  assert.doesNotMatch(src, /active\.status === 'approved'[\s\S]{0,260}updateStatus\(active\.id, 'pending'\)/,
+  assert.doesNotMatch(src, /active\.status === 'approved'[\s\S]{0,900}updateStatus\(active\.id, 'pending'\)/,
     'approved → pending is forbidden by the backend state machine');
   assert.match(src, /active\.status === 'rejected'[\s\S]{0,260}updateStatus\(active\.id, 'reviewing'\)/,
     'rejected booking reopen must go through reviewing');
@@ -3371,6 +3384,14 @@ test('quick-invite carries booking photo + marks booking completed', () => {
   assert.match(block,
     /WHERE external_id=\$1[\s\S]{0,80}AND status = ANY\(\$2::text\[\]\)/,
     'quick-invite UPDATE must guard against forbidden source statuses');
+  assert.match(block, /BOOKING_NOT_APPROVED/,
+    'quick-invite must reject booking carry-over before approve-and-assign');
+  assert.match(block, /BOOKING_ROOM_MISMATCH/,
+    'quick-invite must reject a bookingId that belongs to another room');
+  assert.match(block, /BOOKING_ROOM_NOT_RESERVED/,
+    'quick-invite must require the room reservation to still point at the booking');
+  assert.match(block, /const allowedFromForQuickInvite = \['approved'\]/,
+    'only approved bookings may be marked completed by quick-invite');
   assert.match(block, /SELECT value FROM app_data WHERE key='baankarn_bookings_v1' FOR UPDATE/,
     'quick-invite must lock the JSONB booking list before marking it completed');
   assert.match(block, /status: 'completed'[\s\S]{0,220}contractId: contract\.id/,

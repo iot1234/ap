@@ -287,13 +287,25 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
               </>
             )}
             {active.status === 'approved' && (
-              <Btn variant="ghost" onClick={async () => {
-                const ok = await updateStatus(active.id, 'cancelled');
-                if (!ok) return;
-                addActivity && addActivity({ icon: '↺', text: `ยกเลิกอนุมัติการจอง ${active.id}`, type: 'booking' });
-                setToast && setToast({ kind: 'info', message: 'ยกเลิกการจองและปล่อยห้องแล้ว' });
-                setActiveId(null);
-              }}>ยกเลิก/ปล่อยห้อง</Btn>
+              <>
+                {(active.assignedRoomId || active.roomId) && (
+                  <Btn variant="primary" icon="📄" onClick={() => {
+                    const roomId = active.assignedRoomId || active.roomId;
+                    window.location.hash =
+                      `#tenants?room=${encodeURIComponent(roomId)}&tab=contract&booking=${encodeURIComponent(active.id)}`;
+                    setActiveId(null);
+                  }}>
+                    สร้างสัญญา
+                  </Btn>
+                )}
+                <Btn variant="ghost" onClick={async () => {
+                  const ok = await updateStatus(active.id, 'cancelled');
+                  if (!ok) return;
+                  addActivity && addActivity({ icon: '↺', text: `ยกเลิกอนุมัติการจอง ${active.id}`, type: 'booking' });
+                  setToast && setToast({ kind: 'info', message: 'ยกเลิกการจองและปล่อยห้องแล้ว' });
+                  setActiveId(null);
+                }}>ยกเลิก/ปล่อยห้อง</Btn>
+              </>
             )}
             {active.status === 'rejected' && (
               <Btn variant="ghost" onClick={async () => {
