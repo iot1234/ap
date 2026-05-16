@@ -47,10 +47,28 @@ function isValidSlug(s) {
   return /^[a-z0-9][a-z0-9_-]{1,38}[a-z0-9]$|^[a-z0-9]{2,40}$/.test(s || '');
 }
 
+function asCount(value, fallback = 0) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
 // Internal: turn a DB row into a public-safe object (no secrets exposed
 // unless the caller explicitly asks for the decrypted token).
 function rowToPublic(row, includeSecrets = false) {
   if (!row) return null;
+  const storedBoundCount = asCount(row.bound_count, 0);
+  const hasLiveStats = row.tenant_linked_count != null || row.binding_bound_count != null;
+  const bindingBoundCount = row.binding_bound_count != null
+    ? asCount(row.binding_bound_count, 0)
+    : storedBoundCount;
+  // For "how many people are linked?", the tenant row is the operational
+  // truth because outbound notifications route through tenants.line_user_id
+  // + tenants.line_oa_id. line_bindings remains useful as lifecycle history.
+  const tenantLinkedCount = row.tenant_linked_count != null
+    ? asCount(row.tenant_linked_count, 0)
+    : bindingBoundCount;
+  const counterDrift = tenantLinkedCount - storedBoundCount;
+  const bindingMismatch = tenantLinkedCount - bindingBoundCount;
   const out = {
     id: Number(row.id),
     slug: row.slug,
@@ -61,7 +79,17 @@ function rowToPublic(row, includeSecrets = false) {
     enabled: !!row.enabled,
     isDefault: !!row.is_default,
     ownerUserId: row.owner_user_id || '',
-    boundCount: Number(row.bound_count || 0),
+    boundCount: tenantLinkedCount,
+    tenantLinkedCount,
+    bindingBoundCount,
+    storedBoundCount,
+    pendingCount: asCount(row.pending_count, 0),
+    lastBoundAt: row.last_bound_at || null,
+    countSource: hasLiveStats ? 'live' : 'stored',
+    counterDrift,
+    bindingMismatch,
+    hasCountDrift: hasLiveStats && counterDrift !== 0,
+    hasBindingMismatch: hasLiveStats && bindingMismatch !== 0,
     lastSeenAt: row.last_seen_at,
     lastError: row.last_error || null,
     createdAt: row.created_at,
@@ -107,6 +135,16 @@ function _envOa() {
     channelSecret: channelSecret || null,
     hasAccessToken: !!token,
     hasChannelSecret: !!channelSecret,
+    boundCount: 0,
+    tenantLinkedCount: 0,
+    bindingBoundCount: 0,
+    storedBoundCount: 0,
+    pendingCount: 0,
+    counterDrift: 0,
+    bindingMismatch: 0,
+    hasCountDrift: false,
+    hasBindingMismatch: false,
+    countSource: 'env',
     isEnvOa: true,
   };
 }
@@ -114,17 +152,102 @@ function _envOa() {
 // --- CRUD -----------------------------------------------------------------
 
 async function list(pool, { includeDeleted = false } = {}) {
-  const where = includeDeleted ? '' : 'WHERE deleted_at IS NULL';
+  const where = includeDeleted ? '' : 'WHERE o.deleted_at IS NULL';
   const { rows } = await pool.query(
-    `SELECT * FROM line_oas ${where} ORDER BY is_default DESC, name ASC`
+    `SELECT
+        o.*,
+        COALESCE(bs.binding_bound_count, 0)::int AS binding_bound_count,
+        COALESCE(bs.pending_count, 0)::int AS pending_count,
+        bs.last_bound_at AS last_bound_at,
+        COALESCE(ts.tenant_linked_count, 0)::int AS tenant_linked_count
+       FROM line_oas o
+       LEFT JOIN LATERAL (
+         SELECT
+           COUNT(*) FILTER (WHERE b.status='bound' AND b.oa_id = o.id)::int AS binding_bound_count,
+           COUNT(*) FILTER (
+             WHERE b.status='pending'
+               AND b.expires_at > NOW()
+               AND b.target_oa_id = o.id
+           )::int AS pending_count,
+           MAX(b.bound_at) FILTER (WHERE b.status='bound' AND b.oa_id = o.id) AS last_bound_at
+          FROM line_bindings b
+         WHERE b.oa_id = o.id OR b.target_oa_id = o.id
+       ) bs ON TRUE
+       LEFT JOIN LATERAL (
+         SELECT COUNT(*)::int AS tenant_linked_count
+           FROM tenants t
+          WHERE t.line_oa_id = o.id
+            AND t.line_user_id IS NOT NULL
+            AND t.deleted_at IS NULL
+       ) ts ON TRUE
+       ${where}
+       ORDER BY o.is_default DESC, o.name ASC`
   );
   const items = rows.map((r) => rowToPublic(r, false));
   // If no DB rows, expose the env OA so admin UI can still show something.
   if (items.length === 0) {
     const env = _envOa();
-    if (env) items.push({ ...env, isEnvOa: true, id: 0 });
+    if (env) {
+      try {
+        const stats = await getBindingStats(pool, 0);
+        items.push({ ...env, ...stats, isEnvOa: true, id: 0 });
+      } catch {
+        items.push({ ...env, isEnvOa: true, id: 0 });
+      }
+    }
   }
   return items;
+}
+
+async function getBindingStats(pool, oaId) {
+  const numId = (oaId == null || Number(oaId) === 0) ? null : Number(oaId);
+  if (oaId != null && Number(oaId) !== 0 && (!Number.isFinite(numId) || numId <= 0)) {
+    throw new Error('invalid id');
+  }
+  const { rows } = await pool.query(
+    `SELECT
+       (SELECT COUNT(*)::int
+          FROM tenants t
+         WHERE COALESCE(t.line_oa_id, 0) = COALESCE($1::bigint, 0)
+           AND t.line_user_id IS NOT NULL
+           AND t.deleted_at IS NULL) AS tenant_linked_count,
+       (SELECT COUNT(*)::int
+          FROM line_bindings b
+         WHERE COALESCE(b.oa_id, 0) = COALESCE($1::bigint, 0)
+           AND b.status='bound') AS binding_bound_count,
+       (SELECT COUNT(*)::int
+          FROM line_bindings b
+         WHERE COALESCE(b.target_oa_id, 0) = COALESCE($1::bigint, 0)
+           AND b.status='pending'
+           AND b.expires_at > NOW()) AS pending_count,
+       (SELECT MAX(b.bound_at)
+          FROM line_bindings b
+         WHERE COALESCE(b.oa_id, 0) = COALESCE($1::bigint, 0)
+           AND b.status='bound') AS last_bound_at,
+       (SELECT bound_count::int
+          FROM line_oas o
+         WHERE $1::bigint IS NOT NULL
+           AND o.id = $1::bigint
+           AND o.deleted_at IS NULL) AS stored_bound_count`,
+    [numId]
+  );
+  const row = rows[0] || {};
+  const tenantLinkedCount = asCount(row.tenant_linked_count, 0);
+  const bindingBoundCount = asCount(row.binding_bound_count, 0);
+  const storedBoundCount = row.stored_bound_count == null ? 0 : asCount(row.stored_bound_count, 0);
+  return {
+    boundCount: tenantLinkedCount,
+    tenantLinkedCount,
+    bindingBoundCount,
+    storedBoundCount,
+    pendingCount: asCount(row.pending_count, 0),
+    lastBoundAt: row.last_bound_at || null,
+    countSource: 'live',
+    counterDrift: tenantLinkedCount - storedBoundCount,
+    bindingMismatch: tenantLinkedCount - bindingBoundCount,
+    hasCountDrift: numId != null && tenantLinkedCount !== storedBoundCount,
+    hasBindingMismatch: tenantLinkedCount !== bindingBoundCount,
+  };
 }
 
 async function getById(pool, id, { withSecrets = false } = {}) {
@@ -351,8 +474,10 @@ async function refreshBoundCount(pool, oaId) {
   await pool.query(
     `UPDATE line_oas
         SET bound_count = (
-          SELECT COUNT(*) FROM line_bindings
-            WHERE oa_id=$1 AND status='bound'
+          SELECT COUNT(*) FROM tenants
+            WHERE line_oa_id=$1
+              AND line_user_id IS NOT NULL
+              AND deleted_at IS NULL
         ),
         updated_at = NOW()
       WHERE id=$1`,
@@ -425,7 +550,7 @@ function verifyWebhookSignature(oa, rawBody, signature) {
 
 module.exports = {
   list, getById, getBySlug, getDefault, resolveForTenant,
-  create, update, remove, refreshBoundCount, testConnection,
+  create, update, remove, refreshBoundCount, getBindingStats, testConnection,
   verifyWebhookSignature, invalidateCache,
   normalizeSlug, isValidSlug,
   _envOa,

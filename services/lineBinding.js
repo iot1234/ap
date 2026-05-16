@@ -149,7 +149,10 @@ async function revoke(pool, { tenantId }) {
   if (prevOaId) {
     pool.query(
       `UPDATE line_oas SET bound_count = (
-          SELECT COUNT(*) FROM line_bindings WHERE oa_id=$1 AND status='bound'
+          SELECT COUNT(*) FROM tenants
+           WHERE line_oa_id=$1
+             AND line_user_id IS NOT NULL
+             AND deleted_at IS NULL
         ), updated_at=NOW() WHERE id=$1`,
       [prevOaId]
     ).catch(() => {});
@@ -161,8 +164,14 @@ async function revoke(pool, { tenantId }) {
  */
 async function block(pool, { tenantId, reason }) {
   const client = await pool.connect();
+  let prevOaId = null;
   try {
     await client.query('BEGIN');
+    const before = await client.query(
+      `SELECT line_oa_id FROM tenants WHERE id=$1`,
+      [tenantId]
+    );
+    prevOaId = before.rows[0]?.line_oa_id || null;
     await client.query(
       `UPDATE tenants
           SET line_binding_blocked=TRUE,
@@ -187,6 +196,17 @@ async function block(pool, { tenantId, reason }) {
     throw err;
   } finally {
     client.release();
+  }
+  if (prevOaId) {
+    pool.query(
+      `UPDATE line_oas SET bound_count = (
+          SELECT COUNT(*) FROM tenants
+           WHERE line_oa_id=$1
+             AND line_user_id IS NOT NULL
+             AND deleted_at IS NULL
+        ), updated_at=NOW() WHERE id=$1`,
+      [prevOaId]
+    ).catch(() => {});
   }
 }
 
@@ -349,7 +369,10 @@ async function tryBind(pool, { code, lineUserId, oaId } = {}) {
     if (oaIdNum != null) {
       pool.query(
         `UPDATE line_oas SET bound_count = (
-            SELECT COUNT(*) FROM line_bindings WHERE oa_id=$1 AND status='bound'
+            SELECT COUNT(*) FROM tenants
+             WHERE line_oa_id=$1
+               AND line_user_id IS NOT NULL
+               AND deleted_at IS NULL
           ), last_seen_at=NOW(), updated_at=NOW() WHERE id=$1`,
         [oaIdNum]
       ).catch((err) => console.warn('[line] bound_count update failed:', err.message));

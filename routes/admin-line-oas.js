@@ -15,6 +15,27 @@
 const express = require('express');
 const lineOa = require('../services/lineOa');
 
+function summarize(items) {
+  return items.reduce((acc, o) => {
+    acc.totalOas += 1;
+    if (o.enabled) acc.enabledOas += 1;
+    acc.totalBound += Number(o.boundCount || 0);
+    acc.totalBindingRows += Number(o.bindingBoundCount || 0);
+    acc.totalPending += Number(o.pendingCount || 0);
+    acc.totalCounterDrift += Number(o.counterDrift || 0);
+    if (o.hasCountDrift || o.hasBindingMismatch) acc.hasWarnings = true;
+    return acc;
+  }, {
+    totalOas: 0,
+    enabledOas: 0,
+    totalBound: 0,
+    totalBindingRows: 0,
+    totalPending: 0,
+    totalCounterDrift: 0,
+    hasWarnings: false,
+  });
+}
+
 module.exports = function buildAdminLineOasRouter(ctx) {
   const { pool, requireAuth, requireRole, sameOrigin, csrfGuard, audit } = ctx;
   const r = express.Router();
@@ -33,7 +54,7 @@ module.exports = function buildAdminLineOasRouter(ctx) {
           ? `${base}/webhook/line`
           : `${base}/webhook/line/${o.slug}`,
       }));
-      res.json({ ok: true, items: withUrls });
+      res.json({ ok: true, items: withUrls, summary: summarize(withUrls) });
     } catch (err) {
       console.error('admin line-oas list error:', err);
       res.status(500).json({ error: 'internal error' });
@@ -71,6 +92,7 @@ module.exports = function buildAdminLineOasRouter(ctx) {
       try {
         const oa = await lineOa.getById(pool, id);
         if (!oa) return res.status(404).json({ error: 'not found' });
+        const bindingStats = await lineOa.getBindingStats(pool, id);
         // Compute the public webhook URL. PUBLIC_URL > RAILWAY_PUBLIC_DOMAIN
         // > req-derived (host + protocol). Strip trailing slashes.
         const publicUrl = (process.env.PUBLIC_URL
@@ -110,11 +132,15 @@ module.exports = function buildAdminLineOasRouter(ctx) {
         res.json({
           ok: true,
           oa: { id: oa.id, slug: oa.slug, name: oa.name, enabled: oa.enabled,
-                hasSecret: !!oa.channelSecret, hasToken: !!oa.channelAccessToken },
+                hasSecret: !!(oa.channelSecret || oa.hasChannelSecret),
+                hasToken: !!(oa.channelAccessToken || oa.hasAccessToken),
+                boundCount: bindingStats.boundCount,
+                pendingCount: bindingStats.pendingCount },
           webhookUrl,
           legacyWebhookUrl: `${publicUrl}/webhook/line`,
           lastSuccessAt: lastSuccess?.createdAt || null,
           lastFailureAt: lastFailure?.createdAt || null,
+          bindingStats,
           events,
         });
       } catch (err) {

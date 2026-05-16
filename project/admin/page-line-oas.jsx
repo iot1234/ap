@@ -13,6 +13,10 @@ function PageLineOas({ setToast }) {
   const apiFetch = window.requireApiFetch ? window.requireApiFetch() : window.apiFetch;
 
   const [items, setItems] = useState([]);
+  const [summary, setSummary] = useState({
+    totalOas: 0, enabledOas: 0, totalBound: 0, totalPending: 0,
+    totalBindingRows: 0, totalCounterDrift: 0, hasWarnings: false,
+  });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [editing, setEditing] = useState(null);
@@ -42,6 +46,7 @@ function PageLineOas({ setToast }) {
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || 'load failed');
       setItems(d.items || []);
+      setSummary(d.summary || summarizeLineOas(d.items || []));
     } catch (e) {
       setError(e.message);
     } finally {
@@ -220,6 +225,23 @@ function PageLineOas({ setToast }) {
         </div>
       )}
 
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))',
+        gap: 10,
+        marginBottom: 16,
+      }}>
+        <LineOaStat label="ผู้เช่าผูก LINE แล้ว" value={summary.totalBound || 0}
+                    note="นับสดจาก tenant ที่มี line_user_id" color="#2f8f5b" />
+        <LineOaStat label="รหัสรอผูก" value={summary.totalPending || 0}
+                    note="pending code ที่ยังไม่หมดอายุ" color="#c08a2a" />
+        <LineOaStat label="OA เปิดใช้งาน" value={`${summary.enabledOas || 0}/${summary.totalOas || 0}`}
+                    note="ช่องทางที่รับ/ส่งได้ตอนนี้" color={C.accent || '#2563EB'} />
+        <LineOaStat label="สถานะตัวนับ" value={summary.hasWarnings ? 'ต้องตรวจ' : 'ปกติ'}
+                    note={summary.hasWarnings ? 'มีข้อมูล binding/cache ไม่ตรงกัน' : 'ค่าหน้า OA ตรงกับข้อมูลจริง'}
+                    color={summary.hasWarnings ? '#b94a48' : C.muted} />
+      </div>
+
       {loading && items.length === 0 ? (
         <Card><div style={{ padding: 40, textAlign: 'center', color: C.muted }}>กำลังโหลด…</div></Card>
       ) : items.length === 0 ? (
@@ -244,13 +266,31 @@ function PageLineOas({ setToast }) {
                       ? <Pill color="info" size="sm">เปิด</Pill>
                       : <Pill color="muted" size="sm">ปิด</Pill>}
                     {o.isEnvOa && <Pill color="warning" size="sm">env</Pill>}
-                    <span style={{ fontSize: 12, color: C.muted }}>
-                      ผูกแล้ว {o.boundCount || 0} คน
-                    </span>
+                    <Pill color="success" size="sm">ผูกแล้ว {fmtLineCount(o.boundCount)} คน</Pill>
+                    {!!o.pendingCount && <Pill color="warning" size="sm">รอผูก {fmtLineCount(o.pendingCount)}</Pill>}
+                    {(o.hasCountDrift || o.hasBindingMismatch) && (
+                      <Pill color="danger" size="sm">ตัวนับไม่ตรง</Pill>
+                    )}
                   </div>
                   {o.description && (
                     <div style={{ fontSize: 13, color: C.ink2, marginTop: 4 }}>{o.description}</div>
                   )}
+                  <div style={{
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(auto-fit, minmax(118px, 1fr))',
+                    gap: 8,
+                    marginTop: 10,
+                  }}>
+                    <OaMetric label="ผูกใช้งานได้" value={o.boundCount || 0}
+                              hint="tenants.line_user_id" color="#2f8f5b" />
+                    <OaMetric label="binding bound" value={o.bindingBoundCount || 0}
+                              hint="line_bindings" color={C.ink2} />
+                    <OaMetric label="รอผูก" value={o.pendingCount || 0}
+                              hint="code ยังไม่หมดอายุ" color="#c08a2a" />
+                    <OaMetric label="cache เดิม" value={o.storedBoundCount || 0}
+                              hint={o.hasCountDrift ? `คลาด ${o.counterDrift > 0 ? '+' : ''}${o.counterDrift}` : 'ตรงกัน'}
+                              color={o.hasCountDrift ? '#b94a48' : C.muted} />
+                  </div>
                   <div style={{ marginTop: 10, padding: 10, background: C.surfaceAlt,
                                 borderRadius: 6, fontSize: 12, fontFamily: 'JetBrains Mono, monospace' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: C.muted, marginBottom: 4 }}>
@@ -299,15 +339,38 @@ function PageLineOas({ setToast }) {
       )}
 
       <Card style={{ marginTop: 16 }}>
-        <SectionHeading title="วิธีตั้งค่า LINE Developer Console" level={3} />
-        <ol style={{ fontSize: 13, color: C.ink2, lineHeight: 1.8, paddingLeft: 20 }}>
-          <li>เข้า <a href="https://developers.line.biz/console/" target="_blank" rel="noreferrer">LINE Developer Console</a> → เลือก provider → กด Create Messaging API channel</li>
-          <li>คัดลอก <b>Channel access token (long-lived)</b> + <b>Channel secret</b></li>
-          <li>กด "เพิ่ม OA" ที่หน้านี้ → กรอก slug (ใช้สั้นๆ เช่น <code>main</code>, <code>branch2</code>) + token + secret</li>
-          <li>กลับไปที่ LINE Console → Messaging API → ใส่ Webhook URL จากการ์ดด้านบน</li>
-          <li>เปิด "Use webhook" → กด Verify เพื่อทดสอบ</li>
-          <li>ปิด "Auto-reply messages" + "Greeting messages" (เพื่อให้ระบบเราคุมการตอบเอง)</li>
-        </ol>
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))',
+          gap: 18,
+          alignItems: 'center',
+        }}>
+          <div style={{
+            borderRadius: 10,
+            overflow: 'hidden',
+            border: `1px solid ${C.borderSoft || C.border}`,
+            background: C.surfaceAlt,
+          }}>
+            <img src="/assets/line-oa-setup-guide.png"
+                 alt="ภาพประกอบขั้นตอนเชื่อม LINE OA กับระบบหลังบ้าน"
+                 style={{ display: 'block', width: '100%', height: 'auto' }} />
+          </div>
+          <div>
+            <SectionHeading
+              title="วิธีตั้งค่า LINE Developer Console"
+              subtitle="ทำตามขั้นตอนนี้แล้วกลับมากดทดสอบ/ตรวจ webhook บนการ์ด OA เพื่อดูสถานะจริง"
+              level={3}
+            />
+            <ol style={{ fontSize: 13, color: C.ink2, lineHeight: 1.8, paddingLeft: 20, margin: 0 }}>
+              <li>เข้า <a href="https://developers.line.biz/console/" target="_blank" rel="noreferrer">LINE Developer Console</a> → เลือก provider → กด Create Messaging API channel</li>
+              <li>คัดลอก <b>Channel access token (long-lived)</b> + <b>Channel secret</b></li>
+              <li>กด "เพิ่ม OA" ที่หน้านี้ → กรอก slug (ใช้สั้นๆ เช่น <code>main</code>, <code>branch2</code>) + token + secret</li>
+              <li>กลับไปที่ LINE Console → Messaging API → ใส่ Webhook URL จากการ์ดด้านบน</li>
+              <li>เปิด "Use webhook" → กด Verify เพื่อทดสอบ</li>
+              <li>ปิด "Auto-reply messages" + "Greeting messages" เพื่อให้ระบบนี้คุมการตอบกลับเอง</li>
+            </ol>
+          </div>
+        </div>
       </Card>
 
       {/* Edit / Add modal */}
@@ -442,6 +505,8 @@ function DiagnosticsBody({ diag, C }) {
     );
   }
   const ev = diag.events || [];
+  const stats = diag.bindingStats || {};
+  const hasBindingWarning = !!(stats.hasCountDrift || stats.hasBindingMismatch);
   const hasRecentFail = !!diag.lastFailureAt && (!diag.lastSuccessAt
     || new Date(diag.lastFailureAt) > new Date(diag.lastSuccessAt));
   const overall = ev.length === 0
@@ -515,6 +580,36 @@ function DiagnosticsBody({ diag, C }) {
         </div>
       </div>
 
+      {/* Binding count diagnostics */}
+      <div style={{ padding: 12, borderRadius: 8, background: hasBindingWarning ? '#fff7e0' : C.surfaceAlt,
+                    border: `1px solid ${hasBindingWarning ? '#f0d58a' : (C.borderSoft || C.border)}` }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 8 }}>
+          <div style={{ fontSize: 12.5, fontWeight: 600 }}>
+            🔎 ตรวจจำนวนผู้ผูก LINE
+          </div>
+          <Pill color={hasBindingWarning ? 'warning' : 'success'} size="sm">
+            {hasBindingWarning ? 'พบข้อมูลไม่ตรงกัน' : 'ตัวเลขปกติ'}
+          </Pill>
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: 8 }}>
+          <DiagMetric C={C} label="ผูกใช้งานได้" value={stats.boundCount || 0}
+                      hint="tenant มี line_user_id" color="#2f8f5b" />
+          <DiagMetric C={C} label="binding bound" value={stats.bindingBoundCount || 0}
+                      hint="line_bindings" color={C.ink2} />
+          <DiagMetric C={C} label="รอผูก" value={stats.pendingCount || 0}
+                      hint="pending code" color="#c08a2a" />
+          <DiagMetric C={C} label="cache เดิม" value={stats.storedBoundCount || 0}
+                      hint={stats.hasCountDrift ? `คลาด ${stats.counterDrift > 0 ? '+' : ''}${stats.counterDrift}` : 'ตรงกัน'}
+                      color={stats.hasCountDrift ? '#b94a48' : C.muted} />
+        </div>
+        {hasBindingWarning && (
+          <div style={{ marginTop: 8, fontSize: 12, color: '#7a5a00', lineHeight: 1.5 }}>
+            ระบบจะแสดงเลขหลักจาก tenant ที่มี LINE userId เพราะเป็นข้อมูลที่ใช้ส่งแจ้งเตือนจริง
+            ส่วนเลข cache เดิมใช้เป็นตัวช่วยจับความคลาดเคลื่อนเท่านั้น
+          </div>
+        )}
+      </div>
+
       {/* Recent events */}
       <div>
         <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>
@@ -557,6 +652,90 @@ function DiagnosticsBody({ diag, C }) {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+function fmtLineCount(value) {
+  const n = Number(value || 0);
+  return Number.isFinite(n) ? n.toLocaleString('th-TH') : '0';
+}
+
+function summarizeLineOas(items) {
+  return (items || []).reduce((acc, o) => {
+    acc.totalOas += 1;
+    if (o.enabled) acc.enabledOas += 1;
+    acc.totalBound += Number(o.boundCount || 0);
+    acc.totalBindingRows += Number(o.bindingBoundCount || 0);
+    acc.totalPending += Number(o.pendingCount || 0);
+    acc.totalCounterDrift += Number(o.counterDrift || 0);
+    if (o.hasCountDrift || o.hasBindingMismatch) acc.hasWarnings = true;
+    return acc;
+  }, {
+    totalOas: 0,
+    enabledOas: 0,
+    totalBound: 0,
+    totalBindingRows: 0,
+    totalPending: 0,
+    totalCounterDrift: 0,
+    hasWarnings: false,
+  });
+}
+
+function LineOaStat({ label, value, note, color }) {
+  const C = window.ADMIN_C;
+  return (
+    <div style={{
+      background: C.surface,
+      border: `1px solid ${C.border}`,
+      borderRadius: 8,
+      padding: '12px 14px',
+      minWidth: 0,
+    }}>
+      <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 4 }}>{label}</div>
+      <div style={{ fontSize: 24, lineHeight: 1.1, fontWeight: 700, color, letterSpacing: 0 }}>
+        {typeof value === 'number' ? fmtLineCount(value) : value}
+      </div>
+      <div style={{ fontSize: 11.5, color: C.muted, marginTop: 4 }}>{note}</div>
+    </div>
+  );
+}
+
+function OaMetric({ label, value, hint, color }) {
+  const C = window.ADMIN_C;
+  return (
+    <div style={{
+      padding: '8px 10px',
+      borderRadius: 8,
+      background: C.surfaceAlt,
+      border: `1px solid ${C.borderSoft || C.border}`,
+      minWidth: 0,
+    }}>
+      <div style={{ fontSize: 11, color: C.muted }}>{label}</div>
+      <div style={{ fontSize: 18, lineHeight: 1.2, fontWeight: 700, color, marginTop: 2 }}>
+        {fmtLineCount(value)}
+      </div>
+      <div style={{ fontSize: 10.5, color: C.muted, marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+        {hint}
+      </div>
+    </div>
+  );
+}
+
+function DiagMetric({ C, label, value, hint, color }) {
+  return (
+    <div style={{
+      padding: '8px 10px',
+      borderRadius: 8,
+      background: '#fff',
+      border: `1px solid ${C.borderSoft || C.border}`,
+      minWidth: 0,
+    }}>
+      <div style={{ fontSize: 11, color: C.muted }}>{label}</div>
+      <div style={{ fontSize: 19, lineHeight: 1.2, fontWeight: 700, color, marginTop: 2 }}>
+        {fmtLineCount(value)}
+      </div>
+      <div style={{ fontSize: 10.5, color: C.muted, marginTop: 2 }}>{hint}</div>
     </div>
   );
 }

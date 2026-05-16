@@ -83,6 +83,63 @@ test('list: returns DB OAs when present', async () => {
   assert.equal(items[0].slug, 'main');
 });
 
+test('list: uses live tenant-linked count and exposes stale counter drift', async () => {
+  const lastBoundAt = new Date();
+  const pool = buildFakePool({
+    'FROM line_oas o': () => ({
+      rows: [{
+        id: 1, slug: 'main', name: 'Main', enabled: true, is_default: true,
+        bound_count: 1,
+        tenant_linked_count: 2,
+        binding_bound_count: 3,
+        pending_count: 4,
+        last_bound_at: lastBoundAt,
+        created_at: new Date(), updated_at: new Date(),
+      }],
+    }),
+  });
+  const items = await lineOa.list(pool);
+  assert.equal(items[0].boundCount, 2);
+  assert.equal(items[0].tenantLinkedCount, 2);
+  assert.equal(items[0].bindingBoundCount, 3);
+  assert.equal(items[0].storedBoundCount, 1);
+  assert.equal(items[0].pendingCount, 4);
+  assert.equal(items[0].counterDrift, 1);
+  assert.equal(items[0].bindingMismatch, -1);
+  assert.equal(items[0].hasCountDrift, true);
+  assert.equal(items[0].hasBindingMismatch, true);
+  assert.equal(items[0].lastBoundAt, lastBoundAt);
+});
+
+test('getBindingStats: returns current linked tenants, binding rows, and pending codes', async () => {
+  const lastBoundAt = new Date();
+  const pool = buildFakePool({
+    'tenant_linked_count': (_sql, params) => {
+      assert.deepEqual(params, [7]);
+      return {
+        rows: [{
+          tenant_linked_count: '5',
+          binding_bound_count: '4',
+          pending_count: '2',
+          stored_bound_count: '3',
+          last_bound_at: lastBoundAt,
+        }],
+      };
+    },
+  });
+  const stats = await lineOa.getBindingStats(pool, 7);
+  assert.equal(stats.boundCount, 5);
+  assert.equal(stats.tenantLinkedCount, 5);
+  assert.equal(stats.bindingBoundCount, 4);
+  assert.equal(stats.pendingCount, 2);
+  assert.equal(stats.storedBoundCount, 3);
+  assert.equal(stats.counterDrift, 2);
+  assert.equal(stats.bindingMismatch, 1);
+  assert.equal(stats.hasCountDrift, true);
+  assert.equal(stats.hasBindingMismatch, true);
+  assert.equal(stats.lastBoundAt, lastBoundAt);
+});
+
 test('getById(0) returns env OA without hitting DB', async () => {
   process.env.LINE_CHANNEL_ACCESS_TOKEN = 'env-token-xxx';
   let dbCalled = false;
