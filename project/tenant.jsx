@@ -293,6 +293,14 @@ function fileToDataUrl(file) {
     r.readAsDataURL(file);
   });
 }
+function safeStorageGet(key) {
+  try { return localStorage.getItem(key); }
+  catch { return null; }
+}
+function safeStorageSet(key, value) {
+  try { localStorage.setItem(key, value); }
+  catch { /* storage can be blocked in private/locked-down browsers */ }
+}
 function initialsOf(name) {
   const s = String(name || '').trim();
   if (!s) return '—';
@@ -677,6 +685,41 @@ function Empty({ icon = 'spark', title, hint, action }) {
   );
 }
 
+function SyncBanner({ errors = [], syncing, onRetry, locale }) {
+  if (!errors.length) return null;
+  const th = locale !== 'en';
+  return (
+    <div className="sync-banner" role="status" aria-live="polite" style={{
+      marginBottom: 16, padding: 12, borderRadius: 14,
+      background: errors.length ? 'var(--amber-soft)' : 'var(--blue-soft)',
+      border: '1px solid var(--line)',
+      color: errors.length ? 'var(--amber)' : 'var(--blue)',
+      display: 'flex', gap: 12, alignItems: 'flex-start', justifyContent: 'space-between',
+    }}>
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontWeight: 700, fontSize: 13.5 }}>
+          {th ? 'ข้อมูลบางส่วนยังซิงก์ไม่สำเร็จ' : 'Some data could not sync'}
+        </div>
+        <div style={{ fontSize: 12.5, lineHeight: 1.55, marginTop: 4 }}>
+          {errors.map((e) => (
+            <div key={e.key}>
+              • {e.label}: {e.message || (th ? 'โหลดไม่สำเร็จ' : 'failed to load')}
+            </div>
+          ))}
+          <div style={{ color: 'var(--muted)', marginTop: 4 }}>
+            {th
+              ? 'ระบบเก็บข้อมูลล่าสุดที่โหลดสำเร็จไว้ ไม่ล้างหน้าจอเป็นค่าว่างเพื่อป้องกันเข้าใจผิด'
+              : 'Previously loaded data is kept on screen instead of being cleared.'}
+          </div>
+        </div>
+      </div>
+      <Button size="sm" variant="outline" onClick={onRetry} disabled={syncing} style={{ flex: '0 0 auto' }}>
+        {syncing ? (th ? 'กำลังลองใหม่…' : 'Retrying…') : (th ? 'ลองใหม่' : 'Retry')}
+      </Button>
+    </div>
+  );
+}
+
 function Modal({ open, onClose, children, title, size = 'md' }) {
   useEffect(() => {
     if (!open) return undefined;
@@ -696,7 +739,7 @@ function Modal({ open, onClose, children, title, size = 'md' }) {
       zIndex: 100, animation: 'fade-in .2s ease',
       padding: '24px 12px 0',
     }}>
-      <div onClick={(e) => e.stopPropagation()} style={{
+      <div className="modal-panel" onClick={(e) => e.stopPropagation()} style={{
         background: 'var(--surface)', color: 'var(--ink)',
         width: '100%', maxWidth: widths[size],
         borderRadius: '22px 22px 0 0',
@@ -718,7 +761,7 @@ function Modal({ open, onClose, children, title, size = 'md' }) {
             }}><Icon name="close" size={18} /></button>
           </div>
         ) : null}
-        <div style={{ overflow: 'auto', padding: '20px 22px 24px' }}>{children}</div>
+        <div className="modal-body" style={{ overflow: 'auto', padding: '20px 22px 24px' }}>{children}</div>
       </div>
     </div>
   );
@@ -771,7 +814,7 @@ function LoginView({ locale, setLocale, onLoggedIn, portalEnabled }) {
       const out = await api('/api/tenant/login', {
         method: 'POST', body: JSON.stringify({ phone: normalizedPhone }),
       });
-      onLoggedIn(out.tenant);
+      await onLoggedIn(out.tenant);
     } catch (e2) {
       // Map server response codes to user-friendly messages.
       // - 503 → portal disabled (feature flag)
@@ -798,7 +841,7 @@ function LoginView({ locale, setLocale, onLoggedIn, portalEnabled }) {
         background: 'var(--surface)', borderRadius: 24, overflow: 'hidden',
         boxShadow: 'var(--shadow-lg)', border: '1px solid var(--line)',
       }}>
-        <div style={{
+        <div className="login-hero" style={{
           padding: '44px 40px', display: 'flex', flexDirection: 'column',
           gap: 22, justifyContent: 'space-between',
           background: 'linear-gradient(160deg, #2a1f15 0%, #3a2c1f 100%)',
@@ -827,7 +870,7 @@ function LoginView({ locale, setLocale, onLoggedIn, portalEnabled }) {
             <span>v3</span><span>·</span><span>{t('secure')}</span><span>·</span><span>th / en</span>
           </div>
         </div>
-        <form onSubmit={submit} style={{ padding: '44px 40px', display: 'flex', flexDirection: 'column', gap: 16 }}>
+        <form className="login-form" onSubmit={submit} style={{ padding: '44px 40px', display: 'flex', flexDirection: 'column', gap: 16 }}>
           <div style={{ marginBottom: 6 }}>
             <h1 style={{ margin: 0, fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 24, letterSpacing: '-.01em' }}>{t('signIn')}</h1>
             <p style={{ color: 'var(--muted)', fontSize: 13.5, margin: '6px 0 0' }}>
@@ -871,7 +914,12 @@ function LoginView({ locale, setLocale, onLoggedIn, portalEnabled }) {
           </div>
         </form>
       </div>
-      <style>{`@media (max-width: 760px) { .login-grid { grid-template-columns: 1fr !important; } }`}</style>
+      <style>{`
+        @media (max-width: 760px) { .login-grid { grid-template-columns: 1fr !important; } }
+        @media (max-width: 480px) {
+          .login-hero, .login-form { padding: 28px 22px !important; }
+        }
+      `}</style>
     </div>
   );
 }
@@ -1057,7 +1105,7 @@ function QuickAction({ icon, label, sub, tone = 'accent', onClick }) {
 
 function BillRow({ bill, onClick, divider, locale, t }) {
   return (
-    <button onClick={onClick} style={{
+    <button className="bill-row" onClick={onClick} style={{
       display: 'grid', alignItems: 'center', width: '100%',
       gridTemplateColumns: '1fr auto auto auto', gap: 14, textAlign: 'left',
       padding: '16px 20px', background: 'transparent', border: 0, cursor: 'pointer',
@@ -1143,7 +1191,7 @@ function BillsView({ locale, bills, refresh, slipFeature, openId, setOpenId }) {
         <div style={{ display: 'grid', gap: 12 }}>
           {filtered.map((b) => (
             <Card key={b.id} hoverable pad={0} onClick={() => setOpenId(b.id)}>
-              <div style={{ padding: '18px 20px', display: 'grid', gridTemplateColumns: '1fr auto', gap: 18, alignItems: 'center' }}>
+              <div className="bill-card-main" style={{ padding: '18px 20px', display: 'grid', gridTemplateColumns: '1fr auto', gap: 18, alignItems: 'center' }}>
                 <div style={{ minWidth: 0 }}>
                   <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
                     <div style={{ fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 16 }}>{b.bill_no}</div>
@@ -1153,12 +1201,12 @@ function BillsView({ locale, bills, refresh, slipFeature, openId, setOpenId }) {
                     {t('billPeriod')} {fmtPeriod(b.period, locale)} · {t('dueDate')} {fmtDate(b.due_date, locale)}
                   </div>
                 </div>
-                <div style={{ textAlign: 'right' }}>
+                <div className="bill-card-amount" style={{ textAlign: 'right' }}>
                   <div style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 22 }}>฿{fmtMoney(b.total)}</div>
                   <div style={{ color: 'var(--muted)', fontSize: 12 }}>{t('billTotal')}</div>
                 </div>
               </div>
-              <div style={{
+              <div className="mini-cells" style={{
                 display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)',
                 borderTop: '1px solid var(--line)',
               }}>
@@ -1178,7 +1226,7 @@ function BillsView({ locale, bills, refresh, slipFeature, openId, setOpenId }) {
 
 function MiniCell({ label, v, divider }) {
   return (
-    <div style={{ padding: '10px 18px', borderLeft: divider ? '1px solid var(--line)' : 'none' }}>
+    <div className="mini-cell" style={{ padding: '10px 18px', borderLeft: divider ? '1px solid var(--line)' : 'none' }}>
       <div style={{ color: 'var(--muted)', fontSize: 11.5 }}>{label}</div>
       <div style={{ fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 13.5, marginTop: 2 }}>฿{fmtMoney(v)}</div>
     </div>
@@ -1505,8 +1553,16 @@ function BillDetailBody({ bill, locale, refresh, slipFeature }) {
           <input key={fileInputKey} type="file" accept="image/jpeg,image/png,image/webp"
             onChange={(e) => {
               const f = e.target.files[0];
+              if (f && !['image/jpeg', 'image/png', 'image/webp'].includes(f.type)) {
+                setNotice({ kind: 'error', title: t('slipField'),
+                  message: locale === 'th'
+                    ? 'รองรับเฉพาะ JPG, PNG หรือ WebP เท่านั้น'
+                    : 'Only JPG, PNG or WebP images are supported.' });
+                e.target.value = ''; setFile(null); return;
+              }
               if (f && f.size > 5 * 1024 * 1024) {
-                alert('ไฟล์ใหญ่เกินไป (เกิน 5 MB)');
+                setNotice({ kind: 'error', title: t('slipField'),
+                  message: locale === 'th' ? 'ไฟล์ใหญ่เกินไป (เกิน 5 MB)' : 'File is too large (over 5 MB).' });
                 e.target.value = ''; setFile(null); return;
               }
               setFile(f);
@@ -1589,19 +1645,10 @@ function PaymentNotice({ notice }) {
 }
 
 // =========================================================== PaymentsView =
-function PaymentsView({ locale }) {
+function PaymentsView({ locale, payments, syncErrors }) {
   const t = (k) => tr(locale, k);
-  const [items, setItems] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [err, setErr] = useState('');
-  useEffect(() => {
-    let cancelled = false;
-    api('/api/tenant/payments')
-      .then((d) => { if (!cancelled) setItems(d.payments || []); })
-      .catch((e) => { if (!cancelled) setErr(e.message || 'failed'); })
-      .finally(() => { if (!cancelled) setLoading(false); });
-    return () => { cancelled = true; };
-  }, []);
+  const items = payments || [];
+  const paymentError = (syncErrors || []).find((e) => e.key === 'payments');
   const statusLabel = (s) => s === 'verified' ? t('paymentVerified')
                            : s === 'pending' ? t('paymentPending')
                            : s === 'rejected' ? t('paymentRejected')
@@ -1609,9 +1656,7 @@ function PaymentsView({ locale }) {
   return (
     <div className="anim-in">
       <SectionHeader title={t('paymentHistory')} subtitle={t('paymentHistorySub')} />
-      {loading ? <Card><div style={{ color: 'var(--muted)' }}>{t('loading')}</div></Card>
-        : err ? <Card><div style={{ color: 'var(--red)' }}>{err}</div></Card>
-        : items.length === 0 ? <Empty icon="payments" title={t('noPayments')} />
+      {items.length === 0 ? <Empty icon="payments" title={paymentError ? t('nothingHere') : t('noPayments')} />
         : (
         <Card pad={0}>
           <div className="pay-head" style={{
@@ -1661,18 +1706,9 @@ function PaymentsView({ locale }) {
 }
 
 // =========================================================== ContractView =
-function ContractView({ locale, tenant }) {
+function ContractView({ locale, tenant, contract }) {
   const t = (k) => tr(locale, k);
-  const [state, setState] = useState({ loading: true, contract: null, error: null });
-  useEffect(() => {
-    let cancel = false;
-    api('/api/tenant/contract')
-      .then((d) => { if (!cancel) setState({ loading: false, contract: d.contract, error: null }); })
-      .catch((err) => { if (!cancel) setState({ loading: false, contract: null, error: err.message || 'load failed' }); });
-    return () => { cancel = true; };
-  }, []);
-  if (state.loading) return <Card><div style={{ color: 'var(--muted)' }}>{t('loading')}</div></Card>;
-  const c = state.contract;
+  const c = contract;
   if (!c) {
     return (
       <div className="anim-in">
@@ -1809,7 +1845,7 @@ function MaintenanceView({ locale, tenant, tickets, refresh }) {
             const cat = MAINT_CATS.find((c) => c.id === x.category);
             return (
               <Card key={x.id} hoverable>
-                <div style={{ display: 'flex', alignItems: 'flex-start', gap: 14 }}>
+                <div className="maintenance-ticket-row" style={{ display: 'flex', alignItems: 'flex-start', gap: 14 }}>
                   <div style={{
                     width: 48, height: 48, borderRadius: 12,
                     background: 'var(--accent-soft)', color: 'var(--accent-2)',
@@ -1874,7 +1910,14 @@ function MaintenanceForm({ tenant, locale, onDone, onCancel }) {
   const missingRoom = !tenant || !tenant.roomId;
   async function submit(e) {
     e.preventDefault();
-    if (!title.trim()) return;
+    if (!title.trim()) {
+      setErr(locale === 'th' ? 'กรุณาระบุหัวข้อแจ้งซ่อม' : 'Enter a repair title.');
+      return;
+    }
+    if (desc.length > 2000) {
+      setErr(locale === 'th' ? 'รายละเอียดต้องไม่เกิน 2,000 ตัวอักษร' : 'Description must be 2,000 characters or less.');
+      return;
+    }
     if (missingRoom) {
       setErr(locale === 'th'
         ? 'ไม่พบห้องของคุณ — กรุณาติดต่อสำนักงาน'
@@ -1933,7 +1976,7 @@ function MaintenanceForm({ tenant, locale, onDone, onCancel }) {
       </div>
       <div>
         <Label>{t('description')}</Label>
-        <textarea value={desc} onChange={(e) => setDesc(e.target.value)} rows={4}
+        <textarea value={desc} onChange={(e) => setDesc(e.target.value)} rows={4} maxLength={2000}
           placeholder={t('descPlaceholder')}
           style={{
             width: '100%', padding: 14, borderRadius: 12, background: 'var(--surface-2)',
@@ -2328,36 +2371,41 @@ function App() {
   const [tenant, setTenant] = useState(null);
   const [loading, setLoading] = useState(true);
   const [features, setFeatures] = useState(null);
-  const _initLocale = (typeof localStorage !== 'undefined') ? localStorage.getItem('tenant_locale') : null;
-  const _initTheme = (typeof localStorage !== 'undefined') ? localStorage.getItem('tenant_theme') : null;
+  const _initLocale = safeStorageGet('tenant_locale');
+  const _initTheme = safeStorageGet('tenant_theme');
   const [locale, setLocaleRaw] = useState(ALLOWED_LOCALES.includes(_initLocale) ? _initLocale : 'th');
   const [theme, setThemeRaw] = useState(ALLOWED_THEMES.includes(_initTheme) ? _initTheme : 'light');
   const [page, setPage] = useState('home');
   const [drawer, setDrawer] = useState(false);
   const [bills, setBills] = useState([]);
+  const [payments, setPayments] = useState([]);
   const [tickets, setTickets] = useState([]);
   const [contract, setContract] = useState(null);
   const [building, setBuilding] = useState(null);
+  const [syncErrors, setSyncErrors] = useState([]);
+  const [syncing, setSyncing] = useState(false);
   const [openBillId, setOpenBillId] = useState(null);
+  const refreshSeq = useRef(0);
 
   const setLocale = (v) => {
     if (!ALLOWED_LOCALES.includes(v)) return;
     setLocaleRaw(v);
-    localStorage.setItem('tenant_locale', v);
+    safeStorageSet('tenant_locale', v);
     if (tenant) api('/api/tenant/me', { method: 'PUT', body: JSON.stringify({ locale: v }) }).catch(() => {});
   };
   const setTheme = (v) => {
     if (!ALLOWED_THEMES.includes(v)) return;
     setThemeRaw(v);
     document.body.dataset.theme = v;
-    localStorage.setItem('tenant_theme', v);
+    safeStorageSet('tenant_theme', v);
   };
 
   useEffect(() => { document.body.dataset.theme = theme; }, [theme]);
 
   useEffect(() => onAuthExpired(() => {
-    setTenant(null); setBills([]); setTickets([]); setContract(null);
-    setBuilding(null); setPage('home');
+    refreshSeq.current++;
+    setTenant(null); setBills([]); setPayments([]); setTickets([]); setContract(null);
+    setBuilding(null); setSyncErrors([]); setPage('home');
   }), []);
 
   useEffect(() => {
@@ -2387,26 +2435,54 @@ function App() {
   const refresh = useCallback(async (currentTenant) => {
     const t = currentTenant || tenant;
     if (!t) return;
+    const seq = ++refreshSeq.current;
+    setSyncing(true);
+    const labels = {
+      bills: locale === 'th' ? 'บิล' : 'Bills',
+      payments: locale === 'th' ? 'ประวัติชำระเงิน' : 'Payments',
+      tickets: locale === 'th' ? 'แจ้งซ่อม' : 'Maintenance',
+      contract: locale === 'th' ? 'สัญญา' : 'Contract',
+      paymentInfo: locale === 'th' ? 'ข้อมูลหอพัก/ช่องทางชำระเงิน' : 'Building/payment info',
+    };
     try {
-      const [billsR, ticketsR, contractR, payInfoR] = await Promise.all([
-        api('/api/tenant/bills').catch(() => ({ bills: [] })),
-        api('/api/tenant/maintenance').catch(() => ({ tickets: [] })),
-        api('/api/tenant/contract').catch(() => ({ contract: null })),
+      const results = await Promise.allSettled([
+        api('/api/tenant/bills'),
+        api('/api/tenant/payments'),
+        api('/api/tenant/maintenance'),
+        api('/api/tenant/contract'),
         // Building info is used by Profile contact cards. /api/tenant/payment-info
-        // is the cheapest endpoint that returns it; we tolerate failure
-        // (the cards just won't render the dynamic phone/address).
-        api('/api/tenant/payment-info').catch(() => ({ building: null })),
+        // is the cheapest endpoint that returns it.
+        api('/api/tenant/payment-info'),
       ]);
-      setBills(billsR.bills || []);
-      setTickets(ticketsR.tickets || []);
-      setContract(contractR.contract || null);
-      setBuilding(payInfoR.building || null);
-    } catch {}
-  }, [tenant]);
+      if (seq !== refreshSeq.current) return;
+      const errors = [];
+      const applyResult = (idx, key, apply) => {
+        const r = results[idx];
+        if (r.status === 'fulfilled') {
+          apply(r.value || {});
+          return;
+        }
+        errors.push({
+          key,
+          label: labels[key] || key,
+          message: r.reason?.message || (locale === 'th' ? 'โหลดไม่สำเร็จ' : 'failed to load'),
+        });
+      };
+      applyResult(0, 'bills', (d) => setBills(Array.isArray(d.bills) ? d.bills : []));
+      applyResult(1, 'payments', (d) => setPayments(Array.isArray(d.payments) ? d.payments : []));
+      applyResult(2, 'tickets', (d) => setTickets(Array.isArray(d.tickets) ? d.tickets : []));
+      applyResult(3, 'contract', (d) => setContract(d.contract || null));
+      applyResult(4, 'paymentInfo', (d) => setBuilding(d.building || null));
+      setSyncErrors(errors);
+    } finally {
+      if (seq === refreshSeq.current) setSyncing(false);
+    }
+  }, [tenant, locale]);
   const triggerRefresh = useCallback(() => refresh(tenant), [refresh, tenant]);
 
   async function onLoggedIn() {
     const me = await fetch('/api/tenant/me', { credentials: 'same-origin' }).then((r) => r.json());
+    if (!me.tenant) throw new Error(locale === 'th' ? 'ไม่สามารถโหลดข้อมูลผู้เช่าได้' : 'Could not load tenant profile');
     setTenant(me.tenant);
     if (me.tenant?.locale && ALLOWED_LOCALES.includes(me.tenant.locale)) setLocaleRaw(me.tenant.locale);
     await refresh(me.tenant);
@@ -2415,8 +2491,9 @@ function App() {
 
   async function onLogout() {
     try { await api('/api/tenant/logout', { method: 'POST' }); } catch {}
-    setTenant(null); setBills([]); setTickets([]); setContract(null);
-    setBuilding(null); setPage('home');
+    refreshSeq.current++;
+    setTenant(null); setBills([]); setPayments([]); setTickets([]); setContract(null);
+    setBuilding(null); setSyncErrors([]); setPage('home');
   }
 
   function goto(p, billId) {
@@ -2449,14 +2526,18 @@ function App() {
           <TopBar page={page} locale={locale} tenant={tenant} openMenu={() => setDrawer(true)}
             unpaidCount={unpaidCount} openTickets={openTickets}
             onBellClick={() => setPage(unpaidCount > 0 ? 'bills' : openTickets > 0 ? 'maintenance' : 'bills')} />
-          <main style={{ padding: '24px 28px 110px', maxWidth: 1180, width: '100%' }}>
+          <main className="tenant-main" style={{ padding: '24px 28px 110px', maxWidth: 1180, width: '100%', margin: '0 auto' }}>
+            <SyncBanner errors={syncErrors} syncing={syncing}
+              onRetry={triggerRefresh} locale={locale} />
             {page === 'home'        && <HomeView tenant={tenant} locale={locale} bills={bills}
               tickets={tickets} contract={contract} goto={goto} />}
             {page === 'bills'       && <BillsView locale={locale} bills={bills}
               refresh={triggerRefresh} slipFeature={features?.slipUpload}
               openId={openBillId} setOpenId={setOpenBillId} />}
-            {page === 'payments'    && <PaymentsView locale={locale} />}
-            {page === 'contract'    && <ContractView locale={locale} tenant={tenant} />}
+            {page === 'payments'    && <PaymentsView locale={locale} payments={payments}
+              syncErrors={syncErrors} />}
+            {page === 'contract'    && <ContractView locale={locale} tenant={tenant}
+              contract={contract} />}
             {page === 'maintenance' && <MaintenanceView locale={locale} tenant={tenant}
               tickets={tickets} refresh={triggerRefresh} />}
             {page === 'profile'     && <ProfileView tenant={tenant} locale={locale} setLocale={setLocale}
@@ -2474,7 +2555,7 @@ function App() {
           .portal-shell { grid-template-columns: 1fr !important; }
           .portal-sidebar { display: none !important; }
           .topbar-menu-btn { display: grid !important; }
-          .portal-shell main { padding: 18px 16px 110px !important; }
+          .tenant-main { padding: 18px 16px 110px !important; }
         }
         @media (max-width: 640px) {
           .bottom-nav { display: flex !important; }
@@ -2484,6 +2565,18 @@ function App() {
         }
         @media (max-width: 540px) {
           .home-grid { grid-template-columns: 1fr !important; }
+          .tenant-main { padding: 14px 12px calc(env(safe-area-inset-bottom,0px) + 104px) !important; }
+          .sync-banner { flex-direction: column !important; align-items: stretch !important; }
+          .bill-row { grid-template-columns: 1fr !important; gap: 8px !important; padding: 14px 16px !important; }
+          .bill-row > * { justify-self: start !important; text-align: left !important; min-width: 0 !important; }
+          .bill-card-main { grid-template-columns: 1fr !important; gap: 10px !important; }
+          .bill-card-amount { text-align: left !important; }
+          .mini-cells { grid-template-columns: 1fr !important; }
+          .mini-cell { border-left: 0 !important; border-top: 1px solid var(--line) !important; }
+          .mini-cell:first-child { border-top: 0 !important; }
+          .maintenance-ticket-row { flex-direction: column !important; }
+          .modal-panel { max-height: calc(100dvh - 10px) !important; border-radius: 18px 18px 0 0 !important; }
+          .modal-body { padding: 16px 14px 20px !important; }
         }
       `}</style>
     </>

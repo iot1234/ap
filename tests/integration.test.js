@@ -1434,6 +1434,61 @@ test('tenant bill modal blocks bad payment steps before slip upload', () => {
     'tenant upload button must use the combined step gate');
 });
 
+test('tenant portal sync is partial-failure safe and user-visible', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const tenant = fs.readFileSync(path.join(__dirname, '..', 'project', 'tenant.jsx'), 'utf8');
+
+  assert.match(tenant, /const \[syncErrors, setSyncErrors\]/,
+    'tenant portal must track sync errors instead of silently hiding backend failures');
+  assert.match(tenant, /Promise\.allSettled\(\[/,
+    'tenant refresh must let one endpoint fail without failing the whole portal sync');
+  assert.match(tenant, /api\('\/api\/tenant\/payments'\)/,
+    'tenant refresh must include payment history so slip uploads and payment tab stay in sync');
+  assert.match(tenant, /setPayments\(Array\.isArray\(d\.payments\) \? d\.payments : \[\]\)/,
+    'tenant refresh must update payment history from the live backend response');
+  assert.match(tenant, /setSyncErrors\(errors\)/,
+    'tenant refresh must surface failed backend sections to the UI');
+  assert.match(tenant, /function SyncBanner\(/,
+    'tenant portal must render a sync warning banner');
+  assert.match(tenant, /ระบบเก็บข้อมูลล่าสุดที่โหลดสำเร็จไว้|Previously loaded data is kept/,
+    'sync warning must explain that stale visible data is preserved');
+  assert.match(tenant, /refreshSeq\.current\+\+/,
+    'tenant refresh must invalidate stale async responses on logout/session expiry');
+  assert.doesNotMatch(tenant, /api\('\/api\/tenant\/bills'\)\.catch\(\(\) => \(\{ bills: \[\] \}\)\)/,
+    'tenant refresh must not turn a failed bills API call into an empty bill list');
+});
+
+test('tenant portal mobile layout and client-side guards cover common failures', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const tenant = fs.readFileSync(path.join(__dirname, '..', 'project', 'tenant.jsx'), 'utf8');
+
+  for (const cls of [
+    '.tenant-main',
+    '.sync-banner',
+    '.bill-row',
+    '.bill-card-main',
+    '.mini-cells',
+    '.maintenance-ticket-row',
+    '.modal-panel',
+    '.modal-body',
+  ]) {
+    assert.match(tenant, new RegExp(cls.replace('.', '\\.')),
+      `tenant portal CSS must include responsive rule for ${cls}`);
+  }
+  assert.match(tenant, /100dvh/,
+    'tenant modal must use dynamic viewport height on mobile browsers');
+  assert.match(tenant, /safeStorageGet\('tenant_locale'\)/,
+    'tenant portal must not crash when localStorage is blocked');
+  assert.match(tenant, /safeStorageSet\('tenant_theme', v\)/,
+    'tenant portal must write preferences through a guarded storage helper');
+  assert.match(tenant, /Only JPG, PNG or WebP images are supported/,
+    'tenant slip upload must reject unsupported file types before reading/uploading');
+  assert.match(tenant, /maxLength=\{2000\}/,
+    'tenant maintenance description must match the backend schema limit');
+});
+
 test('tenant API does not send tenants back to login on CSRF retryable 403', () => {
   const fs = require('node:fs');
   const path = require('node:path');
