@@ -831,8 +831,8 @@ function TopBar({ search, setSearch, isMobile, onMenu, roomCount, vacantCount })
       )}
 
       <a
-        href="/maintenance"
-        title="แจ้งซ่อม"
+        href="/tenant"
+        title="พอร์ทัลผู้เช่า"
         style={{
           display: isMobile ? 'none' : 'inline-flex', alignItems: 'center', gap: 6,
           padding: isMobile ? '0 10px' : '0 14px', height: 36,
@@ -844,8 +844,8 @@ function TopBar({ search, setSearch, isMobile, onMenu, roomCount, vacantCount })
         }}
         onMouseEnter={(e) => e.currentTarget.style.background = C.surfaceAlt}
         onMouseLeave={(e) => e.currentTarget.style.background = C.surface}>
-        <span style={{ fontSize: 13 }}>🛠</span>
-        {!isMobile && <span>แจ้งซ่อม</span>}
+        <span style={{ fontSize: 13 }}>👤</span>
+        {!isMobile && <span>พอร์ทัลผู้เช่า</span>}
       </a>
 
       <a
