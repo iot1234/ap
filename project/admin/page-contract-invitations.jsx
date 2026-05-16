@@ -173,6 +173,24 @@ function PageContractInvitations({ setToast, addActivity }) {
   );
 }
 
+function approvalPrecheckWarnings(detail) {
+  const draft = (detail && detail.draft) || {};
+  const checks = [
+    ['signatureFileId', 'ลายเซ็นผู้เช่า', 'ถ้าอนุมัติต่อ PDF จะถูก lock โดยไม่มีลายเซ็น'],
+    ['address', 'ที่อยู่ผู้เช่า', 'ถ้าอนุมัติต่อ สัญญาจะไม่มีที่อยู่อ้างอิง'],
+    ['emergencyContactName', 'ชื่อผู้ติดต่อฉุกเฉิน', 'ทีมงานจะไม่มีชื่อผู้ติดต่อเมื่อเกิดเหตุฉุกเฉิน'],
+    ['emergencyContactPhone', 'เบอร์ผู้ติดต่อฉุกเฉิน', 'ทีมงานจะติดต่อฉุกเฉินไม่ได้'],
+    ['citizenIdImageFrontId', 'รูปบัตรประชาชนด้านหน้า', 'ตรวจตัวตนย้อนหลังไม่ครบ'],
+    ['citizenIdImageBackId', 'รูปบัตรประชาชนด้านหลัง', 'เอกสารยืนยันตัวตนไม่ครบทั้งสองด้าน'],
+  ];
+  return checks.filter(([field]) => {
+    const value = draft[field];
+    return field.endsWith('Id')
+      ? (!Number.isInteger(Number(value)) || Number(value) < 1)
+      : !String(value || '').trim();
+  }).map(([field, label, consequence]) => ({ field, label, consequence }));
+}
+
 // === Review modal — admin sees tenant's submission and approves/rejects ===
 function ReviewModal({ invitation, onClose, onAction, onError }) {
   const C = window.ADMIN_C;
@@ -182,6 +200,7 @@ function ReviewModal({ invitation, onClose, onAction, onError }) {
   const [busy, setBusy] = useState(false);
   const [rejectReason, setRejectReason] = useState('');
   const [showReject, setShowReject] = useState(false);
+  const approvalWarnings = approvalPrecheckWarnings(detail);
 
   useEffect(() => {
     apiCall(`/api/admin/contract-invitations/${invitation.id}`).then((d) => {
@@ -190,7 +209,11 @@ function ReviewModal({ invitation, onClose, onAction, onError }) {
   }, [invitation.id]);
 
   const approve = async () => {
-    if (!confirm('อนุมัติ + ลงข้อมูลให้ผู้เช่า + lock สัญญา? (กลับมาแก้ไม่ได้)')) return;
+    if (approvalWarnings.length) {
+      onError('ยังอนุมัติไม่ได้: ข้อมูลสำคัญยังไม่ครบ ให้กด "ขอให้แก้" แล้วส่งกลับให้ผู้เช่ากรอก');
+      return;
+    }
+    if (!confirm('อนุมัติ + ลงข้อมูลให้ผู้เช่า + lock สัญญา?\n\nผลที่จะเกิดขึ้น:\n- ข้อมูลผู้เช่าจะถูกบันทึกเข้าระบบ\n- ห้องจะเปลี่ยนเป็น occupied\n- สัญญาจะถูก lock และแก้เงื่อนไขสำคัญไม่ได้\n- ระบบจะสร้างบิลแรกถ้ายังไม่มี')) return;
     setBusy(true);
     try {
       const result = await apiCall(`/api/admin/contract-invitations/${invitation.id}/approve`, { method: 'POST' });
@@ -253,7 +276,7 @@ function ReviewModal({ invitation, onClose, onAction, onError }) {
             <>
               <Btn variant="ghost" onClick={onClose} disabled={busy}>ปิด</Btn>
               <Btn variant="ghost" onClick={() => setShowReject(true)} disabled={busy}>ขอให้แก้</Btn>
-              <Btn variant="primary" onClick={approve} disabled={busy}>
+              <Btn variant="primary" onClick={approve} disabled={busy || approvalWarnings.length > 0}>
                 {busy ? '…' : '✓ อนุมัติ + lock'}
               </Btn>
             </>
@@ -282,13 +305,13 @@ function ReviewModal({ invitation, onClose, onAction, onError }) {
             onChange={(e) => setRejectReason(e.target.value)} />
         </div>
       ) : (
-        <ReviewBody detail={detail} />
+        <ReviewBody detail={detail} approvalWarnings={approvalWarnings} />
       )}
     </Modal>
   );
 }
 
-function ReviewBody({ detail }) {
+function ReviewBody({ detail, approvalWarnings = [] }) {
   const C = window.ADMIN_C;
   const draft = detail.draft || {};
   const Section = ({ title, children }) => (
@@ -306,6 +329,28 @@ function ReviewBody({ detail }) {
   );
   return (
     <div>
+      {approvalWarnings.length ? (
+        <div style={{
+          padding: 12, marginBottom: 16, background: C.warningSoft,
+          border: '1px solid #f1b32d', borderRadius: 8,
+          color: C.warningInk || C.ink2, fontSize: 13, lineHeight: 1.55,
+        }}>
+          <b>ยัง approve ไม่ได้</b> — ถ้าฝืนอนุมัติ สัญญาจะถูก lock โดยข้อมูลสำคัญไม่ครบ:
+          <ul style={{ margin: '8px 0 0 18px', padding: 0 }}>
+            {approvalWarnings.map((w) => (
+              <li key={w.field}><b>{w.label}</b>: {w.consequence}</li>
+            ))}
+          </ul>
+        </div>
+      ) : (
+        <div style={{
+          padding: 12, marginBottom: 16, background: C.successSoft || C.surfaceAlt,
+          border: `1px solid ${C.success || C.border}`, borderRadius: 8,
+          color: C.successInk || C.ink2, fontSize: 13, lineHeight: 1.55,
+        }}>
+          เมื่อกดอนุมัติ ระบบจะบันทึกข้อมูลผู้เช่า, เปลี่ยนห้องเป็น occupied, lock สัญญา และเปิด PDF ให้ตรวจทันที
+        </div>
+      )}
       <Section title="ข้อมูลสัญญา">
         <KV k="เลขที่สัญญา" v={detail.contract_no} />
         <KV k="ห้อง" v={detail.room_id} />

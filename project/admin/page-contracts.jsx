@@ -89,11 +89,14 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
   // Counts for the header tabs — derived from contracts but recomputed each
   // render so filter switches stay snappy without an extra fetch.
   const counts = useMemo(() => {
-    const out = { all: contracts.length, active: 0, expired: 0, ended: 0, expiring: 0 };
+    const out = { all: contracts.length, active: 0, expired: 0, ended: 0, expiring: 0, warnings: 0 };
     for (const c of contracts) {
       out[c.status] = (out[c.status] || 0) + 1;
       if (c.status === 'active' && c.days_left != null && c.days_left <= 30 && c.days_left >= 0) {
         out.expiring++;
+      }
+      if (Array.isArray(c.warnings) && c.warnings.length) {
+        out.warnings++;
       }
     }
     return out;
@@ -137,6 +140,15 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
             fontSize: 13, color: C.ink2,
           }}>
             ⏰ <b>{counts.expiring}</b> สัญญาจะหมดอายุภายใน 30 วัน — แนะนำติดต่อผู้เช่าเพื่อต่อสัญญา
+          </div>
+        ) : null}
+        {counts.warnings > 0 ? (
+          <div style={{
+            marginTop: 12, padding: 10, background: C.warningSoft,
+            border: '1px solid #f1b32d', borderRadius: 8,
+            fontSize: 13, color: C.warningInk || C.ink2,
+          }}>
+            <b>ต้องตรวจ {counts.warnings} สัญญา</b> — ระบบพบข้อมูลที่อาจทำให้บิล, ห้อง, ผู้เช่า หรือ PDF สัญญาไม่ตรงกัน
           </div>
         ) : null}
       </Card>
@@ -209,6 +221,19 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
                             style={{ display: 'inline-block', textDecoration: 'none' }}>
                             <Pill color="warning">✓ รอตรวจสอบ →</Pill>
                           </a>
+                        </div>
+                      ) : null}
+                      {Array.isArray(c.warnings) && c.warnings.length ? (
+                        <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                          <Pill color={c.warning_severity === 'error' ? 'danger' : 'warning'}>
+                            ต้องตรวจ {c.warnings.length}
+                          </Pill>
+                          {c.warnings.slice(0, 2).map((w) => (
+                            <div key={w.code} title={w.consequence || ''}
+                              style={{ fontSize: 11, color: C.warningInk || C.ink2, lineHeight: 1.35 }}>
+                              {w.title || w.code}
+                            </div>
+                          ))}
                         </div>
                       ) : null}
                     </td>

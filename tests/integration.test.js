@@ -1530,6 +1530,12 @@ test('healthCheck surfaces data integrity and failed notification backlog', () =
     'JSONB room scan must qualify rec.key so app_data.key is not ambiguous in PostgreSQL');
   assert.match(hc, /legacy rooms exist but rooms_v2 is empty/,
     'data integrity probe must flag unsynced legacy room inventory');
+  assert.match(hc, /active_contract_identity_incomplete/,
+    'data integrity probe must flag active contracts missing legal identity fields');
+  assert.match(hc, /locked_contract_missing_terms_snapshot/,
+    'data integrity probe must flag locked contracts missing immutable terms snapshot');
+  assert.match(hc, /expired_pending_contract_invitations/,
+    'data integrity probe must flag expired pending contract invitations');
 });
 
 test('public booking dual-writes to bookings table', () => {
@@ -3519,6 +3525,50 @@ test('approve atomically applies draft + locks contract in single transaction', 
   assert.match(block, /CITIZEN_ID_DUPLICATE/);
 });
 
+test('approve preflight blocks incomplete tenant submissions before locking', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const approveBlock = src.match(/\/approve'[\s\S]+?app\.post\('\/api\/admin\/contract-invitations\/:id\/reject'/);
+  assert.ok(approveBlock, 'approve handler must be present');
+  const block = approveBlock[0];
+  assert.match(src, /function validateContractApprovalDraft/);
+  assert.match(block, /validateContractApprovalDraft\(draft\)/);
+  assert.match(block, /CONTRACT_APPROVAL_PRECHECK_FAILED/);
+  assert.match(block, /draftIssues\.map\(\(x\) => x\.consequence\)/);
+  assert.match(src, /signatureFileId/);
+  assert.match(src, /citizenIdImageFrontId/);
+  assert.match(src, /citizenIdImageBackId/);
+});
+
+test('approve preflight blocks invalid contract targets before tenant-room sync', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const approveBlock = src.match(/\/approve'[\s\S]+?app\.post\('\/api\/admin\/contract-invitations\/:id\/reject'/);
+  assert.ok(approveBlock, 'approve handler must be present');
+  const block = approveBlock[0];
+  assert.match(src, /function validateContractApprovalTarget/);
+  assert.match(block, /validateContractApprovalTarget\(inv, cLock\.rows\[0\]\)/);
+  assert.match(block, /CONTRACT_APPROVAL_TARGET_INVALID/);
+  assert.match(src, /CONTRACT_TENANT_MISMATCH/);
+  assert.match(src, /CONTRACT_RENT_INVALID/);
+});
+
+test('contract admin lists expire stale pending invites and return warnings', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(src, /function expirePendingContractInvitations/);
+  assert.match(src, /status='expired'[\s\S]{0,200}status='pending'/);
+  assert.match(src, /await expirePendingContractInvitations\(pool\)/);
+  assert.match(src, /function buildContractWarnings/);
+  assert.match(src, /TENANT_ROOM_MISMATCH/);
+  assert.match(src, /CONTRACT_IDENTITY_INCOMPLETE/);
+  assert.match(src, /LOCKED_CONTRACT_MISSING_TERMS_SNAPSHOT/);
+  assert.match(src, /warning_severity: contractWarningSeverity\(warnings\)/);
+});
+
 test('public fill endpoints: token-gated, rate-limited, no auth required', () => {
   const fs = require('node:fs');
   const path = require('node:path');
@@ -3606,6 +3656,17 @@ test('admin UI: contract-invitations page registered + script-loaded', () => {
   assert.match(page, /\/api\/admin\/contract-invitations\/\$\{invitation\.id\}\/revoke/);
 });
 
+test('admin UI: contract review shows approval consequences and disables incomplete approvals', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const page = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-contract-invitations.jsx'), 'utf8');
+  assert.match(page, /function approvalPrecheckWarnings/);
+  assert.match(page, /approvalWarnings\.length/);
+  assert.match(page, /disabled=\{busy \|\| approvalWarnings\.length > 0\}/);
+  assert.match(page, /ถ้าฝืนอนุมัติ/);
+  assert.match(page, /ผลที่จะเกิดขึ้น/);
+});
+
 test('contracts page has invite button + InviteTenantModal', () => {
   const fs = require('node:fs');
   const path = require('node:path');
@@ -3619,6 +3680,16 @@ test('contracts page has invite button + InviteTenantModal', () => {
   assert.match(src, /แสดงครั้งเดียว/);
   // Copy-to-clipboard
   assert.match(src, /navigator\.clipboard\.writeText/);
+});
+
+test('contracts page displays server-side contract warnings', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-contracts.jsx'), 'utf8');
+  assert.match(src, /counts\.warnings/);
+  assert.match(src, /Array\.isArray\(c\.warnings\)/);
+  assert.match(src, /c\.warning_severity === 'error'/);
+  assert.match(src, /w\.consequence/);
 });
 
 test('public contract-fill HTML page exists + has expected steps', () => {

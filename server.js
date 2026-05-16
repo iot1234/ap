@@ -1275,8 +1275,6 @@ async function loadEffectivePaymentBlock() {
   return { config, paymentBlock: buildEffectivePaymentBlock(config) };
 }
 
-// getRenderBillId moved to routes/bills-extras.js alongside POST /api/bills/render.
-
 function numOrNull(value) {
   if (value == null || value === '') return null;
   const n = Number(value);
@@ -1297,14 +1295,10 @@ function storedUtilityUsage(b, prefix) {
   };
 }
 
-// buildStoredBillPdfObject moved to routes/bills-extras.js alongside POST
-// /api/bills/render. The tenant-side PDF endpoint (still in this file
-// further down) inlines its own equivalent assembly because it needs to
-// resolve config + payment block on the same code path.
-
-// POST /api/bills/render moved to routes/bills-extras.js together with the
-// other /api/bills/* endpoints so the bills surface lives in one file.
-// The getRenderBillId + buildStoredBillPdfObject helpers travelled with it.
+// The tenant-side bill PDF endpoint (further down in this file) inlines
+// its own bill-object assembly because it needs to resolve config +
+// payment block on the same code path — the admin /api/bills/render
+// version lives in routes/bills-extras.js with the rest of /api/bills.
 
 // Note: the generic GET /api/promptpay/qr?target=&amount= endpoint was
 // removed. It accepted a query-string target+amount and would render a QR
@@ -6444,6 +6438,223 @@ const _routesMounted = _routesIndex(app, _routesCtx);
 
 // === v2: Contracts CRUD ===================================================
 // The contracts table is populated by /api/tenants/:id/checkin (which is
+async function expirePendingContractInvitations(db) {
+  try {
+    await db.query(
+      `UPDATE contract_invitations
+          SET status='expired', updated_at=NOW()
+        WHERE status='pending'
+          AND expires_at IS NOT NULL
+          AND expires_at <= NOW()`
+    );
+  } catch (err) {
+    if (err.code !== '42P01' && err.code !== '42703') {
+      console.warn('[contracts] stale invitation expiry skipped:', err.message);
+    }
+  }
+}
+
+function contractWarning(code, severity, title, consequence, action, extra = {}) {
+  return { code, severity, title, consequence, action, ...extra };
+}
+
+function buildContractWarnings(row) {
+  const warnings = [];
+  const isActive = row.status === 'active';
+  const locked = !!row.locked_at;
+  const tenantRoom = row.tenant_current_room_id || row.current_room_id || null;
+
+  if (isActive && row.tenant_id && !row.tenant_status) {
+    warnings.push(contractWarning(
+      'CONTRACT_TENANT_MISSING',
+      'error',
+      'ไม่พบผู้เช่าที่ผูกกับสัญญา',
+      'ถ้าใช้สัญญานี้ต่อ ระบบจะออกบิล/แจ้งเตือนผู้เช่าไม่ได้ครบถ้วน เพราะ tenant row หายหรือถูกลบ',
+      'ตรวจ tenant_id ในสัญญา แล้วผูกผู้เช่าใหม่หรือปิดสัญญานี้'
+    ));
+  }
+  if (isActive && row.tenant_status && row.tenant_status !== 'active') {
+    warnings.push(contractWarning(
+      'ACTIVE_CONTRACT_INACTIVE_TENANT',
+      'error',
+      'สัญญายัง active แต่ผู้เช่าไม่ได้ active',
+      'ถ้าปล่อยไว้ scheduler อาจยังคิดว่าสัญญามีผล แต่ผู้เช่าจะไม่อยู่ใน flow ห้อง/บิลตามปกติ',
+      'checkout ให้ครบหรือปรับสถานะผู้เช่าและห้องให้ตรงกัน'
+    ));
+  }
+  if (isActive && row.tenant_status === 'active' && row.room_id
+      && tenantRoom && String(tenantRoom) !== String(row.room_id)) {
+    warnings.push(contractWarning(
+      'TENANT_ROOM_MISMATCH',
+      'error',
+      'ห้องในสัญญาไม่ตรงกับห้องปัจจุบันของผู้เช่า',
+      'ถ้าออกบิลหรือ approve งานต่อ ระบบอาจผูกค่าใช้จ่าย/สถานะห้องผิดห้อง',
+      'ตรวจว่าผู้เช่าย้ายห้องแล้วหรือยัง ถ้าย้ายแล้วให้ checkout/reconcile ให้ครบก่อน'
+    ));
+  }
+  if (isActive && row.tenant_status === 'active' && row.room_id && !tenantRoom) {
+    warnings.push(contractWarning(
+      'TENANT_ROOM_EMPTY',
+      'error',
+      'ผู้เช่า active แต่ไม่มี current_room_id',
+      'ถ้าออกบิลหรือแจ้งเตือนต่อ ระบบจะไม่รู้ว่าผู้เช่าควรอยู่ห้องใด แม้สัญญายัง active',
+      'ผูกผู้เช่ากลับเข้าห้องในสัญญา หรือปิดสัญญา/checkout ถ้าย้ายออกแล้ว'
+    ));
+  }
+  if (isActive && (!Number.isFinite(Number(row.monthly_rent)) || Number(row.monthly_rent) <= 0)) {
+    warnings.push(contractWarning(
+      'CONTRACT_RENT_INVALID',
+      'error',
+      'ค่าเช่าในสัญญาไม่ถูกต้อง',
+      'ถ้าระบบออกบิลจากสัญญานี้ ค่าเช่าอาจเป็น 0 หรือ fallback ไปสูตรราคาอื่น ทำให้ยอดไม่ตรงสัญญา',
+      'แก้ค่าเช่าก่อน lock/ออกบิล หรือสร้างสัญญาใหม่ด้วยค่าเช่าที่ถูกต้อง'
+    ));
+  }
+  if (isActive && Number(row.deposit) < 0) {
+    warnings.push(contractWarning(
+      'CONTRACT_DEPOSIT_INVALID',
+      'error',
+      'เงินมัดจำติดลบ',
+      'ถ้า checkout/refund จากข้อมูลนี้ ยอดคืนมัดจำจะผิด',
+      'แก้เงินมัดจำก่อนทำรายการต่อ'
+    ));
+  }
+
+  const missingIdentity = [];
+  if (!row.address) missingIdentity.push('address');
+  if (!row.emergency_contact_name) missingIdentity.push('emergencyContactName');
+  if (!row.emergency_contact_phone) missingIdentity.push('emergencyContactPhone');
+  if (!row.citizen_id_image_front_id) missingIdentity.push('citizenIdFront');
+  if (!row.citizen_id_image_back_id) missingIdentity.push('citizenIdBack');
+  if (isActive && missingIdentity.length) {
+    warnings.push(contractWarning(
+      'CONTRACT_IDENTITY_INCOMPLETE',
+      locked ? 'error' : 'warn',
+      'ข้อมูลผู้เช่า/เอกสารประกอบสัญญายังไม่ครบ',
+      locked
+        ? 'สัญญานี้ถูก lock แล้ว แต่เอกสารไม่ครบ ทำให้หลักฐานหลังอนุมัติไม่สมบูรณ์'
+        : 'ถ้า lock/approve ตอนนี้ สัญญาจะถูกปิดแก้ไขทั้งที่ข้อมูลสำคัญยังไม่ครบ',
+      'ให้ผู้เช่ากรอก/อัปโหลดเอกสารให้ครบ หรือ mark เป็น legacy อย่างตั้งใจ',
+      { missing: missingIdentity }
+    ));
+  }
+  if (locked && row.has_terms_template_snapshot === false) {
+    warnings.push(contractWarning(
+      'LOCKED_CONTRACT_MISSING_TERMS_SNAPSHOT',
+      'error',
+      'สัญญา lock แล้วแต่ไม่มี snapshot เงื่อนไข',
+      'ถ้าแก้ template ภายหลัง PDF ย้อนหลังอาจเปลี่ยนตาม template ใหม่ ไม่ immutable ตามหลักฐานวันที่เซ็น',
+      'backfill terms_template_snapshot จาก template ที่ตั้งใจใช้ในวันอนุมัติ'
+    ));
+  }
+  if (!locked && row.active_invitation_status === 'pending'
+      && row.active_invitation_expires_at
+      && new Date(row.active_invitation_expires_at).getTime() <= Date.now()) {
+    warnings.push(contractWarning(
+      'PENDING_INVITATION_EXPIRED',
+      'warn',
+      'ลิงก์ให้ผู้เช่ากรอกหมดอายุแล้ว',
+      'ผู้เช่าจะเปิดลิงก์เดิมไม่ได้ และงานจะค้างในระบบจนออกลิงก์ใหม่หรือปิด invitation',
+      'ออก invitation ใหม่หลังตรวจข้อมูลห้อง/ผู้เช่า'
+    ));
+  }
+  if (!locked && !row.template_id && row.has_default_template === false) {
+    warnings.push(contractWarning(
+      'NO_DEFAULT_CONTRACT_TEMPLATE',
+      'warn',
+      'ยังไม่ได้ตั้ง default template',
+      'ถ้า preview/approve โดยไม่ผูก template ระบบจะ fallback ไปเงื่อนไข legacy/default ทำให้รูปแบบสัญญาไม่ predictable',
+      'ตั้ง default template ที่หน้าเทมเพลตสัญญา'
+    ));
+  }
+  return warnings;
+}
+
+function contractWarningSeverity(warnings) {
+  if (!warnings || !warnings.length) return 'ok';
+  if (warnings.some((w) => w.severity === 'error')) return 'error';
+  return 'warn';
+}
+
+function validateContractApprovalDraft(draft) {
+  const required = [
+    ['signatureFileId', 'signature', 'ลายเซ็นผู้เช่า', 'สัญญาจะถูก lock โดยไม่มีลายเซ็นใน PDF'],
+    ['address', 'address', 'ที่อยู่ผู้เช่า', 'สัญญาจะถูก lock โดยไม่มีที่อยู่สำหรับอ้างอิงตามเอกสาร'],
+    ['emergencyContactName', 'emergencyContactName', 'ชื่อผู้ติดต่อฉุกเฉิน', 'ทีมงานจะไม่มีคนติดต่อเมื่อเกิดเหตุฉุกเฉิน'],
+    ['emergencyContactPhone', 'emergencyContactPhone', 'เบอร์ผู้ติดต่อฉุกเฉิน', 'ทีมงานจะโทรหาผู้ติดต่อฉุกเฉินไม่ได้'],
+    ['citizenIdImageFrontId', 'citizenIdFront', 'รูปบัตรประชาชนด้านหน้า', 'ตรวจตัวตนย้อนหลังไม่ได้ครบถ้วน'],
+    ['citizenIdImageBackId', 'citizenIdBack', 'รูปบัตรประชาชนด้านหลัง', 'เอกสารยืนยันตัวตนไม่ครบทั้งสองด้าน'],
+  ];
+  const issues = [];
+  for (const [field, code, label, consequence] of required) {
+    const value = draft && draft[field];
+    const missing = field.endsWith('Id')
+      ? (!Number.isInteger(Number(value)) || Number(value) < 1)
+      : !String(value || '').trim();
+    if (missing) {
+      issues.push({
+        field,
+        code,
+        label,
+        consequence,
+        action: 'reject ใบเชิญนี้กลับให้ผู้เช่าแก้ไข แล้ว approve ใหม่เมื่อข้อมูลครบ',
+      });
+    }
+  }
+  return issues;
+}
+
+function validateContractApprovalTarget(inv, contract) {
+  const issues = [];
+  if (!contract.room_id) {
+    issues.push({
+      code: 'CONTRACT_ROOM_REQUIRED',
+      field: 'room_id',
+      label: 'สัญญาไม่มีเลขห้อง',
+      consequence: 'approve แล้วระบบจะผูกผู้เช่าเข้าห้องไม่ได้ และ billing/room status จะเพี้ยน',
+      action: 'แก้หรือสร้างสัญญาใหม่ให้มี room_id ก่อน approve',
+    });
+  }
+  if (contract.status !== 'active') {
+    issues.push({
+      code: 'CONTRACT_NOT_ACTIVE',
+      field: 'status',
+      label: `สัญญาสถานะ ${contract.status || '-'}`,
+      consequence: 'approve แล้วจะ lock สัญญาที่ไม่ได้มีผลใช้งาน ทำให้ flow เช่าและบิลสับสน',
+      action: 'ใช้เฉพาะสัญญา active หรือสร้างสัญญาใหม่',
+    });
+  }
+  if (Number(contract.monthly_rent) <= 0) {
+    issues.push({
+      code: 'CONTRACT_RENT_INVALID',
+      field: 'monthly_rent',
+      label: 'ค่าเช่าไม่ถูกต้อง',
+      consequence: 'บิลแรกและบิลรายเดือนอาจเป็น 0 หรือไม่ตรงกับที่ตกลงในสัญญา',
+      action: 'แก้ค่าเช่าให้ถูกต้องก่อน approve',
+    });
+  }
+  if (Number(contract.deposit) < 0) {
+    issues.push({
+      code: 'CONTRACT_DEPOSIT_INVALID',
+      field: 'deposit',
+      label: 'เงินมัดจำติดลบ',
+      consequence: 'ยอดคืนมัดจำตอน checkout จะผิด',
+      action: 'แก้เงินมัดจำก่อน approve',
+    });
+  }
+  if (contract.tenant_id && inv.tenant_id
+      && Number(contract.tenant_id) !== Number(inv.tenant_id)) {
+    issues.push({
+      code: 'CONTRACT_TENANT_MISMATCH',
+      field: 'tenant_id',
+      label: 'ผู้เช่าในสัญญาไม่ตรงกับผู้เช่าใน invitation',
+      consequence: 'ข้อมูลที่ผู้เช่ากรอกจะถูกบันทึกให้คนหนึ่ง แต่สัญญา/บิลอาจผูกกับอีกคน',
+      action: 'ยกเลิก invitation นี้ แล้วออกใหม่จากสัญญาที่ผูก tenant ถูกต้อง',
+    });
+  }
+  return issues;
+}
+
 // finally accessible via UI in this round). These endpoints expose the
 // table for read + targeted edits — admin needs them to:
 //   - see who's coming up for renewal (paired with tickContractExpiry alerts)
@@ -6481,13 +6692,19 @@ app.get('/api/contracts', requireAuth, async (req, res) => {
     // keeps loading mid-migration.
     let rows;
     try {
+      await expirePendingContractInvitations(pool);
       ({ rows } = await pool.query(
         `SELECT c.id, c.contract_no, c.tenant_id, c.room_id,
                 c.start_date, c.end_date, c.term_months,
                 c.monthly_rent, c.deposit, c.discount_pct,
                 c.status, c.signed_at, c.created_at,
                 c.locked_at, c.locked_by, c.template_id,
+                c.terms_template_snapshot IS NOT NULL AS has_terms_template_snapshot,
+                c.signature_image_id,
                 t.full_name AS tenant_name, t.phone AS tenant_phone,
+                t.status AS tenant_status, t.current_room_id AS tenant_current_room_id,
+                t.address, t.emergency_contact_name, t.emergency_contact_phone,
+                t.citizen_id_image_front_id, t.citizen_id_image_back_id,
                 CASE WHEN c.end_date IS NULL THEN NULL
                      ELSE (c.end_date - CURRENT_DATE)::int
                 END AS days_left,
@@ -6497,7 +6714,17 @@ app.get('/api/contracts', requireAuth, async (req, res) => {
                 (SELECT i.status FROM contract_invitations i
                    WHERE i.contract_id = c.id
                      AND i.status IN ('pending','submitted')
-                   ORDER BY i.created_at DESC LIMIT 1) AS active_invitation_status
+                   ORDER BY i.created_at DESC LIMIT 1) AS active_invitation_status,
+                (SELECT i.expires_at FROM contract_invitations i
+                   WHERE i.contract_id = c.id
+                     AND i.status IN ('pending','submitted')
+                   ORDER BY i.created_at DESC LIMIT 1) AS active_invitation_expires_at,
+                EXISTS (
+                  SELECT 1 FROM contract_templates tpl
+                   WHERE tpl.deleted_at IS NULL
+                     AND tpl.enabled = TRUE
+                     AND tpl.is_default = TRUE
+                ) AS has_default_template
            FROM contracts c
            LEFT JOIN tenants t ON t.id = c.tenant_id AND t.deleted_at IS NULL
           WHERE ${where.join(' AND ')}
@@ -6528,7 +6755,15 @@ app.get('/api/contracts', requireAuth, async (req, res) => {
         params
       ));
     }
-    res.json({ ok: true, contracts: rows });
+    const contracts = rows.map((row) => {
+      const warnings = buildContractWarnings(row);
+      return {
+        ...row,
+        warnings,
+        warning_severity: contractWarningSeverity(warnings),
+      };
+    });
+    res.json({ ok: true, contracts });
   } catch (err) {
     console.error('contracts list error:', err);
     res.status(500).json({ error: 'internal error', code: 'DB_ERROR' });
@@ -7925,6 +8160,7 @@ app.get('/api/admin/contract-invitations',
       where.push(`i.status=$${params.length}`);
     }
     try {
+      await expirePendingContractInvitations(pool);
       const { rows } = await pool.query(
         `SELECT i.id, i.contract_id, i.tenant_id, i.status,
                 i.draft, i.submitted_at, i.approved_at, i.approved_by,
@@ -7957,6 +8193,7 @@ app.get('/api/admin/contract-invitations/:id',
     const id = Number(req.params.id);
     if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
     try {
+      await expirePendingContractInvitations(pool);
       const { rows } = await pool.query(
         `SELECT i.*, c.contract_no, c.room_id, c.monthly_rent, c.deposit,
                 t.full_name AS tenant_name, t.phone AS tenant_phone, t.email AS tenant_email,
@@ -8022,6 +8259,20 @@ app.post('/api/admin/contract-invitations/:id/approve',
         });
       }
       const draft = inv.draft || {};
+      const draftIssues = validateContractApprovalDraft(draft);
+      if (draftIssues.length) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'ข้อมูลที่ผู้เช่ากรอกยังไม่ครบ จึงยัง approve และ lock สัญญาไม่ได้',
+          code: 'CONTRACT_APPROVAL_PRECHECK_FAILED',
+          issues: draftIssues,
+          consequences: draftIssues.map((x) => x.consequence),
+          nextActions: {
+            rejectInvitation: true,
+            hint: 'กด "ขอให้แก้" พร้อมระบุรายการที่ขาด แล้วให้ผู้เช่าส่งกลับมาใหม่',
+          },
+        });
+      }
 
       // Apply draft → tenants row (when one is linked).
       if (inv.tenant_id) {
@@ -8072,7 +8323,9 @@ app.post('/api/admin/contract-invitations/:id/approve',
 
       // Apply signature → contracts row + lock the contract.
       const cLock = await client.query(
-        `SELECT id, template_id, locked_at FROM contracts
+        `SELECT id, tenant_id, room_id, status, monthly_rent, deposit,
+                template_id, locked_at
+           FROM contracts
           WHERE id=$1 AND deleted_at IS NULL FOR UPDATE`,
         [inv.contract_id]
       );
@@ -8085,6 +8338,21 @@ app.post('/api/admin/contract-invitations/:id/approve',
         return res.status(409).json({
           error: 'contract is already locked',
           code: 'CONTRACT_LOCKED',
+        });
+      }
+      const targetIssues = validateContractApprovalTarget(inv, cLock.rows[0]);
+      if (targetIssues.length) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'สัญญาปลายทางไม่พร้อมสำหรับการ approve',
+          code: 'CONTRACT_APPROVAL_TARGET_INVALID',
+          issues: targetIssues,
+          consequences: targetIssues.map((x) => x.consequence),
+          nextActions: {
+            contractUrl: `/admin#contracts`,
+            invitationUrl: `/admin#contract-invitations`,
+            hint: 'แก้ข้อมูลสัญญา/ผู้เช่า/ห้องให้ตรงกันก่อน แล้วค่อย approve ใหม่',
+          },
         });
       }
       const termsSnapshot = await loadContractTermsSnapshot(client, cLock.rows[0]);

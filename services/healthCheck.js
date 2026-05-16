@@ -612,6 +612,34 @@ async function checkDataIntegrity(pool) {
             AND t.status = 'moved_out'
             AND c.deleted_at IS NULL
             AND c.status = 'active') AS moved_out_with_active_contract,
+        (SELECT COUNT(*)::int FROM contracts c
+           JOIN tenants t ON t.id = c.tenant_id AND t.deleted_at IS NULL
+          WHERE c.deleted_at IS NULL
+            AND c.status = 'active'
+            AND (
+              NULLIF(BTRIM(COALESCE(t.address, '')), '') IS NULL
+              OR NULLIF(BTRIM(COALESCE(t.emergency_contact_name, '')), '') IS NULL
+              OR NULLIF(BTRIM(COALESCE(t.emergency_contact_phone, '')), '') IS NULL
+              OR t.citizen_id_image_front_id IS NULL
+              OR t.citizen_id_image_back_id IS NULL
+            )) AS active_contract_identity_incomplete,
+        (SELECT COUNT(*)::int FROM contracts
+          WHERE deleted_at IS NULL
+            AND locked_at IS NOT NULL
+            AND terms_template_snapshot IS NULL) AS locked_contract_missing_terms_snapshot,
+        (SELECT COUNT(*)::int FROM contract_invitations
+          WHERE status='pending'
+            AND expires_at IS NOT NULL
+            AND expires_at <= NOW()) AS expired_pending_contract_invitations,
+        (SELECT CASE WHEN EXISTS (
+                  SELECT 1 FROM contract_templates
+                   WHERE deleted_at IS NULL AND enabled = TRUE
+                )
+                AND NOT EXISTS (
+                  SELECT 1 FROM contract_templates
+                   WHERE deleted_at IS NULL AND enabled = TRUE AND is_default = TRUE
+                )
+                THEN 1 ELSE 0 END)::int AS missing_default_contract_template,
         -- Rooms whose legacy JSONB blob shows a tenant attached but no
         -- contract is active for that room. This is the "ห้องยังขึ้นมีคน
         -- หลังย้ายออก" symptom — the rooms page reads from the blob so
@@ -769,6 +797,10 @@ async function checkDataIntegrity(pool) {
         busy_rooms_without_active_tenant: Number(counts.busy_rooms_without_active_tenant) || 0,
         reserved_rooms_without_hold: Number(counts.reserved_rooms_without_hold) || 0,
         moved_out_with_active_contract: Number(counts.moved_out_with_active_contract) || 0,
+        active_contract_identity_incomplete: Number(counts.active_contract_identity_incomplete) || 0,
+        locked_contract_missing_terms_snapshot: Number(counts.locked_contract_missing_terms_snapshot) || 0,
+        expired_pending_contract_invitations: Number(counts.expired_pending_contract_invitations) || 0,
+        missing_default_contract_template: Number(counts.missing_default_contract_template) || 0,
         stranded_occupied_rooms: Number(counts.stranded_occupied_rooms) || 0,
         rooms_reserved_by_ghost_contract: Number(counts.rooms_reserved_by_ghost_contract) || 0,
       },
@@ -793,6 +825,45 @@ async function checkDataIntegrity(pool) {
          ORDER BY c.id DESC
          LIMIT 10`);
       detail.moved_out_active_contract_samples = orphans.rows;
+    } catch { /* tolerate older schemas */ }
+
+    try {
+      const contractRisks = await pool.query(`
+        SELECT c.id AS contract_id, c.contract_no, c.room_id, c.locked_at,
+               t.id AS tenant_id, t.full_name,
+               ARRAY_REMOVE(ARRAY[
+                 CASE WHEN NULLIF(BTRIM(COALESCE(t.address, '')), '') IS NULL THEN 'address' END,
+                 CASE WHEN NULLIF(BTRIM(COALESCE(t.emergency_contact_name, '')), '') IS NULL THEN 'emergency_contact_name' END,
+                 CASE WHEN NULLIF(BTRIM(COALESCE(t.emergency_contact_phone, '')), '') IS NULL THEN 'emergency_contact_phone' END,
+                 CASE WHEN t.citizen_id_image_front_id IS NULL THEN 'citizen_id_image_front_id' END,
+                 CASE WHEN t.citizen_id_image_back_id IS NULL THEN 'citizen_id_image_back_id' END
+               ], NULL) AS missing
+          FROM contracts c
+          JOIN tenants t ON t.id = c.tenant_id AND t.deleted_at IS NULL
+         WHERE c.deleted_at IS NULL
+           AND c.status='active'
+           AND (
+             NULLIF(BTRIM(COALESCE(t.address, '')), '') IS NULL
+             OR NULLIF(BTRIM(COALESCE(t.emergency_contact_name, '')), '') IS NULL
+             OR NULLIF(BTRIM(COALESCE(t.emergency_contact_phone, '')), '') IS NULL
+             OR t.citizen_id_image_front_id IS NULL
+             OR t.citizen_id_image_back_id IS NULL
+           )
+         ORDER BY c.locked_at DESC NULLS LAST, c.id ASC
+         LIMIT 10`);
+      detail.active_contract_identity_incomplete_samples = contractRisks.rows;
+    } catch { /* tolerate older schemas */ }
+
+    try {
+      const staleInvites = await pool.query(`
+        SELECT id, contract_id, tenant_id, expires_at
+          FROM contract_invitations
+         WHERE status='pending'
+           AND expires_at IS NOT NULL
+           AND expires_at <= NOW()
+         ORDER BY expires_at ASC
+         LIMIT 10`);
+      detail.expired_pending_contract_invitation_samples = staleInvites.rows;
     } catch { /* tolerate older schemas */ }
 
     const errors = [];
@@ -844,6 +915,30 @@ async function checkDataIntegrity(pool) {
       errors.push(
         `${detail.counts.moved_out_with_active_contract} moved_out tenant(s) still have an active contract — ` +
         `close via PUT /api/contracts/:id { status: 'ended' } or re-run /api/tenants/:id/checkout`
+      );
+    }
+    if (detail.counts.locked_contract_missing_terms_snapshot > 0) {
+      errors.push(
+        `${detail.counts.locked_contract_missing_terms_snapshot} locked contract(s) are missing terms_template_snapshot — ` +
+        `PDF terms may change after template edits; backfill the intended snapshot before relying on the PDF as immutable evidence`
+      );
+    }
+    if (detail.counts.active_contract_identity_incomplete > 0) {
+      warnings.push(
+        `${detail.counts.active_contract_identity_incomplete} active contract(s) are missing address/emergency/ID image fields — ` +
+        `new approvals are blocked until complete; legacy rows should be backfilled or explicitly accepted as legacy`
+      );
+    }
+    if (detail.counts.expired_pending_contract_invitations > 0) {
+      warnings.push(
+        `${detail.counts.expired_pending_contract_invitations} pending contract invitation(s) already expired — ` +
+        `admin list/API will flip stale pending links to expired and a fresh link should be issued if still needed`
+      );
+    }
+    if (detail.counts.missing_default_contract_template > 0) {
+      warnings.push(
+        `contract_templates has enabled rows but no default template — ` +
+        `unassigned contracts fall back to legacy/default terms until an owner sets a default`
       );
     }
     if (detail.counts.legacy_rooms > 0 && detail.counts.rooms_v2 === 0) {
