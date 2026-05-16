@@ -2,49 +2,96 @@
 <html lang="th">
 <head>
 <meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
 <title>พอร์ทัลผู้เช่า · บ้านกาญจน์ เรสซิเดนซ์</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
-<link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700&family=IBM+Plex+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700&family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"/>
 <style>
   :root {
-    --bg: #faf6ee;
-    --ink: #2c241b;
-    --ink2: #5b4f40;
-    --muted: #8a7d6b;
-    --border: #ece4d4;
-    --accent: #c46a3e;
-    --accent-hover: #a4542d;
-    --card: #ffffff;
-    --green: #2f8f5b;
-    --red: #b94a48;
-    --amber: #c08a2a;
+    --bg:         #f6f1e7;
+    --bg-2:       #efe8d8;
+    --surface:    #ffffff;
+    --surface-2:  #fbf7ee;
+    --ink:        #221b13;
+    --ink-2:      #4a3e2f;
+    --muted:      #8a7d6a;
+    --line:       #e7dfcd;
+    --line-2:     #d9cfb8;
+    --accent:     #c46a3e;
+    --accent-2:   #a4542d;
+    --accent-soft:#fbeadc;
+    --green:      #2f8f5b;
+    --green-soft: #e3f1e8;
+    --red:        #b94a48;
+    --red-soft:   #f8e0dc;
+    --amber:      #b9852a;
+    --amber-soft: #f6ead0;
+    --blue:       #3a6fae;
+    --blue-soft:  #e1ecf7;
+
+    --r-sm: 10px;
+    --r:    14px;
+    --r-lg: 18px;
+    --r-xl: 22px;
+
+    --shadow-sm: 0 1px 2px rgba(40,28,12,0.04), 0 1px 1px rgba(40,28,12,0.03);
+    --shadow:    0 6px 18px -10px rgba(40,28,12,0.18), 0 1px 2px rgba(40,28,12,0.04);
+    --shadow-lg: 0 30px 60px -30px rgba(40,28,12,0.30), 0 8px 24px -16px rgba(40,28,12,0.14);
+
+    --font-sans:    "IBM Plex Sans Thai","Sora",system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+    --font-display: "Sora","IBM Plex Sans Thai",system-ui,sans-serif;
+    --font-mono:    "JetBrains Mono",ui-monospace,Menlo,monospace;
   }
   [data-theme="dark"] {
-    --bg: #1a1612;
-    --ink: #f3ead7;
-    --ink2: #c8b89b;
-    --muted: #7d705c;
-    --border: #2a221a;
-    --card: #221c16;
+    --bg:         #18130d;
+    --bg-2:       #1f1810;
+    --surface:    #221b12;
+    --surface-2:  #28200f;
+    --ink:        #f4ecd9;
+    --ink-2:      #d4c6a8;
+    --muted:      #8a7c63;
+    --line:       #2e2618;
+    --line-2:     #3a3022;
+    --accent-soft:#3a2615;
+    --green-soft: #1a2a20;
+    --red-soft:   #2d1c1a;
+    --amber-soft: #2f2614;
+    --blue-soft:  #1c2630;
+    --shadow-sm: 0 1px 2px rgba(0,0,0,0.4);
+    --shadow:    0 6px 18px -10px rgba(0,0,0,0.6), 0 1px 2px rgba(0,0,0,0.4);
+    --shadow-lg: 0 30px 60px -30px rgba(0,0,0,0.8), 0 8px 24px -16px rgba(0,0,0,0.5);
   }
   * { box-sizing: border-box; }
-  html, body { margin:0; padding:0; height:100%; }
+  html, body { margin: 0; padding: 0; }
   body {
-    font-family: "IBM Plex Sans Thai","Sora",system-ui,sans-serif;
+    font-family: var(--font-sans);
     background: var(--bg);
     color: var(--ink);
     -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    min-height: 100vh;
   }
-  #root { min-height: 100vh; }
+  button { font-family: inherit; }
+  input, select, textarea { font-family: inherit; }
+  a { color: inherit; }
+  .no-scrollbar::-webkit-scrollbar { display: none; }
+  .no-scrollbar { scrollbar-width: none; }
+  @keyframes slide-up { from { transform: translateY(12px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+  @keyframes fade-in  { from { opacity: 0; } to { opacity: 1; } }
+  .anim-in { animation: slide-up .26s ease both; }
+  .ph-stripe {
+    background-image: repeating-linear-gradient(135deg,
+      var(--surface-2) 0 8px, transparent 8px 16px);
+    background-color: var(--surface);
+  }
 </style>
 </head>
 <body data-theme="light">
-<div id="root">กำลังโหลด…</div>
+<div id="root" style="min-height:100vh;display:grid;place-items:center;color:var(--muted);font-family:var(--font-sans,system-ui)">กำลังโหลด…</div>
 
 <script src="/api-client.js"></script>
-<!-- A5+B6: production builds with Subresource Integrity. development.js was 20× the size and exposed dev panels.  -->
+<!-- A5+B6: production React+ReactDOM with SRI. development.js was 20× the size and exposed dev panels. -->
 <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"
   integrity="sha384-DGyLxAyjq0f9SPpVevD6IgztCFlnMF6oW/XQGmfe+IsZ8TqEiDrcHkMLKI6fiB/Z"
   crossorigin="anonymous"></script>
