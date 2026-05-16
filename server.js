@@ -120,6 +120,37 @@ function sanitizeError(err) {
   return msg.replace(/(\b[a-z]+:\/\/)[^@\s]+@/gi, '$1***@');
 }
 
+function safeAuditJson(value, maxBytes = 16_000) {
+  if (value === null || value === undefined) return null;
+  const seen = new WeakSet();
+  let out;
+  try {
+    out = JSON.stringify(value, (_key, v) => {
+      if (typeof v === 'bigint') return v.toString();
+      if (v instanceof Error) {
+        return { name: v.name, message: v.message, stack: String(v.stack || '').slice(0, 1000) };
+      }
+      if (v && typeof v === 'object') {
+        if (seen.has(v)) return '[Circular]';
+        seen.add(v);
+      }
+      return v;
+    });
+  } catch (err) {
+    out = JSON.stringify({
+      unserialisable: true,
+      message: String(err && err.message || err).slice(0, 500),
+    });
+  }
+  if (typeof out !== 'string') return null;
+  if (out.length <= maxBytes) return out;
+  return JSON.stringify({
+    truncated: true,
+    originalLength: out.length,
+    preview: out.slice(0, Math.max(0, maxBytes - 200)),
+  });
+}
+
 // Railway-internal Postgres URLs are plain TCP; external ones use SSL.
 // Heuristic: enable SSL only when the host isn't .railway.internal.
 const useSSL = !/\.railway\.internal/i.test(DATABASE_URL);
@@ -343,7 +374,7 @@ async function audit(req, action, entityType, entityId, detail, userIdOverride) 
       `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, detail, ip, ua)
        VALUES ($1,$2,$3,$4,$5,$6,$7)`,
       [userId, action, entityType || null, entityId || null,
-       detail ? JSON.stringify(detail) : null, ip, ua]
+       safeAuditJson(detail), ip, ua]
     );
   } catch (err) {
     console.error('[audit] log failed:', err.message);
@@ -663,6 +694,13 @@ app.put('/api/data/:key', sameOrigin, csrfGuard, requireAuth, requireRole('owner
       });
     }
   }
+  if (value === null || value === undefined) {
+    return res.status(400).json({
+      error: 'use DELETE to remove a key',
+      code: 'NULL_VALUE',
+      hint: 'JSON string values such as "null" are rejected so app_data never stores a null blob.',
+    });
+  }
   // Re-stringify ourselves so pg-node sends a clean JSON literal — this
   // sidesteps any double-escape edge case where an array element was
   // previously serialized as a JSON-string-of-an-object.
@@ -705,7 +743,7 @@ app.put('/api/data/:key', sameOrigin, csrfGuard, requireAuth, requireRole('owner
   if (want === 'array' && !Array.isArray(value)) {
     return res.status(400).json({ error: `${key} must be a JSON array`, code: 'BAD_SHAPE' });
   }
-  if (want === 'object' && (typeof value !== 'object' || Array.isArray(value))) {
+  if (want === 'object' && (value === null || typeof value !== 'object' || Array.isArray(value))) {
     return res.status(400).json({ error: `${key} must be a JSON object`, code: 'BAD_SHAPE' });
   }
   // For arrays, repair common corruption: any element that's a STRING which

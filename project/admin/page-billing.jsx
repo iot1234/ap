@@ -507,6 +507,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
       // Not required; mark-paid still works without it.
       slipFile: null,
       slipDataUrl: null,
+      slipError: '',
       busy: false,
       readinessIssues,
     });
@@ -1825,27 +1826,46 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
               onChange={(e) => {
                 const f = e.target.files && e.target.files[0];
                 if (!f) {
-                  setMarkPaidPrompt({ ...markPaidPrompt, slipFile: null, slipDataUrl: null });
+                  setMarkPaidPrompt((prev) => prev ? { ...prev, slipFile: null, slipDataUrl: null, slipError: '' } : prev);
+                  return;
+                }
+                const allowed = ['image/jpeg', 'image/png', 'image/webp'];
+                if (f.type && !allowed.includes(f.type)) {
+                  const msg = 'รองรับเฉพาะไฟล์ JPG, PNG หรือ WebP เท่านั้น — ไฟล์นี้จะไม่ถูกส่งเข้าระบบ';
+                  e.target.value = '';
+                  setMarkPaidPrompt((prev) => prev ? { ...prev, slipFile: null, slipDataUrl: null, slipError: msg } : prev);
+                  setToast && setToast({ kind: 'warning', message: msg });
                   return;
                 }
                 if (f.size > 5 * 1024 * 1024) {
-                  alert('ไฟล์ใหญ่เกินไป (เกิน 5 MB) — โปรดถ่ายใหม่หรือลดขนาดภาพก่อน');
+                  const msg = 'ไฟล์ใหญ่เกินไป (เกิน 5 MB) — โปรดถ่ายใหม่หรือลดขนาดภาพก่อน';
                   e.target.value = '';
-                  setMarkPaidPrompt({ ...markPaidPrompt, slipFile: null, slipDataUrl: null });
+                  setMarkPaidPrompt((prev) => prev ? { ...prev, slipFile: null, slipDataUrl: null, slipError: msg } : prev);
+                  setToast && setToast({ kind: 'warning', message: msg });
                   return;
                 }
                 const reader = new FileReader();
                 reader.onload = () => {
                   setMarkPaidPrompt((prev) => prev ? {
-                    ...prev, slipFile: f, slipDataUrl: reader.result,
+                    ...prev, slipFile: f, slipDataUrl: reader.result, slipError: '',
                   } : prev);
                 };
                 reader.onerror = () => {
-                  alert('อ่านไฟล์ไม่สำเร็จ — โปรดเลือกใหม่');
+                  const msg = 'อ่านไฟล์ไม่สำเร็จ — โปรดเลือกใหม่';
+                  setMarkPaidPrompt((prev) => prev ? { ...prev, slipFile: null, slipDataUrl: null, slipError: msg } : prev);
+                  setToast && setToast({ kind: 'error', message: msg });
                 };
                 reader.readAsDataURL(f);
               }}
               style={{ display: 'block', marginBottom: 6 }} />
+            {markPaidPrompt.slipError ? (
+              <div role="alert" style={{
+                fontSize: 11.5, color: C.danger || '#c0392b',
+                background: C.dangerSoft || '#fdecea',
+                border: `1px solid ${(C.danger || '#c0392b')}33`,
+                borderRadius: 6, padding: '7px 9px', marginBottom: 8,
+              }}>{markPaidPrompt.slipError}</div>
+            ) : null}
             <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 12 }}>
               เก็บเป็นหลักฐานในประวัติชำระ ดูได้ที่ /admin#payments · JPG/PNG/WebP · ไม่เกิน 5 MB
               {markPaidPrompt.slipFile

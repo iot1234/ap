@@ -177,6 +177,26 @@ test('room sync bridges legacy JSONB rooms and rooms_v2 both directions', () => 
     'room delete/rename must refuse active references instead of orphaning rows');
 });
 
+test('app_data JSONB writes reject parsed null and audit logs are circular-safe', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const idx = server.indexOf("app.put('/api/data/:key'");
+  assert.ok(idx > 0, 'should find app_data PUT handler');
+  const block = server.slice(idx, server.indexOf("app.delete('/api/data/:key'", idx));
+
+  assert.match(server, /function safeAuditJson\(value, maxBytes = 16_000\)/,
+    'audit helper must stringify circular/error details without breaking the request');
+  assert.match(server, /safeAuditJson\(detail\)/,
+    'audit() must use the circular-safe JSON helper');
+  assert.match(server, /truncated: true[\s\S]{0,120}originalLength[\s\S]{0,120}preview/,
+    'oversized audit detail must stay valid JSON after truncation');
+  assert.match(block, /JSON\.parse\(value\)[\s\S]{0,450}code: 'NULL_VALUE'/,
+    'PUT /api/data must reject JSON strings that parse to null');
+  assert.match(block, /value === null \|\| typeof value !== 'object' \|\| Array\.isArray\(value\)/,
+    'object-shaped app_data keys must not accept null after parsing');
+});
+
 test('rooms edit drawer stages type/feature changes and explains pricing impact', () => {
   const fs = require('node:fs');
   const path = require('node:path');
@@ -1304,6 +1324,25 @@ test('admin billing mark-paid uses the bill payment endpoint, not the rooms blob
     'mark-paid must require an issued DB bill');
   assert.doesNotMatch(body, /setRooms\(/,
     'mark-paid must not fake payment status by mutating rooms');
+});
+
+test('admin billing mark-paid slip upload validates client-side and uses inline alerts', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-billing.jsx'), 'utf8');
+  const idx = src.indexOf('<input type="file" accept="image/jpeg,image/png,image/webp"');
+  assert.ok(idx > 0, 'should find mark-paid slip upload input');
+  const block = src.slice(idx, src.indexOf('reader.readAsDataURL(f)', idx) + 120);
+  assert.match(block, /allowed = \['image\/jpeg', 'image\/png', 'image\/webp'\]/,
+    'admin mark-paid should reject unsupported slip MIME types before reading the file');
+  assert.match(block, /slipError/,
+    'file validation errors should be stored inline in the modal state');
+  assert.match(block, /setToast && setToast\(\{ kind: 'warning'/,
+    'oversized/unsupported file errors should use the app notification surface');
+  assert.doesNotMatch(block, /alert\(/,
+    'mark-paid slip upload must not use blocking window.alert');
+  assert.match(src, /<div role="alert"[\s\S]{0,520}\{markPaidPrompt\.slipError\}/,
+    'modal must render file validation errors with an accessible alert');
 });
 
 test('admin billing selected period drives estimates and bulk generation', () => {
