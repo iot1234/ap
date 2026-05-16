@@ -6647,6 +6647,45 @@ function normalizeContractCloseType(body, status) {
   return status === 'expired' ? 'natural_expiry' : 'early_move_out';
 }
 
+function contractInvitationDeliveryText(contract, url, expiresAt) {
+  const expires = expiresAt ? new Date(expiresAt).toLocaleString('th-TH', {
+    timeZone: 'Asia/Bangkok',
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  }) : '-';
+  return [
+    `กรุณากรอกข้อมูลสัญญาเช่า ${contract.contract_no || ''}`.trim(),
+    contract.room_id ? `ห้อง: ${contract.room_id}` : null,
+    `ลิงก์กรอกสัญญา: ${url}`,
+    `หมดอายุ: ${expires}`,
+    `หลังกรอกเสร็จ ระบบจะส่งให้เจ้าของหอพักตรวจและอนุมัติ`,
+  ].filter(Boolean).join('\n');
+}
+
+async function tryNotifyTenantContractInvitation(tenant, contract, url, expiresAt) {
+  if (!tenant || !tenant.id) {
+    return { ok: false, channel: 'none', reason: 'tenant not linked' };
+  }
+  try {
+    const flags = await features.load(pool);
+    const result = await notifier.notifyTenant({ pool, features: flags }, {
+      ...tenant,
+      status: tenant.status || tenant.tenant_status || 'active',
+    }, {
+      subject: `ลิงก์กรอกสัญญา ${contract.contract_no}`,
+      text: contractInvitationDeliveryText(contract, url, expiresAt),
+      force: true,
+    });
+    return result || { ok: false, channel: 'none' };
+  } catch (err) {
+    console.warn('[contracts] invite delivery failed:', err.message);
+    return { ok: false, channel: 'none', reason: err.message };
+  }
+}
+
 function validateContractApprovalDraft(draft) {
   const required = [
     ['signatureFileId', 'signature', 'ลายเซ็นผู้เช่า', 'สัญญาจะถูก lock โดยไม่มีลายเซ็นใน PDF'],
@@ -7921,14 +7960,26 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
       // Active tenants ranked first so we re-use rather than creating
       // another row for the same person across multiple contracts.
       let tenantId = null;
+      let tenantForInviteNotify = null;
       const tQ = await client.query(
-        `SELECT id, full_name, status, current_room_id FROM tenants
+        `SELECT id, full_name, phone, email, line_user_id, line_oa_id,
+                status, current_room_id
+           FROM tenants
            WHERE phone=$1 AND deleted_at IS NULL
            ORDER BY (status='active') DESC, updated_at DESC LIMIT 1`,
         [tenantPhone]
       );
       if (tQ.rows.length) {
         tenantId = tQ.rows[0].id;
+        tenantForInviteNotify = {
+          id: tenantId,
+          full_name: tQ.rows[0].full_name || tenantName,
+          phone: tQ.rows[0].phone || tenantPhone,
+          email: tenantEmail || tQ.rows[0].email || null,
+          line_user_id: tQ.rows[0].line_user_id || null,
+          line_oa_id: tQ.rows[0].line_oa_id || null,
+          status: 'active',
+        };
         // Blacklist guard — refuse silent reactivation of blacklisted
         // tenants. Admin can still force the override but it's
         // audit-logged + owner-notified so a hijacked admin session
@@ -7976,6 +8027,13 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
           [tenantName, tenantPhone, tenantEmail]
         );
         tenantId = ins.rows[0].id;
+        tenantForInviteNotify = {
+          id: tenantId,
+          full_name: tenantName,
+          phone: tenantPhone,
+          email: tenantEmail || null,
+          status: 'active',
+        };
       }
 
       // Room-level guard for draft contracts. Quick-invite happens before
@@ -8008,7 +8066,7 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
             AND c.tenant_id <> $2
           ORDER BY c.created_at DESC
           LIMIT 1
-          FOR UPDATE`,
+          FOR UPDATE OF c`,
         [roomId, tenantId]
       );
       if (roomContract.rows.length) {
@@ -8299,14 +8357,21 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
       const proto = req.headers['x-forwarded-proto'] || req.protocol || 'https';
       const host = req.headers['x-forwarded-host'] || req.headers.host || 'localhost';
       const url = `${proto}://${host}/contract/fill/${invitation.token}`;
+      const delivery = await tryNotifyTenantContractInvitation(
+        tenantForInviteNotify,
+        contract,
+        url,
+        invitation.expiresAt
+      );
 
       audit(req, 'contract.quick_invite', 'contract', String(contract.id),
-        { contractNo: contract.contract_no, tenantId, invitationId: invitation.id });
+        { contractNo: contract.contract_no, tenantId, invitationId: invitation.id, delivery });
 
       res.json({
         ok: true,
         tenant: { id: tenantId, fullName: tenantName, phone: tenantPhone },
         contract,
+        delivery,
         invitation: {
           id: invitation.id,
           token: invitation.token,
@@ -8338,8 +8403,13 @@ app.post('/api/contracts/:id/invite-tenant',
       // accept fresh tenant input — admin must unlock first (a deliberate
       // step) before re-soliciting tenant data.
       const cQ = await pool.query(
-        `SELECT id, contract_no, tenant_id, locked_at FROM contracts
-           WHERE id=$1 AND deleted_at IS NULL`,
+        `SELECT c.id, c.contract_no, c.tenant_id, c.room_id, c.locked_at,
+                t.full_name AS tenant_name, t.phone AS tenant_phone,
+                t.email AS tenant_email, t.line_user_id, t.line_oa_id,
+                t.status AS tenant_status
+           FROM contracts c
+           LEFT JOIN tenants t ON t.id = c.tenant_id AND t.deleted_at IS NULL
+          WHERE c.id=$1 AND c.deleted_at IS NULL`,
         [id]
       );
       if (!cQ.rows.length) return res.status(404).json({ error: 'contract not found' });
@@ -8362,10 +8432,20 @@ app.post('/api/contracts/:id/invite-tenant',
       const proto = req.headers['x-forwarded-proto'] || req.protocol || 'https';
       const host = req.headers['x-forwarded-host'] || req.headers.host || 'localhost';
       const url = `${proto}://${host}/contract/fill/${inv.token}`;
+      const delivery = await tryNotifyTenantContractInvitation({
+        id: cQ.rows[0].tenant_id,
+        full_name: cQ.rows[0].tenant_name,
+        phone: cQ.rows[0].tenant_phone,
+        email: cQ.rows[0].tenant_email,
+        line_user_id: cQ.rows[0].line_user_id,
+        line_oa_id: cQ.rows[0].line_oa_id,
+        status: cQ.rows[0].tenant_status || 'active',
+      }, cQ.rows[0], url, inv.expiresAt);
       audit(req, 'contract.invite_tenant', 'contract', String(id),
-        { invitationId: inv.id, expiresAt: inv.expiresAt });
+        { invitationId: inv.id, expiresAt: inv.expiresAt, delivery });
       res.json({
         ok: true,
+        delivery,
         invitation: {
           id: inv.id,
           token: inv.token,           // ONLY exposed here — never again

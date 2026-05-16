@@ -349,6 +349,29 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
 // Generates a tokenised URL on the server, displays it ONCE for admin to
 // copy/share. Token is never re-shown after this modal closes — admin must
 // generate a fresh one if they lose it.
+function inviteDeliverySummary(delivery) {
+  if (!delivery) return 'ยังไม่ได้ตรวจสถานะการส่งอัตโนมัติ';
+  if (delivery.ok) {
+    const channel = delivery.channel === 'line' ? 'LINE'
+      : delivery.channel === 'email' ? 'อีเมล'
+      : delivery.channel === 'sms' ? 'SMS'
+      : delivery.channel || 'ช่องทางแจ้งเตือน';
+    return `ส่งลิงก์ให้ผู้เช่าแล้วทาง ${channel}`;
+  }
+  if (delivery.queued) return 'ส่งไม่สำเร็จทันที แต่เข้าคิวแจ้งเตือนให้ retry แล้ว';
+  const reason = delivery.reason || delivery.error || 'ไม่มี LINE/อีเมล/SMS ที่พร้อมส่ง';
+  return `ยังไม่ได้ส่งอัตโนมัติ: ${reason} — ให้ก๊อปลิงก์ด้านล่างส่งเอง`;
+}
+
+function inviteErrorMessage(prefix, err) {
+  const raw = err && err.raw ? err.raw : {};
+  const parts = [`${prefix}: ${err && err.message ? err.message : 'unknown'}`];
+  if (err && err.code) parts.push(`รหัส ${err.code}`);
+  if (raw.hint) parts.push(raw.hint);
+  if (raw.reconcileUrl) parts.push(`แก้ไขได้ที่ ${raw.reconcileUrl}`);
+  return parts.join(' · ');
+}
+
 function InviteTenantModal({ contract, onClose, onSaved, onError }) {
   const C = window.ADMIN_C;
   const { Modal, Btn } = window;
@@ -365,24 +388,24 @@ function InviteTenantModal({ contract, onClose, onSaved, onError }) {
         method: 'POST',
         body: JSON.stringify({ expiresInHours: hours }),
       });
-      setResult(d.invitation);
+      setResult(d);
     } catch (err) {
-      onError && onError('สร้างลิงก์ล้มเหลว: ' + err.message);
+      onError && onError(inviteErrorMessage('สร้าง/ส่งลิงก์ล้มเหลว', err));
     } finally {
       setBusy(false);
     }
   };
 
   const copy = async () => {
-    if (!result || !result.url) return;
+    if (!result || !result.invitation || !result.invitation.url) return;
     try {
-      await navigator.clipboard.writeText(result.url);
+      await navigator.clipboard.writeText(result.invitation.url);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {
       // Fallback: select-and-copy via temp input
       const t = document.createElement('input');
-      t.value = result.url;
+      t.value = result.invitation.url;
       document.body.appendChild(t);
       t.select();
       document.execCommand('copy');
@@ -440,13 +463,25 @@ function InviteTenantModal({ contract, onClose, onSaved, onError }) {
             ✅ สร้างลิงก์เรียบร้อย — ส่งให้ผู้เช่าผ่าน LINE / SMS หรือก็อปแล้วส่งทางอื่นได้เลย
           </div>
           <label style={lbl}>ลิงก์สำหรับผู้เช่า</label>
+          <div style={{
+            padding: 10,
+            background: result.delivery && result.delivery.ok ? C.successSoft : C.warningSoft,
+            border: `1px solid ${result.delivery && result.delivery.ok ? '#4a8b4a' : '#f1b32d'}`,
+            borderRadius: 8,
+            fontSize: 12,
+            color: result.delivery && result.delivery.ok ? C.successInk : C.warningInk,
+            marginBottom: 12,
+            lineHeight: 1.5,
+          }}>
+            {inviteDeliverySummary(result.delivery)}
+          </div>
           <div style={{ display: 'flex', gap: 6 }}>
-            <input readOnly value={result.url} style={{ ...inp, fontFamily: 'monospace', fontSize: 11 }}
+            <input readOnly value={result.invitation.url} style={{ ...inp, fontFamily: 'monospace', fontSize: 11 }}
               onFocus={(e) => e.target.select()} />
             <Btn variant="primary" onClick={copy}>{copied ? '✓ ก็อปแล้ว' : 'ก็อป'}</Btn>
           </div>
           <div style={{ marginTop: 12, fontSize: 12, color: C.muted }}>
-            อายุลิงก์: หมดอายุ {new Date(result.expiresAt).toLocaleString('th-TH', {
+            อายุลิงก์: หมดอายุ {new Date(result.invitation.expiresAt).toLocaleString('th-TH', {
               year: 'numeric', month: 'short', day: 'numeric',
               hour: '2-digit', minute: '2-digit',
             })}
@@ -1044,7 +1079,7 @@ function QuickInviteModal({ rooms = {}, config, onClose, onSaved, onError }) {
       });
       setResult(d);
     } catch (err) {
-      onError && onError('สร้างสัญญาล้มเหลว: ' + err.message);
+      onError && onError(inviteErrorMessage('สร้างสัญญา/ส่งลิงก์ล้มเหลว', err));
     } finally {
       setBusy(false);
     }
@@ -1217,6 +1252,18 @@ function QuickInviteModal({ rooms = {}, config, onClose, onSaved, onError }) {
             ส่งลิงก์ด้านล่างให้ <b>{result.tenant.fullName}</b> กรอกได้เลย
           </div>
           <label style={lbl}>ลิงก์สำหรับผู้เช่า</label>
+          <div style={{
+            padding: 10,
+            background: result.delivery && result.delivery.ok ? C.successSoft : C.warningSoft,
+            border: `1px solid ${result.delivery && result.delivery.ok ? '#4a8b4a' : '#f1b32d'}`,
+            borderRadius: 8,
+            fontSize: 12,
+            color: result.delivery && result.delivery.ok ? C.successInk : C.warningInk,
+            marginBottom: 12,
+            lineHeight: 1.5,
+          }}>
+            {inviteDeliverySummary(result.delivery)}
+          </div>
           <div style={{ display: 'flex', gap: 6 }}>
             <input readOnly value={result.invitation.url}
               style={{ ...inp, fontFamily: 'monospace', fontSize: 11 }}

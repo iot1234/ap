@@ -2983,6 +2983,12 @@ test('quick-invite locks the requested room before creating a draft contract', (
   assert.match(block,
     /UPDATE rooms_v2 SET status='reserved', updated_at=NOW\(\)[\s\S]{0,120}WHERE room_code=\$1 AND status='vacant'/,
     'draft reservation must be mirrored to rooms_v2 when the room was vacant');
+  assert.match(block,
+    /LEFT JOIN tenants t ON t\.id = c\.tenant_id[\s\S]{0,180}FOR UPDATE OF c/,
+    'room-contract conflict query must lock only contracts; plain FOR UPDATE crashes on LEFT JOIN nullable side');
+  assert.doesNotMatch(block,
+    /LEFT JOIN tenants t ON t\.id = c\.tenant_id[\s\S]{0,180}FOR UPDATE\s*(?:`|,)/,
+    'quick-invite must not use plain FOR UPDATE after LEFT JOIN tenants');
 });
 
 test('PUT /api/contracts/:id status=ended cascades tenant + room state', () => {
@@ -3345,7 +3351,7 @@ test('quick-invite endpoint exists + creates tenant + contract + invitation atom
   assert.match(block, /ROLLBACK/);
   // Must look up tenant by phone first to avoid duplicating rows for the
   // same person across multiple contracts.
-  assert.match(block, /SELECT id, full_name, status, current_room_id FROM tenants[\s\S]{0,200}WHERE phone=\$1/);
+  assert.match(block, /SELECT id, full_name, phone, email, line_user_id, line_oa_id,[\s\S]{0,120}status, current_room_id[\s\S]{0,200}WHERE phone=\$1/);
   // Must reactivate moved_out tenants instead of creating new rows.
   assert.match(block, /SET status='active'/);
   // Must skip the heavy checkin guards (no IDENTITY_INCOMPLETE here).
@@ -3354,6 +3360,10 @@ test('quick-invite endpoint exists + creates tenant + contract + invitation atom
   // Token + invitation must be inlined in the same transaction (no
   // nested BEGIN — the helper would crash inside an open tx).
   assert.match(block, /INSERT INTO contract_invitations/);
+  assert.match(block, /tryNotifyTenantContractInvitation/,
+    'quick-invite must attempt to send the generated link after commit');
+  assert.match(block, /delivery,[\s\S]{0,120}invitation:/,
+    'quick-invite response must include delivery status for the UI');
   assert.match(block, /audit\(req, 'contract\.quick_invite'/);
 });
 
@@ -3376,6 +3386,10 @@ test('contracts page has "+ สร้างสัญญา" entry button + Quick
   assert.match(src, /Number\(v\) \* 2/);
   // Result panel shows the URL with copy
   assert.match(src, /result\.invitation\.url/);
+  assert.match(src, /inviteDeliverySummary\(result\.delivery\)/,
+    'quick-invite result must show whether the link was sent automatically');
+  assert.match(src, /inviteErrorMessage\('สร้างสัญญา\/ส่งลิงก์ล้มเหลว'/,
+    'quick-invite errors should include structured hints/codes');
   assert.match(src, /navigator\.clipboard\.writeText/);
 });
 
@@ -3526,6 +3540,23 @@ test('invite-tenant refuses to issue link for locked contract', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   assert.match(src, /CONTRACT_LOCKED/,
     'invite-tenant must surface CONTRACT_LOCKED when locked_at is set');
+});
+
+test('contract invite links are sent or surfaced with delivery status', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(src, /function contractInvitationDeliveryText/,
+    'server must build a tenant-facing contract invitation message');
+  assert.match(src, /async function tryNotifyTenantContractInvitation/,
+    'server must centralize best-effort invitation delivery');
+  const block = src.match(/app\.post\('\/api\/contracts\/:id\/invite-tenant'[\s\S]+?\/\/ GET \/api\/admin\/contract-invitations/)[0];
+  assert.match(block, /LEFT JOIN tenants t ON t\.id = c\.tenant_id/,
+    'invite-tenant should load tenant contact details in the same lookup');
+  assert.match(block, /tryNotifyTenantContractInvitation/,
+    'invite-tenant should attempt LINE/email/SMS delivery after link creation');
+  assert.match(block, /res\.json\(\{[\s\S]{0,120}delivery,[\s\S]{0,180}invitation:/,
+    'invite-tenant response must tell the UI whether auto-delivery happened');
 });
 
 test('approve atomically applies draft + locks contract in single transaction', () => {
@@ -3712,6 +3743,10 @@ test('contracts page has invite button + InviteTenantModal', () => {
   // Modal generates link via API + shows token ONCE + offers copy
   assert.match(src, /function InviteTenantModal/);
   assert.match(src, /\/api\/contracts\/\$\{contract\.id\}\/invite-tenant/);
+  assert.match(src, /setResult\(d\)/,
+    'InviteTenantModal must keep the full response so delivery status is not lost');
+  assert.match(src, /inviteDeliverySummary\(result\.delivery\)/,
+    'InviteTenantModal must display auto-delivery status');
   // Surface "show only once" warning so admin doesn't lose the URL
   assert.match(src, /แสดงครั้งเดียว/);
   // Copy-to-clipboard
