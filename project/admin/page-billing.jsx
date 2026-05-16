@@ -245,14 +245,24 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
     return Object.values(rooms)
       .filter(r => r.tenant && (r.status === 'occupied' || r.status === 'overdue'))
       .map(r => {
-        const waterUnits = unitsFromReadingsOrFallback(r, 'water');
-        const elecUnits = unitsFromReadingsOrFallback(r, 'elec');
+        // Flat-mode preview matches services/billing.js — if room mode is
+        // 'flat' and amount > 0, bill the flat number and zero out
+        // units/rate so the table doesn't show "5 หน่วย × 18" alongside
+        // the flat amount.
+        const waterFlat = Number(r.waterFlatAmount);
+        const elecFlat  = Number(r.elecFlatAmount);
+        const waterFlatActive = String(r.waterMode || '').toLowerCase() === 'flat'
+          && Number.isFinite(waterFlat) && waterFlat > 0;
+        const elecFlatActive  = String(r.elecMode || '').toLowerCase() === 'flat'
+          && Number.isFinite(elecFlat)  && elecFlat  > 0;
+        const waterUnits = waterFlatActive ? 0 : unitsFromReadingsOrFallback(r, 'water');
+        const elecUnits  = elecFlatActive  ? 0 : unitsFromReadingsOrFallback(r, 'elec');
         const waterPair = readingPair(r, 'water');
         const elecPair = readingPair(r, 'elec');
-        const waterRate = overrideOrFallback(r.waterRateOverride, globalWaterRate);
-        const elecRate  = overrideOrFallback(r.elecRateOverride,  globalElecRate);
-        const water = waterUnits * waterRate;
-        const elec  = elecUnits * elecRate;
+        const waterRate = waterFlatActive ? 0 : overrideOrFallback(r.waterRateOverride, globalWaterRate);
+        const elecRate  = elecFlatActive  ? 0 : overrideOrFallback(r.elecRateOverride,  globalElecRate);
+        const water = waterFlatActive ? waterFlat : waterUnits * waterRate;
+        const elec  = elecFlatActive  ? elecFlat  : elecUnits * elecRate;
         // Honor wifi=0 as a real override (free wifi), not "use global".
         const wifiRaw = r.wifiOverride ?? r.wifi;
         const wifi = (wifiRaw != null && wifiRaw !== '' && Number.isFinite(Number(wifiRaw)))

@@ -1338,54 +1338,127 @@ function RoomEditForm({ room, originalRoom, onUpdate, onServerPatch, config }) {
             value={room.deposit}
             onChange={(v) => onUpdate({ deposit: Number(v) })}
           />
-          <Input
-            label="ค่าน้ำ (หน่วย)" type="number" suffix="หน่วย"
-            value={room.waterUnits}
-            onChange={(v) => onUpdate({
-              waterUnits: Number(v),
-              water: Number(v) * (Number(room.waterRateOverride) > 0
-                ? Number(room.waterRateOverride)
-                : config.utilities.waterRate),
-            })}
-          />
-          <Input
-            label="ค่าไฟ (หน่วย)" type="number" suffix="หน่วย"
-            value={room.elecUnits}
-            onChange={(v) => onUpdate({
-              elecUnits: Number(v),
-              elec: Number(v) * (Number(room.elecRateOverride) > 0
-                ? Number(room.elecRateOverride)
-                : config.utilities.elecRate),
-            })}
-          />
+          {/* Water section — mode toggle drives whether the metered inputs
+              or the flat-amount input shows. Both modes save to the room
+              blob so admin can flip back and forth without losing data. */}
+          <div style={{
+            gridColumn: '1 / -1',
+            padding: 12,
+            border: `1px solid ${C.borderSoft}`, borderRadius: 8,
+            background: C.surface,
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 10 }}>
+              <span style={{ fontSize: 13, fontWeight: 600, color: C.ink }}>โหมดค่าน้ำ</span>
+              <label style={{ fontSize: 13, color: C.ink2, display: 'flex', alignItems: 'center', gap: 4 }}>
+                <input type="radio" name={`waterMode-${room.id}`}
+                  checked={(room.waterMode || 'metered') !== 'flat'}
+                  onChange={() => onUpdate({ waterMode: 'metered' })} />
+                ตามมิเตอร์
+              </label>
+              <label style={{ fontSize: 13, color: C.ink2, display: 'flex', alignItems: 'center', gap: 4 }}>
+                <input type="radio" name={`waterMode-${room.id}`}
+                  checked={room.waterMode === 'flat'}
+                  onChange={() => onUpdate({ waterMode: 'flat' })} />
+                เหมารายเดือน
+              </label>
+            </div>
+            {room.waterMode === 'flat' ? (
+              <Input
+                label="ค่าน้ำเหมา" type="number" step="0.01" suffix="บาท/เดือน"
+                value={room.waterFlatAmount == null ? '' : room.waterFlatAmount}
+                onChange={(v) => onUpdate({
+                  waterFlatAmount: v === '' ? null : Number(v),
+                  water: v === '' ? 0 : Number(v),
+                })}
+                hint="ค่าน้ำเดือนละเท่าไรไม่นับตามเลขมิเตอร์"
+              />
+            ) : (
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                <Input
+                  label="ค่าน้ำ (หน่วย)" type="number" suffix="หน่วย"
+                  value={room.waterUnits}
+                  onChange={(v) => onUpdate({
+                    waterUnits: Number(v),
+                    water: Number(v) * (Number(room.waterRateOverride) > 0
+                      ? Number(room.waterRateOverride)
+                      : config.utilities.waterRate),
+                  })}
+                />
+                <Input
+                  label="อัตราพิเศษ" type="number" step="0.01" suffix="บาท/หน่วย"
+                  value={room.waterRateOverride == null ? '' : room.waterRateOverride}
+                  placeholder={String(config.utilities.waterRate ?? 18)}
+                  onChange={(v) => onUpdate({
+                    waterRateOverride: v === '' ? null : Number(v),
+                  })}
+                  hint="ว่าง = ใช้อัตรากลางจาก Pricing"
+                />
+              </div>
+            )}
+          </div>
+
+          {/* Electricity section — same shape as water. */}
+          <div style={{
+            gridColumn: '1 / -1',
+            padding: 12,
+            border: `1px solid ${C.borderSoft}`, borderRadius: 8,
+            background: C.surface,
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 10 }}>
+              <span style={{ fontSize: 13, fontWeight: 600, color: C.ink }}>โหมดค่าไฟ</span>
+              <label style={{ fontSize: 13, color: C.ink2, display: 'flex', alignItems: 'center', gap: 4 }}>
+                <input type="radio" name={`elecMode-${room.id}`}
+                  checked={(room.elecMode || 'metered') !== 'flat'}
+                  onChange={() => onUpdate({ elecMode: 'metered' })} />
+                ตามมิเตอร์
+              </label>
+              <label style={{ fontSize: 13, color: C.ink2, display: 'flex', alignItems: 'center', gap: 4 }}>
+                <input type="radio" name={`elecMode-${room.id}`}
+                  checked={room.elecMode === 'flat'}
+                  onChange={() => onUpdate({ elecMode: 'flat' })} />
+                เหมารายเดือน
+              </label>
+            </div>
+            {room.elecMode === 'flat' ? (
+              <Input
+                label="ค่าไฟเหมา" type="number" step="0.01" suffix="บาท/เดือน"
+                value={room.elecFlatAmount == null ? '' : room.elecFlatAmount}
+                onChange={(v) => onUpdate({
+                  elecFlatAmount: v === '' ? null : Number(v),
+                  elec: v === '' ? 0 : Number(v),
+                })}
+                hint="ค่าไฟเดือนละเท่าไรไม่นับตามเลขมิเตอร์"
+              />
+            ) : (
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                <Input
+                  label="ค่าไฟ (หน่วย)" type="number" suffix="หน่วย"
+                  value={room.elecUnits}
+                  onChange={(v) => onUpdate({
+                    elecUnits: Number(v),
+                    elec: Number(v) * (Number(room.elecRateOverride) > 0
+                      ? Number(room.elecRateOverride)
+                      : config.utilities.elecRate),
+                  })}
+                />
+                <Input
+                  label="อัตราพิเศษ" type="number" step="0.01" suffix="บาท/หน่วย"
+                  value={room.elecRateOverride == null ? '' : room.elecRateOverride}
+                  placeholder={String(config.utilities.elecRate ?? 8)}
+                  onChange={(v) => onUpdate({
+                    elecRateOverride: v === '' ? null : Number(v),
+                  })}
+                  hint="ว่าง = ใช้อัตรากลางจาก Pricing"
+                />
+              </div>
+            )}
+          </div>
+
           <Input
             label="ค่า Wi-Fi" type="number" suffix="บาท/เดือน"
             value={room.wifi}
             onChange={(v) => onUpdate({ wifi: Number(v) })}
             hint="ใส่ 0 เพื่อไม่คิด (free wifi) — ปล่อยว่างเพื่อใช้ค่ากลางจาก Pricing"
-          />
-          {/* Per-room rate overrides — same fallback pattern as rent_override.
-              Empty / 0 / negative → falls back to config.utilities.{waterRate,
-              elecRate}. Server-side billing engine reads room.waterRateOverride
-              or snake_case water_rate_override, so the saved value flows to
-              the actual generated bill (not just the preview). */}
-          <Input
-            label="อัตราค่าน้ำพิเศษ (บาท/หน่วย)" type="number" step="0.01" suffix="บาท/หน่วย"
-            value={room.waterRateOverride == null ? '' : room.waterRateOverride}
-            placeholder={String(config.utilities.waterRate ?? 18)}
-            onChange={(v) => onUpdate({
-              waterRateOverride: v === '' ? null : Number(v),
-            })}
-            hint="ปล่อยว่างเพื่อใช้อัตรากลางจาก Pricing"
-          />
-          <Input
-            label="อัตราค่าไฟพิเศษ (บาท/หน่วย)" type="number" step="0.01" suffix="บาท/หน่วย"
-            value={room.elecRateOverride == null ? '' : room.elecRateOverride}
-            placeholder={String(config.utilities.elecRate ?? 8)}
-            onChange={(v) => onUpdate({
-              elecRateOverride: v === '' ? null : Number(v),
-            })}
-            hint="ปล่อยว่างเพื่อใช้อัตรากลางจาก Pricing"
           />
         </div>
         <div style={{

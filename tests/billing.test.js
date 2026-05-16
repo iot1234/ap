@@ -302,6 +302,81 @@ test('buildBill: no override → both source = global, rates match config', () =
   assert.equal(bill.wifiFeeSource, 'global');
 });
 
+// --- Flat (เหมา) billing mode ---------------------------------------------
+// Some rooms don't have a real meter — admin bundles water/elec as a flat
+// monthly fee. Toggled per-room at /admin#rooms, so one building can mix
+// metered + flat rooms freely. Bill must surface "ค่าน้ำเหมา" so the
+// tenant doesn't dispute "why charged 300 when meter says 5 units".
+
+test('buildBill: water flat mode → charges flat amount, zero units/rate', () => {
+  const flags = { lateFee: { enabled: false }, vat: { enabled: false } };
+  const room = { ...baseRoom, waterMode: 'flat', waterFlatAmount: 300, waterUnits: 999 };
+  const bill = billing.buildBill({ room, config: baseConfig, features: flags });
+  assert.equal(bill.waterAmount, 300);
+  assert.equal(bill.waterUnits, 0, 'flat mode drops units (legal record)');
+  assert.equal(bill.waterRate, 0, 'flat mode zeros rate so qty line not "× 0"');
+  assert.equal(bill.waterMode, 'flat');
+  // No prev/current readings on flat — clears the audit trail noise.
+  assert.equal(bill.waterPrevReading, null);
+  assert.equal(bill.waterCurrentReading, null);
+  // Item label includes "(เหมา)" so the bill PDF + tenant view make
+  // the billing mode explicit.
+  const waterItem = bill.items.find((it) => /ค่าน้ำ/.test(it.label));
+  assert.match(waterItem.label, /เหมา/);
+  assert.match(waterItem.detail, /เหมารายเดือน/);
+});
+
+test('buildBill: elec flat mode is independent from water', () => {
+  // Same room can have metered water + flat elec (or vice-versa) — common
+  // for older units where elec meter exists but water is shared.
+  const flags = { lateFee: { enabled: false }, vat: { enabled: false } };
+  const room = {
+    ...baseRoom,
+    waterMode: 'metered', waterUnits: 5,
+    elecMode: 'flat', elecFlatAmount: 500,
+  };
+  const bill = billing.buildBill({ room, config: baseConfig, features: flags });
+  assert.equal(bill.waterMode, 'metered');
+  assert.equal(bill.waterAmount, 90);  // 5 × 18
+  assert.equal(bill.elecMode, 'flat');
+  assert.equal(bill.elecAmount, 500);
+});
+
+test('buildBill: flat mode with missing amount → falls back to metered + flag', () => {
+  // Safety: if admin selected flat but never typed an amount, don't charge 0
+  // — fall back to the metered formula and surface waterFlatFellBack so
+  // /admin#billing can warn admin to set the amount.
+  const flags = { lateFee: { enabled: false }, vat: { enabled: false } };
+  const room = { ...baseRoom, waterMode: 'flat', waterFlatAmount: null };
+  const bill = billing.buildBill({ room, config: baseConfig, features: flags });
+  assert.equal(bill.waterMode, 'metered', 'falls back when amount missing');
+  assert.equal(bill.waterFlatFellBack, true, 'fellBack flag set for admin to notice');
+  assert.equal(bill.waterAmount, 90);  // metered path: 5 × 18
+});
+
+test('buildBill: flat mode with negative amount → falls back to metered + flag', () => {
+  const flags = { lateFee: { enabled: false }, vat: { enabled: false } };
+  const room = { ...baseRoom, elecMode: 'flat', elecFlatAmount: -100 };
+  const bill = billing.buildBill({ room, config: baseConfig, features: flags });
+  assert.equal(bill.elecMode, 'metered');
+  assert.equal(bill.elecFlatFellBack, true);
+});
+
+test('buildBill: flat mode with snake_case keys (rooms_v2 column shape)', () => {
+  const flags = { lateFee: { enabled: false }, vat: { enabled: false } };
+  const room = { ...baseRoom, water_mode: 'flat', water_flat_amount: 250 };
+  const bill = billing.buildBill({ room, config: baseConfig, features: flags });
+  assert.equal(bill.waterMode, 'flat');
+  assert.equal(bill.waterAmount, 250);
+});
+
+test('buildBill: default mode (no field) → metered (backward compat)', () => {
+  const flags = { lateFee: { enabled: false }, vat: { enabled: false } };
+  const bill = billing.buildBill({ room: baseRoom, config: baseConfig, features: flags });
+  assert.equal(bill.waterMode, 'metered');
+  assert.equal(bill.elecMode, 'metered');
+});
+
 test('isChargeApplicableForPeriod: rejects YYYY-13 / YYYY-00 outside 01-12', () => {
   // Bill period must be a real Gregorian month. The matching regex in
   // /api/bills/bulk-generate accepts only digit count, so the recurring

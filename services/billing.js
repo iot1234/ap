@@ -70,12 +70,48 @@ function buildBill({ room, contract = null, config, features, previous = null, r
   // priority + rationale.
   const resolved = pricing.resolveBillingRent({ room, contract, config });
   const rentBase = Number(resolved.rent) || 0;
+  // Billing mode resolution per utility — admin can pick 'flat' (เหมา)
+  // for rooms that don't have a real meter (older units, single-tenant
+  // serviced rooms where utilities are bundled). Three states:
+  //   1. mode='flat' AND flat amount > 0 → bill the flat number, drop
+  //      units/rate from the line item.
+  //   2. mode='flat' BUT flat amount missing/<=0 → fall back to metered
+  //      and surface a "flat amount not set" note so admin notices
+  //      before the bill goes out (defence-in-depth).
+  //   3. mode='metered' (default for legacy rooms without a mode field) →
+  //      existing units × rate.
+  // Accept both camelCase (blob) + snake_case (rooms_v2 columns).
+  const resolveFlatMode = (modeRaw, flatRaw) => {
+    const requested = String(modeRaw || '').toLowerCase();
+    if (requested !== 'flat') return { mode: 'metered', flat: 0 };
+    const flat = Number(flatRaw);
+    if (!Number.isFinite(flat) || flat <= 0) {
+      return { mode: 'metered', flat: 0, fellBack: true };
+    }
+    return { mode: 'flat', flat };
+  };
+  const waterModeInfo = resolveFlatMode(
+    r.waterMode ?? r.water_mode,
+    r.waterFlatAmount ?? r.water_flat_amount
+  );
+  const elecModeInfo = resolveFlatMode(
+    r.elecMode ?? r.elec_mode,
+    r.elecFlatAmount ?? r.elec_flat_amount
+  );
   const waterUsage = resolveUtilityUsage(room, 'water');
   const elecUsage = resolveUtilityUsage(room, 'elec');
-  const waterUnits = waterUsage.units;
-  const elecUnits  = elecUsage.units;
-  const waterAmount = round2(waterUnits * waterRate);
-  const elecAmount  = round2(elecUnits  * elecRate);
+  const waterUnits = waterModeInfo.mode === 'flat' ? 0 : waterUsage.units;
+  const elecUnits  = elecModeInfo.mode  === 'flat' ? 0 : elecUsage.units;
+  const waterAmount = waterModeInfo.mode === 'flat'
+    ? round2(waterModeInfo.flat)
+    : round2(waterUnits * waterRate);
+  const elecAmount = elecModeInfo.mode === 'flat'
+    ? round2(elecModeInfo.flat)
+    : round2(elecUnits * elecRate);
+  // Zero out rate on the bill row when flat — the rate column is
+  // meaningless for a flat charge and printing "× 0" confuses tenants.
+  const effectiveWaterRate = waterModeInfo.mode === 'flat' ? 0 : waterRate;
+  const effectiveElecRate  = elecModeInfo.mode  === 'flat' ? 0 : elecRate;
 
   // Contract-length discount applies only to the rent portion (utilities
   // are pass-through cost — discounting kWh would underbill). discountPct
@@ -103,10 +139,24 @@ function buildBill({ room, contract = null, config, features, previous = null, r
   // separate negative line — keeps the receipt transparent (tenant sees
   // both the headline rent and the discount they're getting). Subtotal
   // math matches: rentBase + utilities + (-discountAmount) = rent + utilities.
+  // Flat-mode utility item — different shape from buildUtilityItem since
+  // there are no readings/units/rate to display. Tenant sees "ค่าน้ำเหมา
+  // รายเดือน" so they don't dispute "why was I charged 300 when my meter
+  // says 5 units" — the bill makes the billing mode explicit.
+  const flatItem = (label, amount) => ({
+    label: `${label} (เหมา)`,
+    qty: '1 เดือน',
+    amount,
+    detail: 'ค่าเหมารายเดือน — ไม่นับตามเลขมิเตอร์',
+  });
   const items = [
     { label: 'ค่าเช่าห้องพัก', qty: '1 เดือน', amount: rentBase },
-    buildUtilityItem('ค่าน้ำ', waterUsage, waterRate, waterAmount),
-    buildUtilityItem('ค่าไฟฟ้า', elecUsage, elecRate, elecAmount),
+    waterModeInfo.mode === 'flat'
+      ? flatItem('ค่าน้ำ', waterAmount)
+      : buildUtilityItem('ค่าน้ำ', waterUsage, waterRate, waterAmount),
+    elecModeInfo.mode === 'flat'
+      ? flatItem('ค่าไฟฟ้า', elecAmount)
+      : buildUtilityItem('ค่าไฟฟ้า', elecUsage, elecRate, elecAmount),
   ];
   if (wifiFee > 0) items.push({ label: 'ค่าอินเทอร์เน็ต', qty: '1 เดือน', amount: wifiFee });
   if (discountAmount > 0) {
@@ -166,14 +216,18 @@ function buildBill({ room, contract = null, config, features, previous = null, r
     dueDate: dueDate || formatDueDate(15),
     items,
     rent, rentBase, discountPct: safePct, discountAmount,
-    waterUnits, waterRate, waterAmount,
+    waterUnits, waterRate: effectiveWaterRate, waterAmount,
     waterRateSource,    // 'override' | 'global' — admin can audit which
-    waterPrevReading: waterUsage.prevReading,
-    waterCurrentReading: waterUsage.currentReading,
-    elecUnits, elecRate, elecAmount,
+    waterMode: waterModeInfo.mode,      // 'flat' | 'metered'
+    waterFlatFellBack: !!waterModeInfo.fellBack,
+    waterPrevReading: waterModeInfo.mode === 'flat' ? null : waterUsage.prevReading,
+    waterCurrentReading: waterModeInfo.mode === 'flat' ? null : waterUsage.currentReading,
+    elecUnits, elecRate: effectiveElecRate, elecAmount,
     elecRateSource,
-    elecPrevReading: elecUsage.prevReading,
-    elecCurrentReading: elecUsage.currentReading,
+    elecMode: elecModeInfo.mode,
+    elecFlatFellBack: !!elecModeInfo.fellBack,
+    elecPrevReading: elecModeInfo.mode === 'flat' ? null : elecUsage.prevReading,
+    elecCurrentReading: elecModeInfo.mode === 'flat' ? null : elecUsage.currentReading,
     wifi: wifiFee,
     wifiFeeSource,
     subtotal: round2(subtotal),
