@@ -15,10 +15,10 @@ function useViewport() {
 }
 
 const C = {
-  bg: '#f5efe3', surface: '#ffffff', surfaceAlt: '#faf6ee',
-  ink: '#2c241b', ink2: '#5b4f40', muted: '#8a7d6b',
-  border: '#ece4d4', borderSoft: '#f3ece0',
-  accent: '#c46a3e', dark: '#2c241b',
+  bg: '#f3f7f4', surface: '#ffffff', surfaceAlt: '#f7faf8',
+  ink: '#1e2a24', ink2: '#506156', muted: '#7b8b81',
+  border: '#dfe9e2', borderSoft: '#eef4ef',
+  accent: '#2f8a70', accentWarm: '#b98448', dark: '#14231d',
 };
 
 const STATUS = {
@@ -93,6 +93,47 @@ function getAllFloors(rooms) {
 
 const fmt = (n) => n.toLocaleString('th-TH');
 
+const ROOM_PHOTO_SETS = {
+  standard: ['/assets/rooms/room-standard.jpg', '/assets/rooms/room-studio.jpg', '/assets/rooms/room-deluxe.jpg'],
+  deluxe: ['/assets/rooms/room-deluxe.jpg', '/assets/rooms/room-suite.jpg', '/assets/rooms/room-standard.jpg'],
+  suite: ['/assets/rooms/room-suite.jpg', '/assets/rooms/room-deluxe.jpg', '/assets/rooms/room-studio.jpg'],
+  studio: ['/assets/rooms/room-studio.jpg', '/assets/rooms/room-standard.jpg', '/assets/rooms/room-suite.jpg'],
+};
+
+function getRoomType(room) {
+  return ROOM_TYPES[room?.type] || ROOM_TYPES.standard;
+}
+
+function getRoomStatus(room) {
+  return STATUS[room?.status] ? room.status : 'vacant';
+}
+
+function realRoomPhotos(room) {
+  if (!Array.isArray(room?.photos)) return [];
+  return room.photos.filter((p) => (
+    typeof p === 'string' &&
+    p.trim() &&
+    !p.startsWith('data:')
+  ));
+}
+
+function roomPhotos(room) {
+  const photos = realRoomPhotos(room);
+  if (photos.length) return photos;
+  const set = ROOM_PHOTO_SETS[room?.type] || ROOM_PHOTO_SETS.standard;
+  const offset = (Number(room?.floor) || 0) + (Number(room?.no) || 0);
+  return [set[0], set[(offset % (set.length - 1)) + 1], set[((offset + 1) % (set.length - 1)) + 1]];
+}
+
+function bookingHref(room) {
+  const qs = new URLSearchParams({
+    roomId: room.id,
+    floor: String(room.floor || ''),
+    roomType: room.type || 'standard',
+  });
+  return `/book?${qs.toString()}`;
+}
+
 function placeholderPhoto(room, idx = 0) {
   const seed = room.floor * 100 + room.no + idx * 7;
   const hues = [28, 200, 150, 35, 12, 220];
@@ -119,21 +160,43 @@ function placeholderPhoto(room, idx = 0) {
       <rect x='230' y='100' width='40' height='20' rx='3' fill='${dk}' fill-opacity='0.2'/>
       <circle cx='210' cy='80' r='10' fill='${ac}' fill-opacity='0.6'/>
       <line x1='210' y1='90' x2='210' y2='180' stroke='${dk}' stroke-opacity='0.3' stroke-width='2'/>
-      <text x='20' y='245' font-family='ui-monospace, monospace' font-size='11' fill='${dk}' fill-opacity='0.55'>ROOM ${room.id} · ${ROOM_TYPES[room.type].th}</text>
+      <text x='20' y='245' font-family='ui-monospace, monospace' font-size='11' fill='${dk}' fill-opacity='0.55'>ROOM ${room.id} · ${getRoomType(room).th}</text>
     </svg>
   `)}`;
 }
 
-const StatusDot = ({ status, size = 8, ring = true }) => (
-  <span style={{
-    display: 'inline-block', width: size, height: size, borderRadius: '50%',
-    background: STATUS[status].dot, flex: 'none',
-    boxShadow: ring ? `0 0 0 3px ${STATUS[status].dot}22` : 'none',
-  }}/>
-);
+function RoomImage({ room, src, alt = '', style = {}, ...props }) {
+  const fallback = placeholderPhoto(room);
+  const [current, setCurrent] = useState(src || fallback);
+  useEffect(() => setCurrent(src || fallback), [src, room?.id, fallback]);
+  return (
+    <img
+      src={current}
+      alt={alt}
+      loading="lazy"
+      decoding="async"
+      onError={() => {
+        if (current !== fallback) setCurrent(fallback);
+      }}
+      style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block', ...style }}
+      {...props}
+    />
+  );
+}
+
+const StatusDot = ({ status, size = 8, ring = true }) => {
+  const s = STATUS[status] || STATUS.vacant;
+  return (
+    <span style={{
+      display: 'inline-block', width: size, height: size, borderRadius: '50%',
+      background: s.dot, flex: 'none',
+      boxShadow: ring ? `0 0 0 3px ${s.dot}22` : 'none',
+    }}/>
+  );
+};
 
 const StatusBadge = ({ status, compact = false }) => {
-  const s = STATUS[status];
+  const s = STATUS[status] || STATUS.vacant;
   return (
     <span style={{
       display: 'inline-flex', alignItems: 'center', gap: 6,
@@ -147,10 +210,10 @@ const StatusBadge = ({ status, compact = false }) => {
   );
 };
 
-function KpiBar({ totals, isMobile }) {
-  const pct = (n) => Math.round((n / totals.all) * 100);
+function KpiBar({ totals, isMobile, floorCount }) {
+  const pct = (n) => totals.all ? Math.round((n / totals.all) * 100) : 0;
   const items = [
-    { k: 'all', label: 'ห้องทั้งหมด', val: totals.all, sub: '40 ห้อง · 5 ชั้น', color: C.ink },
+    { k: 'all', label: 'ห้องทั้งหมด', val: totals.all, sub: `${totals.all} ห้อง · ${floorCount} ชั้น`, color: C.ink },
     { k: 'vacant', label: 'ว่าง', val: totals.vacant, sub: `${pct(totals.vacant)}% ของทั้งหมด`, color: STATUS.vacant.dot },
     { k: 'occupied', label: 'มีผู้เช่า', val: totals.occupied, sub: `${pct(totals.occupied)}% เข้าพัก`, color: STATUS.occupied.dot },
     { k: 'overdue', label: 'ค้างชำระ', val: totals.overdue, sub: 'ต้องติดตาม', color: STATUS.overdue.dot },
@@ -171,7 +234,7 @@ function KpiBar({ totals, isMobile }) {
           </div>
           <div style={{
             fontFamily: 'Sora', fontSize: isMobile ? 24 : 28,
-            fontWeight: 600, color: C.ink, marginTop: 4, letterSpacing: -1,
+            fontWeight: 600, color: C.ink, marginTop: 4, letterSpacing: 0,
           }}>{it.val}</div>
           <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>{it.sub}</div>
         </div>
@@ -213,7 +276,7 @@ function BuildingDiagram({ rooms, currentFloor, onSelectFloor }) {
                 <div style={{
                   fontFamily: 'Sora', fontWeight: 600, fontSize: 18,
                   color: active ? C.accent : C.ink,
-                  width: 22, textAlign: 'center', letterSpacing: -0.5,
+                  width: 22, textAlign: 'center', letterSpacing: 0,
                 }}>{f}</div>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 12, color: C.ink, fontWeight: 600 }}>ชั้น {f}</div>
@@ -225,7 +288,7 @@ function BuildingDiagram({ rooms, currentFloor, onSelectFloor }) {
                   {list.sort((a,b)=>a.no-b.no).map(r => (
                     <div key={r.id} style={{
                       width: 4, height: 14, borderRadius: 1,
-                      background: STATUS[r.status].dot, opacity: 0.85,
+                      background: STATUS[getRoomStatus(r)].dot, opacity: 0.85,
                     }}/>
                   ))}
                 </div>
@@ -289,7 +352,7 @@ function FloorTabs({ rooms, currentFloor, onSelectFloor }) {
           }}>
             <div style={{
               fontFamily: 'Sora', fontWeight: 600, fontSize: 18,
-              color: active ? C.accent : C.ink, letterSpacing: -0.5, lineHeight: 1,
+              color: active ? C.accent : C.ink, letterSpacing: 0, lineHeight: 1,
             }}>{f}</div>
             <div style={{ fontSize: 9, opacity: 0.85, marginTop: 3, fontWeight: 500 }}>
               ว่าง {vacant}
@@ -340,28 +403,54 @@ function FilterChips({ filter, setFilter, totals }) {
 }
 
 function RoomCard({ room, selected, onClick }) {
-  const t = ROOM_TYPES[room.type];
+  const t = getRoomType(room);
+  const status = getRoomStatus(room);
+  const photos = roomPhotos(room);
+  const photoCount = realRoomPhotos(room).length;
+  const rent = Number(room.rent) || t.baseRent;
   return (
     <button onClick={onClick} style={{
       background: C.surface,
       border: selected ? `2px solid ${C.accent}` : `1px solid ${C.border}`,
-      borderRadius: 12, padding: 0, cursor: 'pointer',
+      borderRadius: 14, padding: 0, cursor: 'pointer',
       textAlign: 'left', overflow: 'hidden',
-      boxShadow: selected ? `0 14px 30px -16px ${C.accent}66` : '0 1px 0 rgba(44,36,27,0.02)',
+      boxShadow: selected ? `0 18px 34px -18px ${C.accent}88` : '0 10px 26px -24px rgba(20,35,29,0.45)',
       transition: 'all 0.15s', fontFamily: 'inherit',
-      display: 'flex', flexDirection: 'column',
+      display: 'flex', flexDirection: 'column', minWidth: 0,
     }}>
       <div style={{ position: 'relative', aspectRatio: '16/10', background: C.borderSoft, overflow: 'hidden' }}>
-        <img src={room.photos[0] || placeholderPhoto(room)} alt=""
-          style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}/>
+        <RoomImage room={room} src={photos[0]} alt={`ห้อง ${room.id}`}/>
+        <div style={{
+          position: 'absolute', inset: 0,
+          background: 'linear-gradient(180deg, rgba(20,35,29,0.05) 35%, rgba(20,35,29,0.70) 100%)',
+          pointerEvents: 'none',
+        }}/>
         <div style={{
           position: 'absolute', top: 8, left: 8,
           background: 'rgba(255,255,255,0.95)', backdropFilter: 'blur(6px)',
           borderRadius: 6, padding: '3px 8px',
-          fontFamily: 'Sora', fontWeight: 700, fontSize: 13, color: C.ink, letterSpacing: -0.3,
+          fontFamily: 'Sora', fontWeight: 700, fontSize: 13, color: C.ink, letterSpacing: 0,
         }}>{room.id}</div>
         <div style={{ position: 'absolute', top: 8, right: 8 }}>
-          <StatusBadge status={room.status} compact/>
+          <StatusBadge status={status} compact/>
+        </div>
+        <div style={{
+          position: 'absolute', left: 10, right: 10, bottom: 9,
+          display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 8,
+          color: '#fff',
+        }}>
+          <div>
+            <div style={{ fontSize: 10.5, opacity: 0.82, fontWeight: 600 }}>{t.th}</div>
+            <div style={{ fontFamily: 'Sora', fontSize: 17, fontWeight: 700, letterSpacing: 0 }}>
+              ฿{fmt(rent)}
+              <span style={{ fontSize: 10, fontWeight: 500, opacity: 0.86, marginLeft: 3 }}>/เดือน</span>
+            </div>
+          </div>
+          <div style={{
+            fontSize: 10, fontWeight: 600, padding: '3px 7px', borderRadius: 999,
+            background: 'rgba(255,255,255,0.18)', border: '1px solid rgba(255,255,255,0.28)',
+            backdropFilter: 'blur(6px)', whiteSpace: 'nowrap',
+          }}>{photoCount ? `${photoCount} รูป` : 'ภาพห้อง'}</div>
         </div>
       </div>
       <div style={{ padding: '10px 12px 12px' }}>
@@ -371,13 +460,6 @@ function RoomCard({ room, selected, onClick }) {
             overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
           }}>{t.th}</div>
           <div style={{ fontSize: 10, color: C.muted, flex: 'none' }}>{t.size} ตร.ม.</div>
-        </div>
-        <div style={{
-          fontFamily: 'Sora', fontSize: 17, fontWeight: 600, color: C.ink,
-          letterSpacing: -0.5, marginTop: 4,
-        }}>
-          ฿{fmt(room.rent)}
-          <span style={{ fontSize: 10, color: C.muted, fontWeight: 400, marginLeft: 3 }}>/เดือน</span>
         </div>
         {room.tenant ? (
           <div style={{
@@ -389,6 +471,14 @@ function RoomCard({ room, selected, onClick }) {
             ✓ พร้อมเข้าพัก
           </div>
         )}
+        <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', marginTop: 8 }}>
+          {[room.view, `${t.beds} เตียง`, t.ac ? 'แอร์' : 'พัดลม'].filter(Boolean).map((label) => (
+            <span key={label} style={{
+              fontSize: 10.5, color: C.ink2, background: C.surfaceAlt,
+              border: `1px solid ${C.border}`, borderRadius: 999, padding: '3px 7px',
+            }}>{label}</span>
+          ))}
+        </div>
       </div>
     </button>
   );
@@ -415,11 +505,17 @@ function DetailPanel({ room, onClose }) {
     );
   }
 
-  const t = ROOM_TYPES[room.type];
-  const s = STATUS[room.status];
-  const totalMonthly = room.rent + room.water + room.elec + room.wifi;
-
-  const photos = room.photos.length ? room.photos : [placeholderPhoto(room,0), placeholderPhoto(room,1), placeholderPhoto(room,2)];
+  const t = getRoomType(room);
+  const status = getRoomStatus(room);
+  const s = STATUS[status];
+  const photos = roomPhotos(room);
+  const photoCount = realRoomPhotos(room).length;
+  const rent = Number(room.rent) || t.baseRent;
+  const water = Number(room.water) || 0;
+  const elec = Number(room.elec) || 0;
+  const wifi = Number(room.wifi) || 0;
+  const deposit = Number(room.deposit) || rent * 2;
+  const totalMonthly = rent + water + elec + wifi;
 
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column', background: C.surface }}>
@@ -431,7 +527,7 @@ function DetailPanel({ room, onClose }) {
             </div>
             <h2 style={{
               fontFamily: 'Sora', fontSize: 32, fontWeight: 600,
-              color: C.ink, margin: '4px 0 4px', letterSpacing: -1.4,
+              color: C.ink, margin: '4px 0 4px', letterSpacing: 0,
             }}>{room.id}</h2>
             <div style={{ fontSize: 13, color: C.ink2 }}>
               {t.th} · ชั้น {room.floor} · {t.size} ตร.ม.
@@ -443,7 +539,7 @@ function DetailPanel({ room, onClose }) {
           }}>✕</button>
         </div>
         <div style={{ marginTop: 12, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-          <StatusBadge status={room.status}/>
+          <StatusBadge status={status}/>
           <span style={{
             background: C.surfaceAlt, color: C.ink2, fontSize: 11, fontWeight: 500,
             padding: '5px 10px', borderRadius: 999,
@@ -453,12 +549,22 @@ function DetailPanel({ room, onClose }) {
             padding: '5px 10px', borderRadius: 999,
           }}>{t.beds} เตียง · {t.ac ? 'แอร์' : 'พัดลม'}</span>
         </div>
+        <a href={bookingHref(room)} style={{
+          marginTop: 14, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+          height: 42, borderRadius: 10, textDecoration: 'none',
+          background: status === 'vacant' ? C.accent : C.dark,
+          color: '#fff', fontSize: 13, fontWeight: 700,
+          boxShadow: `0 10px 24px -18px ${status === 'vacant' ? C.accent : C.dark}`,
+        }}>
+          <span>{status === 'vacant' ? 'จองห้องนี้' : 'สอบถามห้องนี้'}</span>
+          <span aria-hidden="true">→</span>
+        </a>
       </div>
 
       <div style={{ padding: '0 22px', borderBottom: `1px solid ${C.border}`, display: 'flex', gap: 0, flex: 'none', overflow: 'auto' }}>
         {[
           ['overview','รายละเอียด'],
-          ['photos', `รูปภาพ${room.photos.length ? ` (${room.photos.length})` : ''}`],
+          ['photos', `รูปภาพ${photoCount ? ` (${photoCount})` : ''}`],
           ['billing','ค่าใช้จ่าย'],
         ].map(([key,label]) => (
           <button key={key} onClick={() => setTab(key)} style={{
@@ -476,7 +582,7 @@ function DetailPanel({ room, onClose }) {
         {tab === 'overview' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
             <div style={{ aspectRatio: '16/9', borderRadius: 10, overflow: 'hidden', background: C.borderSoft }}>
-              <img src={photos[0]} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }}/>
+              <RoomImage room={room} src={photos[0]} alt={`ห้อง ${room.id}`}/>
             </div>
 
             {room.tenant ? (
@@ -584,8 +690,8 @@ function DetailPanel({ room, onClose }) {
                   borderRadius: 10, overflow: 'hidden', background: C.borderSoft,
                   border: `1px solid ${C.border}`,
                 }}>
-                  <img src={src} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }}/>
-                  {!room.photos.length && (
+                  <RoomImage room={room} src={src} alt={`รูปห้อง ${room.id} ${i + 1}`}/>
+                  {!photoCount && (
                     <div style={{
                       position: 'absolute', bottom: 6, left: 6,
                       fontSize: 10, fontFamily: 'ui-monospace', color: C.ink,
@@ -606,10 +712,10 @@ function DetailPanel({ room, onClose }) {
               </div>
               <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, overflow: 'hidden' }}>
                 {[
-                  ['ค่าเช่าห้อง', `฿${fmt(room.rent)}`, 'ฐาน + พรีเมียมชั้น'],
-                  ['ค่าน้ำประปา', `฿${fmt(room.water)}`, `${room.waterUnits} หน่วย × 18 ฿`],
-                  ['ค่าไฟฟ้า', `฿${fmt(room.elec)}`, `${room.elecUnits} หน่วย × 8 ฿`],
-                  ['ค่าอินเทอร์เน็ต', `฿${fmt(room.wifi)}`, 'Wi-Fi 500/500 Mbps'],
+                  ['ค่าเช่าห้อง', `฿${fmt(rent)}`, 'ฐาน + พรีเมียมชั้น'],
+                  ['ค่าน้ำประปา', `฿${fmt(water)}`, `${Number(room.waterUnits) || 0} หน่วย × 18 ฿`],
+                  ['ค่าไฟฟ้า', `฿${fmt(elec)}`, `${Number(room.elecUnits) || 0} หน่วย × 8 ฿`],
+                  ['ค่าอินเทอร์เน็ต', `฿${fmt(wifi)}`, 'Wi-Fi 500/500 Mbps'],
                 ].map(([k,v,sub], i) => (
                   <div key={k} style={{
                     display: 'flex', justifyContent: 'space-between', alignItems: 'center',
@@ -627,7 +733,7 @@ function DetailPanel({ room, onClose }) {
                   padding: '14px 16px', background: C.dark, color: C.surfaceAlt,
                 }}>
                   <div style={{ fontSize: 12, letterSpacing: 1.4, fontWeight: 600 }}>รวมต่อเดือน</div>
-                  <div style={{ fontFamily: 'Sora', fontSize: 22, fontWeight: 600, letterSpacing: -0.5 }}>
+                  <div style={{ fontFamily: 'Sora', fontSize: 22, fontWeight: 600, letterSpacing: 0 }}>
                     ฿{fmt(totalMonthly)}
                   </div>
                 </div>
@@ -640,8 +746,8 @@ function DetailPanel({ room, onClose }) {
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10, marginTop: 10 }}>
                 {[
-                  ['เงินประกัน', room.deposit],
-                  ['เช่าล่วงหน้า', room.rent],
+                  ['เงินประกัน', deposit],
+                  ['เช่าล่วงหน้า', rent],
                   ['ค่าทำสัญญา', 500],
                 ].map(([k,v]) => (
                   <div key={k}>
@@ -658,7 +764,7 @@ function DetailPanel({ room, onClose }) {
               }}>
                 <div style={{ fontSize: 12, color: C.ink, fontWeight: 600 }}>รวมแรกเข้า</div>
                 <div style={{ fontFamily: 'Sora', fontSize: 18, color: C.accent, fontWeight: 600 }}>
-                  ฿{fmt(room.deposit + room.rent + 500)}
+                  ฿{fmt(deposit + rent + 500)}
                 </div>
               </div>
             </div>
@@ -674,7 +780,7 @@ function DetailPanel({ room, onClose }) {
   );
 }
 
-function TopBar({ search, setSearch, isMobile, onMenu }) {
+function TopBar({ search, setSearch, isMobile, onMenu, roomCount, vacantCount }) {
   return (
     <div style={{
       padding: isMobile ? '10px 14px' : '14px 24px',
@@ -693,16 +799,16 @@ function TopBar({ search, setSearch, isMobile, onMenu }) {
         <div style={{
           width: 34, height: 34, borderRadius: 8, background: C.dark,
           color: C.surfaceAlt, display: 'flex', alignItems: 'center', justifyContent: 'center',
-          fontFamily: 'Sora', fontWeight: 700, fontSize: 14, letterSpacing: -1,
+          fontFamily: 'Sora', fontWeight: 700, fontSize: 14, letterSpacing: 0,
         }}>บก</div>
         <div style={{ minWidth: 0 }}>
           <div style={{
             fontFamily: 'Sora', fontSize: isMobile ? 14 : 15,
-            color: C.ink, fontWeight: 600, letterSpacing: -0.4, lineHeight: 1.2,
+            color: C.ink, fontWeight: 600, letterSpacing: 0, lineHeight: 1.2,
           }}>บ้านกาญจน์ เรสซิเดนซ์</div>
           {!isMobile && (
             <div style={{ fontSize: 11, color: C.muted, marginTop: 1 }}>
-              ระบบจัดการหอพัก · 40 ห้อง
+              ห้องพักอพาร์ตเมนต์ · {roomCount} ห้อง · ว่าง {vacantCount}
             </div>
           )}
         </div>
@@ -710,35 +816,36 @@ function TopBar({ search, setSearch, isMobile, onMenu }) {
 
       <div style={{ flex: 1 }}/>
 
-      <div style={{
-        display: 'flex', alignItems: 'center', gap: 8,
-        background: C.surfaceAlt, border: `1px solid ${C.border}`, borderRadius: 8,
-        padding: '7px 12px', minWidth: 0,
-        width: isMobile ? 180 : 280,
-      }}>
-        <span style={{ color: C.muted, fontSize: 13 }}>⌕</span>
-        <input value={search} onChange={(e) => setSearch(e.target.value)}
-          placeholder="ค้นหาห้อง / ผู้เช่า..."
-          style={{
-            flex: 1, border: 'none', background: 'transparent', outline: 'none',
-            fontFamily: 'inherit', fontSize: 13, color: C.ink, minWidth: 0,
-          }}/>
-      </div>
+      {!isMobile && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 8,
+          background: C.surfaceAlt, border: `1px solid ${C.border}`, borderRadius: 8,
+          padding: '7px 12px', minWidth: 0, width: 280,
+        }}>
+          <span style={{ color: C.muted, fontSize: 13 }}>⌕</span>
+          <input value={search} onChange={(e) => setSearch(e.target.value)}
+            placeholder="ค้นหาห้อง / ผู้เช่า..."
+            style={{
+              flex: 1, border: 'none', background: 'transparent', outline: 'none',
+              fontFamily: 'inherit', fontSize: 13, color: C.ink, minWidth: 0,
+            }}/>
+        </div>
+      )}
 
       <a
         href="/maintenance"
         title="แจ้งซ่อม"
         style={{
-          display: 'inline-flex', alignItems: 'center', gap: 6,
+          display: isMobile ? 'none' : 'inline-flex', alignItems: 'center', gap: 6,
           padding: isMobile ? '0 10px' : '0 14px', height: 36,
-          background: '#fff', color: '#5b4f40',
-          border: '1px solid #ece4d4', borderRadius: 8,
+          background: C.surface, color: C.ink2,
+          border: `1px solid ${C.border}`, borderRadius: 8,
           fontFamily: 'inherit', fontSize: 12.5, fontWeight: 500,
           textDecoration: 'none', cursor: 'pointer', flex: 'none',
           transition: 'background .15s',
         }}
-        onMouseEnter={(e) => e.currentTarget.style.background = '#faf6ee'}
-        onMouseLeave={(e) => e.currentTarget.style.background = '#fff'}>
+        onMouseEnter={(e) => e.currentTarget.style.background = C.surfaceAlt}
+        onMouseLeave={(e) => e.currentTarget.style.background = C.surface}>
         <span style={{ fontSize: 13 }}>🛠</span>
         {!isMobile && <span>แจ้งซ่อม</span>}
       </a>
@@ -749,14 +856,14 @@ function TopBar({ search, setSearch, isMobile, onMenu }) {
         style={{
           display: 'inline-flex', alignItems: 'center', gap: 6,
           padding: isMobile ? '0 10px' : '0 14px', height: 36,
-          background: '#c46a3e', color: '#fff',
+          background: C.accent, color: '#fff',
           border: 'none', borderRadius: 8,
           fontFamily: 'inherit', fontSize: 12.5, fontWeight: 500,
           textDecoration: 'none', cursor: 'pointer', flex: 'none',
           transition: 'background .15s',
         }}
-        onMouseEnter={(e) => e.currentTarget.style.background = '#a4542d'}
-        onMouseLeave={(e) => e.currentTarget.style.background = '#c46a3e'}>
+        onMouseEnter={(e) => e.currentTarget.style.background = '#24715c'}
+        onMouseLeave={(e) => e.currentTarget.style.background = C.accent}>
         <span style={{ fontSize: 13 }}>📋</span>
         {!isMobile && <span>จองห้อง</span>}
       </a>
@@ -765,7 +872,7 @@ function TopBar({ search, setSearch, isMobile, onMenu }) {
         href="/admin"
         title="หลังบ้าน Admin"
         style={{
-          display: 'inline-flex', alignItems: 'center', gap: 6,
+          display: isMobile ? 'none' : 'inline-flex', alignItems: 'center', gap: 6,
           padding: isMobile ? '0 10px' : '0 14px', height: 36,
           background: C.dark, color: '#fff',
           border: 'none', borderRadius: 8,
@@ -773,7 +880,7 @@ function TopBar({ search, setSearch, isMobile, onMenu }) {
           textDecoration: 'none', cursor: 'pointer', flex: 'none',
           transition: 'background .15s',
         }}
-        onMouseEnter={(e) => e.currentTarget.style.background = '#1a140e'}
+        onMouseEnter={(e) => e.currentTarget.style.background = '#0d1914'}
         onMouseLeave={(e) => e.currentTarget.style.background = C.dark}>
         <span style={{ fontSize: 13 }}>🛡</span>
         {!isMobile && <span>Admin</span>}
@@ -839,7 +946,7 @@ function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, [mobileDetailOpen, mobileMenuOpen]);
 
-  const { isMobile } = useViewport();
+  const { isMobile, w: viewportWidth } = useViewport();
 
   const totals = useMemo(() => {
     const all = Object.values(rooms);
@@ -851,6 +958,7 @@ function App() {
       overdue: all.filter(r => r.status === 'overdue').length,
     };
   }, [rooms]);
+  const floorCount = useMemo(() => getAllFloors(rooms).length, [rooms]);
 
   const floorRooms = useMemo(() => {
     let list = Object.values(rooms).filter(r => r.floor === floor);
@@ -860,7 +968,7 @@ function App() {
       list = list.filter(r =>
         r.id.includes(q) ||
         (r.tenant?.name?.toLowerCase?.().includes(q)) ||
-        ROOM_TYPES[r.type].th.includes(q)
+        getRoomType(r).th.includes(q)
       );
     }
     return list.sort((a,b) => a.no - b.no);
@@ -892,7 +1000,7 @@ function App() {
           </div>
           <h1 style={{
             fontFamily: 'Sora', fontSize: isMobile ? 24 : 30,
-            fontWeight: 600, margin: '2px 0 0', color: C.ink, letterSpacing: -1.2,
+            fontWeight: 600, margin: '2px 0 0', color: C.ink, letterSpacing: 0,
           }}>
             ชั้น {floor}
             <span style={{
@@ -922,7 +1030,7 @@ function App() {
           <div>
             <div style={{
               fontFamily: 'Sora', fontSize: 18, fontWeight: 600, color: C.ink,
-              letterSpacing: -0.5, lineHeight: 1,
+              letterSpacing: 0, lineHeight: 1,
             }}>{floorVacant}/{allFloorRooms.length}</div>
             <div style={{ fontSize: 10, color: C.muted, marginTop: 2 }}>ห้องว่าง</div>
           </div>
@@ -931,7 +1039,23 @@ function App() {
 
       {!isMobile && (
         <div style={{ marginBottom: 16 }}>
-          <KpiBar totals={totals} isMobile={isMobile}/>
+          <KpiBar totals={totals} isMobile={isMobile} floorCount={floorCount}/>
+        </div>
+      )}
+
+      {isMobile && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 8,
+          background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10,
+          padding: '9px 12px', marginBottom: 12,
+        }}>
+          <span style={{ color: C.muted, fontSize: 13 }}>⌕</span>
+          <input value={search} onChange={(e) => setSearch(e.target.value)}
+            placeholder="ค้นหาห้อง..."
+            style={{
+              flex: 1, border: 'none', background: 'transparent', outline: 'none',
+              fontFamily: 'inherit', fontSize: 13, color: C.ink, minWidth: 0,
+            }}/>
         </div>
       )}
 
@@ -942,7 +1066,7 @@ function App() {
       <div style={{
         display: 'grid',
         gridTemplateColumns: isMobile
-          ? 'repeat(2, 1fr)'
+          ? (viewportWidth < 520 ? '1fr' : 'repeat(2, minmax(0, 1fr))')
           : 'repeat(auto-fill, minmax(220px, 1fr))',
         gap: isMobile ? 10 : 14,
       }}>
@@ -968,7 +1092,9 @@ function App() {
       color: C.ink, display: 'flex', flexDirection: 'column', overflow: 'hidden',
     }}>
       <TopBar search={search} setSearch={setSearch} isMobile={isMobile}
-        onMenu={() => setMobileMenuOpen(true)}/>
+        onMenu={() => setMobileMenuOpen(true)}
+        roomCount={totals.all}
+        vacantCount={totals.vacant}/>
 
       {isMobile ? (
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>

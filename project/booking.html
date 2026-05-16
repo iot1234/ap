@@ -12,8 +12,8 @@
   html, body { margin: 0; padding: 0; min-height: 100%; }
   body {
     font-family: "IBM Plex Sans Thai", "Sora", system-ui, sans-serif;
-    background: #f5efe3;
-    color: #2c241b;
+    background: #f3f7f4;
+    color: #1e2a24;
     -webkit-font-smoothing: antialiased;
     line-height: 1.55;
   }
@@ -33,63 +33,87 @@
   }
   .brand-logo {
     width: 40px; height: 40px; border-radius: 11px;
-    background: linear-gradient(135deg, #c46a3e, #a4542d);
+    background: linear-gradient(135deg, #2f8a70, #b98448);
     color: #fff;
     display: grid; place-items: center;
     font-weight: 700; font-size: 20px;
   }
   .topbar a {
-    color: #5b4f40; text-decoration: none; font-size: 13.5px;
+    color: #506156; text-decoration: none; font-size: 13.5px;
     padding: 8px 14px; border-radius: 8px;
-    background: #ffffff; border: 1px solid #ece4d4;
+    background: #ffffff; border: 1px solid #dfe9e2;
     transition: background .15s;
   }
-  .topbar a:hover { background: #faf6ee; }
+  .topbar a:hover { background: #f7faf8; }
   h1 {
     font-family: 'Sora', sans-serif;
     font-size: 28px; font-weight: 600;
-    margin: 0 0 8px; color: #2c241b;
+    margin: 0 0 8px; color: #1e2a24;
   }
   .lead {
-    font-size: 14.5px; color: #5b4f40; margin-bottom: 32px;
+    font-size: 14.5px; color: #506156; margin-bottom: 32px;
   }
   .card {
     background: #ffffff;
-    border: 1px solid #ece4d4;
+    border: 1px solid #dfe9e2;
     border-radius: 14px;
     padding: 28px;
   }
   .row { display: grid; gap: 16px; margin-bottom: 16px; }
   .row.cols-2 { grid-template-columns: 1fr 1fr; }
-  @media (max-width: 600px) { .row.cols-2 { grid-template-columns: 1fr; } }
+  @media (max-width: 600px) {
+    body { overflow-x: hidden; }
+    .wrap { width: 100%; padding: 24px 14px 72px; }
+    .topbar { gap: 12px; justify-content: flex-start; }
+    .brand { min-width: 0; flex: 1; }
+    .brand span { font-size: 16px; line-height: 1.25; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .topbar a {
+      width: 40px; height: 40px; padding: 0;
+      display: grid; place-items: center; flex: none;
+      font-size: 0;
+    }
+    .topbar a::before { content: "←"; font-size: 18px; }
+    .row.cols-2 { grid-template-columns: 1fr; }
+  }
   label {
     display: block;
-    font-size: 12.5px; font-weight: 500; color: #5b4f40;
+    font-size: 12.5px; font-weight: 500; color: #506156;
     margin-bottom: 6px;
   }
   .req::after { content: " *"; color: #b54639; }
   input, select, textarea {
     width: 100%; height: 40px; padding: 0 12px;
-    background: #ffffff; color: #2c241b;
-    border: 1px solid #ece4d4; border-radius: 9px;
+    background: #ffffff; color: #1e2a24;
+    border: 1px solid #dfe9e2; border-radius: 9px;
     font-family: inherit; font-size: 13.5px;
     transition: border-color .15s, box-shadow .15s;
   }
   textarea { height: auto; padding: 10px 12px; min-height: 80px; resize: vertical; }
   input:focus, select:focus, textarea:focus {
     outline: none;
-    border-color: #c46a3e;
-    box-shadow: 0 0 0 3px rgba(196,106,62,0.13);
+    border-color: #2f8a70;
+    box-shadow: 0 0 0 3px rgba(47,138,112,0.14);
   }
-  .hint { font-size: 11.5px; color: #8a7d6b; margin-top: 4px; }
+  .hint { font-size: 11.5px; color: #7b8b81; margin-top: 4px; }
+  .room-lock {
+    background: #f7faf8;
+    border: 1px solid #dfe9e2;
+    border-radius: 10px;
+    padding: 14px;
+  }
+  .room-lock input {
+    background: #fff;
+    font-family: 'Sora', "IBM Plex Sans Thai", system-ui, sans-serif;
+    font-weight: 600;
+  }
   button[type=submit] {
     width: 100%; height: 46px; margin-top: 12px;
-    background: #2c241b; color: #fff;
+    background: #14231d; color: #fff;
     border: none; border-radius: 10px;
     font-family: inherit; font-size: 14px; font-weight: 500;
     cursor: pointer; transition: background .15s, transform .08s;
   }
-  button[type=submit]:hover:not(:disabled) { background: #1f1813; }
+  button[type=submit]:hover:not(:disabled) { background: #0d1914; }
   button[type=submit]:active:not(:disabled) { transform: translateY(1px); }
   button[type=submit]:disabled { opacity: 0.5; cursor: not-allowed; }
   .alert {
@@ -103,7 +127,7 @@
     background: #e6f4ec; border: 1px solid #c1deca; color: #0e3a25;
   }
   .success-card {
-    background: #ffffff; border: 1px solid #ece4d4; border-radius: 14px;
+    background: #ffffff; border: 1px solid #dfe9e2; border-radius: 14px;
     padding: 40px 28px; text-align: center;
   }
   .success-icon {
@@ -117,8 +141,8 @@
     font-size: 22px; font-weight: 600;
     margin: 0 0 8px;
   }
-  .success-card p { color: #5b4f40; font-size: 14px; margin: 0 0 8px; }
-  .ref { font-family: 'JetBrains Mono', monospace; color: #c46a3e; }
+  .success-card p { color: #506156; font-size: 14px; margin: 0 0 8px; }
+  .ref { font-family: 'JetBrains Mono', monospace; color: #2f8a70; }
 </style>
 </head>
 <body>
@@ -182,6 +206,14 @@
         </div>
       </div>
 
+      <div class="row" id="roomRow" style="display:none">
+        <div class="room-lock">
+          <label for="roomId">ห้องที่สนใจ</label>
+          <input type="text" id="roomId" name="roomId" maxlength="32" readonly/>
+          <div class="hint">ระบบแนบเลขห้องจากหน้าดูห้องให้แล้ว เจ้าหน้าที่จะตรวจสอบสถานะอีกครั้งก่อนยืนยัน</div>
+        </div>
+      </div>
+
       <div class="row">
         <div>
           <label for="message">ข้อความเพิ่มเติม</label>
@@ -202,7 +234,7 @@
       <h2>ได้รับคำขอจองแล้ว</h2>
       <p>ขอบคุณสำหรับการจอง — เจ้าหน้าที่จะติดต่อกลับภายใน 24 ชั่วโมง</p>
       <p>หมายเลขอ้างอิง: <span class="ref" id="refNo"></span></p>
-      <p style="margin-top:24px"><a href="/" style="color:#c46a3e;text-decoration:none;font-weight:500">← กลับหน้าแรก</a></p>
+      <p style="margin-top:24px"><a href="/" style="color:#2f8a70;text-decoration:none;font-weight:500">← กลับหน้าแรก</a></p>
     </div>
   </template>
 </div>
@@ -219,6 +251,31 @@
   dt.setDate(dt.getDate() + 7);
   document.getElementById('checkInDate').value = dt.toISOString().slice(0, 10);
   document.getElementById('checkInDate').min = new Date().toISOString().slice(0, 10);
+
+  const params = new URLSearchParams(window.location.search);
+  const roomIdParam = (params.get('roomId') || '').trim().slice(0, 32);
+  const floorParam = (params.get('floor') || '').trim().slice(0, 2);
+  const roomTypeParam = (params.get('roomType') || '').trim().slice(0, 32);
+
+  function setSelectValue(id, value, labelPrefix) {
+    if (!value) return;
+    const select = document.getElementById(id);
+    if (!select) return;
+    if (![...select.options].some((opt) => opt.value === value)) {
+      const opt = document.createElement('option');
+      opt.value = value;
+      opt.textContent = `${labelPrefix} ${value}`;
+      select.appendChild(opt);
+    }
+    select.value = value;
+  }
+
+  if (roomIdParam) {
+    document.getElementById('roomRow').style.display = 'block';
+    document.getElementById('roomId').value = roomIdParam;
+  }
+  setSelectValue('floor', floorParam, 'ชั้น');
+  setSelectValue('roomType', roomTypeParam, 'ประเภท');
 
   function showError(msg) {
     alert.textContent = msg;
@@ -240,6 +297,7 @@
       phone: document.getElementById('phone').value.trim(),
       email: document.getElementById('email').value.trim(),
       checkInDate: document.getElementById('checkInDate').value,
+      roomId: document.getElementById('roomId').value.trim() || undefined,
       floor: document.getElementById('floor').value || undefined,
       roomType: document.getElementById('roomType').value || undefined,
       message: document.getElementById('message').value.trim(),
