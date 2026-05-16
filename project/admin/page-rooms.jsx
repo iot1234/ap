@@ -1698,20 +1698,54 @@ function RoomEditForm({ room, originalRoom, onUpdate, onServerPatch, config }) {
             ปุ่มเหล่านี้ไม่ได้เป็นแค่ข้อมูลแสดงผล แต่เป็นตัวแปรในสูตรค่าเช่าเดียวกับหน้า Pricing
             จึงมีผลกับราคาห้องว่างและสัญญาใหม่ ส่วนสัญญาที่ lock แล้ว/บิลที่ออกแล้วจะไม่ถูกแก้ย้อนหลัง
           </div>
-          {featureToggleRows.map((item) => {
-            const nextLabel = item.deltaOnToggle === 0
-              ? 'ราคาไม่เปลี่ยน'
-              : `${item.deltaOnToggle > 0 ? '+' : ''}${fmtCurrency(item.deltaOnToggle)}`;
-            return (
-              <Toggle
-                key={item.key}
-                label={`${item.label} (${item.checked ? 'เปิดอยู่' : 'ปิดอยู่'})`}
-                checked={item.checked}
-                onChange={item.onChange}
-                hint={`${item.note} · Premium ที่ตั้งไว้: +${fmtCurrency(item.premium)} · ถ้ากดตอนนี้สูตรราคาจะเปลี่ยน ${nextLabel}`}
-              />
-            );
-          })}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 8 }}>
+            {featureToggleRows.map((item) => {
+              const isOn = !!item.checked;
+              const nextLabel = item.deltaOnToggle === 0
+                ? 'ราคาไม่เปลี่ยน'
+                : `${item.deltaOnToggle > 0 ? '+' : ''}${fmtCurrency(item.deltaOnToggle)}`;
+              const handleClick = () => {
+                if (typeof item.onChange !== 'function') return;
+                // Pass the explicit boolean so a click never lands inside the
+                // callback as a SyntheticEvent — that was the silent bug when
+                // a name-collision swapped Toggle out from under us.
+                item.onChange(!isOn);
+              };
+              return (
+                <button
+                  type="button"
+                  key={item.key}
+                  onClick={handleClick}
+                  aria-pressed={isOn}
+                  title={`${item.note} · Premium +${fmtCurrency(item.premium)} · กดแล้ว ${nextLabel}`}
+                  style={{
+                    display: 'flex', flexDirection: 'column', alignItems: 'stretch',
+                    gap: 4, padding: '10px 12px',
+                    background: isOn ? (C.successSoft || '#e3f3e8') : C.surface,
+                    border: `1.5px solid ${isOn ? (C.success || '#4a8b4a') : C.border}`,
+                    color: isOn ? (C.successInk || '#1d4a2c') : C.ink,
+                    borderRadius: 8, cursor: 'pointer', textAlign: 'left',
+                    fontFamily: 'inherit', minWidth: 0,
+                    transition: 'background .15s, border-color .15s',
+                  }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                    <span style={{ fontSize: 13.5, fontWeight: 600 }}>{item.label}</span>
+                    <span style={{
+                      fontSize: 10.5, fontWeight: 700, padding: '2px 8px', borderRadius: 999,
+                      background: isOn ? (C.success || '#4a8b4a') : (C.borderStrong || '#999'),
+                      color: '#fff', flexShrink: 0,
+                    }}>{isOn ? 'เปิด' : 'ปิด'}</span>
+                  </div>
+                  <div style={{ fontSize: 11.5, color: C.muted, lineHeight: 1.4 }}>
+                    Premium ที่ตั้งไว้ +{fmtCurrency(item.premium)} · กดแล้ว {nextLabel}
+                  </div>
+                  <div style={{ fontSize: 11, color: C.muted, lineHeight: 1.4 }}>
+                    {item.note}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
         </div>
         <div style={{
           marginTop: 10, padding: 10,

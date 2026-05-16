@@ -344,7 +344,7 @@ function PageFeatures({ setToast, embedded = false, currentUser = null }) {
             </div>
           ) : null}
         </div>
-        <Toggle
+        <FeatureFlagToggle
           on={!!f.enabled}
           disabled={busy || !canEdit}
           label={title}
@@ -616,7 +616,13 @@ function PageFeatures({ setToast, embedded = false, currentUser = null }) {
   );
 }
 
-function Toggle({ on, disabled, onChange, label, disabledReason }) {
+// Local switch used by this page only. Named distinctly from window.Toggle
+// (ui.jsx) so the top-level function declaration does not overwrite the
+// shared Toggle reference on `window`. Earlier this was `function Toggle`,
+// which silently shadowed window.Toggle for every page that loaded after
+// page-features.jsx, breaking <Toggle label= checked= hint= /> in rooms,
+// settings, and line-oas.
+function FeatureFlagToggle({ on, disabled, onChange, label, disabledReason }) {
   const C = window.ADMIN_C;
   return (
     <button

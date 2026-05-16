@@ -1454,7 +1454,13 @@ function SkeletonCard({ height = 96, style = {} }) {
 }
 
 // --- Expose to window ---------------------------------------------------
-Object.assign(window, {
+// Each script in /admin/* runs in the same global scope via babel-standalone.
+// That means a top-level `function Toggle(){}` in any page-*.jsx silently
+// overwrites our shared Toggle, breaking every <Toggle label= checked= hint= />
+// after that script loads. We seal these primitives with writable:false so
+// any future name collision logs an error in dev tools and the page-level
+// declaration becomes a local shadow inside its own scope only.
+const __UI_PRIMITIVES = {
   Card, SectionHeading, Btn, IconBtn,
   Input, Select, Toggle, Textarea,
   StatusDot, StatusBadge, Pill,
@@ -1464,4 +1470,21 @@ Object.assign(window, {
   Skeleton, SkeletonRows, SkeletonCard,
   BarChart, DonutChart, Sparkline, HBar,
   DefList, PageContainer, PageHeader,
+};
+Object.keys(__UI_PRIMITIVES).forEach((name) => {
+  try {
+    Object.defineProperty(window, name, {
+      value: __UI_PRIMITIVES[name],
+      writable: false,
+      configurable: false,
+      enumerable: true,
+    });
+  } catch (err) {
+    // Fall back to plain assignment if the property already exists with a
+    // conflicting descriptor (e.g., hot reload) — surfaces the collision.
+    try { window[name] = __UI_PRIMITIVES[name]; } catch (_) {}
+    if (typeof console !== 'undefined' && console.warn) {
+      console.warn(`[ui] ${name} could not be sealed:`, err && err.message);
+    }
+  }
 });
