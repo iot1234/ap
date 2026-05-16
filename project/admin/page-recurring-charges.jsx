@@ -19,12 +19,18 @@ function PageRecurringCharges({ setToast }) {
   const { Card, Btn, Pill, PageContainer, PageHeader, SectionHeading, Modal,
           DataTable, EmptyState } = window;
   const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
+  const recurringFlag = window.useFeatureFlag
+    ? window.useFeatureFlag('recurringCharges')
+    : { ready: true, enabled: true, flag: { autoIncludeOnBillGen: true } };
+  const API_TIMEOUT_MS = 12000;
 
   const [items, setItems] = useState([]);
   const [tenants, setTenants] = useState([]);
+  const [rooms, setRooms] = useState([]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   const [tenantLoadWarning, setTenantLoadWarning] = useState('');
+  const [roomLoadWarning, setRoomLoadWarning] = useState('');
   const [form, setForm] = useState(null);   // null = closed; object = editing/creating
   const [filter, setFilter] = useState('active');
   const loadSeqRef = useRef(0);
@@ -36,15 +42,16 @@ function PageRecurringCharges({ setToast }) {
 
   async function load() {
     const seq = ++loadSeqRef.current;
-    setBusy(true); setErr(''); setTenantLoadWarning('');
+    setBusy(true); setErr(''); setTenantLoadWarning(''); setRoomLoadWarning('');
     try {
       const params = new URLSearchParams();
       if (filter === 'active')   params.set('active', 'true');
       if (filter === 'inactive') params.set('active', 'false');
       const query = params.toString();
-      const [chargesResult, tenantsResult] = await Promise.allSettled([
-        apiCall('/api/recurring-charges' + (query ? '?' + query : ''), { timeoutMs: 12_000 }),
-        apiCall('/api/tenants?status=active', { timeoutMs: 12_000 }),
+      const [chargesResult, tenantsResult, roomsResult] = await Promise.allSettled([
+        apiCall('/api/recurring-charges' + (query ? '?' + query : ''), { timeoutMs: API_TIMEOUT_MS }),
+        apiCall('/api/tenants?status=active', { timeoutMs: API_TIMEOUT_MS }),
+        apiCall('/api/rooms', { timeoutMs: API_TIMEOUT_MS }),
       ]);
       if (seq !== loadSeqRef.current) return;
 
@@ -60,6 +67,17 @@ function PageRecurringCharges({ setToast }) {
         setTenantLoadWarning(
           errorText(tenantsResult.reason, 'โหลดรายชื่อผู้เช่าไม่สำเร็จ') +
           ' — ยังดู/แก้รายการค่าใช้จ่ายได้ แต่การเลือกผู้เช่าจะไม่ครบจนกว่าจะรีเฟรช'
+        );
+      }
+
+      if (roomsResult.status === 'fulfilled') {
+        const roomPayload = roomsResult.value || {};
+        setRooms(Array.isArray(roomPayload.rooms) ? roomPayload.rooms : []);
+      } else {
+        setRooms([]);
+        setRoomLoadWarning(
+          errorText(roomsResult.reason, 'โหลดรายชื่อห้องไม่สำเร็จ') +
+          ' — ยังเพิ่มแบบพิมพ์เลขห้องเองได้ แต่ควรรีเฟรชเพื่อเลือกจากรายการจริง'
         );
       }
     } catch (e) {
@@ -81,7 +99,7 @@ function PageRecurringCharges({ setToast }) {
       await apiCall(url, {
         method: isUpdate ? 'PUT' : 'POST',
         body: JSON.stringify(payload),
-        timeoutMs: 12_000,
+        timeoutMs: API_TIMEOUT_MS,
       });
       setToast && setToast({ kind: 'success', message: isUpdate ? 'อัปเดตแล้ว' : 'เพิ่มรายการแล้ว' });
       setForm(null);
@@ -126,7 +144,7 @@ function PageRecurringCharges({ setToast }) {
     if (!window.confirm(lines.join('\n'))) return;
     setBusy(true);
     try {
-      await apiCall(`/api/recurring-charges/${id}`, { method: 'DELETE', timeoutMs: 12_000 });
+      await apiCall(`/api/recurring-charges/${id}`, { method: 'DELETE', timeoutMs: API_TIMEOUT_MS });
       setToast && setToast({ kind: 'success', message: `ลบ "${it.label}" แล้ว` });
       await load();
     } catch (e) {
@@ -148,9 +166,29 @@ function PageRecurringCharges({ setToast }) {
     return m;
   }, [tenants]);
 
+  const roomByCode = useMemo(() => {
+    const m = new Map();
+    for (const r of rooms) m.set(String(r.room_code || r.id || ''), r);
+    return m;
+  }, [rooms]);
+
   const tenantLabel = (id) => {
     const t = tenantById.get(Number(id));
     return t ? `${t.full_name} · ${t.phone}` : id ? `#${id}` : '—';
+  };
+
+  const roomLabel = (id) => {
+    const key = id ? String(id) : '';
+    const r = roomByCode.get(key);
+    if (!r) return key ? `ห้อง ${key}` : '—';
+    const statusText = {
+      vacant: 'ว่าง',
+      occupied: 'มีผู้เช่า',
+      reserved: 'จองแล้ว',
+      overdue: 'ค้างชำระ',
+      maintenance: 'ซ่อมบำรุง',
+    }[r.status] || r.status || '';
+    return statusText ? `ห้อง ${key} · ${statusText}` : `ห้อง ${key}`;
   };
 
   const FREQ_LABEL = { monthly: 'รายเดือน', quarterly: 'รายไตรมาส', one_off: 'ครั้งเดียว' };
@@ -164,7 +202,7 @@ function PageRecurringCharges({ setToast }) {
       render: (it) => <Pill color="info" size="sm">{FREQ_LABEL[it.frequency] || it.frequency}</Pill> },
     { key: 'target', label: 'ผูกกับ', minWidth: 200,
       render: (it) => it.tenant_id ? `ผู้เช่า: ${tenantLabel(it.tenant_id)}`
-        : it.room_id ? `ห้อง ${it.room_id}` : '—' },
+        : it.room_id ? roomLabel(it.room_id) : '—' },
     { key: 'active', label: 'สถานะ', minWidth: 100,
       render: (it) => <Pill color={it.active ? 'success' : 'muted'} size="sm">
         {it.active ? 'เปิด' : 'ปิด'}</Pill> },
@@ -185,6 +223,27 @@ function PageRecurringCharges({ setToast }) {
       <PageHeader title="ค่าใช้จ่ายประจำ"
         subtitle="parking / internet add-on / cleaning ฯลฯ — ผูกกับผู้เช่าหรือห้อง" />
 
+      {recurringFlag.ready && !recurringFlag.enabled ? (
+        <Card style={{
+          background: C.warningSoft, color: C.warningInk, border: '1px solid ' + C.warning,
+          display: 'flex', gap: 12, alignItems: 'center', justifyContent: 'space-between',
+        }}>
+          <div>
+            <div style={{ fontWeight: 700 }}>ฟีเจอร์รวมเข้าบิลอัตโนมัติยังปิดอยู่</div>
+            <div style={{ fontSize: 13, marginTop: 4 }}>
+              ยังเพิ่มและแก้รายการได้ แต่รายการจะยังไม่ถูกรวมในบิลจนกว่าจะเปิด recurringCharges
+            </div>
+          </div>
+          <Btn size="sm" variant="secondary" onClick={() => { window.location.hash = '#features'; }}>
+            ไปเปิดฟีเจอร์
+          </Btn>
+        </Card>
+      ) : recurringFlag.ready && recurringFlag.enabled && recurringFlag.flag?.autoIncludeOnBillGen === false ? (
+        <Card style={{ background: C.infoSoft, color: C.infoInk, border: '1px solid ' + C.info }}>
+          เปิดฟีเจอร์แล้ว แต่ autoIncludeOnBillGen ปิดอยู่: รายการจะไม่เข้าบิลอัตโนมัติจนกว่าจะเปิดตัวเลือกนี้
+        </Card>
+      ) : null}
+
       {err ? (
         <Card style={{ color: C.danger, display: 'flex', gap: 12, alignItems: 'center', justifyContent: 'space-between' }}>
           <div>
@@ -203,6 +262,19 @@ function PageRecurringCharges({ setToast }) {
           <div>
             <div style={{ fontWeight: 700 }}>โหลดรายชื่อผู้เช่าไม่ครบ</div>
             <div style={{ fontSize: 13, marginTop: 4 }}>{tenantLoadWarning}</div>
+          </div>
+          <Btn size="sm" variant="secondary" onClick={load} disabled={busy}>รีเฟรช</Btn>
+        </Card>
+      ) : null}
+
+      {roomLoadWarning ? (
+        <Card style={{
+          background: C.warningSoft, color: C.warningInk, border: '1px solid ' + C.warning,
+          display: 'flex', gap: 12, alignItems: 'center', justifyContent: 'space-between',
+        }}>
+          <div>
+            <div style={{ fontWeight: 700 }}>โหลดรายชื่อห้องไม่ครบ</div>
+            <div style={{ fontSize: 13, marginTop: 4 }}>{roomLoadWarning}</div>
           </div>
           <Btn size="sm" variant="secondary" onClick={load} disabled={busy}>รีเฟรช</Btn>
         </Card>
@@ -245,7 +317,9 @@ function PageRecurringCharges({ setToast }) {
         <RecurringForm
           initial={form}
           tenants={tenants}
+          rooms={rooms}
           tenantLoadWarning={tenantLoadWarning}
+          roomLoadWarning={roomLoadWarning}
           onReloadTenants={load}
           onCancel={() => setForm(null)}
           onSave={save}
@@ -256,7 +330,7 @@ function PageRecurringCharges({ setToast }) {
   );
 }
 
-function RecurringForm({ initial, tenants, tenantLoadWarning, onReloadTenants, onCancel, onSave, busy }) {
+function RecurringForm({ initial, tenants, rooms, tenantLoadWarning, roomLoadWarning, onReloadTenants, onCancel, onSave, busy }) {
   const C = window.ADMIN_C;
   const { Modal, Btn } = window;
   const isUpdate = !!initial.id;
@@ -366,8 +440,40 @@ function RecurringForm({ initial, tenants, tenantLoadWarning, onReloadTenants, o
             ) : null}
           </React.Fragment>
         ) : (
-          <input value={form.room_id} onChange={(e) => setForm({ ...form, room_id: e.target.value })}
-            placeholder="เช่น 1A" maxLength={32} style={inp} />
+          <React.Fragment>
+            {rooms && rooms.length > 0 ? (
+              <select value={form.room_id} onChange={(e) => setForm({ ...form, room_id: e.target.value })}
+                style={inp}>
+                <option value="">— เลือกห้อง —</option>
+                {rooms.map((r) => {
+                  const code = String(r.room_code || r.id || '');
+                  const statusText = {
+                    vacant: 'ว่าง',
+                    occupied: 'มีผู้เช่า',
+                    reserved: 'จองแล้ว',
+                    overdue: 'ค้างชำระ',
+                    maintenance: 'ซ่อมบำรุง',
+                  }[r.status] || r.status || '';
+                  return (
+                    <option key={code} value={code}>
+                      ห้อง {code}{statusText ? ` · ${statusText}` : ''}
+                    </option>
+                  );
+                })}
+              </select>
+            ) : (
+              <input value={form.room_id} onChange={(e) => setForm({ ...form, room_id: e.target.value })}
+                placeholder="เช่น 101" maxLength={32} style={inp} />
+            )}
+            {roomLoadWarning ? (
+              <div style={{
+                marginTop: 8, padding: 10, borderRadius: 8,
+                background: C.warningSoft, color: C.warningInk, fontSize: 12.5,
+              }}>
+                รายชื่อห้องยังโหลดไม่ครบ พิมพ์เลขห้องเองได้ แต่ระบบจะตรวจว่าห้องมีจริงตอนบันทึก
+              </div>
+            ) : null}
+          </React.Fragment>
         )}
 
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
@@ -413,10 +519,4 @@ function RecurringForm({ initial, tenants, tenantLoadWarning, onReloadTenants, o
   );
 }
 
-window.PageRecurringCharges = window.FeatureGate
-  ? function PageRecurringChargesGated(props) {
-      return React.createElement(window.FeatureGate,
-        { flag: 'recurringCharges', label: 'ค่าใช้จ่ายประจำ' },
-        React.createElement(PageRecurringCharges, props));
-    }
-  : PageRecurringCharges;
+window.PageRecurringCharges = PageRecurringCharges;

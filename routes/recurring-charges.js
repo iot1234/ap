@@ -45,8 +45,8 @@ const baseShape = {
 };
 
 const writeSchema = z.preprocess(aliasPreprocess, z.object(baseShape)
-  .refine((v) => v.roomId || v.tenantId, {
-    message: 'ต้องผูกกับห้อง หรือ ผู้เช่า อย่างน้อยหนึ่งอย่าง',
+  .refine((v) => Boolean(v.roomId) !== Boolean(v.tenantId), {
+    message: 'ต้องเลือกผูกกับห้องหรือผู้เช่าอย่างใดอย่างหนึ่ง',
     path: ['roomId'],
   })
 );
@@ -55,6 +55,65 @@ const writeSchema = z.preprocess(aliasPreprocess, z.object(baseShape)
 // when both roomId and tenantId are absent — the existing row already has
 // a target so the constraint still holds in DB.
 const patchSchema = z.preprocess(aliasPreprocess, z.object(baseShape));
+
+async function roomExists(pool, roomId) {
+  const code = String(roomId || '').trim().slice(0, 32);
+  if (!code) return false;
+  try {
+    const r = await pool.query(
+      `SELECT 1 FROM rooms_v2 WHERE room_code=$1 AND deleted_at IS NULL LIMIT 1`,
+      [code]
+    );
+    if (r.rows.length) return true;
+  } catch (err) {
+    if (err.code !== '42P01') throw err;
+  }
+  const legacy = await pool.query(
+    `SELECT 1 FROM app_data WHERE key='baankarn_rooms_v1' AND value ? $1 LIMIT 1`,
+    [code]
+  );
+  return legacy.rows.length > 0;
+}
+
+async function validateRecurringTarget(pool, { roomId, tenantId }) {
+  const hasRoom = !!roomId;
+  const hasTenant = !!tenantId;
+  if (hasRoom === hasTenant) {
+    return {
+      status: 400,
+      body: {
+        error: 'เลือกผูกกับห้องหรือผู้เช่าอย่างใดอย่างหนึ่งเท่านั้น',
+        code: 'INVALID_RECURRING_TARGET',
+      },
+    };
+  }
+  if (hasTenant) {
+    const t = await pool.query(
+      `SELECT id FROM tenants
+        WHERE id=$1 AND status='active' AND deleted_at IS NULL LIMIT 1`,
+      [tenantId]
+    );
+    if (!t.rows.length) {
+      return {
+        status: 404,
+        body: {
+          error: 'ไม่พบผู้เช่าที่ active สำหรับค่าใช้จ่ายประจำนี้',
+          code: 'TENANT_NOT_ACTIVE',
+        },
+      };
+    }
+  }
+  if (hasRoom && !(await roomExists(pool, roomId))) {
+    return {
+      status: 404,
+      body: {
+        error: 'ไม่พบห้องนี้ในระบบ',
+        code: 'ROOM_NOT_FOUND',
+      },
+    };
+  }
+  return null;
+}
 
 module.exports = function buildRecurringChargesRouter(ctx) {
   const { pool, requireAuth, requireRole, sameOrigin, csrfGuard, audit } = ctx;
@@ -113,6 +172,11 @@ module.exports = function buildRecurringChargesRouter(ctx) {
       if (!b.label) return res.status(400).json({ error: 'label required' });
       if (b.amount == null) return res.status(400).json({ error: 'amount required' });
       try {
+        const targetErr = await validateRecurringTarget(pool, {
+          roomId: b.roomId || null,
+          tenantId: b.tenantId || null,
+        });
+        if (targetErr) return res.status(targetErr.status).json(targetErr.body);
         const { rows } = await pool.query(
           `INSERT INTO recurring_charges
              (room_id, tenant_id, label, amount, frequency, active, start_at, end_at, notes, created_by)
@@ -164,6 +228,13 @@ module.exports = function buildRecurringChargesRouter(ctx) {
       try {
         const { rows: prev } = await pool.query('SELECT * FROM recurring_charges WHERE id=$1', [id]);
         if (!prev.length) return res.status(404).json({ error: 'not found' });
+        if (b.roomId !== undefined || b.tenantId !== undefined) {
+          const targetErr = await validateRecurringTarget(pool, {
+            roomId: b.roomId !== undefined ? b.roomId || null : prev[0].room_id,
+            tenantId: b.tenantId !== undefined ? b.tenantId || null : prev[0].tenant_id,
+          });
+          if (targetErr) return res.status(targetErr.status).json(targetErr.body);
+        }
         const { rows } = await pool.query(
           `UPDATE recurring_charges SET ${fields.join(', ')} WHERE id=$${i} RETURNING *`,
           params

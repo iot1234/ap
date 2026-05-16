@@ -158,7 +158,10 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
   }, [currentPeriod]);
   React.useEffect(() => fetchBatchReadiness(), [fetchBatchReadiness, dbBills]);
 
-  // Active recurring charges keyed by roomId. The server's bulk-generate
+  // Active recurring charges keyed by roomId. Tenant-scoped rows are resolved
+  // through /api/tenants?status=active so the preview matches the server's
+  // loadRecurringFor({ tenantId, roomId }) behaviour during real bill create.
+  // The server's bulk-generate
   // path automatically merges these into the actual bill (services/billing.js
   // appends each `recurring[].amount` as a line item), and one_off rows
   // auto-deactivate after first inclusion. We mirror that here so the
@@ -168,13 +171,24 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
   const [activeRecurring, setActiveRecurring] = React.useState({});
   React.useEffect(() => {
     let cancel = false;
-    fetch('/api/recurring-charges?active=true', { credentials: 'same-origin' })
-      .then(async (r) => {
-        const d = await r.json().catch(() => ({}));
-        if (cancel || !r.ok) return;
+    Promise.allSettled([
+      fetch('/api/recurring-charges?active=true', { credentials: 'same-origin' }),
+      fetch('/api/tenants?status=active', { credentials: 'same-origin' }),
+    ])
+      .then(async ([chargeRes, tenantRes]) => {
+        if (cancel || chargeRes.status !== 'fulfilled' || !chargeRes.value.ok) return;
+        const d = await chargeRes.value.json().catch(() => ({}));
+        if (cancel) return;
+        const tenantById = {};
+        if (tenantRes.status === 'fulfilled' && tenantRes.value.ok) {
+          const td = await tenantRes.value.json().catch(() => ({}));
+          for (const t of (td.tenants || [])) {
+            if (t.id && t.current_room_id) tenantById[String(t.id)] = String(t.current_room_id);
+          }
+        }
         const byRoom = {};
         for (const c of (d.charges || [])) {
-          const rid = c.room_id || c.roomId;
+          const rid = c.room_id || c.roomId || tenantById[String(c.tenant_id || c.tenantId || '')];
           if (!rid) continue;
           (byRoom[rid] = byRoom[rid] || []).push({
             label: c.label,

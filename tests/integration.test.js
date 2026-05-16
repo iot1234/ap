@@ -2038,18 +2038,60 @@ test('recurring charges page fails soft instead of hanging on tenant-list load',
 
   assert.match(src, /Promise\.allSettled/,
     'charges list must not be blocked by tenant-list failure');
-  assert.match(src, /apiCall\('\/api\/recurring-charges'[\s\S]{0,160}timeoutMs:\s*12_000/,
+  assert.match(src, /apiCall\('\/api\/recurring-charges'[\s\S]{0,180}timeoutMs:\s*API_TIMEOUT_MS/,
     'charges load must use the structured API helper with a bounded timeout');
-  assert.match(src, /apiCall\('\/api\/tenants\?status=active'[\s\S]{0,160}timeoutMs:\s*12_000/,
+  assert.match(src, /apiCall\('\/api\/tenants\?status=active'[\s\S]{0,180}timeoutMs:\s*API_TIMEOUT_MS/,
     'tenant lookup must be bounded and scoped to active tenants');
+  assert.match(src, /apiCall\('\/api\/rooms'[\s\S]{0,180}timeoutMs:\s*API_TIMEOUT_MS/,
+    'room lookup must be loaded so admins do not have to type room IDs blindly');
   assert.match(src, /tenantLoadWarning/,
     'tenant-list failure must be surfaced without hiding existing charges');
+  assert.match(src, /roomLoadWarning/,
+    'room-list failure must be surfaced without hiding existing charges');
   assert.match(src, /role="status"[\s\S]{0,520}กำลังโหลดค่าใช้จ่ายประจำ/,
     'initial load must show an explicit loading state');
+  assert.match(src, /window\.PageRecurringCharges = PageRecurringCharges/,
+    'management page must remain usable even when auto-inclusion is disabled');
+  assert.doesNotMatch(src, /window\.FeatureGate[\s\S]{0,160}PageRecurringCharges/,
+    'feature flag should warn about billing inclusion, not block the management page');
   assert.doesNotMatch(src, /Promise\.all\(\[/,
     'one slow side request must not freeze the entire page');
   assert.doesNotMatch(src, /apiFetch\(/,
     'page should use apiCall so errors/timeouts are normalized');
+});
+
+test('recurring charges API validates targets before saving', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'recurring-charges.js'), 'utf8');
+
+  assert.match(src, /Boolean\(v\.roomId\) !== Boolean\(v\.tenantId\)/,
+    'create must require exactly one target: room or tenant');
+  assert.match(src, /async function validateRecurringTarget/,
+    'route must centralize target validation for create/update');
+  assert.match(src, /WHERE id=\$1 AND status='active' AND deleted_at IS NULL/,
+    'tenant-scoped charges must point at an active tenant');
+  assert.match(src, /FROM rooms_v2 WHERE room_code=\$1 AND deleted_at IS NULL/,
+    'room-scoped charges must verify rooms_v2 first');
+  assert.match(src, /baankarn_rooms_v1' AND value \? \$1/,
+    'room validation must fall back to the legacy room blob');
+  assert.match(src, /INVALID_RECURRING_TARGET|TENANT_NOT_ACTIVE|ROOM_NOT_FOUND/,
+    'target validation must return actionable error codes');
+});
+
+test('billing preview includes tenant-scoped recurring charges', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-billing.jsx'), 'utf8');
+
+  assert.match(src, /fetch\('\/api\/recurring-charges\?active=true'/,
+    'billing preview must load active recurring charges');
+  assert.match(src, /fetch\('\/api\/tenants\?status=active'/,
+    'billing preview must resolve tenant-scoped charges to current rooms');
+  assert.match(src, /tenantById\[String\(t\.id\)\] = String\(t\.current_room_id\)/,
+    'active tenant current_room_id must be indexed by tenant id');
+  assert.match(src, /c\.room_id \|\| c\.roomId \|\| tenantById\[String\(c\.tenant_id \|\| c\.tenantId/,
+    'tenant-scoped recurring rows must be grouped into the preview room totals');
 });
 
 test('recurring charges form wraps multi-sibling ternary in a Fragment (no babel crash)', () => {
