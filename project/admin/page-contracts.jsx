@@ -760,6 +760,13 @@ function ContractEditModal({ contract, onClose, onSaved, onError }) {
   const { Modal, Btn, Input, Select } = window;
   const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
   const isLocked = !!contract.locked_at;
+  const closeTypes = [
+    { value: 'early_move_out', label: 'ผู้เช่าออกก่อนกำหนด' },
+    { value: 'mutual_cancel', label: 'ยกเลิกตามตกลง' },
+    { value: 'no_show', label: 'ยกเลิกก่อนเข้าอยู่ / no-show' },
+    { value: 'natural_expiry', label: 'หมดอายุตามกำหนด' },
+    { value: 'admin_correction', label: 'แก้ไขข้อมูลย้อนหลัง' },
+  ];
   const original = {
     discountPct: Number(contract.discount_pct ?? 0),
     termMonths: contract.term_months == null ? null : Number(contract.term_months),
@@ -771,6 +778,8 @@ function ContractEditModal({ contract, onClose, onSaved, onError }) {
     termMonths:  contract.term_months  != null ? String(contract.term_months)  : '',
     endDate:     contract.end_date ? String(contract.end_date).slice(0, 10) : '',
     status:      contract.status || 'active',
+    closeType:   'early_move_out',
+    closeReason: '',
   });
   const [busy, setBusy] = useState(false);
   const formPct = Number(form.discountPct);
@@ -780,14 +789,19 @@ function ContractEditModal({ contract, onClose, onSaved, onError }) {
     || formTerm !== original.termMonths
     || formEndDate !== original.endDate;
   const statusChanged = form.status !== original.status;
-  const canSave = statusChanged || (!isLocked && materialChanged);
+  const lifecycleClosed = original.status !== 'active';
+  const closingRequested = original.status === 'active' && ['ended', 'expired'].includes(form.status);
+  const closeReasonReady = !closingRequested || form.closeReason.trim().length >= 5;
+  const materialDisabled = isLocked || busy || lifecycleClosed || closingRequested;
+  const canSave = !lifecycleClosed && closeReasonReady
+    && (statusChanged || (!isLocked && !closingRequested && materialChanged));
 
   const submit = async (e) => {
     e.preventDefault();
     setBusy(true);
     try {
       const payload = {};
-      if (!isLocked) {
+      if (!isLocked && !closingRequested) {
         const pct = Number(form.discountPct);
         if (Number.isFinite(pct) && pct !== original.discountPct) payload.discountPct = pct;
         const term = form.termMonths === '' ? null : Number(form.termMonths);
@@ -796,6 +810,15 @@ function ContractEditModal({ contract, onClose, onSaved, onError }) {
         if (endDate !== original.endDate) payload.endDate = endDate;
       }
       if (form.status !== original.status) payload.status = form.status;
+      if (closingRequested) {
+        const closeReason = form.closeReason.trim();
+        if (closeReason.length < 5) {
+          onError && onError('กรุณาระบุเหตุผลการปิดสัญญาอย่างน้อย 5 ตัวอักษร');
+          return;
+        }
+        payload.closeType = form.closeType;
+        payload.closeReason = closeReason;
+      }
       if (!Object.keys(payload).length) {
         onError && onError('ไม่มีข้อมูลที่เปลี่ยนแปลง');
         return;
@@ -839,19 +862,36 @@ function ContractEditModal({ contract, onClose, onSaved, onError }) {
             แต่ยังเปลี่ยนสถานะเป็น “สิ้นสุด” หรือ “หมดอายุ” เพื่อปิดสัญญาและปล่อยห้องได้
           </div>
         ) : null}
+        {lifecycleClosed ? (
+          <div style={{
+            padding: 10, background: C.surfaceAlt, borderRadius: 6,
+            fontSize: 12, color: C.muted, lineHeight: 1.5,
+          }}>
+            สัญญานี้ปิดแล้ว ระบบไม่อนุญาตให้เปิดกลับจากหน้านี้ เพราะจะทำให้ห้อง ผู้เช่า และบิลย้อนสถานะผิด ให้สร้างสัญญาใหม่หรือ check-in ใหม่แทน
+          </div>
+        ) : null}
+        {closingRequested ? (
+          <div style={{
+            padding: 10, background: C.dangerSoft || '#fff5f4',
+            border: '1px solid #f5c0b4', borderRadius: 6,
+            fontSize: 12, color: C.dangerInk || '#8a2f2b', lineHeight: 1.5,
+          }}>
+            เมื่อบันทึก ระบบจะปิดสัญญา ตั้งวันสิ้นสุดเป็นวันนี้ถ้าไม่ได้ระบุไว้ ย้ายผู้เช่าออก ปล่อยห้องเป็นว่าง ยกเลิกลิงก์สัญญาที่ยังค้าง เพิกถอนสิทธิที่ผูกกับผู้เช่ารายนี้ และส่งแจ้งเตือนให้ผู้เกี่ยวข้อง
+          </div>
+        ) : null}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
           <div>
             <label style={lbl}>ส่วนลด (%) — สูงสุด 50</label>
             <input type="number" step="0.1" min="0" max="50" value={form.discountPct}
               onChange={(e) => setForm({ ...form, discountPct: e.target.value })}
-              disabled={isLocked || busy}
+              disabled={materialDisabled}
               style={inp} />
           </div>
           <div>
             <label style={lbl}>ระยะสัญญา (เดือน)</label>
             <input type="number" step="1" min="1" max="120" value={form.termMonths}
               onChange={(e) => setForm({ ...form, termMonths: e.target.value })}
-              disabled={isLocked || busy}
+              disabled={materialDisabled}
               style={inp} placeholder="เปิด-ไม่จำกัด" />
           </div>
         </div>
@@ -860,14 +900,19 @@ function ContractEditModal({ contract, onClose, onSaved, onError }) {
             <label style={lbl}>วันสิ้นสุด</label>
             <input type="date" value={form.endDate}
               onChange={(e) => setForm({ ...form, endDate: e.target.value })}
-              disabled={isLocked || busy}
+              disabled={materialDisabled}
               style={inp} />
           </div>
           <div>
             <label style={lbl}>สถานะ</label>
             <select value={form.status}
-              onChange={(e) => setForm({ ...form, status: e.target.value })}
-              disabled={busy}
+              onChange={(e) => setForm({
+                ...form,
+                status: e.target.value,
+                closeType: e.target.value === 'expired' ? 'natural_expiry'
+                  : (form.closeType === 'natural_expiry' ? 'early_move_out' : form.closeType),
+              })}
+              disabled={busy || lifecycleClosed}
               style={inp}>
               <option value="active">มีผล</option>
               <option value="expired">หมดอายุ</option>
@@ -875,6 +920,33 @@ function ContractEditModal({ contract, onClose, onSaved, onError }) {
             </select>
           </div>
         </div>
+        {closingRequested ? (
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+            <div>
+              <label style={lbl}>ประเภทการปิดสัญญา</label>
+              <select value={form.closeType}
+                onChange={(e) => setForm({ ...form, closeType: e.target.value })}
+                disabled={busy}
+                style={inp}>
+                {closeTypes.map((t) => (
+                  <option key={t.value} value={t.value}>{t.label}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label style={lbl}>เหตุผล (บังคับ)</label>
+              <textarea rows={3} maxLength={500}
+                value={form.closeReason}
+                onChange={(e) => setForm({ ...form, closeReason: e.target.value })}
+                disabled={busy}
+                placeholder="เช่น ผู้เช่าออกก่อนกำหนด, ยกเลิกตามตกลง, ไม่เข้าอยู่"
+                style={{ ...inp, minHeight: 76, resize: 'vertical' }} />
+              <div style={{ fontSize: 11, color: C.muted, marginTop: 4 }}>
+                เหตุผลนี้จะถูกบันทึกใน contract + audit log และใช้ในข้อความแจ้งเตือน
+              </div>
+            </div>
+          </div>
+        ) : null}
         <div style={{
           padding: 10, background: C.surfaceAlt, borderRadius: 6,
           fontSize: 12, color: C.muted, lineHeight: 1.5,

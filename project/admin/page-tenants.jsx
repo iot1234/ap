@@ -988,11 +988,11 @@ function TabContract({ t, setToast, addActivity, setRooms, onClosed }) {
     } finally { setBusy(false); }
   };
 
-  // Cancel an active contract — sets status='ended' with today's endDate,
-  // and the server cascades: tenant.status → 'moved_out', current_room_id
-  // cleared, room.status → 'vacant' (both blob + rooms_v2). The reason is
-  // audit-logged via the {reason} metadata so we have a paper trail
-  // without adding a column to the contracts table.
+  // Cancel an active contract through checkout when possible so early
+  // move-out gets the full cascade: contract ended, tenant moved out,
+  // room freed, sessions/cards revoked, recurring charges disabled, and
+  // closing bill generated. Direct contract PUT remains a fallback for
+  // legacy rows where tenantDbId cannot be resolved.
   const cancelContract = async () => {
     if (!contract) return;
     const reason = (cancelReason || '').trim();
@@ -1002,15 +1002,24 @@ function TabContract({ t, setToast, addActivity, setRooms, onClosed }) {
     }
     setBusy(true);
     try {
-      const today = new Date().toISOString().slice(0, 10);
-      await apiCall(`/api/contracts/${contract.id}`, {
-        method: 'PUT',
-        body: JSON.stringify({
-          status: 'ended',
-          endDate: today,
-          cancelReason: reason,  // captured by audit log on the server side
-        }),
-      });
+      if (tenantDbId) {
+        await apiCall(`/api/tenants/${tenantDbId}/checkout`, {
+          method: 'POST',
+          body: JSON.stringify({
+            reason,
+            generateClosingBill: true,
+          }),
+        });
+      } else {
+        await apiCall(`/api/contracts/${contract.id}`, {
+          method: 'PUT',
+          body: JSON.stringify({
+            status: 'ended',
+            closeType: 'early_move_out',
+            closeReason: reason,
+          }),
+        });
+      }
       setCancelling(false);
       setCancelReason('');
       setToast && setToast({

@@ -1319,18 +1319,11 @@ function numOrNull(value) {
   return Number.isFinite(n) ? n : null;
 }
 
+// Bills-table → usage shape adapter. Delegates to billing service so the
+// snake_case → before/after detail logic is shared with routes/bills-extras
+// instead of drifting between two near-identical implementations.
 function storedUtilityUsage(b, prefix) {
-  const unitsKey = `${prefix}_units`;
-  const prevKey = `${prefix}_prev_reading`;
-  const currentKey = `${prefix}_current_reading`;
-  const prevReading = numOrNull(b[prevKey]);
-  const currentReading = numOrNull(b[currentKey]);
-  return {
-    units: Number(b[unitsKey]) || 0,
-    prevReading,
-    currentReading,
-    hasReadings: prevReading != null && currentReading != null,
-  };
+  return billing.resolveUtilityUsageFromBillRow(b, prefix);
 }
 
 // The tenant-side bill PDF endpoint (further down in this file) inlines
@@ -6501,6 +6494,8 @@ function buildContractWarnings(row) {
   const isActive = row.status === 'active';
   const locked = !!row.locked_at;
   const tenantRoom = row.tenant_current_room_id || row.current_room_id || null;
+  const endYmd = row.end_date ? String(row.end_date).slice(0, 10) : null;
+  const todayYmd = new Date().toISOString().slice(0, 10);
 
   if (isActive && row.tenant_id && !row.tenant_status) {
     warnings.push(contractWarning(
@@ -6555,6 +6550,24 @@ function buildContractWarnings(row) {
       'เงินมัดจำติดลบ',
       'ถ้า checkout/refund จากข้อมูลนี้ ยอดคืนมัดจำจะผิด',
       'แก้เงินมัดจำก่อนทำรายการต่อ'
+    ));
+  }
+  if (isActive && endYmd && endYmd < todayYmd) {
+    warnings.push(contractWarning(
+      'ACTIVE_CONTRACT_END_DATE_PAST',
+      'error',
+      'สัญญาเลยวันสิ้นสุดแล้วแต่ยัง active',
+      'ถ้าปล่อยไว้ ระบบอาจยังออกบิล/ให้สิทธิผู้เช่าเหมือนสัญญายังมีผล ทั้งที่ควรต่อสัญญาหรือปิดสัญญา',
+      'ต่อสัญญาใหม่ หรือปิดเป็นหมดอายุ/สิ้นสุดพร้อมเหตุผล'
+    ));
+  }
+  if (!isActive && row.active_invitation_status) {
+    warnings.push(contractWarning(
+      'CLOSED_CONTRACT_HAS_ACTIVE_INVITATION',
+      'warn',
+      'สัญญาปิดแล้วแต่ยังมีลิงก์กรอกสัญญาค้าง',
+      'ผู้เช่าอาจเห็นลิงก์ที่ไม่ควรใช้ต่อ หรือ admin อาจเข้าใจผิดว่ายังรอผู้เช่ากรอก',
+      'ยกเลิก invitation หรือออกสัญญาใหม่ถ้ายังต้องการให้เช่าต่อ'
     ));
   }
 
@@ -6612,6 +6625,26 @@ function contractWarningSeverity(warnings) {
   if (!warnings || !warnings.length) return 'ok';
   if (warnings.some((w) => w.severity === 'error')) return 'error';
   return 'warn';
+}
+
+const CONTRACT_CLOSE_TYPES = new Set([
+  'early_move_out',
+  'mutual_cancel',
+  'no_show',
+  'natural_expiry',
+  'admin_correction',
+]);
+
+function normalizeContractCloseReason(body) {
+  return String(body?.closeReason ?? body?.cancelReason ?? body?.reason ?? '')
+    .trim()
+    .slice(0, 500);
+}
+
+function normalizeContractCloseType(body, status) {
+  const raw = String(body?.closeType || '').trim();
+  if (raw) return raw;
+  return status === 'expired' ? 'natural_expiry' : 'early_move_out';
 }
 
 function validateContractApprovalDraft(draft) {
@@ -6736,6 +6769,7 @@ app.get('/api/contracts', requireAuth, async (req, res) => {
                 c.start_date, c.end_date, c.term_months,
                 c.monthly_rent, c.deposit, c.discount_pct,
                 c.status, c.signed_at, c.created_at,
+                c.closed_at, c.closed_by, c.closed_reason, c.closed_type,
                 c.locked_at, c.locked_by, c.template_id,
                 c.terms_template_snapshot IS NOT NULL AS has_terms_template_snapshot,
                 c.signature_image_id,
@@ -6831,6 +6865,26 @@ app.put('/api/contracts/:id', sameOrigin, csrfGuard, requireAuth, requireRole('o
     const id = Number(req.params.id);
     if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
     const b = req.body || {};
+    const requestedStatus = b.status !== undefined ? String(b.status) : undefined;
+    const isClosingContract = requestedStatus === 'ended' || requestedStatus === 'expired';
+    const closeReason = normalizeContractCloseReason(b);
+    const closeType = normalizeContractCloseType(b, requestedStatus);
+    if (isClosingContract) {
+      if (!closeReason) {
+        return res.status(400).json({
+          error: 'closeReason is required when closing a contract',
+          code: 'CONTRACT_CLOSE_REASON_REQUIRED',
+          hint: 'ระบุเหตุผล เช่น ผู้เช่าออกก่อนกำหนด / ยกเลิกตามตกลง / หมดอายุตามกำหนด เพื่อให้ audit และการแจ้งเตือนครบถ้วน',
+        });
+      }
+      if (!CONTRACT_CLOSE_TYPES.has(closeType)) {
+        return res.status(400).json({
+          error: 'closeType is invalid',
+          code: 'CONTRACT_CLOSE_TYPE_INVALID',
+          allowed: Array.from(CONTRACT_CLOSE_TYPES),
+        });
+      }
+    }
     const fields = []; const params = []; let i = 1;
     // Allow-list mutable fields. monthly_rent is intentionally NOT here
     // because the bill computation reads room.rent (rooms blob) — letting
@@ -6857,10 +6911,21 @@ app.put('/api/contracts/:id', sameOrigin, csrfGuard, requireAuth, requireRole('o
       fields.push(`end_date=$${i++}::date`); params.push(b.endDate);
     }
     if (b.status !== undefined) {
-      if (!['active', 'ended', 'expired'].includes(String(b.status))) {
+      if (!['active', 'ended', 'expired'].includes(requestedStatus)) {
         return res.status(400).json({ error: 'status must be active|ended|expired' });
       }
-      fields.push(`status=$${i++}`); params.push(b.status);
+      fields.push(`status=$${i++}`); params.push(requestedStatus);
+    }
+    if (isClosingContract && b.endDate === undefined) {
+      fields.push(requestedStatus === 'expired'
+        ? `end_date=CASE WHEN end_date IS NOT NULL AND end_date <= CURRENT_DATE THEN end_date ELSE CURRENT_DATE END`
+        : `end_date=CURRENT_DATE`);
+    }
+    if (isClosingContract) {
+      fields.push('closed_at=COALESCE(closed_at, NOW())');
+      fields.push(`closed_by=$${i++}`); params.push(req.session.user.username);
+      fields.push(`closed_reason=$${i++}`); params.push(closeReason);
+      fields.push(`closed_type=$${i++}`); params.push(closeType);
     }
     if (!fields.length) return res.status(400).json({ error: 'nothing to update' });
     // Always bump updated_at so audit history reflects the actual edit time
@@ -6874,31 +6939,52 @@ app.put('/api/contracts/:id', sameOrigin, csrfGuard, requireAuth, requireRole('o
     // + clear current_room_id + free the room state. Without this, the
     // contract shows ended but bills keep auto-generating and
     // /api/rooms still shows the room as occupied (drift #7 from audit).
-    const isClosingContract = b.status === 'ended' || b.status === 'expired';
     const materialEditRequested = b.discountPct !== undefined
       || b.termMonths !== undefined
-      || b.endDate !== undefined;
+      || (b.endDate !== undefined && !isClosingContract);
 
     const client = await pool.connect();
+    let closeEffects = null;
+    let closeTenantNotify = null;
     try {
       await client.query('BEGIN');
-      if (materialEditRequested) {
-        const lockQ = await client.query(
-          `SELECT locked_at FROM contracts
-            WHERE id=$1 AND deleted_at IS NULL FOR UPDATE`,
-          [id]
-        );
-        if (!lockQ.rows.length) {
-          await client.query('ROLLBACK');
-          return res.status(404).json({ error: 'not found' });
-        }
-        if (lockQ.rows[0].locked_at) {
-          await client.query('ROLLBACK');
-          return res.status(409).json({
-            error: 'contract is locked; material terms cannot be edited',
-            code: 'CONTRACT_LOCKED',
-          });
-        }
+      const currentQ = await client.query(
+        `SELECT c.*, t.full_name AS tenant_name, t.phone AS tenant_phone,
+                t.email AS tenant_email, t.line_user_id, t.line_oa_id,
+                t.status AS tenant_status, t.current_room_id AS tenant_current_room_id
+           FROM contracts c
+           LEFT JOIN tenants t ON t.id = c.tenant_id AND t.deleted_at IS NULL
+          WHERE c.id=$1 AND c.deleted_at IS NULL
+          FOR UPDATE OF c`,
+        [id]
+      );
+      if (!currentQ.rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'not found' });
+      }
+      const current = currentQ.rows[0];
+      if (requestedStatus === 'active' && current.status !== 'active') {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'closed contracts cannot be re-opened from this endpoint',
+          code: 'CONTRACT_REOPEN_BLOCKED',
+          hint: 'สร้างสัญญาใหม่หรือ check-in ใหม่ เพื่อไม่ให้ห้อง/ผู้เช่า/บิลย้อนสถานะผิด',
+        });
+      }
+      if (isClosingContract && current.status !== 'active') {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'contract is already closed',
+          code: 'CONTRACT_ALREADY_CLOSED',
+          currentStatus: current.status,
+        });
+      }
+      if (materialEditRequested && current.locked_at) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'contract is locked; material terms cannot be edited',
+          code: 'CONTRACT_LOCKED',
+        });
       }
       const { rows } = await client.query(
         `UPDATE contracts SET ${fields.join(', ')} WHERE id=$${i} AND deleted_at IS NULL RETURNING *`,
@@ -6939,6 +7025,26 @@ app.put('/api/contracts/:id', sameOrigin, csrfGuard, requireAuth, requireRole('o
       // Cascade: closing the contract → tenant moves out + room freed.
       // Skip if tenant is already non-active (idempotent re-closure).
       if (isClosingContract && contract.tenant_id && contract.room_id) {
+        closeEffects = {
+          tenantMovedOut: false,
+          roomFreed: false,
+          invitationsRevoked: 0,
+          sessionsRevoked: 0,
+          cardsRevoked: 0,
+          recurringDeactivated: 0,
+          warnings: [],
+        };
+        const revokedInvites = await client.query(
+          `UPDATE contract_invitations
+              SET status='revoked', revoked_at=NOW(), revoked_by=$2, updated_at=NOW()
+            WHERE contract_id=$1 AND status IN ('pending','submitted')
+            RETURNING id`,
+          [contract.id, req.session.user.username]
+        ).catch((err) => {
+          if (err.code === '42P01' || err.code === '42703') return { rowCount: 0, rows: [] };
+          throw err;
+        });
+        closeEffects.invitationsRevoked = revokedInvites.rowCount || 0;
         let roomFreed = false;
         const tQ = await client.query(
           `SELECT id, status, current_room_id FROM tenants
@@ -6946,12 +7052,47 @@ app.put('/api/contracts/:id', sameOrigin, csrfGuard, requireAuth, requireRole('o
           [contract.tenant_id]
         );
         const t = tQ.rows[0];
-        if (t && t.status === 'active' && t.current_room_id === contract.room_id) {
+        if (t && t.status === 'active' && String(t.current_room_id || '') === String(contract.room_id)) {
           await client.query(
             `UPDATE tenants SET status='moved_out', current_room_id=NULL, updated_at=NOW()
                WHERE id=$1`,
             [contract.tenant_id]
           );
+          closeEffects.tenantMovedOut = true;
+          const sessions = await client.query(`DELETE FROM tenant_sessions WHERE tenant_id=$1`, [contract.tenant_id]);
+          closeEffects.sessionsRevoked = sessions.rowCount || 0;
+          const cards = await client.query(
+            `UPDATE access_cards
+                SET status='revoked', revoked_at=NOW(), revoke_reason=$2
+              WHERE tenant_id=$1 AND status='active'
+              RETURNING id`,
+            [contract.tenant_id, `auto:contract-close:${closeType}`]
+          ).catch((err) => {
+            if (err.code === '42P01') return { rowCount: 0, rows: [] };
+            throw err;
+          });
+          closeEffects.cardsRevoked = cards.rowCount || 0;
+          const recurring = await client.query(
+            `UPDATE recurring_charges
+                SET active=FALSE, updated_at=NOW(),
+                    notes = COALESCE(notes,'') || E'\n[auto] deactivated on contract close at ' || NOW()::text
+              WHERE tenant_id=$1 AND active=TRUE
+              RETURNING id`,
+            [contract.tenant_id]
+          ).catch((err) => {
+            if (err.code === '42P01') return { rowCount: 0, rows: [] };
+            throw err;
+          });
+          closeEffects.recurringDeactivated = recurring.rowCount || 0;
+          closeTenantNotify = {
+            id: contract.tenant_id,
+            full_name: current.tenant_name,
+            phone: current.tenant_phone,
+            email: current.tenant_email,
+            line_user_id: current.line_user_id,
+            line_oa_id: current.line_oa_id,
+            status: 'active',
+          };
           // Free the room (drop tenant key + flip status).
           await client.query(
             `UPDATE app_data
@@ -6972,6 +7113,12 @@ app.put('/api/contracts/:id', sameOrigin, csrfGuard, requireAuth, requireRole('o
             if (err.code !== '42P01') throw err;
           });
           roomFreed = true;
+          closeEffects.roomFreed = true;
+        } else if (t && t.status === 'active') {
+          closeEffects.warnings.push({
+            code: 'TENANT_ROOM_MISMATCH_ON_CLOSE',
+            message: 'สัญญาถูกปิด แต่ผู้เช่า active อยู่คนละห้อง จึงไม่ย้ายผู้เช่าออกหรือเพิกถอนสิทธิอัตโนมัติ',
+          });
         }
         if (!roomFreed) {
           const rQ = await client.query(
@@ -6996,6 +7143,7 @@ app.put('/api/contracts/:id', sameOrigin, csrfGuard, requireAuth, requireRole('o
             ).catch((err) => {
               if (err.code !== '42P01') throw err;
             });
+            closeEffects.roomFreed = true;
           }
         }
       }
@@ -7003,13 +7151,62 @@ app.put('/api/contracts/:id', sameOrigin, csrfGuard, requireAuth, requireRole('o
       // Capture cancelReason (when admin terminates via the tenant page
       // "ยกเลิกสัญญา" button) in the audit metadata so we have a paper
       // trail of WHY the lease was ended without a dedicated column.
-      const auditMeta = { fields: Object.keys(b), cascadedTenantMovedOut: isClosingContract };
-      if (b.cancelReason && typeof b.cancelReason === 'string') {
+      const auditMeta = {
+        fields: Object.keys(b),
+        cascadedTenantMovedOut: !!(closeEffects && closeEffects.tenantMovedOut),
+        closeEffects,
+      };
+      if (isClosingContract) {
+        auditMeta.closeReason = closeReason;
+        auditMeta.closeType = closeType;
+      } else if (b.cancelReason && typeof b.cancelReason === 'string') {
         auditMeta.cancelReason = String(b.cancelReason).slice(0, 500);
       }
       audit(req, isClosingContract ? 'contract.cancel' : 'contract.update',
         'contract', String(id), auditMeta);
-      res.json({ ok: true, contract });
+      if (isClosingContract) {
+        try {
+          const flags = await features.load(pool);
+          const lines = [
+            `สัญญาถูกปิด: ${contract.contract_no}`,
+            `สถานะ: ${requestedStatus}`,
+            `ประเภท: ${closeType}`,
+            `เหตุผล: ${closeReason}`,
+          ];
+          if (contract.room_id) lines.push(`ห้อง: ${contract.room_id}`);
+          if (current.tenant_name) lines.push(`ผู้เช่า: ${current.tenant_name}`);
+          if (closeEffects) {
+            lines.push(`ย้ายผู้เช่าออก: ${closeEffects.tenantMovedOut ? 'ใช่' : 'ไม่ใช่'}`);
+            lines.push(`ปล่อยห้อง: ${closeEffects.roomFreed ? 'ใช่' : 'ไม่ใช่'}`);
+            if (closeEffects.cardsRevoked) lines.push(`เพิกถอนบัตร: ${closeEffects.cardsRevoked} ใบ`);
+            if (closeEffects.recurringDeactivated) lines.push(`ปิด recurring charge: ${closeEffects.recurringDeactivated} รายการ`);
+            if (closeEffects.invitationsRevoked) lines.push(`ยกเลิกลิงก์สัญญาค้าง: ${closeEffects.invitationsRevoked} ลิงก์`);
+            for (const w of closeEffects.warnings || []) lines.push(`คำเตือน: ${w.message}`);
+          }
+          notifier.notifyOwner({ pool, features: flags }, {
+            subject: `ปิดสัญญา ${contract.contract_no}`,
+            text: lines.join('\n'),
+          }).catch(() => {});
+          if (closeTenantNotify) {
+            notifier.notifyTenant({ pool, features: flags }, closeTenantNotify, {
+              subject: `แจ้งปิดสัญญา ${contract.contract_no}`,
+              text: [
+                `เรียน คุณ${closeTenantNotify.full_name || ''}`,
+                ``,
+                `ระบบบันทึกการปิดสัญญา ${contract.contract_no} แล้ว`,
+                contract.room_id ? `ห้อง: ${contract.room_id}` : null,
+                `เหตุผล: ${closeReason}`,
+                closeEffects && closeEffects.cardsRevoked ? `บัตรเข้า-ออกถูกเพิกถอน ${closeEffects.cardsRevoked} ใบ` : null,
+                `หากยังมีบิลค้างชำระหรือเงินมัดจำ โปรดติดต่อสำนักงานเพื่อปิดยอด`,
+              ].filter(Boolean).join('\n'),
+              force: true,
+            }).catch(() => {});
+          }
+        } catch (err) {
+          console.warn('[contracts] close notification failed:', err.message);
+        }
+      }
+      res.json({ ok: true, contract, effects: closeEffects });
     } catch (err) {
       await client.query('ROLLBACK').catch(() => {});
       console.error('contract update error:', err);

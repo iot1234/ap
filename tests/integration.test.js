@@ -2529,6 +2529,12 @@ test('checkout revokes access cards + records refund + pro-rates closing bill', 
     'closing-bill pro-rate path must exist');
   assert.match(src, /generateClosingBill !== false/,
     'admin can opt out of the closing bill (default true)');
+  assert.match(src, /closed_at = COALESCE\(closed_at, NOW\(\)\)/,
+    'checkout must stamp contract closure time');
+  assert.match(src, /closed_reason = \$3/,
+    'checkout reason must persist on the contract row');
+  assert.match(src, /closed_type = 'tenant_checkout'/,
+    'checkout path must identify the closure source');
 });
 
 test('contracts gain deposit_returned columns in migration', () => {
@@ -2536,6 +2542,16 @@ test('contracts gain deposit_returned columns in migration', () => {
   const path = require('node:path');
   const src = fs.readFileSync(path.join(__dirname, '..', 'db', 'migrate.js'), 'utf8');
   for (const col of ['deposit_returned', 'deposit_returned_at', 'deposit_return_reason']) {
+    assert.match(src, new RegExp(`ALTER TABLE contracts ADD COLUMN IF NOT EXISTS ${col}`),
+      `${col} column must be in migration`);
+  }
+});
+
+test('contracts gain close audit columns in migration', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'db', 'migrate.js'), 'utf8');
+  for (const col of ['closed_at', 'closed_by', 'closed_reason', 'closed_type']) {
     assert.match(src, new RegExp(`ALTER TABLE contracts ADD COLUMN IF NOT EXISTS ${col}`),
       `${col} column must be in migration`);
   }
@@ -2978,7 +2994,7 @@ test('PUT /api/contracts/:id status=ended cascades tenant + room state', () => {
   const path = require('node:path');
   const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   const block = src.match(/app\.put\('\/api\/contracts\/:id'[\s\S]+?app\.post\('\/api\/contracts\/:id\/sign'/)[0];
-  assert.match(block, /isClosingContract = b\.status === 'ended' \|\| b\.status === 'expired'/);
+  assert.match(block, /isClosingContract = requestedStatus === 'ended' \|\| requestedStatus === 'expired'/);
   assert.match(block,
     /UPDATE tenants SET status='moved_out', current_room_id=NULL/,
     'tenant must be moved out when contract closes');
@@ -2995,6 +3011,26 @@ test('PUT /api/contracts/:id status=ended cascades tenant + room state', () => {
   assert.match(block,
     /UPDATE rooms_v2 SET status='vacant', updated_at=NOW\(\)[\s\S]{0,120}WHERE room_code=\$1 AND status='reserved'/,
     'draft close must release rooms_v2 only from reserved status');
+});
+
+test('contract close requires reason and performs full lifecycle cleanup', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const block = src.match(/app\.put\('\/api\/contracts\/:id'[\s\S]+?app\.post\('\/api\/contracts\/:id\/sign'/)[0];
+  assert.match(block, /CONTRACT_CLOSE_REASON_REQUIRED/);
+  assert.match(block, /CONTRACT_REOPEN_BLOCKED/);
+  assert.match(block, /CONTRACT_CLOSE_TYPE_INVALID/);
+  assert.match(block, /closed_at=COALESCE\(closed_at, NOW\(\)\)/);
+  assert.match(block, /closed_reason=\$/);
+  assert.match(block, /params\.push\(closeReason\)/);
+  assert.match(block, /end_date=CURRENT_DATE/);
+  assert.match(block, /UPDATE contract_invitations[\s\S]{0,260}status='revoked'/);
+  assert.match(block, /DELETE FROM tenant_sessions/);
+  assert.match(block, /UPDATE access_cards[\s\S]{0,260}auto:contract-close/);
+  assert.match(block, /UPDATE recurring_charges[\s\S]{0,420}deactivated on contract close/);
+  assert.match(block, /notifyOwner[\s\S]{0,400}ปิดสัญญา/);
+  assert.match(block, /notifyTenant[\s\S]{0,500}แจ้งปิดสัญญา/);
 });
 
 test('approve ROOM_OCCUPIED + CITIZEN_ID_DUPLICATE return nextActions for self-recovery', () => {
@@ -3699,12 +3735,42 @@ test('contracts edit modal keeps locked contracts closable without material edit
   const block = src.match(/function ContractEditModal[\s\S]+?function QuickInviteModal/);
   assert.ok(block, 'ContractEditModal must exist');
   assert.match(block[0], /const isLocked = !!contract\.locked_at/);
-  assert.match(block[0], /if \(!isLocked\) \{[\s\S]{0,500}payload\.discountPct/);
+  assert.match(block[0], /if \(!isLocked && !closingRequested\) \{[\s\S]{0,500}payload\.discountPct/);
   assert.match(block[0], /if \(form\.status !== original\.status\) payload\.status = form\.status/);
-  assert.match(block[0], /disabled=\{isLocked \|\| busy\}/,
+  assert.match(block[0], /disabled=\{materialDisabled\}/,
     'locked contracts must disable material term inputs');
   assert.match(block[0], /disabled=\{busy \|\| !canSave\}/,
     'save button should be disabled until a valid change is present');
+});
+
+test('contracts edit modal requires close type and reason before closing', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-contracts.jsx'), 'utf8');
+  const block = src.match(/function ContractEditModal[\s\S]+?function QuickInviteModal/);
+  assert.ok(block, 'ContractEditModal must exist');
+  assert.match(block[0], /closingRequested/);
+  assert.match(block[0], /closeReasonReady/);
+  assert.match(block[0], /payload\.closeType = form\.closeType/);
+  assert.match(block[0], /payload\.closeReason = closeReason/);
+  assert.match(block[0], /disabled=\{materialDisabled\}/);
+  assert.match(block[0], /contract \+ audit log/);
+});
+
+test('tenant contract cancel UI uses checkout cascade for early move-out', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-tenants.jsx'), 'utf8');
+  const block = src.match(/const cancelContract = async \(\) => \{[\s\S]+?const rejectSubmitted/);
+  assert.ok(block, 'tenant cancelContract handler must exist');
+  assert.match(block[0], /apiCall\(`\/api\/tenants\/\$\{tenantDbId\}\/checkout`/,
+    'tenant-page contract cancel should use checkout when tenantDbId is known');
+  assert.match(block[0], /generateClosingBill: true/,
+    'early move-out should generate a closing bill by default');
+  assert.match(block[0], /apiCall\(`\/api\/contracts\/\$\{contract\.id\}`[\s\S]{0,260}closeType: 'early_move_out'/,
+    'legacy rows without tenantDbId should still close the contract with an explicit type');
+  assert.match(block[0], /closeReason: reason/,
+    'cancel reason must flow into the close audit trail');
 });
 
 test('contracts page hides manual signing for locked contracts', () => {
@@ -4116,7 +4182,7 @@ test('locked contracts use immutable terms snapshot for PDFs and edits are block
     'PDF endpoints must prefer the immutable snapshot for locked contracts');
   assert.match(src, /PDF template override is disabled/,
     'admin PDF template overrides must be refused after lock');
-  assert.match(src, /materialEditRequested[\s\S]{0,350}SELECT locked_at FROM contracts/,
+  assert.match(src, /materialEditRequested[\s\S]{0,1800}current\.locked_at/,
     'material contract edits must check locked_at under row lock');
   assert.match(src, /contract is locked; material terms cannot be edited/,
     'locked contracts must reject material term edits');

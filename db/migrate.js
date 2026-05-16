@@ -728,6 +728,13 @@ async function migrate(pool, opts = {}) {
     ALTER TABLE contracts ADD COLUMN IF NOT EXISTS deposit_returned_at TIMESTAMPTZ;
     ALTER TABLE contracts ADD COLUMN IF NOT EXISTS deposit_return_reason TEXT;
 
+    -- Contract closure audit fields. status='ended'/'expired' tells the
+    -- current state, but operations still need to know why it closed.
+    ALTER TABLE contracts ADD COLUMN IF NOT EXISTS closed_at TIMESTAMPTZ;
+    ALTER TABLE contracts ADD COLUMN IF NOT EXISTS closed_by TEXT;
+    ALTER TABLE contracts ADD COLUMN IF NOT EXISTS closed_reason TEXT;
+    ALTER TABLE contracts ADD COLUMN IF NOT EXISTS closed_type TEXT;
+
     -- === Identity capture (citizen ID front+back, address, emergency) =====
     -- Thailand law requires landlords to keep tenant identification on file
     -- (พ.ร.บ. การเช่าอสังหาริมทรัพย์) — without these columns the existing

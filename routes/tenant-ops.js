@@ -1848,12 +1848,16 @@ module.exports = function buildTenantOpsRouter(ctx) {
         // appears in reports / aged-receivable views without joining audit_logs.
         const contractRes = await client.query(
           `UPDATE contracts SET status='ended', end_date=CURRENT_DATE,
+              closed_at = COALESCE(closed_at, NOW()),
+              closed_by = $4,
+              closed_reason = $3,
+              closed_type = 'tenant_checkout',
               deposit_returned = $2,
               deposit_returned_at = CASE WHEN $2 IS NOT NULL THEN NOW() ELSE NULL END,
               deposit_return_reason = $3
              WHERE tenant_id=$1 AND status='active'
            RETURNING id, contract_no, start_date, monthly_rent, deposit, discount_pct`,
-          [id, refund, reason]
+          [id, refund, reason, req.session.user.username]
         );
         const closedContract = contractRes.rows[0] || null;
 
