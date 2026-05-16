@@ -10,7 +10,7 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
   const ADMIN_ROOM_TYPES = window.ADMIN_ROOM_TYPES;
   const ADMIN_ROOM_TYPE_KEYS = window.ADMIN_ROOM_TYPE_KEYS;
   const ADMIN_VIEWS = window.ADMIN_VIEWS;
-  const { fmt, fmtCurrency, resolveRoomRent } = window;
+  const { fmt, fmtCurrency, resolveRoomRent, computeRoomRent } = window;
   const { Card, Btn, IconBtn, Input, Select, Toggle, Textarea, StatusBadge, Pill, DataTable,
           Drawer, Modal, SearchInput, FilterChip, PageContainer, PageHeader, SectionHeading, DefList } = window;
 
@@ -109,6 +109,27 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
     const after = cloneRoom(editDraft);
     const beforeRent = resolveRoomRent ? resolveRoomRent(before, config) : { rent: before.rent, source: 'legacy' };
     const afterRent = resolveRoomRent ? resolveRoomRent(after, config) : { rent: after.rent, source: 'legacy' };
+    const preWarnings = [];
+    if (Number(beforeRent.rent) !== Number(afterRent.rent)) {
+      preWarnings.push(`ค่าเช่าที่ระบบจะใช้เปลี่ยนจาก ${fmtCurrency(beforeRent.rent)} เป็น ${fmtCurrency(afterRent.rent)}`);
+    }
+    if (roomPricingChanged(before, after)) {
+      preWarnings.push('ประเภท/วิว/คุณสมบัติพิเศษถูกเปลี่ยน และจะมีผลกับสูตรราคาของห้องว่าง สัญญาใหม่ หรือบิลใหม่ที่ยังไม่ lock ราคาเดิม');
+    }
+    if (afterRent.source === 'override') {
+      preWarnings.push('ห้องนี้มีราคาพิเศษรายห้อง ระบบจะไม่ใช้สูตร Pricing จนกว่าจะล้างราคาพิเศษ');
+    }
+    if (Number(afterRent.rent) > 0 && Number(afterRent.rent) < 100) {
+      preWarnings.push('ค่าเช่าต่ำกว่า 100 บาท ผิดปกติสำหรับการออกสัญญา/บิล');
+    }
+    if (preWarnings.length) {
+      const ok = window.confirm(
+        `ตรวจสอบก่อนบันทึกห้อง ${editId}\n\n` +
+        preWarnings.map((x) => `• ${x}`).join('\n') +
+        '\n\nยืนยันบันทึกหรือไม่?'
+      );
+      if (!ok) return;
+    }
     setRooms(prev => ({ ...prev, [editId]: after }));
     addActivity && addActivity({ icon: '✏️', text: `แก้ไขข้อมูลห้อง ${editId}`, type: 'system' });
 
@@ -286,15 +307,25 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
       return false;
     }
     const t = ADMIN_ROOM_TYPES[data.type];
+    const features = { ac: !!data.ac, balcony: !!data.balcony, parking: !!data.parking, kitchen: !!data.kitchen };
+    const formulaRent = computeRoomRent
+      ? computeRoomRent(data.type, Number(data.floor), data.view, features, config)
+      : Number(data.rent);
+    const rent = Number(data.rent) || formulaRent || t.baseRent;
+    const rentIsOverride = Math.abs(Number(rent) - Number(formulaRent || 0)) >= 0.01;
     const newRoom = {
       id: data.id, floor: Number(data.floor), no: Number(data.no || 1),
       type: data.type, status: 'vacant',
-      rent: Number(data.rent), deposit: Number(data.rent) * 2,
+      rent, deposit: rent * 2,
       tenant: null, since: null, contractEnd: null,
       water: 0, elec: 0, waterUnits: 0, elecUnits: 0, wifi: config.utilities.wifi || 250,
       photos: [], notes: '',
       view: data.view, ac: !!data.ac,
       balcony: !!data.balcony, parking: !!data.parking, kitchen: !!data.kitchen,
+      rentOverride: rentIsOverride ? rent : null,
+      rentOverrideReason: rentIsOverride ? 'manual room price on create' : null,
+      rentOverrideAt: rentIsOverride ? new Date().toISOString() : null,
+      rentOverrideBy: rentIsOverride ? 'admin-ui' : null,
       lastCleaned: window.fmtDateTH(new Date()),
       lastBillDate: null, billStatus: 'none', overdueDays: 0,
     };
@@ -325,6 +356,12 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
       return false;
     }
     const t = ADMIN_ROOM_TYPES[data.type] || ADMIN_ROOM_TYPES.standard;
+    const features = { ac: !!data.ac, balcony: !!data.balcony, parking: !!data.parking, kitchen: !!data.kitchen };
+    const formulaRent = computeRoomRent
+      ? computeRoomRent(data.type, f, data.view, features, config)
+      : Number(data.rent);
+    const rent = Number(data.rent) || formulaRent || t.baseRent;
+    const rentIsOverride = Math.abs(Number(rent) - Number(formulaRent || 0)) >= 0.01;
     let added = 0, skipped = 0;
     setRooms(prev => {
       const next = { ...prev };
@@ -333,8 +370,8 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
         if (next[id]) { skipped++; continue; }
         next[id] = {
           id, floor: f, no: n, type: data.type, status: 'vacant',
-          rent: Number(data.rent) || t.baseRent,
-          deposit: (Number(data.rent) || t.baseRent) * 2,
+          rent,
+          deposit: rent * 2,
           tenant: null, since: null, contractEnd: null,
           water: 0, elec: 0, waterUnits: 0, elecUnits: 0,
           wifi: config.utilities.wifi || 250,
@@ -342,6 +379,10 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
           view: data.view || 'วิวสวน',
           ac: !!data.ac,
           balcony: !!data.balcony, parking: !!data.parking, kitchen: !!data.kitchen,
+          rentOverride: rentIsOverride ? rent : null,
+          rentOverrideReason: rentIsOverride ? 'manual room price on bulk create' : null,
+          rentOverrideAt: rentIsOverride ? new Date().toISOString() : null,
+          rentOverrideBy: rentIsOverride ? 'admin-ui' : null,
           lastCleaned: window.fmtDateTH(new Date()),
           lastBillDate: null, billStatus: 'none', overdueDays: 0,
         };
@@ -640,6 +681,7 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
         open={addOpen}
         onClose={() => setAddOpen(false)}
         onAdd={handleAddRoom}
+        config={config}
         existingIds={Object.keys(rooms)}
       />
 
@@ -647,6 +689,7 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
         open={bulkAddOpen}
         onClose={() => setBulkAddOpen(false)}
         onAdd={(data) => { if (handleBulkAddFloor(data)) setBulkAddOpen(false); }}
+        config={config}
         existingFloors={allFloors}
       />
     </PageContainer>
@@ -658,12 +701,13 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
 // per floor and admin would otherwise click "เพิ่มห้อง" per room. Generates
 // `count` rooms in floor `floor` starting at `startNo`, all with the same
 // type/rent/view. Idempotent — re-running skips IDs that already exist.
-function BulkAddFloorModal({ open, onClose, onAdd, existingFloors }) {
+function BulkAddFloorModal({ open, onClose, onAdd, existingFloors, config }) {
   const C = window.ADMIN_C;
   const ADMIN_ROOM_TYPES = window.ADMIN_ROOM_TYPES;
   const ADMIN_ROOM_TYPE_KEYS = window.ADMIN_ROOM_TYPE_KEYS;
   const ADMIN_VIEWS = window.ADMIN_VIEWS;
   const { Modal, Btn, Input, Select, Toggle } = window;
+  const { fmtCurrency, computeRoomRent } = window;
 
   // Default the new floor to "next floor up from the highest existing one".
   // Same UX shortcut as AddRoomModal for the per-room flow — the operator
@@ -671,17 +715,23 @@ function BulkAddFloorModal({ open, onClose, onAdd, existingFloors }) {
   const defaultFloor = (existingFloors && existingFloors.length)
     ? Math.min(99, existingFloors[existingFloors.length - 1] + 1)
     : 1;
+  const defaultBulkView = 'วิวสวน';
+  const defaultBulkFeatures = { ac: ADMIN_ROOM_TYPES.standard.ac, balcony: false, parking: false, kitchen: false };
+  const defaultBulkRent = computeRoomRent
+    ? computeRoomRent('standard', defaultFloor, defaultBulkView, defaultBulkFeatures, config)
+    : ADMIN_ROOM_TYPES.standard.baseRent;
 
   const [form, setForm] = React.useState({
     floor: defaultFloor,
     startNo: 1,
     count: 8,
     type: 'standard',
-    rent: ADMIN_ROOM_TYPES.standard.baseRent,
-    view: 'วิวสวน',
+    rent: defaultBulkRent,
+    view: defaultBulkView,
     ac: ADMIN_ROOM_TYPES.standard.ac,
     balcony: false, parking: false, kitchen: false,
   });
+  const [manualRent, setManualRent] = React.useState(false);
   React.useEffect(() => {
     if (open) {
       setForm({
@@ -689,11 +739,12 @@ function BulkAddFloorModal({ open, onClose, onAdd, existingFloors }) {
         startNo: 1,
         count: 8,
         type: 'standard',
-        rent: ADMIN_ROOM_TYPES.standard.baseRent,
-        view: 'วิวสวน',
+        rent: defaultBulkRent,
+        view: defaultBulkView,
         ac: ADMIN_ROOM_TYPES.standard.ac,
         balcony: false, parking: false, kitchen: false,
       });
+      setManualRent(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
@@ -702,8 +753,11 @@ function BulkAddFloorModal({ open, onClose, onAdd, existingFloors }) {
     setForm(p => {
       const next = { ...p, [k]: v };
       if (k === 'type') {
-        next.rent = ADMIN_ROOM_TYPES[v].baseRent;
         next.ac = ADMIN_ROOM_TYPES[v].ac;
+      }
+      if (computeRoomRent && k !== 'rent' && !manualRent) {
+        const feats = { ac: !!next.ac, balcony: !!next.balcony, parking: !!next.parking, kitchen: !!next.kitchen };
+        next.rent = computeRoomRent(next.type, Number(next.floor), next.view, feats, config);
       }
       return next;
     });
@@ -714,6 +768,48 @@ function BulkAddFloorModal({ open, onClose, onAdd, existingFloors }) {
   const lastId = `${form.floor}${String(lastNo).padStart(2, '0')}`;
   const firstId = `${form.floor}${String(form.startNo).padStart(2, '0')}`;
   const tooMany = lastNo > 99;
+  const bulkFeatures = { ac: !!form.ac, balcony: !!form.balcony, parking: !!form.parking, kitchen: !!form.kitchen };
+  const formulaRent = computeRoomRent
+    ? computeRoomRent(form.type, Number(form.floor), form.view, bulkFeatures, config)
+    : Number(form.rent || 0);
+  const rentDiffersFromFormula = Math.abs(Number(form.rent || 0) - Number(formulaRent || 0)) >= 0.01;
+  const featurePremium = config?.featurePremium || {};
+  const featureRows = [
+    { key: 'ac', label: 'แอร์', premium: Number(featurePremium.ac || 0) },
+    { key: 'balcony', label: 'มีระเบียง', premium: Number(featurePremium.balcony || 0) },
+    { key: 'parking', label: 'ที่จอดรถ', premium: Number(featurePremium.parking || 0) },
+    { key: 'kitchen', label: 'ครัวในห้อง', premium: Number(featurePremium.kitchen || 0) },
+  ];
+  const bulkIssues = [];
+  if (!Number.isFinite(Number(form.rent))) bulkIssues.push('ค่าเช่าต้องเป็นตัวเลข');
+  else if (Number(form.rent) > 0 && Number(form.rent) < 100) bulkIssues.push('ค่าเช่าต่ำกว่า 100 บาท ผิดปกติสำหรับการออกสัญญา/บิล');
+  if (tooMany) bulkIssues.push(`เลขห้องสุดท้ายเกิน 99 (${lastNo})`);
+  const submit = () => {
+    if (bulkIssues.length) {
+      window.toast && window.toast({
+        kind: 'danger',
+        message: { title: 'ยังเพิ่มชั้นไม่ได้', description: bulkIssues.join('\n') },
+      });
+      return;
+    }
+    if (rentDiffersFromFormula || floorExists) {
+      const ok = window.confirm(
+        `ตรวจสอบก่อนเพิ่มชั้น ${form.floor}\n\n` +
+        `ช่วงห้อง: ${firstId} ถึง ${lastId}\n` +
+        `ราคาตามสูตร Pricing: ${fmtCurrency(formulaRent)}\n` +
+        `ราคาที่จะบันทึก: ${fmtCurrency(form.rent)}\n\n` +
+        (rentDiffersFromFormula
+          ? 'ราคาที่จะบันทึกไม่ตรงสูตร ระบบจะเก็บเป็นราคาพิเศษของห้องที่สร้างใหม่\n'
+          : '') +
+        (floorExists
+          ? 'ชั้นนี้มีห้องอยู่แล้ว ห้องที่เลขซ้ำจะถูกข้าม\n'
+          : '') +
+        '\nยืนยันเพิ่มห้องหรือไม่?'
+      );
+      if (!ok) return;
+    }
+    onAdd(form);
+  };
 
   return (
     <Modal
@@ -724,7 +820,7 @@ function BulkAddFloorModal({ open, onClose, onAdd, existingFloors }) {
       footer={
         <>
           <Btn variant="ghost" onClick={onClose}>ยกเลิก</Btn>
-          <Btn variant="primary" disabled={tooMany || !form.count} onClick={() => onAdd(form)}>
+          <Btn variant="primary" disabled={!!bulkIssues.length || !form.count} onClick={submit}>
             เพิ่ม {form.count} ห้อง
           </Btn>
         </>
@@ -762,16 +858,38 @@ function BulkAddFloorModal({ open, onClose, onAdd, existingFloors }) {
         </div>
 
         <Input label="ค่าเช่า/เดือน (ทุกห้อง)" type="number" suffix="บาท"
-               value={form.rent} onChange={(v) => update('rent', Number(v))} />
+               value={form.rent}
+               onChange={(v) => { setManualRent(true); update('rent', Number(v)); }}
+               error={bulkIssues.find((x) => x.includes('ค่าเช่า')) || null}
+               hint={`ราคาตามสูตร Pricing: ${fmtCurrency(formulaRent)}${rentDiffersFromFormula ? ' · ราคาที่กรอกจะเป็นราคาพิเศษของห้องที่สร้างใหม่' : ''}`} />
+        {rentDiffersFromFormula ? (
+          <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: -4 }}>
+            <Btn variant="ghost" size="sm" onClick={() => { setManualRent(false); update('rent', formulaRent); }}>
+              ใช้ราคาตามสูตร
+            </Btn>
+          </div>
+        ) : null}
 
         <div style={{ padding: 10, background: C.surfaceAlt, borderRadius: 8 }}>
           <div style={{ fontSize: 12, color: C.muted, marginBottom: 6 }}>
             คุณสมบัติพิเศษ (ติดทุกห้องที่สร้าง — แก้ทีหลังรายห้องได้)
           </div>
-          <Toggle label="แอร์" checked={form.ac} onChange={(v) => update('ac', v)} />
-          <Toggle label="มีระเบียง"  checked={form.balcony} onChange={(v) => update('balcony', v)} />
-          <Toggle label="ที่จอดรถ"   checked={form.parking} onChange={(v) => update('parking', v)} />
-          <Toggle label="ครัวในห้อง" checked={form.kitchen} onChange={(v) => update('kitchen', v)} />
+          {featureRows.map((item) => {
+            const nextFeatures = { ...bulkFeatures, [item.key]: !bulkFeatures[item.key] };
+            const nextRent = computeRoomRent
+              ? computeRoomRent(form.type, Number(form.floor), form.view, nextFeatures, config)
+              : formulaRent;
+            const diff = Number(nextRent || 0) - Number(formulaRent || 0);
+            return (
+              <Toggle
+                key={item.key}
+                label={`${item.label} (${bulkFeatures[item.key] ? 'เปิดอยู่' : 'ปิดอยู่'})`}
+                checked={!!bulkFeatures[item.key]}
+                onChange={(v) => update(item.key, v)}
+                hint={`ใช้กับทุกห้องที่สร้างใหม่ · Premium ที่ตั้งไว้: +${fmtCurrency(item.premium)} · ถ้ากดตอนนี้สูตรจะเปลี่ยน ${diff === 0 ? '0' : (diff > 0 ? '+' : '') + fmtCurrency(diff)}`}
+              />
+            );
+          })}
         </div>
       </div>
     </Modal>
@@ -839,19 +957,26 @@ function TenantSection({ room }) {
 }
 
 // --- Add room modal ------------------------------------------------------
-function AddRoomModal({ open, onClose, onAdd, existingIds }) {
+function AddRoomModal({ open, onClose, onAdd, existingIds, config }) {
   const C = window.ADMIN_C;
   const ADMIN_ROOM_TYPES = window.ADMIN_ROOM_TYPES;
   const ADMIN_ROOM_TYPE_KEYS = window.ADMIN_ROOM_TYPE_KEYS;
   const ADMIN_VIEWS = window.ADMIN_VIEWS;
   const { Modal, Btn, Input, Select, Toggle } = window;
+  const { fmtCurrency, computeRoomRent } = window;
+  const defaultAddView = 'วิวสวน';
+  const defaultAddFeatures = { ac: ADMIN_ROOM_TYPES.standard.ac, balcony: false, parking: false, kitchen: false };
+  const defaultAddRent = computeRoomRent
+    ? computeRoomRent('standard', 1, defaultAddView, defaultAddFeatures, config)
+    : ADMIN_ROOM_TYPES.standard.baseRent;
 
   const [form, setForm] = React.useState({
     id: '', floor: 1, no: 1, type: 'standard',
-    rent: 4500, view: 'วิวสวน',
+    rent: defaultAddRent, view: defaultAddView,
     ac: ADMIN_ROOM_TYPES.standard.ac,
     balcony: false, parking: false, kitchen: false,
   });
+  const [manualRent, setManualRent] = React.useState(false);
 
   // Suggest the next-available room id based on what's ALREADY in the
   // rooms blob (not a hardcoded 5×8 grid). Strategy:
@@ -910,13 +1035,18 @@ function AddRoomModal({ open, onClose, onAdd, existingIds }) {
         id = `${suggestedFloor}${String(suggestedNo).padStart(2, '0')}`;
       }
     }
+    const floor = Number(id.match(/^(\d{1,2})/)[1]);
+    const rent = computeRoomRent
+      ? computeRoomRent('standard', floor, defaultAddView, defaultAddFeatures, config)
+      : ADMIN_ROOM_TYPES.standard.baseRent;
     setForm(prev => ({ ...prev,
       id,
-      floor: Number(id.match(/^(\d{1,2})/)[1]),
+      floor,
       no: Number(id.slice(-2)),
-      rent: ADMIN_ROOM_TYPES.standard.baseRent,
+      rent,
       ac: ADMIN_ROOM_TYPES.standard.ac,
     }));
+    setManualRent(false);
   }, [open]);
 
   const exists = existingIds.includes(form.id);
@@ -925,13 +1055,55 @@ function AddRoomModal({ open, onClose, onAdd, existingIds }) {
     setForm(p => {
       const next = { ...p, [k]: v };
       if (k === 'type') {
-        next.rent = ADMIN_ROOM_TYPES[v].baseRent;
         next.ac = ADMIN_ROOM_TYPES[v].ac;
       }
       if (k === 'floor') next.id = `${v}${String(p.no).padStart(2,'0')}`;
       if (k === 'no')    next.id = `${p.floor}${String(v).padStart(2,'0')}`;
+      if (computeRoomRent && k !== 'rent' && !manualRent) {
+        const feats = { ac: !!next.ac, balcony: !!next.balcony, parking: !!next.parking, kitchen: !!next.kitchen };
+        next.rent = computeRoomRent(next.type, Number(next.floor), next.view, feats, config);
+      }
       return next;
     });
+  };
+  const addFeatures = { ac: !!form.ac, balcony: !!form.balcony, parking: !!form.parking, kitchen: !!form.kitchen };
+  const formulaRent = computeRoomRent
+    ? computeRoomRent(form.type, Number(form.floor), form.view, addFeatures, config)
+    : Number(form.rent || 0);
+  const rentDiffersFromFormula = Math.abs(Number(form.rent || 0) - Number(formulaRent || 0)) >= 0.01;
+  const featurePremium = config?.featurePremium || {};
+  const featureRows = [
+    { key: 'ac', label: 'แอร์', premium: Number(featurePremium.ac || 0) },
+    { key: 'balcony', label: 'มีระเบียง', premium: Number(featurePremium.balcony || 0) },
+    { key: 'parking', label: 'ที่จอดรถ', premium: Number(featurePremium.parking || 0) },
+    { key: 'kitchen', label: 'ครัวในห้อง', premium: Number(featurePremium.kitchen || 0) },
+  ];
+  const addIssues = [];
+  if (!form.id) addIssues.push('ต้องระบุเลขห้อง');
+  if (exists) addIssues.push(`เลขห้อง ${form.id} มีอยู่แล้ว`);
+  if (!Number.isFinite(Number(form.floor)) || Number(form.floor) < 1 || Number(form.floor) > 99) addIssues.push('ชั้นต้องอยู่ระหว่าง 1-99');
+  if (!Number.isFinite(Number(form.no)) || Number(form.no) < 1 || Number(form.no) > 99) addIssues.push('ลำดับห้องต้องอยู่ระหว่าง 1-99');
+  if (!Number.isFinite(Number(form.rent))) addIssues.push('ค่าเช่าต้องเป็นตัวเลข');
+  else if (Number(form.rent) > 0 && Number(form.rent) < 100) addIssues.push('ค่าเช่าต่ำกว่า 100 บาท ผิดปกติสำหรับการออกสัญญา/บิล');
+  const submit = () => {
+    if (addIssues.length) {
+      window.toast && window.toast({
+        kind: 'danger',
+        message: { title: 'ยังเพิ่มห้องไม่ได้', description: addIssues.join('\n') },
+      });
+      return;
+    }
+    if (rentDiffersFromFormula) {
+      const ok = window.confirm(
+        `ตรวจสอบก่อนเพิ่มห้อง ${form.id}\n\n` +
+        `ราคาตามสูตร Pricing: ${fmtCurrency(formulaRent)}\n` +
+        `ราคาที่จะบันทึก: ${fmtCurrency(form.rent)}\n\n` +
+        `ราคาที่จะบันทึกไม่ตรงสูตร ระบบจะเก็บเป็นราคาพิเศษของห้องนี้จนกว่าจะล้างราคาพิเศษ\n\n` +
+        `ยืนยันเพิ่มห้องหรือไม่?`
+      );
+      if (!ok) return;
+    }
+    onAdd(form);
   };
 
   return (
@@ -943,8 +1115,8 @@ function AddRoomModal({ open, onClose, onAdd, existingIds }) {
       footer={
         <>
           <Btn variant="ghost" onClick={onClose}>ยกเลิก</Btn>
-          <Btn variant="primary" disabled={!form.id || exists || !form.rent}
-               onClick={() => onAdd(form)}>เพิ่มห้อง</Btn>
+          <Btn variant="primary" disabled={!!addIssues.length}
+               onClick={submit}>เพิ่มห้อง</Btn>
         </>
       }
     >
@@ -967,13 +1139,35 @@ function AddRoomModal({ open, onClose, onAdd, existingIds }) {
                   options={ADMIN_VIEWS} />
         </div>
         <Input label="ค่าเช่า/เดือน" type="number" suffix="บาท"
-               value={form.rent} onChange={(v) => update('rent', Number(v))} />
+               value={form.rent}
+               onChange={(v) => { setManualRent(true); update('rent', Number(v)); }}
+               error={addIssues.find((x) => x.includes('ค่าเช่า')) || null}
+               hint={`ราคาตามสูตร Pricing: ${fmtCurrency(formulaRent)}${rentDiffersFromFormula ? ' · ราคาที่กรอกจะเป็นราคาพิเศษของห้องนี้' : ''}`} />
+        {rentDiffersFromFormula ? (
+          <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: -4 }}>
+            <Btn variant="ghost" size="sm" onClick={() => { setManualRent(false); update('rent', formulaRent); }}>
+              ใช้ราคาตามสูตร
+            </Btn>
+          </div>
+        ) : null}
         <div style={{ padding: 10, background: C.surfaceAlt, borderRadius: 8 }}>
           <div style={{ fontSize: 12, color: C.muted, marginBottom: 6 }}>คุณสมบัติพิเศษ</div>
-          <Toggle label="แอร์" checked={form.ac} onChange={(v) => update('ac', v)} />
-          <Toggle label="มีระเบียง"  checked={form.balcony} onChange={(v) => update('balcony', v)} />
-          <Toggle label="ที่จอดรถ"   checked={form.parking} onChange={(v) => update('parking', v)} />
-          <Toggle label="ครัวในห้อง" checked={form.kitchen} onChange={(v) => update('kitchen', v)} />
+          {featureRows.map((item) => {
+            const nextFeatures = { ...addFeatures, [item.key]: !addFeatures[item.key] };
+            const nextRent = computeRoomRent
+              ? computeRoomRent(form.type, Number(form.floor), form.view, nextFeatures, config)
+              : formulaRent;
+            const diff = Number(nextRent || 0) - Number(formulaRent || 0);
+            return (
+              <Toggle
+                key={item.key}
+                label={`${item.label} (${addFeatures[item.key] ? 'เปิดอยู่' : 'ปิดอยู่'})`}
+                checked={!!addFeatures[item.key]}
+                onChange={(v) => update(item.key, v)}
+                hint={`ใช้กับสูตรราคาห้องนี้และแสดงในหน้าห้อง/จอง · Premium ที่ตั้งไว้: +${fmtCurrency(item.premium)} · ถ้ากดตอนนี้สูตรจะเปลี่ยน ${diff === 0 ? '0' : (diff > 0 ? '+' : '') + fmtCurrency(diff)}`}
+              />
+            );
+          })}
         </div>
       </div>
     </Modal>

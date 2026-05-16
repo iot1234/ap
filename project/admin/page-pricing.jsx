@@ -3,7 +3,7 @@
 // + Live preview แสดงราคาที่คำนวณได้ตามเงื่อนไข
 // ===========================================================================
 
-const { useState, useMemo } = React;
+const { useState, useMemo, useEffect } = React;
 
 const PRICING_CONFIG_KEYS = [
   'rates',
@@ -29,6 +29,109 @@ function resetPricingSections(config) {
   return next;
 }
 
+function pricingNumber(value) {
+  if (value === '' || value === null || value === undefined) return 0;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : NaN;
+}
+
+function inspectPricingBucket(bucketName, obj, issues, warnings) {
+  if (!obj || typeof obj !== 'object') return;
+  for (const [key, raw] of Object.entries(obj)) {
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      inspectPricingBucket(`${bucketName}.${key}`, raw, issues, warnings);
+      continue;
+    }
+    const n = pricingNumber(raw);
+    if (!Number.isFinite(n)) {
+      issues.push(`${bucketName}.${key}: ตัวเลขไม่ถูกต้อง`);
+    } else if (n < 0) {
+      issues.push(`${bucketName}.${key}: ห้ามติดลบ เพราะระบบยังไม่รองรับส่วนลดแบบลบในสูตรราคา`);
+    } else if (n > 1000000) {
+      warnings.push(`${bucketName}.${key}: จำนวนสูงผิดปกติ (${n.toLocaleString()} บาท) ตรวจสอบก่อนบันทึก`);
+    }
+  }
+}
+
+function buildPricingReview(draft, current, rooms) {
+  const issues = [];
+  const warnings = [];
+  const impact = [];
+  const fmtCurrency = window.fmtCurrency || ((v) => Number(v || 0).toLocaleString());
+  const resolveRoomRent = window.resolveRoomRent;
+  const ADMIN_ROOM_TYPES = window.ADMIN_ROOM_TYPES || {};
+  const typeEntries = Object.keys(ADMIN_ROOM_TYPES);
+
+  for (const type of typeEntries) {
+    const th = ADMIN_ROOM_TYPES[type]?.th || type;
+    const rate = (draft?.rates || {})[type] || {};
+    const rent = pricingNumber(rate.rent);
+    const deposit = pricingNumber(rate.deposit);
+    if (!Number.isFinite(rent)) issues.push(`ค่าเช่า ${th}: ตัวเลขไม่ถูกต้อง`);
+    else if (rent > 0 && rent < 100) issues.push(`ค่าเช่า ${th}: ต่ำกว่า 100 บาท ระบบอาจออกสัญญา/บิลผิด`);
+    else if (rent === 0) warnings.push(`ค่าเช่า ${th}: เป็น 0 บาท ห้องประเภทนี้จะไม่มีค่าเช่าถ้าใช้สูตรราคา`);
+
+    if (!Number.isFinite(deposit)) issues.push(`เงินมัดจำ ${th}: ตัวเลขไม่ถูกต้อง`);
+    else if (deposit > 0 && deposit < 100) issues.push(`เงินมัดจำ ${th}: ต่ำกว่า 100 บาท ตรวจสอบก่อนออกสัญญา`);
+    else if (rent > 0 && deposit > rent * 4) warnings.push(`เงินมัดจำ ${th}: สูงกว่า 4 เดือน (${fmtCurrency(deposit)})`);
+  }
+
+  const utilities = draft?.utilities || {};
+  for (const key of ['waterRate', 'elecRate']) {
+    const n = pricingNumber(utilities[key]);
+    const label = key === 'waterRate' ? 'ค่าน้ำ/หน่วย' : 'ค่าไฟ/หน่วย';
+    if (!Number.isFinite(n)) issues.push(`${label}: ตัวเลขไม่ถูกต้อง`);
+    else if (n > 0 && n < 1) issues.push(`${label}: ต่ำกว่า 1 บาท/หน่วย ผิดปกติและจะทำให้บิลต่ำเกินจริง`);
+    else if (n === 0) warnings.push(`${label}: เป็น 0 บาท บิลค่าน้ำ/ค่าไฟจะไม่คิดเงินส่วนนี้`);
+  }
+  for (const key of ['wifi', 'commonFee', 'waterMin', 'elecMin']) {
+    const n = pricingNumber(utilities[key]);
+    if (!Number.isFinite(n)) issues.push(`utilities.${key}: ตัวเลขไม่ถูกต้อง`);
+    else if (n < 0) issues.push(`utilities.${key}: ห้ามติดลบ`);
+  }
+
+  inspectPricingBucket('floorPremium', draft?.floorPremium, issues, warnings);
+  inspectPricingBucket('viewPremium', draft?.viewPremium, issues, warnings);
+  inspectPricingBucket('featurePremium', draft?.featurePremium, issues, warnings);
+
+  for (const [key, raw] of Object.entries(draft?.discounts || {})) {
+    const n = pricingNumber(raw);
+    if (!Number.isFinite(n)) issues.push(`discounts.${key}: ตัวเลขไม่ถูกต้อง`);
+    else if (n < 0 || n > 50) issues.push(`discounts.${key}: ต้องอยู่ระหว่าง 0-50% เพื่อป้องกันบิลผิด`);
+  }
+  inspectPricingBucket('fees', draft?.fees, issues, warnings);
+
+  if (resolveRoomRent && rooms && typeof rooms === 'object') {
+    for (const room of Object.values(rooms)) {
+      if (!room || typeof room !== 'object') continue;
+      const before = resolveRoomRent(room, current);
+      const after = resolveRoomRent(room, draft);
+      if (before?.source === 'override' || after?.source === 'override') continue;
+      const b = Number(before?.rent || 0);
+      const a = Number(after?.rent || 0);
+      if (Number.isFinite(b) && Number.isFinite(a) && Math.abs(a - b) >= 0.01) {
+        impact.push({
+          id: room.id,
+          before: b,
+          after: a,
+          diff: a - b,
+          status: room.status || 'unknown',
+        });
+      }
+    }
+  }
+
+  const bigMoves = impact.filter((x) => Math.abs(x.diff) >= Math.max(1000, Math.abs(x.before) * 0.25));
+  if (bigMoves.length > 0) {
+    warnings.push(`มี ${bigMoves.length} ห้องที่ค่าเช่าตามสูตรเปลี่ยนมากกว่า 25% หรือเกิน 1,000 บาท`);
+  }
+  if (impact.length > 20) {
+    warnings.push(`การเปลี่ยนนี้กระทบ ${impact.length} ห้อง ตรวจสอบตัวอย่างก่อนบันทึก`);
+  }
+
+  return { issues, warnings, impact };
+}
+
 // `embedded` lets PageSettings host this component inside its
 // "ตั้งราคา" tab without duplicating the outer PageContainer + PageHeader
 // chrome. The standalone route /admin#pricing keeps working for legacy
@@ -46,12 +149,23 @@ function PagePricing({ config, setConfig, rooms, addActivity, setToast, embedded
   const Header = embedded
     ? () => null
     : (props) => <PageHeader {...props} />;
+  const fmtMoney = window.fmtCurrency || ((v) => Number(v || 0).toLocaleString());
 
   const [tab, setTab] = useState('rates');
   const [draft, setDraft] = useState(config);
   const [confirmReset, setConfirmReset] = useState(false);
+  const [confirmSave, setConfirmSave] = useState(false);
+  const lastConfigJsonRef = React.useRef(JSON.stringify(config));
+
+  useEffect(() => {
+    const nextJson = JSON.stringify(config);
+    if (nextJson === lastConfigJsonRef.current) return;
+    setDraft(prev => (JSON.stringify(prev) === lastConfigJsonRef.current ? config : prev));
+    lastConfigJsonRef.current = nextJson;
+  }, [config]);
 
   const dirty = useMemo(() => JSON.stringify(draft) !== JSON.stringify(config), [draft, config]);
+  const review = useMemo(() => buildPricingReview(draft, config, rooms), [draft, config, rooms]);
 
   // Derive the unique sorted list of floors actually present so the
   // "พรีเมียมตามชั้น" inputs + preview floor selector show every floor an
@@ -80,15 +194,38 @@ function PagePricing({ config, setConfig, rooms, addActivity, setToast, embedded
   // Update helpers
   const updatePath = (path, value) => {
     setDraft(prev => {
-      const next = JSON.parse(JSON.stringify(prev));
+      const next = JSON.parse(JSON.stringify(prev || {}));
       let cur = next;
       const parts = path.split('.');
-      for (let i = 0; i < parts.length - 1; i++) cur = cur[parts[i]];
+      for (let i = 0; i < parts.length - 1; i++) {
+        if (!cur[parts[i]] || typeof cur[parts[i]] !== 'object') cur[parts[i]] = {};
+        cur = cur[parts[i]];
+      }
       cur[parts[parts.length - 1]] = value;
       return next;
     });
   };
+  const commitPricingDraft = () => {
+    setConfig(draft);
+    setConfirmSave(false);
+    addActivity && addActivity({ icon: '💰', text: 'อัปเดตการตั้งค่าราคาห้องพัก', type: 'system' });
+    setToast && setToast({ kind: 'success', message: 'บันทึกการตั้งค่าราคาเรียบร้อย' });
+  };
   const handleSave = () => {
+    if (review.issues.length) {
+      setToast && setToast({
+        kind: 'danger',
+        message: {
+          title: 'ยังบันทึกการตั้งค่าราคาไม่ได้',
+          description: review.issues.slice(0, 5).join('\n'),
+        },
+      });
+      return;
+    }
+    if (review.warnings.length || review.impact.length) {
+      setConfirmSave(true);
+      return;
+    }
     setConfig(draft);
     addActivity && addActivity({ icon: '💰', text: 'อัปเดตการตั้งราคาห้องพัก', type: 'system' });
     setToast && setToast({ kind: 'success', message: 'บันทึกการตั้งราคาเรียบร้อย' });
@@ -111,7 +248,7 @@ function PagePricing({ config, setConfig, rooms, addActivity, setToast, embedded
           <>
             <Btn variant="ghost" onClick={() => setConfirmReset(true)}>↺ รีเซ็ต</Btn>
             <Btn variant="secondary" onClick={() => setDraft(config)} disabled={!dirty}>ยกเลิกการแก้ไข</Btn>
-            <Btn variant="primary" tone="finance" icon="✓" onClick={handleSave} disabled={!dirty}>
+            <Btn variant="primary" tone="finance" icon="✓" onClick={handleSave} disabled={!dirty || review.issues.length > 0}>
               {dirty ? 'บันทึกการเปลี่ยนแปลง' : 'บันทึกแล้ว'}
             </Btn>
           </>
@@ -128,7 +265,7 @@ function PagePricing({ config, setConfig, rooms, addActivity, setToast, embedded
         }}>
           <Btn variant="ghost" size="sm" onClick={() => setConfirmReset(true)}>↺ รีเซ็ต</Btn>
           <Btn variant="secondary" size="sm" onClick={() => setDraft(config)} disabled={!dirty}>ยกเลิกการแก้ไข</Btn>
-          <Btn variant="primary" tone="finance" size="sm" icon="✓" onClick={handleSave} disabled={!dirty}>
+          <Btn variant="primary" tone="finance" size="sm" icon="✓" onClick={handleSave} disabled={!dirty || review.issues.length > 0}>
             {dirty ? 'บันทึกการเปลี่ยนแปลง' : 'บันทึกแล้ว'}
           </Btn>
         </div>
@@ -145,6 +282,48 @@ function PagePricing({ config, setConfig, rooms, addActivity, setToast, embedded
           <span>คุณมีการเปลี่ยนแปลงที่ยังไม่ได้บันทึก กดปุ่ม "บันทึกการเปลี่ยนแปลง" เพื่อยืนยัน</span>
         </div>
       )}
+
+      {dirty && review.issues.length > 0 ? (
+        <Card style={{
+          marginBottom: 16,
+          background: C.dangerSoft || '#FDEDEC',
+          border: `1px solid ${(C.danger || '#D92D20')}55`,
+        }}>
+          <div style={{ fontSize: 14, fontWeight: 700, color: C.dangerInk || C.danger, marginBottom: 8 }}>
+            หยุดก่อน: พบค่าราคาที่ผิดปกติ
+          </div>
+          <div style={{ fontSize: 12.5, color: C.dangerInk || C.ink2, lineHeight: 1.6 }}>
+            {review.issues.slice(0, 8).map((it, idx) => <div key={idx}>• {it}</div>)}
+            {review.issues.length > 8 ? <div>• อีก {review.issues.length - 8} รายการ</div> : null}
+          </div>
+        </Card>
+      ) : null}
+
+      {dirty && review.issues.length === 0 && (review.warnings.length > 0 || review.impact.length > 0) ? (
+        <Card style={{
+          marginBottom: 16,
+          background: C.warningSoft,
+          border: `1px solid ${C.warning}55`,
+        }}>
+          <div style={{ fontSize: 14, fontWeight: 700, color: C.warningInk, marginBottom: 8 }}>
+            ตรวจสอบผลกระทบก่อนบันทึก
+          </div>
+          <div style={{ fontSize: 12.5, color: C.warningInk, lineHeight: 1.6 }}>
+            {review.warnings.map((it, idx) => <div key={`w-${idx}`}>• {it}</div>)}
+            {review.impact.length > 0 ? (
+              <div style={{ marginTop: 6 }}>
+                • ค่าเช่าตามสูตรจะเปลี่ยน {review.impact.length} ห้อง
+                {review.impact.slice(0, 5).map((it) => (
+                  <div key={it.id} style={{ marginLeft: 14 }}>
+                    ห้อง {it.id}: {fmtMoney(it.before)} → {fmtMoney(it.after)}
+                  </div>
+                ))}
+                {review.impact.length > 5 ? <div style={{ marginLeft: 14 }}>…อีก {review.impact.length - 5} ห้อง</div> : null}
+              </div>
+            ) : null}
+          </div>
+        </Card>
+      ) : null}
 
       <Tabs
         items={[
@@ -163,6 +342,52 @@ function PagePricing({ config, setConfig, rooms, addActivity, setToast, embedded
       {tab === 'utils'    && <TabUtils    draft={draft} updatePath={updatePath} />}
       {tab === 'discount' && <TabDiscount draft={draft} updatePath={updatePath} />}
       {tab === 'fees'     && <TabFees     draft={draft} updatePath={updatePath} />}
+
+      <Modal
+        open={confirmSave}
+        onClose={() => setConfirmSave(false)}
+        title="ตรวจสอบก่อนบันทึกการตั้งค่าราคา"
+        footer={
+          <>
+            <Btn variant="ghost" onClick={() => setConfirmSave(false)}>ยกเลิก</Btn>
+            <Btn variant="primary" tone="finance" icon="✓" onClick={commitPricingDraft} disabled={review.issues.length > 0}>
+              ยืนยันบันทึกราคา
+            </Btn>
+          </>
+        }
+      >
+        <div style={{ fontSize: 13.5, color: C.ink2, lineHeight: 1.65 }}>
+          {review.issues.length > 0 ? (
+            <div style={{ padding: 12, background: C.dangerSoft, border: `1px solid ${C.danger}44`, borderRadius: 8, color: C.dangerInk }}>
+              <b>ยังบันทึกไม่ได้</b>
+              {review.issues.slice(0, 8).map((it, idx) => <div key={idx}>• {it}</div>)}
+            </div>
+          ) : (
+            <>
+              <div style={{ marginBottom: 10 }}>
+                ระบบจะบันทึกค่าราคากลางชุดนี้และนำไปใช้กับห้องว่าง สัญญาใหม่ และบิลใหม่ที่ยังไม่ได้ lock ราคาเดิม
+              </div>
+              {review.warnings.length > 0 ? (
+                <div style={{ marginBottom: 10, padding: 12, background: C.warningSoft, border: `1px solid ${C.warning}44`, borderRadius: 8, color: C.warningInk }}>
+                  <b>คำเตือน</b>
+                  {review.warnings.map((it, idx) => <div key={idx}>• {it}</div>)}
+                </div>
+              ) : null}
+              {review.impact.length > 0 ? (
+                <div style={{ padding: 12, background: C.surfaceAlt, border: `1px solid ${C.borderSoft}`, borderRadius: 8 }}>
+                  <b>ตัวอย่างห้องที่ค่าเช่าตามสูตรจะเปลี่ยน</b>
+                  {review.impact.slice(0, 8).map((it) => (
+                    <div key={it.id}>
+                      ห้อง {it.id}: {fmtMoney(it.before)} → {fmtMoney(it.after)}
+                    </div>
+                  ))}
+                  {review.impact.length > 8 ? <div>…อีก {review.impact.length - 8} ห้อง</div> : null}
+                </div>
+              ) : null}
+            </>
+          )}
+        </div>
+      </Modal>
 
       {/* Reset confirm */}
       <Modal

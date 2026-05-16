@@ -195,7 +195,7 @@ test('rooms edit drawer stages type/feature changes and explains pricing impact'
     'type/view/feature controls must tell admin what they are used for');
   assert.match(roomsPage, /ราคาตามสูตร: \{fmtCurrency\(originalComputedRent\)\} →/,
     'UI must show before/after formula rent when toggles move the number');
-  assert.match(roomsPage, /Toggle label="แอร์"/,
+  assert.match(roomsPage, /key: 'ac', label: 'แอร์'/,
     'rooms UI must expose the AC feature because pricing has featurePremium.ac');
   assert.match(roomsPage, /ac: !!data\.ac/,
     'new rooms and bulk-added rooms must persist the AC feature flag');
@@ -228,6 +228,56 @@ test('pricing reset only resets pricing sections', () => {
     'Pricing reset must not overwrite unrelated Settings/Features config');
   assert.doesNotMatch(src, /setDraft\(DEFAULT_CONFIG\)/,
     'Pricing draft reset must not wipe unrelated config sections');
+});
+
+test('pricing save validates issues and shows impact review before commit', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const pricing = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-pricing.jsx'), 'utf8');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+
+  assert.match(pricing, /function buildPricingReview\(draft, current, rooms\)/,
+    'pricing page must run a review before saving config');
+  assert.match(pricing, /review\.issues\.length/,
+    'pricing review must block abnormal values before save');
+  assert.match(pricing, /setConfirmSave\(true\)/,
+    'pricing page must open a confirmation modal when warnings or room impact exist');
+  assert.match(pricing, /review\.impact\.slice\(0, 8\)/,
+    'pricing confirmation must show examples of affected rooms');
+  assert.match(pricing, /if \(!cur\[parts\[i\]\] \|\| typeof cur\[parts\[i\]\] !== 'object'\) cur\[parts\[i\]\] = \{\}/,
+    'pricing updatePath must create missing nested config sections instead of crashing');
+  assert.match(server, /ระบบจะไม่รับค่าราคาที่ผิดปกติเพื่อป้องกันสัญญาและบิลผิด/,
+    'server INVALID_CONFIG hint must not advertise a non-existent unsafe force override');
+});
+
+test('room add flows use pricing formula and preserve manual rent overrides', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const roomsPage = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-rooms.jsx'), 'utf8');
+  const shared = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'shared.jsx'), 'utf8');
+
+  assert.match(roomsPage, /<AddRoomModal[\s\S]*config=\{config\}/,
+    'AddRoomModal must receive current pricing config');
+  assert.match(roomsPage, /<BulkAddFloorModal[\s\S]*config=\{config\}/,
+    'BulkAddFloorModal must receive current pricing config');
+  assert.match(roomsPage, /const defaultAddRent = computeRoomRent/,
+    'single-room create should default to the active pricing formula');
+  assert.match(roomsPage, /const defaultBulkRent = computeRoomRent/,
+    'bulk floor create should default to the active pricing formula');
+  assert.match(roomsPage, /rentOverride: rentIsOverride \? rent : null/,
+    'manual prices on new rooms must be persisted as rentOverride so billing/contracts use them');
+  assert.match(roomsPage, /Premium ที่ตั้งไว้/,
+    'special-property toggles must explain configured premium impact');
+  assert.match(roomsPage, /ใช้ราคาตามสูตร/,
+    'admin must be able to return a manual price back to the formula');
+  assert.match(roomsPage, /ตรวจสอบก่อนเพิ่มห้อง/,
+    'new-room create must warn before committing abnormal/manual pricing');
+  assert.match(roomsPage, /ตรวจสอบก่อนเพิ่มชั้น/,
+    'bulk create must warn before committing abnormal/manual pricing');
+  assert.match(roomsPage, /ตรวจสอบก่อนบันทึกห้อง/,
+    'room edit save must warn before applying pricing-sensitive changes');
+  assert.match(shared, /Math\.round\(\(base \+ fp \+ vp \+ balcony \+ ac \+ parking \+ kitchen\) \* 100\) \/ 100/,
+    'client formula rounding must match the server-side pricing calculation');
 });
 
 test('settings automation tab defers scheduler controls to feature flags', () => {
@@ -1815,7 +1865,7 @@ test('tenant portal exposes payments tab + PDF download button', () => {
   const path = require('node:path');
   const tenant = fs.readFileSync(path.join(__dirname, '..', 'project', 'tenant.jsx'), 'utf8');
   assert.match(tenant, /function PaymentsView/, 'PaymentsView component must exist');
-  assert.match(tenant, /id="payments"/, 'payments tab must be in nav');
+  assert.match(tenant, /id:\s*"payments"/, 'payments tab must be in nav');
   assert.match(tenant, /\/api\/tenant\/bills\/\$\{bill\.id\}\/pdf/,
     'bill detail must link to PDF endpoint');
 });

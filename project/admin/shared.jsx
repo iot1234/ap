@@ -473,7 +473,7 @@ function computeRoomRent(type, floor, view, features, config) {
   const ac      = features?.ac      ? (premiums.ac      || 0) : 0;
   const parking = features?.parking ? (premiums.parking || 0) : 0;
   const kitchen = features?.kitchen ? (premiums.kitchen || 0) : 0;
-  return base + fp + vp + balcony + ac + parking + kitchen;
+  return Math.round((base + fp + vp + balcony + ac + parking + kitchen) * 100) / 100;
 }
 
 function positiveMoneyOrNull(v) {

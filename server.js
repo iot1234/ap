@@ -781,7 +781,7 @@ app.put('/api/data/:key', sameOrigin, csrfGuard, requireAuth, requireRole('owner
         error: 'ค่า config ไม่ผ่านการตรวจสอบ',
         code: 'INVALID_CONFIG',
         issues,
-        hint: 'แก้ค่าที่หน้า /admin#pricing แล้วบันทึกใหม่ — ส่ง force=true เพื่อ override (ไม่แนะนำ)',
+        hint: 'แก้ค่าที่หน้า /admin#pricing แล้วบันทึกใหม่ ระบบจะไม่รับค่าราคาที่ผิดปกติเพื่อป้องกันสัญญาและบิลผิด',
       });
     }
   }
