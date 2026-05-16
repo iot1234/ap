@@ -28,10 +28,9 @@ function periodBangkokBounds(period) {
 }
 
 /**
- * Insert a reading. Also computes the delta from the previous reading and
- * patches `app_data['baankarn_rooms_v1'][roomId][elecUnits|waterUnits]` so
- * the existing billing UI (which reads from rooms blob) sees the latest
- * monthly consumption automatically.
+ * Insert a reading. Period-scoped readings are the source of truth for
+ * monthly billing; legacy unscoped readings still patch the rooms blob so old
+ * demo paths keep working.
  *
  * Returns the inserted row, augmented with `delta` (consumption since prev).
  */

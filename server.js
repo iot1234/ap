@@ -2263,7 +2263,7 @@ app.get('/api/admin/line/owner-claim/:id',
 
 app.get('/api/admin/billing-readiness',
   requireAuth, requireRole('owner', 'manager'),
-  async (_req, res) => {
+  async (req, res) => {
     try {
       const flags = await features.load(pool);
       const { config: cfg, paymentBlock } = await loadEffectivePaymentBlock();
@@ -2271,6 +2271,18 @@ app.get('/api/admin/billing-readiness',
       const slipVerifier = require('./services/slipVerifier');
       const secretsSvc = require('./services/secrets');
       const issues = [];
+      const now = new Date();
+      let readinessPeriod = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+      if (req.query.period) {
+        try {
+          readinessPeriod = meter.normalisePeriod(req.query.period);
+        } catch {
+          return res.status(400).json({
+            error: 'period must be YYYY-MM',
+            code: 'INVALID_PERIOD',
+          });
+        }
+      }
 
       if (!paymentBlock.promptpayTarget) {
         issues.push({
@@ -2337,8 +2349,16 @@ app.get('/api/admin/billing-readiness',
         const tenantsWithBills = Object.values(rooms).filter(
           (r) => r && r.tenant && (r.status === 'occupied' || r.status === 'overdue')
         );
+        const periodMeters = await meter.buildPeriodSummary(pool, rooms, readinessPeriod);
+        const isFlatOk = (r, prefix) => String(r?.[`${prefix}Mode`] || '').toLowerCase() === 'flat'
+          && Number(r?.[`${prefix}FlatAmount`]) > 0;
+        const hasPeriodReading = (r, prefix) => {
+          const m = periodMeters[String(r.id)] || {};
+          return m[`${prefix}CurrentReading`] != null;
+        };
         const noMeter = tenantsWithBills.filter((r) =>
-          (Number(r.waterUnits) || 0) === 0 && (Number(r.elecUnits) || 0) === 0
+          (!isFlatOk(r, 'water') && !hasPeriodReading(r, 'water'))
+          || (!isFlatOk(r, 'elec') && !hasPeriodReading(r, 'elec'))
         );
         if (tenantsWithBills.length === 0) {
           issues.push({
@@ -2349,9 +2369,9 @@ app.get('/api/admin/billing-readiness',
         } else if (noMeter.length > 0) {
           issues.push({
             sev: 'med', code: 'NO_METER_READINGS', area: ['issue'],
-            msg: `${noMeter.length} ห้องยังไม่บันทึกค่าน้ำ/ไฟ — บิลจะออกแต่ยอดน้ำ-ไฟเป็น 0`,
-            fix: '/admin#meters → บันทึกค่ามิเตอร์ก่อนออกบิล',
-            detail: { rooms: noMeter.map((r) => r.id).slice(0, 20) },
+            msg: `${noMeter.length} ห้องยังไม่มีเลขมิเตอร์ครบสำหรับรอบ ${readinessPeriod} — บิลส่วนน้ำ/ไฟอาจเป็น 0 หรือข้อมูลไม่ครบ`,
+            fix: `/admin#meters → เลือกรอบ ${readinessPeriod} แล้วบันทึกเลขมิเตอร์ก่อนออกบิล`,
+            detail: { period: readinessPeriod, rooms: noMeter.map((r) => r.id).slice(0, 20) },
           });
         }
       } catch { /* tolerate empty rooms blob */ }

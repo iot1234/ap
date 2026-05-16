@@ -1383,6 +1383,10 @@ test('admin billing readiness backs bill issue and payment preflights', () => {
     'billing-readiness must be admin-gated');
   assert.match(route, /loadEffectivePaymentBlock\(\)/,
     'billing-readiness must use the effective payment config');
+  assert.match(route, /meter\.normalisePeriod\(req\.query\.period\)/,
+    'billing-readiness must validate and honor the selected billing period');
+  assert.match(route, /meter\.buildPeriodSummary\(pool, rooms, readinessPeriod\)/,
+    'billing-readiness must check meter readings for the same period being issued');
   for (const code of [
     'NO_PROMPTPAY',
     'NO_WATER_RATE',
@@ -1395,8 +1399,8 @@ test('admin billing readiness backs bill issue and payment preflights', () => {
   }
 
   const billingPage = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-billing.jsx'), 'utf8');
-  assert.match(billingPage, /\/api\/admin\/billing-readiness/,
-    'admin billing page must call the readiness endpoint');
+  assert.match(billingPage, /\/api\/admin\/billing-readiness\?period=\$\{encodeURIComponent\(currentPeriod\)\}/,
+    'admin billing page must call readiness for the selected period');
   assert.match(billingPage, /formatReadinessIssues\(readiness, 'payment'\)/,
     'mark-paid flow must surface payment readiness issues');
   assert.match(billingPage, /i\.area\.includes\('issue'\)/,

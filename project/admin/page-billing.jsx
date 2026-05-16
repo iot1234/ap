@@ -439,11 +439,11 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
   // transient blip).
   const fetchBillingReadiness = React.useCallback(async () => {
     try {
-      const r = await fetch('/api/admin/billing-readiness', { credentials: 'same-origin' });
+      const r = await fetch(`/api/admin/billing-readiness?period=${encodeURIComponent(currentPeriod)}`, { credentials: 'same-origin' });
       if (!r.ok) return null;
       return await r.json();
     } catch { return null; }
-  }, []);
+  }, [currentPeriod]);
 
   // Render the preflight modal text. Filters by `area` so the same endpoint
   // serves both flows: "ออกบิล" wants area=issue, "บันทึกชำระ" wants payment.
@@ -714,14 +714,21 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
       if (!Number.isFinite(eRate) || eRate <= 0) {
         issues.push({ sev: 'high', msg: 'ค่าไฟต่อหน่วยไม่ได้ตั้ง — บิลจะ ฿0 ในส่วนค่าไฟ', fix: '/admin#pricing → ค่าน้ำ-ไฟ' });
       }
+      const isFlatOk = (r, prefix) => String(r?.[`${prefix}Mode`] || '').toLowerCase() === 'flat'
+        && Number(r?.[`${prefix}FlatAmount`]) > 0;
+      const hasPeriodReading = (r, prefix) => {
+        const m = periodMeters && periodMeters[String(r.id)] ? periodMeters[String(r.id)] : null;
+        return m && m[`${prefix}CurrentReading`] != null;
+      };
       const noMeter = tenantsWithBills.filter((r) =>
-        (Number(r.waterUnits) || 0) === 0 && (Number(r.elecUnits) || 0) === 0
+        (!isFlatOk(r, 'water') && !hasPeriodReading(r, 'water'))
+        || (!isFlatOk(r, 'elec') && !hasPeriodReading(r, 'elec'))
       ).length;
       if (noMeter > 0) {
         issues.push({
           sev: 'med',
-          msg: `${noMeter} ห้องยังไม่บันทึกค่าน้ำ/ไฟ — บิลจะออกแต่ยอดน้ำ/ไฟเป็น 0`,
-          fix: '/admin#meters → บันทึกค่ามิเตอร์ก่อนออกบิล',
+          msg: `${noMeter} ห้องยังไม่มีเลขมิเตอร์ครบสำหรับรอบ ${currentPeriod} — บิลส่วนน้ำ/ไฟอาจเป็น 0 หรือข้อมูลไม่ครบ`,
+          fix: `/admin#meters → เลือกรอบ ${currentPeriod} แล้วบันทึกเลขมิเตอร์ก่อนออกบิล`,
         });
       }
       if (tenantsWithBills.length === 0) {
