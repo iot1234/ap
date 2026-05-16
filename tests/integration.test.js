@@ -4561,6 +4561,33 @@ test('VariableRow shows live cleanup hint when key auto-strips', () => {
   assert.match(src, /เป็นชื่อสงวน/);
 });
 
+test('admin UI: contract template variables insert by button instead of manual tokens', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const page = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-contract-templates.jsx'), 'utf8');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const pdf = fs.readFileSync(path.join(__dirname, '..', 'services', 'contractPdf.js'), 'utf8');
+
+  assert.match(pdf, /SYSTEM_VARIABLES = Object\.freeze/,
+    'renderer must expose a canonical variable list');
+  assert.match(server, /systemVariables: contractPdf\.SYSTEM_VARIABLES/,
+    'contract-template APIs must return the canonical variable list');
+  assert.match(page, /const \[systemVariables, setSystemVariables\]/,
+    'admin page must store variables from the API');
+  assert.match(page, /function ClauseVariablePicker/,
+    'clause editor must render a clickable variable picker');
+  assert.match(page, /selectionStart[\s\S]{0,1200}setSelectionRange/,
+    'clicking a variable must insert at the textarea cursor');
+  assert.match(page, /placeholderFor\(key\)/,
+    'UI must build {{variable}} tokens for admin instead of requiring manual typing');
+  assert.match(page, /COMMON_SYSTEM_VARIABLE_KEYS = new Set\([\s\S]{0,120}'lessorName'[\s\S]{0,80}'tenantName'[\s\S]{0,80}'roomId'/,
+    'common buttons must include lessor, tenant, and room variables');
+  assert.match(page, /CUSTOM_VARIABLE_PRESETS = Object\.freeze/,
+    'custom variables should have preset buttons for common dorm settings');
+  assert.match(page, /VariableReferencePanel/,
+    'variables tab must show a click/copy reference panel');
+});
+
 test('admin UI: contract-templates page registered + script-loaded', () => {
   // The new page-contract-templates.jsx must be loaded by the dashboard
   // HTML AND wired into the shell PAGES + NAV map. Otherwise admin clicks

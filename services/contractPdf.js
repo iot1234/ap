@@ -195,6 +195,43 @@ const DEFAULT_CLAUSES = Object.freeze([
   },
 ]);
 
+const SYSTEM_VARIABLES = Object.freeze([
+  { key: 'lessorName', label: 'ชื่อผู้ให้เช่า', group: 'party' },
+  { key: 'tenantName', label: 'ชื่อผู้เช่า', group: 'party' },
+  { key: 'tenantPhone', label: 'เบอร์ผู้เช่า', group: 'party' },
+  { key: 'tenantEmail', label: 'อีเมลผู้เช่า', group: 'party' },
+  { key: 'tenantCitizenId', label: 'เลขบัตรผู้เช่าแบบปิดบัง', group: 'party' },
+  { key: 'tenantAddress', label: 'ที่อยู่ผู้เช่า', group: 'party' },
+  { key: 'emergencyContactName', label: 'ชื่อผู้ติดต่อฉุกเฉิน', group: 'party' },
+  { key: 'emergencyContactPhone', label: 'เบอร์ผู้ติดต่อฉุกเฉิน', group: 'party' },
+  { key: 'emergencyContactRelation', label: 'ความสัมพันธ์ผู้ติดต่อฉุกเฉิน', group: 'party' },
+
+  { key: 'buildingName', label: 'ชื่อหอพัก/อาคาร', group: 'building' },
+  { key: 'buildingAddress', label: 'ที่อยู่หอพัก', group: 'building' },
+  { key: 'buildingPhone', label: 'เบอร์หอพัก', group: 'building' },
+  { key: 'buildingTaxId', label: 'เลขผู้เสียภาษีผู้ให้เช่า', group: 'building' },
+
+  { key: 'roomId', label: 'เลขห้อง', group: 'room' },
+  { key: 'roomType', label: 'ประเภทห้อง', group: 'room' },
+  { key: 'roomFloor', label: 'ชั้น', group: 'room' },
+  { key: 'roomSize', label: 'ขนาดห้อง', group: 'room' },
+  { key: 'roomAddress', label: 'ที่ตั้งห้อง', group: 'room' },
+  { key: 'roomAmenities', label: 'สิ่งอำนวยความสะดวก', group: 'room' },
+
+  { key: 'contractNo', label: 'เลขที่สัญญา', group: 'contract' },
+  { key: 'signedDate', label: 'วันที่ทำสัญญา', group: 'contract' },
+  { key: 'startDate', label: 'วันเริ่มเช่า', group: 'contract' },
+  { key: 'endDate', label: 'วันสิ้นสุดสัญญา', group: 'contract' },
+  { key: 'endDateClause', label: 'ข้อความวันสิ้นสุดสัญญา', group: 'contract' },
+  { key: 'termMonths', label: 'จำนวนเดือนสัญญา', group: 'contract' },
+
+  { key: 'monthlyRent', label: 'ค่าเช่ารายเดือน', group: 'money' },
+  { key: 'depositAmount', label: 'เงินมัดจำ', group: 'money' },
+  { key: 'discountPct', label: 'ส่วนลด (%)', group: 'money' },
+  { key: 'dueDay', label: 'วันที่ครบกำหนดชำระ', group: 'money' },
+  { key: 'lateFeeRate', label: 'ค่าปรับล่าช้า (%)', group: 'money' },
+]);
+
 /**
  * Substitute {{key}} placeholders against `vars`. Missing keys render as
  * an em-dash so a partially-filled contract still prints sensibly.
@@ -539,12 +576,6 @@ async function renderContractPdf(contract, tenant, room, building, options, stre
     // Custom variables first (so they're overridable by the built-ins).
     ...tmplVars,
     // Built-in context.
-    roomId: room?.id || '—',
-    roomType: room?.type || '—',
-    roomFloor: room?.floor != null ? String(room.floor) : '—',
-    roomSize: room?.size != null ? String(room.size) : '—',
-    lessorName,
-    tenantName,
     monthlyRent: fmtCurrency(contract.monthlyRent),
     depositAmount: fmtCurrency(contract.deposit),
     dueDay: String(opts.dueDay || 15),
@@ -554,6 +585,33 @@ async function renderContractPdf(contract, tenant, room, building, options, stre
     endDateClause: contract.endDate
       ? `และมีกำหนดสิ้นสุดในวันที่ ${fmtThaiDate(contract.endDate)}`
       : 'และเป็นสัญญาต่อเนื่องรายเดือนจนกว่าจะมีการบอกเลิก',
+    contractNo: contract.contractNo || '—',
+    signedDate: fmtThaiDate(contract.signedAt || new Date()),
+    buildingName: building?.name || '—',
+    buildingAddress: building?.address || '—',
+    buildingPhone: building?.phone || '—',
+    buildingTaxId: building?.taxId || '—',
+    roomId: room?.id || '—',
+    roomType: room?.type || '—',
+    roomFloor: room?.floor != null ? String(room.floor) : '—',
+    roomSize: room?.size != null ? String(room.size) : '—',
+    roomAddress: room?.address || building?.address || '—',
+    roomAmenities: Array.isArray(room?.amenities) && room.amenities.length
+      ? room.amenities.join(' · ')
+      : '—',
+    lessorName,
+    tenantName,
+    tenantPhone: tenant?.phone || '—',
+    tenantEmail: tenant?.email || '—',
+    tenantCitizenId: tenant?.citizenIdMasked || '—',
+    tenantAddress: tenant?.address || '—',
+    emergencyContactName: tenant?.emergencyContactName || '—',
+    emergencyContactPhone: tenant?.emergencyContactPhone || '—',
+    emergencyContactRelation: tenant?.emergencyContactRelation || '—',
+    discountPct: Number.isFinite(Number(contract.discountPct))
+      ? Number(contract.discountPct).toFixed(2)
+      : '0.00',
+    termMonths: contract.termMonths ? String(contract.termMonths) : '—',
   };
 
   for (let i = 0; i < clauses.length; i++) {
@@ -716,4 +774,5 @@ module.exports = {
   renderContractPdf,
   resolveClauses,
   DEFAULT_CLAUSES,
+  SYSTEM_VARIABLES,
 };

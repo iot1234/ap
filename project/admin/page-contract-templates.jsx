@@ -13,6 +13,56 @@
 
 const { useState, useEffect, useMemo, useCallback } = React;
 
+const VARIABLE_GROUP_LABELS = Object.freeze({
+  party: 'คู่สัญญา',
+  building: 'หอพัก/ผู้ให้เช่า',
+  room: 'ห้องพัก',
+  contract: 'สัญญา',
+  money: 'การเงิน',
+  custom: 'กำหนดเอง',
+});
+const COMMON_SYSTEM_VARIABLE_KEYS = new Set([
+  'lessorName', 'tenantName', 'roomId', 'monthlyRent',
+  'depositAmount', 'startDate', 'endDate', 'dueDay',
+]);
+const CUSTOM_VARIABLE_PRESETS = Object.freeze([
+  { key: 'wifi_password', label: 'รหัส WiFi' },
+  { key: 'pet_policy', label: 'เงื่อนไขสัตว์เลี้ยง' },
+  { key: 'parking_note', label: 'หมายเหตุที่จอดรถ' },
+  { key: 'common_area_fee_note', label: 'หมายเหตุค่าส่วนกลาง' },
+  { key: 'move_out_notice_days', label: 'จำนวนวันแจ้งย้ายออก' },
+]);
+
+function cleanVariableKey(raw) {
+  return String(raw || '').toLowerCase().replace(/[^a-z0-9_]/g, '');
+}
+function cleanSystemVariableKey(raw) {
+  return String(raw || '').replace(/[^a-zA-Z0-9_]/g, '');
+}
+function placeholderFor(key) {
+  return `{{${key}}}`;
+}
+function normaliseVariableOption(v) {
+  const key = cleanSystemVariableKey(v?.key);
+  if (!key) return null;
+  return {
+    key,
+    label: String(v.label || key),
+    group: v.group || 'custom',
+  };
+}
+function groupVariableOptions(variables) {
+  const groups = {};
+  for (const raw of Array.isArray(variables) ? variables : []) {
+    const v = normaliseVariableOption(raw);
+    if (!v) continue;
+    const group = v.group || 'custom';
+    if (!groups[group]) groups[group] = [];
+    groups[group].push(v);
+  }
+  return groups;
+}
+
 function PageContractTemplates({ setToast, addActivity }) {
   const C = window.ADMIN_C;
   const { Card, Btn, Modal, Pill, PageContainer, PageHeader } = window;
@@ -24,6 +74,7 @@ function PageContractTemplates({ setToast, addActivity }) {
   const [viewing, setViewing] = useState(null);   // GET detail payload for read-only preview
   const [includeDisabled, setIncludeDisabled] = useState(false);
   const [defaultClauses, setDefaultClauses] = useState([]);
+  const [systemVariables, setSystemVariables] = useState([]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -32,6 +83,7 @@ function PageContractTemplates({ setToast, addActivity }) {
       const d = await apiCall(`/api/admin/contract-templates${params}`);
       setList(d.templates || []);
       setDefaultClauses(d.defaults || []);
+      setSystemVariables(Array.isArray(d.systemVariables) ? d.systemVariables : []);
     } catch (err) {
       setToast && setToast({ kind: 'danger', message: 'โหลด templates ล้มเหลว: ' + err.message });
     } finally {
@@ -238,6 +290,7 @@ function PageContractTemplates({ setToast, addActivity }) {
         <TemplateEditor
           template={editing === 'new' ? null : editing}
           defaultClauses={defaultClauses}
+          systemVariables={systemVariables}
           onClose={() => setEditing(null)}
           onSaved={(saved) => {
             setEditing(null);
@@ -379,7 +432,7 @@ function TemplateDetailsModal({ data, onClose, onEdit }) {
 // Two-pane layout: left = metadata + section flags + variables, right =
 // clause list editor with add/remove/reorder. Uses tabs to keep the modal
 // height manageable on small screens.
-function TemplateEditor({ template, defaultClauses, onClose, onSaved, onError }) {
+function TemplateEditor({ template, defaultClauses, systemVariables = [], onClose, onSaved, onError }) {
   const C = window.ADMIN_C;
   const { Modal, Btn } = window;
   const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
@@ -408,6 +461,25 @@ function TemplateEditor({ template, defaultClauses, onClose, onSaved, onError })
   const [tab, setTab] = useState('basic');     // basic | clauses | sections | variables
   const [busy, setBusy] = useState(false);
   const defaultCount = defaultClauses.length || 0;
+  const existingVariableKeys = useMemo(() => new Set(
+    form.variables.map((v) => cleanVariableKey(v.key)).filter(Boolean)
+  ), [form.variables]);
+  const availableVariables = useMemo(() => {
+    const merged = [];
+    const seen = new Set();
+    const add = (item) => {
+      const normalised = normaliseVariableOption(item);
+      if (!normalised || seen.has(normalised.key)) return;
+      seen.add(normalised.key);
+      merged.push(normalised);
+    };
+    (Array.isArray(systemVariables) ? systemVariables : []).forEach(add);
+    form.variables.forEach((v) => {
+      const key = cleanVariableKey(v.key);
+      if (key) add({ key, label: key, group: 'custom' });
+    });
+    return merged;
+  }, [systemVariables, form.variables]);
 
   function normaliseClause(c) {
     return {
@@ -473,6 +545,19 @@ function TemplateEditor({ template, defaultClauses, onClose, onSaved, onError })
     }
     setForm({ ...form, mode: 'override',
       clauses: defaultClauses.map((c) => ({ id: c.id, title: c.title, body: c.body })) });
+  };
+
+  const addVariablePreset = (preset) => {
+    const key = cleanVariableKey(preset.key);
+    if (!key) return;
+    if (existingVariableKeys.has(key)) {
+      onError && onError(`มีตัวแปร ${placeholderFor(key)} อยู่แล้ว`);
+      return;
+    }
+    setForm({
+      ...form,
+      variables: [...form.variables, { key, value: preset.value || '' }],
+    });
   };
 
   return (
@@ -599,6 +684,7 @@ function TemplateEditor({ template, defaultClauses, onClose, onSaved, onError })
               {form.clauses.map((c, i) => (
                 <ClauseRow key={i} index={i} clause={c}
                   total={form.clauses.length}
+                  variables={availableVariables}
                   onChange={(next) => {
                     const arr = [...form.clauses];
                     arr[i] = next;
@@ -687,6 +773,19 @@ function TemplateEditor({ template, defaultClauses, onClose, onSaved, onError })
                 variables: [...form.variables, { key: '', value: '' }]
               })}
             >+ เพิ่มตัวแปร</Btn>
+            <div style={{ display: 'inline-flex', gap: 6, flexWrap: 'wrap', marginLeft: 8 }}>
+              {CUSTOM_VARIABLE_PRESETS.map((preset) => {
+                const key = cleanVariableKey(preset.key);
+                return (
+                  <Btn key={key} size="sm" variant="ghost"
+                    disabled={existingVariableKeys.has(key)}
+                    onClick={() => addVariablePreset(preset)}
+                    title={`เพิ่มตัวแปร ${placeholderFor(key)}`}>
+                    + {preset.label}
+                  </Btn>
+                );
+              })}
+            </div>
           </div>
           {form.variables.length === 0 ? (
             <div style={{ padding: 20, color: C.muted, fontSize: 13, textAlign: 'center',
@@ -713,17 +812,115 @@ function TemplateEditor({ template, defaultClauses, onClose, onSaved, onError })
               ))}
             </div>
           )}
-          <div style={{ marginTop: 12, padding: 10, background: '#f6f3ec', borderRadius: 6,
-                        fontSize: 11, color: C.muted, lineHeight: 1.6 }}>
-            <b>ตัวแปรในระบบ (ใช้ได้ในทุก clause):</b><br/>
-            <code>{'{{lessorName}}'}</code> {'{{tenantName}}'} {'{{roomId}}'} {'{{roomType}}'} {'{{roomFloor}}'} {'{{roomSize}}'}<br/>
-            <code>{'{{monthlyRent}}'}</code> {'{{depositAmount}}'} {'{{startDate}}'} {'{{endDate}}'}<br/>
-            <code>{'{{dueDay}}'}</code> {'{{lateFeeRate}}'}
-          </div>
+          <VariableReferencePanel variables={availableVariables} />
         </div>
       ) : null}
     </Modal>
   );
+}
+
+function VariableReferencePanel({ variables }) {
+  const C = window.ADMIN_C;
+  const [copied, setCopied] = React.useState(null);
+  const groups = groupVariableOptions(variables);
+  const copyToken = async (key) => {
+    const token = placeholderFor(key);
+    try {
+      if (window.navigator?.clipboard?.writeText) await window.navigator.clipboard.writeText(token);
+    } catch {
+      // Clipboard can be blocked on non-HTTPS/local contexts; the visible
+      // token still lets admin confirm what was selected.
+    }
+    setCopied(key);
+    setTimeout(() => setCopied(null), 1200);
+  };
+  return (
+    <div style={{ marginTop: 12, padding: 10, background: '#f6f3ec', borderRadius: 6,
+                  fontSize: 11, color: C.muted, lineHeight: 1.6 }}>
+      <b>ตัวแปรที่กดใช้ได้:</b>
+      <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {Object.entries(groups).map(([group, items]) => (
+          <div key={group}>
+            <div style={{ fontWeight: 600, color: C.ink2, marginBottom: 4 }}>
+              {VARIABLE_GROUP_LABELS[group] || group}
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+              {items.map((v) => (
+                <button key={v.key} type="button"
+                  onClick={() => copyToken(v.key)}
+                  title={`คัดลอก ${placeholderFor(v.key)}`}
+                  style={variableBtnStyle(C)}>
+                  {v.label}
+                  <code style={{ marginLeft: 5, color: C.muted }}>{placeholderFor(v.key)}</code>
+                  {copied === v.key ? <span style={{ marginLeft: 5 }}>คัดลอกแล้ว</span> : null}
+                </button>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ClauseVariablePicker({ variables, onInsert }) {
+  const C = window.ADMIN_C;
+  const normalised = (Array.isArray(variables) ? variables : [])
+    .map(normaliseVariableOption)
+    .filter(Boolean);
+  const common = normalised.filter((v) => COMMON_SYSTEM_VARIABLE_KEYS.has(v.key));
+  const commonList = common.length ? common : normalised.slice(0, 8);
+  const groups = groupVariableOptions(normalised);
+  if (!normalised.length) return null;
+  const renderButton = (v) => (
+    <button key={v.key} type="button"
+      onClick={() => onInsert(v.key)}
+      title={`แทรก ${placeholderFor(v.key)} ในตำแหน่ง cursor`}
+      style={variableBtnStyle(C)}>
+      {v.label}
+    </button>
+  );
+  return (
+    <div style={{ marginTop: 8, padding: 8, border: `1px solid ${C.border}`,
+                  borderRadius: 6, background: '#fff' }}>
+      <div style={{ fontSize: 11, color: C.muted, marginBottom: 6 }}>
+        แทรกตัวแปรเร็ว: กดปุ่มแล้วระบบจะใส่ค่าแบบ {placeholderFor('tenantName')} ให้ในตำแหน่ง cursor
+      </div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+        {commonList.map(renderButton)}
+      </div>
+      <details style={{ marginTop: 8 }}>
+        <summary style={{ cursor: 'pointer', fontSize: 11, color: C.ink2 }}>
+          ตัวแปรทั้งหมด
+        </summary>
+        <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {Object.entries(groups).map(([group, items]) => (
+            <div key={group}>
+              <div style={{ fontSize: 11, fontWeight: 600, color: C.muted, marginBottom: 4 }}>
+                {VARIABLE_GROUP_LABELS[group] || group}
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                {items.map(renderButton)}
+              </div>
+            </div>
+          ))}
+        </div>
+      </details>
+    </div>
+  );
+}
+
+function variableBtnStyle(C) {
+  return {
+    border: `1px solid ${C.border}`,
+    background: '#fff',
+    borderRadius: 6,
+    padding: '4px 8px',
+    fontSize: 11,
+    cursor: 'pointer',
+    color: C.ink2,
+    fontFamily: 'inherit',
+  };
 }
 
 // === Variable key/value row ===============================================
@@ -737,7 +934,7 @@ function VariableRow({ pair, onChange, onRemove }) {
   const C = window.ADMIN_C;
   const { Btn } = window;
   const [raw, setRaw] = React.useState(pair.key || '');
-  const cleaned = String(raw || '').toLowerCase().replace(/[^a-z0-9_]/g, '');
+  const cleaned = cleanVariableKey(raw);
   const wasCleaned = raw !== cleaned;
   const isReserved = ['__proto__', 'constructor', 'prototype'].includes(cleaned);
   return (
@@ -753,7 +950,7 @@ function VariableRow({ pair, onChange, onRemove }) {
           onChange={(e) => {
             const next = e.target.value;
             setRaw(next);
-            onChange({ ...pair, key: next.toLowerCase().replace(/[^a-z0-9_]/g, '') });
+            onChange({ ...pair, key: cleanVariableKey(next) });
           }} />
         <input style={inp} placeholder="ค่า (≤ 500 ตัวอักษร)"
           maxLength={500}
@@ -779,9 +976,33 @@ function VariableRow({ pair, onChange, onRemove }) {
 // === Single clause row ====================================================
 // Title input + body textarea + reorder/delete buttons. Compact enough to
 // fit several on screen at once but expandable per-row when admin focuses.
-function ClauseRow({ index, total, clause, onChange, onRemove, onMove }) {
+function ClauseRow({ index, total, clause, variables, onChange, onRemove, onMove }) {
   const C = window.ADMIN_C;
   const { Btn } = window;
+  const bodyRef = React.useRef(null);
+  const insertVariable = (key) => {
+    const token = placeholderFor(key);
+    const body = String(clause.body || '');
+    const el = bodyRef.current;
+    const start = el && Number.isInteger(el.selectionStart) ? el.selectionStart : body.length;
+    const end = el && Number.isInteger(el.selectionEnd) ? el.selectionEnd : start;
+    const before = body.slice(0, start);
+    const after = body.slice(end);
+    const lead = before && !/\s$/.test(before) ? ' ' : '';
+    const tail = after && !/^\s/.test(after) ? ' ' : '';
+    const nextBody = `${before}${lead}${token}${tail}${after}`;
+    if (nextBody.length > 4000) {
+      alert('เนื้อหา clause เกิน 4000 ตัวอักษร กรุณาลบข้อความบางส่วนก่อนแทรกตัวแปร');
+      return;
+    }
+    onChange({ ...clause, body: nextBody });
+    const cursor = before.length + lead.length + token.length + tail.length;
+    setTimeout(() => {
+      if (!bodyRef.current) return;
+      bodyRef.current.focus();
+      bodyRef.current.setSelectionRange(cursor, cursor);
+    }, 0);
+  };
   return (
     <div style={{
       border: `1px solid ${C.border}`, borderRadius: 6, padding: 10,
@@ -808,7 +1029,7 @@ function ClauseRow({ index, total, clause, onChange, onRemove, onMove }) {
         <Btn size="sm" variant="ghost" onClick={onRemove} title="ลบ"
           style={{ color: '#c0392b' }}>×</Btn>
       </div>
-      <textarea rows={3} maxLength={4000}
+      <textarea ref={bodyRef} rows={3} maxLength={4000}
         placeholder="เนื้อหา — รองรับ {{ตัวแปร}} เช่น {{monthlyRent}}, {{depositAmount}}"
         value={clause.body}
         onChange={(e) => onChange({ ...clause, body: e.target.value })}
@@ -817,6 +1038,7 @@ function ClauseRow({ index, total, clause, onChange, onRemove, onMove }) {
           border: `1px solid ${C.border}`, borderRadius: 4, fontSize: 13,
           fontFamily: 'inherit', resize: 'vertical', lineHeight: 1.5,
         }} />
+      <ClauseVariablePicker variables={variables} onInsert={insertVariable} />
       <div style={{ fontSize: 10, color: C.muted, marginTop: 4, textAlign: 'right' }}>
         {clause.body.length}/4000
       </div>

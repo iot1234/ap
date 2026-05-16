@@ -7627,6 +7627,7 @@ app.get('/api/admin/contract-templates', requireAuth, requireRole('owner', 'mana
         ok: true,
         templates: rows,
         defaults: contractPdf.DEFAULT_CLAUSES,
+        systemVariables: contractPdf.SYSTEM_VARIABLES,
       });
     } catch (err) {
       console.error('contract-templates list error:', err);
@@ -7650,6 +7651,7 @@ app.get('/api/admin/contract-templates/:id', requireAuth, requireRole('owner', '
         ok: true,
         template: rows[0],
         defaults: contractPdf.DEFAULT_CLAUSES,
+        systemVariables: contractPdf.SYSTEM_VARIABLES,
         // Preview the final clause list the renderer will produce.
         resolved: contractPdf.resolveClauses(rows[0]),
       });

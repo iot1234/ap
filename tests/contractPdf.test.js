@@ -263,6 +263,29 @@ test('DEFAULT_CLAUSES: covers the standard Thai dorm contract topics', () => {
   }
 });
 
+test('SYSTEM_VARIABLES: advertised placeholders are backed by renderer context', () => {
+  assert.ok(Array.isArray(contractPdf.SYSTEM_VARIABLES),
+    'system variables must be exported for the admin template editor');
+  const keys = new Set(contractPdf.SYSTEM_VARIABLES.map((v) => v.key));
+  for (const required of ['lessorName', 'tenantName', 'roomId', 'monthlyRent',
+                          'depositAmount', 'startDate', 'endDate', 'contractNo',
+                          'tenantPhone', 'buildingName', 'roomAmenities',
+                          'termMonths']) {
+    assert.ok(keys.has(required), `system variables must expose ${required}`);
+  }
+
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'contractPdf.js'), 'utf8');
+  const ctxStart = src.indexOf('const ctx = {');
+  assert.ok(ctxStart > 0, 'renderer interpolation context must exist');
+  const ctx = src.slice(ctxStart, src.indexOf('};', ctxStart) + 2);
+  for (const key of keys) {
+    assert.match(ctx, new RegExp(`\\b${key}\\s*(?::|,)`),
+      `${key} must be populated in the PDF interpolation context`);
+  }
+});
+
 test('renderContractPdf: rich room details surface in property section', async () => {
   const stream = memStream();
   const richRoom = {
