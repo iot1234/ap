@@ -145,6 +145,35 @@ test('generateBill: manual bill requires positive total and ledger fields', () =
   assert.equal(bad.success, false);
 });
 
+test('generateBill: manual bill preserves meter reading snapshots', () => {
+  const r = schemas.generateBill.safeParse({
+    roomId: '101',
+    billNo: 'INV-1',
+    period: '2026-05',
+    dueDate: '2026-05-15',
+    total: 100,
+    waterPrevReading: '120',
+    waterCurrentReading: '135.5',
+    elecPrevReading: 1500,
+    elecCurrentReading: 1625,
+  });
+  assert.equal(r.success, true);
+  assert.equal(r.data.waterPrevReading, 120);
+  assert.equal(r.data.waterCurrentReading, 135.5);
+  assert.equal(r.data.elecPrevReading, 1500);
+  assert.equal(r.data.elecCurrentReading, 1625);
+
+  const bad = schemas.generateBill.safeParse({
+    roomId: '101',
+    billNo: 'INV-1',
+    period: '2026-05',
+    dueDate: '2026-05-15',
+    total: 100,
+    waterPrevReading: -1,
+  });
+  assert.equal(bad.success, false);
+});
+
 test('rooms schema accepts nullable per-room rent override fields', () => {
   const base = {
     floor: 1,

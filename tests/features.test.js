@@ -35,6 +35,15 @@ test('slipUpload does not trust tenant uploads by default', () => {
   assert.equal(f.slipUpload.allowUnverifiedAutoApprove, false);
 });
 
+test('disabledPayload returns a structured client-facing error', () => {
+  const out = features.disabledPayload('meterIot', { id: 'req-123' });
+  assert.equal(out.code, 'FEATURE_DISABLED');
+  assert.equal(out.feature, 'meterIot');
+  assert.equal(out.enabled, false);
+  assert.equal(out.requestId, 'req-123');
+  assert.match(out.hint, /\/admin#features/);
+});
+
 test('DEFAULTS keys are stable (regression guard)', () => {
   const expected = ['tenantPortal','slipUpload','photoUpload','meterIot','accessControl',
     'recurringCharges','lateFee','vat','email','sms','i18n','darkMode','softDelete',

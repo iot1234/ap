@@ -272,24 +272,77 @@ async function renderContractPdf(contract, tenant, room, building, options, stre
     doc.moveTo(MARGIN, y).lineTo(PAGE_W - MARGIN, y)
       .lineWidth(0.5).strokeColor(C.border).stroke();
   }
+  function drawSectionTitle(title) {
+    ensureRoom(28);
+    const y = doc.y;
+    doc.roundedRect(MARGIN, y, CONTENT_W, 20, 5).fill(C.bg);
+    doc.rect(MARGIN, y, 4, 20).fill(C.accent);
+    doc.font(FONT_B).fontSize(10.5).fillColor(C.ink)
+      .text(title, MARGIN + 12, y + 5, { width: CONTENT_W - 24 });
+    doc.y = y + 26;
+  }
+  function infoBoxHeight(title, lines, width) {
+    doc.font(FONT_B).fontSize(10);
+    const titleH = doc.heightOfString(title || ' ', { width: width - 20 });
+    doc.font(FONT).fontSize(9);
+    const bodyH = lines.reduce((sum, line) => (
+      sum + doc.heightOfString(line || ' ', { width: width - 20 }) + 3
+    ), 0);
+    return Math.max(62, 10 + titleH + 6 + bodyH + 6);
+  }
+  function drawInfoBox(x, y, width, title, lines) {
+    const height = infoBoxHeight(title, lines, width);
+    doc.roundedRect(x, y, width, height, 7).fill('#fffdf8');
+    doc.roundedRect(x, y, width, height, 7).lineWidth(0.5).strokeColor(C.border).stroke();
+    doc.font(FONT_B).fontSize(10).fillColor(C.ink)
+      .text(title, x + 10, y + 7, { width: width - 20 });
+    let lineY = doc.y + 4;
+    doc.font(FONT).fontSize(9).fillColor(C.ink2);
+    for (const line of lines) {
+      doc.text(line || '—', x + 10, lineY, { width: width - 20, lineGap: 1 });
+      lineY = doc.y + 3;
+    }
+    return height;
+  }
 
   // =============== Page 1 — Header + parties + property =================
+  const lessorName = building?.ownerName || building?.name || '—';
+  const tenantName = tenant?.fullName || '—';
 
   // Header band
-  doc.fillColor(C.ink).font(FONT_B).fontSize(13)
-    .text(building?.name || 'บ้านกาญจน์ เรสซิเดนซ์', MARGIN, MARGIN, { width: CONTENT_W });
-  doc.font(FONT).fontSize(10).fillColor(C.muted);
-  if (building?.address) doc.text(building.address, MARGIN, doc.y + 2, { width: CONTENT_W });
-  if (building?.phone) doc.text(`โทร. ${building.phone}`, MARGIN, doc.y + 2, { width: CONTENT_W });
-  if (building?.taxId) doc.text(`เลขประจำตัวผู้เสียภาษี ${building.taxId}`, MARGIN, doc.y + 2, { width: CONTENT_W });
-  // Optional header note from template — admin can add a tagline,
-  // promotional text, or compliance notice (e.g. "เลขทะเบียนหอพัก ...").
+  const headerY = MARGIN;
+  doc.roundedRect(MARGIN, headerY, CONTENT_W, 68, 8).fill(C.bg);
+  doc.rect(MARGIN, headerY, 6, 68).fill(C.accent);
+  doc.font(FONT_B).fontSize(15).fillColor(C.ink)
+    .text(building?.name || 'บ้านกาญจน์ เรสซิเดนซ์', MARGIN + 14, headerY + 12, { width: 290 });
+  doc.font(FONT).fontSize(9.5).fillColor(C.ink2);
+  let headerLineY = doc.y + 2;
+  if (building?.address) {
+    doc.text(building.address, MARGIN + 14, headerLineY, { width: 290 });
+    headerLineY = doc.y + 2;
+  }
+  if (building?.phone) {
+    doc.text(`โทร. ${building.phone}`, MARGIN + 14, headerLineY, { width: 290 });
+    headerLineY = doc.y + 2;
+  }
+  if (building?.taxId) {
+    doc.text(`เลขประจำตัวผู้เสียภาษี ${building.taxId}`, MARGIN + 14, headerLineY, { width: 290 });
+    headerLineY = doc.y + 2;
+  }
   if (sections.headerNote) {
     doc.font(FONT).fontSize(9).fillColor(C.accent)
-      .text(sections.headerNote, MARGIN, doc.y + 2, { width: CONTENT_W });
+      .text(sections.headerNote, MARGIN + 14, headerLineY, { width: 290 });
   }
-  hr(doc.y + 8);
-  doc.y = doc.y + 16;
+  const metaX = MARGIN + CONTENT_W - 176;
+  doc.roundedRect(metaX, headerY + 10, 162, 48, 6).fill('#ffffff');
+  doc.roundedRect(metaX, headerY + 10, 162, 48, 6).lineWidth(0.5).strokeColor(C.border).stroke();
+  doc.font(FONT).fontSize(8.5).fillColor(C.muted)
+    .text('เลขที่สัญญา', metaX + 10, headerY + 17, { width: 142 });
+  doc.font(FONT_B).fontSize(11).fillColor(C.ink)
+    .text(contract.contractNo || '—', metaX + 10, headerY + 29, { width: 142 });
+  doc.font(FONT).fontSize(8.5).fillColor(C.muted)
+    .text(fmtThaiDate(contract.signedAt || new Date()), metaX + 10, headerY + 44, { width: 142 });
+  doc.y = headerY + 80;
 
   // Title
   doc.font(FONT_B).fontSize(18).fillColor(C.ink)
@@ -299,84 +352,62 @@ async function renderContractPdf(contract, tenant, room, building, options, stre
   // Contract meta line
   doc.font(FONT).fontSize(10).fillColor(C.ink2)
     .text(
-      `เลขที่สัญญา: ${contract.contractNo || '—'}    `
-      + `วันที่ทำสัญญา: ${fmtThaiDate(contract.signedAt || new Date())}`,
+      `ห้อง ${room?.id || '—'}    ผู้เช่า ${tenantName}`,
       MARGIN, doc.y, { width: CONTENT_W, align: 'center' }
     );
   doc.y += 16;
 
   // Lead paragraph: "วันที่ ... ระหว่าง ... กับ ..."
-  const lessorName = building?.ownerName || building?.name || '—';
-  const tenantName = tenant?.fullName || '—';
+  const leadText =
+    `สัญญาฉบับนี้ทำขึ้นเมื่อ ${fmtThaiDate(contract.signedAt || new Date())} `
+    + `ระหว่าง ${lessorName} (ซึ่งต่อไปในสัญญานี้เรียกว่า "ผู้ให้เช่า") `
+    + `กับ ${tenantName} (ซึ่งต่อไปในสัญญานี้เรียกว่า "ผู้เช่า") `
+    + `ทั้งสองฝ่ายตกลงทำสัญญาเช่าห้องพักดังนี้`;
+  doc.font(FONT).fontSize(10.5);
+  const leadH = doc.heightOfString(leadText, { width: CONTENT_W - 20, align: 'justify', lineGap: 2 }) + 18;
+  ensureRoom(leadH + 12);
+  const leadY = doc.y;
+  doc.roundedRect(MARGIN, leadY, CONTENT_W, leadH, 7).fill('#fffdf8');
+  doc.roundedRect(MARGIN, leadY, CONTENT_W, leadH, 7).lineWidth(0.5).strokeColor(C.border).stroke();
   doc.font(FONT).fontSize(11).fillColor(C.ink)
-    .text(
-      `สัญญาฉบับนี้ทำขึ้นเมื่อ ${fmtThaiDate(contract.signedAt || new Date())} `
-      + `ระหว่าง ${lessorName} (ซึ่งต่อไปในสัญญานี้เรียกว่า "ผู้ให้เช่า") `
-      + `กับ ${tenantName} (ซึ่งต่อไปในสัญญานี้เรียกว่า "ผู้เช่า") `
-      + `ทั้งสองฝ่ายตกลงทำสัญญาเช่าห้องพักดังนี้`,
-      MARGIN, doc.y,
-      { width: CONTENT_W, align: 'justify', lineGap: 2 }
-    );
-  doc.y += 12;
+    .text(leadText, MARGIN + 10, leadY + 9,
+      { width: CONTENT_W - 20, align: 'justify', lineGap: 2 });
+  doc.y = leadY + leadH + 12;
 
   // === Parties block (two-column) ===
-  // Defensive layout: if either column overruns, we advance doc.y by the
-  // taller column so the next section starts below both blocks.
+  drawSectionTitle('คู่สัญญา');
   const partyColW = (CONTENT_W - 16) / 2;
   const partyTopY = doc.y;
-  // Left: ผู้ให้เช่า
-  doc.font(FONT_B).fontSize(11).fillColor(C.ink)
-    .text('ผู้ให้เช่า', MARGIN, partyTopY);
-  doc.font(FONT).fontSize(10).fillColor(C.ink2);
-  doc.text(`ชื่อ: ${lessorName}`, MARGIN, doc.y + 2, { width: partyColW });
-  if (building?.address) doc.text(`ที่อยู่: ${building.address}`, MARGIN, doc.y + 2, { width: partyColW });
-  if (building?.phone) doc.text(`โทรศัพท์: ${building.phone}`, MARGIN, doc.y + 2, { width: partyColW });
-  if (building?.taxId) doc.text(`เลขประจำตัวผู้เสียภาษี: ${building.taxId}`, MARGIN, doc.y + 2, { width: partyColW });
-  const leftEndY = doc.y;
+  const lessorLines = [
+    `ชื่อ: ${lessorName}`,
+    building?.address ? `ที่อยู่: ${building.address}` : null,
+    building?.phone ? `โทรศัพท์: ${building.phone}` : null,
+    building?.taxId ? `เลขประจำตัวผู้เสียภาษี: ${building.taxId}` : null,
+  ].filter(Boolean);
+  const tenantLines = [
+    `ชื่อ: ${tenantName}`,
+    tenant?.citizenIdMasked ? `เลขบัตร ปชช.: ${tenant.citizenIdMasked}` : null,
+    tenant?.phone ? `โทรศัพท์: ${tenant.phone}` : null,
+    tenant?.address ? `ที่อยู่: ${tenant.address}` : null,
+    sections.showEmergencyContact && tenant?.emergencyContactName
+      ? `ติดต่อฉุกเฉิน: ${tenant.emergencyContactName}`
+          + (tenant.emergencyContactPhone ? ` · ${tenant.emergencyContactPhone}` : '')
+          + (tenant.emergencyContactRelation ? ` (${tenant.emergencyContactRelation})` : '')
+      : null,
+  ].filter(Boolean);
+  const leftH = drawInfoBox(MARGIN, partyTopY, partyColW, 'ผู้ให้เช่า', lessorLines);
+  const rightH = drawInfoBox(MARGIN + partyColW + 16, partyTopY, partyColW, 'ผู้เช่า', tenantLines);
 
-  // Right: ผู้เช่า
-  doc.font(FONT_B).fontSize(11).fillColor(C.ink)
-    .text('ผู้เช่า', MARGIN + partyColW + 16, partyTopY);
-  doc.font(FONT).fontSize(10).fillColor(C.ink2);
-  let ry = partyTopY + doc.currentLineHeight() + 2;
-  doc.text(`ชื่อ: ${tenantName}`, MARGIN + partyColW + 16, ry, { width: partyColW });
-  ry = doc.y + 2;
-  if (tenant?.citizenIdMasked) {
-    doc.text(`เลขบัตร ปชช.: ${tenant.citizenIdMasked}`, MARGIN + partyColW + 16, ry, { width: partyColW });
-    ry = doc.y + 2;
-  }
-  if (tenant?.phone) {
-    doc.text(`โทรศัพท์: ${tenant.phone}`, MARGIN + partyColW + 16, ry, { width: partyColW });
-    ry = doc.y + 2;
-  }
-  if (tenant?.address) {
-    doc.text(`ที่อยู่: ${tenant.address}`, MARGIN + partyColW + 16, ry, { width: partyColW });
-    ry = doc.y + 2;
-  }
-  if (sections.showEmergencyContact && tenant?.emergencyContactName) {
-    doc.text(
-      `ติดต่อฉุกเฉิน: ${tenant.emergencyContactName}`
-        + (tenant.emergencyContactPhone ? ` · ${tenant.emergencyContactPhone}` : '')
-        + (tenant.emergencyContactRelation ? ` (${tenant.emergencyContactRelation})` : ''),
-      MARGIN + partyColW + 16, ry, { width: partyColW }
-    );
-    ry = doc.y + 2;
-  }
-  const rightEndY = doc.y;
-
-  doc.y = Math.max(leftEndY, rightEndY) + 12;
+  doc.y = partyTopY + Math.max(leftH, rightH) + 14;
   ensureRoom(120);
 
   // === Property + financial summary ===
   // Sections can be hidden via template — admin renting commercial space
   // might want to skip the rich amenity list, e.g.
   if (sections.showPropertyDetails || sections.showFinancialTable) {
-    const tableTop = doc.y;
-    doc.font(FONT_B).fontSize(11).fillColor(C.ink)
-      .text('รายละเอียดห้องพักและการเงิน', MARGIN, tableTop);
-    doc.y = tableTop + 18;
+    drawSectionTitle('รายละเอียดห้องพักและการเงิน');
 
-    const rowH = 18;
+    const rowH = 16;
     const labelW = 160;
     const valW = CONTENT_W - labelW;
     const rows = [];
@@ -422,28 +453,27 @@ async function renderContractPdf(contract, tenant, room, building, options, stre
         ? `${contract.termMonths} เดือน` : 'ไม่กำหนดล่วงหน้า']);
     }
 
-    for (const [k, v] of rows) {
+    rows.forEach(([k, v], idx) => {
       doc.font(FONT).fontSize(10);
       const labelH = doc.heightOfString(k, { width: labelW });
       const valueH = doc.heightOfString(String(v || '—'), { width: valW });
-      const actualRowH = Math.max(rowH, labelH, valueH) + 6;
+      const actualRowH = Math.max(rowH, labelH, valueH) + 4;
       ensureRoom(actualRowH);
       const rowTop = doc.y;
+      doc.roundedRect(MARGIN, rowTop, CONTENT_W, actualRowH - 1, 3)
+        .fill(idx % 2 === 0 ? '#fffdf8' : C.bg);
       doc.font(FONT).fontSize(10).fillColor(C.muted)
-        .text(k, MARGIN, rowTop + 4, { width: labelW });
+        .text(k, MARGIN, rowTop + 3, { width: labelW });
       doc.font(FONT).fontSize(10).fillColor(C.ink)
-        .text(v, MARGIN + labelW, rowTop + 4, { width: valW });
-      hr(rowTop + actualRowH - 2);
+        .text(v, MARGIN + labelW, rowTop + 3, { width: valW });
+      hr(rowTop + actualRowH - 1);
       doc.y = rowTop + actualRowH;
-    }
+    });
     doc.y += 8;
   }
 
   // =============== Clauses (numbered, auto page break) ==================
-  ensureRoom(40);
-  doc.font(FONT_B).fontSize(13).fillColor(C.ink)
-    .text('ข้อตกลงและกฎข้อบังคับ', MARGIN, doc.y, { width: CONTENT_W });
-  doc.y += 8;
+  drawSectionTitle('ข้อตกลงและกฎข้อบังคับ');
 
   // Resolve clause list — defaults vs custom mode (admin choice).
   const clauses = resolveClauses(opts.termsTemplate);
@@ -484,20 +514,22 @@ async function renderContractPdf(contract, tenant, room, building, options, stre
       align: 'justify',
       lineGap: 2,
     });
-    ensureRoom(titleH + bodyH + 12);
+    ensureRoom(titleH + bodyH + 16);
+    const clauseY = doc.y;
+    doc.rect(MARGIN, clauseY + 2, 3, titleH + bodyH + 8).fill(C.accent);
     doc.font(FONT_B).fontSize(11).fillColor(C.ink)
-      .text(titleText, MARGIN, doc.y,
-            { width: CONTENT_W });
+      .text(titleText, MARGIN + 10, doc.y,
+            { width: CONTENT_W - 10 });
     doc.y += 2;
     doc.font(FONT).fontSize(10).fillColor(C.ink2)
       .text(body, MARGIN + 16, doc.y,
             { width: CONTENT_W - 16, align: 'justify', lineGap: 2 });
-    doc.y += 8;
+    doc.y += 10;
   }
 
   // =============== Signature block ======================================
   const sigColW = (CONTENT_W - 32) / 2;
-  const sigBoxH = 56;
+  const sigBoxH = 50;
   doc.font(FONT).fontSize(10);
   const ackH = doc.heightOfString(sections.acknowledgmentText || ' ', {
     width: CONTENT_W,
@@ -506,25 +538,30 @@ async function renderContractPdf(contract, tenant, room, building, options, stre
   // Reserve the actual rendered height for the signature cluster. The old
   // fixed 240pt reservation frequently pushed signatures to a new page while
   // 150-200pt still remained, producing a visually empty tail page.
-  const signatureLabelsH = 56;
-  const witnessH = sections.showWitnesses ? 60 + 14 + 56 : 0;
-  const signatureBlockH = 8 + ackH + 16 + 4 + sigBoxH + Math.max(signatureLabelsH, witnessH) + 8;
+  const signatureLabelsH = 50;
+  const witnessH = sections.showWitnesses ? 56 + 12 + 50 : 0;
+  const signatureBlockH = 26 + (ackH + 10) + 10 + 4 + sigBoxH + Math.max(signatureLabelsH, witnessH) + 6;
   ensureRoom(signatureBlockH);
 
   // Acknowledgement line above signatures — admin can override the wording
   // via template.sections.acknowledgmentText (e.g. omit "ต่อหน้าพยาน" when
   // not using witnesses).
-  doc.y += 8;
+  drawSectionTitle('ลงนาม');
+  const ackY = doc.y;
+  const ackBoxH = ackH + 10;
+  doc.roundedRect(MARGIN, ackY, CONTENT_W, ackBoxH, 7).fill('#fffdf8');
+  doc.roundedRect(MARGIN, ackY, CONTENT_W, ackBoxH, 7).lineWidth(0.5).strokeColor(C.border).stroke();
   doc.font(FONT).fontSize(10).fillColor(C.ink2)
-    .text(sections.acknowledgmentText, MARGIN, doc.y,
-      { width: CONTENT_W, align: 'center' });
-  doc.y += 16;
+    .text(sections.acknowledgmentText, MARGIN + 10, ackY + 5,
+      { width: CONTENT_W - 20, align: 'center' });
+  doc.y = ackY + ackBoxH + 10;
 
   // Two signature columns — lessor on the left, lessee on the right.
   const sigTopY = doc.y + 4;
 
   function drawSignatureBox(x, y, label, name, signatureBuf, dateLabel) {
     // Box border
+    doc.roundedRect(x, y, sigColW, sigBoxH, 4).fill('#fffdf8');
     doc.lineWidth(0.5).strokeColor(C.hairline)
       .roundedRect(x, y, sigColW, sigBoxH, 4).stroke();
     // Embed signature image if provided (online sign path)
@@ -546,8 +583,8 @@ async function renderContractPdf(contract, tenant, room, building, options, stre
       .text(`(${name || '—'})`, x, lblY + 14,
             { width: sigColW, align: 'center' });
     doc.font(FONT).fontSize(9).fillColor(C.muted)
-      .text(label, x, lblY + 28, { width: sigColW, align: 'center' });
-    doc.text(dateLabel, x, lblY + 42, { width: sigColW, align: 'center' });
+      .text(label, x, lblY + 27, { width: sigColW, align: 'center' });
+    doc.text(dateLabel, x, lblY + 39, { width: sigColW, align: 'center' });
   }
 
   drawSignatureBox(
@@ -568,11 +605,11 @@ async function renderContractPdf(contract, tenant, room, building, options, stre
   // Witness lines — admin can hide via template.sections.showWitnesses=false
   // (e.g. for short-stay contracts that don't need witnesses).
   if (sections.showWitnesses) {
-    const witnessTopY = sigTopY + sigBoxH + 60;
+    const witnessTopY = sigTopY + sigBoxH + 56;
     doc.y = witnessTopY;
     doc.font(FONT_B).fontSize(10).fillColor(C.ink)
       .text('พยาน', MARGIN, doc.y, { width: CONTENT_W });
-    doc.y += 14;
+    doc.y += 12;
     for (let i = 0; i < 2; i++) {
       doc.font(FONT).fontSize(9).fillColor(C.muted)
         .text('ลงชื่อ ............................................................. พยาน',

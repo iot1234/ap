@@ -32,6 +32,32 @@ test('buildBill: basic line items + total', () => {
   assert.ok(bill.billNo.startsWith('INV-'));
 });
 
+test('buildBill: utility readings use before/after meter deltas', () => {
+  const flags = { lateFee: { enabled: false }, vat: { enabled: false } };
+  const bill = billing.buildBill({
+    room: {
+      ...baseRoom,
+      waterUnits: 999,
+      waterPrevReading: 120,
+      waterCurrentReading: 135.5,
+      elecUnits: 999,
+      elecPrevReading: 1500,
+      elecCurrentReading: 1625,
+    },
+    config: baseConfig,
+    features: flags,
+  });
+  assert.equal(bill.waterUnits, 15.5);
+  assert.equal(bill.waterAmount, 279);
+  assert.equal(bill.elecUnits, 125);
+  assert.equal(bill.elecAmount, 1000);
+  const waterItem = bill.items.find((it) => it.label === 'ค่าน้ำ');
+  const elecItem = bill.items.find((it) => it.label === 'ค่าไฟฟ้า');
+  assert.match(waterItem.detail, /เลขก่อน 120/);
+  assert.match(waterItem.detail, /เลขหลัง 135\.50/);
+  assert.match(elecItem.qty, /125 หน่วย × 8/);
+});
+
 test('buildBill: VAT applied when enabled', () => {
   const flags = { lateFee: { enabled: false }, vat: { enabled: true, ratePct: 7 } };
   const bill = billing.buildBill({ room: baseRoom, config: baseConfig, features: flags });

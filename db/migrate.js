@@ -125,9 +125,13 @@ async function migrate(pool, opts = {}) {
       room_id       TEXT NOT NULL,
       period        TEXT NOT NULL,
       rent          NUMERIC(10,2) NOT NULL DEFAULT 0,
+      water_prev_reading    NUMERIC(12,2),
+      water_current_reading NUMERIC(12,2),
       water_units   NUMERIC(10,2) DEFAULT 0,
       water_rate    NUMERIC(10,2) DEFAULT 0,
       water_amount  NUMERIC(10,2) DEFAULT 0,
+      elec_prev_reading     NUMERIC(12,2),
+      elec_current_reading  NUMERIC(12,2),
       elec_units    NUMERIC(10,2) DEFAULT 0,
       elec_rate     NUMERIC(10,2) DEFAULT 0,
       elec_amount   NUMERIC(10,2) DEFAULT 0,
@@ -198,6 +202,13 @@ async function migrate(pool, opts = {}) {
     -- Previous code refused a second reminder within 60 min; admin
     -- requested to make it informational (just warn, allow override).
     ALTER TABLE bills ADD COLUMN IF NOT EXISTS reminder_count INT NOT NULL DEFAULT 0;
+    -- Snapshot meter readings used for the bill. water_units/elec_units are
+    -- still stored as the computed delta, but these columns make the PDF
+    -- auditable: previous -> current = units x rate.
+    ALTER TABLE bills ADD COLUMN IF NOT EXISTS water_prev_reading NUMERIC(12,2);
+    ALTER TABLE bills ADD COLUMN IF NOT EXISTS water_current_reading NUMERIC(12,2);
+    ALTER TABLE bills ADD COLUMN IF NOT EXISTS elec_prev_reading NUMERIC(12,2);
+    ALTER TABLE bills ADD COLUMN IF NOT EXISTS elec_current_reading NUMERIC(12,2);
     -- Rejected slips should not permanently consume a bank ref/hash: if a
     -- tenant uploaded a valid slip against the wrong bill and admin rejected
     -- it, the same real payment may be re-submitted for the correct bill.

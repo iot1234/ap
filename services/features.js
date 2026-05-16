@@ -223,6 +223,27 @@ async function save(pool, partial, updatedBy) {
   return next;
 }
 
+function disabledPayload(name, req) {
+  const label = {
+    tenantPortal: 'Tenant portal',
+    slipUpload: 'Slip upload',
+    photoUpload: 'Photo upload',
+    meterIot: 'Meter readings',
+    accessControl: 'Access control',
+    recurringCharges: 'Recurring charges',
+  }[name] || name;
+  const out = {
+    error: `feature ${name} is disabled`,
+    code: 'FEATURE_DISABLED',
+    feature: name,
+    enabled: false,
+    message: `${label} is disabled by feature flag`,
+    hint: 'Enable this feature in /admin#features before using this endpoint.',
+  };
+  if (req && req.id) out.requestId = req.id;
+  return out;
+}
+
 /**
  * Convenience: middleware factory. Returns 503 if the named flag is off.
  *   app.post('/api/slips', requireFeature('slipUpload'), handler)
@@ -235,7 +256,7 @@ function requireFeature(name) {
       req.features = features;
       const flag = features[name];
       if (!flag || flag.enabled !== true) {
-        return res.status(503).json({ error: `feature ${name} is disabled` });
+        return res.status(503).json(disabledPayload(name, req));
       }
       next();
     } catch (err) {
@@ -259,4 +280,13 @@ async function attach(req, res, next) {
   }
 }
 
-module.exports = { DEFAULTS, FEATURES_KEY, load, save, requireFeature, attach, withDefaults };
+module.exports = {
+  DEFAULTS,
+  FEATURES_KEY,
+  load,
+  save,
+  requireFeature,
+  attach,
+  withDefaults,
+  disabledPayload,
+};

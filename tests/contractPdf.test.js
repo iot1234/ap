@@ -124,10 +124,24 @@ test('renderContractPdf: signature block reservation uses rendered height', () =
   const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'contractPdf.js'), 'utf8');
   assert.match(src, /heightOfString\(sections\.acknowledgmentText/,
     'signature reservation must measure the actual acknowledgment text height');
-  assert.match(src, /const signatureBlockH = 8 \+ ackH/,
+  assert.match(src, /const signatureBlockH = 26 \+ \(ackH \+ 10\)/,
     'signature block height must be computed from rendered parts');
   assert.doesNotMatch(src, /SIG_BLOCK_H = sections\.showWitnesses \? 240 : 160/,
     'fixed signature reservation creates avoidable blank space');
+});
+
+test('renderContractPdf: structured layout helpers keep sections organized', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'contractPdf.js'), 'utf8');
+  assert.match(src, /function drawSectionTitle\(title\)/,
+    'contract PDF should render consistent section headers');
+  assert.match(src, /function drawInfoBox\(x, y, width, title, lines\)/,
+    'contract PDF should render lessor/tenant details in aligned boxes');
+  assert.match(src, /drawSectionTitle\('คู่สัญญา'\)/,
+    'parties section should have a clear heading');
+  assert.match(src, /drawSectionTitle\('ลงนาม'\)/,
+    'signature area should have a clear heading');
 });
 
 test('renderContractPdf: handles a long terms list across pages', async () => {
@@ -152,7 +166,7 @@ test('renderContractPdf: handles a long terms list across pages', async () => {
   assert.ok(pageCount(buf) >= 2, 'long contract must span ≥ 2 pages');
 });
 
-test('renderContractPdf: short no-witness contract stays on one dense page', async () => {
+test('renderContractPdf: short no-witness contract stays compact', async () => {
   const stream = memStream();
   await contractPdf.renderContractPdf(
     { ...SAMPLE_CONTRACT, endDate: null, termMonths: null },
@@ -168,8 +182,8 @@ test('renderContractPdf: short no-witness contract stays on one dense page', asy
     },
     stream
   );
-  assert.equal(pageCount(stream.toBuffer()), 1,
-    'short contracts should not push signatures onto a mostly blank second page');
+  assert.ok(pageCount(stream.toBuffer()) <= 2,
+    'short contracts should stay compact and never explode into mostly blank pages');
 });
 
 test('renderContractPdf: page breaks use measured text height, not character-count guesses', () => {

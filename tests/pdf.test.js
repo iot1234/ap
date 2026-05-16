@@ -78,6 +78,32 @@ test('renderBillPdf with bank info renders without throwing', async () => {
   assert.ok(sink.getBuffer().length > 1000);
 });
 
+test('renderBillPdf renders utility reading detail rows without throwing', async () => {
+  const sink = memSink();
+  await renderBillPdf({
+    ...minimalBill,
+    items: [
+      { label: 'ค่าเช่าห้องพัก', qty: '1 เดือน', amount: 5000 },
+      {
+        label: 'ค่าน้ำ',
+        qty: '15.50 หน่วย × 18',
+        detail: 'เลขก่อน 120  เลขหลัง 135.50  ใช้ 15.50 หน่วย',
+        amount: 279,
+      },
+      {
+        label: 'ค่าไฟฟ้า',
+        qty: '125 หน่วย × 8',
+        detail: 'เลขก่อน 1500  เลขหลัง 1625  ใช้ 125 หน่วย',
+        amount: 1000,
+      },
+    ],
+    total: 6279,
+  }, sink);
+  const buf = sink.getBuffer();
+  assert.equal(buf.slice(0, 5).toString('ascii'), '%PDF-');
+  assert.ok(pageCount(buf) <= 2, 'meter detail should not force blank pages');
+});
+
 test('renderBillPdf with paymentMethods list renders without throwing', async () => {
   const sink = memSink();
   await renderBillPdf({

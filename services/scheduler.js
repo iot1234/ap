@@ -450,18 +450,23 @@ async function tickBillGen(pool, flags, now, state) {
             if (rcErr.code !== '42P01') throw rcErr;
           }
         }
-        const bill = billing.buildBill({ room, contract: activeContract, config, features: flags, previous, recurring, period, dueDate, discountPct });
+        const roomForBilling = await meter.attachLatestBillingReadings(billClient, room);
+        const bill = billing.buildBill({ room: roomForBilling, contract: activeContract, config, features: flags, previous, recurring, period, dueDate, discountPct });
         const otherJson = JSON.stringify(recurring || []);
         const ins = await billClient.query(
           `INSERT INTO bills (bill_no, tenant_id, room_id, period, rent,
-              water_units, water_rate, water_amount,
-              elec_units, elec_rate, elec_amount, wifi, other, subtotal, vat, late_fee, total, due_date, status)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14,$15,$16,$17,$18,'pending')
+              water_prev_reading, water_current_reading, water_units, water_rate, water_amount,
+              elec_prev_reading, elec_current_reading, elec_units, elec_rate, elec_amount,
+              wifi, other, subtotal, vat, late_fee, total, due_date, status)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::jsonb,$18,$19,$20,$21,$22,'pending')
            ON CONFLICT (bill_no) DO NOTHING
            RETURNING id`,
           [
             bill.billNo, tenantId, bill.roomId, bill.period,
-            bill.rent, bill.waterUnits, bill.waterRate, bill.waterAmount,
+            bill.rent,
+            bill.waterPrevReading, bill.waterCurrentReading,
+            bill.waterUnits, bill.waterRate, bill.waterAmount,
+            bill.elecPrevReading, bill.elecCurrentReading,
             bill.elecUnits, bill.elecRate, bill.elecAmount,
             bill.wifi, otherJson, bill.subtotal, bill.vat, bill.lateFee, bill.total,
             bill.dueDate,

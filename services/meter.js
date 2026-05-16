@@ -28,18 +28,27 @@ async function record(pool, { roomId, meterType, reading, source = 'manual', cre
 
   // Sync delta into the rooms JSONB blob so admin/page-billing.jsx (which
   // calculates bills from rooms[id].elecUnits × rate) reflects current
-  // consumption without manual entry. Fail-soft: if rooms key is missing or
-  // the room id isn't there, jsonb_set is a no-op and we still return the row.
-  if (delta > 0) {
+  // consumption without manual entry, and keep before/after readings for the
+  // bill preview/PDF. Fail-soft: if rooms key is missing or the room id isn't
+  // there, jsonb_set is a no-op and we still return the row.
+  {
     const col = meterType === 'elec' ? 'elecUnits' : 'waterUnits';
+    const prevCol = meterType === 'elec' ? 'elecPrevReading' : 'waterPrevReading';
+    const currentCol = meterType === 'elec' ? 'elecCurrentReading' : 'waterCurrentReading';
     try {
       await pool.query(
         `UPDATE app_data
-            SET value = jsonb_set(value, ARRAY[$1::text, $2::text], to_jsonb($3::numeric)),
+            SET value = jsonb_set(
+                          jsonb_set(
+                            jsonb_set(value, ARRAY[$1::text, $2::text], COALESCE(to_jsonb($3::numeric), 'null'::jsonb)),
+                            ARRAY[$1::text, $4::text], COALESCE(to_jsonb($5::numeric), 'null'::jsonb)
+                          ),
+                          ARRAY[$1::text, $6::text], COALESCE(to_jsonb($7::numeric), 'null'::jsonb)
+                        ),
                 updated_at = NOW()
           WHERE key = 'baankarn_rooms_v1'
             AND value ? $1`,
-        [safeRoom, col, delta]
+        [safeRoom, col, delta, prevCol, prev ? Number(prev.reading) : null, currentCol, r]
       );
     } catch (err) {
       console.error('[meter] room blob sync failed:', err.message);
@@ -60,6 +69,57 @@ async function latest(pool, roomId, meterType) {
     [roomId, meterType]
   );
   return rows[0] || null;
+}
+
+/**
+ * Decorate a room object with the latest before/after meter readings.
+ *
+ * Billing needs the audit trail, not just the already-computed delta:
+ *   previous reading -> current reading = units used x rate
+ *
+ * When fewer than two readings exist for a meter type, the existing
+ * room.waterUnits / room.elecUnits value is left intact so legacy manual
+ * entry still works.
+ */
+async function attachLatestBillingReadings(pool, room) {
+  if (!room || !room.id) return room;
+  const safeRoom = String(room.id).slice(0, 32);
+  let rows = [];
+  try {
+    const out = await pool.query(
+      `SELECT meter_type, reading, reading_at
+         FROM (
+           SELECT meter_type, reading, reading_at,
+                  ROW_NUMBER() OVER (PARTITION BY meter_type ORDER BY reading_at DESC) AS rn
+             FROM meter_readings
+            WHERE room_id=$1 AND meter_type IN ('water', 'elec')
+         ) ranked
+        WHERE rn <= 2
+        ORDER BY meter_type, reading_at DESC`,
+      [safeRoom]
+    );
+    rows = out.rows || [];
+  } catch (err) {
+    // Older deployments may not have meter_readings yet. Billing can still
+    // proceed from the legacy room units.
+    if (err.code !== '42P01' && err.code !== '42703') throw err;
+    return room;
+  }
+
+  const next = { ...room };
+  for (const meterType of ['water', 'elec']) {
+    const pair = rows.filter((r) => r.meter_type === meterType);
+    const current = pair[0] || null;
+    const prev = pair[1] || null;
+    if (!current) continue;
+    const prefix = meterType === 'elec' ? 'elec' : 'water';
+    next[`${prefix}CurrentReading`] = Number(current.reading);
+    if (prev) {
+      next[`${prefix}PrevReading`] = Number(prev.reading);
+      next[`${prefix}Units`] = consumption(prev, current);
+    }
+  }
+  return next;
 }
 
 /**
@@ -131,4 +191,11 @@ async function detectAnomaly(pool, roomId, meterType, sigmas = 3) {
   return null;
 }
 
-module.exports = { record, latest, consumption, detectAnomaly, ALLOWED_TYPES };
+module.exports = {
+  record,
+  latest,
+  attachLatestBillingReadings,
+  consumption,
+  detectAnomaly,
+  ALLOWED_TYPES,
+};

@@ -1081,6 +1081,27 @@ test('GET /api/tenant/bills/:id/pdf is wired (tenant PDF download)', () => {
     'tenant PDF must stream through renderBillPdf');
 });
 
+test('bill PDFs include before/after utility meter snapshots', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const migrate = fs.readFileSync(path.join(__dirname, '..', 'db', 'migrate.js'), 'utf8');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const billingSvc = fs.readFileSync(path.join(__dirname, '..', 'services', 'billing.js'), 'utf8');
+
+  for (const col of ['water_prev_reading', 'water_current_reading', 'elec_prev_reading', 'elec_current_reading']) {
+    assert.match(migrate, new RegExp(`ALTER TABLE bills ADD COLUMN IF NOT EXISTS ${col}`),
+      `migration must add ${col}`);
+    assert.match(server, new RegExp(col),
+      `bill routes must persist/select ${col}`);
+  }
+  assert.match(billingSvc, /resolveUtilityUsage\(room, 'water'\)/,
+    'bill calculation must derive water units from before/after readings when available');
+  assert.match(billingSvc, /buildUtilityItem\('ค่าไฟฟ้า'/,
+    'utility line items must carry readable meter math for PDF rendering');
+  assert.match(server, /billing\.buildUtilityItem\('ค่าน้ำ', storedUtilityUsage\(b, 'water'\)/,
+    'stored bill PDF rebuild must include water meter detail');
+});
+
 test('legacy /api/promptpay/qr endpoint is removed (no query-string QR)', () => {
   // The generic /api/promptpay/qr accepted target+amount from the query
   // string — useful only as an admin convenience, but a real attack
@@ -1415,6 +1436,32 @@ test('access_cards CRUD endpoints exist', () => {
   // off cleanly disables the whole module.
   assert.match(server, /\/api\/access\/cards'[\s\S]{0,400}requireFeature\('accessControl'\)/,
     'issue must be gated by accessControl');
+  assert.match(server, /app\.get\('\/api\/access\/cards', requireAuth, features\.requireFeature\('accessControl'\)/,
+    'list must be gated by accessControl');
+  assert.match(server, /app\.put\('\/api\/access\/cards\/:id\/revoke'[\s\S]{0,180}features\.requireFeature\('accessControl'\)/,
+    'revoke must be gated by accessControl');
+  assert.match(server, /app\.put\('\/api\/access\/cards\/:id\/restore'[\s\S]{0,180}features\.requireFeature\('accessControl'\)/,
+    'restore must be gated by accessControl');
+});
+
+test('feature-gated modules fail closed with structured errors', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const featureSvc = fs.readFileSync(path.join(__dirname, '..', 'services', 'features.js'), 'utf8');
+
+  assert.match(featureSvc, /code: 'FEATURE_DISABLED'/,
+    'disabled features must return a stable machine-readable code');
+  assert.match(featureSvc, /feature: name/,
+    'disabled feature payload must identify which feature blocked the request');
+  assert.match(featureSvc, /requestId/,
+    'disabled feature payload should carry requestId for support/audit');
+  assert.match(server, /tenantPortalDisabled[\s\S]{0,220}disabledPayload\('tenantPortal'/,
+    'tenant portal session routes must return FEATURE_DISABLED when the flag is off');
+  assert.match(server, /app\.get\('\/api\/meters\/:roomId\/readings', requireAuth, features\.requireFeature\('meterIot'\)/,
+    'meter read API must be gated, not only meter write API');
+  assert.match(server, /app\.get\('\/api\/access\/logs', requireAuth, features\.requireFeature\('accessControl'\)/,
+    'access log read API must be gated with the accessControl flag');
 });
 
 test('healthCheck flags meterIot.mode = "mqtt" as unimplemented', () => {

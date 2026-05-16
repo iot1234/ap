@@ -137,6 +137,30 @@ const TR = {
 };
 function tr(locale, k) { return (TR[locale] || TR.th)[k] || k; }
 
+function numOrNull(value) {
+  if (value == null || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function fmtQty(n) {
+  const value = Number(n) || 0;
+  return Number.isInteger(value) ? String(value) : value.toFixed(2);
+}
+
+function billUtilityDetail(bill, prefix, locale) {
+  const prev = numOrNull(bill?.[`${prefix}_prev_reading`]);
+  const current = numOrNull(bill?.[`${prefix}_current_reading`]);
+  const units = Number(bill?.[`${prefix}_units`]) || 0;
+  const rate = Number(bill?.[`${prefix}_rate`]) || 0;
+  if (prev == null || current == null) {
+    return `${fmtQty(units)} ${locale === 'en' ? 'units' : 'หน่วย'} × ${fmtQty(rate)}`;
+  }
+  return locale === 'en'
+    ? `Before ${fmtQty(prev)}  After ${fmtQty(current)}  Used ${fmtQty(units)} units × ${fmtQty(rate)}`
+    : `เลขก่อน ${fmtQty(prev)}  เลขหลัง ${fmtQty(current)}  ใช้ ${fmtQty(units)} หน่วย × ${fmtQty(rate)}`;
+}
+
 // --------------------------------------------------------- helpers / api ---
 // CSRF: tenant routes that go through csrfGuard need X-CSRF-Token. We
 // fetch it once and reuse — the cookie+token pair is bound to the session.
@@ -744,6 +768,10 @@ function BillDetail({ bill, locale, onClose, slipFeature, refresh }) {
           </div>
           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 14, padding: '4px 0' }}>
             <span>{t('status')}</span><Pill color={STATUS_COLOR[bill.status]}>{t(bill.status)}</Pill>
+          </div>
+          <div style={{ borderTop: '1px dashed var(--border)', marginTop: 8, paddingTop: 8, fontSize: 13, color: 'var(--muted)', lineHeight: 1.55 }}>
+            <div>{locale === 'en' ? 'Water' : 'ค่าน้ำ'}: {billUtilityDetail(bill, 'water', locale)}</div>
+            <div>{locale === 'en' ? 'Electricity' : 'ค่าไฟ'}: {billUtilityDetail(bill, 'elec', locale)}</div>
           </div>
         </div>
         {/* Server-side blocking issues (PromptPay misconfigured, bill not

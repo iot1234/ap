@@ -185,15 +185,25 @@ async function renderBillPdf(bill, stream) {
   for (const it of items) {
     doc.font('th').fontSize(10);
     const label = String(it.label || '');
+    const detail = String(it.detail || '');
     const qty = String(it.qty || '');
     const amount = fmtCurrency(it.amount);
     const labelH = doc.heightOfString(label || ' ', { width: colW.label });
+    doc.font('th').fontSize(8.5);
+    const detailH = detail ? doc.heightOfString(detail, { width: colW.label }) : 0;
+    doc.font('th').fontSize(10);
     const qtyH = doc.heightOfString(qty || ' ', { width: colW.qty, align: 'center' });
     const amountH = doc.heightOfString(amount, { width: colW.amount, align: 'right' });
-    const rowH = Math.max(22, labelH, qtyH, amountH) + 8;
+    const labelBlockH = labelH + (detail ? detailH + 2 : 0);
+    const rowH = Math.max(22, labelBlockH, qtyH, amountH) + 8;
     if (y + rowH > CONTENT_BOTTOM) addPageWithTableHeader();
     doc.font('th').fontSize(10).fillColor(C.ink)
-      .text(label, colX.label, y + 4, { width: colW.label })
+      .text(label, colX.label, y + 4, { width: colW.label });
+    if (detail) {
+      doc.font('th').fontSize(8.5).fillColor(C.muted)
+        .text(detail, colX.label, y + 4 + labelH + 2, { width: colW.label });
+    }
+    doc.font('th').fontSize(10).fillColor(C.ink)
       .text(qty, colX.qty, y + 4, { width: colW.qty, align: 'center' })
       .text(amount, colX.amount, y + 4, { width: colW.amount, align: 'right' });
     y += rowH;

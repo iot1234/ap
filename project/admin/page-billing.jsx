@@ -4,6 +4,39 @@
 
 const { useState, useMemo } = React;
 
+function numOrNull(value) {
+  if (value == null || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function fmtQty(n) {
+  const value = Number(n) || 0;
+  return Number.isInteger(value) ? String(value) : value.toFixed(2);
+}
+
+function readingPair(room, prefix) {
+  const prev = numOrNull(room?.[`${prefix}PrevReading`] ?? room?.[`${prefix}PreviousReading`] ?? room?.[`${prefix}ReadingBefore`] ?? room?.[`${prefix}Before`]);
+  const current = numOrNull(room?.[`${prefix}CurrentReading`] ?? room?.[`${prefix}ReadingAfter`] ?? room?.[`${prefix}After`]);
+  return { prev, current };
+}
+
+function unitsFromReadingsOrFallback(room, prefix) {
+  const pair = readingPair(room, prefix);
+  if (pair.prev != null && pair.current != null) {
+    return Math.max(0, Math.round((pair.current - pair.prev) * 100) / 100);
+  }
+  return Math.max(0, Number(room?.[`${prefix}Units`]) || 0);
+}
+
+function utilityDetailFromBill(b, prefix) {
+  const prev = numOrNull(b?.[`${prefix}PrevReading`]);
+  const current = numOrNull(b?.[`${prefix}CurrentReading`]);
+  const units = Number(b?.[`${prefix}Units`]) || 0;
+  if (prev == null || current == null) return '';
+  return `เลขก่อน ${fmtQty(prev)}  เลขหลัง ${fmtQty(current)}  ใช้ ${fmtQty(units)} หน่วย`;
+}
+
 function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
   const C = window.ADMIN_C;
   const ADMIN_ROOM_TYPES = window.ADMIN_ROOM_TYPES;
@@ -166,8 +199,12 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
     return Object.values(rooms)
       .filter(r => r.tenant && (r.status === 'occupied' || r.status === 'overdue'))
       .map(r => {
-        const water = (r.waterUnits || 0) * waterRate;
-        const elec  = (r.elecUnits  || 0) * elecRate;
+        const waterUnits = unitsFromReadingsOrFallback(r, 'water');
+        const elecUnits = unitsFromReadingsOrFallback(r, 'elec');
+        const waterPair = readingPair(r, 'water');
+        const elecPair = readingPair(r, 'elec');
+        const water = waterUnits * waterRate;
+        const elec  = elecUnits * elecRate;
         const wifi  = (r.wifi != null && r.wifi !== 0) ? r.wifi : wifiFee;
         // Bill line items come from /api/recurring-charges (active rows).
         // Server's bulk-generate merges these via services/billing.js, so
@@ -198,8 +235,14 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
           periodDisplay,                 // for UI
           rent: r.rent,
           water, elec, wifi,
-          waterUnits: r.waterUnits,
-          elecUnits: r.elecUnits,
+          waterUnits,
+          waterRate,
+          waterPrevReading: waterPair.prev,
+          waterCurrentReading: waterPair.current,
+          elecUnits,
+          elecRate,
+          elecPrevReading: elecPair.prev,
+          elecCurrentReading: elecPair.current,
           charges,
           chargesTotal,
           subtotal: total,
@@ -231,6 +274,18 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
           dbBillNo: real.bill_no,
           status: real.status === 'paid' ? 'paid' : 'unpaid',
           dbStatus: real.status,                     // pending / paid / overdue / void
+          rent: numOrNull(real.rent) ?? est.rent,
+          water: numOrNull(real.water_amount) ?? est.water,
+          waterUnits: numOrNull(real.water_units) ?? est.waterUnits,
+          waterRate: numOrNull(real.water_rate) ?? est.waterRate,
+          waterPrevReading: numOrNull(real.water_prev_reading),
+          waterCurrentReading: numOrNull(real.water_current_reading),
+          elec: numOrNull(real.elec_amount) ?? est.elec,
+          elecUnits: numOrNull(real.elec_units) ?? est.elecUnits,
+          elecRate: numOrNull(real.elec_rate) ?? est.elecRate,
+          elecPrevReading: numOrNull(real.elec_prev_reading),
+          elecCurrentReading: numOrNull(real.elec_current_reading),
+          wifi: numOrNull(real.wifi) ?? est.wifi,
           total: Number(real.total) || est.total,    // trust DB total over estimate
           // Slip summary (only present when fetched with withPayments=1).
           // Used by the row "การชำระ" column + the "รอตรวจสลิป" tab
@@ -1355,8 +1410,18 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
               // Build the bill payload matching services/pdf.js renderBillPdf shape.
               const items = [
                 { label: 'ค่าเช่าห้อง', amount: b.rent || 0 },
-                { label: 'ค่าน้ำประปา', qty: `${b.waterUnits || 0} หน่วย`, amount: b.water || 0 },
-                { label: 'ค่าไฟฟ้า', qty: `${b.elecUnits || 0} หน่วย`, amount: b.elec || 0 },
+                {
+                  label: 'ค่าน้ำประปา',
+                  qty: `${fmtQty(b.waterUnits)} หน่วย × ${fmtQty(b.waterRate || config.utilities?.waterRate || 0)}`,
+                  detail: utilityDetailFromBill(b, 'water'),
+                  amount: b.water || 0,
+                },
+                {
+                  label: 'ค่าไฟฟ้า',
+                  qty: `${fmtQty(b.elecUnits)} หน่วย × ${fmtQty(b.elecRate || config.utilities?.elecRate || 0)}`,
+                  detail: utilityDetailFromBill(b, 'elec'),
+                  amount: b.elec || 0,
+                },
                 { label: 'ค่า Wi-Fi', amount: b.wifi || 0 },
               ];
               // Maintenance / repair charges from completed tickets.
@@ -1379,6 +1444,14 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
                 dueDate: b.dueDate,
                 items,
                 total: b.total,
+                waterUnits: b.waterUnits,
+                waterRate: b.waterRate,
+                waterPrevReading: b.waterPrevReading,
+                waterCurrentReading: b.waterCurrentReading,
+                elecUnits: b.elecUnits,
+                elecRate: b.elecRate,
+                elecPrevReading: b.elecPrevReading,
+                elecCurrentReading: b.elecCurrentReading,
                 building: (config && config.building) || { name: 'บ้านกาญจน์ เรสซิเดนซ์' },
               };
               const apiFetch = window.requireApiFetch ? window.requireApiFetch() : window.apiFetch;
@@ -2058,8 +2131,16 @@ function BillPreview({ b }) {
 
   const rows = [
     { label: 'ค่าเช่ารายเดือน', value: b.rent },
-    { label: `ค่าน้ำ (${b.waterUnits} หน่วย)`, value: b.water },
-    { label: `ค่าไฟ (${b.elecUnits} หน่วย)`, value: b.elec },
+    {
+      label: `ค่าน้ำ (${fmtQty(b.waterUnits)} หน่วย × ${fmtQty(b.waterRate || 0)})`,
+      detail: utilityDetailFromBill(b, 'water'),
+      value: b.water,
+    },
+    {
+      label: `ค่าไฟ (${fmtQty(b.elecUnits)} หน่วย × ${fmtQty(b.elecRate || 0)})`,
+      detail: utilityDetailFromBill(b, 'elec'),
+      value: b.elec,
+    },
     { label: 'ค่า Wi-Fi', value: b.wifi },
   ];
   if (b.penalty > 0) rows.push({ label: `ค่าปรับชำระล่าช้า (${b.overdueDays} วัน)`, value: b.penalty, danger: true });
@@ -2081,8 +2162,11 @@ function BillPreview({ b }) {
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 12 }}>
         {rows.map((r, i) => (
-          <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0', borderBottom: `1px dashed ${C.borderSoft}` }}>
-            <span style={{ fontSize: 13, color: r.danger ? C.danger : C.ink2 }}>{r.label}</span>
+          <div key={i} style={{ display: 'flex', justifyContent: 'space-between', gap: 12, padding: '8px 0', borderBottom: `1px dashed ${C.borderSoft}` }}>
+            <span style={{ fontSize: 13, color: r.danger ? C.danger : C.ink2, lineHeight: 1.45 }}>
+              {r.label}
+              {r.detail ? <div style={{ fontSize: 11.5, color: C.muted, marginTop: 2 }}>{r.detail}</div> : null}
+            </span>
             <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 13.5, fontWeight: 500, color: r.danger ? C.danger : C.ink }}>
               {fmtCurrency(r.value)}
             </span>

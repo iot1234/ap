@@ -41,8 +41,10 @@ function buildBill({ room, contract = null, config, features, previous = null, r
   // priority + rationale.
   const resolved = pricing.resolveBillingRent({ room, contract, config });
   const rentBase = Number(resolved.rent) || 0;
-  const waterUnits = Number(room.waterUnits) || 0;
-  const elecUnits  = Number(room.elecUnits)  || 0;
+  const waterUsage = resolveUtilityUsage(room, 'water');
+  const elecUsage = resolveUtilityUsage(room, 'elec');
+  const waterUnits = waterUsage.units;
+  const elecUnits  = elecUsage.units;
   const waterAmount = waterUnits * waterRate;
   const elecAmount  = elecUnits  * elecRate;
 
@@ -74,8 +76,8 @@ function buildBill({ room, contract = null, config, features, previous = null, r
   // math matches: rentBase + utilities + (-discountAmount) = rent + utilities.
   const items = [
     { label: 'ค่าเช่าห้องพัก', qty: '1 เดือน', amount: rentBase },
-    { label: 'ค่าน้ำ', qty: `${waterUnits} หน่วย × ${waterRate}`, amount: waterAmount },
-    { label: 'ค่าไฟฟ้า', qty: `${elecUnits} หน่วย × ${elecRate}`, amount: elecAmount },
+    buildUtilityItem('ค่าน้ำ', waterUsage, waterRate, waterAmount),
+    buildUtilityItem('ค่าไฟฟ้า', elecUsage, elecRate, elecAmount),
   ];
   if (wifiFee > 0) items.push({ label: 'ค่าอินเทอร์เน็ต', qty: '1 เดือน', amount: wifiFee });
   if (discountAmount > 0) {
@@ -136,7 +138,11 @@ function buildBill({ room, contract = null, config, features, previous = null, r
     items,
     rent, rentBase, discountPct: safePct, discountAmount,
     waterUnits, waterRate, waterAmount,
+    waterPrevReading: waterUsage.prevReading,
+    waterCurrentReading: waterUsage.currentReading,
     elecUnits, elecRate, elecAmount,
+    elecPrevReading: elecUsage.prevReading,
+    elecCurrentReading: elecUsage.currentReading,
     wifi: wifiFee,
     subtotal: round2(subtotal),
     vat,
@@ -154,6 +160,57 @@ function buildBill({ room, contract = null, config, features, previous = null, r
     building: (config && config.building) || {},
     ...buildPaymentBlock(config),
   };
+}
+
+function firstFinite(...values) {
+  for (const value of values) {
+    if (value == null || value === '') continue;
+    const n = Number(value);
+    if (Number.isFinite(n)) return n;
+  }
+  return null;
+}
+
+function resolveUtilityUsage(room, prefix) {
+  const prevReading = firstFinite(
+    room?.[`${prefix}PrevReading`],
+    room?.[`${prefix}PreviousReading`],
+    room?.[`${prefix}ReadingBefore`],
+    room?.[`${prefix}Before`]
+  );
+  const currentReading = firstFinite(
+    room?.[`${prefix}CurrentReading`],
+    room?.[`${prefix}ReadingAfter`],
+    room?.[`${prefix}After`]
+  );
+  const fallbackUnits = Math.max(0, Number(room?.[`${prefix}Units`]) || 0);
+  let units = fallbackUnits;
+  if (prevReading != null && currentReading != null) {
+    units = Math.max(0, round2(currentReading - prevReading));
+  }
+  return {
+    units,
+    prevReading,
+    currentReading,
+    hasReadings: prevReading != null && currentReading != null,
+  };
+}
+
+function fmtQty(n) {
+  const value = Number(n) || 0;
+  return Number.isInteger(value) ? String(value) : value.toFixed(2);
+}
+
+function buildUtilityItem(label, usage, rate, amount) {
+  const item = {
+    label,
+    qty: `${fmtQty(usage.units)} หน่วย × ${fmtQty(rate)}`,
+    amount,
+  };
+  if (usage.hasReadings) {
+    item.detail = `เลขก่อน ${fmtQty(usage.prevReading)}  เลขหลัง ${fmtQty(usage.currentReading)}  ใช้ ${fmtQty(usage.units)} หน่วย`;
+  }
+  return item;
 }
 
 /**
@@ -306,6 +363,7 @@ const PAYMENT_TOLERANCE_THB = 1.0;
 module.exports = {
   buildBill, buildPaymentBlock, statusOf, makeBillNo,
   formatPeriodNow, formatDueDate, formatYMD, round2,
+  resolveUtilityUsage, buildUtilityItem,
   isChargeApplicableForPeriod,
   PAYMENT_TOLERANCE_THB,
 };

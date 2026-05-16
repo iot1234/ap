@@ -1360,11 +1360,31 @@ function getRenderBillId(req, bill) {
   return null;
 }
 
+function numOrNull(value) {
+  if (value == null || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function storedUtilityUsage(b, prefix) {
+  const unitsKey = `${prefix}_units`;
+  const prevKey = `${prefix}_prev_reading`;
+  const currentKey = `${prefix}_current_reading`;
+  const prevReading = numOrNull(b[prevKey]);
+  const currentReading = numOrNull(b[currentKey]);
+  return {
+    units: Number(b[unitsKey]) || 0,
+    prevReading,
+    currentReading,
+    hasReadings: prevReading != null && currentReading != null,
+  };
+}
+
 function buildStoredBillPdfObject(b, config, paymentBlock) {
   const items = [
     { label: 'ค่าเช่าห้องพัก', qty: '1 เดือน', amount: Number(b.rent) || 0 },
-    { label: 'ค่าน้ำ', qty: `${b.water_units || 0} หน่วย x ${b.water_rate || 0}`, amount: Number(b.water_amount) || 0 },
-    { label: 'ค่าไฟฟ้า', qty: `${b.elec_units || 0} หน่วย x ${b.elec_rate || 0}`, amount: Number(b.elec_amount) || 0 },
+    billing.buildUtilityItem('ค่าน้ำ', storedUtilityUsage(b, 'water'), Number(b.water_rate) || 0, Number(b.water_amount) || 0),
+    billing.buildUtilityItem('ค่าไฟฟ้า', storedUtilityUsage(b, 'elec'), Number(b.elec_rate) || 0, Number(b.elec_amount) || 0),
   ];
   if (Number(b.wifi) > 0) {
     items.push({ label: 'ค่าอินเทอร์เน็ต', qty: '1 เดือน', amount: Number(b.wifi) });
@@ -1398,9 +1418,13 @@ function buildStoredBillPdfObject(b, config, paymentBlock) {
     waterUnits: Number(b.water_units) || 0,
     waterRate: Number(b.water_rate) || 0,
     waterAmount: Number(b.water_amount) || 0,
+    waterPrevReading: numOrNull(b.water_prev_reading),
+    waterCurrentReading: numOrNull(b.water_current_reading),
     elecUnits: Number(b.elec_units) || 0,
     elecRate: Number(b.elec_rate) || 0,
     elecAmount: Number(b.elec_amount) || 0,
+    elecPrevReading: numOrNull(b.elec_prev_reading),
+    elecCurrentReading: numOrNull(b.elec_current_reading),
     wifi: Number(b.wifi) || 0,
     subtotal: Number(b.subtotal) || 0,
     vat: Number(b.vat) || 0,
@@ -3104,7 +3128,12 @@ function tenantCanUsePortal(t) {
 
 async function tenantSessionLookup(req) {
   const flags = await features.load(pool);
-  if (!flags.tenantPortal || !flags.tenantPortal.enabled) return null;
+  req.features = req.features || flags;
+  if (!flags.tenantPortal || !flags.tenantPortal.enabled) {
+    req.tenantPortalDisabled = true;
+    return null;
+  }
+  req.tenantPortalDisabled = false;
   const sid = req.headers.cookie ? (req.headers.cookie.match(/(?:^|;\s*)tenant_sid=([^;]+)/) || [])[1] : null;
   if (!sid) return null;
   const sidHash = hashSid(sid);
@@ -3142,7 +3171,17 @@ async function tenantSessionLookup(req) {
 async function requireTenant(req, res, next) {
   try {
     const t = await tenantSessionLookup(req);
-    if (!t) return res.status(401).json({ error: 'unauthorized' });
+    if (!t) {
+      if (req.tenantPortalDisabled) {
+        return res.status(503).json(features.disabledPayload('tenantPortal', req));
+      }
+      return res.status(401).json({
+        error: 'unauthorized',
+        code: 'TENANT_SESSION_REQUIRED',
+        hint: 'Log in again from /tenant.',
+        requestId: req.id,
+      });
+    }
     req.tenant = t;
     next();
   } catch (err) {
@@ -3256,7 +3295,15 @@ app.post('/api/tenant/logout', sameOrigin, csrfGuard, async (req, res) => {
 app.get('/api/tenant/me', async (req, res) => {
   try {
     const t = await tenantSessionLookup(req);
-    if (!t) return res.json({ tenant: null });
+    if (!t) {
+      if (req.tenantPortalDisabled) {
+        return res.status(503).json({
+          tenant: null,
+          ...features.disabledPayload('tenantPortal', req),
+        });
+      }
+      return res.json({ tenant: null });
+    }
     res.json({
       tenant: {
         id: t.tenant_id, fullName: t.full_name, phone: t.phone,
@@ -5033,8 +5080,9 @@ app.get('/api/tenant/bills', requireTenant, async (req, res) => {
   params.push(limit, offset);
   try {
     const { rows } = await pool.query(
-      `SELECT id, bill_no, period, rent, water_units, water_rate, water_amount,
-              elec_units, elec_rate, elec_amount, wifi, other,
+      `SELECT id, bill_no, period, rent,
+              water_prev_reading, water_current_reading, water_units, water_rate, water_amount,
+              elec_prev_reading, elec_current_reading, elec_units, elec_rate, elec_amount, wifi, other,
               subtotal, vat, late_fee, total,
               due_date, status, paid_at, created_at
          FROM bills
@@ -5105,8 +5153,8 @@ app.get('/api/tenant/bills/:id/pdf', requireTenant, async (req, res) => {
     // path has to assemble it from the row.
     const items = [
       { label: 'ค่าเช่าห้องพัก', qty: '1 เดือน', amount: Number(b.rent) || 0 },
-      { label: 'ค่าน้ำ', qty: `${b.water_units || 0} หน่วย × ${b.water_rate || 0}`, amount: Number(b.water_amount) || 0 },
-      { label: 'ค่าไฟฟ้า', qty: `${b.elec_units || 0} หน่วย × ${b.elec_rate || 0}`, amount: Number(b.elec_amount) || 0 },
+      billing.buildUtilityItem('ค่าน้ำ', storedUtilityUsage(b, 'water'), Number(b.water_rate) || 0, Number(b.water_amount) || 0),
+      billing.buildUtilityItem('ค่าไฟฟ้า', storedUtilityUsage(b, 'elec'), Number(b.elec_rate) || 0, Number(b.elec_amount) || 0),
     ];
     if (Number(b.wifi) > 0) {
       items.push({ label: 'ค่าอินเทอร์เน็ต', qty: '1 เดือน', amount: Number(b.wifi) });
@@ -5134,9 +5182,13 @@ app.get('/api/tenant/bills/:id/pdf', requireTenant, async (req, res) => {
       waterUnits: Number(b.water_units) || 0,
       waterRate: Number(b.water_rate) || 0,
       waterAmount: Number(b.water_amount) || 0,
+      waterPrevReading: numOrNull(b.water_prev_reading),
+      waterCurrentReading: numOrNull(b.water_current_reading),
       elecUnits: Number(b.elec_units) || 0,
       elecRate: Number(b.elec_rate) || 0,
       elecAmount: Number(b.elec_amount) || 0,
+      elecPrevReading: numOrNull(b.elec_prev_reading),
+      elecCurrentReading: numOrNull(b.elec_current_reading),
       wifi: Number(b.wifi) || 0,
       subtotal: Number(b.subtotal) || 0,
       vat: Number(b.vat) || 0,
@@ -5405,8 +5457,9 @@ app.post('/api/bills', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 
         discountPct = Number(cq.rows[0].discount_pct) || 0;
       }
     } catch { /* contracts may be empty on legacy deploys */ }
+    const roomForBilling = await meter.attachLatestBillingReadings(pool, room);
     computed = billing.buildBill({
-      room, contract: activeContract, config, features: flags,
+      room: roomForBilling, contract: activeContract, config, features: flags,
       previous,
       recurring: recurringList,
       period: b.period, dueDate: b.dueDate,
@@ -5437,6 +5490,16 @@ app.post('/api/bills', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 
       });
     }
   }
+  for (const field of ['waterPrevReading', 'waterCurrentReading', 'elecPrevReading', 'elecCurrentReading']) {
+    if (computed[field] == null || computed[field] === '') continue;
+    const n = Number(computed[field]);
+    if (!Number.isFinite(n) || n < 0) {
+      return res.status(400).json({
+        error: `invalid nonnegative bill field: ${field}`,
+        code: 'INVALID_BILL_AMOUNT',
+      });
+    }
+  }
   // Auto-link to tenant: if caller didn't pass tenantId explicitly, look up
   // the active tenant currently in this room. This is what makes bills
   // visible in the tenant portal — without it tenant_id stays NULL.
@@ -5458,14 +5521,20 @@ app.post('/api/bills', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 
     const { rows } = await pool.query(
       `INSERT INTO bills
        (bill_no, tenant_id, room_id, period, rent,
-        water_units, water_rate, water_amount,
-        elec_units, elec_rate, elec_amount,
+        water_prev_reading, water_current_reading, water_units, water_rate, water_amount,
+        elec_prev_reading, elec_current_reading, elec_units, elec_rate, elec_amount,
         wifi, other, subtotal, vat, late_fee, total, due_date, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14,$15,$16,$17,$18,'pending')
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::jsonb,$18,$19,$20,$21,$22,'pending')
        ON CONFLICT (bill_no) DO UPDATE SET
          tenant_id=COALESCE(EXCLUDED.tenant_id, bills.tenant_id),
-         rent=EXCLUDED.rent, water_units=EXCLUDED.water_units, water_rate=EXCLUDED.water_rate,
-         water_amount=EXCLUDED.water_amount, elec_units=EXCLUDED.elec_units,
+         rent=EXCLUDED.rent,
+         water_prev_reading=EXCLUDED.water_prev_reading,
+         water_current_reading=EXCLUDED.water_current_reading,
+         water_units=EXCLUDED.water_units, water_rate=EXCLUDED.water_rate,
+         water_amount=EXCLUDED.water_amount,
+         elec_prev_reading=EXCLUDED.elec_prev_reading,
+         elec_current_reading=EXCLUDED.elec_current_reading,
+         elec_units=EXCLUDED.elec_units,
          elec_rate=EXCLUDED.elec_rate, elec_amount=EXCLUDED.elec_amount,
          wifi=EXCLUDED.wifi, other=EXCLUDED.other,
          subtotal=EXCLUDED.subtotal, vat=EXCLUDED.vat, late_fee=EXCLUDED.late_fee,
@@ -5480,7 +5549,9 @@ app.post('/api/bills', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 
       [
         computed.billNo, tenantId, computed.roomId, computed.period,
         computed.rent || 0,
+        computed.waterPrevReading, computed.waterCurrentReading,
         computed.waterUnits || 0, computed.waterRate || 0, computed.waterAmount || 0,
+        computed.elecPrevReading, computed.elecCurrentReading,
         computed.elecUnits || 0, computed.elecRate || 0, computed.elecAmount || 0,
         computed.wifi || 0,
         JSON.stringify(otherForStorage || []),
@@ -8130,7 +8201,7 @@ app.post('/api/meters/:roomId/readings', sameOrigin, csrfGuard, requireAuth, req
   }
 });
 
-app.get('/api/meters/:roomId/readings', requireAuth, async (req, res) => {
+app.get('/api/meters/:roomId/readings', requireAuth, features.requireFeature('meterIot'), async (req, res) => {
   const roomId = String(req.params.roomId).slice(0, 32);
   const type = String(req.query.type || 'elec');
   if (!meter.ALLOWED_TYPES.has(type)) return res.status(400).json({ error: 'invalid type' });
@@ -8182,7 +8253,7 @@ app.post('/api/access/log', deviceOrSameOrigin, requireDeviceOrAdmin, features.r
   }
 });
 
-app.get('/api/access/logs', requireAuth, async (req, res) => {
+app.get('/api/access/logs', requireAuth, features.requireFeature('accessControl'), async (req, res) => {
   const limit = Math.min(Number(req.query.limit) || 100, 500);
   try {
     const { rows } = await pool.query(
@@ -8202,7 +8273,7 @@ app.get('/api/access/logs', requireAuth, async (req, res) => {
 // services/scheduler.tickAccessControlSync), but until now there was no
 // way for admin to actually CREATE the cards being revoked — the table
 // was effectively dead. These endpoints close that loop.
-app.get('/api/access/cards', requireAuth, async (req, res) => {
+app.get('/api/access/cards', requireAuth, features.requireFeature('accessControl'), async (req, res) => {
   try {
     const params = [];
     const where = [];
@@ -8268,7 +8339,7 @@ app.post('/api/access/cards', sameOrigin, csrfGuard, requireAuth, requireRole('o
     }
   });
 
-app.put('/api/access/cards/:id/revoke', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'),
+app.put('/api/access/cards/:id/revoke', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'), features.requireFeature('accessControl'),
   async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
@@ -8292,7 +8363,7 @@ app.put('/api/access/cards/:id/revoke', sameOrigin, csrfGuard, requireAuth, requ
     }
   });
 
-app.put('/api/access/cards/:id/restore', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'),
+app.put('/api/access/cards/:id/restore', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'), features.requireFeature('accessControl'),
   async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });

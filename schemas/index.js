@@ -160,6 +160,7 @@ schemas.generateBill = z.object({
 
 const billMoney = z.coerce.number().nonnegative().max(10_000_000);
 const billUnits = z.coerce.number().nonnegative().max(9_999_999);
+const billReading = z.coerce.number().nonnegative().max(999_999_999);
 const billLineItems = z.array(z.object({
   label: z.string().trim().min(1).max(80),
   amount: billMoney,
@@ -170,9 +171,13 @@ schemas.generateBill = schemas.generateBill.extend({
   tenantId: z.coerce.number().int().positive().optional().nullable(),
   billNo: z.string().trim().min(1).max(80).optional(),
   rent: billMoney.optional(),
+  waterPrevReading: billReading.optional().nullable(),
+  waterCurrentReading: billReading.optional().nullable(),
   waterUnits: billUnits.optional(),
   waterRate: billMoney.optional(),
   waterAmount: billMoney.optional(),
+  elecPrevReading: billReading.optional().nullable(),
+  elecCurrentReading: billReading.optional().nullable(),
   elecUnits: billUnits.optional(),
   elecRate: billMoney.optional(),
   elecAmount: billMoney.optional(),
