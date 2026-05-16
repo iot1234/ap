@@ -149,16 +149,34 @@ function fmtQty(n) {
 }
 
 function billUtilityDetail(bill, prefix, locale) {
+  // Tenant should always see how the unit count was derived, even when the
+  // bill is missing one or both meter readings (legacy data / admin manual
+  // entry). Renders "—" for missing sides so the bill stays auditable.
   const prev = numOrNull(bill?.[`${prefix}_prev_reading`]);
   const current = numOrNull(bill?.[`${prefix}_current_reading`]);
-  const units = Number(bill?.[`${prefix}_units`]) || 0;
-  const rate = Number(bill?.[`${prefix}_rate`]) || 0;
-  if (prev == null || current == null) {
-    return `${fmtQty(units)} ${locale === 'en' ? 'units' : 'หน่วย'} × ${fmtQty(rate)}`;
+  const rawUnits = Number(bill?.[`${prefix}_units`]);
+  const units = Number.isFinite(rawUnits) ? Math.max(0, rawUnits) : 0;
+  const rawRate = Number(bill?.[`${prefix}_rate`]);
+  const rate = Number.isFinite(rawRate) ? Math.max(0, rawRate) : 0;
+  const isEn = locale === 'en';
+  const unitsLabel = isEn ? 'units' : 'หน่วย';
+  const fr = (v) => v == null ? '—' : fmtQty(v);
+  const rateTail = rate > 0 ? ` × ${fmtQty(rate)}` : '';
+
+  if (prev == null && current == null) {
+    if (units <= 0) return isEn ? 'No usage' : 'ไม่มีการใช้งาน';
+    return isEn
+      ? `${fmtQty(units)} ${unitsLabel}${rateTail} (no meter reading)`
+      : `${fmtQty(units)} ${unitsLabel}${rateTail} (ไม่มีเลขมิเตอร์)`;
   }
-  return locale === 'en'
-    ? `Before ${fmtQty(prev)}  After ${fmtQty(current)}  Used ${fmtQty(units)} units × ${fmtQty(rate)}`
-    : `เลขก่อน ${fmtQty(prev)}  เลขหลัง ${fmtQty(current)}  ใช้ ${fmtQty(units)} หน่วย × ${fmtQty(rate)}`;
+  const partial = prev == null || current == null;
+  const flagged = !partial && Number.isFinite(prev) && Number.isFinite(current) && current < prev;
+  const baseTh = `เลขก่อน ${fr(prev)}  เลขหลัง ${fr(current)}  ใช้ ${fmtQty(units)} ${unitsLabel}${rateTail}`;
+  const baseEn = `Before ${fr(prev)}  After ${fr(current)}  Used ${fmtQty(units)} ${unitsLabel}${rateTail}`;
+  const suffix = partial
+    ? (isEn ? ' (incomplete)' : ' (ข้อมูลไม่ครบ)')
+    : (flagged ? (isEn ? ' (meter went down)' : ' (มิเตอร์ลดลง)') : '');
+  return (isEn ? baseEn : baseTh) + suffix;
 }
 
 // --------------------------------------------------------- helpers / api ---

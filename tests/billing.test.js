@@ -98,6 +98,129 @@ test('makeBillNo is deterministic for room+period', () => {
   assert.equal(billing.makeBillNo('201', '2026-05'), 'INV-2026-05-201');
 });
 
+// --- Defensive readings handling -------------------------------------------
+// The bill PDF + tenant portal must always show before/after meter info
+// (even when one or both readings are missing) so the customer can audit
+// the unit count. Defaults to "—" for missing sides + flags anomalies
+// (meter reset, units mismatch) so admin can fix before the bill goes out.
+
+test('buildUtilityItem: both readings → normal เลขก่อน/หลัง detail', () => {
+  const usage = { units: 10, prevReading: 100, currentReading: 110, hasReadings: true };
+  const item = billing.buildUtilityItem('ค่าน้ำ', usage, 18, 180);
+  assert.match(item.detail, /เลขก่อน 100/);
+  assert.match(item.detail, /เลขหลัง 110/);
+  assert.match(item.detail, /ใช้ 10 หน่วย/);
+  assert.doesNotMatch(item.detail, /ไม่ครบ|ลดลง|ไม่ตรง/);
+});
+
+test('buildUtilityItem: only prev reading → marked incomplete with dash', () => {
+  const usage = { units: 0, prevReading: 100, currentReading: null, hasReadings: false };
+  const item = billing.buildUtilityItem('ค่าน้ำ', usage, 18, 0);
+  assert.match(item.detail, /เลขก่อน 100/);
+  assert.match(item.detail, /เลขหลัง —/);
+  assert.match(item.detail, /ข้อมูลไม่ครบ/);
+});
+
+test('buildUtilityItem: only current reading → marked incomplete with dash', () => {
+  const usage = { units: 0, prevReading: null, currentReading: 110, hasReadings: false };
+  const item = billing.buildUtilityItem('ค่าน้ำ', usage, 18, 0);
+  assert.match(item.detail, /เลขก่อน —/);
+  assert.match(item.detail, /เลขหลัง 110/);
+  assert.match(item.detail, /ข้อมูลไม่ครบ/);
+});
+
+test('buildUtilityItem: no readings but units > 0 → "ไม่ได้บันทึกเลขมิเตอร์"', () => {
+  const usage = { units: 5, prevReading: null, currentReading: null, hasReadings: false };
+  const item = billing.buildUtilityItem('ค่าน้ำ', usage, 18, 90);
+  assert.match(item.detail, /ใช้ 5 หน่วย/);
+  assert.match(item.detail, /ไม่ได้บันทึกเลขมิเตอร์/);
+});
+
+test('buildUtilityItem: no readings + no usage → "ไม่มีการใช้งาน"', () => {
+  const usage = { units: 0, prevReading: null, currentReading: null, hasReadings: false };
+  const item = billing.buildUtilityItem('ค่าน้ำ', usage, 18, 0);
+  assert.equal(item.detail, 'ไม่มีการใช้งาน');
+});
+
+test('buildUtilityItem: meter went backwards → flagged with warning', () => {
+  // Common cause: meter rolled over (digital reset) or admin typo. Don't
+  // silently bill a negative number — surface the anomaly in the detail
+  // line so admin sees it before sending. Caller is expected to clamp
+  // units to 0 (resolveUtilityUsage does this).
+  const usage = { units: 0, prevReading: 200, currentReading: 100, hasReadings: true };
+  const item = billing.buildUtilityItem('ค่าน้ำ', usage, 18, 0);
+  assert.match(item.detail, /มิเตอร์ลดลง/);
+});
+
+test('buildUtilityItem: units mismatch derived (admin override) → flagged', () => {
+  // Stored units=50 but readings imply 10 — admin manually overrode.
+  // The bill prints stored units (the legal record) but the detail line
+  // shows the mismatch so admin sees it.
+  const usage = { units: 50, prevReading: 100, currentReading: 110, hasReadings: true };
+  const item = billing.buildUtilityItem('ค่าน้ำ', usage, 18, 900);
+  assert.match(item.detail, /หน่วยไม่ตรงกับเลขมิเตอร์/);
+  assert.match(item.detail, /คำนวณได้ 10/);
+});
+
+test('buildUtilityItem: NaN/null rate → drops × rate tail without crash', () => {
+  const usage = { units: 5, prevReading: 100, currentReading: 105, hasReadings: true };
+  // null rate → no × tail in qty
+  const item = billing.buildUtilityItem('ค่าน้ำ', usage, null, 0);
+  assert.equal(item.qty, '5 หน่วย');
+  // NaN amount → coerced to 0
+  const itemNaN = billing.buildUtilityItem('ค่าน้ำ', usage, NaN, NaN);
+  assert.equal(itemNaN.amount, 0);
+});
+
+test('buildUtilityItem: undefined usage → safe defaults (no crash)', () => {
+  const item = billing.buildUtilityItem('ค่าน้ำ', undefined, 18, 0);
+  assert.equal(item.qty, '0 หน่วย × 18');
+  assert.equal(item.amount, 0);
+  assert.equal(item.detail, 'ไม่มีการใช้งาน');
+});
+
+test('resolveUtilityUsage: clamps negative readings delta to 0', () => {
+  // Defence-in-depth — buildUtilityItem also flags this, but the resolver
+  // must not bill the tenant for negative units even when called directly.
+  const room = { waterPrevReading: 200, waterCurrentReading: 100, waterUnits: 999 };
+  const u = billing.resolveUtilityUsage(room, 'water');
+  assert.equal(u.units, 0);
+  assert.equal(u.prevReading, 200);
+  assert.equal(u.currentReading, 100);
+});
+
+test('resolveUtilityUsage: missing room object → zero-shape (no crash)', () => {
+  const u = billing.resolveUtilityUsage(null, 'water');
+  assert.equal(u.units, 0);
+  assert.equal(u.prevReading, null);
+  assert.equal(u.currentReading, null);
+  assert.equal(u.hasReadings, false);
+});
+
+test('resolveUtilityUsageFromBillRow: snake_case fields → same shape', () => {
+  const row = {
+    water_prev_reading: 100,
+    water_current_reading: 110,
+    water_units: 10,
+  };
+  const u = billing.resolveUtilityUsageFromBillRow(row, 'water');
+  assert.equal(u.units, 10);
+  assert.equal(u.prevReading, 100);
+  assert.equal(u.currentReading, 110);
+  assert.equal(u.hasReadings, true);
+});
+
+test('resolveUtilityUsageFromBillRow: NaN/missing fields → defensive zero-shape', () => {
+  const u1 = billing.resolveUtilityUsageFromBillRow({}, 'water');
+  assert.equal(u1.units, 0);
+  assert.equal(u1.hasReadings, false);
+  const u2 = billing.resolveUtilityUsageFromBillRow(null, 'elec');
+  assert.equal(u2.units, 0);
+  // NaN-coerced units come back as 0, not NaN
+  const u3 = billing.resolveUtilityUsageFromBillRow({ water_units: 'oops' }, 'water');
+  assert.equal(u3.units, 0);
+});
+
 test('buildPaymentBlock: payment.promptpay (form key) wins over legacy promptpayTarget', () => {
   const block = billing.buildPaymentBlock({ payment: { promptpay: '0801234567', promptpayTarget: '0900000000' } });
   assert.equal(block.promptpayTarget, '0801234567');

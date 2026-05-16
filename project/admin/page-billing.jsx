@@ -30,11 +30,24 @@ function unitsFromReadingsOrFallback(room, prefix) {
 }
 
 function utilityDetailFromBill(b, prefix) {
+  // Mirror services/billing.js#buildUtilityItem detail logic so the admin
+  // table cell shows the same before/after string the tenant sees on the
+  // PDF — never an empty cell. Missing readings render as "—".
   const prev = numOrNull(b?.[`${prefix}PrevReading`]);
   const current = numOrNull(b?.[`${prefix}CurrentReading`]);
-  const units = Number(b?.[`${prefix}Units`]) || 0;
-  if (prev == null || current == null) return '';
-  return `เลขก่อน ${fmtQty(prev)}  เลขหลัง ${fmtQty(current)}  ใช้ ${fmtQty(units)} หน่วย`;
+  const rawUnits = Number(b?.[`${prefix}Units`]);
+  const units = Number.isFinite(rawUnits) ? Math.max(0, rawUnits) : 0;
+  const fr = (v) => v == null ? '—' : fmtQty(v);
+  if (prev == null && current == null) {
+    if (units <= 0) return 'ไม่มีการใช้งาน';
+    return `ใช้ ${fmtQty(units)} หน่วย (ไม่มีเลขมิเตอร์)`;
+  }
+  const partial = prev == null || current == null;
+  const flagged = !partial && Number.isFinite(prev) && Number.isFinite(current) && current < prev;
+  const base = `เลขก่อน ${fr(prev)}  เลขหลัง ${fr(current)}  ใช้ ${fmtQty(units)} หน่วย`;
+  if (partial) return base + ' (ข้อมูลไม่ครบ)';
+  if (flagged) return base + ' (มิเตอร์ลดลง)';
+  return base;
 }
 
 function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {

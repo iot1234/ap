@@ -172,22 +172,53 @@ function firstFinite(...values) {
 }
 
 function resolveUtilityUsage(room, prefix) {
+  // Accept null/undefined rooms gracefully — every reader (bill builder,
+  // tenant portal, admin preview) calls this with whatever the caller has,
+  // including legacy blobs missing meter fields entirely. Returning a
+  // zero-shape lets the bill render the "no usage / no meter" branch
+  // without a defensive guard at every call site.
+  const r = room || {};
   const prevReading = firstFinite(
-    room?.[`${prefix}PrevReading`],
-    room?.[`${prefix}PreviousReading`],
-    room?.[`${prefix}ReadingBefore`],
-    room?.[`${prefix}Before`]
+    r[`${prefix}PrevReading`],
+    r[`${prefix}PreviousReading`],
+    r[`${prefix}ReadingBefore`],
+    r[`${prefix}Before`]
   );
   const currentReading = firstFinite(
-    room?.[`${prefix}CurrentReading`],
-    room?.[`${prefix}ReadingAfter`],
-    room?.[`${prefix}After`]
+    r[`${prefix}CurrentReading`],
+    r[`${prefix}ReadingAfter`],
+    r[`${prefix}After`]
   );
-  const fallbackUnits = Math.max(0, Number(room?.[`${prefix}Units`]) || 0);
+  const rawUnits = Number(r[`${prefix}Units`]);
+  const fallbackUnits = Number.isFinite(rawUnits) ? Math.max(0, rawUnits) : 0;
   let units = fallbackUnits;
   if (prevReading != null && currentReading != null) {
+    // Clamp negative usage (meter reset / typo) to 0 instead of billing the
+    // tenant for a negative number of kWh. The detail line in
+    // buildUtilityItem surfaces the anomaly so admin can fix the reading
+    // before the bill goes out.
     units = Math.max(0, round2(currentReading - prevReading));
   }
+  return {
+    units,
+    prevReading,
+    currentReading,
+    hasReadings: prevReading != null && currentReading != null,
+  };
+}
+
+// Sibling resolver for bills already persisted in the `bills` table.
+// The DB row uses snake_case (`water_prev_reading` etc.) so the room-shape
+// resolver above can't be used directly. Both functions return the same
+// shape so buildUtilityItem treats them interchangeably. Trusts the stored
+// `*_units` value (the legal record at bill-issue time) rather than
+// recomputing from readings — admin may have intentionally over/underridden.
+function resolveUtilityUsageFromBillRow(row, prefix) {
+  const r = row || {};
+  const prevReading = firstFinite(r[`${prefix}_prev_reading`]);
+  const currentReading = firstFinite(r[`${prefix}_current_reading`]);
+  const rawUnits = Number(r[`${prefix}_units`]);
+  const units = Number.isFinite(rawUnits) ? Math.max(0, rawUnits) : 0;
   return {
     units,
     prevReading,
@@ -201,16 +232,74 @@ function fmtQty(n) {
   return Number.isInteger(value) ? String(value) : value.toFixed(2);
 }
 
+// Reading-or-dash: missing readings render as "—" so the bill always shows
+// a before/after column rather than silently dropping the row. Lets tenants
+// dispute "where did this number come from?" against the printed bill.
+function fmtReadingOrDash(n) {
+  return n == null || !Number.isFinite(Number(n)) ? '—' : fmtQty(n);
+}
+
 function buildUtilityItem(label, usage, rate, amount) {
-  const item = {
-    label,
-    qty: `${fmtQty(usage.units)} หน่วย × ${fmtQty(rate)}`,
-    amount,
-  };
-  if (usage.hasReadings) {
-    item.detail = `เลขก่อน ${fmtQty(usage.prevReading)}  เลขหลัง ${fmtQty(usage.currentReading)}  ใช้ ${fmtQty(usage.units)} หน่วย`;
+  // Defensive normalisation — every caller pass goes through here, so the
+  // PDF renderer never sees NaN/undefined for an arithmetic field.
+  const u = usage || {};
+  const rawUnits = Number(u.units);
+  const safeUnits = Number.isFinite(rawUnits) ? Math.max(0, rawUnits) : 0;
+  const rawRate = Number(rate);
+  const safeRate = Number.isFinite(rawRate) ? Math.max(0, rawRate) : 0;
+  const rawAmount = Number(amount);
+  const safeAmount = Number.isFinite(rawAmount) ? rawAmount : 0;
+  // Coerce only when the source is a real number/string-number — Number(null)
+  // is 0 (finite!) so a naive Number.isFinite check would treat missing as 0
+  // and the bill would render "เลขก่อน 0 เลขหลัง 0" instead of "ไม่มีการใช้งาน".
+  const prev = (u.prevReading == null || u.prevReading === '')
+    ? null
+    : (Number.isFinite(Number(u.prevReading)) ? Number(u.prevReading) : null);
+  const current = (u.currentReading == null || u.currentReading === '')
+    ? null
+    : (Number.isFinite(Number(u.currentReading)) ? Number(u.currentReading) : null);
+
+  // Qty column: drop the "× rate" tail when there's no rate (free utility
+  // or admin-disabled meter) so the bill doesn't print "5 หน่วย × 0".
+  const qty = safeRate > 0
+    ? `${fmtQty(safeUnits)} หน่วย × ${fmtQty(safeRate)}`
+    : `${fmtQty(safeUnits)} หน่วย`;
+
+  // Detail line — ALWAYS present (this is the key fix). Earlier versions
+  // omitted detail when readings were missing, which left the tenant with
+  // no idea where the unit count came from. Four cases:
+  //   1. Both readings present — show normal "เลขก่อน/หลัง/ใช้".
+  //      Also flag anomalies: current < prev (meter reset) or stored
+  //      units != derived (admin override or data drift).
+  //   2. Partial — show what we have with — for the missing side, plus
+  //      "(ข้อมูลไม่ครบ)" so admin can correct before the next bill.
+  //   3. No readings but units > 0 — admin entered units manually without
+  //      a meter snapshot. Mark explicitly so tenant doesn't think the
+  //      number came from a meter.
+  //   4. No readings and no usage — say "no usage" so the bill is still
+  //      auditable (vs silently omitting the row).
+  let detail;
+  if (prev != null && current != null) {
+    detail = `เลขก่อน ${fmtQty(prev)}  เลขหลัง ${fmtQty(current)}  ใช้ ${fmtQty(safeUnits)} หน่วย`;
+    if (current < prev) {
+      detail += '  ⚠ มิเตอร์ลดลง (อาจรีเซ็ตหรือป้อนผิด)';
+    } else {
+      const derived = round2(current - prev);
+      // Tolerate sub-unit float drift; flag honest mismatch so admin
+      // sees the discrepancy on the printed bill before sending.
+      if (Math.abs(derived - safeUnits) > 0.5) {
+        detail += `  ⚠ หน่วยไม่ตรงกับเลขมิเตอร์ (คำนวณได้ ${fmtQty(derived)})`;
+      }
+    }
+  } else if (prev != null || current != null) {
+    detail = `เลขก่อน ${fmtReadingOrDash(prev)}  เลขหลัง ${fmtReadingOrDash(current)}  ใช้ ${fmtQty(safeUnits)} หน่วย  (ข้อมูลไม่ครบ — กรุณาตรวจสอบ)`;
+  } else if (safeUnits > 0) {
+    detail = `ใช้ ${fmtQty(safeUnits)} หน่วย (ไม่ได้บันทึกเลขมิเตอร์)`;
+  } else {
+    detail = 'ไม่มีการใช้งาน';
   }
-  return item;
+
+  return { label, qty, amount: safeAmount, detail };
 }
 
 /**
@@ -363,7 +452,7 @@ const PAYMENT_TOLERANCE_THB = 1.0;
 module.exports = {
   buildBill, buildPaymentBlock, statusOf, makeBillNo,
   formatPeriodNow, formatDueDate, formatYMD, round2,
-  resolveUtilityUsage, buildUtilityItem,
+  resolveUtilityUsage, resolveUtilityUsageFromBillRow, buildUtilityItem,
   isChargeApplicableForPeriod,
   PAYMENT_TOLERANCE_THB,
 };

@@ -56,18 +56,11 @@ function numOrNull(value) {
   return Number.isFinite(n) ? n : null;
 }
 
+// Adapter for bills-table snake_case rows. Delegates to billing service so
+// the readings normalisation (anomaly flags, NaN guards) is shared with the
+// tenant-side renderer in server.js.
 function storedUtilityUsage(b, prefix) {
-  const unitsKey = `${prefix}_units`;
-  const prevKey = `${prefix}_prev_reading`;
-  const currentKey = `${prefix}_current_reading`;
-  const prevReading = numOrNull(b[prevKey]);
-  const currentReading = numOrNull(b[currentKey]);
-  return {
-    units: Number(b[unitsKey]) || 0,
-    prevReading,
-    currentReading,
-    hasReadings: prevReading != null && currentReading != null,
-  };
+  return billing.resolveUtilityUsageFromBillRow(b, prefix);
 }
 
 function getRenderBillId(req, bill) {
