@@ -10320,7 +10320,13 @@ app.get('/api/admin/notifications', requireAuth, requireRole('owner', 'manager')
          ORDER BY created_at DESC LIMIT 200`,
       params
     );
-    res.json({ ok: true, items: rows });
+    res.json({
+      ok: true,
+      items: rows.map((row) => ({
+        ...row,
+        diagnostic: row.last_error ? notifQueue.diagnoseFailure(row) : null,
+      })),
+    });
   } catch (err) {
     res.status(500).json({ error: 'internal error' });
   }

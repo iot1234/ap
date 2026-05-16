@@ -1667,6 +1667,12 @@ test('healthCheck surfaces data integrity and failed notification backlog', () =
   const hc = fs.readFileSync(path.join(__dirname, '..', 'services', 'healthCheck.js'), 'utf8');
   assert.match(hc, /failed_total/,
     'notification queue check must count old failed backlog, not only recent failures');
+  assert.match(hc, /recent_failed_breakdown/,
+    'notification queue check must include a grouped recent-failure breakdown');
+  assert.match(hc, /not configured\|not implemented\|host\\\/user\\\/pass/,
+    'notification queue health must warn on provider configuration failures even when the count is small');
+  assert.match(hc, /Settings > API\/Keys/,
+    'notification queue health must tell admins exactly where to fix missing provider credentials');
   assert.match(hc, /id: 'data_integrity'/,
     'health checks must include core data integrity probe');
   assert.match(hc, /orphan_payable_bills/,
@@ -2754,6 +2760,25 @@ test('notifier falls back to notification queue when all immediate channels fail
     'must enqueue line as fallback');
   assert.match(src, /'notifier-fallback'/,
     'fallback enqueue carries source tag');
+});
+
+test('admin notification queue exposes failure diagnostics and retry guidance', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const routeIdx = server.indexOf("app.get('/api/admin/notifications'");
+  assert.ok(routeIdx > 0, 'admin notification queue endpoint must exist');
+  const route = server.slice(routeIdx, server.indexOf("app.post('/api/admin/notifications/:id/retry'", routeIdx));
+  assert.match(route, /notifQueue\.diagnoseFailure\(row\)/,
+    'notification API must attach structured diagnostics for failed rows');
+  assert.match(route, /diagnostic: row\.last_error/,
+    'diagnostics should only be attached when a row has an actual failure');
+
+  const page = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-notifications-queue.jsx'), 'utf8');
+  assert.match(page, /x\.diagnostic\.hint/,
+    'notification queue UI must show the actionable failure hint');
+  assert.match(page, /Retry หลังแก้ config/,
+    'retry button must make config-dependent retry timing clear');
 });
 
 test('lineBinding tryBind catches 23505 → clean reason', () => {

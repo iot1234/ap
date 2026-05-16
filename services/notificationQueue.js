@@ -14,6 +14,51 @@ const crypto = require('crypto');
 const MAX_RETRY = 3;
 const BACKOFF_MIN = [60_000, 5 * 60_000, 30 * 60_000]; // 1m, 5m, 30m
 
+function diagnoseFailure(row) {
+  const channel = String(row?.channel || '').toLowerCase();
+  const err = String(row?.last_error || '').trim();
+  const lower = err.toLowerCase();
+  if (!err) return null;
+  if (channel === 'email' && /email not configured|smtp .*not configured|smtp host\/user\/pass/.test(lower)) {
+    return {
+      code: 'EMAIL_NOT_CONFIGURED',
+      title: 'ยังไม่ได้ตั้งค่าอีเมล',
+      hint: 'ตั้งค่า SMTP_HOST, SMTP_USER, SMTP_PASS, SMTP_FROM และ OWNER_EMAIL ที่ Settings > API/Keys แล้วค่อย Retry รายการนี้',
+      retryAfterFix: true,
+    };
+  }
+  if (channel === 'line' && /line not configured|oa resolve failed|token rejected|401|403/.test(lower)) {
+    return {
+      code: 'LINE_NOT_CONFIGURED',
+      title: 'LINE OA ต้องตรวจสอบ',
+      hint: 'ตรวจ default LINE OA, channel access token, channel secret และการผูก LINE ของผู้เช่าก่อน Retry',
+      retryAfterFix: true,
+    };
+  }
+  if (channel === 'sms' && /sms provider not configured|not implemented|provider .*not configured/.test(lower)) {
+    return {
+      code: 'SMS_NOT_CONFIGURED',
+      title: 'ยังไม่ได้ตั้งค่า SMS',
+      hint: 'ติดตั้ง/ตั้งค่า SMS provider ที่รองรับและ credentials ให้ครบก่อน Retry รายการ SMS',
+      retryAfterFix: true,
+    };
+  }
+  if (/rate limit|429/.test(lower)) {
+    return {
+      code: 'PROVIDER_RATE_LIMIT',
+      title: 'ผู้ให้บริการจำกัดจำนวนส่ง',
+      hint: 'รอให้ provider reset รอบ limit แล้วค่อย Retry หรือปล่อยให้คิว retry ตามรอบ',
+      retryAfterFix: false,
+    };
+  }
+  return {
+    code: 'DELIVERY_FAILED',
+    title: 'ส่งแจ้งเตือนไม่สำเร็จ',
+    hint: 'ตรวจ provider configuration และ server logs แก้สาเหตุหลัก แล้วค่อย Retry',
+    retryAfterFix: true,
+  };
+}
+
 function retryKeyForRowId(rowId) {
   const hex = crypto
     .createHash('sha256')
@@ -329,4 +374,12 @@ async function retryById(pool, id) {
   );
 }
 
-module.exports = { enqueue, tick, start, stop, retryById, _retryKeyForRowId: retryKeyForRowId };
+module.exports = {
+  enqueue,
+  tick,
+  start,
+  stop,
+  retryById,
+  diagnoseFailure,
+  _retryKeyForRowId: retryKeyForRowId,
+};

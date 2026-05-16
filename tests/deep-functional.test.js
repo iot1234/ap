@@ -304,6 +304,30 @@ test('notifQueue LINE retry key is a deterministic UUID accepted by LINE', () =>
     'LINE rejects ad-hoc keys like notifq-160; use UUID format');
 });
 
+test('notifQueue explains provider-configuration failures for admins', () => {
+  const notifQueue = require('../services/notificationQueue');
+  const emailDiag = notifQueue.diagnoseFailure({
+    channel: 'email',
+    last_error: 'email not configured',
+  });
+  assert.equal(emailDiag.code, 'EMAIL_NOT_CONFIGURED');
+  assert.match(emailDiag.hint, /SMTP_HOST/);
+  assert.equal(emailDiag.retryAfterFix, true);
+
+  const smsDiag = notifQueue.diagnoseFailure({
+    channel: 'sms',
+    last_error: "SMS provider 'foo' is not implemented",
+  });
+  assert.equal(smsDiag.code, 'SMS_NOT_CONFIGURED');
+
+  const rateDiag = notifQueue.diagnoseFailure({
+    channel: 'line',
+    last_error: 'HTTP 429 rate limit',
+  });
+  assert.equal(rateDiag.code, 'PROVIDER_RATE_LIMIT');
+  assert.equal(rateDiag.retryAfterFix, false);
+});
+
 test('notifQueue.tick: claims pending rows + retries on failure with exponential backoff', async () => {
   // We can't call processOne directly (not exported), but we can drive
   // tick() which claims one row and processes it. To assert backoff math

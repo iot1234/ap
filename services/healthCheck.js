@@ -197,6 +197,36 @@ async function checkNotificationQueue(pool) {
     const failedTotal = Number(r.failed_total) || 0;
     const pending = Number(r.pending) || 0;
     const detail = { pending, stuck, recent_failed: failed, failed_total: failedTotal };
+    const failedBreakdown = await pool.query(`
+      SELECT
+        channel,
+        left(coalesce(last_error, ''), 120) AS error,
+        COUNT(*)::int AS count
+      FROM notifications_queue
+      WHERE status='failed'
+        AND created_at > NOW() - INTERVAL '24 hours'
+      GROUP BY channel, left(coalesce(last_error, ''), 120)
+      ORDER BY count DESC, channel ASC
+      LIMIT 8`);
+    const breakdown = (
+      failedBreakdown && Array.isArray(failedBreakdown.rows) ? failedBreakdown.rows : []
+    ).map((x) => ({
+      channel: x.channel || 'unknown',
+      error: x.error || '',
+      count: Number(x.count) || 0,
+    }));
+    detail.recent_failed_breakdown = breakdown;
+    const configFailures = breakdown.filter((x) => /not configured|not implemented|host\/user\/pass/i.test(x.error));
+    if (configFailures.length > 0) {
+      return {
+        status: 'warn',
+        message: `${configFailures.reduce((sum, x) => sum + x.count, 0)} failed notifications need provider configuration`,
+        detail: {
+          ...detail,
+          nextAction: 'Open Settings > API/Keys, complete the missing LINE/SMTP/SMS credentials, then retry failed rows from the notification queue.',
+        },
+      };
+    }
     if (stuck > 5)  return { status: 'error', message: `${stuck} notifications stuck > 15min — queue worker may be wedged`, detail };
     if (failed > 20) return { status: 'warn', message: `${failed} notifications failed in the last hour`, detail };
     if (failedTotal > 50) return { status: 'warn', message: `${failedTotal} failed notifications in backlog — review provider/secrets before relying on alerts`, detail };

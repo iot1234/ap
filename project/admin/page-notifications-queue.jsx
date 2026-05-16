@@ -45,6 +45,7 @@ function PageNotificationsQueue({ setToast }) {
 
   const colors = { pending: '#c08a2a', sent: '#2f8f5b', failed: '#b94a48' };
   const channelIcon = { line: '💬', email: '📧', sms: '📱' };
+  const retryLabel = (x) => x?.diagnostic?.retryAfterFix ? 'Retry หลังแก้ config' : 'Retry';
 
   return (
     <PageContainer>
@@ -81,12 +82,27 @@ function PageNotificationsQueue({ setToast }) {
                       ⚠ {x.last_error}
                     </div>
                   )}
+                  {x.diagnostic ? (
+                    <div style={{
+                      marginTop: 8,
+                      padding: 10,
+                      borderRadius: 8,
+                      background: '#fffbe8',
+                      border: '1px solid #f0e3a7',
+                      color: '#6b5b1a',
+                      fontSize: 12.5,
+                      lineHeight: 1.45,
+                    }}>
+                      <div style={{ fontWeight: 600 }}>{x.diagnostic.title || x.diagnostic.code}</div>
+                      <div>{x.diagnostic.hint}</div>
+                    </div>
+                  ) : null}
                 </div>
                 <Pill color={colors[x.status] || C.muted}>{x.status}</Pill>
                 <div>
                   {(x.status === 'failed' || x.status === 'pending') && (
                     <Btn size="sm" disabled={busy === x.id} onClick={() => retry(x.id)}>
-                      {busy === x.id ? '…' : 'Retry'}
+                      {busy === x.id ? '…' : retryLabel(x)}
                     </Btn>
                   )}
                 </div>
