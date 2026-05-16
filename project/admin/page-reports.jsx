@@ -26,6 +26,11 @@ function PageReports({ rooms, config, addActivity, setToast }) {
   // Replaced Math.sin fabrications — see audit, May 2026.
   const [revRows, setRevRows] = React.useState(null);   // null=loading
   const [occRows, setOccRows] = React.useState(null);
+  const currentPeriod = useMemo(() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+  }, []);
+  const [currentBills, setCurrentBills] = React.useState(null);
 
   // Pull live aggregates from the server. Falls back gracefully to local
   // computeStats if the server is unreachable.
@@ -56,6 +61,32 @@ function PageReports({ rooms, config, addActivity, setToast }) {
 
   const stats = useMemo(() => computeStats(rooms, config), [rooms, config]);
   const list = useMemo(() => Object.values(rooms), [rooms]);
+  const roomById = useMemo(() => {
+    const out = {};
+    for (const r of list) out[String(r.id)] = r;
+    return out;
+  }, [list]);
+
+  React.useEffect(() => {
+    let cancel = false;
+    fetch(`/api/bills?period=${encodeURIComponent(currentPeriod)}&limit=500`, { credentials: 'include' })
+      .then(async (r) => (r.ok ? (await r.json()).bills : []))
+      .then((rows) => { if (!cancel) setCurrentBills(Array.isArray(rows) ? rows : []); })
+      .catch(() => { if (!cancel) setCurrentBills([]); });
+    return () => { cancel = true; };
+  }, [currentPeriod]);
+
+  const issuedBillsThisMonth = useMemo(() => (
+    Array.isArray(currentBills) ? currentBills.filter((b) => b && b.status !== 'void') : []
+  ), [currentBills]);
+  const currentRevenueRow = useMemo(() => (
+    revRows ? revRows.find((x) => x.period === currentPeriod) || null : null
+  ), [revRows, currentPeriod]);
+  const currentPaidRevenue = revRows ? Number(currentRevenueRow?.paid_amount || 0) : null;
+  const currentOverdueRevenue = revRows ? Number(currentRevenueRow?.overdue_amount || 0) : null;
+  const avgRevenuePerIssuedRoom = issuedBillsThisMonth.length
+    ? Math.round(issuedBillsThisMonth.reduce((s, b) => s + (Number(b.total) || 0), 0) / issuedBillsThisMonth.length)
+    : 0;
 
   // Revenue trend — slice the year-long /api/reports/revenue series down to
   // the selected range (3 / 6 / 12 months). Each row carries paid_amount;
@@ -126,33 +157,36 @@ function PageReports({ rooms, config, addActivity, setToast }) {
     { label: 'ปรับปรุง',  value: stats.counts.maintenance, color: '#7a6c54' },
   ].filter(s => s.value > 0);
 
-  // Revenue by type
+  // Revenue by type from issued bills for the current period.
   const revenueByType = useMemo(() => {
     const totals = {};
-    list.forEach(r => {
-      if (r.tenant) {
-        totals[r.type] = (totals[r.type] || 0) + r.rent + (r.water||0) + (r.elec||0) + (r.wifi||0);
-      }
-    });
+    for (const b of issuedBillsThisMonth) {
+      const room = roomById[String(b.room_id || b.roomId)];
+      const type = room?.type || 'standard';
+      totals[type] = (totals[type] || 0) + (Number(b.total) || 0);
+    }
     return Object.entries(totals).map(([k, v]) => ({
-      label: ADMIN_ROOM_TYPES[k].th,
+      label: ADMIN_ROOM_TYPES[k]?.th || k,
       value: v,
-      color: ADMIN_ROOM_TYPES[k].accent,
+      color: ADMIN_ROOM_TYPES[k]?.accent || C.accent,
     })).sort((a, b) => b.value - a.value);
-  }, [list]);
+  }, [issuedBillsThisMonth, roomById]);
   const totalByType = revenueByType.reduce((s, x) => s + x.value, 0) || 1;
 
-  // Top rooms
-  const topRooms = useMemo(() => list
-    .filter(r => r.tenant)
-    .map(r => ({
-      id: r.id,
-      name: r.tenant.name,
-      type: ADMIN_ROOM_TYPES[r.type].th,
-      total: r.rent + (r.water||0) + (r.elec||0) + (r.wifi||0),
-    }))
+  // Top rooms from issued bills for the current period.
+  const topRooms = useMemo(() => issuedBillsThisMonth
+    .map((b) => {
+      const room = roomById[String(b.room_id || b.roomId)] || {};
+      return {
+        id: b.room_id || b.roomId,
+        name: room.tenant?.name || '',
+        type: ADMIN_ROOM_TYPES[room.type]?.th || room.type || '',
+        total: Number(b.total) || 0,
+      };
+    })
+    .filter((r) => r.total > 0)
     .sort((a, b) => b.total - a.total)
-    .slice(0, 8), [list]);
+    .slice(0, 8), [issuedBillsThisMonth, roomById]);
 
   // Floor performance — derive floors from actual rooms data so floors 6+
   // an admin added show up in the breakdown. Previously hardcoded
@@ -170,13 +204,16 @@ function PageReports({ rooms, config, addActivity, setToast }) {
       const rooms = list.filter(r => r.floor === f);
       const occupied = rooms.filter(r => r.status === 'occupied' || r.status === 'overdue' || r.status === 'reserved').length;
       const total = rooms.length;
-      const revenue = rooms.filter(r => r.tenant).reduce((s, r) => s + r.rent + (r.water||0) + (r.elec||0) + (r.wifi||0), 0);
+      const revenue = issuedBillsThisMonth.reduce((s, b) => {
+        const room = roomById[String(b.room_id || b.roomId)];
+        return room && Number(room.floor) === f ? s + (Number(b.total) || 0) : s;
+      }, 0);
       // Guard against division-by-zero — floors that exist in `floors` always
       // have at least one room so total > 0 in practice, but defensive.
       const occupancy = total > 0 ? Math.round(occupied / total * 100) : 0;
       return { floor: f, total, occupied, occupancy, revenue };
     });
-  }, [list]);
+  }, [list, issuedBillsThisMonth, roomById]);
 
   return (
     <PageContainer>
@@ -202,7 +239,7 @@ function PageReports({ rooms, config, addActivity, setToast }) {
               setTimeout(() => window.printPage(), 300);
             }}>ส่งออก PDF</Btn>
             <Btn variant="secondary" icon="📊" onClick={() => {
-              window.open('/api/reports/bills.xlsx', '_blank');
+              window.open(`/api/reports/bills.xlsx?period=${encodeURIComponent(currentPeriod)}`, '_blank');
               addActivity && addActivity({ icon: '📊', text: 'ดาวน์โหลดบิลทั้งหอเป็น Excel', type: 'system' });
             }}>Excel บิลทั้งหอ</Btn>
           </>
@@ -227,10 +264,10 @@ function PageReports({ rooms, config, addActivity, setToast }) {
       {view === 'charts' && (<>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 14, marginBottom: 20 }}>
-        <KpiCard label="รายได้รวม"  value={fmtCurrency(stats.revenue)} change={revChangePct} sub="เดือนนี้" color="accent" icon="💰" />
+        <KpiCard label="รายได้รวม"  value={currentPaidRevenue == null ? '-' : fmtCurrency(currentPaidRevenue)} change={revChangePct} sub="เดือนนี้ · จากบิลที่ชำระแล้ว" color="accent" icon="💰" />
         <KpiCard label="อัตราเข้าพักเฉลี่ย" value={`${stats.occupancy}%`} change={occChangePct} color="success" icon="📊" />
-        <KpiCard label="รายได้/ห้อง"     value={fmtCurrency(Math.round(stats.revenue / Math.max(1, stats.counts.occupied + stats.counts.overdue)))} sub="ต่อเดือน" color="info" icon="🏠" />
-        <KpiCard label="ค้างชำระ"      value={fmtCurrency(stats.overdueAmt)} sub={`${stats.counts.overdue} ห้อง`} color="danger" icon="⚠️" />
+        <KpiCard label="รายได้/ห้อง"     value={fmtCurrency(avgRevenuePerIssuedRoom)} sub="เฉลี่ยจากบิลที่ออก" color="info" icon="🏠" />
+        <KpiCard label="ค้างชำระ"      value={currentOverdueRevenue == null ? '-' : fmtCurrency(currentOverdueRevenue)} sub={`${stats.counts.overdue} ห้อง`} color="danger" icon="⚠️" />
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 16, marginBottom: 16 }}>

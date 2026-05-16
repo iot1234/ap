@@ -12,6 +12,10 @@ function PageOverview({ rooms, config, bookings, activities, addActivity, setToa
 
   const stats = useMemo(() => computeStats(rooms, config), [rooms, config]);
   const list  = useMemo(() => Object.values(rooms), [rooms]);
+  const currentPeriod = useMemo(() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+  }, []);
 
   // --- Real revenue trend from DB. Pulls 12 months of bills, slices to last
   // 6 for the dashboard chart. Falls back to an empty series if the endpoint
@@ -60,6 +64,17 @@ function PageOverview({ rooms, config, bookings, activities, addActivity, setToa
     return Math.round(((cur - prev) / prev) * 100);
   }, [revenueRows]);
 
+  const currentRevenueRow = useMemo(() => {
+    if (!revenueRows) return null;
+    return revenueRows.find((x) => x.period === currentPeriod) || null;
+  }, [revenueRows, currentPeriod]);
+  const revenueKpi = revenueRows
+    ? Number(currentRevenueRow?.paid_amount || 0)
+    : null;
+  const overdueKpiAmount = revenueRows
+    ? Number(currentRevenueRow?.overdue_amount || 0)
+    : null;
+
   // --- Status distribution ----
   const statusSegs = [
     { label: 'มีผู้เช่า',  value: stats.counts.occupied,    color: '#475569' },
@@ -69,20 +84,28 @@ function PageOverview({ rooms, config, bookings, activities, addActivity, setToa
     { label: 'ปรับปรุง',  value: stats.counts.maintenance, color: '#7a6c54' },
   ].filter(s => s.value > 0);
 
-  // --- Top revenue rooms (use current config rates) ----
+  // --- Top revenue rooms from issued bills for the current period ----
+  const [currentBills, setCurrentBills] = React.useState(null);
+  React.useEffect(() => {
+    let cancel = false;
+    fetch(`/api/bills?period=${encodeURIComponent(currentPeriod)}&limit=500`, { credentials: 'same-origin' })
+      .then(async (r) => (r.ok ? (await r.json()).bills : []))
+      .then((rows) => { if (!cancel) setCurrentBills(Array.isArray(rows) ? rows : []); })
+      .catch(() => { if (!cancel) setCurrentBills([]); });
+    return () => { cancel = true; };
+  }, [currentPeriod]);
   const topRooms = useMemo(() => {
-    const wRate = config.utilities?.waterRate ?? 18;
-    const eRate = config.utilities?.elecRate  ?? 8;
-    const wifi  = config.utilities?.wifi       ?? 250;
-    return list
-      .filter(r => r.tenant)
-      .map(r => ({
-        id: r.id,
-        total: r.rent + (r.waterUnits||0)*wRate + (r.elecUnits||0)*eRate + (r.wifi || wifi),
+    if (!Array.isArray(currentBills)) return [];
+    return currentBills
+      .filter((b) => b && b.status !== 'void')
+      .map((b) => ({
+        id: b.room_id || b.roomId || '-',
+        total: Number(b.total || 0),
       }))
+      .filter((b) => b.total > 0)
       .sort((a, b) => b.total - a.total)
       .slice(0, 5);
-  }, [list, config]);
+  }, [currentBills]);
   const topMax = topRooms[0]?.total || 1;
 
   // --- Upcoming contract endings from the relational contracts table ----
@@ -139,9 +162,9 @@ function PageOverview({ rooms, config, bookings, activities, addActivity, setToa
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 14, marginBottom: 24 }}>
         <KpiCard
           label="รายได้เดือนนี้"
-          value={fmtCurrency(stats.revenue)}
+          value={revenueRows ? fmtCurrency(revenueKpi) : '-'}
           change={revChangePct}
-          sub={revChangePct == null ? 'ยังไม่มีข้อมูลเปรียบเทียบ' : 'เทียบเดือนก่อน'}
+          sub={revenueRows == null ? 'กำลังโหลดจากบิลที่ชำระแล้ว' : (revChangePct == null ? 'จากบิลที่ชำระแล้ว' : 'เทียบเดือนก่อน')}
           color="accent"
           icon="💰"
         />
@@ -162,7 +185,7 @@ function PageOverview({ rooms, config, bookings, activities, addActivity, setToa
         <KpiCard
           label="ค้างชำระ"
           value={fmt(stats.counts.overdue)}
-          sub={fmtCurrency(stats.overdueAmt)}
+          sub={overdueKpiAmount == null ? 'กำลังโหลดจากบิล' : fmtCurrency(overdueKpiAmount)}
           color="danger"
           icon="⚠️"
         />
@@ -255,8 +278,12 @@ function PageOverview({ rooms, config, bookings, activities, addActivity, setToa
 
         <Card>
           <SectionHeading title="ห้องรายได้สูงสุด" subtitle="Top 5 ของเดือนนี้" level={3} />
-          {topRooms.length === 0 ? (
-            <EmptyState icon="📊" title="ยังไม่มีข้อมูล" />
+          {currentBills == null ? (
+            <div style={{ padding: 16 }}>
+              {window.SkeletonRows ? <window.SkeletonRows count={5} lineHeight={22} varyWidths /> : <div style={{ padding: 16, textAlign: 'center', color: C.muted, fontSize: 13 }}>กำลังโหลดบิลเดือนนี้...</div>}
+            </div>
+          ) : topRooms.length === 0 ? (
+            <EmptyState icon="📊" title="ยังไม่มีบิลเดือนนี้" description="ออกบิลรอบนี้ก่อน ระบบจึงจัดอันดับจากยอดบิลจริง" />
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               {topRooms.map(r => (

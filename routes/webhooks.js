@@ -486,8 +486,7 @@ module.exports = function buildWebhooksRouter(ctx) {
       if (r) {
         const STATUS_TH = { occupied: 'พักอยู่', overdue: 'ค้างชำระ', maintenance: 'แจ้งซ่อม', vacant: 'ว่าง' };
         extra = `\nสถานะ: ${STATUS_TH[r.status] || r.status || '-'}`;
-        if (r.elecUnits != null) extra += `\nไฟฟ้า: ${r.elecUnits} หน่วย`;
-        if (r.waterUnits != null) extra += `\nน้ำ: ${r.waterUnits} หน่วย`;
+        extra += `\nค่าน้ำ/ไฟ: ดูจากบิลรอบล่าสุดเพื่อป้องกันใช้เลขมิเตอร์ผิดรอบ`;
       }
     } catch { /* ignore */ }
     await lineSvc.replyText(oa, replyToken,

@@ -467,23 +467,21 @@ function resolveRoomRent(room, config) {
 }
 
 // --- Aggregate stats for dashboard ----------------------------------------
-// ใช้ config มา recompute ค่าน้ำ/ค่าไฟ ตามเรทปัจจุบัน (ไม่ใช่ที่ฝังในห้อง)
+// Room blobs only carry latest/legacy meter units. Financial screens that
+// need water/electric totals must use period bills; this fallback aggregate
+// therefore counts only fixed monthly charges (rent + wifi).
 function computeStats(rooms, config) {
   const list = Object.values(rooms);
   const total = list.length;
   const counts = { vacant: 0, occupied: 0, reserved: 0, overdue: 0, maintenance: 0 };
   let revenue = 0, overdueAmt = 0;
-  const waterRate = config?.utilities?.waterRate ?? 18;
-  const elecRate  = config?.utilities?.elecRate  ?? 8;
   const wifiFee   = config?.utilities?.wifi      ?? 250;
   list.forEach(r => {
     counts[r.status] = (counts[r.status] || 0) + 1;
     if (r.status === 'occupied' || r.status === 'overdue') {
-      const water = (r.waterUnits || 0) * waterRate;
-      const elec  = (r.elecUnits  || 0) * elecRate;
       const wifi  = (r.wifi != null && r.wifi !== 0) ? r.wifi : wifiFee;
       const rentInfo = resolveRoomRent(r, config);
-      const t = (rentInfo.rent || 0) + water + elec + wifi;
+      const t = (rentInfo.rent || 0) + wifi;
       revenue += t;
       if (r.status === 'overdue') overdueAmt += t;
     }

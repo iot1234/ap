@@ -272,6 +272,23 @@ test('bill generation honors recurringCharges.autoIncludeOnBillGen', () => {
     'bulk-generate must respect autoIncludeOnBillGen');
 });
 
+test('bulk bill generation warns when flat utility mode falls back to metered', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const extras = fs.readFileSync(path.join(__dirname, '..', 'routes', 'bills-extras.js'), 'utf8');
+  const billingPage = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-billing.jsx'), 'utf8');
+  assert.match(extras, /const flatFellBack = \[\]/,
+    'bulk-generate must collect rooms where flat utility mode fell back');
+  assert.match(extras, /bill\.waterFlatFellBack \|\| bill\.elecFlatFellBack/,
+    'bulk-generate must detect both water and electricity flat fallback flags');
+  assert.match(extras, /res\.json\(\{ ok: true, period, made, skipped, flatFellBack \}\)/,
+    'bulk-generate response must expose flat fallback details to the UI');
+  assert.match(billingPage, /Array\.isArray\(d\.flatFellBack\)/,
+    'billing UI must read flat fallback details');
+  assert.match(billingPage, /ตั้งโหมดเหมาไว้แต่ยังไม่กรอกจำนวน/,
+    'billing UI must warn the operator in plain language');
+});
+
 test('migrate.js creates composite index on payments(status, created_at)', async () => {
   // Pins the index added to defend the slip-queue listing query against
   // a full sort on every page load. If this test fails because the index
@@ -1548,6 +1565,56 @@ test('monthly meter readings drive billing period instead of room edit units', (
     'room edit must not be the monthly electricity input surface');
   assert.match(roomsPage, /window\.location\.hash = 'meters'/,
     'room edit should route admins to the correct meter page');
+});
+
+test('financial reports do not price utilities from room meter snapshots', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const reportsRoute = fs.readFileSync(path.join(__dirname, '..', 'routes', 'reports.js'), 'utf8');
+  const overviewPage = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-overview.jsx'), 'utf8');
+  const reportsPage = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-reports.jsx'), 'utf8');
+  const shared = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'shared.jsx'), 'utf8');
+  const publicApp = fs.readFileSync(path.join(__dirname, '..', 'project', 'app.jsx'), 'utf8');
+  const webhooks = fs.readFileSync(path.join(__dirname, '..', 'routes', 'webhooks.js'), 'utf8');
+
+  const xlsxIdx = reportsRoute.indexOf("r.get('/bills.xlsx'");
+  assert.ok(xlsxIdx > 0, 'bills workbook route must exist');
+  const xlsxRoute = reportsRoute.slice(xlsxIdx, reportsRoute.indexOf('  // GET /api/reports/maintenance', xlsxIdx));
+  assert.match(xlsxRoute, /FROM bills b/,
+    'bill workbook must export issued bills');
+  assert.match(xlsxRoute, /b\.period = \$1/,
+    'bill workbook must be scoped to the selected billing period');
+  assert.doesNotMatch(xlsxRoute, /baankarn_rooms_v1|rm\.waterUnits|rm\.elecUnits|waterRate\s*=|elecRate\s*=/,
+    'bill workbook must not rebuild utility charges from room snapshots');
+
+  assert.match(overviewPage, /\/api\/bills\?period=\$\{encodeURIComponent\(currentPeriod\)\}&limit=500/,
+    'overview top rooms must load issued bills for the current period');
+  const overviewTopIdx = overviewPage.indexOf('const topRooms = useMemo');
+  const overviewTop = overviewPage.slice(overviewTopIdx, overviewPage.indexOf('const topMax', overviewTopIdx));
+  assert.doesNotMatch(overviewTop, /waterUnits|elecUnits|config\.utilities/,
+    'overview top rooms must not rank from room meter snapshots');
+
+  assert.match(reportsPage, /\/api\/reports\/bills\.xlsx\?period=\$\{encodeURIComponent\(currentPeriod\)\}/,
+    'reports export button must request the selected/current period explicitly');
+  const reportRevenueIdx = reportsPage.indexOf('const revenueByType = useMemo');
+  const reportRevenue = reportsPage.slice(reportRevenueIdx, reportsPage.indexOf('// Floor performance', reportRevenueIdx));
+  assert.doesNotMatch(reportRevenue, /waterUnits|elecUnits|\(r\.water\|\|0\)|\(r\.elec\|\|0\)/,
+    'report charts must aggregate from issued bills instead of legacy room utility amounts');
+
+  const statsIdx = shared.indexOf('function computeStats');
+  const statsSlice = shared.slice(statsIdx, shared.indexOf('// --- File export/import helpers', statsIdx));
+  assert.doesNotMatch(statsSlice, /waterUnits|elecUnits/,
+    'fallback room stats must not calculate money from latest meter units');
+
+  const publicDetailIdx = publicApp.indexOf('function DetailPanel');
+  const publicDetail = publicApp.slice(publicDetailIdx, publicApp.indexOf('{tab ===', publicDetailIdx));
+  assert.doesNotMatch(publicDetail, /room\.waterUnits|room\.elecUnits|Number\(room\.water\)|Number\(room\.elec\)/,
+    'public room detail must not present stale room units as monthly utility charges');
+
+  const roomStatusIdx = webhooks.indexOf('async function replyRoomStatus');
+  const roomStatus = webhooks.slice(roomStatusIdx, webhooks.indexOf('  return r;', roomStatusIdx));
+  assert.doesNotMatch(roomStatus, /r\.elecUnits|r\.waterUnits/,
+    'LINE room status must not send stale room utility units');
 });
 
 test('healthCheck flags meterIot.mode = "mqtt" as unimplemented', () => {

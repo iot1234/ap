@@ -511,11 +511,9 @@ function DetailPanel({ room, onClose }) {
   const photos = roomPhotos(room);
   const photoCount = realRoomPhotos(room).length;
   const rent = Number(room.rent) || t.baseRent;
-  const water = Number(room.water) || 0;
-  const elec = Number(room.elec) || 0;
   const wifi = Number(room.wifi) || 0;
   const deposit = Number(room.deposit) || rent * 2;
-  const totalMonthly = rent + water + elec + wifi;
+  const totalMonthly = rent + wifi;
 
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column', background: C.surface }}>
@@ -713,8 +711,8 @@ function DetailPanel({ room, onClose }) {
               <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, overflow: 'hidden' }}>
                 {[
                   ['ค่าเช่าห้อง', `฿${fmt(rent)}`, 'ฐาน + พรีเมียมชั้น'],
-                  ['ค่าน้ำประปา', `฿${fmt(water)}`, `${Number(room.waterUnits) || 0} หน่วย × 18 ฿`],
-                  ['ค่าไฟฟ้า', `฿${fmt(elec)}`, `${Number(room.elecUnits) || 0} หน่วย × 8 ฿`],
+                  ['ค่าน้ำประปา', 'ตามมิเตอร์', 'กรอกเลขมิเตอร์รายเดือนในระบบ'],
+                  ['ค่าไฟฟ้า', 'ตามมิเตอร์', 'กรอกเลขมิเตอร์รายเดือนในระบบ'],
                   ['ค่าอินเทอร์เน็ต', `฿${fmt(wifi)}`, 'Wi-Fi 500/500 Mbps'],
                 ].map(([k,v,sub], i) => (
                   <div key={k} style={{
@@ -732,7 +730,7 @@ function DetailPanel({ room, onClose }) {
                   display: 'flex', justifyContent: 'space-between', alignItems: 'center',
                   padding: '14px 16px', background: C.dark, color: C.surfaceAlt,
                 }}>
-                  <div style={{ fontSize: 12, letterSpacing: 1.4, fontWeight: 600 }}>รวมต่อเดือน</div>
+                  <div style={{ fontSize: 12, letterSpacing: 1.4, fontWeight: 600 }}>รวมค่าคงที่ต่อเดือน</div>
                   <div style={{ fontFamily: 'Sora', fontSize: 22, fontWeight: 600, letterSpacing: 0 }}>
                     ฿{fmt(totalMonthly)}
                   </div>

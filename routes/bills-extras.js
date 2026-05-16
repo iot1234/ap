@@ -1085,6 +1085,13 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         // at the top of this handler.
         const dueDate = billing.formatYMD(periodYear, periodMonth, dueDay);
         let made = 0, skipped = 0;
+        // Track rooms that asked for flat (เหมา) mode but didn't have a
+        // valid amount — services/billing.js#resolveFlatMode silently falls
+        // back to metered in this case, which can issue a wrong bill if
+        // admin forgot to type the flat amount. Surface those rooms back
+        // in the response so the /admin#billing toast can show "ห้อง A101
+        // กลับไปคิดตามมิเตอร์เพราะยังไม่ตั้งจำนวนเหมา".
+        const flatFellBack = [];
         for (const room of rooms) {
           if (!room || !room.tenant) { skipped++; continue; }
           if (room.status !== 'occupied' && room.status !== 'overdue') { skipped++; continue; }
@@ -1184,6 +1191,19 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             }
             const roomForBilling = await meter.attachBillingReadingsForPeriod(billClient, room, period);
             const bill = billing.buildBill({ room: roomForBilling, contract: activeContract, config, features: flags, previous, recurring, period, dueDate, discountPct });
+            // Capture which utilities silently fell back from flat → metered
+            // for this room. waterFlatFellBack/elecFlatFellBack are set by
+            // services/billing.js#resolveFlatMode when mode='flat' but the
+            // flatAmount is missing/<=0/NaN. Admin gets these back in the
+            // bulk-generate response so they don't ship dozens of bills at
+            // the wrong rate without knowing.
+            if (bill.waterFlatFellBack || bill.elecFlatFellBack) {
+              flatFellBack.push({
+                roomId: room.id,
+                water: !!bill.waterFlatFellBack,
+                elec: !!bill.elecFlatFellBack,
+              });
+            }
             const otherJson = JSON.stringify(recurring || []);
             const ins = await billClient.query(
               `INSERT INTO bills
@@ -1235,7 +1255,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           }
         }
         audit(req, 'bill.bulk_generate', 'period', period, { made, skipped });
-        res.json({ ok: true, period, made, skipped });
+        res.json({ ok: true, period, made, skipped, flatFellBack });
       } catch (err) {
         console.error('bulk-generate error:', err);
         res.status(500).json({ error: 'internal error', code: 'DB_ERROR' });

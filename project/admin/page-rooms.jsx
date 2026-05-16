@@ -442,7 +442,7 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
       },
     },
     {
-      key: 'utilities', label: 'น้ำ/ไฟ', align: 'right', minWidth: 110,
+      key: 'utilities', label: 'หน่วยล่าสุด', align: 'right', minWidth: 110,
       render: r => (
         <div style={{ fontSize: 11.5 }}>
           <div style={{ color: C.ink2 }}>💧 {r.waterUnits} หน่วย</div>

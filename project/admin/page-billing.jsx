@@ -780,11 +780,20 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         body: JSON.stringify({ period, dueDay, force: issues.length > 0 }),
       });
       addActivity && addActivity({ icon: 'บิล', text: `ออกบิลรอบ ${period}: ${d.made} ใบ (ข้าม ${d.skipped})`, type: 'billing' });
+      // Surface rooms that silently fell back from flat → metered so admin
+      // can fix the flat amount before the next cycle. Without this the
+      // billing UI just says "ออกบิล N ใบ" and the wrong-mode bills go
+      // out unnoticed until a tenant disputes.
+      const fellBack = Array.isArray(d.flatFellBack) ? d.flatFellBack : [];
+      const fellBackMsg = fellBack.length
+        ? ` · เตือน: ${fellBack.length} ห้อง (${fellBack.slice(0, 3).map((x) => x.roomId).join(', ')}${fellBack.length > 3 ? '…' : ''}) ตั้งโหมดเหมาไว้แต่ยังไม่กรอกจำนวน — บิลถูกออกตามมิเตอร์แทน`
+        : '';
       setToast && setToast({
-        kind: d.made > 0 ? 'success' : 'info',
-        message: d.made > 0
+        kind: fellBack.length ? 'warning' : (d.made > 0 ? 'success' : 'info'),
+        message: (d.made > 0
           ? `ออกบิล ${d.made} ใบสำเร็จ${d.skipped ? ` (ข้าม ${d.skipped} ใบที่มีอยู่แล้ว)` : ''}`
-          : `ทุกห้องมีบิลรอบ ${period} อยู่แล้ว — ไม่ได้สร้างเพิ่ม`,
+          : `ทุกห้องมีบิลรอบ ${period} อยู่แล้ว — ไม่ได้สร้างเพิ่ม`)
+          + fellBackMsg,
       });
       // Refresh the DB-bills overlay so the banner + per-row badge flip
       // from "ประมาณการ" to "ออกแล้ว" without needing a manual reload.

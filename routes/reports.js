@@ -151,63 +151,104 @@ module.exports = function buildReportsRouter(ctx) {
     }
   });
 
-  // GET /api/reports/bills.xlsx — current-month bill estimate workbook.
-  r.get('/bills.xlsx', requireAuth, managerOrOwner, async (_req, res) => {
+  // GET /api/reports/bills.xlsx?period=YYYY-MM — persisted bill workbook.
+  // Reports must reflect issued ledger rows, not current room meter snapshots.
+  // The billing page owns pre-issue estimates; this export is the legal bill
+  // record for the selected period.
+  r.get('/bills.xlsx', requireAuth, managerOrOwner, async (req, res) => {
     let ExcelJS;
     try { ExcelJS = require('exceljs'); }
     catch { return res.status(500).json({ error: 'exceljs not installed' }); }
+    const period = String(req.query.period || require('../services/billing').formatPeriodNow()).slice(0, 7);
+    if (!/^\d{4}-\d{2}$/.test(period)) {
+      return res.status(400).json({ error: 'period must be YYYY-MM', code: 'INVALID_PERIOD' });
+    }
     try {
-      const [roomsRow, configRow] = await Promise.all([
-        pool.query(`SELECT value FROM app_data WHERE key='baankarn_rooms_v1'`),
+      const [billRows, configRow] = await Promise.all([
+        pool.query(
+          `SELECT b.*, t.full_name AS tenant_name
+             FROM bills b
+             LEFT JOIN tenants t ON t.id = b.tenant_id AND t.deleted_at IS NULL
+            WHERE b.deleted_at IS NULL
+              AND b.status <> 'void'
+              AND b.period = $1
+            ORDER BY b.room_id ASC, b.created_at DESC`,
+          [period]
+        ),
         pool.query(`SELECT value FROM app_data WHERE key='baankarn_config_v1'`),
       ]);
-      const rooms = Object.values(roomsRow.rows.length ? roomsRow.rows[0].value : {});
       const config = configRow.rows.length ? configRow.rows[0].value : {};
-      const waterRate = config?.utilities?.waterRate ?? 18;
-      const elecRate  = config?.utilities?.elecRate  ?? 8;
-      const wifiFee   = config?.utilities?.wifi      ?? 250;
 
       const wb = new ExcelJS.Workbook();
       wb.creator = config?.building?.name || 'บ้านกาญจน์ เรสซิเดนซ์';
       wb.created = new Date();
-      const ws = wb.addWorksheet('บิลรอบนี้');
+      const ws = wb.addWorksheet(`Bills ${period}`);
       ws.columns = [
-        { header: 'ห้อง', key: 'room', width: 8 },
-        { header: 'ผู้เช่า', key: 'tenant', width: 28 },
-        { header: 'สถานะ', key: 'status', width: 12 },
-        { header: 'ค่าเช่า', key: 'rent', width: 12, style: { numFmt: '#,##0.00' } },
-        { header: 'ค่าน้ำ', key: 'water', width: 12, style: { numFmt: '#,##0.00' } },
-        { header: 'ค่าไฟ', key: 'elec', width: 12, style: { numFmt: '#,##0.00' } },
+        { header: 'Bill No', key: 'billNo', width: 18 },
+        { header: 'Period', key: 'period', width: 10 },
+        { header: 'Room', key: 'room', width: 8 },
+        { header: 'Tenant', key: 'tenant', width: 28 },
+        { header: 'Status', key: 'status', width: 12 },
+        { header: 'Due Date', key: 'dueDate', width: 14 },
+        { header: 'Rent', key: 'rent', width: 12, style: { numFmt: '#,##0.00' } },
+        { header: 'Water Prev', key: 'waterPrev', width: 12, style: { numFmt: '#,##0.00' } },
+        { header: 'Water Current', key: 'waterCurrent', width: 14, style: { numFmt: '#,##0.00' } },
+        { header: 'Water Units', key: 'waterUnits', width: 12, style: { numFmt: '#,##0.00' } },
+        { header: 'Water Rate', key: 'waterRate', width: 12, style: { numFmt: '#,##0.00' } },
+        { header: 'Water Amount', key: 'waterAmount', width: 14, style: { numFmt: '#,##0.00' } },
+        { header: 'Elec Prev', key: 'elecPrev', width: 12, style: { numFmt: '#,##0.00' } },
+        { header: 'Elec Current', key: 'elecCurrent', width: 14, style: { numFmt: '#,##0.00' } },
+        { header: 'Elec Units', key: 'elecUnits', width: 12, style: { numFmt: '#,##0.00' } },
+        { header: 'Elec Rate', key: 'elecRate', width: 12, style: { numFmt: '#,##0.00' } },
+        { header: 'Elec Amount', key: 'elecAmount', width: 14, style: { numFmt: '#,##0.00' } },
         { header: 'Wi-Fi', key: 'wifi', width: 10, style: { numFmt: '#,##0.00' } },
-        { header: 'รวม', key: 'total', width: 14, style: { numFmt: '#,##0.00' } },
+        { header: 'Other', key: 'other', width: 28 },
+        { header: 'Subtotal', key: 'subtotal', width: 14, style: { numFmt: '#,##0.00' } },
+        { header: 'VAT', key: 'vat', width: 10, style: { numFmt: '#,##0.00' } },
+        { header: 'Late Fee', key: 'lateFee', width: 12, style: { numFmt: '#,##0.00' } },
+        { header: 'Total', key: 'total', width: 14, style: { numFmt: '#,##0.00' } },
       ];
       ws.getRow(1).font = { bold: true };
       ws.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFAF6EE' } };
       ws.views = [{ state: 'frozen', ySplit: 1 }];
 
-      rooms
-        .sort((a, b) => String(a.id).localeCompare(String(b.id)))
-        .forEach((rm) => {
-          const water = (Number(rm.waterUnits) || 0) * waterRate;
-          const elec  = (Number(rm.elecUnits)  || 0) * elecRate;
-          const total = (Number(rm.rent) || 0) + water + elec + wifiFee;
-          ws.addRow({
-            room: rm.id,
-            tenant: rm.tenant?.name || '—',
-            status: rm.status || '—',
-            rent: Number(rm.rent) || 0,
-            water,
-            elec,
-            wifi: wifiFee,
-            total,
-          });
+      for (const bill of billRows.rows) {
+        const other = Array.isArray(bill.other) ? bill.other : [];
+        const otherText = other
+          .map((x) => `${String(x.label || 'Other')}: ${Number(x.amount || 0).toFixed(2)}`)
+          .join(', ');
+        ws.addRow({
+          billNo: bill.bill_no,
+          period: bill.period,
+          room: bill.room_id,
+          tenant: bill.tenant_name || '',
+          status: bill.status,
+          dueDate: bill.due_date,
+          rent: Number(bill.rent) || 0,
+          waterPrev: bill.water_prev_reading == null ? null : Number(bill.water_prev_reading),
+          waterCurrent: bill.water_current_reading == null ? null : Number(bill.water_current_reading),
+          waterUnits: Number(bill.water_units) || 0,
+          waterRate: Number(bill.water_rate) || 0,
+          waterAmount: Number(bill.water_amount) || 0,
+          elecPrev: bill.elec_prev_reading == null ? null : Number(bill.elec_prev_reading),
+          elecCurrent: bill.elec_current_reading == null ? null : Number(bill.elec_current_reading),
+          elecUnits: Number(bill.elec_units) || 0,
+          elecRate: Number(bill.elec_rate) || 0,
+          elecAmount: Number(bill.elec_amount) || 0,
+          wifi: Number(bill.wifi) || 0,
+          other: otherText,
+          subtotal: Number(bill.subtotal) || 0,
+          vat: Number(bill.vat) || 0,
+          lateFee: Number(bill.late_fee) || 0,
+          total: Number(bill.total) || 0,
         });
+      }
 
       res.setHeader(
         'Content-Type',
         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
       );
-      res.setHeader('Content-Disposition', `attachment; filename="bills-${new Date().toISOString().slice(0,10)}.xlsx"`);
+      res.setHeader('Content-Disposition', `attachment; filename="bills-${period}.xlsx"`);
       await wb.xlsx.write(res);
       res.end();
     } catch (err) {
