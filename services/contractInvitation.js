@@ -90,15 +90,25 @@ async function resolveActiveByToken(pool, token) {
   // Lazy expire — pending only. Submitted rows stay accessible so admin
   // can approve and tenant can revisit. The cleanup of stale pending rows
   // keeps admin's "active" list accurate without a sweep job.
-  if (row.status === 'pending' && row.expires_at
-      && new Date(row.expires_at) < new Date()) {
-    try {
-      await pool.query(
-        `UPDATE contract_invitations SET status='expired', updated_at=NOW() WHERE id=$1`,
-        [row.id]
-      );
-    } catch { /* best-effort; don't block the read on the flip */ }
-    return null;
+  // Use DB NOW() instead of JS Date.now() so expiration comparison runs
+  // in the same clock as the one that stamped expires_at. A side-by-side
+  // JS-vs-DB comparison drifts whenever the host running this process
+  // isn't aligned to the DB's timezone — small but real on operator
+  // machines running in Asia/Bangkok while DB stores UTC.
+  if (row.status === 'pending' && row.expires_at) {
+    const { rows: expRows } = await pool.query(
+      `SELECT (expires_at < NOW()) AS is_expired FROM contract_invitations WHERE id=$1`,
+      [row.id]
+    );
+    if (expRows.length && expRows[0].is_expired) {
+      try {
+        await pool.query(
+          `UPDATE contract_invitations SET status='expired', updated_at=NOW() WHERE id=$1`,
+          [row.id]
+        );
+      } catch { /* best-effort; don't block the read on the flip */ }
+      return null;
+    }
   }
   if (!ACTIVE_STATUSES.has(row.status)) return null;
   return row;
@@ -136,7 +146,6 @@ async function createInvitation(pool, {
   const hours = Number.isFinite(Number(expiresInHours))
     ? Math.max(1, Math.min(720, Number(expiresInHours)))   // 1h … 30 days
     : DEFAULT_EXPIRY_HOURS;
-  const expiresAt = new Date(Date.now() + hours * 3600_000);
   const { token, hash } = generateToken();
   const client = await pool.connect();
   try {
@@ -149,12 +158,18 @@ async function createInvitation(pool, {
         WHERE contract_id=$1 AND status IN ('pending','submitted')`,
       [contractId, createdBy || 'system']
     );
+    // Use DB NOW() + INTERVAL instead of JS Date.now() so expiry math stays
+    // consistent with the resolveActiveByToken() side that compares against
+    // DB NOW(). Mixing JS wallclock (could be UTC, could be Asia/Bangkok
+    // depending on the host) with DB-side timestamps drifts the expiration
+    // window by whatever the host clock offset is — small but real for
+    // operators running this on a non-UTC server.
     const { rows } = await client.query(
       `INSERT INTO contract_invitations
           (contract_id, tenant_id, token_hash, expires_at, created_by)
-       VALUES ($1, $2, $3, $4, $5)
+       VALUES ($1, $2, $3, NOW() + ($4::int || ' hours')::interval, $5)
        RETURNING id, contract_id, tenant_id, status, expires_at, created_at`,
-      [contractId, tenantId || null, hash, expiresAt, createdBy || 'system']
+      [contractId, tenantId || null, hash, hours, createdBy || 'system']
     );
     await client.query('COMMIT');
     return {

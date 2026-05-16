@@ -290,7 +290,22 @@ async function detectAnomaly(pool, roomId, meterType, sigmas = 3) {
   }
 
   // σ test on the prior positive-only deltas (excluding the just-observed one).
-  if (sorted.length < 5) return null;
+  // For new rooms (< 4 prior deltas) we fall back to a simpler "much bigger
+  // than last observation" heuristic so brand-new units still get SOME fraud
+  // protection — the σ test silently returning null left them open for the
+  // first ~4 readings.
+  if (sorted.length < 5) {
+    // Simple rule: if the latest delta is more than 5x the previous delta and
+    // both are positive, flag it. Misses subtle drifts but catches the
+    // typo-entered-wrong-number case (10 → 1000) on a young meter.
+    if (sorted.length >= 3) {
+      const prev = Number(sorted[sorted.length - 2].reading) - Number(sorted[sorted.length - 3].reading);
+      if (prev > 0 && lastDelta > 0 && lastDelta > prev * 5) {
+        return { kind: 'jump', last: lastDelta, prev, threshold: sigmas, ratio: lastDelta / prev };
+      }
+    }
+    return null;
+  }
   const deltas = [];
   for (let i = 1; i < sorted.length; i++) {
     const d = Number(sorted[i].reading) - Number(sorted[i - 1].reading);
@@ -301,7 +316,17 @@ async function detectAnomaly(pool, roomId, meterType, sigmas = 3) {
   const mean = deltas.reduce((s, x) => s + x, 0) / deltas.length;
   const variance = deltas.reduce((s, x) => s + (x - mean) ** 2, 0) / deltas.length;
   const std = Math.sqrt(variance);
-  if (std === 0) return null;
+  // Constant-consumption rooms (e.g. unoccupied with steady leak, or fully
+  // automated flat charges) produce std === 0. The original code returned
+  // null here which meant a sudden jump from a perfectly-flat baseline to,
+  // say, 10x usage went completely undetected. When std is 0 but the latest
+  // delta differs from the mean, flag it as a 'zero-variance' anomaly.
+  if (std === 0) {
+    if (last !== mean) {
+      return { kind: 'zero-variance', last, mean, std: 0, threshold: sigmas };
+    }
+    return null;
+  }
   const z = (last - mean) / std;
   if (Math.abs(z) >= sigmas) {
     return { kind: 'sigma', z, mean, std, last, threshold: sigmas };

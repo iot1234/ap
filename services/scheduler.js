@@ -124,8 +124,19 @@ function readState() {
 }
 function writeState(s) {
   if (!STATE_FILE) return;
-  try { fs.writeFileSync(STATE_FILE, JSON.stringify(s)); }
-  catch (err) {
+  // Write atomically: write to a sibling temp file then rename. POSIX rename
+  // is atomic (Windows too on same volume from Node 18+), so a second
+  // process can never see a half-written JSON. Without this, two instances
+  // (Railway redeploy overlap, or a pod with multiple workers) can clobber
+  // each other's daily-latch state — losing todaysAccessSync mid-cycle and
+  // making the owner digest skip the access-card summary.
+  const tmp = `${STATE_FILE}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(s));
+    fs.renameSync(tmp, STATE_FILE);
+    return;
+  } catch (err) {
+    try { fs.unlinkSync(tmp); } catch { /* ignore */ }
     // First write that lands here means our pick became unwritable
     // (e.g. permissions changed). Try to relocate ONCE so we don't spam logs.
     if (err.code === 'EACCES' || err.code === 'EROFS') {
@@ -133,8 +144,16 @@ function writeState(s) {
       if (STATE_FILE !== fallback) {
         console.warn('[scheduler] relocating state file to', fallback, '(reason:', err.code + ')');
         STATE_FILE = fallback;
-        try { fs.writeFileSync(STATE_FILE, JSON.stringify(s)); return; }
-        catch (e2) { console.error('[scheduler] tmp fallback also failed:', e2.message); }
+        const tmp2 = `${STATE_FILE}.${process.pid}.${Date.now()}.tmp`;
+        try {
+          fs.writeFileSync(tmp2, JSON.stringify(s));
+          fs.renameSync(tmp2, STATE_FILE);
+          return;
+        }
+        catch (e2) {
+          try { fs.unlinkSync(tmp2); } catch { /* ignore */ }
+          console.error('[scheduler] tmp fallback also failed:', e2.message);
+        }
       }
     }
     console.error('[scheduler] state write failed:', err.message);
@@ -368,11 +387,21 @@ async function tickBillGen(pool, flags, now, state) {
     else if (promptpay.isDemoTarget(ppTarget)) issues.push('PROMPTPAY_TARGET ยังเป็นค่า demo');
     const wRate = Number(config?.utilities?.waterRate);
     const eRate = Number(config?.utilities?.elecRate);
-    if (!Number.isFinite(wRate) || wRate <= 0) issues.push('waterRate ไม่ตั้ง / ≤ 0');
-    if (!Number.isFinite(eRate) || eRate <= 0) issues.push('elecRate ไม่ตั้ง / ≤ 0');
-    const eligibleCount = rooms.filter((r) => r && r.tenant
-      && (r.status === 'occupied' || r.status === 'overdue')).length;
-    if (eligibleCount === 0) issues.push('ไม่มีห้อง occupied/overdue ที่จะออกบิล');
+    // Only require global rate > 0 if any eligible room is on metered mode for
+    // that utility. Flat-mode rooms (เหมา) carry their own water_flat_amount /
+    // elec_flat_amount and don't need a global per-unit rate. Without this gate,
+    // buildings that run entirely on flat charges would skip every monthly run
+    // because the operator legitimately left global rates at 0.
+    const eligibleRooms = rooms.filter((r) => r && r.tenant
+      && (r.status === 'occupied' || r.status === 'overdue'));
+    const isFlat = (r, prefix) => String(
+      r[`${prefix}Mode`] ?? r[`${prefix}_mode`] ?? ''
+    ).toLowerCase() === 'flat';
+    const anyMeteredWater = eligibleRooms.some((r) => !isFlat(r, 'water'));
+    const anyMeteredElec  = eligibleRooms.some((r) => !isFlat(r, 'elec'));
+    if (anyMeteredWater && (!Number.isFinite(wRate) || wRate <= 0)) issues.push('waterRate ไม่ตั้ง / ≤ 0');
+    if (anyMeteredElec  && (!Number.isFinite(eRate) || eRate <= 0)) issues.push('elecRate ไม่ตั้ง / ≤ 0');
+    if (eligibleRooms.length === 0) issues.push('ไม่มีห้อง occupied/overdue ที่จะออกบิล');
 
     if (issues.length > 0) {
       // Latch via state so we don't re-alert every hourly tick — only

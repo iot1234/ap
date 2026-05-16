@@ -99,17 +99,35 @@ let _loaded = false;
 async function preload(pool) {
   try {
     const { rows } = await pool.query('SELECT key, value_encrypted FROM secrets');
+    const failedKeys = [];
     for (const row of rows) {
       try {
         const v = encryption.decryptString(row.value_encrypted);
         if (v != null) _cache.set(row.key, v);
       } catch (err) {
+        failedKeys.push(`${row.key}: ${err.message}`);
         console.warn(`[secrets] decrypt failed for ${row.key}:`, err.message);
       }
     }
     _loaded = true;
     console.log(`[secrets] loaded ${rows.length} secret(s) from DB`);
+    // STRICT_SECRETS=1 in production turns silent decrypt failures into a
+    // hard boot abort. Without this, a key rotation that fails to decrypt
+    // existing rows (e.g. operator overwrote ENCRYPTION_KEY_V1 in place
+    // instead of adding V2) ends up with LINE/SMTP/PromptPay all silently
+    // disabled and the operator only notices when a tenant complains that
+    // notifications stopped. Defaults to off so existing deployments don't
+    // change behavior on this commit.
+    if (failedKeys.length && process.env.STRICT_SECRETS === '1') {
+      throw new Error(
+        `[secrets] STRICT_SECRETS=1: ${failedKeys.length} key(s) failed to decrypt:\n` +
+        failedKeys.map((k) => `  • ${k}`).join('\n') +
+        `\nMost likely cause: ENCRYPTION_KEY_V<N> was overwritten in place ` +
+        `(should be added as V<N+1>). Set STRICT_SECRETS=0 to ignore.`
+      );
+    }
   } catch (err) {
+    if (err && err.message && err.message.startsWith('[secrets] STRICT_SECRETS=1')) throw err;
     // Table missing or DB down: don't crash boot — env vars still work.
     console.warn('[secrets] preload skipped:', err.message);
   }

@@ -9,11 +9,82 @@
 
 const { useState, useEffect, useMemo } = React;
 
+const FEATURE_HELP = {
+  tenantPortal: [
+    'เปิดแล้วผู้เช่าเข้า /tenant ได้ ดูบิล แจ้งซ่อม และอัปโหลดสลิปตามสิทธิ์ที่เกี่ยวข้อง',
+    'ปิดแล้ว endpoint ฝั่ง tenant จะตอบ 503 และฟีเจอร์ที่พึ่งพา tenant portal เช่น slip upload จะใช้ไม่ได้',
+  ],
+  photoUpload: [
+    'ใช้กับรูปห้อง ลายเซ็น สัญญา และเอกสารยืนยันตัวตน',
+    'ปิดแล้วไฟล์เดิมยังอยู่ แต่ admin/tenant จะอัปโหลดเพิ่มไม่ได้',
+  ],
+  lateFee: [
+    'ใช้คำนวณค่าปรับจากบิลค้างชำระจริงใน backend',
+    'ถ้าปิด ระบบจะไม่เพิ่มค่าปรับในบิลใหม่ แม้บิลก่อนหน้าจะ overdue',
+  ],
+  vat: [
+    'เปิดแล้ว backend เพิ่ม VAT ตามเปอร์เซ็นต์ที่ตั้งในบิลใหม่',
+    'บิลที่ออกไปแล้วไม่ถูกคำนวณย้อนหลัง',
+  ],
+  recurringCharges: [
+    'เปิดแล้วรายการค่าใช้จ่ายประจำ/ครั้งเดียวจะถูกดึงเข้าบิลเมื่อออกบิล',
+    'ถ้าปิด รายการเดิมยังอยู่แต่ไม่ถูกนำไปคิดในรอบบิลใหม่',
+  ],
+  billAutoGenerate: [
+    'เปิดแล้ว scheduler จะออกบิลรายเดือนตามวันที่ตั้งไว้',
+    'ถ้าปิด ต้องออกบิลเองจากหน้าบิล รายการ recurring จะยังรวมได้เมื่อกดออกบิลเอง',
+  ],
+  meterIot: [
+    'เปิดแล้วหน้ามิเตอร์และ API บันทึกค่าน้ำไฟตามรอบเดือนจะใช้งานได้',
+    'โหมด MQTT ยังไม่รองรับใน build นี้ ระบบจึงปิดตัวเลือกไว้และ backend กันซ้ำอีกชั้น',
+  ],
+  accessControl: [
+    'เปิดแล้วระบบบันทึก access log และจัดการบัตร/QR ได้',
+    'ถ้าเปิดระงับบัตรเมื่อค้างชำระ ระบบจะใช้ overdue threshold เพื่อตัดสิทธิ์อัตโนมัติ',
+  ],
+  email: [
+    'ใช้เป็นช่องทางแจ้งเตือนสำรองเมื่อ LINE ส่งไม่ได้',
+    'ต้องตั้ง SMTP credentials ในหน้า Secrets/env ไม่อย่างนั้นเปิดไว้ก็ยังส่งจริงไม่ได้',
+  ],
+  sms: [
+    'ใช้เป็นช่องทางสำรองเพิ่มเติมสำหรับแจ้งเตือนสำคัญ',
+    'ต้องติดตั้ง provider/credentials เพิ่ม เปิด toggle อย่างเดียวไม่ทำให้ส่ง SMS ได้ทันที',
+  ],
+  darkMode: [
+    'มีผลเฉพาะ tenant portal ไม่ได้เปลี่ยนธีมหน้า admin',
+    'ปิดแล้วผู้เช่าจะไม่เห็นตัวเลือกโหมดมืด',
+  ],
+  i18n: [
+    'เปิดแล้ว tenant portal ใช้ภาษาไทย/อังกฤษได้ตามค่าเริ่มต้น',
+    'ปิดแล้ว UI ฝั่ง tenant จะไม่แสดงตัวเลือกภาษา',
+  ],
+  citizenIdEncryption: [
+    'ควรเปิดไว้เสมอเพื่อเข้ารหัสเลขบัตรประชาชนก่อนเก็บลงฐานข้อมูล',
+    'ปิดแล้วข้อมูลใหม่จะเสี่ยงเป็น plaintext และอาจปนกับข้อมูลเก่าที่เข้ารหัสไว้',
+  ],
+  softDelete: [
+    'เปิดแล้วการลบข้อมูลจะเก็บ deleted_at เพื่อกู้คืน/ตรวจสอบย้อนหลังได้',
+    'ปิดแล้วการลบครั้งต่อไปอาจเป็นการลบถาวรหรือชน FK กับข้อมูลบิล/สัญญา',
+  ],
+  errorTracking: [
+    'เปิดแล้วระบบส่ง error ไป Sentry เมื่อมี SENTRY_DSN',
+    'ถ้าไม่มี DSN จะไม่เกิดผลจริง ให้ตั้งค่าที่ Secrets/env ก่อน',
+  ],
+  autoBackup: [
+    'เปิดแล้ว scheduler จะสำรองฐานข้อมูลตามชั่วโมง UTC ที่กำหนด',
+    'ถ้าไม่ตั้ง R2 credentials backup อาจอยู่ใน disk ของ container และหายตอน redeploy',
+  ],
+  autoReconcileRooms: [
+    'เปิดแล้ว scheduler ช่วยแก้ห้องค้างสถานะเฉพาะเคสที่ปลอดภัย เช่น tenant moved_out แล้วแต่ห้องยัง occupied',
+    'ระบบยังแจ้งเตือน anomaly เสมอ แม้ปิด auto-fix เพื่อให้ admin ตรวจเองก่อน',
+  ],
+};
+
 // `embedded` prop lets PageSettings render this component INSIDE one of
 // its tabs without duplicating the outer PageContainer + PageHeader.
 // When embedded=true the wrapper / header are skipped; the page still
 // works standalone at /admin#features for legacy URLs / direct links.
-function PageFeatures({ setToast, embedded = false }) {
+function PageFeatures({ setToast, embedded = false, currentUser = null }) {
   const C = window.ADMIN_C;
   const { Card, SectionHeading, Btn, Pill, PageContainer, PageHeader } = window;
   // Wrap with PageContainer/PageHeader only when NOT embedded. Inside a
@@ -32,8 +103,15 @@ function PageFeatures({ setToast, embedded = false }) {
   const [defaults, setDefaults] = useState(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
+  const [canEdit, setCanEdit] = useState(currentUser?.role === 'owner');
+  const [viewerRole, setViewerRole] = useState(currentUser?.role || '');
 
   useEffect(() => { load(); }, []);
+  useEffect(() => {
+    if (!currentUser?.role) return;
+    setViewerRole(currentUser.role);
+    setCanEdit(currentUser.role === 'owner');
+  }, [currentUser?.role]);
 
   async function load() {
     try {
@@ -41,10 +119,21 @@ function PageFeatures({ setToast, embedded = false }) {
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || 'load failed');
       setFeatures(d.features); setDefaults(d.defaults);
+      if (typeof d.canEdit === 'boolean') setCanEdit(d.canEdit);
+      if (d.role) setViewerRole(d.role);
     } catch (e) { setErr(e.message); }
   }
 
   async function save(partial) {
+    if (!canEdit) {
+      const message = {
+        title: 'ไม่มีสิทธิ์เปิด/ปิดฟีเจอร์',
+        description: 'การแก้ฟีเจอร์ระบบทำได้เฉพาะ owner เท่านั้น บัญชี manager/staff ดูค่าได้แต่บันทึกไม่ได้',
+      };
+      setToast && setToast({ kind: 'warning', message });
+      setErr(message.description);
+      return;
+    }
     setBusy(true); setErr('');
     try {
       const r = await apiFetch('/api/admin/features', {
@@ -93,6 +182,10 @@ function PageFeatures({ setToast, embedded = false }) {
 
   function toggle(key) {
     if (!features) return;
+    if (!canEdit) {
+      save({ [key]: { enabled: !features[key]?.enabled } });
+      return;
+    }
     const cur = features[key];
     if (!cur) return;
     const turningOff = cur.enabled === true;
@@ -106,6 +199,10 @@ function PageFeatures({ setToast, embedded = false }) {
 
   function setField(key, field, value) {
     if (!features) return;
+    if (!canEdit) {
+      save({ [key]: { [field]: value } });
+      return;
+    }
     save({ [key]: { [field]: value } });
   }
 
@@ -211,24 +308,49 @@ function PageFeatures({ setToast, embedded = false }) {
     );
   }
 
+  const readOnlyReason = canEdit ? '' : `บัญชี ${viewerRole || 'ปัจจุบัน'} ดูค่าได้เท่านั้น ต้องใช้ role owner เพื่อบันทึก`;
+
   // Render row helper
   const Row = ({ id, title, desc, children }) => {
     const f = features[id] || {};
+    const help = FEATURE_HELP[id] || [];
     return (
       <div style={{
         display: 'grid', gridTemplateColumns: '1fr auto', gap: 16,
         padding: '14px 0', borderBottom: '1px solid ' + C.border, alignItems: 'flex-start',
       }}>
         <div>
-          <div style={{ fontWeight: 600, fontSize: 14.5, marginBottom: 4 }}>{title}</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 4 }}>
+            <span style={{ fontWeight: 600, fontSize: 14.5 }}>{title}</span>
+            <Pill color={f.enabled ? 'success' : 'muted'} size="sm">{f.enabled ? 'เปิดอยู่' : 'ปิดอยู่'}</Pill>
+          </div>
           <div style={{ color: C.muted, fontSize: 13, marginBottom: 8 }}>{desc}</div>
+          {help.length ? (
+            <ul style={{
+              margin: '0 0 8px 0', paddingLeft: 18,
+              color: C.ink2, fontSize: 12.5, lineHeight: 1.55,
+            }}>
+              {help.map((line, i) => <li key={i}>{line}</li>)}
+            </ul>
+          ) : null}
           {f.enabled && children ? (
             <div style={{ marginTop: 8, display: 'flex', flexWrap: 'wrap', gap: 12 }}>
               {children}
             </div>
           ) : null}
+          {!canEdit ? (
+            <div style={{ marginTop: 8, fontSize: 12, color: C.warningInk || '#7A5A0F' }}>
+              {readOnlyReason}
+            </div>
+          ) : null}
         </div>
-        <Toggle on={!!f.enabled} disabled={busy} onChange={() => toggle(id)} />
+        <Toggle
+          on={!!f.enabled}
+          disabled={busy || !canEdit}
+          label={title}
+          disabledReason={readOnlyReason}
+          onChange={() => toggle(id)}
+        />
       </div>
     );
   };
@@ -241,6 +363,8 @@ function PageFeatures({ setToast, embedded = false }) {
         <input
           type={type} step={step}
           defaultValue={v ?? ''}
+          disabled={!canEdit || busy}
+          title={!canEdit ? readOnlyReason : undefined}
           onBlur={(e) => {
             let next = e.target.value;
             if (type === 'number') next = next === '' ? null : Number(next);
@@ -248,8 +372,11 @@ function PageFeatures({ setToast, embedded = false }) {
           }}
           style={{
             marginTop: 4, padding: '6px 10px', borderRadius: 6,
-            border: '1px solid ' + C.border, background: C.bg, color: C.ink,
+            border: '1px solid ' + C.border,
+            background: (!canEdit || busy) ? C.surfaceMuted || C.surfaceAlt : C.bg,
+            color: C.ink,
             width: type === 'number' ? 100 : 220, fontSize: 13,
+            cursor: (!canEdit || busy) ? 'not-allowed' : 'text',
           }}
         />
       </label>
@@ -261,6 +388,21 @@ function PageFeatures({ setToast, embedded = false }) {
       <Header title="ฟีเจอร์ระบบ"
         subtitle="เปิด/ปิดฟีเจอร์ของระบบ — รายการที่ปิดจะถูกบล็อกที่ฝั่ง server (503)" />
       {err ? <Card style={{ color: C.danger }}>{err}</Card> : null}
+      {!canEdit ? (
+        <Card style={{
+          background: C.warningSoft || '#FEF3C7',
+          borderLeft: `4px solid ${C.warning || '#D97706'}`,
+          marginBottom: 12,
+          color: C.warningInk || '#7A5A0F',
+          fontSize: 13,
+          lineHeight: 1.6,
+        }}>
+          <b>โหมดดูอย่างเดียว</b>: {readOnlyReason}
+          <div style={{ marginTop: 4 }}>
+            ปุ่มเปิด/ปิดถูกปิดไว้ล่วงหน้าเพื่อกันการกดแล้วไม่เกิดผลหรือเจอ 403 หลังจากคลิก
+          </div>
+        </Card>
+      ) : null}
 
       {dependencyWarnings.length > 0 && (
         <Card style={{
@@ -284,7 +426,7 @@ function PageFeatures({ setToast, embedded = false }) {
       )}
 
       <Card>
-        <SectionHeading>ฝั่งผู้เช่า</SectionHeading>
+        <SectionHeading title="ฝั่งผู้เช่า" />
         <Row id="tenantPortal"
           title="พอร์ทัลผู้เช่า (/tenant)"
           desc="ผู้เช่า login ด้วยเบอร์โทรที่ผูกกับห้อง เพื่อดูบิล แจ้งซ่อม อัปโหลดสลิป">
@@ -330,7 +472,7 @@ function PageFeatures({ setToast, embedded = false }) {
       </Card>
 
       <Card>
-        <SectionHeading>การเงิน</SectionHeading>
+        <SectionHeading title="การเงิน" />
         <Row id="lateFee"
           title="ค่าปรับชำระล่าช้า"
           desc="คำนวณจากยอดบิลก่อนหน้าที่เกินกำหนด">
@@ -347,7 +489,8 @@ function PageFeatures({ setToast, embedded = false }) {
           desc="ค่าใช้จ่ายต่อเนื่องผูกกับผู้เช่า/ห้อง — รวมเข้าบิลทุกเดือนอัตโนมัติ">
           <ToggleField id="recurringCharges" field="autoIncludeOnBillGen"
             label="รวมเข้าบิลอัตโนมัติเมื่อสร้างบิล"
-            features={features} setField={setField} />
+            features={features} setField={setField}
+            disabled={!canEdit || busy} disabledReason={readOnlyReason} />
         </Row>
         <Row id="billAutoGenerate"
           title="ออกบิลอัตโนมัติทุกเดือน"
@@ -357,13 +500,14 @@ function PageFeatures({ setToast, embedded = false }) {
       </Card>
 
       <Card>
-        <SectionHeading>มิเตอร์ &amp; ควบคุมการเข้า-ออก</SectionHeading>
+        <SectionHeading title="มิเตอร์ & ควบคุมการเข้า-ออก" />
         <Row id="meterIot"
           title="ระบบมิเตอร์"
           desc="บันทึกค่าน้ำ/ไฟ + ตรวจจับความผิดปกติ (3σ)">
           <SelectField id="meterIot" field="mode" label="โหมด"
             features={features} setField={setField}
-            options={[['manual', 'กรอกเอง'], ['simulator', 'จำลอง'], ['mqtt', 'MQTT (ยังไม่รองรับ)', true]]} />
+            options={[['manual', 'กรอกเอง'], ['simulator', 'จำลอง'], ['mqtt', 'MQTT (ยังไม่รองรับ)', true]]}
+            disabled={!canEdit || busy} disabledReason={readOnlyReason} />
           <Field id="meterIot" field="anomalySigmas" label="เกณฑ์ σ" type="number" step="0.5" />
         </Row>
         <Row id="accessControl"
@@ -371,14 +515,15 @@ function PageFeatures({ setToast, embedded = false }) {
           desc="บันทึก log การเข้า-ออก + RFID/QR (ทำงานร่วมกับ hardware ภายนอก)">
           <ToggleField id="accessControl" field="requirePaymentForCard"
             label="ระงับการ์ดอัตโนมัติเมื่อค้างชำระ"
-            features={features} setField={setField} />
+            features={features} setField={setField}
+            disabled={!canEdit || busy} disabledReason={readOnlyReason} />
           <Field id="accessControl" field="overdueDaysThreshold"
             label="ค้างชำระเกิน (วัน) จึงระงับ" type="number" />
         </Row>
       </Card>
 
       <Card>
-        <SectionHeading>การแจ้งเตือน</SectionHeading>
+        <SectionHeading title="การแจ้งเตือน" />
         <Row id="email"
           title="อีเมล (SMTP)"
           desc="แจ้งเตือนผ่านอีเมลเมื่อ LINE ส่งไม่สำเร็จ">
@@ -395,12 +540,13 @@ function PageFeatures({ setToast, embedded = false }) {
           desc="⚠ ต้องติดตั้ง SDK ผู้ให้บริการเองก่อน (npm i twilio) แล้วตั้ง credentials ในหน้า Secrets — เปิดอย่างเดียวจะไม่ส่งข้อความ">
           <SelectField id="sms" field="provider" label="ผู้ให้บริการ"
             features={features} setField={setField}
-            options={[['thsms', 'thsms.com'], ['twilio', 'Twilio']]} />
+            options={[['thsms', 'thsms.com'], ['twilio', 'Twilio']]}
+            disabled={!canEdit || busy} disabledReason={readOnlyReason} />
         </Row>
       </Card>
 
       <Card>
-        <SectionHeading>UX</SectionHeading>
+        <SectionHeading title="UX" />
         <Row id="darkMode"
           title="โหมดมืด"
           desc="ใช้ในพอร์ทัลผู้เช่า (/tenant) เท่านั้น — admin console ใช้ธีมเดียว" />
@@ -409,12 +555,13 @@ function PageFeatures({ setToast, embedded = false }) {
           desc="เปลี่ยนภาษาไทย/อังกฤษ ในพอร์ทัลผู้เช่า">
           <SelectField id="i18n" field="defaultLocale" label="ภาษาเริ่มต้น"
             features={features} setField={setField}
-            options={[['th', 'ไทย'], ['en', 'English']]} />
+            options={[['th', 'ไทย'], ['en', 'English']]}
+            disabled={!canEdit || busy} disabledReason={readOnlyReason} />
         </Row>
       </Card>
 
       <Card>
-        <SectionHeading>ความปลอดภัย / ปฏิบัติการ</SectionHeading>
+        <SectionHeading title="ความปลอดภัย / ปฏิบัติการ" />
         <Row id="citizenIdEncryption"
           title="เข้ารหัสเลขบัตร ปชช. (AES-256-GCM)"
           desc="เก็บข้อมูล PII แบบเข้ารหัส (ต้องตั้ง CITIZEN_ID_KEY หรือ SESSION_SECRET)" />
@@ -430,15 +577,56 @@ function PageFeatures({ setToast, embedded = false }) {
           <Field id="autoBackup" field="hourUtc" label="ชั่วโมง UTC" type="number" />
           <Field id="autoBackup" field="retainDays" label="เก็บไว้ (วัน)" type="number" />
         </Row>
+        <Row id="autoReconcileRooms"
+          title="Reconcile ห้องอัตโนมัติ"
+          desc="ช่วยแก้สถานะห้อง/สัญญาที่ค้างไม่ตรงกันเฉพาะเคสที่ระบบพิสูจน์ได้ว่าปลอดภัย" />
+        <div style={{
+          padding: '14px 0',
+          borderBottom: '1px solid ' + C.border,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 4 }}>
+            <span style={{ fontWeight: 600, fontSize: 14.5 }}>กฎสัญญาและเช็คอิน</span>
+            <Pill color="info" size="sm">guard หลัก</Pill>
+          </div>
+          <div style={{ color: C.muted, fontSize: 13, marginBottom: 8 }}>
+            ใช้ป้องกันการเข้าห้องผิดวัน, เงินมัดจำผิดปกติ, เอกสารไม่ครบ และข้อมูลฉุกเฉินไม่ครบก่อนสร้างสัญญา/เช็คอิน
+          </div>
+          <ul style={{ margin: '0 0 8px 0', paddingLeft: 18, color: C.ink2, fontSize: 12.5, lineHeight: 1.55 }}>
+            <li>ค่ากลุ่มนี้ถูกใช้ทั้ง flow สร้างสัญญาจาก booking และ flow check-in ผู้เช่า</li>
+            <li>ไม่ทำเป็น master toggle เพื่อกันปิด guard สำคัญโดยไม่ตั้งใจ แต่ปรับระดับความเข้มงวดได้ด้านล่าง</li>
+          </ul>
+          <div style={{ marginTop: 8, display: 'flex', flexWrap: 'wrap', gap: 12 }}>
+            <ToggleField id="tenancyContract" field="requireIdentityImages"
+              label="ต้องมีรูปบัตรหน้า/หลัง" features={features} setField={setField}
+              disabled={!canEdit || busy} disabledReason={readOnlyReason} />
+            <ToggleField id="tenancyContract" field="requireEmergencyContact"
+              label="ต้องมีผู้ติดต่อฉุกเฉิน" features={features} setField={setField}
+              disabled={!canEdit || busy} disabledReason={readOnlyReason} />
+            <ToggleField id="tenancyContract" field="requireAddress"
+              label="ต้องมีที่อยู่ผู้เช่า" features={features} setField={setField}
+              disabled={!canEdit || busy} disabledReason={readOnlyReason} />
+            <Field id="tenancyContract" field="moveInPastDays" label="ย้อนหลังได้ (วัน)" type="number" />
+            <Field id="tenancyContract" field="moveInFutureDays" label="ล่วงหน้าได้ (วัน)" type="number" />
+            <Field id="tenancyContract" field="depositMaxMonths" label="มัดจำสูงสุด (เดือน)" type="number" step="0.5" />
+            <Field id="tenancyContract" field="termsVersion" label="เวอร์ชันเงื่อนไข" />
+          </div>
+        </div>
       </Card>
     </Wrapper>
   );
 }
 
-function Toggle({ on, disabled, onChange }) {
+function Toggle({ on, disabled, onChange, label, disabledReason }) {
   const C = window.ADMIN_C;
   return (
-    <button onClick={onChange} disabled={disabled}
+    <button
+      type="button"
+      onClick={onChange}
+      disabled={disabled}
+      role="switch"
+      aria-checked={!!on}
+      aria-label={`${label || 'feature'}: ${on ? 'เปิดอยู่' : 'ปิดอยู่'}`}
+      title={disabled ? (disabledReason || 'กำลังบันทึก') : `${on ? 'ปิด' : 'เปิด'} ${label || 'feature'}`}
       style={{
         width: 46, height: 26, borderRadius: 999, border: 0,
         background: on ? C.accent : C.border,
@@ -454,27 +642,40 @@ function Toggle({ on, disabled, onChange }) {
   );
 }
 
-function ToggleField({ id, field, label, features, setField }) {
+function ToggleField({ id, field, label, features, setField, disabled = false, disabledReason = '' }) {
   const C = window.ADMIN_C;
   const on = !!(features[id] && features[id][field]);
   return (
     <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5, color: C.ink2 }}>
-      <input type="checkbox" checked={on} onChange={(e) => setField(id, field, e.target.checked)} />
+      <input
+        type="checkbox"
+        checked={on}
+        disabled={disabled}
+        title={disabled ? disabledReason : undefined}
+        onChange={(e) => setField(id, field, e.target.checked)}
+      />
       {label}
     </label>
   );
 }
 
-function SelectField({ id, field, label, options, features, setField }) {
+function SelectField({ id, field, label, options, features, setField, disabled = false, disabledReason = '' }) {
   const C = window.ADMIN_C;
   const v = (features[id] || {})[field] || '';
   return (
     <label style={{ fontSize: 12.5, color: C.muted, display: 'flex', flexDirection: 'column' }}>
       {label}
-      <select value={v} onChange={(e) => setField(id, field, e.target.value)}
+      <select
+        value={v}
+        disabled={disabled}
+        title={disabled ? disabledReason : undefined}
+        onChange={(e) => setField(id, field, e.target.value)}
         style={{
           marginTop: 4, padding: '6px 10px', borderRadius: 6,
-          border: '1px solid ' + C.border, background: C.bg, color: C.ink, fontSize: 13,
+          border: '1px solid ' + C.border,
+          background: disabled ? C.surfaceMuted || C.surfaceAlt : C.bg,
+          color: C.ink, fontSize: 13,
+          cursor: disabled ? 'not-allowed' : 'pointer',
         }}>
         {options.map(([val, lab, disabled]) => <option key={val} value={val} disabled={!!disabled}>{lab}</option>)}
       </select>

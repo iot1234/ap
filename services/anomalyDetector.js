@@ -16,11 +16,22 @@ const notifier = require('./notifier');
 const features = require('./features');
 
 const RE_ALERT_AFTER_MIN = 60;
+// Cap escalation at 24h between repeated alerts so long-running incidents
+// don't spam the owner every hour for days. Doubling pattern: 1h, 2h, 4h,
+// 8h, 16h, 24h (capped). escalationCount on the state row drives this.
+const ESCALATION_CAP_MIN = 24 * 60;
 const SEVERITY_EMOJI = { ok: '✅', warn: '⚠️', error: '🚨' };
 
 function ageMin(iso) {
   if (!iso) return Infinity;
   return (Date.now() - new Date(iso).getTime()) / 60_000;
+}
+
+function escalationDelayMin(count) {
+  // count=0 → 60min (first re-alert), count=1 → 120min, …, capped at 24h.
+  const n = Number.isFinite(count) ? Math.max(0, count) : 0;
+  const minutes = RE_ALERT_AFTER_MIN * Math.pow(2, n);
+  return Math.min(minutes, ESCALATION_CAP_MIN);
 }
 
 /**
@@ -38,14 +49,19 @@ function diffAndUpdate(state, report) {
   }
   const alerts = [];
   for (const c of report.checks) {
-    const prev = state.healthStatus[c.id] || { status: 'ok', notifiedAt: null };
+    const prev = state.healthStatus[c.id] || { status: 'ok', notifiedAt: null, escalationCount: 0 };
     const worsened =
       (prev.status === 'ok' && (c.status === 'warn' || c.status === 'error')) ||
       (prev.status === 'warn' && c.status === 'error');
+    // Escalation uses exponential backoff: 1h, 2h, 4h, …, capped at 24h.
+    // Without this, an error that persists for days re-alerts every 60min
+    // and the operator stops paying attention. Spreading later alerts out
+    // keeps signal-to-noise reasonable while still guaranteeing a fresh
+    // ping at least once a day.
     const escalate =
       c.status === 'error' &&
       prev.status === 'error' &&
-      ageMin(prev.notifiedAt) >= RE_ALERT_AFTER_MIN;
+      ageMin(prev.notifiedAt) >= escalationDelayMin(prev.escalationCount || 0);
     // Partial recovery: error → warn is *better* than before, so the owner
     // should know the system is healing even though it isn't fully OK yet.
     // Treated as a "recovered" alert (single ✅-flavoured message). Without
@@ -61,10 +77,17 @@ function diffAndUpdate(state, report) {
       alerts.push({
         check: c, prevStatus: prev.status, recovered,
       });
+      // Reset escalation count on recovery / status change; bump on each
+      // same-state escalation so the next interval doubles. Capped inside
+      // escalationDelayMin().
+      const nextCount = recovered || c.status !== prev.status
+        ? 0
+        : (Number(prev.escalationCount) || 0) + 1;
       state.healthStatus[c.id] = {
         status: c.status,
         message: c.message,
         notifiedAt: new Date().toISOString(),
+        escalationCount: nextCount,
       };
     } else {
       // Update status without bumping notifiedAt so escalation timer keeps running
@@ -72,6 +95,7 @@ function diffAndUpdate(state, report) {
         status: c.status,
         message: c.message,
         notifiedAt: prev.notifiedAt,
+        escalationCount: prev.escalationCount || 0,
       };
     }
   }

@@ -4,7 +4,7 @@
 
 const { useState } = React;
 
-function PageSettings({ rooms, setRooms, config, setConfig, bookings, setBookings, activities, setActivities, addActivity, setToast }) {
+function PageSettings({ rooms, setRooms, config, setConfig, bookings, setBookings, activities, setActivities, addActivity, setToast, currentUser }) {
   const C = window.ADMIN_C;
   const { Card, Btn, Input, Select, Toggle, Textarea, Tabs, Pill, Avatar, Modal,
           PageContainer, PageHeader, SectionHeading, DefList } = window;
@@ -134,7 +134,7 @@ function PageSettings({ rooms, setRooms, config, setConfig, bookings, setBooking
           still work via hash routes /admin#features and /admin#secrets
           (legacy URL compat) but the sidebar now shows just one entry. */}
       {tab === 'features' && window.PageFeatures
-        ? <window.PageFeatures setToast={setToast} embedded />
+        ? <window.PageFeatures setToast={setToast} embedded currentUser={currentUser} />
         : null}
       {tab === 'secrets'  && window.PageSecrets
         ? <window.PageSecrets setToast={setToast} embedded />

@@ -1845,7 +1845,14 @@ module.exports = function buildTenantOpsRouter(ctx) {
     async (req, res) => {
       const id = Number(req.params.id);
       if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
-      const reason = req.body.reason || null;
+      const reason = String(req.body.reason || '').trim();
+      if (reason.length < 5) {
+        return res.status(400).json({
+          error: 'reason is required when checking out or cancelling a contract',
+          code: 'CONTRACT_CLOSE_REASON_REQUIRED',
+          hint: 'ระบุเหตุผลอย่างน้อย 5 ตัวอักษร เช่น ผู้เช่าออกก่อนกำหนด / ยกเลิกตามตกลง / หมดอายุตามกำหนด',
+        });
+      }
       const refund = req.body.finalDepositReturn != null ? Number(req.body.finalDepositReturn) : null;
       // Default true so admin doesn't have to opt-in for the common case.
       // Admin can pass generateClosingBill:false on the last-day-of-month
@@ -1865,7 +1872,7 @@ module.exports = function buildTenantOpsRouter(ctx) {
           return res.status(404).json({ error: 'tenant not found' });
         }
         const tenant = tres.rows[0];
-        const oldRoom = tenant.current_room_id;
+        const tenantCurrentRoom = tenant.current_room_id ? String(tenant.current_room_id) : null;
 
         // Mark tenant moved_out
         await client.query(
@@ -1888,18 +1895,46 @@ module.exports = function buildTenantOpsRouter(ctx) {
               deposit_returned_at = CASE WHEN $2 IS NOT NULL THEN NOW() ELSE NULL END,
               deposit_return_reason = $3
              WHERE tenant_id=$1 AND status='active'
-           RETURNING id, contract_no, start_date, monthly_rent, deposit, discount_pct`,
+           RETURNING id, contract_no, room_id, start_date, monthly_rent, deposit, discount_pct`,
           [id, refund, reason, req.session.user.username]
         );
-        const closedContract = contractRes.rows[0] || null;
+        const closedContracts = contractRes.rows || [];
+        const closedContract = closedContracts[0] || null;
+        const closedContractIds = closedContracts
+          .map((c) => Number(c.id))
+          .filter((n) => Number.isInteger(n) && n > 0);
+        const contractRooms = closedContracts
+          .map((c) => c.room_id ? String(c.room_id) : '')
+          .filter(Boolean);
+        const releaseRoomIds = Array.from(new Set([
+          tenantCurrentRoom,
+          ...contractRooms,
+        ].filter(Boolean)));
+        const oldRoom = tenantCurrentRoom || contractRooms[0] || null;
+        const roomRelease = { released: [], skipped: [] };
+        const revokedInvitations = closedContractIds.length
+          ? await client.query(
+              `UPDATE contract_invitations
+                  SET status='revoked', revoked_at=NOW(), revoked_by=$2, updated_at=NOW()
+                WHERE contract_id = ANY($1::bigint[])
+                  AND status IN ('pending','submitted')
+                RETURNING id`,
+              [closedContractIds, req.session.user.username]
+            ).catch((err) => {
+              if (err.code === '42P01' || err.code === '42703') return { rowCount: 0, rows: [] };
+              throw err;
+            })
+          : { rowCount: 0, rows: [] };
 
         // Flip room status to vacant in BOTH JSONB blob and rooms_v2.
-        if (oldRoom) {
+        const normalizedTenantPhone = String(tenant.phone || '').replace(/[\s-]/g, '');
+        const contractReservationKeys = closedContractIds.map((cid) => `contract:${cid}`);
+        for (const roomToRelease of releaseRoomIds) {
           // Status='vacant' AND remove room.tenant so notifications can't
           // leak to the moved-out tenant on the next bill cycle (e.g.
           // bulk-send pulled from blob → SMS to old tenant). The `-`
           // operator drops the 'tenant' top-level key from the room object.
-          await client.query(
+          const blobRelease = await client.query(
             `UPDATE app_data
                 SET value = jsonb_set(
                               value,
@@ -1907,17 +1942,41 @@ module.exports = function buildTenantOpsRouter(ctx) {
                               ((value->$1) - 'tenant') || jsonb_build_object('status', 'vacant')
                             ),
                     updated_at=NOW()
-              WHERE key='baankarn_rooms_v1' AND value ? $1`,
-            [oldRoom]
+              WHERE key='baankarn_rooms_v1'
+                AND value ? $1
+                AND (
+                  ((value->$1)->'tenant') IS NULL
+                  OR ((value->$1)->'tenant'->>'tenantId') = $2
+                  OR replace(replace(COALESCE(((value->$1)->'tenant'->>'phone'), ''), ' ', ''), '-', '') = $3
+                  OR ((value->$1)->>'reservedBy') = ANY($4::text[])
+                )`,
+            [roomToRelease, String(id), normalizedTenantPhone, contractReservationKeys]
           );
+          let roomV2Rows = 0;
           try {
-            await client.query(
+            const roomV2Release = await client.query(
               `UPDATE rooms_v2 SET status='vacant', updated_at=NOW()
-                 WHERE room_code=$1 AND deleted_at IS NULL`,
-              [oldRoom]
+                 WHERE room_code=$1 AND deleted_at IS NULL
+                   AND NOT EXISTS (
+                     SELECT 1 FROM tenants tx
+                      WHERE tx.current_room_id=$1
+                        AND tx.status='active'
+                        AND tx.deleted_at IS NULL
+                        AND tx.id<>$2
+                   )`,
+              [roomToRelease, id]
             );
+            roomV2Rows = roomV2Release.rowCount || 0;
           } catch (err) {
             if (err.code !== '42P01') throw err;
+          }
+          if ((blobRelease.rowCount || 0) > 0 || roomV2Rows > 0) {
+            roomRelease.released.push(roomToRelease);
+          } else {
+            roomRelease.skipped.push({
+              roomId: roomToRelease,
+              reason: 'room_not_found_or_belongs_to_another_active_tenant',
+            });
           }
         }
 
@@ -1957,7 +2016,10 @@ module.exports = function buildTenantOpsRouter(ctx) {
         // would block a duplicate anyway, but we want a clean result not
         // a 23505 error.
         let closingBill = null;
-        if (wantClosingBill && oldRoom && closedContract) {
+        const billingRoom = closedContract && closedContract.room_id
+          ? String(closedContract.room_id)
+          : oldRoom;
+        if (wantClosingBill && billingRoom && closedContract) {
           // Asia/Bangkok local-time components — checkout at 00:30 ICT
           // (UTC 17:30 prev day) on a UTC-deployed Railway server would
           // otherwise read the previous day, off-by-one'ing pro-rate +
@@ -1974,7 +2036,7 @@ module.exports = function buildTenantOpsRouter(ctx) {
             `SELECT id FROM bills
                WHERE room_id=$1 AND period=$2 AND deleted_at IS NULL AND status<>'void'
                LIMIT 1`,
-            [oldRoom, period]
+            [billingRoom, period]
           );
           if (!dup.rows.length) {
             // daysInMonth: day 0 of next month is the last day of this month.
@@ -1988,7 +2050,7 @@ module.exports = function buildTenantOpsRouter(ctx) {
             const proRatedRent = Math.round(
               baseRent * fraction * (1 - discount / 100) * 100
             ) / 100;
-            const billNo = billing.makeBillNo(oldRoom, period) + '-X';
+            const billNo = billing.makeBillNo(billingRoom, period) + '-X';
             const dueDate = billing.formatYMD(ty, tm, Math.min(daysInMonth, daysLived + 7));
             try {
               const ins = await client.query(
@@ -1998,7 +2060,7 @@ module.exports = function buildTenantOpsRouter(ctx) {
                  VALUES ($1,$2,$3,$4,$5,$5,$5,$6,'pending',$7::jsonb)
                  ON CONFLICT (bill_no) DO NOTHING
                  RETURNING id, bill_no, total, due_date`,
-                [billNo, id, oldRoom, period, proRatedRent, dueDate,
+                [billNo, id, billingRoom, period, proRatedRent, dueDate,
                  JSON.stringify([{ label: 'pro-rate', amount: proRatedRent, daysLived, daysInMonth }])]
               );
               closingBill = ins.rows[0] || null;
@@ -2015,12 +2077,14 @@ module.exports = function buildTenantOpsRouter(ctx) {
         // late-fee tick concurrently — syncRoom re-derives the final state
         // (vacant when no active contract + no payable bills) so an admin
         // looking at /admin#rooms right after checkout sees the right thing.
-        if (oldRoom) {
-          require('../services/roomStatus').syncRoom(pool, oldRoom, { reason: 'tenant-checkout' })
+        for (const roomId of releaseRoomIds) {
+          require('../services/roomStatus').syncRoom(pool, roomId, { reason: 'tenant-checkout' })
             .catch((err) => console.warn(`[checkout] room sync failed:`, err.message));
         }
         audit(req, 'tenant.checkout', 'tenant', String(id),
-          { oldRoom, reason, refund,
+          { oldRoom, releaseRoomIds, roomRelease, reason, refund,
+            closedContracts: closedContracts.map((c) => c.contract_no || c.id),
+            invitationsRevoked: revokedInvitations.rowCount || 0,
             cardsRevoked: revokedCards.rows.map((c) => c.card_id),
             recurringDeactivated: deactivatedRecurring.rows.map((rc) => rc.label),
             closingBill: closingBill ? closingBill.bill_no : null });
@@ -2034,7 +2098,7 @@ module.exports = function buildTenantOpsRouter(ctx) {
             ``,
             `ระบบยืนยันการ check-out เรียบร้อยแล้ว`,
           ];
-          if (oldRoom) lines.push(`ห้อง: ${oldRoom}`);
+          if (releaseRoomIds.length) lines.push(`ห้อง: ${releaseRoomIds.join(', ')}`);
           if (revokedCards.rowCount > 0) {
             lines.push(`บัตรเข้า-ออกถูกเพิกถอน (${revokedCards.rowCount} ใบ)`);
           }
@@ -2060,13 +2124,20 @@ module.exports = function buildTenantOpsRouter(ctx) {
 
         res.json({
           ok: true, tenantId: id, oldRoom, refund,
+          releasedRooms: roomRelease.released,
+          skippedRooms: roomRelease.skipped,
+          invitationsRevoked: revokedInvitations.rowCount || 0,
           cardsRevoked: revokedCards.rowCount,
           closingBill,
         });
       } catch (err) {
         await client.query('ROLLBACK').catch(() => {});
         console.error('checkout error:', err);
-        res.status(500).json({ error: 'internal error' });
+        res.status(500).json({
+          error: 'checkout failed; contract, tenant, room, cards, recurring charges and closing bill were rolled back',
+          code: 'CHECKOUT_FAILED',
+          hint: 'ลองรีเฟรชแล้วทำรายการอีกครั้ง หากยังไม่สำเร็จให้ตรวจ health/schema และดู server log ตามเวลาที่ทำรายการ',
+        });
       } finally {
         client.release();
       }

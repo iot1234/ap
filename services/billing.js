@@ -175,7 +175,11 @@ function buildBill({ room, contract = null, config, features, previous = null, r
     }
   }
 
-  let subtotal = items.reduce((s, it) => s + (Number(it.amount) || 0), 0);
+  // Round at each accumulation step so VAT/total math runs on stable 2-decimal
+  // values. Items are individually rounded but raw reduce of floats can drift
+  // sub-cent; rounding here keeps the bill total exactly equal to the displayed
+  // line-item sum (also matches what the bill renderer prints).
+  let subtotal = round2(items.reduce((s, it) => s + (Number(it.amount) || 0), 0));
 
   // Late fee from previous bill
   let lateFee = 0;
@@ -190,7 +194,7 @@ function buildBill({ room, contract = null, config, features, previous = null, r
         lateFee = round2((Number(previous.total) || 0) * (ratePctMonth / 100) * monthsOver);
         if (lateFee > 0) {
           items.push({ label: `ค่าปรับชำระล่าช้า (${daysOver} วัน)`, qty: '', amount: lateFee });
-          subtotal += lateFee;
+          subtotal = round2(subtotal + lateFee);
         }
       }
     }

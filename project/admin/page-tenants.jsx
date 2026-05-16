@@ -940,7 +940,11 @@ function TabContract({ t, setToast, addActivity, setRooms, onClosed }) {
       setToast && setToast({ kind: 'success', message: 'ยกเลิกลิงก์เรียบร้อย' });
       reload();
     } catch (err) {
-      setToast && setToast({ kind: 'danger', message: 'ยกเลิกล้มเหลว: ' + err.message });
+      if (window.toastError && setToast) {
+        window.toastError(setToast, err, { action: 'ยกเลิกลิงก์สัญญา' });
+      } else {
+        setToast && setToast({ kind: 'danger', message: 'ยกเลิกล้มเหลว: ' + err.message });
+      }
     } finally { setBusy(false); }
   };
 
@@ -1001,8 +1005,8 @@ function TabContract({ t, setToast, addActivity, setRooms, onClosed }) {
   const cancelContract = async () => {
     if (!contract) return;
     const reason = (cancelReason || '').trim();
-    if (!reason) {
-      setToast && setToast({ kind: 'danger', message: 'กรุณาระบุเหตุผลก่อนยกเลิกสัญญา' });
+    if (reason.length < 5) {
+      setToast && setToast({ kind: 'danger', message: 'กรุณาระบุเหตุผลก่อนยกเลิกสัญญาอย่างน้อย 5 ตัวอักษร' });
       return;
     }
     setBusy(true);
@@ -1059,7 +1063,11 @@ function TabContract({ t, setToast, addActivity, setRooms, onClosed }) {
       // an empty drawer hanging open.
       if (onClosed) onClosed();
     } catch (err) {
-      setToast && setToast({ kind: 'danger', message: 'ยกเลิกล้มเหลว: ' + err.message });
+      if (window.toastError && setToast) {
+        window.toastError(setToast, err, { action: 'ยกเลิกสัญญา' });
+      } else {
+        setToast && setToast({ kind: 'danger', message: 'ยกเลิกล้มเหลว: ' + err.message });
+      }
     } finally { setBusy(false); }
   };
 
@@ -1316,7 +1324,7 @@ function CancelContractModal({ contract, tenant, reason, setReason, busy, onClos
       footer={
         <>
           <Btn variant="ghost" onClick={onClose} disabled={busy}>ปิด</Btn>
-          <Btn variant="danger" onClick={onConfirm} disabled={busy || !reason.trim()}>
+          <Btn variant="danger" onClick={onConfirm} disabled={busy || reason.trim().length < 5}>
             {busy ? 'กำลังยกเลิก…' : 'ยืนยันยกเลิก'}
           </Btn>
         </>

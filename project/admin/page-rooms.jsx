@@ -1079,6 +1079,45 @@ function RoomEditForm({ room, originalRoom, onUpdate, onServerPatch, config }) {
   };
   const effectiveRent = Number(rentInfo.rent) || 0;
   const overrideRent = rentInfo.override == null ? '' : rentInfo.override;
+  const featurePremium = config?.featurePremium || {};
+  const featureToggleRows = [
+    {
+      key: 'ac',
+      label: 'แอร์',
+      checked: !!features.ac,
+      premium: Number(featurePremium.ac || 0),
+      onChange: (v) => onUpdate({ ac: v }),
+      note: 'ใช้กำหนดว่าห้องนี้คิดพรีเมียมแอร์หรือไม่ แม้ประเภทห้องเดิมจะเป็นห้องแอร์ก็ตาม',
+    },
+    {
+      key: 'balcony',
+      label: 'มีระเบียง',
+      checked: !!features.balcony,
+      premium: Number(featurePremium.balcony || 0),
+      onChange: (v) => onUpdate({ balcony: v }),
+      note: 'เปิดเมื่อห้องมีระเบียงจริงและต้องการให้สูตรค่าเช่าบวกพรีเมียมระเบียง',
+    },
+    {
+      key: 'parking',
+      label: 'ที่จอดรถ',
+      checked: !!features.parking,
+      premium: Number(featurePremium.parking || 0),
+      onChange: (v) => onUpdate({ parking: v }),
+      note: 'เปิดเมื่อห้องผูกสิทธิ์จอดรถประจำกับค่าเช่าห้อง ไม่ใช่ค่าจอดรถรายเดือนแยก',
+    },
+    {
+      key: 'kitchen',
+      label: 'ครัวในห้อง',
+      checked: !!features.kitchen,
+      premium: Number(featurePremium.kitchen || 0),
+      onChange: (v) => onUpdate({ kitchen: v }),
+      note: 'เปิดเมื่อห้องมีครัวในตัวและต้องคิดพรีเมียมตามสูตรค่าเช่า',
+    },
+  ].map((item) => {
+    const nextFeatures = { ...features, [item.key]: !item.checked };
+    const nextRent = computeRoomRent(room.type, room.floor, room.view, nextFeatures, config);
+    return { ...item, deltaOnToggle: nextRent - computedRent };
+  });
   const pricingControlChanged = !!(originalRoom && (
     String(originalRoom.type || '') !== String(room.type || '') ||
     String(originalRoom.view || '') !== String(room.view || '') ||
@@ -1280,15 +1319,24 @@ function RoomEditForm({ room, originalRoom, onUpdate, onServerPatch, config }) {
           <div style={{ fontSize: 12, color: C.muted, marginBottom: 4 }}>
             คุณสมบัติพิเศษที่ใช้ในสูตรราคา
           </div>
-          <Toggle
-            label="แอร์"
-            checked={features.ac}
-            onChange={(v) => onUpdate({ ac: v })}
-            hint="ถ้าเปิด ระบบจะบวกพรีเมียมแอร์ตามหน้า Pricing; ถ้าปิด จะไม่บวกแม้ประเภทห้องปกติมีแอร์"
-          />
-          <Toggle label="มีระเบียง"  checked={!!room.balcony} onChange={(v) => onUpdate({ balcony: v })} />
-          <Toggle label="ที่จอดรถ"   checked={!!room.parking} onChange={(v) => onUpdate({ parking: v })} />
-          <Toggle label="ครัวในห้อง" checked={!!room.kitchen} onChange={(v) => onUpdate({ kitchen: v })} />
+          <div style={{ fontSize: 12.5, color: C.ink2, lineHeight: 1.55, marginBottom: 8 }}>
+            ปุ่มเหล่านี้ไม่ได้เป็นแค่ข้อมูลแสดงผล แต่เป็นตัวแปรในสูตรค่าเช่าเดียวกับหน้า Pricing
+            จึงมีผลกับราคาห้องว่างและสัญญาใหม่ ส่วนสัญญาที่ lock แล้ว/บิลที่ออกแล้วจะไม่ถูกแก้ย้อนหลัง
+          </div>
+          {featureToggleRows.map((item) => {
+            const nextLabel = item.deltaOnToggle === 0
+              ? 'ราคาไม่เปลี่ยน'
+              : `${item.deltaOnToggle > 0 ? '+' : ''}${fmtCurrency(item.deltaOnToggle)}`;
+            return (
+              <Toggle
+                key={item.key}
+                label={`${item.label} (${item.checked ? 'เปิดอยู่' : 'ปิดอยู่'})`}
+                checked={item.checked}
+                onChange={item.onChange}
+                hint={`${item.note} · Premium ที่ตั้งไว้: +${fmtCurrency(item.premium)} · ถ้ากดตอนนี้สูตรราคาจะเปลี่ยน ${nextLabel}`}
+              />
+            );
+          })}
         </div>
         <div style={{
           marginTop: 10, padding: 10,

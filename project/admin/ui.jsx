@@ -282,6 +282,10 @@ function Toggle({ label, checked, onChange, hint, disabled }) {
       <button
         type="button"
         disabled={disabled}
+        role="switch"
+        aria-checked={!!checked}
+        aria-label={`${label || 'toggle'}: ${checked ? 'เปิดอยู่' : 'ปิดอยู่'}`}
+        title={hint || label || undefined}
         onClick={() => onChange && onChange(!checked)}
         style={{
           width: 42, height: 24,

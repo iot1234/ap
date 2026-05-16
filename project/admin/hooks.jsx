@@ -714,6 +714,10 @@
       title: 'สถานะปัจจุบันทำรายการนี้ไม่ได้',
       description: (e) => e.hint || `สถานะปัจจุบัน: ${e.currentStatus || '-'} — รีเฟรชข้อมูลแล้วตรวจขั้นตอนใหม่`,
     },
+    REOPEN_REASON_REQUIRED: {
+      title: 'ต้องระบุเหตุผลก่อนทบทวนใหม่',
+      description: (e) => e.hint || 'การเปิดรายการที่ถูกปฏิเสธกลับมาตรวจใหม่ต้องมีเหตุผล เพื่อให้ audit log ตรวจย้อนหลังได้',
+    },
     TENANT_REQUIRED: {
       title: 'รายการนี้ยังไม่ผูกผู้เช่า',
       description: (e) => e.hint || 'ออก invitation ใหม่จากสัญญาที่ผูก tenant ถูกต้อง',

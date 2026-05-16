@@ -22,6 +22,15 @@ class LockedOutError extends Error {
   }
 }
 
+// Canonical-form the principal so attackers can't fork the lockout counter
+// by varying case/whitespace ("admin:Nick", "admin:nick ", "admin:NICK" all
+// resolve to the same lockout row). Caller is expected to pass an already-
+// shaped key like `admin:${username}` / `tenant:${phone}`, but we still
+// normalize defensively here as a single source of truth.
+function normalizePrincipal(p) {
+  return String(p || '').trim().toLowerCase().slice(0, 256);
+}
+
 function makeLockout(pool) {
   /**
    * Throws LockedOutError if the principal is currently locked. Pass the
@@ -30,7 +39,7 @@ function makeLockout(pool) {
   async function check(principal) {
     const { rows } = await pool.query(
       `SELECT locked_until FROM login_lockouts WHERE principal=$1`,
-      [String(principal).slice(0, 256)]
+      [normalizePrincipal(principal)]
     );
     if (!rows.length || !rows[0].locked_until) return;
     const until = new Date(rows[0].locked_until).getTime();
@@ -41,7 +50,7 @@ function makeLockout(pool) {
   }
 
   async function recordFailure(principal, kind = 'admin') {
-    const key = String(principal).slice(0, 256);
+    const key = normalizePrincipal(principal);
     // Atomic upsert: if first_fail_at is older than FAIL_WINDOW we restart
     // the counter; otherwise increment. When we hit threshold, set
     // locked_until and reset the counter.
@@ -77,11 +86,11 @@ function makeLockout(pool) {
   async function reset(principal) {
     await pool.query(
       `DELETE FROM login_lockouts WHERE principal=$1`,
-      [String(principal).slice(0, 256)]
+      [normalizePrincipal(principal)]
     );
   }
 
   return { check, recordFailure, reset };
 }
 
-module.exports = { makeLockout, LockedOutError, FAIL_THRESHOLD, FAIL_WINDOW_MS, LOCKOUT_DURATION_MS };
+module.exports = { makeLockout, LockedOutError, normalizePrincipal, FAIL_THRESHOLD, FAIL_WINDOW_MS, LOCKOUT_DURATION_MS };

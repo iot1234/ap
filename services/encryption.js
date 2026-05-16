@@ -147,12 +147,69 @@ function validateAtBoot() {
   return { ok: true, mode: 'versioned', current: _current, loaded: Array.from(_keys.keys()) };
 }
 
+/**
+ * Async canary check against the DB. Catches the most dangerous operator
+ * mistake: overwriting an existing ENCRYPTION_KEY_V<N> in place (instead of
+ * adding a new V<N+1>). The synchronous validateAtBoot() only round-trips
+ * with the CURRENT key, so a same-version key replacement would pass it
+ * cleanly while every old ciphertext in the DB becomes unreadable.
+ *
+ * On first boot: encrypts a known plaintext + persists to app_data.
+ * On later boots: decrypts the stored canary; if it fails, the current
+ * key set can't read existing ciphertexts (keys were rotated incorrectly).
+ *
+ * Caller is expected to halt boot when this returns ok:false in production.
+ */
+async function validateCanary(pool) {
+  if (!pool) return { ok: true, mode: 'skipped' };
+  loadKeys();
+  if (_keys.size === 0) return { ok: true, mode: 'legacy', reason: 'no versioned keys' };
+  const KEY = 'encryption_canary_v1';
+  const CANARY_PLAINTEXT = 'baankarn-encryption-canary-v1';
+  try {
+    const { rows } = await pool.query(
+      `SELECT value FROM app_data WHERE key=$1 LIMIT 1`,
+      [KEY]
+    );
+    if (!rows.length) {
+      const encoded = encryptString(CANARY_PLAINTEXT);
+      await pool.query(
+        `INSERT INTO app_data (key, value, updated_at)
+           VALUES ($1, $2::jsonb, NOW())
+         ON CONFLICT (key) DO NOTHING`,
+        [KEY, JSON.stringify({ ciphertext: encoded, createdAt: new Date().toISOString() })]
+      );
+      return { ok: true, mode: 'created' };
+    }
+    const stored = rows[0].value;
+    const ciphertext = stored && stored.ciphertext;
+    if (!ciphertext) return { ok: true, mode: 'no-canary' };
+    const decoded = decryptString(ciphertext);
+    if (decoded !== CANARY_PLAINTEXT) {
+      return {
+        ok: false,
+        reason: 'canary decrypted but plaintext mismatch — keys were rotated incorrectly',
+      };
+    }
+    return { ok: true, mode: 'verified', version: ciphertext.match(/^v(\d+)\$/)?.[1] || 'legacy' };
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `canary decrypt failed: ${err.message}. ` +
+              'Existing ciphertexts (secrets, citizen_id) will be unreadable. ' +
+              'If you intended to rotate keys, ADD a new ENCRYPTION_KEY_V<N+1> ' +
+              'and set ENCRYPTION_KEY_CURRENT=<N+1> — do NOT overwrite an existing V<N>.',
+    };
+  }
+}
+
 module.exports = {
   encryptString,
   decryptString,
   currentVersion,
   loadedVersions,
   validateAtBoot,
+  validateCanary,
   // Re-export helpers from legacy for callers that want masking/HMAC
   maskTail: legacyCrypto.maskTail,
   hmac: legacyCrypto.hmac,

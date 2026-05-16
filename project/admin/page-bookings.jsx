@@ -14,6 +14,7 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
   const [tab, setTab] = useState('pending');
   const [activeId, setActiveId] = useState(null);
   const [confirmAction, setConfirmAction] = useState(null);
+  const [actionReason, setActionReason] = useState('');
 
   const filtered = useMemo(() => {
     if (tab === 'all') return bookings;
@@ -149,6 +150,20 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
     addActivity && addActivity({ icon: '❌', text: `ปฏิเสธการจอง ${id}`, type: 'booking' });
     setToast && setToast({ kind: 'info', message: 'ปฏิเสธการจองแล้ว' });
     setActiveId(null); setConfirmAction(null);
+  };
+
+  const handleReopen = async (id) => {
+    const reopenReason = actionReason.trim();
+    if (reopenReason.length < 5) {
+      setToast && setToast({ kind: 'danger', message: 'กรุณาระบุเหตุผลทบทวนใหม่อย่างน้อย 5 ตัวอักษร' });
+      return;
+    }
+    const ok = await updateStatus(id, 'reviewing', { reopenReason });
+    if (!ok) return;
+    addActivity && addActivity({ icon: '↺', text: `ทบทวนการจอง ${id}: ${reopenReason.slice(0, 60)}`, type: 'booking' });
+    setToast && setToast({ kind: 'info', message: 'ส่งกลับไปตรวจสอบใหม่แล้ว' });
+    setActionReason('');
+    setConfirmAction(null);
   };
 
   const statusMap = {
@@ -308,11 +323,9 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
               </>
             )}
             {active.status === 'rejected' && (
-              <Btn variant="ghost" onClick={async () => {
-                const ok = await updateStatus(active.id, 'reviewing');
-                if (!ok) return;
-                addActivity && addActivity({ icon: '↺', text: `ทบทวนการจอง ${active.id}`, type: 'booking' });
-                setToast && setToast({ kind: 'info', message: 'ส่งกลับไปตรวจสอบใหม่แล้ว' });
+              <Btn variant="ghost" onClick={() => {
+                setActionReason('');
+                setConfirmAction({ id: active.id, type: 'reopen' });
               }}>↺ ทบทวนใหม่</Btn>
             )}
           </>
@@ -323,14 +336,21 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
 
       <Modal
         open={!!confirmAction}
-        onClose={() => setConfirmAction(null)}
-        title={confirmAction?.type === 'approve' ? 'ยืนยันการอนุมัติ' : 'ยืนยันการปฏิเสธ'}
+        onClose={() => { setConfirmAction(null); setActionReason(''); }}
+        title={confirmAction?.type === 'approve'
+          ? 'ยืนยันการอนุมัติ'
+          : confirmAction?.type === 'reopen'
+            ? 'ยืนยันการทบทวนใหม่'
+            : 'ยืนยันการปฏิเสธ'}
         footer={
           <>
-            <Btn variant="ghost" onClick={() => setConfirmAction(null)}>ยกเลิก</Btn>
+            <Btn variant="ghost" onClick={() => { setConfirmAction(null); setActionReason(''); }}>ยกเลิก</Btn>
             {confirmAction?.type === 'approve'
               ? <Btn variant="success" onClick={() => handleApprove(confirmAction.id)}>อนุมัติ</Btn>
-              : <Btn variant="danger" onClick={() => handleReject(confirmAction.id)}>ปฏิเสธการจอง</Btn>}
+              : confirmAction?.type === 'reopen'
+                ? <Btn variant="secondary" onClick={() => handleReopen(confirmAction.id)}
+                    disabled={actionReason.trim().length < 5}>ส่งกลับไปตรวจสอบ</Btn>
+                : <Btn variant="danger" onClick={() => handleReject(confirmAction.id)}>ปฏิเสธการจอง</Btn>}
           </>
         }
       >
@@ -341,10 +361,11 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
           // is the right booking before the destructive click.
           const b = confirmAction ? bookings.find((x) => x.id === confirmAction.id) : null;
           const isApprove = confirmAction?.type === 'approve';
+          const isReopen = confirmAction?.type === 'reopen';
           return (
             <div style={{ fontSize: 14, color: C.ink2, lineHeight: 1.7 }}>
               <div style={{ marginBottom: 12 }}>
-                {isApprove ? 'อนุมัติการจอง:' : 'ปฏิเสธการจอง:'}
+                {isApprove ? 'อนุมัติการจอง:' : isReopen ? 'ทบทวนการจองใหม่:' : 'ปฏิเสธการจอง:'}
                 <div style={{ marginTop: 6, padding: '8px 12px',
                               background: C.surfaceAlt || C.surfaceAlt,
                               borderRadius: 8, fontSize: 13.5 }}>
@@ -360,6 +381,26 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
                 </div>
               </div>
 
+              {isReopen ? (
+                <div style={{ marginBottom: 12 }}>
+                  <label style={{ display: 'block', fontSize: 12, color: C.muted, marginBottom: 4 }}>
+                    เหตุผลที่นำกลับมาตรวจใหม่
+                  </label>
+                  <textarea rows={3} maxLength={500}
+                    value={actionReason}
+                    onChange={(e) => setActionReason(e.target.value)}
+                    placeholder="เช่น ผู้จองส่งเอกสารเพิ่มแล้ว, ตรวจข้อมูลซ้ำพบว่าถูกต้อง"
+                    style={{
+                      width: '100%', padding: '8px 10px', border: `1px solid ${C.border}`,
+                      borderRadius: 6, fontSize: 13, fontFamily: 'inherit',
+                      boxSizing: 'border-box', resize: 'vertical',
+                    }} />
+                  <div style={{ fontSize: 11, color: C.muted, marginTop: 4 }}>
+                    ระบบจะบันทึกเหตุผลนี้ในรายการจองและ audit log
+                  </div>
+                </div>
+              ) : null}
+
               <div style={{
                 padding: '10px 12px',
                 background: isApprove ? (C.successSoft || C.successSoft) : (C.warningSoft || C.warningSoft),
@@ -372,6 +413,11 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
                     1) ระบบจะหาห้องว่างตรงเงื่อนไขแล้วตั้งเป็น "จองแล้ว" อัตโนมัติ<br/>
                     2) ผู้จองจะได้รับแจ้งเตือนทาง LINE/อีเมล (ถ้ามีข้อมูล)<br/>
                     3) <b style={{ color: C.warning || C.warning }}>ขั้นต่อไป:</b> ตรวจเบอร์ผู้เช่า + ผูก LINE ที่หน้า "ผู้เช่า" — ผู้เช่า login portal ด้วยเบอร์ที่ผูกกับห้อง
+                  </>
+                ) : isReopen ? (
+                  <>
+                    1) สถานะการจองจะกลับเป็น "กำลังตรวจ" เพื่อให้ตรวจเอกสารและตัดสินใจใหม่<br/>
+                    2) เหตุผลจะถูกเก็บไว้ในรายการจองและ audit log เพื่อย้อนตรวจสอบภายหลัง
                   </>
                 ) : (
                   <>

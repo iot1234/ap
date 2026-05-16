@@ -1073,6 +1073,7 @@ function App() {
     bookings, setBookings,
     activities, setActivities, addActivity,
     setToast,
+    currentUser,
   };
 
   const PAGES = {

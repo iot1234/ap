@@ -2032,7 +2032,12 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             billStatus: row.status,
           });
         }
-        const billTotal = Number(row.total);
+        // Round bill total to 2 decimals so legacy rows with sub-cent drift
+        // (e.g. 5000.0000000001 from older code) don't propagate into the
+        // payments ledger. Without this round2, payments.amount can have
+        // float dust that breaks downstream reconciliation against
+        // bills.total (and against tenant-displayed amounts).
+        const billTotal = billing.round2(Number(row.total));
         if (!Number.isFinite(billTotal) || billTotal <= 0) {
           await client.query('ROLLBACK');
           return res.status(409).json({ error: 'bill total is invalid', code: 'INVALID_BILL_TOTAL' });
@@ -2109,18 +2114,18 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           });
         }
         await client.query('COMMIT');
-        audit(req, 'bill.manual_pay', 'bill', String(id), {
-          paymentId: payment.rows[0].id,
-          amount: billTotal,
-          method,
-          supersededPaymentIds: supersededPending.rows.map((r) => r.id),
-        });
         notifyManualPayment(
           payment.rows[0],
           paid.rows[0] || row,
           verifier,
           supersededPending.rows.length
         ).catch(() => {});
+        audit(req, 'bill.manual_pay', 'bill', String(id), {
+          paymentId: payment.rows[0].id,
+          amount: billTotal,
+          method,
+          supersededPaymentIds: supersededPending.rows.map((r) => r.id),
+        });
         // Auto-recompute room status — if this was the last overdue bill,
         // the room flips overdue → occupied without admin clicking.
         // paid.rows[0].room_id comes from the RETURNING * above.

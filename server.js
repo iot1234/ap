@@ -415,9 +415,9 @@ const lockout = makeLockout(pool);
 const DUMMY_HASH = '$2a$10$' + 'X'.repeat(53);
 
 // --- Auth endpoints -------------------------------------------------------
-app.post('/api/auth/login', sameOrigin, loginLimiter, validateBody(schemas.login), async (req, res) => {
+app.post('/api/auth/login', sameOrigin, loginLimiter, lookupJitter, validateBody(schemas.login), async (req, res) => {
   const { username, password } = req.body;
-  const principal = `admin:${username.toLowerCase()}`;
+  const principal = `admin:${username.toLowerCase().trim()}`;
   try {
     // Reject early if locked, but still consume some time so the response
     // shape mirrors a normal failed login.
@@ -1702,11 +1702,18 @@ app.get('/api/features', async (_req, res) => {
   }
 });
 
-app.get('/api/admin/features', requireAuth, async (_req, res) => {
+app.get('/api/admin/features', requireAuth, requireRole('owner', 'manager', 'staff'), async (req, res) => {
   try {
     const f = await features.load(pool);
     // Never echo a secret. SMTP_PASS is env-only and not in DB anyway.
-    res.json({ ok: true, features: f, defaults: features.DEFAULTS });
+    const role = req.session.user.role;
+    res.json({
+      ok: true,
+      features: f,
+      defaults: features.DEFAULTS,
+      role,
+      canEdit: role === 'owner',
+    });
   } catch (err) {
     console.error('features admin GET error:', err);
     res.status(500).json({ error: 'internal error' });
@@ -1852,7 +1859,7 @@ const rateLimitTenantLogin = makeIpLimiter({
   windowMs: 15 * 60_000, max: 8, message: 'too many login attempts',
 });
 
-app.post('/api/tenant/login', sameOrigin, rateLimitTenantLogin, features.requireFeature('tenantPortal'),
+app.post('/api/tenant/login', sameOrigin, rateLimitTenantLogin, lookupJitter, features.requireFeature('tenantPortal'),
   // Wire the tenantLogin schema so phoneStr's dash/space normalisation runs
   // before the DB lookup. Without this a tenant typing "081-234-5678" got
   // an exact-match miss against admin-stored "0812345678" and login failed
@@ -5619,12 +5626,34 @@ app.put('/api/bookings/:id', sameOrigin, csrfGuard, requireAuth, requireRole('ow
           allowed,
         });
       }
+      // Reverse transition rejected → reviewing is a legitimate admin
+      // override (reconsider a previously-rejected booking) but it bypasses
+      // the audit trail rationale carried by the original reject reason.
+      // Require an explicit `reopenReason` (≥5 chars) on the reopen so we
+      // can answer the audit question "why was this back in the queue?"
+      // six months later. The reason gets stamped onto the row + audit log.
+      if (before.status === 'rejected' && b.status === 'reviewing') {
+        const reopenReason = String(b.reopenReason || '').trim();
+        if (reopenReason.length < 5) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({
+            error: 'ต้องระบุเหตุผลในการเปิด booking ที่ถูกปฏิเสธอย่างน้อย 5 ตัวอักษร',
+            code: 'REOPEN_REASON_REQUIRED',
+            hint: 'กดทบทวนใหม่จากหน้า booking แล้วใส่เหตุผล เช่น ผู้จองส่งเอกสารเพิ่ม หรือแอดมินตรวจข้อมูลซ้ำแล้ว',
+          });
+        }
+        // Stash the reason on the booking blob so it shows up in admin UI.
+        b.reopenReason = reopenReason.slice(0, 500);
+      }
     }
     const updated = {
       ...before,
       status: b.status || before.status,
       adminNotes: b.adminNotes !== undefined ? String(b.adminNotes).slice(0, 1000) : before.adminNotes,
       roomId: b.roomId !== undefined ? String(b.roomId).slice(0, 32) : before.roomId,
+      // Preserve reopenReason from the rejected→reviewing reverse transition so
+      // it shows up on the booking detail panel + survives subsequent edits.
+      reopenReason: b.reopenReason !== undefined ? b.reopenReason : before.reopenReason,
       updatedAt: new Date().toISOString(),
       updatedBy: req.session.user.username,
     };
@@ -8189,11 +8218,9 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
                 t.full_name AS tenant_name, t.status AS tenant_status
            FROM contracts c
            LEFT JOIN tenants t ON t.id = c.tenant_id
-          WHERE c.room_id=$1 AND c.status='active' AND c.deleted_at IS NULL
-            AND c.tenant_id <> $2
-          ORDER BY c.created_at DESC
-          LIMIT 1
-          FOR UPDATE OF c`,
+          WHERE c.room_id=$1 AND c.status='active'
+            AND c.deleted_at IS NULL AND c.tenant_id <> $2
+          LIMIT 1 FOR UPDATE OF c`,
         [roomId, tenantId]
       );
       if (roomContract.rows.length) {
@@ -9107,6 +9134,7 @@ app.post('/api/admin/contract-invitations/:id/approve',
       // DO NOTHING handles the (rare) race where a manual bill was already
       // created for this room+period.
       let welcomeBillCreated = null;
+      let welcomeBillError = null;
       if (inv.tenant_id && contract.room_id && Number(contract.monthly_rent) > 0) {
         await client.query('SAVEPOINT welcome_bill');
         try {
@@ -9150,8 +9178,13 @@ app.post('/api/admin/contract-invitations/:id/approve',
           // Welcome bill is best-effort — admin can manually create one
           // from /admin#billing if this fails. Roll back only this block so
           // a unique/schema error cannot poison the main approve transaction.
+          // Capture the error message so the admin response can surface a
+          // visible warning instead of failing silently (previously this
+          // only hit the server log and admins missed it until the tenant
+          // complained about no first-month bill).
           await client.query('ROLLBACK TO SAVEPOINT welcome_bill').catch(() => {});
           await client.query('RELEASE SAVEPOINT welcome_bill').catch(() => {});
+          welcomeBillError = err && err.message ? String(err.message).slice(0, 200) : 'unknown error';
           console.warn('[approve] welcome bill skipped:', err.message);
         }
       }
@@ -9230,6 +9263,11 @@ app.post('/api/admin/contract-invitations/:id/approve',
         contractId: inv.contract_id,
         contract,
         locked: true,
+        welcomeBill: welcomeBillCreated || null,
+        // Non-fatal warning so admin sees in UI immediately and can create
+        // the bill manually from /admin#billing instead of finding out via
+        // tenant complaint that the first month never billed.
+        welcomeBillError: welcomeBillError || null,
         // Surface the integration so admin UI can show "ดู PDF" / "สร้างบิลแรก"
         // CTAs without round-tripping back to the server.
         nextActions: {
@@ -11033,6 +11071,30 @@ migrate()
         const status = enc.validateAtBoot();
         if (status.mode === 'versioned') {
           console.log(`[boot] encryption: versioned (current=v${status.current}, loaded=[${status.loaded.join(',')}])`);
+        }
+        // Canary check: detects the operator-overwrite-V1 hazard that the
+        // sync round-trip can't see. validateAtBoot() encrypts+decrypts with
+        // the SAME current key; if V1 was rotated to a brand-new 32-byte value
+        // (instead of adding V2), it still passes the round-trip while every
+        // existing ciphertext silently becomes unreadable. The canary stores
+        // a known plaintext at first boot and re-decrypts on every subsequent
+        // boot, catching the rotation mistake before the first user write
+        // surfaces it as a "decrypt failed" log for every secret column.
+        try {
+          const canary = await enc.validateCanary(pool);
+          if (!canary.ok) {
+            console.error('[boot] encryption canary failed:', canary.reason);
+            if (NODE_ENV === 'production') {
+              console.error('[boot] refusing to start: encryption keys were rotated incorrectly');
+              process.exit(1);
+            }
+          } else if (canary.mode === 'created') {
+            console.log('[boot] encryption canary: created (first run)');
+          } else if (canary.mode === 'verified') {
+            console.log(`[boot] encryption canary: verified (v${canary.version})`);
+          }
+        } catch (canaryErr) {
+          console.warn('[boot] encryption canary check skipped:', canaryErr.message);
         }
       } catch (err) {
         console.error(err.message);

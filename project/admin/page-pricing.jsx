@@ -215,6 +215,12 @@ function TabRates({ draft, updatePath, floorsForPricing }) {
   const [previewFeats, setPreviewFeats] = useState({ balcony: true, ac: true, parking: false, kitchen: false });
 
   const previewRent = computeRoomRent(previewType, Number(previewFloor), previewView, previewFeats, draft);
+  const featurePremiumItems = [
+    { key: 'balcony', label: 'มีระเบียง', premium: Number(draft.featurePremium.balcony || 0) },
+    { key: 'ac', label: 'แอร์', premium: Number(draft.featurePremium.ac || 0) },
+    { key: 'parking', label: 'ที่จอดรถ', premium: Number(draft.featurePremium.parking || 0) },
+    { key: 'kitchen', label: 'ครัวในห้อง', premium: Number(draft.featurePremium.kitchen || 0) },
+  ];
 
   return (
     <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 2fr) minmax(0, 1fr)', gap: 16, alignItems: 'start' }}>
@@ -306,6 +312,10 @@ function TabRates({ draft, updatePath, floorsForPricing }) {
 
         <Card>
           <SectionHeading title="พรีเมียมตามคุณสมบัติ" subtitle="ส่วนเพิ่มเมื่อห้องมีสิ่งอำนวยความสะดวกพิเศษ" level={3} />
+          <div style={{ fontSize: 12.5, color: C.ink2, lineHeight: 1.55, marginBottom: 10 }}>
+            ตัวเลขชุดนี้เป็นราคากลางของสูตรค่าเช่า เมื่อเปิดคุณสมบัติเดียวกันในหน้าห้องพัก ระบบจะบวกเพิ่มจากค่าเช่าฐานทันทีใน preview
+            และใช้กับห้องว่าง/สัญญาใหม่ที่ยังไม่ได้ lock ราคา
+          </div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 12 }}>
             <Input label="มีระเบียง"  type="number" suffix="+ บาท"
                    value={draft.featurePremium.balcony} onChange={(v) => updatePath('featurePremium.balcony', Number(v))} />
@@ -341,12 +351,7 @@ function TabRates({ draft, updatePath, floorsForPricing }) {
               display: 'flex', flexDirection: 'column', gap: 4,
             }}>
               <div style={{ fontSize: 11.5, color: '#bcaf95', marginBottom: 4 }}>คุณสมบัติพิเศษ</div>
-              {[
-                ['balcony', 'มีระเบียง'],
-                ['ac', 'แอร์'],
-                ['parking', 'ที่จอดรถ'],
-                ['kitchen', 'ครัวในห้อง'],
-              ].map(([k, label]) => (
+              {featurePremiumItems.map(({ key: k, label, premium }) => (
                 <label key={k} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5, color: '#ebe1cc', cursor: 'pointer' }}>
                   <input
                     type="checkbox"
@@ -354,7 +359,10 @@ function TabRates({ draft, updatePath, floorsForPricing }) {
                     onChange={(e) => setPreviewFeats(prev => ({ ...prev, [k]: e.target.checked }))}
                     style={{ accentColor: C.accent }}
                   />
-                  {label}
+                  <span>{label}</span>
+                  <span style={{ marginLeft: 'auto', color: '#bcaf95', fontFamily: 'JetBrains Mono, monospace', fontSize: 11.5 }}>
+                    +{fmtCurrency(premium)}
+                  </span>
                 </label>
               ))}
             </div>

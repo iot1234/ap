@@ -178,12 +178,24 @@ async function dispatch(pool, features, row) {
 async function processOne(pool, features, row) {
   try {
     await dispatch(pool, features, row);
-    await pool.query(
+    // Only mark sent if WE still own this claim — the reaper may have flipped
+    // the row back to 'pending' if our dispatch hung past 10 minutes, and a
+    // sibling worker may have picked it up. Without the status guard we'd
+    // overwrite a sibling's progress (their retry_count, their last_error)
+    // and lock the row at 'sent' even though our dispatch never returned
+    // before being reaped. The dispatch ALSO sent twice in that case, but
+    // LINE's X-Line-Retry-Key catches the duplicate within 10 min; email/SMS
+    // get no such dedup so this guard is the only line of defense.
+    const upd = await pool.query(
       `UPDATE notifications_queue
          SET status='sent', sent_at=NOW(), last_error=NULL
-         WHERE id=$1`,
+         WHERE id=$1 AND status='processing'`,
       [row.id]
     );
+    if (upd.rowCount === 0) {
+      console.warn(`[notif-queue] row ${row.id} no longer 'processing' on success — likely reaped mid-dispatch`);
+      return;
+    }
     await logResult(pool, row, 'sent', null);
   } catch (err) {
     // nextRetry is computed from the snapshot at CLAIM TIME, but the

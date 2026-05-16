@@ -1661,6 +1661,68 @@ test('admin feature settings block unsupported meter MQTT mode', () => {
     'SelectField must honor disabled options');
 });
 
+test('admin feature settings are owner-editable only and explain every switch', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const page = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-features.jsx'), 'utf8');
+  const shell = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'shell.jsx'), 'utf8');
+  const settings = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-settings.jsx'), 'utf8');
+
+  const getIdx = server.indexOf("app.get('/api/admin/features'");
+  const getBlock = server.slice(getIdx, server.indexOf("app.put('/api/admin/features'", getIdx));
+  assert.match(getBlock, /canEdit:\s*role === 'owner'/,
+    'GET /api/admin/features must tell the UI whether the current role can edit');
+  assert.match(getBlock, /role,/,
+    'GET /api/admin/features must return the role for read-only messaging');
+
+  assert.match(shell, /currentUser,/,
+    'shell must pass currentUser into page props so embedded feature settings know the role');
+  assert.match(settings, /PageFeatures[\s\S]{0,120}currentUser=\{currentUser\}/,
+    'Settings > Features must forward currentUser to the embedded feature page');
+  assert.match(page, /currentUser = null/,
+    'PageFeatures must accept the current user');
+  assert.match(page, /readOnlyReason/,
+    'PageFeatures must render a clear read-only reason for manager/staff');
+  assert.match(page, /disabled=\{busy \|\| !canEdit\}/,
+    'feature switches must be disabled before a non-owner can click into a 403');
+  assert.match(page, /role="switch"[\s\S]{0,80}aria-checked/,
+    'feature switches must expose switch semantics and state');
+  assert.match(page, /FEATURE_HELP/,
+    'feature switches must have inline explanations instead of unlabeled toggles');
+  assert.match(page, /SectionHeading title="ฝั่งผู้เช่า"/,
+    'section headings must use the actual SectionHeading API');
+  assert.match(page, /Row id="autoReconcileRooms"/,
+    'autoReconcileRooms must not be a hidden feature flag');
+  assert.match(page, /field="requireIdentityImages"/,
+    'tenancy contract identity guard must be visible and configurable');
+  assert.match(page, /field="moveInPastDays"/,
+    'tenancy contract date-window guard must be visible and configurable');
+});
+
+test('room special-property toggles explain pricing impact', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const rooms = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-rooms.jsx'), 'utf8');
+  const pricing = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-pricing.jsx'), 'utf8');
+  const ui = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'ui.jsx'), 'utf8');
+
+  assert.match(rooms, /const featureToggleRows = \[/,
+    'room drawer must define special-property toggles in one auditable list');
+  assert.match(rooms, /deltaOnToggle: nextRent - computedRent/,
+    'each room special-property toggle must calculate the immediate rent impact');
+  assert.match(rooms, /Premium ที่ตั้งไว้/,
+    'room drawer must tell admin which Pricing premium backs the toggle');
+  assert.match(rooms, /สัญญาที่ lock แล้ว\/บิลที่ออกแล้วจะไม่ถูกแก้ย้อนหลัง/,
+    'room drawer must warn that locked contracts and issued bills are not retroactively changed');
+  assert.match(pricing, /const featurePremiumItems = \[/,
+    'pricing page must use the same special-property list for preview toggles');
+  assert.match(pricing, /\+\{fmtCurrency\(premium\)\}/,
+    'pricing preview toggles must show how much each special property adds');
+  assert.match(ui, /role="switch"[\s\S]{0,120}aria-checked=\{!!checked\}/,
+    'shared Toggle must expose switch semantics for every button-like toggle');
+});
+
 test('healthCheck surfaces data integrity and failed notification backlog', () => {
   const fs = require('node:fs');
   const path = require('node:path');
@@ -2912,6 +2974,14 @@ test('checkout revokes access cards + records refund + pro-rates closing bill', 
     'checkout reason must persist on the contract row');
   assert.match(src, /closed_type = 'tenant_checkout'/,
     'checkout path must identify the closure source');
+  assert.match(src, /RETURNING id, contract_no, room_id,/,
+    'checkout must keep the closed contract room_id for drift-safe room release');
+  assert.match(src, /const releaseRoomIds = Array\.from\(new Set\(\[[\s\S]{0,140}tenantCurrentRoom,[\s\S]{0,80}\.\.\.contractRooms/,
+    'checkout must release both tenant.current_room_id and active contracts.room_id when they drift');
+  assert.match(src, /room_not_found_or_belongs_to_another_active_tenant/,
+    'checkout must guard against clearing a room that now belongs to another tenant');
+  assert.match(src, /UPDATE contract_invitations[\s\S]{0,260}status='revoked'/,
+    'checkout must revoke pending/submitted contract invitations for closed contracts');
 });
 
 test('contracts gain deposit_returned columns in migration', () => {
@@ -3598,8 +3668,12 @@ test('bookings admin UI handles terminal statuses and uses valid reopen/cancel t
     'approved booking button must cancel/release, not return to pending');
   assert.doesNotMatch(src, /active\.status === 'approved'[\s\S]{0,900}updateStatus\(active\.id, 'pending'\)/,
     'approved → pending is forbidden by the backend state machine');
-  assert.match(src, /active\.status === 'rejected'[\s\S]{0,260}updateStatus\(active\.id, 'reviewing'\)/,
-    'rejected booking reopen must go through reviewing');
+  assert.match(src, /active\.status === 'rejected'[\s\S]{0,260}type: 'reopen'/,
+    'rejected booking reopen must open a reason-confirmation flow');
+  assert.match(src, /const handleReopen = async \(id\) => \{[\s\S]{0,500}updateStatus\(id, 'reviewing', \{ reopenReason \}\)/,
+    'rejected booking reopen must go through reviewing with an explicit reason');
+  assert.match(src, /actionReason\.trim\(\)\.length < 5/,
+    'rejected booking reopen must block short/empty reasons before calling the API');
 });
 
 test('quick-invite refuses blacklisted tenant without force=true', () => {
@@ -4324,6 +4398,10 @@ test('tenant contract cancel UI uses checkout cascade for early move-out', () =>
     'legacy rows without tenantDbId should still close the contract with an explicit type');
   assert.match(block[0], /closeReason: reason/,
     'cancel reason must flow into the close audit trail');
+  assert.match(block[0], /reason\.length < 5/,
+    'tenant-page cancellation must require a useful audit reason before submit');
+  assert.match(block[0], /window\.toastError\(setToast, err, \{ action: 'ยกเลิกสัญญา' \}\)/,
+    'tenant-page cancellation must render structured API errors instead of a generic message');
 });
 
 test('contracts page hides manual signing for locked contracts', () => {
