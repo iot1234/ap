@@ -723,45 +723,83 @@ function SyncBanner({ errors = [], syncing, onRetry, locale }) {
 function Modal({ open, onClose, children, title, size = 'md' }) {
   useEffect(() => {
     if (!open) return undefined;
-    const prev = document.body.style.overflow;
+    // Lock body scroll while preserving position — iOS Safari's naive
+    // `overflow: hidden` resets the visual viewport which makes the page
+    // appear to jump on close. On phones we freeze with `position: fixed`
+    // at the current scroll Y, then restore on unmount.
+    const scrollY = window.scrollY || window.pageYOffset || 0;
+    const prev = {
+      overflow: document.body.style.overflow,
+      position: document.body.style.position,
+      top: document.body.style.top,
+      width: document.body.style.width,
+    };
     document.body.style.overflow = 'hidden';
+    const isMobile = window.matchMedia && window.matchMedia('(max-width: 640px)').matches;
+    if (isMobile) {
+      document.body.style.position = 'fixed';
+      document.body.style.top = `-${scrollY}px`;
+      document.body.style.width = '100%';
+    }
     const onKey = (e) => { if (e.key === 'Escape') onClose?.(); };
     window.addEventListener('keydown', onKey);
-    return () => { document.body.style.overflow = prev; window.removeEventListener('keydown', onKey); };
+    return () => {
+      document.body.style.overflow = prev.overflow;
+      document.body.style.position = prev.position;
+      document.body.style.top = prev.top;
+      document.body.style.width = prev.width;
+      if (isMobile && scrollY) window.scrollTo(0, scrollY);
+      window.removeEventListener('keydown', onKey);
+    };
   }, [open, onClose]);
   if (!open) return null;
   const widths = { sm: 420, md: 560, lg: 760 };
   return (
-    <div onClick={onClose} style={{
+    <div className="modal-overlay" onClick={onClose} style={{
       position: 'fixed', inset: 0, background: 'rgba(28,18,8,0.45)',
       backdropFilter: 'blur(6px)', WebkitBackdropFilter: 'blur(6px)',
-      display: 'grid', placeItems: 'end center',
       zIndex: 100, animation: 'fade-in .2s ease',
-      padding: '24px 12px 0',
+      // Desktop default: center the dialog inside the viewport so long
+      // forms never dangle past the bottom edge. The matching @media in
+      // the App-level <style> block switches mobile to a slide-up sheet.
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      padding: '24px 16px',
+      overflowY: 'auto', overflowX: 'hidden',
+      WebkitOverflowScrolling: 'touch',
     }}>
       <div className="modal-panel" onClick={(e) => e.stopPropagation()} style={{
         background: 'var(--surface)', color: 'var(--ink)',
         width: '100%', maxWidth: widths[size],
-        borderRadius: '22px 22px 0 0',
-        boxShadow: 'var(--shadow-lg)',
-        maxHeight: 'calc(100vh - 48px)', overflow: 'hidden',
-        display: 'flex', flexDirection: 'column',
+        borderRadius: 22, boxShadow: 'var(--shadow-lg)',
+        // 100dvh tracks mobile UI chrome / on-screen keyboards; 100vh
+        // fallback keeps the cap working on browsers without dvh support.
+        maxHeight: 'min(calc(100vh - 80px), calc(100dvh - 80px))',
+        overflow: 'hidden', display: 'flex', flexDirection: 'column',
         animation: 'slide-up .26s cubic-bezier(.2,.8,.2,1)',
+        margin: 'auto',
       }}>
         {title || onClose ? (
           <div style={{
-            display: 'flex', alignItems: 'center', gap: 12,
+            display: 'flex', alignItems: 'center', gap: 12, flex: '0 0 auto',
             padding: '18px 22px 14px', borderBottom: '1px solid var(--line)',
           }}>
-            <div style={{ flex: 1, fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 17 }}>{title}</div>
+            <div style={{
+              flex: 1, minWidth: 0, fontFamily: 'var(--font-display)',
+              fontWeight: 600, fontSize: 17,
+              whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+            }}>{title}</div>
             <button onClick={onClose} aria-label="close" style={{
               width: 36, height: 36, borderRadius: 10, border: 0, cursor: 'pointer',
               background: 'var(--surface-2)', color: 'var(--ink-2)',
-              display: 'grid', placeItems: 'center',
+              display: 'grid', placeItems: 'center', flex: '0 0 auto',
             }}><Icon name="close" size={18} /></button>
           </div>
         ) : null}
-        <div className="modal-body" style={{ overflow: 'auto', padding: '20px 22px 24px' }}>{children}</div>
+        <div className="modal-body" style={{
+          overflow: 'auto', overflowX: 'hidden', flex: 1,
+          padding: '20px 22px 24px',
+          WebkitOverflowScrolling: 'touch',
+        }}>{children}</div>
       </div>
     </div>
   );
@@ -2311,30 +2349,49 @@ function BottomNav({ page, setPage, locale, unpaidCount }) {
 
 function DrawerNav({ open, onClose, page, setPage, locale, onLogout, unpaidCount }) {
   const t = (k) => tr(locale, k);
+  useEffect(() => {
+    if (!open) return undefined;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const onKey = (e) => { if (e.key === 'Escape') onClose?.(); };
+    window.addEventListener('keydown', onKey);
+    return () => {
+      document.body.style.overflow = prevOverflow;
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [open, onClose]);
   if (!open) return null;
   return (
     <div onClick={onClose} style={{
       position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(28,18,8,0.42)',
-      backdropFilter: 'blur(4px)', animation: 'fade-in .2s ease',
+      backdropFilter: 'blur(4px)', WebkitBackdropFilter: 'blur(4px)',
+      animation: 'fade-in .2s ease',
     }}>
-      <div onClick={(e) => e.stopPropagation()} style={{
-        position: 'absolute', top: 0, left: 0, bottom: 0, width: 280,
-        background: 'var(--surface)', padding: '18px 14px', display: 'flex', flexDirection: 'column',
-        animation: 'slide-up .25s ease',
+      <div onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" style={{
+        position: 'absolute', top: 0, left: 0, bottom: 0,
+        width: 'min(280px, 86vw)', maxWidth: 280,
+        background: 'var(--surface)',
+        padding: `18px 14px calc(env(safe-area-inset-bottom, 0px) + 18px)`,
+        display: 'flex', flexDirection: 'column',
+        // Slide in from the left edge — replaces the old slide-up which
+        // barely registered (12px) on a side drawer.
+        animation: 'drawer-in .25s cubic-bezier(.2,.8,.2,1)',
+        overflowY: 'auto', WebkitOverflowScrolling: 'touch',
+        boxShadow: 'var(--shadow-lg)',
       }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '6px 6px 18px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '6px 6px 18px', flex: '0 0 auto' }}>
           <LogoMark size={36} />
-          <div>
+          <div style={{ minWidth: 0 }}>
             <div style={{ fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 14 }}>บ้านกาญจน์</div>
             <div style={{ color: 'var(--muted)', fontSize: 11.5 }}>Tenant Portal</div>
           </div>
-          <button onClick={onClose} style={{
+          <button onClick={onClose} aria-label="close" style={{
             marginLeft: 'auto', width: 32, height: 32, borderRadius: 8,
             border: 0, background: 'var(--surface-2)', cursor: 'pointer',
-            display: 'grid', placeItems: 'center', color: 'var(--ink-2)',
+            display: 'grid', placeItems: 'center', color: 'var(--ink-2)', flex: '0 0 auto',
           }}><Icon name="close" size={16} /></button>
         </div>
-        <nav style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        <nav style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: '0 0 auto' }}>
           {NAV.map((n) => {
             const active = n.id === page;
             return (
@@ -2346,7 +2403,7 @@ function DrawerNav({ open, onClose, page, setPage, locale, onLogout, unpaidCount
                 fontWeight: active ? 600 : 500, fontSize: 14, textAlign: 'left',
               }}>
                 <Icon name={n.icon} size={18} />
-                <span style={{ flex: 1 }}>{t(n.label)}</span>
+                <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>{t(n.label)}</span>
                 {n.id === 'bills' && unpaidCount > 0 ? (
                   <span style={{
                     background: 'var(--accent)', color: '#fff', borderRadius: 999,
@@ -2357,9 +2414,15 @@ function DrawerNav({ open, onClose, page, setPage, locale, onLogout, unpaidCount
             );
           })}
         </nav>
-        <div style={{ flex: 1 }} />
-        <Button variant="outline" icon="logout" onClick={onLogout}>{t('logOut')}</Button>
+        <div style={{ flex: 1, minHeight: 12 }} />
+        <Button variant="outline" icon="logout" onClick={onLogout} style={{ flex: '0 0 auto' }}>{t('logOut')}</Button>
       </div>
+      <style>{`
+        @keyframes drawer-in {
+          from { transform: translateX(-100%); }
+          to   { transform: translateX(0); }
+        }
+      `}</style>
     </div>
   );
 }
@@ -2559,9 +2622,20 @@ function App() {
         }
         @media (max-width: 640px) {
           .bottom-nav { display: flex !important; }
-          /* Keep the topbar menu visible on phones too — it is the only
-             entry point to the drawer, which exposes the Payments page
-             that is omitted from the 5-slot bottom nav. */
+          /* Modal switches to slide-up bottom-sheet on phones:
+             stick to the bottom edge, only round the top corners, and pad
+             for the home-indicator safe area so no content sits under it. */
+          .modal-overlay {
+            align-items: flex-end !important;
+            justify-content: stretch !important;
+            padding: 24px 0 0 !important;
+          }
+          .modal-panel {
+            margin: 0 !important;
+            border-radius: 22px 22px 0 0 !important;
+            max-height: min(calc(100vh - 24px), calc(100dvh - 24px)) !important;
+            padding-bottom: env(safe-area-inset-bottom, 0px) !important;
+          }
         }
         @media (max-width: 540px) {
           .home-grid { grid-template-columns: 1fr !important; }
@@ -2575,8 +2649,15 @@ function App() {
           .mini-cell { border-left: 0 !important; border-top: 1px solid var(--line) !important; }
           .mini-cell:first-child { border-top: 0 !important; }
           .maintenance-ticket-row { flex-direction: column !important; }
-          .modal-panel { max-height: calc(100dvh - 10px) !important; border-radius: 18px 18px 0 0 !important; }
+          .modal-panel { border-radius: 18px 18px 0 0 !important; }
           .modal-body { padding: 16px 14px 20px !important; }
+        }
+        /* Landscape-mobile: short-but-wide viewports (e.g. phone in landscape)
+           often broke the bottom-sheet because the height was less than the
+           top padding + form padding. Drop the top air to recover space. */
+        @media (max-height: 520px) and (max-width: 960px) {
+          .modal-overlay { padding-top: 12px !important; }
+          .modal-panel { max-height: min(calc(100vh - 12px), calc(100dvh - 12px)) !important; }
         }
       `}</style>
     </>
