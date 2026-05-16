@@ -613,11 +613,20 @@ function TabFees({ draft, updatePath }) {
 
       <Card>
         <SectionHeading title="ค่าปรับและบทลงโทษ" level={3} />
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
-          <Input label="ค่าปรับชำระล่าช้า" type="number" suffix="บาท / วัน"
-                 value={draft.fees.latePenaltyPerDay}
-                 onChange={(v) => updatePath('fees.latePenaltyPerDay', Number(v))}
-                 hint="คิดต่อวันหลังครบกำหนดชำระ" />
+        {/* The legacy `latePenaltyPerDay` (THB/day) field used to live here,
+            but nothing on the server reads it — services/billing.js (line ~101)
+            uses features.lateFee.ratePctPerMonth + gracePeriodDays as the
+            authoritative calc. Setting a THB/day number here just made the
+            client-side preview disagree with the actual bill. Canonical
+            surface for late fees is now Settings → ฟีเจอร์ระบบ → ค่าปรับ. */}
+        <div style={{
+          padding: 12, background: C.surfaceAlt,
+          border: `1px solid ${C.border}`, borderRadius: 8,
+          fontSize: 13, color: C.ink2, lineHeight: 1.6,
+        }}>
+          💡 ค่าปรับชำระล่าช้าตั้งค่าที่ <b>ฟีเจอร์ระบบ → ค่าปรับชำระล่าช้า</b>
+          (อัตรา %/เดือน + วันผ่อนผัน) — ใช้ source เดียวกับการคำนวณจริงใน
+          backend เพื่อป้องกัน preview ไม่ตรงกับบิลจริง.
         </div>
       </Card>
     </div>

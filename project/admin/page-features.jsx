@@ -290,34 +290,38 @@ function PageFeatures({ setToast, embedded = false }) {
           desc="ผู้เช่า login ด้วยเบอร์โทรที่ผูกกับห้อง เพื่อดูบิล แจ้งซ่อม อัปโหลดสลิป">
           <Field id="tenantPortal" field="sessionDays" label="อายุ session (วัน)" type="number" />
         </Row>
-        <Row id="slipUpload"
-          title="อัปโหลดสลิปชำระเงิน"
-          desc="ผู้เช่าแนบสลิปแทนการโอนเงินสด แอดมินตรวจสอบก่อนอนุมัติ">
-          <ToggleField id="slipUpload" field="requireVerification" label="ต้องตรวจสอบก่อน" features={features} setField={setField} />
-          <ToggleField id="slipUpload" field="autoVerify" label="ตรวจสลิปอัตโนมัติ" features={features} setField={setField} />
-          <SelectField id="slipUpload" field="provider" label="ผู้ให้บริการตรวจสลิป"
-            options={[['slipok', 'SlipOK'], ['easyslip', 'EasySlip'], ['slip2go', 'Slip2Go']]} features={features} setField={setField} />
-          <Field id="slipUpload" field="maxBytes" label="ขนาดสูงสุด (bytes)" type="number" />
-          {/* Surface the provider-key requirement inline so the operator
-              doesn't enable autoVerify and silently wait for verifications
-              that never happen. Visible whenever autoVerify is on; the
-              actual key presence is checked server-side at
-              /api/admin/billing-readiness — but pointing at the right page
-              from here closes the discovery loop. */}
-          {features?.slipUpload?.autoVerify ? (
-            <div style={{
-              gridColumn: '1 / -1',
-              marginTop: 6, padding: '10px 12px',
-              background: '#fff7e0', border: '1px solid #f0e3a7',
-              borderRadius: 6, fontSize: 12.5, lineHeight: 1.6, color: '#6b5b1a',
-            }}>
-              🔑 <b>autoVerify เปิดอยู่</b> — ต้องตั้ง API key ของ {features?.slipUpload?.provider === 'easyslip' ? 'EasySlip' : (features?.slipUpload?.provider === 'slip2go' ? 'Slip2Go' : 'SlipOK')} ที่{' '}
-              <a href="/admin#secrets" style={{ color: '#8a6b1a', fontWeight: 600 }}>
-                /admin#secrets → ตรวจสลิปอัตโนมัติ
-              </a>{' '}แล้วกด "🔌 ทดสอบ" ก่อนใช้งานจริง — ถ้า key หาย สลิปจะตกเข้าคิว admin เหมือนเดิม (ไม่ auto-verify)
+        {/* slipUpload inline toggles used to live here, duplicating the
+            dedicated wizard at /admin#slip-verify. Operators kept enabling
+            autoVerify without setting an API key and then debugging across
+            three pages (features here + secrets there + readiness elsewhere).
+            Surfacing only a deep link keeps slip-verify as the single
+            canonical place. Dependency warnings above (line ~125) still
+            fire because they read features.slipUpload.* regardless. */}
+        <div style={{
+          padding: '12px 14px', marginBottom: 12,
+          background: C.surfaceAlt, border: `1px solid ${C.border}`, borderRadius: 8,
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          gap: 12, flexWrap: 'wrap',
+        }}>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 2 }}>
+              อัปโหลดสลิปชำระเงิน
+              {features?.slipUpload?.enabled
+                ? <span style={{ marginLeft: 8, fontSize: 11.5, color: C.success, fontWeight: 500 }}>● เปิดอยู่</span>
+                : <span style={{ marginLeft: 8, fontSize: 11.5, color: C.muted }}>○ ปิด</span>}
             </div>
-          ) : null}
-        </Row>
+            <div style={{ fontSize: 12.5, color: C.ink2, lineHeight: 1.5 }}>
+              ตั้งค่า feature toggle, autoVerify, provider, API key, และทดสอบ end-to-end
+              ในที่เดียวที่หน้า <b>ตรวจสลิปอัตโนมัติ</b> เพื่อกัน config กระจัดกระจาย.
+            </div>
+          </div>
+          <a href="/admin#slip-verify" style={{
+            padding: '8px 14px', borderRadius: 6,
+            background: C.accent, color: '#fff',
+            textDecoration: 'none', fontWeight: 500, fontSize: 13,
+            whiteSpace: 'nowrap',
+          }}>ไปตั้งค่า →</a>
+        </div>
         <Row id="photoUpload"
           title="อัปโหลดรูปภาพ"
           desc="รูปห้อง / ลายเซ็นสัญญา / สำเนาบัตร">

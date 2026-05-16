@@ -143,7 +143,14 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         const chargesTotal = charges.reduce((s, c) => s + (Number(c.amount) || 0), 0);
         const total = r.rent + water + elec + wifi + chargesTotal;
         const overdue = r.status === 'overdue';
-        const penalty = overdue ? (r.overdueDays || 0) * (config.fees?.latePenaltyPerDay || 0) : 0;
+        // Late fee is computed server-side at bill-gen time using
+        // features.lateFee.ratePctPerMonth + gracePeriodDays (the canonical
+        // formula in services/billing.js). The legacy preview multiplied
+        // overdueDays × config.fees.latePenaltyPerDay, which no backend code
+        // reads — admin saw a THB/day estimate that didn't match the actual
+        // %/month bill. Showing 0 here keeps the preview honest; the real
+        // penalty appears once the bill is actually generated.
+        const penalty = 0;
         const grandTotal = total + penalty;
         const periodIso = currentPeriod;
         return {
