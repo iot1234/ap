@@ -995,26 +995,53 @@ function BulkAddFloorModal({ open, onClose, onAdd, existingFloors, config }) {
           </div>
         ) : null}
 
-        <div style={{ padding: 10, background: C.surfaceAlt, borderRadius: 8 }}>
-          <div style={{ fontSize: 12, color: C.muted, marginBottom: 6 }}>
+        <div style={{ padding: 12, background: C.surfaceAlt, borderRadius: 8 }}>
+          <div style={{ fontSize: 12, color: C.muted, marginBottom: 8 }}>
             คุณสมบัติพิเศษ (ติดทุกห้องที่สร้าง — แก้ทีหลังรายห้องได้)
           </div>
-          {featureRows.map((item) => {
-            const nextFeatures = { ...bulkFeatures, [item.key]: !bulkFeatures[item.key] };
-            const nextRent = computeRoomRent
-              ? computeRoomRent(form.type, Number(form.floor), form.view, nextFeatures, config)
-              : formulaRent;
-            const diff = Number(nextRent || 0) - Number(formulaRent || 0);
-            return (
-              <Toggle
-                key={item.key}
-                label={`${item.label} (${bulkFeatures[item.key] ? 'เปิดอยู่' : 'ปิดอยู่'})`}
-                checked={!!bulkFeatures[item.key]}
-                onChange={(v) => update(item.key, v)}
-                hint={`ใช้กับทุกห้องที่สร้างใหม่ · Premium ที่ตั้งไว้: +${fmtCurrency(item.premium)} · ถ้ากดตอนนี้สูตรจะเปลี่ยน ${diff === 0 ? '0' : (diff > 0 ? '+' : '') + fmtCurrency(diff)}`}
-              />
-            );
-          })}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 8 }}>
+            {featureRows.map((item) => {
+              const isOn = !!bulkFeatures[item.key];
+              const nextFeatures = { ...bulkFeatures, [item.key]: !isOn };
+              const nextRent = computeRoomRent
+                ? computeRoomRent(form.type, Number(form.floor), form.view, nextFeatures, config)
+                : formulaRent;
+              const diff = Number(nextRent || 0) - Number(formulaRent || 0);
+              const diffLabel = diff === 0
+                ? 'ราคาไม่เปลี่ยน'
+                : `${diff > 0 ? '+' : ''}${fmtCurrency(diff)}`;
+              return (
+                <button
+                  type="button"
+                  key={item.key}
+                  onClick={() => update(item.key, !isOn)}
+                  aria-pressed={isOn}
+                  title={`${item.label} · Premium +${fmtCurrency(item.premium)} · กดแล้ว ${diffLabel}`}
+                  style={{
+                    display: 'flex', flexDirection: 'column', alignItems: 'stretch',
+                    gap: 4, padding: '10px 12px',
+                    background: isOn ? (C.successSoft || '#e3f3e8') : C.surface,
+                    border: `1.5px solid ${isOn ? (C.success || '#4a8b4a') : C.border}`,
+                    color: isOn ? (C.successInk || '#1d4a2c') : C.ink,
+                    borderRadius: 8, cursor: 'pointer', textAlign: 'left',
+                    fontFamily: 'inherit', minWidth: 0,
+                    transition: 'background .15s, border-color .15s',
+                  }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                    <span style={{ fontSize: 13.5, fontWeight: 600 }}>{item.label}</span>
+                    <span style={{
+                      fontSize: 10.5, fontWeight: 700, padding: '2px 8px', borderRadius: 999,
+                      background: isOn ? (C.success || '#4a8b4a') : (C.borderStrong || '#999'),
+                      color: '#fff', flexShrink: 0,
+                    }}>{isOn ? 'เปิด' : 'ปิด'}</span>
+                  </div>
+                  <div style={{ fontSize: 11.5, color: C.muted, lineHeight: 1.4 }}>
+                    Premium +{fmtCurrency(item.premium)} · กดแล้ว {diffLabel}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
         </div>
       </div>
     </Modal>
@@ -1275,24 +1302,53 @@ function AddRoomModal({ open, onClose, onAdd, existingIds, config }) {
             </Btn>
           </div>
         ) : null}
-        <div style={{ padding: 10, background: C.surfaceAlt, borderRadius: 8 }}>
-          <div style={{ fontSize: 12, color: C.muted, marginBottom: 6 }}>คุณสมบัติพิเศษ</div>
-          {featureRows.map((item) => {
-            const nextFeatures = { ...addFeatures, [item.key]: !addFeatures[item.key] };
-            const nextRent = computeRoomRent
-              ? computeRoomRent(form.type, Number(form.floor), form.view, nextFeatures, config)
-              : formulaRent;
-            const diff = Number(nextRent || 0) - Number(formulaRent || 0);
-            return (
-              <Toggle
-                key={item.key}
-                label={`${item.label} (${addFeatures[item.key] ? 'เปิดอยู่' : 'ปิดอยู่'})`}
-                checked={!!addFeatures[item.key]}
-                onChange={(v) => update(item.key, v)}
-                hint={`ใช้กับสูตรราคาห้องนี้และแสดงในหน้าห้อง/จอง · Premium ที่ตั้งไว้: +${fmtCurrency(item.premium)} · ถ้ากดตอนนี้สูตรจะเปลี่ยน ${diff === 0 ? '0' : (diff > 0 ? '+' : '') + fmtCurrency(diff)}`}
-              />
-            );
-          })}
+        <div style={{ padding: 12, background: C.surfaceAlt, borderRadius: 8 }}>
+          <div style={{ fontSize: 12, color: C.muted, marginBottom: 8 }}>
+            คุณสมบัติพิเศษ (กดเพื่อเปิด/ปิด — มีผลกับสูตรราคาห้องนี้)
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 8 }}>
+            {featureRows.map((item) => {
+              const isOn = !!addFeatures[item.key];
+              const nextFeatures = { ...addFeatures, [item.key]: !isOn };
+              const nextRent = computeRoomRent
+                ? computeRoomRent(form.type, Number(form.floor), form.view, nextFeatures, config)
+                : formulaRent;
+              const diff = Number(nextRent || 0) - Number(formulaRent || 0);
+              const diffLabel = diff === 0
+                ? 'ราคาไม่เปลี่ยน'
+                : `${diff > 0 ? '+' : ''}${fmtCurrency(diff)}`;
+              return (
+                <button
+                  type="button"
+                  key={item.key}
+                  onClick={() => update(item.key, !isOn)}
+                  aria-pressed={isOn}
+                  title={`${item.label} · Premium +${fmtCurrency(item.premium)} · กดแล้ว ${diffLabel}`}
+                  style={{
+                    display: 'flex', flexDirection: 'column', alignItems: 'stretch',
+                    gap: 4, padding: '10px 12px',
+                    background: isOn ? (C.successSoft || '#e3f3e8') : C.surface,
+                    border: `1.5px solid ${isOn ? (C.success || '#4a8b4a') : C.border}`,
+                    color: isOn ? (C.successInk || '#1d4a2c') : C.ink,
+                    borderRadius: 8, cursor: 'pointer', textAlign: 'left',
+                    fontFamily: 'inherit', minWidth: 0,
+                    transition: 'background .15s, border-color .15s',
+                  }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                    <span style={{ fontSize: 13.5, fontWeight: 600 }}>{item.label}</span>
+                    <span style={{
+                      fontSize: 10.5, fontWeight: 700, padding: '2px 8px', borderRadius: 999,
+                      background: isOn ? (C.success || '#4a8b4a') : (C.borderStrong || '#999'),
+                      color: '#fff', flexShrink: 0,
+                    }}>{isOn ? 'เปิด' : 'ปิด'}</span>
+                  </div>
+                  <div style={{ fontSize: 11.5, color: C.muted, lineHeight: 1.4 }}>
+                    Premium +{fmtCurrency(item.premium)} · กดแล้ว {diffLabel}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
         </div>
       </div>
     </Modal>
