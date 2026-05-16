@@ -23,6 +23,71 @@ const lineNotify = require('./line');
 const meter = require('./meter');
 
 const TICK_MS = 60 * 60 * 1000;          // hourly
+const SCHEDULER_FAILURE_RE_ALERT_MIN = 60;
+
+const SCHEDULER_JOB_IMPACT = Object.freeze({
+  'features-load': 'โหลด feature flags ไม่ได้ งานอัตโนมัติรอบนี้ถูกข้ามทั้งหมด',
+  'late-fee': 'บิลเลยกำหนดอาจยังไม่ถูกเปลี่ยนเป็น overdue และค่าปรับอาจยังไม่ถูกคำนวณ',
+  'access-sync': 'บัตรเข้า-ออกอาจยังไม่ถูกระงับ/คืนสิทธิ์ตามสถานะชำระเงินล่าสุด',
+  'auto-backup': 'ระบบอาจไม่ได้สร้าง backup รอบล่าสุด',
+  'bill-gen': 'บิลรายเดือนอัตโนมัติอาจไม่ถูกสร้างหรือส่งแจ้งผู้เช่า',
+  'meter-sim': 'มิเตอร์จำลองอาจไม่สร้างค่าทดสอบรอบนี้',
+  'contract-expiry': 'สัญญาที่หมดอายุอาจยังไม่ถูกปรับสถานะหรือแจ้งเตือน',
+  'overdue-digest': 'เจ้าของอาจไม่ได้รับสรุปบิลค้างชำระรายวัน',
+  'auto-reconcile': 'ห้องที่สถานะค้าง/ไม่สอดคล้องอาจยังไม่ได้ถูกตรวจและแก้',
+  'room-status-sync': 'สถานะห้องจากสัญญา/บิลอาจยังไม่ถูก sync รายวัน',
+  'notif-prune': 'คิวแจ้งเตือนเก่าที่ failed อาจยังไม่ถูกล้าง',
+  'orphan-slip-prune': 'ไฟล์สลิปกำพร้าอาจยังไม่ถูกลบออกจาก storage',
+  'anomaly': 'health/anomaly alert รอบนี้อาจไม่ทำงาน',
+});
+
+function schedulerFailureMessage(err) {
+  if (!err) return 'unknown error';
+  return String(err.message || err.error || err).slice(0, 800);
+}
+
+function schedulerFailureAgeMin(iso) {
+  if (!iso) return Infinity;
+  const t = new Date(iso).getTime();
+  if (!Number.isFinite(t)) return Infinity;
+  return (Date.now() - t) / 60_000;
+}
+
+async function notifySchedulerFailure(pool, flags, state, job, err) {
+  const message = schedulerFailureMessage(err);
+  if (!state.schedulerFailures || typeof state.schedulerFailures !== 'object') {
+    state.schedulerFailures = {};
+  }
+  const prev = state.schedulerFailures[job] || {};
+  const isSameRecent = prev.message === message
+    && schedulerFailureAgeMin(prev.notifiedAt) < SCHEDULER_FAILURE_RE_ALERT_MIN;
+  state.schedulerFailures[job] = {
+    message,
+    notifiedAt: isSameRecent ? prev.notifiedAt : new Date().toISOString(),
+  };
+  writeState(state);
+  if (isSameRecent) return;
+  const impact = SCHEDULER_JOB_IMPACT[job] || 'งานเบื้องหลังบางส่วนอาจไม่ทำงานครบถ้วน';
+  try {
+    await notifier.notifyOwner({ pool, features: flags || {} }, {
+      subject: `🚨 Scheduler job failed: ${job}`,
+      text: [
+        'ระบบงานอัตโนมัติทำงานไม่สำเร็จ',
+        '',
+        `งาน: ${job}`,
+        `ผลกระทบ: ${impact}`,
+        `ข้อผิดพลาด: ${message}`,
+        '',
+        'สิ่งที่ต้องทำ:',
+        '1. เปิด /admin#health เพื่อตรวจสถานะรวม',
+        '2. เปิด /admin#notifications เพื่อตรวจคิวแจ้งเตือน',
+        '3. ถ้าเกิดซ้ำ ให้ตรวจ server logs และแก้ config/DB ตาม error ด้านบน',
+      ].join('\n'),
+    });
+  } catch (notifyErr) {
+    console.warn('[scheduler] failure alert notify failed:', notifyErr.message);
+  }
+}
 
 // Pick a writable location for the state file. Containers commonly run as
 // non-root with /app owned-but-not-writable for new files; SCHEDULER_STATE_FILE
@@ -98,6 +163,7 @@ async function tickAutoBackup(pool, flags, now, state) {
     console.log('[scheduler] backup fired for', todayKey);
   } catch (err) {
     console.error('[scheduler] backup failed:', err.message);
+    return { error: err.message };
   }
 }
 
@@ -224,6 +290,7 @@ async function tickLateFee(pool, flags, now, state) {
     writeState(state);
   } catch (err) {
     console.error('[scheduler] late-fee mark failed:', err.message);
+    return { error: err.message };
   }
 }
 
@@ -262,6 +329,7 @@ async function tickRoomStatusSync(pool, _flags, now, state) {
     writeState(state);
   } catch (err) {
     console.error('[scheduler] roomStatus sync failed:', err.message);
+    return { error: err.message };
   }
 }
 
@@ -554,6 +622,7 @@ async function tickBillGen(pool, flags, now, state) {
     }
   } catch (err) {
     console.error('[scheduler] bill gen failed:', err.message);
+    return { error: err.message };
   }
 }
 
@@ -619,6 +688,7 @@ async function tickMeterSimulator(pool, flags, now, state) {
     if (made) console.log(`[scheduler] simulator generated ${made} readings`);
   } catch (err) {
     console.error('[scheduler] simulator failed:', err.message);
+    return { error: err.message };
   }
 }
 
@@ -910,6 +980,7 @@ async function tickAccessControlSync(pool, flags, now, state) {
     }
   } catch (err) {
     console.error('[scheduler] access sync failed:', err.message);
+    return { error: err.message };
   }
 }
 
@@ -1054,6 +1125,7 @@ async function tickContractExpiry(pool, _flags, now, state) {
     writeState(state);
   } catch (err) {
     console.error('[scheduler] contract expiry tick failed:', err.message);
+    return { error: err.message };
   }
 }
 
@@ -1184,6 +1256,7 @@ async function tickOverdueDigest(pool, flags, now, state) {
     writeState(state);
   } catch (err) {
     console.error('[scheduler] overdue digest tick failed:', err.message);
+    return { error: err.message };
   }
 }
 
@@ -1327,6 +1400,7 @@ async function tickAutoReconcileRooms(pool, flags, now, state) {
     writeState(state);
   } catch (err) {
     console.error('[scheduler] auto-reconcile tick failed:', err.message);
+    return { error: err.message };
   }
 }
 
@@ -1403,6 +1477,7 @@ async function tickPruneFailedNotifications(pool, _flags, now, state) {
     // Tolerate missing table on legacy deploys without notifications_queue.
     if (err.code !== '42P01') {
       console.warn('[scheduler] prune-failed-notifications failed:', err.message);
+      return { error: err.message };
     }
   }
 }
@@ -1455,22 +1530,36 @@ async function tickPruneOrphanSlips(pool, _flags, now, state) {
   } catch (err) {
     if (err.code !== '42P01') {
       console.warn('[scheduler] prune-orphan-slips failed:', err.message);
+      return { error: err.message };
     }
   }
 }
 
 async function tick(pool) {
-  let flags;
-  try { flags = await features.load(pool); } catch { return; }
   const state = readState();
+  let flags;
+  try {
+    flags = await features.load(pool);
+  } catch (err) {
+    console.error('[scheduler] features load failed:', err.message);
+    await notifySchedulerFailure(pool, {}, state, 'features-load', err);
+    return;
+  }
   const now = new Date();
 
   // Late-fee MUST run before bill-gen so today's auto-bills can include the
   // late fee on the previous overdue bill. Running them in parallel races —
   // bill-gen reads bills.status, and a previous bill stuck in 'pending' past
   // its due_date doesn't pay a late fee that cycle.
-  try { await tickLateFee(pool, flags, now, state); }
-  catch (err) { console.error('[scheduler] late-fee:', err.message); }
+  try {
+    const lateFeeResult = await tickLateFee(pool, flags, now, state);
+    if (lateFeeResult && lateFeeResult.error) {
+      await notifySchedulerFailure(pool, flags, state, 'late-fee', lateFeeResult);
+    }
+  } catch (err) {
+    console.error('[scheduler] late-fee:', err.message);
+    await notifySchedulerFailure(pool, flags, state, 'late-fee', err);
+  }
 
   // Wrap the daily ticks in an advisory lock so multi-replica deployments
   // (Railway 2x replica common) don't fan out duplicate notifications. Each
@@ -1486,26 +1575,34 @@ async function tick(pool) {
   // before the parallel daily batch so the digest cannot race ahead with a
   // stale/empty access-card section.
   try {
-    await _withAdvisoryLock(pool, `accessSync-${todayKey}`, () => tickAccessControlSync(pool, flags, now, state));
+    const accessResult = await _withAdvisoryLock(pool, `accessSync-${todayKey}`, () => tickAccessControlSync(pool, flags, now, state));
+    if (accessResult && accessResult.error) {
+      await notifySchedulerFailure(pool, flags, state, 'access-sync', accessResult);
+    }
   } catch (err) {
     console.error('[scheduler] access sync:', err.message);
+    await notifySchedulerFailure(pool, flags, state, 'access-sync', err);
   }
 
-  const results = await Promise.allSettled([
-    _withAdvisoryLock(pool, `autoBackup-${todayKey}`,    () => tickAutoBackup(pool, flags, now, state)),
-    _withAdvisoryLock(pool, `billGen-${todayKey}`,       () => tickBillGen(pool, flags, now, state)),
-    _withAdvisoryLock(pool, `meterSim-${now.toISOString().slice(0,13)}`,
-                                                          () => tickMeterSimulator(pool, flags, now, state)),
-    _withAdvisoryLock(pool, `contractExpiry-${todayKey}`,() => tickContractExpiry(pool, flags, now, state)),
-    _withAdvisoryLock(pool, `overdueDigest-${todayKey}`, () => tickOverdueDigest(pool, flags, now, state)),
-    _withAdvisoryLock(pool, `autoReconcile-${todayKey}`, () => tickAutoReconcileRooms(pool, flags, now, state)),
-    _withAdvisoryLock(pool, `roomStatusSync-${todayKey}`, () => tickRoomStatusSync(pool, flags, now, state)),
-    _withAdvisoryLock(pool, `notifQueuePrune-${todayKey}`, () => tickPruneFailedNotifications(pool, flags, now, state)),
-    _withAdvisoryLock(pool, `orphanSlipPrune-${todayKey}`, () => tickPruneOrphanSlips(pool, flags, now, state)),
-  ]);
-  for (const r of results) {
+  const jobs = [
+    { job: 'auto-backup', promise: _withAdvisoryLock(pool, `autoBackup-${todayKey}`, () => tickAutoBackup(pool, flags, now, state)) },
+    { job: 'bill-gen', promise: _withAdvisoryLock(pool, `billGen-${todayKey}`, () => tickBillGen(pool, flags, now, state)) },
+    { job: 'meter-sim', promise: _withAdvisoryLock(pool, `meterSim-${now.toISOString().slice(0,13)}`, () => tickMeterSimulator(pool, flags, now, state)) },
+    { job: 'contract-expiry', promise: _withAdvisoryLock(pool, `contractExpiry-${todayKey}`, () => tickContractExpiry(pool, flags, now, state)) },
+    { job: 'overdue-digest', promise: _withAdvisoryLock(pool, `overdueDigest-${todayKey}`, () => tickOverdueDigest(pool, flags, now, state)) },
+    { job: 'auto-reconcile', promise: _withAdvisoryLock(pool, `autoReconcile-${todayKey}`, () => tickAutoReconcileRooms(pool, flags, now, state)) },
+    { job: 'room-status-sync', promise: _withAdvisoryLock(pool, `roomStatusSync-${todayKey}`, () => tickRoomStatusSync(pool, flags, now, state)) },
+    { job: 'notif-prune', promise: _withAdvisoryLock(pool, `notifQueuePrune-${todayKey}`, () => tickPruneFailedNotifications(pool, flags, now, state)) },
+    { job: 'orphan-slip-prune', promise: _withAdvisoryLock(pool, `orphanSlipPrune-${todayKey}`, () => tickPruneOrphanSlips(pool, flags, now, state)) },
+  ];
+  const results = await Promise.allSettled(jobs.map((j) => j.promise));
+  for (const [i, r] of results.entries()) {
+    const job = jobs[i].job;
     if (r.status === 'rejected') {
       console.error('[scheduler] sub-tick failed:', r.reason && r.reason.message || r.reason);
+      await notifySchedulerFailure(pool, flags, state, job, r.reason);
+    } else if (r.value && r.value.error) {
+      await notifySchedulerFailure(pool, flags, state, job, r.value);
     }
   }
   // Health probe + auto-alert. Runs every tick (hourly) regardless of
@@ -1518,6 +1615,7 @@ async function tick(pool) {
     writeState(state);
   } catch (err) {
     console.error('[scheduler] anomaly tick failed:', err.message);
+    await notifySchedulerFailure(pool, flags, state, 'anomaly', err);
   }
 }
 

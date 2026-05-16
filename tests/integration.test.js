@@ -2462,9 +2462,12 @@ test('scheduler runs access-card sync before overdue owner digest', () => {
   assert.ok(start > 0 && end > start);
   const body = sched.slice(start, end);
   const accessIdx = body.indexOf("await _withAdvisoryLock(pool, `accessSync-${todayKey}`");
+  const accessResultIdx = body.indexOf("const accessResult = await _withAdvisoryLock(pool, `accessSync-${todayKey}`");
+  const jobsIdx = body.indexOf('const jobs = [');
   const parallelIdx = body.indexOf('const results = await Promise.allSettled');
   const digestIdx = body.indexOf("`overdueDigest-${todayKey}`");
-  assert.ok(accessIdx > 0 && accessIdx < parallelIdx && parallelIdx < digestIdx,
+  const effectiveAccessIdx = accessIdx > 0 ? accessIdx : accessResultIdx;
+  assert.ok(effectiveAccessIdx > 0 && effectiveAccessIdx < jobsIdx && jobsIdx < digestIdx && digestIdx < parallelIdx,
     'overdue digest reads state.todaysAccessSync, so access sync must finish before the parallel digest batch');
 });
 
@@ -2674,10 +2677,36 @@ test('scheduler runs late-fee before bill-gen (sequential)', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'scheduler.js'), 'utf8');
   // Late-fee call must precede the Promise.allSettled([...]) array.
   const lateFeeIdx = src.indexOf('await tickLateFee(');
-  const allSettledIdx = src.indexOf('Promise.allSettled([');
+  const allSettledIdx = src.indexOf('Promise.allSettled(jobs.map');
   assert.ok(lateFeeIdx > 0, 'tickLateFee must be awaited explicitly');
   assert.ok(allSettledIdx > lateFeeIdx,
     'Promise.allSettled (the parallel block) must come AFTER late-fee');
+});
+
+test('scheduler failures notify owner with throttled actionable alerts', () => {
+  // Background jobs used to fail with only a console.error. In production
+  // that means the owner may never learn that bill-gen/expiry/reconcile did
+  // not run. Pin the shared failure reporter and the fan-in checks.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'scheduler.js'), 'utf8');
+  assert.match(src, /SCHEDULER_FAILURE_RE_ALERT_MIN = 60/,
+    'scheduler failure alerts must be throttled');
+  assert.match(src, /async function notifySchedulerFailure/,
+    'scheduler must have a shared owner-alert path');
+  assert.match(src, /notifier\.notifyOwner[\s\S]{0,700}\/admin#health/,
+    'failure alert must tell admin where to investigate');
+  assert.match(src, /features load failed[\s\S]{0,180}notifySchedulerFailure\(pool, \{\}, state, 'features-load'/,
+    'features-load failure must not be swallowed silently');
+  assert.match(src, /lateFeeResult[\s\S]{0,180}notifySchedulerFailure\(pool, flags, state, 'late-fee'/,
+    'late-fee failure must notify owner');
+  assert.match(src, /const jobs = \[[\s\S]{0,1600}job: 'bill-gen'[\s\S]{0,1600}job: 'orphan-slip-prune'/,
+    'parallel scheduler jobs must carry stable alert names');
+  assert.match(src, /r\.value && r\.value\.error[\s\S]{0,120}notifySchedulerFailure\(pool, flags, state, job, r\.value\)/,
+    'fulfilled-but-error job results must still alert');
+  const returnedErrors = src.match(/return \{ error: err\.message \}/g) || [];
+  assert.ok(returnedErrors.length >= 8,
+    'top-level scheduler job catches must return structured errors to the fan-in');
 });
 
 test('notifier falls back to notification queue when all immediate channels fail', () => {
