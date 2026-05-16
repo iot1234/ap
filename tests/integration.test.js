@@ -205,6 +205,29 @@ test('rooms edit drawer stages type/feature changes and explains pricing impact'
     'room CSV export must include AC so feature flags are not hidden outside the drawer');
 });
 
+test('rooms edit drawer rejects event-like patches before dirty comparison', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const roomsPage = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-rooms.jsx'), 'utf8');
+
+  assert.match(roomsPage, /function sanitizeRoomPatch\(patch\)/,
+    'room edits must sanitize patches before they enter draft state');
+  assert.match(roomsPage, /function isReactEventLike\(value\)/,
+    'room edits must detect React click/change events');
+  assert.match(roomsPage, /value\.currentTarget && value\.target/,
+    'React event objects with DOM currentTarget/target must be blocked');
+  assert.match(roomsPage, /key\.startsWith\('__react'\)|key === '_owner'|key === 'stateNode'/,
+    'React fiber references must be stripped from room snapshots');
+  assert.match(roomsPage, /const editDirty = !!\(editing && editDraft[\s\S]{0,140}safeRoomFingerprint\(editDraft\) !== safeRoomFingerprint\(editing\)/,
+    'dirty comparison must use circular-safe room fingerprints');
+  assert.doesNotMatch(roomsPage, /JSON\.stringify\(editDraft\)/,
+    'dirty comparison must not stringify a possibly polluted draft directly');
+  assert.match(roomsPage, /const safePatch = sanitizeRoomPatch\(patch\);[\s\S]{0,220}setEditDraft\(prev => \(\{ \.\.\.safeRoomSnapshot\(prev \|\| editing \|\| \{\}\), \.\.\.safePatch \}\)\)/,
+    'draft updates must merge only sanitized room patches');
+  assert.match(roomsPage, /Blocked non-serializable room patch/,
+    'invalid event patches must produce an operator-visible guarded failure path');
+});
+
 test('billing.buildBill respects feature flags', () => {
   const billing = require('../services/billing');
   const room = { id: '101', rent: 5000, waterUnits: 5, elecUnits: 100, tenant: { name: 'T' } };

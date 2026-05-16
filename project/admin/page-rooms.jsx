@@ -4,6 +4,99 @@
 
 const { useState, useMemo } = React;
 
+const ROOM_PATCH_KEYS = new Set([
+  'id', 'floor', 'no', 'roomNo', 'room_no', 'type', 'roomType', 'room_type',
+  'status', 'rent', 'deposit', 'tenant', 'tenantId', 'tenant_id',
+  'tenantName', 'tenant_name', 'since', 'contractEnd', 'contract_end',
+  'leaseStart', 'lease_start', 'leaseEnd', 'lease_end',
+  'water', 'elec', 'waterUnits', 'water_units', 'elecUnits', 'elec_units',
+  'wifi', 'photos', 'notes', 'view', 'viewType', 'view_type',
+  'ac', 'hasAc', 'has_ac', 'balcony', 'hasBalcony', 'has_balcony',
+  'parking', 'hasParking', 'has_parking', 'kitchen', 'hasKitchen', 'has_kitchen',
+  'rentOverride', 'rent_override', 'rentOverrideReason', 'rent_override_reason',
+  'rentOverrideAt', 'rent_override_at', 'rentOverrideBy', 'rent_override_by',
+  'waterMode', 'water_mode', 'waterFlatAmount', 'water_flat_amount',
+  'waterRateOverride', 'water_rate_override', 'elecMode', 'elec_mode',
+  'elecFlatAmount', 'elec_flat_amount', 'elecRateOverride', 'elec_rate_override',
+  'lastCleaned', 'last_cleaned', 'lastBillDate', 'last_bill_date',
+  'billStatus', 'bill_status', 'overdueDays', 'overdue_days',
+  'createdAt', 'created_at', 'updatedAt', 'updated_at', 'deletedAt', 'deleted_at',
+  'source',
+]);
+
+function isPlainRoomObject(value) {
+  if (!value || typeof value !== 'object') return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+function isReactEventLike(value) {
+  return !!(value && typeof value === 'object' && (
+    typeof value.preventDefault === 'function' ||
+    typeof value.stopPropagation === 'function' ||
+    value.nativeEvent ||
+    (value.currentTarget && value.target)
+  ));
+}
+
+function isDomLike(value) {
+  return !!(value && typeof value === 'object' && (
+    value.nodeType ||
+    value.window === value ||
+    (typeof value.addEventListener === 'function' && typeof value.tagName === 'string')
+  ));
+}
+
+function safeRoomValue(value, seen = new WeakSet()) {
+  if (value == null) return value;
+  const t = typeof value;
+  if (t === 'string' || t === 'number' || t === 'boolean') return value;
+  if (t === 'bigint') return String(value);
+  if (t !== 'object') return undefined;
+  if (isReactEventLike(value) || isDomLike(value)) return undefined;
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value.toISOString();
+  if (seen.has(value)) return undefined;
+  seen.add(value);
+
+  if (Array.isArray(value)) {
+    const out = [];
+    value.forEach((item) => {
+      const safe = safeRoomValue(item, seen);
+      if (safe !== undefined) out.push(safe);
+    });
+    return out;
+  }
+
+  if (!isPlainRoomObject(value)) return undefined;
+  const out = {};
+  Object.keys(value).forEach((key) => {
+    if (key.startsWith('__react') || key === '_owner' || key === 'stateNode') return;
+    const safe = safeRoomValue(value[key], seen);
+    if (safe !== undefined) out[key] = safe;
+  });
+  return out;
+}
+
+function safeRoomSnapshot(room) {
+  const safe = safeRoomValue(room);
+  return isPlainRoomObject(safe) ? safe : {};
+}
+
+function safeRoomFingerprint(room) {
+  return JSON.stringify(safeRoomSnapshot(room));
+}
+
+function sanitizeRoomPatch(patch) {
+  if (isReactEventLike(patch) || !isPlainRoomObject(patch)) return null;
+  const out = {};
+  Object.keys(patch).forEach((key) => {
+    if (!ROOM_PATCH_KEYS.has(key)) return;
+    const safe = safeRoomValue(patch[key]);
+    if (safe !== undefined) out[key] = safe;
+  });
+  return out;
+}
+
 function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
   const C = window.ADMIN_C;
   const ADMIN_STATUS = window.ADMIN_STATUS;
@@ -58,14 +151,32 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
     return c;
   }, [list]);
 
-  const updateRoom = (id, patch) => {
-    setRooms(prev => ({ ...prev, [id]: { ...prev[id], ...patch } }));
+  const rejectInvalidRoomPatch = (source, patch) => {
+    console.warn(`[rooms] Blocked non-serializable room patch from ${source}`, patch);
+    setToast && setToast({
+      kind: 'danger',
+      message: {
+        title: 'อัปเดตห้องไม่สำเร็จ',
+        description: 'ระบบได้รับ event/DOM จากปุ่มแทนข้อมูลห้อง จึงยกเลิกเพื่อป้องกันหน้า Rooms ค้างหรือพัง กรุณาลองกดอีกครั้ง',
+      },
+    });
   };
 
-  const cloneRoom = (room) => {
-    try { return JSON.parse(JSON.stringify(room || null)); }
-    catch { return room ? { ...room } : null; }
+  const updateRoom = (id, patch, source = 'room update') => {
+    const safePatch = sanitizeRoomPatch(patch);
+    if (!safePatch) {
+      rejectInvalidRoomPatch(source, patch);
+      return false;
+    }
+    if (Object.keys(safePatch).length === 0) return false;
+    setRooms(prev => ({
+      ...prev,
+      [id]: { ...safeRoomSnapshot(prev[id] || {}), ...safePatch },
+    }));
+    return true;
   };
+
+  const cloneRoom = (room) => (room ? safeRoomSnapshot(room) : null);
 
   React.useEffect(() => {
     setEditDraft(editId && rooms[editId] ? cloneRoom(rooms[editId]) : null);
@@ -77,16 +188,30 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
   const editing = editId ? rooms[editId] : null;
   const editingRoom = editDraft || editing;
   const editDirty = !!(editing && editDraft
-    && JSON.stringify(editDraft) !== JSON.stringify(editing));
+    && safeRoomFingerprint(editDraft) !== safeRoomFingerprint(editing));
 
   const updateEditDraft = (patch) => {
-    setEditDraft(prev => ({ ...(prev || editing || {}), ...patch }));
+    const safePatch = sanitizeRoomPatch(patch);
+    if (!safePatch) {
+      rejectInvalidRoomPatch('room edit draft', patch);
+      return false;
+    }
+    if (Object.keys(safePatch).length === 0) return false;
+    setEditDraft(prev => ({ ...safeRoomSnapshot(prev || editing || {}), ...safePatch }));
+    return true;
   };
 
   const applyRoomServerPatch = (patch) => {
     if (!editId) return;
-    updateRoom(editId, patch);
-    setEditDraft(prev => ({ ...(prev || editing || {}), ...patch }));
+    const safePatch = sanitizeRoomPatch(patch);
+    if (!safePatch) {
+      rejectInvalidRoomPatch('room server patch', patch);
+      return false;
+    }
+    if (Object.keys(safePatch).length === 0) return false;
+    updateRoom(editId, safePatch, 'room server patch');
+    setEditDraft(prev => ({ ...safeRoomSnapshot(prev || editing || {}), ...safePatch }));
+    return true;
   };
 
   const closeEditDrawer = () => {
