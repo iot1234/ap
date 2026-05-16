@@ -42,6 +42,39 @@
     --font-sans:    "IBM Plex Sans Thai","Sora",system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
     --font-display: "Sora","IBM Plex Sans Thai",system-ui,sans-serif;
     --font-mono:    "JetBrains Mono",ui-monospace,Menlo,monospace;
+
+    /* Spacing scale — one source of truth, no more 14/18/22 mixed in. */
+    --sp-1: 4px;
+    --sp-2: 8px;
+    --sp-3: 12px;
+    --sp-4: 16px;
+    --sp-5: 20px;
+    --sp-6: 24px;
+    --sp-7: 32px;
+    --sp-8: 40px;
+
+    /* Fluid type scale — clamp(min, fluid, max) so sizes ease between
+       360px-wide phones and 1440px-wide desktops instead of snapping
+       at breakpoints. Min = readable on a small phone; max = comfortable
+       on a 4K display. The fluid term uses vw + a constant so the curve
+       is gentle and identical across the scale. */
+    --fs-xs:   clamp(11px,  0.20vw + 10.5px, 12px);   /* meta / footnote */
+    --fs-sm:   clamp(12px,  0.25vw + 11.5px, 13.5px); /* table headers, hints */
+    --fs-base: clamp(13px,  0.35vw + 12px,   15px);   /* body */
+    --fs-md:   clamp(14px,  0.45vw + 13px,   16px);   /* card titles */
+    --fs-lg:   clamp(15px,  0.55vw + 13.5px, 18px);   /* card subtitles */
+    --fs-xl:   clamp(17px,  0.80vw + 15px,   22px);   /* section heading */
+    --fs-2xl:  clamp(22px,  1.50vw + 17px,   30px);   /* page title */
+    --fs-3xl:  clamp(28px,  3.50vw + 18px,   44px);   /* hero amount */
+    --fs-stat: clamp(22px,  1.80vw + 16px,   28px);   /* big stat numbers */
+
+    /* Layout — single set of canonical container widths. */
+    --max-content: 1180px;
+
+    /* Heights of fixed shell elements (used in spacing math). */
+    --topbar-h:    64px;
+    --bottomnav-h: 64px;
+    --sidebar-w:   264px;
   }
   [data-theme="dark"] {
     --bg:         #18130d;

@@ -607,16 +607,16 @@ function Button({ variant = 'primary', size = 'md', children, icon, iconRight, f
 
 function SectionHeader({ title, subtitle, action, style }) {
   return (
-    <div style={{
+    <div className="section-header" style={{
       display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between',
-      gap: 16, marginBottom: 14, flexWrap: 'wrap', ...style,
+      gap: 'var(--sp-4)', marginBottom: 'var(--sp-4)', flexWrap: 'wrap', ...style,
     }}>
-      <div>
+      <div style={{ minWidth: 0 }}>
         <h2 style={{
           margin: 0, fontFamily: 'var(--font-display)', fontWeight: 600,
-          fontSize: 22, letterSpacing: '-.01em',
+          fontSize: 'var(--fs-xl)', letterSpacing: '-.01em', lineHeight: 1.25,
         }}>{title}</h2>
-        {subtitle ? <div style={{ color: 'var(--muted)', fontSize: 13.5, marginTop: 4 }}>{subtitle}</div> : null}
+        {subtitle ? <div style={{ color: 'var(--muted)', fontSize: 'var(--fs-sm)', marginTop: 4 }}>{subtitle}</div> : null}
       </div>
       {action}
     </div>
@@ -897,7 +897,10 @@ function LoginView({ locale, setLocale, onLoggedIn, portalEnabled }) {
             </div>
           </div>
           <div style={{ position: 'relative' }}>
-            <div style={{ fontFamily: 'var(--font-display)', fontSize: 30, lineHeight: 1.2, fontWeight: 600, letterSpacing: '-.015em', whiteSpace: 'pre-line' }}>
+            <div style={{
+              fontFamily: 'var(--font-display)', fontSize: 'var(--fs-2xl)',
+              lineHeight: 1.2, fontWeight: 600, letterSpacing: '-.015em', whiteSpace: 'pre-line',
+            }}>
               {t('loginIntroH')}
             </div>
             <p style={{ opacity: 0.7, lineHeight: 1.65, marginTop: 14, fontSize: 14, maxWidth: 320 }}>
@@ -910,7 +913,10 @@ function LoginView({ locale, setLocale, onLoggedIn, portalEnabled }) {
         </div>
         <form className="login-form" onSubmit={submit} style={{ padding: '44px 40px', display: 'flex', flexDirection: 'column', gap: 16 }}>
           <div style={{ marginBottom: 6 }}>
-            <h1 style={{ margin: 0, fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 24, letterSpacing: '-.01em' }}>{t('signIn')}</h1>
+            <h1 style={{
+              margin: 0, fontFamily: 'var(--font-display)', fontWeight: 600,
+              fontSize: 'var(--fs-xl)', letterSpacing: '-.01em', lineHeight: 1.2,
+            }}>{t('signIn')}</h1>
             <p style={{ color: 'var(--muted)', fontSize: 13.5, margin: '6px 0 0' }}>
               {portalEnabled === false ? t('portalDisabled') : 'กรอกเบอร์โทรศัพท์ที่ผูกกับห้องของคุณ'}
             </p>
@@ -953,7 +959,7 @@ function LoginView({ locale, setLocale, onLoggedIn, portalEnabled }) {
         </form>
       </div>
       <style>{`
-        @media (max-width: 760px) { .login-grid { grid-template-columns: 1fr !important; } }
+        @media (max-width: 768px) { .login-grid { grid-template-columns: 1fr !important; } }
         @media (max-width: 480px) {
           .login-hero, .login-form { padding: 28px 22px !important; }
         }
@@ -976,8 +982,11 @@ function HomeView({ tenant, locale, bills, tickets, contract, goto }) {
       <Card hoverable onClick={() => goto('contract')}>
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between' }}>
           <div>
-            <div style={{ color: 'var(--muted)', fontSize: 12.5 }}>{t('yourRoom')}</div>
-            <div style={{ fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 28, marginTop: 4 }}>{tenant.roomId || '—'}</div>
+            <div style={{ color: 'var(--muted)', fontSize: 'var(--fs-sm)' }}>{t('yourRoom')}</div>
+            <div style={{
+              fontFamily: 'var(--font-display)', fontWeight: 600,
+              fontSize: 'var(--fs-stat)', marginTop: 4, lineHeight: 1.1,
+            }}>{tenant.roomId || '—'}</div>
             {floor != null
               ? <div style={{ color: 'var(--ink-2)', fontSize: 13.5 }}>{t('floor')} {floor}</div>
               : null}
@@ -1002,9 +1011,12 @@ function HomeView({ tenant, locale, bills, tickets, contract, goto }) {
       <Card hoverable onClick={() => goto('maintenance')}>
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between' }}>
           <div>
-            <div style={{ color: 'var(--muted)', fontSize: 12.5 }}>{t('openTicketsCard')}</div>
-            <div style={{ fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 28, marginTop: 4 }}>
-              {openTickets.length} <span style={{ fontSize: 14, color: 'var(--muted)', fontWeight: 500 }}>{t('ticketsUnit')}</span>
+            <div style={{ color: 'var(--muted)', fontSize: 'var(--fs-sm)' }}>{t('openTicketsCard')}</div>
+            <div style={{
+              fontFamily: 'var(--font-display)', fontWeight: 600,
+              fontSize: 'var(--fs-stat)', marginTop: 4, lineHeight: 1.1,
+            }}>
+              {openTickets.length} <span style={{ fontSize: 'var(--fs-base)', color: 'var(--muted)', fontWeight: 500 }}>{t('ticketsUnit')}</span>
             </div>
             {openTickets[0] ? (
               <div style={{ color: 'var(--ink-2)', fontSize: 13.5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
@@ -1046,7 +1058,10 @@ function HomeView({ tenant, locale, bills, tickets, contract, goto }) {
                 <Icon name="wallet" size={14} /> {t('currentBill')}
               </div>
               <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, marginTop: 10, flexWrap: 'wrap' }}>
-                <div style={{ fontFamily: 'var(--font-display)', fontSize: 44, fontWeight: 700, letterSpacing: '-.02em' }}>
+                <div style={{
+                  fontFamily: 'var(--font-display)', fontSize: 'var(--fs-3xl)',
+                  fontWeight: 700, letterSpacing: '-.02em', lineHeight: 1.05,
+                }}>
                   ฿{fmtMoney(unpaid.total)}
                 </div>
                 <Pill tone="amber" size="lg" style={{ background: 'rgba(255,210,160,0.18)', color: '#f3c89a' }}>
@@ -1083,7 +1098,7 @@ function HomeView({ tenant, locale, bills, tickets, contract, goto }) {
         </div>
       )}
 
-      <SectionHeader style={{ marginTop: 28 }} title={t('shortcuts')} subtitle={t('shortcutsSub')} />
+      <SectionHeader style={{ marginTop: 'var(--sp-7)' }} title={t('shortcuts')} subtitle={t('shortcutsSub')} />
       <div style={{
         display: 'grid', gap: 12,
         gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))',
@@ -1100,7 +1115,7 @@ function HomeView({ tenant, locale, bills, tickets, contract, goto }) {
 
       {bills.length > 0 ? (
         <>
-          <SectionHeader style={{ marginTop: 28 }} title={t('recentBills')} subtitle={t('recentBillsSub')}
+          <SectionHeader style={{ marginTop: 'var(--sp-7)' }} title={t('recentBills')} subtitle={t('recentBillsSub')}
             action={<Button variant="ghost" size="sm" iconRight="chevron" onClick={() => goto('bills')}>{t('viewAll')}</Button>} />
           <Card pad={0}>
             {bills.slice(0, 3).map((b, i) => (
@@ -1116,12 +1131,19 @@ function HomeView({ tenant, locale, bills, tickets, contract, goto }) {
 
 function BreakdownCell({ label, value, divider }) {
   return (
-    <div style={{
-      padding: '16px 20px', background: 'var(--surface)',
+    <div className="breakdown-cell" style={{
+      padding: 'var(--sp-4) var(--sp-5)', background: 'var(--surface)',
       borderLeft: divider ? '1px solid var(--line)' : 'none',
+      minWidth: 0,
     }}>
-      <div style={{ color: 'var(--muted)', fontSize: 12 }}>{label}</div>
-      <div style={{ fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 18, marginTop: 4 }}>{value}</div>
+      <div style={{
+        color: 'var(--muted)', fontSize: 'var(--fs-xs)',
+        whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+      }}>{label}</div>
+      <div style={{
+        fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 'var(--fs-md)',
+        marginTop: 4,
+      }}>{value}</div>
     </div>
   );
 }
@@ -1447,12 +1469,12 @@ function BillDetailBody({ bill, locale, refresh, slipFeature }) {
 
   return (
     <>
-      <div className="bill-detail-grid" style={{ display: 'grid', gap: 18, gridTemplateColumns: 'minmax(0,1fr) minmax(0,1fr)' }}>
-        <div>
-          <div style={{ color: 'var(--muted)', fontSize: 13 }}>{t('amountToPay')}</div>
+      <div className="bill-detail-grid" style={{ display: 'grid', gap: 'var(--sp-5)', gridTemplateColumns: 'minmax(0,1fr) minmax(0,1fr)' }}>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ color: 'var(--muted)', fontSize: 'var(--fs-sm)' }}>{t('amountToPay')}</div>
           <div style={{
-            fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 42,
-            letterSpacing: '-.02em', margin: '4px 0 4px', color: 'var(--accent-2)',
+            fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 'var(--fs-3xl)',
+            letterSpacing: '-.02em', margin: '4px 0 4px', color: 'var(--accent-2)', lineHeight: 1.05,
           }}>฿{fmtMoney(bill.total)}</div>
           <div style={{ display: 'flex', gap: 8, marginBottom: 18, flexWrap: 'wrap' }}>
             <Pill tone={STATUS_TONE[bill.status]} size="lg">{t(bill.status)}</Pill>
@@ -1652,7 +1674,7 @@ function BillDetailBody({ bill, locale, refresh, slipFeature }) {
           <div style={{ marginTop: 6, fontSize: 12, color: 'var(--muted)' }}>ℹ️ {t('slipDisabledHelp')}</div>
         </div>
       ) : null}
-      <style>{`@media (max-width: 720px){.bill-detail-grid{grid-template-columns:1fr!important}}`}</style>
+      <style>{`@media (max-width: 768px){.bill-detail-grid{grid-template-columns:1fr!important}}`}</style>
     </>
   );
 }
@@ -1731,11 +1753,11 @@ function PaymentsView({ locale, payments, syncErrors }) {
           ))}
         </Card>
       )}
-      <style>{`@media (max-width: 720px){
+      <style>{`@media (max-width: 768px){
         .pay-head{display:none!important}
         .pay-row{grid-template-columns:1fr auto!important;grid-template-areas:"name amt" "date method"!important}
         .pay-row > *:nth-child(1){grid-area:name}
-        .pay-row > *:nth-child(2){grid-area:date;color:var(--muted);font-size:12px!important}
+        .pay-row > *:nth-child(2){grid-area:date;color:var(--muted);font-size:var(--fs-xs)!important}
         .pay-row > *:nth-child(3){grid-area:method;justify-self:start}
         .pay-row > *:nth-child(4){grid-area:amt}
       }`}</style>
@@ -1782,7 +1804,10 @@ function ContractView({ locale, tenant, contract }) {
             }}>
               <Icon name="contract" size={14} /> {t('contract')}
             </div>
-            <div style={{ fontFamily: 'var(--font-display)', fontSize: 28, fontWeight: 600, marginTop: 8, letterSpacing: '-.01em' }}>
+            <div style={{
+              fontFamily: 'var(--font-display)', fontSize: 'var(--fs-stat)',
+              fontWeight: 600, marginTop: 8, letterSpacing: '-.01em', lineHeight: 1.2,
+            }}>
               {t('contractRoom')} {c.room_id || tenant.roomId || '—'}{floor != null ? ` · ${t('floor')} ${floor}` : ''}
             </div>
             <div style={{ color: 'var(--ink-2)', fontSize: 13.5, marginTop: 4 }}>
@@ -1844,7 +1869,7 @@ function ContractView({ locale, tenant, contract }) {
           {c.start_date ? <KV label={t('moveInDate')} value={fmtDate(c.start_date, locale)} last={!tenant.email} /> : null}
         </Card>
       </div>
-      <style>{`@media (max-width: 880px){.contract-grid{grid-template-columns:1fr!important}}`}</style>
+      <style>{`@media (max-width: 768px){.contract-grid{grid-template-columns:1fr!important}}`}</style>
     </div>
   );
 }
@@ -1977,10 +2002,17 @@ function MaintenanceForm({ tenant, locale, onDone, onCancel }) {
     } finally { setBusy(false); }
   }
   return (
-    <form onSubmit={submit} style={{ display: 'grid', gap: 16 }}>
+    <form onSubmit={submit} style={{ display: 'grid', gap: 'var(--sp-4)' }}>
       <div>
         <Label>{t('category')}</Label>
-        <div className="cat-grid" style={{ display: 'grid', gap: 8, gridTemplateColumns: 'repeat(4, 1fr)' }}>
+        {/* auto-fit lets the category buttons reflow smoothly from 4 cols
+            on a desktop to 2 cols on a 320-wide phone without a breakpoint
+            snap — each cell stays at least 108px wide so the icon + label
+            remain legible. */}
+        <div className="cat-grid" style={{
+          display: 'grid', gap: 'var(--sp-2)',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(108px, 1fr))',
+        }}>
           {MAINT_CATS.map((c) => (
             <button key={c.id} type="button" onClick={() => setCat(c.id)} style={{
               padding: '10px 8px', borderRadius: 12, fontFamily: 'inherit',
@@ -1988,7 +2020,8 @@ function MaintenanceForm({ tenant, locale, onDone, onCancel }) {
               background: cat === c.id ? 'var(--accent-soft)' : 'var(--surface)',
               color: cat === c.id ? 'var(--accent-2)' : 'var(--ink-2)',
               display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6,
-              cursor: 'pointer', fontSize: 12, fontWeight: 600,
+              cursor: 'pointer', fontSize: 'var(--fs-xs)', fontWeight: 600,
+              minHeight: 72,
             }}><span style={{ fontSize: 22 }}>{c.icon}</span>{t('cat_' + c.id)}</button>
           ))}
         </div>
@@ -2027,7 +2060,6 @@ function MaintenanceForm({ tenant, locale, onDone, onCancel }) {
         <Button variant="ghost" type="button" onClick={onCancel}>{t('cancel')}</Button>
         <Button type="submit" disabled={busy || !title.trim() || missingRoom}>{busy ? '…' : t('sendRequest')}</Button>
       </div>
-      <style>{`@media (max-width: 540px){.cat-grid{grid-template-columns:repeat(2,1fr)!important}}`}</style>
     </form>
   );
 }
@@ -2095,10 +2127,13 @@ function ProfileView({ tenant, locale, setLocale, theme, setTheme, onLogout, fea
         }}>
           <Avatar tenant={tenant} size={64} />
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 18 }}>
+            <div style={{
+              fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 'var(--fs-lg)',
+              whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+            }}>
               {tenant.fullName || '—'}
             </div>
-            <div style={{ color: 'var(--muted)', fontSize: 13.5 }}>
+            <div style={{ color: 'var(--muted)', fontSize: 'var(--fs-sm)' }}>
               {tenant.roomId ? `${tr(locale, 'contractRoom')} ${tenant.roomId}` : '—'}
             </div>
             <div style={{ display: 'flex', gap: 10, marginTop: 6, flexWrap: 'wrap' }}>
@@ -2116,7 +2151,7 @@ function ProfileView({ tenant, locale, setLocale, theme, setTheme, onLogout, fea
 
       {(i18nOn || darkOn) ? (
         <>
-          <SectionHeader style={{ marginTop: 26 }} title={t('prefs')} subtitle={t('prefsSub')} />
+          <SectionHeader style={{ marginTop: 'var(--sp-7)' }} title={t('prefs')} subtitle={t('prefsSub')} />
           <Card>
             {darkOn ? (
               <PrefRow icon="moon" label={t('darkMode')} hint={t('darkModeSub')} last={!i18nOn}>
@@ -2137,7 +2172,7 @@ function ProfileView({ tenant, locale, setLocale, theme, setTheme, onLogout, fea
         </>
       ) : null}
 
-      <SectionHeader style={{ marginTop: 26 }} title={t('contactDorm')} subtitle={buildingName} />
+      <SectionHeader style={{ marginTop: 'var(--sp-7)' }} title={t('contactDorm')} subtitle={buildingName} />
       <div style={{ display: 'grid', gap: 12, gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))' }}>
         {buildingPhone ? (
           <a href={`tel:${String(buildingPhone).replace(/[^+\d]/g, '')}`} style={{ textDecoration: 'none' }}>
@@ -2580,7 +2615,7 @@ function App() {
   return (
     <>
       <div className="portal-shell" style={{
-        display: 'grid', gridTemplateColumns: '264px 1fr',
+        display: 'grid', gridTemplateColumns: 'var(--sidebar-w) 1fr',
         minHeight: '100vh', background: 'var(--bg)',
       }}>
         <Sidebar page={page} setPage={setPage} locale={locale} unpaidCount={unpaidCount}
@@ -2589,7 +2624,10 @@ function App() {
           <TopBar page={page} locale={locale} tenant={tenant} openMenu={() => setDrawer(true)}
             unpaidCount={unpaidCount} openTickets={openTickets}
             onBellClick={() => setPage(unpaidCount > 0 ? 'bills' : openTickets > 0 ? 'maintenance' : 'bills')} />
-          <main className="tenant-main" style={{ padding: '24px 28px 110px', maxWidth: 1180, width: '100%', margin: '0 auto' }}>
+          <main className="tenant-main" style={{
+            padding: 'var(--sp-6) var(--sp-7) calc(var(--bottomnav-h) + var(--sp-6))',
+            maxWidth: 'var(--max-content)', width: '100%', margin: '0 auto',
+          }}>
             <SyncBanner errors={syncErrors} syncing={syncing}
               onRetry={triggerRefresh} locale={locale} />
             {page === 'home'        && <HomeView tenant={tenant} locale={locale} bills={bills}
@@ -2614,21 +2652,49 @@ function App() {
         locale={locale} unpaidCount={unpaidCount}
         onLogout={() => { setDrawer(false); onLogout(); }} />
       <style>{`
+        /* Canonical breakpoints used across the whole portal:
+             >960   desktop / large laptop  (sidebar + 28px gutters)
+             ≤960   tablet landscape        (drawer menu, no sidebar)
+             ≤768   tablet portrait         (cards stack to 1 col)
+             ≤640   phone                   (bottom-tab nav, modal → sheet)
+             ≤480   small phone             (extra-tight paddings)
+           No other widths are used so resizing the window never produces
+           an in-between "snap" zone. */
+
+        /* Tablet landscape — hide the sidebar, show drawer trigger. */
         @media (max-width: 960px) {
           .portal-shell { grid-template-columns: 1fr !important; }
           .portal-sidebar { display: none !important; }
           .topbar-menu-btn { display: grid !important; }
-          .tenant-main { padding: 18px 16px 110px !important; }
+          .tenant-main {
+            padding: var(--sp-5) var(--sp-4) calc(var(--bottomnav-h) + var(--sp-5)) !important;
+          }
         }
+
+        /* Phone — bottom-tab nav appears and modal turns into a bottom-sheet. */
         @media (max-width: 640px) {
           .bottom-nav { display: flex !important; }
-          /* Modal switches to slide-up bottom-sheet on phones:
-             stick to the bottom edge, only round the top corners, and pad
-             for the home-indicator safe area so no content sits under it. */
+          .home-grid { grid-template-columns: 1fr !important; }
+          .tenant-main {
+            padding: var(--sp-4) var(--sp-3)
+              calc(env(safe-area-inset-bottom,0px) + var(--bottomnav-h) + var(--sp-5)) !important;
+          }
+          .sync-banner { flex-direction: column !important; align-items: stretch !important; }
+          .bill-row { grid-template-columns: 1fr !important; gap: var(--sp-2) !important; padding: var(--sp-3) var(--sp-4) !important; }
+          .bill-row > * { justify-self: start !important; text-align: left !important; min-width: 0 !important; }
+          .bill-card-main { grid-template-columns: 1fr !important; gap: var(--sp-3) !important; }
+          .bill-card-amount { text-align: left !important; }
+          .mini-cells { grid-template-columns: 1fr !important; }
+          .mini-cell { border-left: 0 !important; border-top: 1px solid var(--line) !important; }
+          .mini-cell:first-child { border-top: 0 !important; }
+          .maintenance-ticket-row { flex-direction: column !important; }
+          /* Modal becomes a slide-up bottom-sheet: stuck to the bottom
+             edge, top corners only, safe-area padding so no content sits
+             under the iOS home indicator. */
           .modal-overlay {
             align-items: flex-end !important;
             justify-content: stretch !important;
-            padding: 24px 0 0 !important;
+            padding: var(--sp-6) 0 0 !important;
           }
           .modal-panel {
             margin: 0 !important;
@@ -2637,26 +2703,17 @@ function App() {
             padding-bottom: env(safe-area-inset-bottom, 0px) !important;
           }
         }
-        @media (max-width: 540px) {
-          .home-grid { grid-template-columns: 1fr !important; }
-          .tenant-main { padding: 14px 12px calc(env(safe-area-inset-bottom,0px) + 104px) !important; }
-          .sync-banner { flex-direction: column !important; align-items: stretch !important; }
-          .bill-row { grid-template-columns: 1fr !important; gap: 8px !important; padding: 14px 16px !important; }
-          .bill-row > * { justify-self: start !important; text-align: left !important; min-width: 0 !important; }
-          .bill-card-main { grid-template-columns: 1fr !important; gap: 10px !important; }
-          .bill-card-amount { text-align: left !important; }
-          .mini-cells { grid-template-columns: 1fr !important; }
-          .mini-cell { border-left: 0 !important; border-top: 1px solid var(--line) !important; }
-          .mini-cell:first-child { border-top: 0 !important; }
-          .maintenance-ticket-row { flex-direction: column !important; }
+
+        /* Small phone — slightly tighter paddings only; no new layout snaps. */
+        @media (max-width: 480px) {
           .modal-panel { border-radius: 18px 18px 0 0 !important; }
-          .modal-body { padding: 16px 14px 20px !important; }
+          .modal-body { padding: var(--sp-4) var(--sp-3) var(--sp-5) !important; }
         }
-        /* Landscape-mobile: short-but-wide viewports (e.g. phone in landscape)
-           often broke the bottom-sheet because the height was less than the
-           top padding + form padding. Drop the top air to recover space. */
+
+        /* Landscape phone — short-but-wide viewport. Reclaim the top air
+           so the bottom-sheet doesn't push past the visible viewport. */
         @media (max-height: 520px) and (max-width: 960px) {
-          .modal-overlay { padding-top: 12px !important; }
+          .modal-overlay { padding-top: var(--sp-3) !important; }
           .modal-panel { max-height: min(calc(100vh - 12px), calc(100dvh - 12px)) !important; }
         }
       `}</style>
