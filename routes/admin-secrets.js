@@ -35,15 +35,29 @@ module.exports = function buildAdminSecretsRouter(ctx) {
   r.put('/:key', sameOrigin, csrfGuard, requireAuth, requireRole('owner'), async (req, res) => {
     const key = String(req.params.key).slice(0, 64);
     const value = req.body?.value;
+    const entry = secrets.CATALOG_BY_KEY[key];
     // Reject keys that aren't in the catalog so the table can't be used
     // as an arbitrary key/value dump.
-    if (!secrets.CATALOG_BY_KEY[key]) {
+    if (!entry) {
       return res.status(400).json({ error: 'unknown secret key', code: 'INVALID_KEY' });
+    }
+    // Hidden keys (e.g. PROMPTPAY_TARGET) are managed from a different
+    // canonical UI surface — Settings → การชำระเงิน writes to
+    // config.payment.promptpay, NOT to this secrets table. Blocking the
+    // SET path here keeps the "one write location" invariant even if a
+    // caller hits the API directly with curl. We still ALLOW clearing
+    // (empty value → DELETE) so admins can purge a stale DB row left
+    // over from before the consolidation.
+    const isClear = value == null || value === '';
+    if (entry.hidden && !isClear) {
+      return res.status(400).json({
+        error: 'PROMPTPAY_TARGET ตั้งค่าจาก Settings → การชำระเงิน เท่านั้น (ป้องกันตั้งหลายที่)',
+        code: 'HIDDEN_KEY_SET',
+      });
     }
     try {
       const out = await secrets.set(pool, key, value, req.session.user.username);
-      audit(req, value == null || value === '' ? 'secret.delete' : 'secret.update',
-        'secret', key);
+      audit(req, isClear ? 'secret.delete' : 'secret.update', 'secret', key);
       res.json({ ok: true, ...out });
     } catch (err) {
       console.error('admin secrets put error:', err);

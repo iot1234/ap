@@ -112,6 +112,22 @@ test('PROMPTPAY_TARGET still usable via get() (env-fallback path)', () => {
   delete process.env.PROMPTPAY_TARGET;
 });
 
+test('CATALOG entry for PROMPTPAY_TARGET carries hidden: true', () => {
+  // Routes use this flag to block SET-via-API and keep the "one canonical
+  // write surface" invariant — if this flag drifts to false the API would
+  // re-open the duplicate-write-paths bug.
+  const entry = secrets.CATALOG_BY_KEY.PROMPTPAY_TARGET;
+  assert.ok(entry, 'PROMPTPAY_TARGET must stay in CATALOG so env-fallback + legacy DB rows keep resolving');
+  assert.equal(entry.hidden, true, 'PROMPTPAY_TARGET must be marked hidden');
+});
+
+test('hidden flag is opt-in (other keys are not hidden)', () => {
+  // Sanity guard — making sure the filter logic in listMetadata isn't
+  // accidentally hiding every key.
+  const visible = secrets.CATALOG.filter((c) => !c.hidden);
+  assert.ok(visible.length >= 10, `expected most keys to remain visible, got ${visible.length}`);
+});
+
 test('maskValue hides full secret', () => {
   assert.equal(secrets.maskValue('abcdefgh', 'password'), '••••efgh');
   assert.equal(secrets.maskValue('abc', 'password'), '••••');
