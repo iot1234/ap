@@ -21,6 +21,13 @@ const C = {
   bg:     '#faf6ee',
 };
 
+const PAGE_W = 595;
+const PAGE_H = 842;
+const MARGIN = 48;
+const CONTENT_W = PAGE_W - MARGIN * 2;
+const CONTENT_BOTTOM = PAGE_H - MARGIN - 34;
+const FOOTER_Y = PAGE_H - MARGIN - 14;
+
 const THAI_MONTHS = [
   'มกราคม','กุมภาพันธ์','มีนาคม','เมษายน','พฤษภาคม','มิถุนายน',
   'กรกฎาคม','สิงหาคม','กันยายน','ตุลาคม','พฤศจิกายน','ธันวาคม',
@@ -57,7 +64,8 @@ function fmtCurrency(n) {
 async function renderBillPdf(bill, stream) {
   const doc = new PDFDocument({
     size: 'A4',
-    margins: { top: 48, bottom: 48, left: 48, right: 48 },
+    margins: { top: MARGIN, bottom: MARGIN, left: MARGIN, right: MARGIN },
+    bufferPages: true,
     info: {
       Title: `Bill ${bill.billNo || ''}`,
       Author: bill.building?.name || 'บ้านกาญจน์ เรสซิเดนซ์',
@@ -71,130 +79,19 @@ async function renderBillPdf(bill, stream) {
 
   doc.pipe(stream);
 
-  // --- Header band ---
   const buildingName = bill.building?.name || 'บ้านกาญจน์ เรสซิเดนซ์';
   const buildingAddr = bill.building?.address || '';
   const buildingPhone = bill.building?.phone || '';
-
-  doc
-    .fillColor(C.ink)
-    .font('th-bold').fontSize(20).text(buildingName, 48, 48)
-    .font('th').fontSize(10).fillColor(C.muted)
-    .text(buildingAddr || '', 48, doc.y + 2)
-    .text(buildingPhone ? `โทร. ${buildingPhone}` : '', 48, doc.y + 2);
-
-  // Right side: title + bill no + date. When the bill is paid we re-label
-  // the title to "ใบเสร็จรับเงิน" so the document doubles as a receipt; the
-  // PAID stamp below makes it unmistakable for anyone glancing at the
-  // printed copy or LINE-forwarded PDF. Avoids the prior failure mode
-  // where a paid bill looked identical to an unpaid one and tenants got
-  // confused about whether they still owed money.
   const isPaid = String(bill.status || '').toLowerCase() === 'paid';
-  doc
-    .fillColor(C.ink).font('th-bold').fontSize(16)
-    .text(isPaid ? 'ใบเสร็จรับเงิน' : 'ใบแจ้งหนี้', 360, 48, { width: 200, align: 'right' })
-    .font('th').fontSize(10).fillColor(C.ink2)
-    .text(`เลขที่: ${bill.billNo || '—'}`, 360, doc.y + 4, { width: 200, align: 'right' })
-    .text(`วันที่ออก: ${fmtThaiDate(new Date())}`, 360, doc.y + 2, { width: 200, align: 'right' });
-  if (isPaid && bill.paidAt) {
-    doc.font('th').fontSize(10).fillColor('#2f8f5b')
-      .text(`ชำระเมื่อ: ${fmtThaiDate(new Date(bill.paidAt))}`, 360, doc.y + 2,
-        { width: 200, align: 'right' });
-  }
-
-  // Divider
-  doc
-    .moveTo(48, 130).lineTo(547, 130)
-    .lineWidth(1).strokeColor(C.border).stroke();
-
-  // --- Tenant block ---
-  let y = 148;
-  doc
-    .fontSize(10).fillColor(C.muted).text('เรียกเก็บจาก', 48, y)
-    .font('th-bold').fontSize(12).fillColor(C.ink).text(bill.tenantName || '—', 48, y + 14);
-  if (bill.tenantPhone) {
-    doc.font('th').fontSize(10).fillColor(C.ink2)
-      .text(`โทร. ${bill.tenantPhone}`, 48, doc.y + 2);
-  }
-
-  // Right side
-  doc
-    .font('th').fontSize(10).fillColor(C.muted)
-    .text('ห้องเลขที่', 360, y, { width: 200, align: 'right' })
-    .font('th-bold').fontSize(12).fillColor(C.ink)
-    .text(bill.roomId || '—', 360, y + 14, { width: 200, align: 'right' });
-  if (bill.period) {
-    doc.font('th').fontSize(10).fillColor(C.ink2)
-      .text(`รอบบิล ${bill.period}`, 360, doc.y + 2, { width: 200, align: 'right' });
-  }
-
-  // --- Items table ---
-  y = 220;
-  const rowH = 26;
-  const colX = { label: 60, qty: 360, amount: 460 };
-  const colW = { label: 290, qty: 90, amount: 90 };
-
-  // Header
-  doc
-    .roundedRect(48, y, 499, rowH, 6).fill(C.bg);
-  doc
-    .fillColor(C.ink2).font('th-bold').fontSize(10)
-    .text('รายการ', colX.label, y + 8, { width: colW.label })
-    .text('จำนวน', colX.qty, y + 8, { width: colW.qty, align: 'center' })
-    .text('จำนวนเงิน (บาท)', colX.amount, y + 8, { width: colW.amount, align: 'right' });
-
-  y += rowH + 6;
-  doc.font('th').fontSize(11).fillColor(C.ink);
-
+  const colX = { label: MARGIN + 12, qty: 360, amount: 460 };
+  const colW = { label: 286, qty: 88, amount: 88 };
+  const tableW = CONTENT_W;
   const items = Array.isArray(bill.items) ? bill.items : [];
-  for (const it of items) {
-    doc.text(it.label || '', colX.label, y, { width: colW.label });
-    doc.text(it.qty || '', colX.qty, y, { width: colW.qty, align: 'center' });
-    doc.text(fmtCurrency(it.amount), colX.amount, y, { width: colW.amount, align: 'right' });
-    y += 22;
-  }
-
-  // Divider before total
-  y += 8;
-  doc.moveTo(48, y).lineTo(547, y).lineWidth(0.5).strokeColor(C.border).stroke();
-  y += 12;
-
-  // Total
-  doc.font('th-bold').fontSize(13).fillColor(C.ink)
-    .text('ยอดรวมทั้งสิ้น', colX.label, y, { width: colW.label })
-    .text(`฿ ${fmtCurrency(bill.total)}`, colX.amount, y, { width: colW.amount, align: 'right' });
-  y += 30;
-
-  // Due date
-  if (bill.dueDate) {
-    doc.font('th').fontSize(10).fillColor(C.muted)
-      .text(`กำหนดชำระ: ${bill.dueDate}`, colX.label, y);
-    y += 18;
-  }
-
-  // --- Payment options block (right column) ---
-  // Renders: PromptPay QR card → bank transfer card → other channels list.
-  // The block is anchored at y (after the totals) so it scales with item count.
-  const payX = 330;
-  const payW = 220;
-  let payY = y + 24;
-
   const qrAmount = Number(bill.total);
+  let qrPng = null;
   if (bill.promptpayTarget && Number.isFinite(qrAmount) && qrAmount > 0) {
     try {
-      const qrPng = await renderQrPng(bill.promptpayTarget, qrAmount, { width: 360 });
-      const qrSize = 130;
-      doc.roundedRect(payX, payY - 12, payW, qrSize + 70, 10).fill(C.bg);
-      doc.fillColor(C.ink2).font('th-bold').fontSize(10)
-        .text('สแกนเพื่อชำระ (PromptPay)', payX + 10, payY - 4, { width: payW - 20, align: 'center' });
-      doc.image(qrPng, payX + (payW - qrSize) / 2, payY + 14, { width: qrSize, height: qrSize });
-      doc.font('th').fontSize(9).fillColor(C.muted)
-        .text(
-          bill.promptpayName ? `${bill.promptpayName} · อ้างอิง ${bill.billNo || '—'}` : `อ้างอิง: ${bill.billNo || '—'}`,
-          payX + 10, payY + qrSize + 18,
-          { width: payW - 20, align: 'center' }
-        );
-      payY += qrSize + 80;
+      qrPng = await renderQrPng(bill.promptpayTarget, qrAmount, { width: 360 });
     } catch (err) {
       console.error('[pdf] QR render failed:', err.message);
     }
@@ -202,67 +99,202 @@ async function renderBillPdf(bill, stream) {
     console.warn('[pdf] QR skipped: bill total must be greater than 0');
   }
 
-  // Bank transfer card
-  if (bill.bankInfo && bill.bankInfo.account) {
-    const cardH = 76;
-    doc.roundedRect(payX, payY, payW, cardH, 10).fill(C.bg);
-    doc.fillColor(C.ink2).font('th-bold').fontSize(10)
-      .text('โอนผ่านธนาคาร', payX + 12, payY + 8, { width: payW - 24 });
-    doc.font('th').fontSize(10).fillColor(C.ink)
-      .text(bill.bankInfo.bank || '—', payX + 12, payY + 24, { width: payW - 24 });
-    doc.font('th-bold').fontSize(11).fillColor(C.ink)
-      .text(bill.bankInfo.account, payX + 12, payY + 40, { width: payW - 24 });
-    if (bill.bankInfo.name) {
-      doc.font('th').fontSize(9).fillColor(C.muted)
-        .text(bill.bankInfo.name, payX + 12, payY + 58, { width: payW - 24 });
+  function drawHeader() {
+    doc
+      .fillColor(C.ink)
+      .font('th-bold').fontSize(20).text(buildingName, MARGIN, MARGIN, { width: 290 })
+      .font('th').fontSize(10).fillColor(C.muted)
+      .text(buildingAddr || '', MARGIN, doc.y + 2, { width: 290 })
+      .text(buildingPhone ? `โทร. ${buildingPhone}` : '', MARGIN, doc.y + 2, { width: 290 });
+
+    doc
+      .fillColor(C.ink).font('th-bold').fontSize(16)
+      .text(isPaid ? 'ใบเสร็จรับเงิน' : 'ใบแจ้งหนี้', 360, MARGIN, { width: 187, align: 'right' })
+      .font('th').fontSize(10).fillColor(C.ink2)
+      .text(`เลขที่: ${bill.billNo || '—'}`, 360, doc.y + 4, { width: 187, align: 'right' })
+      .text(`วันที่ออก: ${fmtThaiDate(new Date())}`, 360, doc.y + 2, { width: 187, align: 'right' });
+    if (isPaid && bill.paidAt) {
+      doc.font('th').fontSize(10).fillColor('#2f8f5b')
+        .text(`ชำระเมื่อ: ${fmtThaiDate(new Date(bill.paidAt))}`, 360, doc.y + 2,
+          { width: 187, align: 'right' });
     }
-    payY += cardH + 8;
+
+    doc
+      .moveTo(MARGIN, 130).lineTo(PAGE_W - MARGIN, 130)
+      .lineWidth(1).strokeColor(C.border).stroke();
   }
 
-  // Additional accepted channels (LINE Pay, TrueMoney, credit card, etc.)
+  function drawTenantBlock() {
+    const y = 148;
+    doc
+      .fontSize(10).fillColor(C.muted).text('เรียกเก็บจาก', MARGIN, y)
+      .font('th-bold').fontSize(12).fillColor(C.ink).text(bill.tenantName || '—', MARGIN, y + 14, { width: 290 });
+    if (bill.tenantPhone) {
+      doc.font('th').fontSize(10).fillColor(C.ink2)
+        .text(`โทร. ${bill.tenantPhone}`, MARGIN, doc.y + 2, { width: 290 });
+    }
+
+    doc
+      .font('th').fontSize(10).fillColor(C.muted)
+      .text('ห้องเลขที่', 360, y, { width: 187, align: 'right' })
+      .font('th-bold').fontSize(12).fillColor(C.ink)
+      .text(bill.roomId || '—', 360, y + 14, { width: 187, align: 'right' });
+    if (bill.period) {
+      doc.font('th').fontSize(10).fillColor(C.ink2)
+        .text(`รอบบิล ${bill.period}`, 360, doc.y + 2, { width: 187, align: 'right' });
+    }
+  }
+
+  function drawContinuationHeader() {
+    doc.font('th-bold').fontSize(13).fillColor(C.ink)
+      .text(isPaid ? 'ใบเสร็จรับเงิน' : 'ใบแจ้งหนี้', MARGIN, MARGIN, { width: 240 });
+    doc.font('th').fontSize(9).fillColor(C.muted)
+      .text(`เลขที่ ${bill.billNo || '—'} · ห้อง ${bill.roomId || '—'}`, MARGIN, doc.y + 2, { width: 300 });
+    doc.moveTo(MARGIN, 86).lineTo(PAGE_W - MARGIN, 86)
+      .lineWidth(0.5).strokeColor(C.border).stroke();
+    return 104;
+  }
+
+  function drawTableHeader(y) {
+    doc.roundedRect(MARGIN, y, tableW, 24, 6).fill(C.bg);
+    doc.fillColor(C.ink2).font('th-bold').fontSize(10)
+      .text('รายการ', colX.label, y + 7, { width: colW.label })
+      .text('จำนวน', colX.qty, y + 7, { width: colW.qty, align: 'center' })
+      .text('จำนวนเงิน (บาท)', colX.amount, y + 7, { width: colW.amount, align: 'right' });
+    return y + 30;
+  }
+
+  let y = 220;
+  drawHeader();
+  drawTenantBlock();
+  y = drawTableHeader(y);
+
+  function addPageWithTableHeader() {
+    doc.addPage();
+    y = drawContinuationHeader();
+    y = drawTableHeader(y);
+  }
+
+  function ensureRoom(height, withTableHeader = false) {
+    if (y + height <= CONTENT_BOTTOM) return;
+    doc.addPage();
+    y = drawContinuationHeader();
+    if (withTableHeader) y = drawTableHeader(y);
+  }
+
+  for (const it of items) {
+    doc.font('th').fontSize(10);
+    const label = String(it.label || '');
+    const qty = String(it.qty || '');
+    const amount = fmtCurrency(it.amount);
+    const labelH = doc.heightOfString(label || ' ', { width: colW.label });
+    const qtyH = doc.heightOfString(qty || ' ', { width: colW.qty, align: 'center' });
+    const amountH = doc.heightOfString(amount, { width: colW.amount, align: 'right' });
+    const rowH = Math.max(22, labelH, qtyH, amountH) + 8;
+    if (y + rowH > CONTENT_BOTTOM) addPageWithTableHeader();
+    doc.font('th').fontSize(10).fillColor(C.ink)
+      .text(label, colX.label, y + 4, { width: colW.label })
+      .text(qty, colX.qty, y + 4, { width: colW.qty, align: 'center' })
+      .text(amount, colX.amount, y + 4, { width: colW.amount, align: 'right' });
+    y += rowH;
+  }
+
+  ensureRoom(68);
+  y += 6;
+  doc.moveTo(MARGIN, y).lineTo(PAGE_W - MARGIN, y).lineWidth(0.5).strokeColor(C.border).stroke();
+  y += 12;
+  doc.font('th-bold').fontSize(13).fillColor(C.ink)
+    .text('ยอดรวมทั้งสิ้น', colX.label, y, { width: colW.label })
+    .text(`฿ ${fmtCurrency(bill.total)}`, colX.amount, y, { width: colW.amount, align: 'right' });
+  y += 26;
+  if (bill.dueDate) {
+    doc.font('th').fontSize(10).fillColor(C.muted)
+      .text(`กำหนดชำระ: ${bill.dueDate}`, colX.label, y, { width: 300 });
+    y += 18;
+  }
+
   const extraMethods = (bill.paymentMethods || [])
     .filter((m) => m && m.enabled && m.key !== 'promptpay' && m.key !== 'bank');
-  if (extraMethods.length > 0) {
-    const cardH = 18 + extraMethods.length * 13;
-    doc.roundedRect(payX, payY, payW, cardH, 10).fill(C.bg);
-    doc.fillColor(C.ink2).font('th-bold').fontSize(10)
-      .text('ช่องทางที่รับชำระอื่น', payX + 12, payY + 6, { width: payW - 24 });
-    let lineY = payY + 22;
-    doc.font('th').fontSize(9).fillColor(C.ink2);
-    for (const m of extraMethods) {
-      doc.text(`• ${m.label}`, payX + 12, lineY, { width: payW - 24 });
-      lineY += 13;
+  const hasBank = !!(bill.bankInfo && bill.bankInfo.account);
+  const qrCardH = qrPng ? 192 : 0;
+  const bankCardH = hasBank ? 76 : 0;
+  const extraCardH = extraMethods.length ? 22 + extraMethods.length * 13 : 0;
+  const rightH = [bankCardH, extraCardH].filter(Boolean).reduce((s, h) => s + h + (s ? 8 : 0), 0);
+  const paymentH = Math.max(qrCardH, rightH);
+  if (paymentH > 0) {
+    ensureRoom(paymentH + 26);
+    y += 12;
+    const payTop = y;
+    const leftX = MARGIN;
+    const leftW = qrPng ? 238 : 0;
+    const rightX = qrPng ? MARGIN + leftW + 16 : MARGIN;
+    const rightW = qrPng ? CONTENT_W - leftW - 16 : CONTENT_W;
+
+    if (qrPng) {
+      const qrSize = 118;
+      doc.roundedRect(leftX, payTop, leftW, qrCardH, 10).fill(C.bg);
+      doc.fillColor(C.ink2).font('th-bold').fontSize(10)
+        .text('สแกนเพื่อชำระ (PromptPay)', leftX + 10, payTop + 10, { width: leftW - 20, align: 'center' });
+      doc.image(qrPng, leftX + (leftW - qrSize) / 2, payTop + 32, { width: qrSize, height: qrSize });
+      doc.font('th').fontSize(9).fillColor(C.muted)
+        .text(
+          bill.promptpayName ? `${bill.promptpayName} · อ้างอิง ${bill.billNo || '—'}` : `อ้างอิง: ${bill.billNo || '—'}`,
+          leftX + 10, payTop + 156,
+          { width: leftW - 20, align: 'center' }
+        );
     }
-    payY += cardH + 8;
+
+    let rightY = payTop;
+    if (hasBank) {
+      doc.roundedRect(rightX, rightY, rightW, bankCardH, 10).fill(C.bg);
+      doc.fillColor(C.ink2).font('th-bold').fontSize(10)
+        .text('โอนผ่านธนาคาร', rightX + 12, rightY + 8, { width: rightW - 24 });
+      doc.font('th').fontSize(10).fillColor(C.ink)
+        .text(bill.bankInfo.bank || '—', rightX + 12, rightY + 24, { width: rightW - 24 });
+      doc.font('th-bold').fontSize(11).fillColor(C.ink)
+        .text(bill.bankInfo.account, rightX + 12, rightY + 40, { width: rightW - 24 });
+      if (bill.bankInfo.name) {
+        doc.font('th').fontSize(9).fillColor(C.muted)
+          .text(bill.bankInfo.name, rightX + 12, rightY + 58, { width: rightW - 24 });
+      }
+      rightY += bankCardH + 8;
+    }
+
+    if (extraMethods.length > 0) {
+      doc.roundedRect(rightX, rightY, rightW, extraCardH, 10).fill(C.bg);
+      doc.fillColor(C.ink2).font('th-bold').fontSize(10)
+        .text('ช่องทางที่รับชำระอื่น', rightX + 12, rightY + 6, { width: rightW - 24 });
+      let lineY = rightY + 22;
+      doc.font('th').fontSize(9).fillColor(C.ink2);
+      for (const m of extraMethods) {
+        doc.text(`• ${m.label}`, rightX + 12, lineY, { width: rightW - 24 });
+        lineY += 13;
+      }
+    }
+    y += paymentH + 8;
   }
 
-  // --- PAID watermark (only when bill is paid) ---
-  // Diagonal "ชำระแล้ว" overlay across the page so a printed/forwarded
-  // PDF is unambiguous at a glance. Rendered LAST so it sits on top of
-  // the totals + payment block — readable but transparent enough that the
-  // numbers underneath stay visible. Translates the title to receipt
-  // wording above + this stamp here so the document can't be mistaken
-  // for an unpaid invoice.
-  if (isPaid) {
-    doc.save();
-    doc.opacity(0.15);
-    doc.rotate(-22, { origin: [297.5, 400] });  // ~A4 center, slight tilt
-    doc.font('th-bold').fontSize(96).fillColor('#2f8f5b')
-      .text('ชำระแล้ว', 0, 360, { width: 595, align: 'center' });
-    doc.restore();
+  const range = doc.bufferedPageRange();
+  for (let i = 0; i < range.count; i++) {
+    doc.switchToPage(range.start + i);
+    if (isPaid) {
+      doc.save();
+      doc.opacity(0.13);
+      doc.rotate(-22, { origin: [PAGE_W / 2, 400] });
+      doc.font('th-bold').fontSize(92).fillColor('#2f8f5b')
+        .text('ชำระแล้ว', 0, 360, { width: PAGE_W, align: 'center' });
+      doc.restore();
+    }
+    doc.font('th').fontSize(9).fillColor(C.muted)
+      .text(
+        isPaid
+          ? `บิลนี้ชำระเรียบร้อยแล้ว — ${bill.paidAt ? `เมื่อ ${fmtThaiDate(new Date(bill.paidAt))}` : ''} ขอบคุณที่ใช้บริการ`
+          : 'กรุณาชำระเงินภายในกำหนด หากมีข้อสงสัยติดต่อเจ้าหน้าที่',
+        MARGIN, FOOTER_Y,
+        { width: CONTENT_W - 80, align: 'left' }
+      )
+      .text(`หน้า ${i + 1} จาก ${range.count}`, PAGE_W - MARGIN - 80, FOOTER_Y, { width: 80, align: 'right' });
   }
-
-  // --- Footer ---
-  const footerY = 750;
-  doc
-    .fontSize(9).fillColor(C.muted)
-    .text(
-      isPaid
-        ? `บิลนี้ชำระเรียบร้อยแล้ว — ${bill.paidAt ? `เมื่อ ${fmtThaiDate(new Date(bill.paidAt))}` : ''} ขอบคุณที่ใช้บริการ`
-        : 'กรุณาชำระเงินภายในกำหนด หากมีข้อสงสัยติดต่อเจ้าหน้าที่',
-      48, footerY,
-      { width: 499, align: 'center' }
-    );
 
   doc.end();
 

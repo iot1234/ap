@@ -19,6 +19,9 @@ function memStream() {
   s.toBuffer = () => Buffer.concat(chunks);
   return s;
 }
+function pageCount(buf) {
+  return (buf.toString('binary').match(/\/Type\s*\/Page\b/g) || []).length;
+}
 
 const SAMPLE_CONTRACT = {
   contractNo: 'C-2026-0001',
@@ -115,15 +118,16 @@ test('renderContractPdf: PDFDocument constructed with bufferPages: true', () => 
     'bufferPages must be true so multi-page footer rendering works');
 });
 
-test('renderContractPdf: SIG_BLOCK_H scales with witness section flag', () => {
+test('renderContractPdf: signature block reservation uses rendered height', () => {
   const fs = require('node:fs');
   const path = require('node:path');
   const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'contractPdf.js'), 'utf8');
-  // ≥ 240pt when witnesses ON (sig boxes + witness lines fit), ≤ 200pt
-  // when OFF so a single-page contract isn't pushed onto a second page.
-  assert.match(src,
-    /SIG_BLOCK_H = sections\.showWitnesses \? 240 : 160/,
-    'SIG_BLOCK_H must adapt to whether witness block renders');
+  assert.match(src, /heightOfString\(sections\.acknowledgmentText/,
+    'signature reservation must measure the actual acknowledgment text height');
+  assert.match(src, /const signatureBlockH = 8 \+ ackH/,
+    'signature block height must be computed from rendered parts');
+  assert.doesNotMatch(src, /SIG_BLOCK_H = sections\.showWitnesses \? 240 : 160/,
+    'fixed signature reservation creates avoidable blank space');
 });
 
 test('renderContractPdf: handles a long terms list across pages', async () => {
@@ -145,10 +149,39 @@ test('renderContractPdf: handles a long terms list across pages', async () => {
   );
   const buf = stream.toBuffer();
   assert.ok(buf.length > 5000, 'multi-page contract must be >5kb');
-  // Crude page-count check via the /Page object marker.
-  const text = buf.toString('binary');
-  const pageMatches = text.match(/\/Type\s*\/Page\b/g) || [];
-  assert.ok(pageMatches.length >= 2, 'long contract must span ≥ 2 pages');
+  assert.ok(pageCount(buf) >= 2, 'long contract must span ≥ 2 pages');
+});
+
+test('renderContractPdf: short no-witness contract stays on one dense page', async () => {
+  const stream = memStream();
+  await contractPdf.renderContractPdf(
+    { ...SAMPLE_CONTRACT, endDate: null, termMonths: null },
+    { fullName: 'ผู้เช่าทดสอบ', phone: '0812345678' },
+    { id: '101' },
+    { name: 'บ้านทดสอบ' },
+    {
+      termsTemplate: {
+        mode: 'override',
+        clauses: [{ title: 'เงื่อนไขหลัก', body: 'ผู้เช่าตกลงชำระค่าเช่าตามกำหนดและดูแลห้องให้อยู่ในสภาพดี' }],
+        sections: { showWitnesses: false },
+      },
+    },
+    stream
+  );
+  assert.equal(pageCount(stream.toBuffer()), 1,
+    'short contracts should not push signatures onto a mostly blank second page');
+});
+
+test('renderContractPdf: page breaks use measured text height, not character-count guesses', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'contractPdf.js'), 'utf8');
+  assert.match(src, /const titleH = doc\.heightOfString\(titleText/,
+    'clause title height must be measured with the active font and width');
+  assert.match(src, /const bodyH = doc\.heightOfString\(body \|\| ' '/,
+    'clause body height must be measured with the active font and width');
+  assert.doesNotMatch(src, /Math\.ceil\(body\.length \/ 100\)/,
+    'character-count page-break estimates cause avoidable blank space');
 });
 
 test('resolveClauses: null/empty template returns defaults', () => {

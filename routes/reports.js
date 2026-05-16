@@ -215,6 +215,26 @@ module.exports = function buildReportsRouter(ctx) {
       const stats = slaQ.rows[0];
       const byStatus = {};
       for (const r of counts.rows) byStatus[r.status] = r.n;
+      const format = String(req.query.format || 'json').toLowerCase();
+      if (format === 'csv' || format === 'xlsx') {
+        const exportRows = [{
+          total: Number(stats.completed || 0)
+            + Number(byStatus.open || 0)
+            + Number(byStatus.in_progress || 0)
+            + Number(byStatus.assigned || 0)
+            + Number(byStatus.cancelled || 0),
+          completed: Number(stats.completed || 0),
+          assigned: Number(byStatus.assigned || 0),
+          in_progress: Number(byStatus.in_progress || 0),
+          open: Number(byStatus.open || 0),
+          cancelled: Number(byStatus.cancelled || 0),
+          open_critical: Number(stats.open_critical || 0),
+          avg_hours_to_resolve: stats.avg_hours_to_resolve || '',
+          avg_rating: stats.avg_rating || '',
+          rated: Number(stats.rated || 0),
+        }];
+        return send(req, res, exportRows, 'maintenance-stats');
+      }
       res.json({ ok: true, byStatus, ...stats });
     } catch (err) {
       console.error('maintenance stats error:', err);

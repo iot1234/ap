@@ -260,7 +260,9 @@ async function renderContractPdf(contract, tenant, room, building, options, stre
   // number footer). When the cursor would cross that line, we addPage()
   // first so the next clause starts at the top of a fresh page.
   function ensureRoom(neededHeight) {
-    if (doc.y + neededHeight > CONTENT_BOTTOM) {
+    const pageBodyH = CONTENT_BOTTOM - CONTENT_TOP;
+    const reserve = Math.min(Number(neededHeight) || 0, pageBodyH);
+    if (doc.y + reserve > CONTENT_BOTTOM) {
       doc.addPage();
       doc.y = CONTENT_TOP;
     }
@@ -374,7 +376,7 @@ async function renderContractPdf(contract, tenant, room, building, options, stre
       .text('รายละเอียดห้องพักและการเงิน', MARGIN, tableTop);
     doc.y = tableTop + 18;
 
-    const rowH = 22;
+    const rowH = 18;
     const labelW = 160;
     const valW = CONTENT_W - labelW;
     const rows = [];
@@ -421,13 +423,18 @@ async function renderContractPdf(contract, tenant, room, building, options, stre
     }
 
     for (const [k, v] of rows) {
-      ensureRoom(rowH);
+      doc.font(FONT).fontSize(10);
+      const labelH = doc.heightOfString(k, { width: labelW });
+      const valueH = doc.heightOfString(String(v || '—'), { width: valW });
+      const actualRowH = Math.max(rowH, labelH, valueH) + 6;
+      ensureRoom(actualRowH);
+      const rowTop = doc.y;
       doc.font(FONT).fontSize(10).fillColor(C.muted)
-        .text(k, MARGIN, doc.y + 6, { width: labelW });
+        .text(k, MARGIN, rowTop + 4, { width: labelW });
       doc.font(FONT).fontSize(10).fillColor(C.ink)
-        .text(v, MARGIN + labelW, doc.y - doc.currentLineHeight(), { width: valW });
-      hr(doc.y + 4);
-      doc.y += 6;
+        .text(v, MARGIN + labelW, rowTop + 4, { width: valW });
+      hr(rowTop + actualRowH - 2);
+      doc.y = rowTop + actualRowH;
     }
     doc.y += 8;
   }
@@ -468,12 +475,18 @@ async function renderContractPdf(contract, tenant, room, building, options, stre
     const cl = clauses[i] || {};
     const title = String(cl.title || '').slice(0, 200);
     const body = interpolate(cl.body, ctx).slice(0, 4000);
-    // Estimate: title 16pt + body lines (10pt each).
-    const bodyLines = Math.ceil(body.length / 100) + 1;
-    const estimate = 18 + bodyLines * 14;
-    ensureRoom(estimate + 8);
+    const titleText = `ข้อ ${thaiNumber(i + 1)}. ${title}`;
+    doc.font(FONT_B).fontSize(11);
+    const titleH = doc.heightOfString(titleText, { width: CONTENT_W });
+    doc.font(FONT).fontSize(10);
+    const bodyH = doc.heightOfString(body || ' ', {
+      width: CONTENT_W - 16,
+      align: 'justify',
+      lineGap: 2,
+    });
+    ensureRoom(titleH + bodyH + 12);
     doc.font(FONT_B).fontSize(11).fillColor(C.ink)
-      .text(`ข้อ ${thaiNumber(i + 1)}. ${title}`, MARGIN, doc.y,
+      .text(titleText, MARGIN, doc.y,
             { width: CONTENT_W });
     doc.y += 2;
     doc.font(FONT).fontSize(10).fillColor(C.ink2)
@@ -483,12 +496,20 @@ async function renderContractPdf(contract, tenant, room, building, options, stre
   }
 
   // =============== Signature block ======================================
-  // Reserve enough room for the WHOLE block — acknowledgment line (~20pt)
-  // + signature boxes (sigBoxH+labels = ~120pt) + witness block when
-  // enabled (~80pt). 240pt covers worst case so we never split across
-  // pages mid-witness — that's the legal ambiguity the comment guards.
-  const SIG_BLOCK_H = sections.showWitnesses ? 240 : 160;
-  ensureRoom(SIG_BLOCK_H);
+  const sigColW = (CONTENT_W - 32) / 2;
+  const sigBoxH = 56;
+  doc.font(FONT).fontSize(10);
+  const ackH = doc.heightOfString(sections.acknowledgmentText || ' ', {
+    width: CONTENT_W,
+    align: 'center',
+  });
+  // Reserve the actual rendered height for the signature cluster. The old
+  // fixed 240pt reservation frequently pushed signatures to a new page while
+  // 150-200pt still remained, producing a visually empty tail page.
+  const signatureLabelsH = 56;
+  const witnessH = sections.showWitnesses ? 60 + 14 + 56 : 0;
+  const signatureBlockH = 8 + ackH + 16 + 4 + sigBoxH + Math.max(signatureLabelsH, witnessH) + 8;
+  ensureRoom(signatureBlockH);
 
   // Acknowledgement line above signatures — admin can override the wording
   // via template.sections.acknowledgmentText (e.g. omit "ต่อหน้าพยาน" when
@@ -500,9 +521,7 @@ async function renderContractPdf(contract, tenant, room, building, options, stre
   doc.y += 16;
 
   // Two signature columns — lessor on the left, lessee on the right.
-  const sigColW = (CONTENT_W - 32) / 2;
   const sigTopY = doc.y + 4;
-  const sigBoxH = 56;
 
   function drawSignatureBox(x, y, label, name, signatureBuf, dateLabel) {
     // Box border

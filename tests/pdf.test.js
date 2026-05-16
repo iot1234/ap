@@ -20,6 +20,9 @@ function memSink() {
   stream.getBuffer = () => Buffer.concat(chunks);
   return stream;
 }
+function pageCount(buf) {
+  return (buf.toString('binary').match(/\/Type\s*\/Page\b/g) || []).length;
+}
 
 const minimalBill = {
   billNo: 'TEST-001',
@@ -92,4 +95,26 @@ test('renderBillPdf handles empty items array', async () => {
   const sink = memSink();
   await renderBillPdf({ ...minimalBill, items: [], total: 0 }, sink);
   assert.ok(sink.getBuffer().length > 500);
+});
+
+test('renderBillPdf paginates long item tables without blank-page explosion', async () => {
+  const sink = memSink();
+  await renderBillPdf({
+    ...minimalBill,
+    items: Array.from({ length: 28 }, (_, i) => ({
+      label: `ค่าบริการเพิ่มเติม ${i + 1}`,
+      qty: '1',
+      amount: 100 + i,
+    })),
+    total: 4000,
+    bankInfo: { bank: 'ไทยพาณิชย์', account: '123-456789-0', name: 'นาง ก.' },
+    paymentMethods: [
+      { key: 'linePay', label: 'LINE Pay', enabled: true },
+      { key: 'cash', label: 'เงินสดที่สำนักงาน', enabled: true },
+    ],
+  }, sink);
+  const buf = sink.getBuffer();
+  assert.equal(buf.slice(0, 5).toString('ascii'), '%PDF-');
+  assert.ok(pageCount(buf) <= 3,
+    '28 line items should paginate to a few dense pages, not many mostly blank pages');
 });

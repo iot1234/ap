@@ -2012,6 +2012,24 @@ test('maintenance report aggregate FILTER syntax is PostgreSQL-valid', () => {
   assert.match(server, /\(SUM\(cost\) FILTER \(WHERE status='completed'\)\)::numeric\(12,2\)/);
 });
 
+test('reports v2 maintenance tab exports CSV and Excel', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const reportsUi = fs.readFileSync(
+    path.join(__dirname, '..', 'project', 'admin', 'page-reports-v2.jsx'), 'utf8'
+  );
+  const reportsRoute = fs.readFileSync(
+    path.join(__dirname, '..', 'routes', 'reports.js'), 'utf8'
+  );
+
+  assert.match(reportsUi, /tab === 'maintenance' \? `\/api\/reports2\/maintenance\/stats\?format=\$\{format\}`/,
+    'maintenance tab export buttons must call the maintenance stats endpoint');
+  assert.doesNotMatch(reportsUi, /tab !== 'maintenance'/,
+    'maintenance tab must not hide CSV/Excel buttons');
+  assert.match(reportsRoute, /if \(format === 'csv' \|\| format === 'xlsx'\)[\s\S]{0,900}send\(req, res, exportRows, 'maintenance-stats'\)/,
+    'maintenance stats route must return export rows via the shared report sender');
+});
+
 test('static assets do not intercept /admin auth route with directory redirect', () => {
   // project/admin is a real static directory. express.static's default
   // redirect=true turns /admin into /admin/ before the auth route runs,

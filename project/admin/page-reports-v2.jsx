@@ -49,6 +49,7 @@ function PageReportsV2({ setToast, embedded = false }) {
     const url = tab === 'revenue' ? `/api/reports2/revenue?year=${year}&format=${format}`
       : tab === 'occupancy' ? `/api/reports2/occupancy?year=${year}&format=${format}`
       : tab === 'overdue' ? `/api/reports2/overdue?format=${format}`
+      : tab === 'maintenance' ? `/api/reports2/maintenance/stats?format=${format}`
       : tab === 'cashflow' ? `/api/reports2/cashflow?months=12&format=${format}`
       : null;
     if (!url) {
@@ -73,12 +74,8 @@ function PageReportsV2({ setToast, embedded = false }) {
                 })}
               </select>
             )}
-            {tab !== 'maintenance' && (
-              <>
-                <Btn size="sm" onClick={() => exportAs('csv')}>CSV</Btn>
-                <Btn size="sm" onClick={() => exportAs('xlsx')}>Excel</Btn>
-              </>
-            )}
+            <Btn size="sm" onClick={() => exportAs('csv')}>CSV</Btn>
+            <Btn size="sm" onClick={() => exportAs('xlsx')}>Excel</Btn>
           </div>
         } />
 
