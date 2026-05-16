@@ -7961,6 +7961,7 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
       // another row for the same person across multiple contracts.
       let tenantId = null;
       let tenantForInviteNotify = null;
+      let sameTenantPreclaimedRoom = false;
       const tQ = await client.query(
         `SELECT id, full_name, phone, email, line_user_id, line_oa_id,
                 status, current_room_id
@@ -8016,6 +8017,8 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
             [tenantId]
           );
         }
+        sameTenantPreclaimedRoom = tQ.rows[0].status === 'active'
+          && tQ.rows[0].current_room_id === roomId;
       } else {
         // Create a fresh tenant row with just the basics — the rest
         // (address, emergency contact, citizen ID + photos) will arrive
@@ -8096,6 +8099,32 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
         });
       }
 
+      const sameTenantRoomContract = await client.query(
+        `SELECT c.id, c.contract_no, c.locked_at
+           FROM contracts c
+          WHERE c.room_id=$1 AND c.tenant_id=$2
+            AND c.status='active' AND c.deleted_at IS NULL
+          ORDER BY c.created_at DESC
+          LIMIT 1
+          FOR UPDATE OF c`,
+        [roomId, tenantId]
+      );
+      if (sameTenantRoomContract.rows.length
+          && (sameTenantRoomContract.rows[0].locked_at || !isForced)) {
+        const conflict = sameTenantRoomContract.rows[0];
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: conflict.locked_at
+            ? 'ผู้เช่ารายนี้มีสัญญา active ของห้องนี้อยู่แล้ว'
+            : `ผู้เช่ารายนี้มีสัญญารอลงนามอยู่แล้ว (${conflict.contract_no})`,
+          code: conflict.locked_at ? 'TENANT_ROOM_CONTRACT_EXISTS' : 'DRAFT_CONTRACT_EXISTS',
+          conflict,
+          hint: conflict.locked_at
+            ? 'ใช้สัญญาเดิม หรือปิดสัญญาเดิมก่อนสร้างฉบับใหม่'
+            : 'ส่งลิงก์ใหม่จากสัญญาเดิมที่ /admin#contracts หรือส่ง { force: true } เพื่อสร้างใหม่ (audit-logged)',
+        });
+      }
+
       let bookingCarryoverList = null;
       let bookingCarryoverIdx = -1;
       if (bookingIdForRoom) {
@@ -8142,11 +8171,19 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
         : roomStatuses.includes('maintenance') ? 'maintenance'
         : roomStatuses.includes('reserved') ? 'reserved'
         : 'vacant';
-      if (roomState === 'occupied' || roomState === 'maintenance') {
+      if (roomState === 'occupied' && !sameTenantPreclaimedRoom) {
         await client.query('ROLLBACK');
         return res.status(409).json({
           error: `room is not available (${roomState})`,
-          code: roomState === 'occupied' ? 'ROOM_OCCUPIED' : 'ROOM_UNAVAILABLE',
+          code: 'ROOM_OCCUPIED',
+          currentStatus: roomState,
+        });
+      }
+      if (roomState === 'maintenance') {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: `room is not available (${roomState})`,
+          code: 'ROOM_UNAVAILABLE',
           currentStatus: roomState,
         });
       }
@@ -8207,6 +8244,18 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
       );
       const contract = cIns.rows[0];
 
+      if (sameTenantPreclaimedRoom) {
+        // Convert a tenant-modal preclaim into the normal invitation state:
+        // the tenant profile exists, the room is reserved by contract:N, and
+        // current_room_id is written only after admin approves the submission.
+        await client.query(
+          `UPDATE tenants
+              SET current_room_id=NULL, updated_at=NOW()
+            WHERE id=$1 AND current_room_id=$2`,
+          [tenantId, roomId]
+        );
+      }
+
       const draftReservation = {
         ...(blobRoom || {}),
         id: blobRoom?.id || roomId,
@@ -8236,10 +8285,13 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
         ['baankarn_rooms_v1', JSON.stringify(roomsForInvite), req.session.user.username]
       );
       try {
+        const reservableStatuses = sameTenantPreclaimedRoom
+          ? ['vacant', 'occupied']
+          : ['vacant'];
         await client.query(
           `UPDATE rooms_v2 SET status='reserved', updated_at=NOW()
-             WHERE room_code=$1 AND status='vacant' AND deleted_at IS NULL`,
-          [roomId]
+             WHERE room_code=$1 AND status = ANY($2::text[]) AND deleted_at IS NULL`,
+          [roomId, reservableStatuses]
         );
       } catch (err) {
         if (err.code !== '42P01') throw err;

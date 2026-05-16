@@ -3075,6 +3075,8 @@ test('quick-invite locks the requested room before creating a draft contract', (
     'must lock/check active occupant by room before drafting');
   assert.match(block, /ROOM_CONTRACT_EXISTS/,
     'must block a second active contract or draft on the same room');
+  assert.match(block, /TENANT_ROOM_CONTRACT_EXISTS/,
+    'must block creating a new invite on top of the same tenant-room locked contract');
   assert.match(block, /ROOM_RESERVED/,
     'must block reservations owned by another booking/contract');
   assert.match(block, /TENANT_ALREADY_ACTIVE/,
@@ -3088,14 +3090,34 @@ test('quick-invite locks the requested room before creating a draft contract', (
   assert.match(block, /reservedBy: `contract:\$\{contract\.id\}`/,
     'draft contract must own the room reservation');
   assert.match(block,
-    /UPDATE rooms_v2 SET status='reserved', updated_at=NOW\(\)[\s\S]{0,120}WHERE room_code=\$1 AND status='vacant'/,
-    'draft reservation must be mirrored to rooms_v2 when the room was vacant');
+    /UPDATE rooms_v2 SET status='reserved', updated_at=NOW\(\)[\s\S]{0,160}WHERE room_code=\$1 AND status = ANY\(\$2::text\[\]\)/,
+    'draft reservation must be mirrored to rooms_v2 for allowed source statuses');
   assert.match(block,
     /LEFT JOIN tenants t ON t\.id = c\.tenant_id[\s\S]{0,180}FOR UPDATE OF c/,
     'room-contract conflict query must lock only contracts; plain FOR UPDATE crashes on LEFT JOIN nullable side');
   assert.doesNotMatch(block,
     /LEFT JOIN tenants t ON t\.id = c\.tenant_id[\s\S]{0,180}FOR UPDATE\s*(?:`|,)/,
     'quick-invite must not use plain FOR UPDATE after LEFT JOIN tenants');
+});
+
+test('quick-invite converts same-tenant preclaimed rooms into draft reservations', () => {
+  // The Add Tenant modal can create a tenant and preclaim a room before the
+  // admin clicks "create contract". Quick-invite must not dead-end on its
+  // own preclaim as ROOM_OCCUPIED; it should turn that state into the normal
+  // pending contract reservation and wait until approval to write
+  // tenants.current_room_id.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const block = src.match(/quick-invite'[\s\S]+?app\.post\('\/api\/contracts\/:id\/invite-tenant'/)[0];
+  assert.match(block, /sameTenantPreclaimedRoom = tQ\.rows\[0\]\.status === 'active'[\s\S]{0,120}current_room_id === roomId/,
+    'quick-invite must recognise a room already preclaimed by the same tenant');
+  assert.match(block, /roomState === 'occupied' && !sameTenantPreclaimedRoom/,
+    'occupied rooms are blocked unless the occupying tenant is the invite tenant');
+  assert.match(block, /UPDATE tenants[\s\S]{0,120}SET current_room_id=NULL/,
+    'same-tenant preclaim must be cleared until the invitation is approved');
+  assert.match(block, /sameTenantPreclaimedRoom[\s\S]{0,120}\['vacant', 'occupied'\]/,
+    'rooms_v2 may move occupied→reserved only for the same-tenant preclaim case');
 });
 
 test('PUT /api/contracts/:id status=ended cascades tenant + room state', () => {
