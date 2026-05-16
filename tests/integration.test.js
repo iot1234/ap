@@ -1326,6 +1326,18 @@ test('tenant payment readiness controls QR and slip upload state', () => {
     'tenant UI must block slip upload when readiness says the bill is not payable');
   assert.doesNotMatch(tenant, /readiness \? readiness\.channels\.qr : \(pay && pay\.promptpayTarget\)/,
     'tenant UI must not fall back to browser payment-info for QR visibility');
+  assert.match(tenant, /const \[paymentInfoError, setPaymentInfoError\] = useState\(null\)/,
+    'tenant UI must keep payment-info failures visible');
+  assert.match(tenant, /setPaymentInfoError\(err\.message \|\|/,
+    'tenant UI must report payment-info load failures instead of dropping them');
+  assert.match(tenant, /\(pay \|\| qrUrl \|\| qrFallback \|\| paymentInfoError\)/,
+    'payment card must not disappear when payment-info fails but bill QR readiness still works');
+  assert.match(tenant, /const readinessLoading = !readiness && !readinessError/,
+    'tenant UI must model the readiness-loading state explicitly');
+  assert.match(tenant, /const slipUploadBlocked = readinessLoading[\s\S]{0,180}amountMismatch/,
+    'tenant upload button must stay disabled until readiness returns');
+  assert.match(tenant, /if \(readinessLoading\) \{[\s\S]{0,240}kind: 'pending'/,
+    'clicking upload while readiness is loading must explain the wait');
 });
 
 test('tenant bill modal blocks bad payment steps before slip upload', () => {
@@ -2279,6 +2291,28 @@ test('admin shell canonicalizes legacy recurring charges hash route', () => {
     'programmatic navigation must also canonicalize page ids');
   assert.match(shared, /pricing: 'finance', recurring: 'finance', 'recurring-charges': 'finance'/,
     'recurring page must keep the finance tone after route rename');
+});
+
+test('admin shell live poll surfaces stale-data failures', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const shell = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'shell.jsx'), 'utf8');
+  const idx = shell.indexOf('// --- Live data polling');
+  assert.ok(idx > 0, 'live data polling block must exist');
+  const block = shell.slice(idx, shell.indexOf('// --- Auth', idx));
+
+  assert.match(block, /let warnedLiveError = false/,
+    'live poll must throttle visible stale-data warnings');
+  assert.match(block, /\(bRes\.status === 401 \|\| tRes\.status === 401\)/,
+    'both live endpoints must surface session expiry');
+  assert.match(block, /const liveErrors = \[/,
+    'non-401 live endpoint failures must be collected');
+  assert.match(block, /kind: 'warning'[\s\S]{0,240}liveErrors\.join/,
+    'HTTP live poll failures must show an admin-facing warning');
+  assert.match(block, /catch \(err\)[\s\S]{0,300}setToast && setToast\(\{[\s\S]{0,120}kind: 'warning'/,
+    'network live poll failures must show an admin-facing warning');
+  assert.match(block, /if \(bRes\.ok && tRes\.ok\)[\s\S]{0,140}warnedLiveError = false/,
+    'live poll warnings should be allowed again after recovery');
 });
 
 test('slip upload re-validates bill.tenant_id under FOR UPDATE lock (BILL_REASSIGNED)', () => {

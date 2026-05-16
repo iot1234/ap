@@ -787,6 +787,7 @@ function App() {
   useEffect(() => {
     let cancel = false;
     let warned401 = false;
+    let warnedLiveError = false;
     const refresh = async () => {
       if (typeof document !== 'undefined' && document.hidden) return;
       try {
@@ -795,9 +796,20 @@ function App() {
           fetch('/api/maintenance', { credentials: 'include' }),
         ]);
         if (cancel) return;
-        if (tRes.status === 401 && !warned401) {
+        if ((bRes.status === 401 || tRes.status === 401) && !warned401) {
           warned401 = true;
           setToast && setToast({ kind: 'error', message: 'หมดเวลาเข้าสู่ระบบ — โปรดล็อกอินใหม่' });
+        }
+        const liveErrors = [
+          !bRes.ok && bRes.status !== 401 ? `bookings HTTP ${bRes.status}` : null,
+          !tRes.ok && tRes.status !== 401 ? `maintenance HTTP ${tRes.status}` : null,
+        ].filter(Boolean);
+        if (liveErrors.length > 0 && !warnedLiveError) {
+          warnedLiveError = true;
+          setToast && setToast({
+            kind: 'warning',
+            message: `โหลดข้อมูลสดไม่สำเร็จ (${liveErrors.join(', ')}) ข้อมูลการจอง/แจ้งซ่อมอาจยังไม่อัปเดต`,
+          });
         }
         if (bRes.ok) {
           const bd = await bRes.json();
@@ -817,12 +829,22 @@ function App() {
           }
         }
         if (tRes.ok) {
-          warned401 = false;
           const td = await tRes.json();
           if (Array.isArray(td?.tickets)) setTickets(td.tickets);
         }
+        if (bRes.ok && tRes.ok) {
+          warned401 = false;
+          warnedLiveError = false;
+        }
       } catch (err) {
         console.warn('[shell] live poll error:', err);
+        if (!cancel && !warnedLiveError) {
+          warnedLiveError = true;
+          setToast && setToast({
+            kind: 'warning',
+            message: 'โหลดข้อมูลสดไม่สำเร็จ ข้อมูลการจอง/แจ้งซ่อมอาจยังไม่อัปเดต',
+          });
+        }
       }
     };
     refresh();

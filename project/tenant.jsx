@@ -637,6 +637,7 @@ function BillDetail({ bill, locale, onClose, slipFeature, refresh }) {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState(null);
   const [pay, setPay] = useState(null);
+  const [paymentInfoError, setPaymentInfoError] = useState(null);
   // pay-readiness: server-side preflight that tells us which channels are
   // actually working for THIS bill + why others don't. Used to gate the
   // QR/slip UI and show a single info banner ("ทำไม QR ไม่ขึ้น") so the
@@ -654,10 +655,25 @@ function BillDetail({ bill, locale, onClose, slipFeature, refresh }) {
     let cancelled = false;
     setReadiness(null);
     setReadinessError(null);
+    setPay(null);
+    setPaymentInfoError(null);
     fetch('/api/tenant/payment-info', { credentials: 'same-origin' })
-      .then((r) => r.json())
-      .then((d) => { if (!cancelled && d && d.payment) setPay(d.payment); })
-      .catch(() => {});
+      .then(async (r) => {
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+        return d;
+      })
+      .then((d) => {
+        if (!cancelled && d && d.payment) {
+          setPay(d.payment);
+          setPaymentInfoError(null);
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setPaymentInfoError(err.message || 'โหลดช่องทางชำระเงินไม่สำเร็จ');
+        }
+      });
     fetch(`/api/tenant/pay-readiness/${encodeURIComponent(bill.id)}`, { credentials: 'same-origin' })
       .then(async (r) => {
         const d = await r.json().catch(() => ({}));
@@ -721,7 +737,9 @@ function BillDetail({ bill, locale, onClose, slipFeature, refresh }) {
     ? (readiness.issues || []).filter((i) => i.sev !== 'high' && i.code !== 'BILL_ALREADY_PAID')
     : [];
   if (readinessError && !readinessHardError) advisoryIssues.push(readinessError);
-  const slipUploadBlocked = readiness?.channels?.slip === false
+  const readinessLoading = !readiness && !readinessError;
+  const slipUploadBlocked = readinessLoading
+    || readiness?.channels?.slip === false
     || !!readinessHardError
     || amountInvalid
     || amountMismatch;
@@ -736,6 +754,16 @@ function BillDetail({ bill, locale, onClose, slipFeature, refresh }) {
     }
     if (readinessHardError) {
       setNotice({ kind: 'error', title: locale === 'th' ? 'ยังชำระผ่านระบบไม่ได้' : 'Payment unavailable', message: readinessError.msg || 'Payment is not available for this bill.' });
+      return;
+    }
+    if (readinessLoading) {
+      setNotice({
+        kind: 'pending',
+        title: locale === 'th' ? 'กำลังตรวจสอบช่องทางชำระเงิน' : 'Checking payment readiness',
+        message: locale === 'th'
+          ? 'กรุณารอสักครู่ ระบบกำลังตรวจสอบว่าบิลนี้รับสลิปได้หรือไม่'
+          : 'Please wait while the system checks whether this bill can accept slips.',
+      });
       return;
     }
     if (readiness?.channels?.slip === false) {
@@ -828,11 +856,21 @@ function BillDetail({ bill, locale, onClose, slipFeature, refresh }) {
             ))}
           </div>
         ) : null}
-        {bill.status !== 'paid' && bill.status !== 'void' && pay ? (
+        {bill.status !== 'paid' && bill.status !== 'void' && (pay || qrUrl || qrFallback || paymentInfoError) ? (
           <div style={{ ...card, marginTop: 12 }}>
             <div style={{ fontFamily: 'Sora', fontWeight: 600, fontSize: 14, marginBottom: 8 }}>
               ช่องทางชำระเงิน
             </div>
+            {paymentInfoError ? (
+              <div style={{
+                marginBottom: 10, padding: 10,
+                background: '#fffbe8', border: '1px solid #f0e3a7',
+                borderRadius: 8, fontSize: 12.5, color: '#6b5b1a', lineHeight: 1.5,
+              }}>
+                โหลดรายละเอียดช่องทางชำระเงินไม่ครบ: {paymentInfoError}
+                {qrUrl ? <div>ยังสามารถสแกน QR ด้านล่างได้ หาก QR แสดงผลปกติ</div> : null}
+              </div>
+            ) : null}
             {qrUrl && !qrFallback ? (
               <div style={{ textAlign: 'center', marginBottom: 12 }}>
                 <img
@@ -852,7 +890,7 @@ function BillDetail({ bill, locale, onClose, slipFeature, refresh }) {
                   }}
                 />
                 <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 4 }}>
-                  สแกน PromptPay {pay.promptpayName ? `· ${pay.promptpayName}` : ''}
+                  สแกน PromptPay {pay?.promptpayName ? `· ${pay.promptpayName}` : ''}
                 </div>
               </div>
             ) : null}
@@ -912,7 +950,7 @@ function BillDetail({ bill, locale, onClose, slipFeature, refresh }) {
                 </div>
               </div>
             ) : null}
-            {pay.bankInfo && pay.bankInfo.account ? (
+            {pay?.bankInfo && pay.bankInfo.account ? (
               <div style={{ padding: 10, background: 'var(--card-alt, #f5efe3)', borderRadius: 8, marginBottom: 8 }}>
                 <div style={{ fontSize: 12, color: 'var(--muted)' }}>โอนผ่านธนาคาร</div>
                 <div style={{ fontSize: 14, fontWeight: 600 }}>{pay.bankInfo.bank}</div>
@@ -920,11 +958,11 @@ function BillDetail({ bill, locale, onClose, slipFeature, refresh }) {
                 {pay.bankInfo.name ? <div style={{ fontSize: 12, color: 'var(--muted)' }}>{pay.bankInfo.name}</div> : null}
               </div>
             ) : null}
-            {(pay.paymentMethods || [])
+            {(pay?.paymentMethods || [])
               .filter((m) => m.key !== 'promptpay' && m.key !== 'bank')
               .length > 0 ? (
               <div style={{ fontSize: 12.5, color: 'var(--muted)' }}>
-                ช่องทางอื่น: {(pay.paymentMethods || [])
+                ช่องทางอื่น: {(pay?.paymentMethods || [])
                   .filter((m) => m.key !== 'promptpay' && m.key !== 'bank')
                   .map((m) => m.label).join(', ')}
               </div>
@@ -978,6 +1016,15 @@ function BillDetail({ bill, locale, onClose, slipFeature, refresh }) {
                     {i.fix ? <span style={{ color: '#8a7a25' }}> — {i.fix}</span> : null}
                   </div>
                 ))}
+              </div>
+            ) : null}
+            {readinessLoading ? (
+              <div style={{
+                marginBottom: 10, padding: 10,
+                background: '#eef5ff', border: '1px solid #b9d7ff',
+                borderRadius: 8, fontSize: 12.5, color: '#214d78', lineHeight: 1.5,
+              }}>
+                กำลังตรวจสอบความพร้อมของบิลนี้ ระบบจะเปิดปุ่มอัปโหลดเมื่อยืนยันแล้วว่าสามารถรับสลิปได้
               </div>
             ) : null}
             <button onClick={upload} disabled={busy || slipUploadBlocked} style={btnPrimary}>{busy ? '…' : t('uploadSlip')}</button>
