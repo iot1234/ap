@@ -592,6 +592,132 @@
       title: 'ลบผู้เช่าไม่ได้',
       description: 'ผู้เช่ายังมีบิล/สัญญา/บัตรเข้า-ออกเชื่อมโยง — เปิด softDelete หรือลบข้อมูลที่อ้างถึงก่อน',
     },
+    // === Booking → contract flow ======================================
+    APPROVAL_REQUIRES_ASSIGNMENT_FLOW: {
+      title: 'อนุมัติการจองผิดช่องทาง',
+      description: (e) => e.hint || 'ต้องใช้ปุ่มอนุมัติที่จองห้องพร้อมกัน เพื่อกัน booking approved แต่ห้องไม่ถูก reserve',
+    },
+    NO_VACANT_ROOM_MATCH: {
+      title: 'ยังไม่มีห้องว่างตรงเงื่อนไข',
+      description: (e) => e.hint || 'รอห้องว่าง เปลี่ยนเงื่อนไข booking หรือจัดห้องด้วยตนเองก่อนอนุมัติ',
+    },
+    BOOKING_NOT_FOUND: {
+      title: 'ไม่พบ booking ต้นทาง',
+      description: (e) => e.hint || 'กลับไปหน้า booking แล้วเริ่มจากรายการล่าสุดอีกครั้ง',
+    },
+    BOOKING_NOT_APPROVED: {
+      title: 'booking ยังไม่พร้อมสร้างสัญญา',
+      description: (e) => e.hint || `สถานะปัจจุบัน: ${e.currentStatus || '-'} — ต้องอนุมัติและจองห้องก่อน`,
+    },
+    BOOKING_ROOM_MISMATCH: {
+      title: 'booking กับห้องไม่ตรงกัน',
+      description: (e) => e.hint || `booking อยู่ห้อง ${e.bookingRoomId || '-'} แต่กำลังใช้ห้อง ${e.requestedRoomId || '-'}`,
+    },
+    BOOKING_ROOM_NOT_RESERVED: {
+      title: 'ห้องไม่ได้ถูกจองโดย booking นี้แล้ว',
+      description: (e) => e.hint || 'ข้อมูล reservation เปลี่ยนไประหว่างทาง รีเฟรชและเริ่มจาก booking ใหม่',
+    },
+    BOOKING_TENANT_MISMATCH: {
+      title: 'booking กับผู้เช่าไม่ตรงกัน',
+      description: (e) => e.hint || `booking เป็นของเบอร์ ${e.bookingPhone || '-'} แต่กำลังสร้างสัญญาให้ ${e.requestedPhone || '-'}`,
+    },
+    BOOKING_HAS_ACTIVE_CONTRACT: {
+      title: 'ยกเลิก booking ไม่ได้ เพราะมีสัญญา active',
+      description: (e) => e.hint || 'ปิดสัญญาหรือ checkout ผู้เช่าก่อน แล้วระบบจะคืนห้องตาม cascade',
+    },
+    // === Room / tenant / contract guards ===============================
+    ROOM_RESERVED: {
+      title: 'ห้องถูกจองอยู่แล้ว',
+      description: (e) => e.hint || 'เปิดจาก booking/สัญญาที่จองห้องนี้ไว้ หรือยกเลิก reservation เดิมก่อน',
+    },
+    ROOM_OCCUPIED: {
+      title: 'ห้องมีผู้เช่าอยู่แล้ว',
+      description: (e) => e.hint || 'ต้อง check-out ผู้เช่าปัจจุบัน หรือเลือกห้องอื่นก่อนทำรายการต่อ',
+    },
+    ROOM_UNAVAILABLE: {
+      title: 'ห้องยังไม่พร้อมใช้งาน',
+      description: (e) => e.hint || 'ห้องอยู่ในสถานะที่ไม่รับผู้เช่าใหม่ ให้เปิดใช้งานหรือเลือกห้องอื่น',
+    },
+    ROOM_NOT_FOUND: {
+      title: 'ไม่พบห้องนี้ในระบบ',
+      description: (e) => e.hint || 'ตรวจเลขห้องหรือสร้างห้องในหน้าห้องพักก่อน',
+    },
+    ROOM_CONTRACT_EXISTS: {
+      title: 'ห้องนี้มีสัญญาอยู่แล้ว',
+      description: (e) => e.hint || 'ใช้สัญญาเดิม หรือปิด/ยกเลิกสัญญาเดิมก่อนสร้างใหม่',
+    },
+    ROOM_STRANDED_CONTRACT: {
+      title: 'ห้องมีสัญญาค้างที่ต้อง reconcile',
+      description: (e) => e.hint || 'ข้อมูลห้อง/ผู้เช่า/สัญญาไม่ตรงกัน ให้ reconcile ห้องก่อนสร้างสัญญาใหม่',
+    },
+    TENANT_ALREADY_ACTIVE: {
+      title: 'ผู้เช่ายัง active อยู่ห้องอื่น',
+      description: (e) => e.hint || `checkout ห้อง ${e.currentRoom || 'เดิม'} ก่อน หรือใช้ force เฉพาะงาน migrate`,
+    },
+    TENANT_BLACKLISTED: {
+      title: 'ผู้เช่าอยู่ใน blacklist',
+      description: (e) => e.hint || 'ตรวจประวัติผู้เช่าก่อน หากต้อง override ต้องทำอย่างตั้งใจและมี audit',
+    },
+    DRAFT_CONTRACT_EXISTS: {
+      title: 'มีสัญญารอลงนามอยู่แล้ว',
+      description: (e) => e.hint || 'ส่งลิงก์ใหม่จากสัญญาเดิม หรือยกเลิก draft เดิมก่อนสร้างใหม่',
+    },
+    TENANT_ROOM_CONTRACT_EXISTS: {
+      title: 'ผู้เช่ามีสัญญาของห้องนี้อยู่แล้ว',
+      description: (e) => e.hint || 'ใช้สัญญาเดิม หรือปิดสัญญาเดิมก่อนสร้างฉบับใหม่',
+    },
+    MOVE_IN_OUT_OF_WINDOW: {
+      title: 'วันเข้าพักอยู่นอกช่วงที่อนุญาต',
+      description: (e) => e.hint || 'ตรวจวันที่อีกครั้ง หรือใช้ force เฉพาะกรณียืนยันว่าข้อมูลถูกต้อง',
+    },
+    DEPOSIT_TOO_LARGE: {
+      title: 'เงินมัดจำสูงผิดปกติ',
+      description: (e) => e.hint || 'ตรวจยอดมัดจำก่อนบันทึก เพื่อกันพิมพ์เลขศูนย์เกิน',
+    },
+    CONTRACT_APPROVAL_PRECHECK_FAILED: {
+      title: 'ยังอนุมัติสัญญาไม่ได้',
+      description: (e) => {
+        const issues = Array.isArray(e.issues) ? e.issues : [];
+        const missing = issues.slice(0, 4).map((it) => `• ${it.label || it.field || it.code}`).join('\n');
+        return missing || e.hint || 'ข้อมูลที่ผู้เช่ากรอกยังไม่ครบ ให้ส่งกลับไปแก้ก่อน lock สัญญา';
+      },
+    },
+    CONTRACT_APPROVAL_TARGET_INVALID: {
+      title: 'สัญญาปลายทางยังไม่พร้อม',
+      description: (e) => {
+        const issues = Array.isArray(e.issues) ? e.issues : [];
+        const top = issues.slice(0, 4).map((it) => `• ${it.label || it.code}: ${it.action || ''}`.trim()).join('\n');
+        return top || e.hint || 'แก้ข้อมูลสัญญา/ผู้เช่า/ห้องให้ตรงกันก่อนอนุมัติ';
+      },
+    },
+    CONTRACT_LOCKED: {
+      title: 'สัญญาถูก lock แล้ว',
+      description: (e) => e.hint || 'สัญญาที่ lock แล้วแก้ข้อมูลสำคัญหรือส่งลิงก์ใหม่ไม่ได้ ต้องสร้างฉบับใหม่หรือทำรายการปิดสัญญา',
+    },
+    CONTRACT_CLOSE_REASON_REQUIRED: {
+      title: 'ต้องระบุเหตุผลการปิดสัญญา',
+      description: (e) => e.hint || 'เหตุผลนี้ใช้ใน audit log และช่วยให้ flow ย้ายออก/ยกเลิกสัญญาตรวจสอบย้อนหลังได้',
+    },
+    CONTRACT_REOPEN_BLOCKED: {
+      title: 'เปิดสัญญาที่ปิดแล้วกลับมาไม่ได้',
+      description: (e) => e.hint || 'สร้างสัญญาใหม่หรือ check-in ใหม่ เพื่อไม่ให้ห้อง/บิล/ผู้เช่าย้อนสถานะผิด',
+    },
+    CONTRACT_ALREADY_CLOSED: {
+      title: 'สัญญานี้ปิดไปแล้ว',
+      description: (e) => `สถานะปัจจุบัน: ${e.currentStatus || '-'} — รีเฟรชข้อมูลก่อนทำรายการต่อ`,
+    },
+    CITIZEN_ID_DUPLICATE: {
+      title: 'เลขบัตรประชาชนซ้ำกับผู้เช่ารายอื่น',
+      description: (e) => e.hint || 'ค้นหาผู้เช่าเดิมก่อนตัดสินใจว่าเป็นคนเดียวกันหรือกรอกเลขผิด',
+    },
+    BAD_STATUS: {
+      title: 'สถานะปัจจุบันทำรายการนี้ไม่ได้',
+      description: (e) => e.hint || `สถานะปัจจุบัน: ${e.currentStatus || '-'} — รีเฟรชข้อมูลแล้วตรวจขั้นตอนใหม่`,
+    },
+    TENANT_REQUIRED: {
+      title: 'รายการนี้ยังไม่ผูกผู้เช่า',
+      description: (e) => e.hint || 'ออก invitation ใหม่จากสัญญาที่ผูก tenant ถูกต้อง',
+    },
     // === Service availability ==========================================
     BUSY: { title: 'ระบบกำลังประมวลผลอยู่', description: 'ลองใหม่ในอีกครู่' },
     DB_ERROR: { title: 'ฐานข้อมูลขัดข้อง', description: 'ทีมงานได้รับแจ้งแล้ว — ลองอีกครั้งภายหลัง' },
@@ -600,6 +726,25 @@
       description: 'เซิร์ฟเวอร์ช้า — ลองใหม่ในไม่กี่วินาที',
     },
   };
+
+  function extraGuidanceFromRaw(raw) {
+    if (!raw || typeof raw !== 'object') return '';
+    const parts = [];
+    if (raw.hint) parts.push(String(raw.hint));
+    const actions = raw.nextActions && typeof raw.nextActions === 'object'
+      ? raw.nextActions
+      : null;
+    if (actions && actions.hint) parts.push(String(actions.hint));
+    if (raw.reconcileUrl) parts.push(`แก้ไขได้ที่ ${raw.reconcileUrl}`);
+    if (actions) {
+      const urls = Object.entries(actions)
+        .filter(([k, v]) => /Url$/.test(k) && typeof v === 'string' && v)
+        .slice(0, 3)
+        .map(([k, v]) => `${k}: ${v}`);
+      if (urls.length) parts.push(urls.join(' · '));
+    }
+    return Array.from(new Set(parts)).join('\n');
+  }
 
   function toastError(setToast, err, ctx) {
     if (!setToast) return null;
@@ -647,18 +792,27 @@
       const description = typeof tpl.description === 'function'
         ? tpl.description({ ...raw, code, error: msg, issues })
         : tpl.description;
+      const guidance = extraGuidanceFromRaw(raw);
+      const finalDescription = Array.from(new Set([
+        description || (msg && msg !== tpl.title ? msg : null),
+        guidance,
+      ].filter(Boolean)))
+        .join('\n');
       const t = { kind: 'danger', message: {
         title: tpl.title,
-        description: description || (msg && msg !== tpl.title ? msg : null),
+        description: finalDescription || null,
       } };
       setToast(t); return t;
     }
 
     // Generic fallback — always prefix with the action verb so the user
     // knows WHAT failed, not just THAT something failed.
+    const guidance = extraGuidanceFromRaw(raw);
     const t = { kind: 'danger', message: {
       title: `${action}ไม่สำเร็จ`,
-      description: msg && msg.length > 200 ? msg.slice(0, 200) + '…' : msg,
+      description: [msg && msg.length > 200 ? msg.slice(0, 200) + '…' : msg, guidance]
+        .filter(Boolean)
+        .join('\n'),
     } };
     setToast(t); return t;
   }

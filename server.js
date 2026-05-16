@@ -8059,6 +8059,7 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
           error: 'room is already occupied by another active tenant',
           code: 'ROOM_OCCUPIED',
           conflict: occupant.rows[0],
+          hint: 'ต้อง check-out ผู้เช่าปัจจุบัน หรือเลือกห้องอื่นก่อนสร้างสัญญาใหม่',
         });
       }
 
@@ -8098,6 +8099,7 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
           error: 'room already has an active contract draft or lease',
           code: 'ROOM_CONTRACT_EXISTS',
           conflict,
+          hint: 'ใช้สัญญาเดิม หรือปิด/ยกเลิกสัญญาเดิมก่อนสร้างสัญญาใหม่',
         });
       }
 
@@ -8167,6 +8169,19 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
             hint: 'เปิดจาก booking ที่อนุมัติแล้ว หรือเลือกห้องที่ booking นั้นจองไว้',
           });
         }
+        const bookingPhone = String(bookingForInvite.phone || '').replace(/[\s-]/g, '');
+        if (bookingPhone && tenantPhone && bookingPhone !== tenantPhone) {
+          await client.query('ROLLBACK');
+          return res.status(409).json({
+            error: `booking ${bookingIdForRoom} เป็นของเบอร์ ${bookingPhone} แต่กำลังสร้างสัญญาให้เบอร์ ${tenantPhone}`,
+            code: 'BOOKING_TENANT_MISMATCH',
+            bookingPhone,
+            requestedPhone: tenantPhone,
+            bookingName: bookingForInvite.name || null,
+            requestedName: tenantName,
+            hint: 'กลับไปเปิดจาก booking/ผู้เช่าคนเดียวกัน หรือสร้างสัญญาแบบไม่อ้าง booking ถ้าเป็นงานแก้ข้อมูลย้อนหลัง',
+          });
+        }
       }
 
       const roomBlobQ = await client.query(
@@ -8209,6 +8224,7 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
           error: `room is not available (${roomState})`,
           code: 'ROOM_OCCUPIED',
           currentStatus: roomState,
+          hint: 'ห้องนี้มีผู้เช่าอยู่แล้ว ต้อง check-out/ปิดสัญญาเดิมก่อน หรือเลือกห้องอื่น',
         });
       }
       if (roomState === 'maintenance') {
@@ -8217,6 +8233,7 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
           error: `room is not available (${roomState})`,
           code: 'ROOM_UNAVAILABLE',
           currentStatus: roomState,
+          hint: 'ห้องอยู่ระหว่างซ่อม/งดใช้งาน เปิดใช้งานห้องหรือเลือกห้องอื่นก่อนสร้างสัญญา',
         });
       }
       const currentReservationOwner = blobRoom?.reservedBy ? String(blobRoom.reservedBy) : null;
@@ -8238,6 +8255,7 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
           code: 'ROOM_RESERVED',
           currentStatus: roomState,
           reservedBy: currentReservationOwner,
+          hint: 'เปิดจาก booking/สัญญาที่จองห้องนี้ไว้ หรือยกเลิก reservation เดิมก่อน',
         });
       }
 

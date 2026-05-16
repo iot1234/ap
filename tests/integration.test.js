@@ -3216,6 +3216,34 @@ test('booking status machine forces approve-and-assign before contract handoff',
     'completed must still allow → cancelled (tenant backs out)');
 });
 
+test('admin toastError explains booking-to-contract guard codes with next actions', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const hooks = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'hooks.jsx'), 'utf8');
+  for (const code of [
+    'APPROVAL_REQUIRES_ASSIGNMENT_FLOW',
+    'BOOKING_NOT_APPROVED',
+    'BOOKING_ROOM_MISMATCH',
+    'BOOKING_ROOM_NOT_RESERVED',
+    'BOOKING_TENANT_MISMATCH',
+    'ROOM_RESERVED',
+    'ROOM_OCCUPIED',
+    'ROOM_STRANDED_CONTRACT',
+    'CONTRACT_APPROVAL_PRECHECK_FAILED',
+    'CONTRACT_APPROVAL_TARGET_INVALID',
+    'CITIZEN_ID_DUPLICATE',
+  ]) {
+    assert.match(hooks, new RegExp(`${code}:\\s*\\{`),
+      `toastError must map ${code} to a clear Thai message`);
+  }
+  assert.match(hooks, /function extraGuidanceFromRaw/,
+    'toastError must have a generic hint/nextActions formatter');
+  assert.match(hooks, /raw\.nextActions/,
+    'generic fallback must surface backend nextActions instead of hiding them');
+  assert.match(hooks, /reconcileUrl/,
+    'generic fallback must surface reconcile links from backend errors');
+});
+
 test('bookings admin UI handles terminal statuses and uses valid reopen/cancel transitions', () => {
   // Completed/cancelled bookings can appear in the "all" tab after contract
   // handoff or no-show cancellation. The UI must render them safely and must
@@ -3379,7 +3407,7 @@ test('quick-invite carries booking photo + marks booking completed', () => {
   // Booking marked completed — with status guard so rejected/cancelled
   // bookings can't be silently resurrected as 'completed'. The guard
   // uses `status = ANY($2::text[])` against the allowedFromForQuickInvite
-  // list (pending/reviewing/approved); the bare SET form was the bug.
+  // list (approved only); the bare SET form was the bug.
   assert.match(block, /UPDATE bookings[\s\S]{0,80}SET status='completed'/);
   assert.match(block,
     /WHERE external_id=\$1[\s\S]{0,80}AND status = ANY\(\$2::text\[\]\)/,
@@ -3390,6 +3418,10 @@ test('quick-invite carries booking photo + marks booking completed', () => {
     'quick-invite must reject a bookingId that belongs to another room');
   assert.match(block, /BOOKING_ROOM_NOT_RESERVED/,
     'quick-invite must require the room reservation to still point at the booking');
+  assert.match(block, /BOOKING_TENANT_MISMATCH/,
+    'quick-invite must reject using one applicant booking to create another tenant contract');
+  assert.match(block, /bookingPhone && tenantPhone && bookingPhone !== tenantPhone/,
+    'booking carry-over identity guard must compare applicant phone to contract phone');
   assert.match(block, /const allowedFromForQuickInvite = \['approved'\]/,
     'only approved bookings may be marked completed by quick-invite');
   assert.match(block, /SELECT value FROM app_data WHERE key='baankarn_bookings_v1' FOR UPDATE/,
