@@ -6292,14 +6292,16 @@ app.put('/api/bookings/:id', sameOrigin, csrfGuard, requireAuth, requireRole('ow
     };
     let releasedRoomId = null;
     let roomsAfterRelease = null;
-    if (updated.status === 'cancelled' && before.status !== 'cancelled') {
-      // A booking can be cancelled from any prior state, but the room-release
-      // logic depends on which state we're cancelling FROM:
-      //   - pending/reviewing/rejected → no room reservation to release
-      //   - approved → room is 'reserved' with reservedBy=<booking.id>
-      //   - completed → quick-invite already created a contract and changed
-      //                 reservedBy to "contract:<id>"; the room belongs to
-      //                 the contract now, not this booking.
+    const shouldReleaseTerminalBookingRoom = ['cancelled', 'rejected'].includes(updated.status)
+      && before.status !== updated.status;
+    if (shouldReleaseTerminalBookingRoom) {
+      // A booking can now reserve a room before approval when the public
+      // booking/deposit flow succeeds. Terminal outcomes must release only
+      // reservations that are still owned by this booking id:
+      //   - pending/reviewing → rejected: public booking reservation is freed
+      //   - approved → cancelled: pre-contract reservation is freed
+      //   - completed → cancelled: quick-invite may have changed reservedBy to
+      //                 "contract:<id>"; active contracts are never freed here.
       // The OLD code only handled the 'approved' case (reservedBy===booking.id).
       // For 'completed' we refuse the cancel outright when the linked
       // contract is still active — admin must end the contract first so the

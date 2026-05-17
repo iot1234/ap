@@ -76,6 +76,16 @@ test('public booking deposit requires a room, a slip, and deduplicates slips', (
     'successful booking must convert the hold into a real booking reservation');
 });
 
+test('rejected public booking reservations release their room lock', () => {
+  const server = read('server.js');
+  assert.match(server, /shouldReleaseTerminalBookingRoom = \['cancelled', 'rejected'\]\.includes\(updated\.status\)/,
+    'terminal rejected bookings must enter the same room-release path as cancellations');
+  assert.match(server, /pending\/reviewing → rejected: public booking reservation is freed/,
+    'the release path must document the public booking reservation case');
+  assert.match(server, /room\.reservedBy === id/,
+    'room release must still be guarded by reservedBy=booking id');
+});
+
 test('orphan slip cleanup preserves booking deposit slips', () => {
   const server = read('server.js');
   const scheduler = read('services/scheduler.js');
