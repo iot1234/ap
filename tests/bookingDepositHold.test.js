@@ -185,10 +185,14 @@ test('public booking page and admin features expose deposit controls', () => {
     'admin sidebar must expose a direct booking deposit settings entry to managers and owners');
   assert.match(settings, /bookingDeposit/,
     'settings hub must expose booking deposit settings as a first-class tab');
+  assert.match(settings, /บันทึกจากกล่องจอง\/มัดจำด้านล่าง/,
+    'settings hub must not show the unrelated global save button on the booking-deposit tab');
   assert.match(depositSettings, /function PageBookingDepositSettings/,
     'dedicated admin page must register a booking deposit settings component');
   assert.match(depositSettings, /\/api\/admin\/booking-deposit-settings/,
     'dedicated admin page must persist through the guarded booking deposit settings API');
+  assert.match(depositSettings, /ไม่ต้องใช้ปุ่มบันทึกของตั้งค่าระบบ/,
+    'embedded booking deposit settings must render its own save action instead of hiding it with the page header');
   assert.match(depositSettings, /bookingDepositCanEditRole/,
     'dedicated admin page must keep owner-manager edit permissions aligned with the API');
   assert.doesNotMatch(depositSettings, /PUT'[\s\S]{0,120}\/api\/admin\/features/,

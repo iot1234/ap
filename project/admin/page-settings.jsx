@@ -133,19 +133,23 @@ function PageSettings({ rooms, setRooms, config, setConfig, bookings, setBooking
     setTimeout(() => location.reload(), 1200);
   };
 
+  const headerActions = tab === 'bookingDeposit' ? (
+    <Pill color="rooms">บันทึกจากกล่องจอง/มัดจำด้านล่าง</Pill>
+  ) : (
+    <>
+      <Btn variant="secondary" onClick={() => setDraft(config)} disabled={saving || !dirty}>ยกเลิก</Btn>
+      <Btn variant="primary" icon="✓" onClick={handleSave} disabled={saving || !dirty}>
+        {saving ? 'กำลังบันทึก...' : dirty ? 'บันทึก' : 'บันทึกแล้ว'}
+      </Btn>
+    </>
+  );
+
   return (
     <PageContainer>
       <PageHeader
         title="ตั้งค่าระบบ"
         subtitle="ข้อมูลตึก, การชำระเงิน, การแจ้งเตือน และอื่นๆ"
-        actions={
-          <>
-            <Btn variant="secondary" onClick={() => setDraft(config)} disabled={saving || !dirty}>ยกเลิก</Btn>
-            <Btn variant="primary" icon="✓" onClick={handleSave} disabled={saving || !dirty}>
-              {saving ? 'กำลังบันทึก...' : dirty ? 'บันทึก' : 'บันทึกแล้ว'}
-            </Btn>
-          </>
-        }
+        actions={headerActions}
       />
 
       <Tabs

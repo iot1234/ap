@@ -265,22 +265,45 @@ function PageBookingDepositSettings({ setToast, embedded = false, currentUser = 
 
   const inputDisabled = busy || !canEdit;
   const maxSlipMb = bookingDepositBytesToMb(draft.maxBytes);
+  const saveActions = (
+    <>
+      <Btn variant="secondary" onClick={resetToSaved} disabled={!dirty || busy}>ยกเลิก</Btn>
+      <Btn variant="soft" tone="rooms" onClick={resetToDefault} disabled={busy || !canEdit}>ค่าเริ่มต้น</Btn>
+      <Btn variant="primary" tone="rooms" onClick={save} disabled={!dirty || busy || !canEdit}>
+        {busy ? 'กำลังบันทึก...' : (dirty ? 'บันทึก' : 'บันทึกแล้ว')}
+      </Btn>
+    </>
+  );
 
   return (
     <Wrapper>
       <Header
         title="ตั้งค่าจอง/มัดจำ"
         subtitle="กำหนดค่าจอง ล็อกห้อง สลิป และการหักเงินจองกับมัดจำสัญญาในที่เดียว"
-        actions={
-          <>
-            <Btn variant="secondary" onClick={resetToSaved} disabled={!dirty || busy}>ยกเลิก</Btn>
-            <Btn variant="soft" tone="rooms" onClick={resetToDefault} disabled={busy || !canEdit}>ค่าเริ่มต้น</Btn>
-            <Btn variant="primary" tone="rooms" onClick={save} disabled={!dirty || busy || !canEdit}>
-              {busy ? 'กำลังบันทึก...' : (dirty ? 'บันทึก' : 'บันทึกแล้ว')}
-            </Btn>
-          </>
-        }
+        actions={saveActions}
       />
+
+      {embedded ? (
+        <Card>
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 12,
+            flexWrap: 'wrap',
+          }}>
+            <div style={{ minWidth: 220, flex: 1 }}>
+              <div style={{ fontSize: 16, fontWeight: 700, color: C.ink }}>ตั้งค่าจอง/มัดจำ</div>
+              <div style={{ fontSize: 13, color: C.muted, marginTop: 3 }}>
+                ปรับค่าในหน้านี้แล้วกดปุ่มบันทึกชุดนี้โดยตรง ไม่ต้องใช้ปุ่มบันทึกของตั้งค่าระบบ
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+              {saveActions}
+            </div>
+          </div>
+        </Card>
+      ) : null}
 
       {!canEdit ? (
         <BookingDepositNotice color="warning" title="โหมดอ่านอย่างเดียว" C={C}>
