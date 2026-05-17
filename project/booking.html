@@ -152,6 +152,7 @@
   }
   .room-option:hover { border-color: #8ab8a7; }
   .room-option:active { transform: translateY(1px); }
+  .room-option:disabled { opacity: 0.55; cursor: not-allowed; transform: none; }
   .room-option.selected {
     border-color: #2f8a70;
     box-shadow: 0 0 0 3px rgba(47,138,112,0.14);
@@ -357,7 +358,8 @@
         <div class="room-lock">
           <label for="roomId">ห้องที่สนใจ</label>
           <input type="text" id="roomId" name="roomId" maxlength="32" readonly/>
-          <div class="hint">ระบบแนบเลขห้องจากหน้าดูห้องให้แล้ว เจ้าหน้าที่จะตรวจสอบสถานะอีกครั้งก่อนยืนยัน</div>
+          <div class="hint">เลือกห้องได้ก่อน ระบบจะล็อกห้องเมื่อเข้าสู่ขั้นชำระค่าจองเท่านั้น</div>
+          <button type="button" id="startPaymentBtn" class="room-picker-action" style="display:none;margin-top:10px">ล็อกห้องและไปชำระค่าจอง</button>
         </div>
       </div>
 
@@ -430,6 +432,7 @@
   const roomPickerRetryBtn = document.getElementById('roomPickerRetryBtn');
   const holdTimer = document.getElementById('holdTimer');
   const holdRetryBtn = document.getElementById('holdRetryBtn');
+  const startPaymentBtn = document.getElementById('startPaymentBtn');
   let bookingConfig = null;
   let holdToken = '';
   let holdExpiresAt = '';
@@ -442,7 +445,6 @@
   let roomPickerReady = false;
   let roomsLoadSeq = 0;
   let roomsLoading = false;
-  let suppressAutoHoldForRoom = '';
   let bookingDisabledReason = '';
   let submitting = false;
   let depositSlipDataUrl = '';
@@ -520,6 +522,13 @@
     holdRetryBtn.style.display = visible ? 'inline-block' : 'none';
   }
 
+  function setRoomPickerDisabled(disabled) {
+    if (!roomPicker) return;
+    roomPicker.querySelectorAll('.room-option').forEach((el) => {
+      el.disabled = !!disabled;
+    });
+  }
+
   function retryAfterSeconds(res, out) {
     const fromBody = Number(out && out.retryAfterSeconds);
     if (Number.isFinite(fromBody) && fromBody > 0) return Math.ceil(fromBody);
@@ -547,7 +556,53 @@
     alert.style.display = 'block';
   }
 
-  function clearHold() {
+  function resetDepositSlipSelection() {
+    depositSlipDataUrl = '';
+    depositSlipReading = false;
+    depositSlipError = '';
+    if (depositSlipInput) depositSlipInput.value = '';
+    if (depositSlipStatus) depositSlipStatus.textContent = '';
+  }
+
+  function releaseCurrentHold(reason = 'client_clear') {
+    const roomId = String(holdRoomId || selectedRoomId() || '').trim().slice(0, 32);
+    const token = holdToken;
+    const expires = Date.parse(holdExpiresAt || '');
+    if (!roomId || !token || (Number.isFinite(expires) && expires <= Date.now())) return;
+    fetch('/api/bookings/public/hold/release', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ roomId, holdToken: token, reason }),
+      keepalive: true,
+    }).catch(() => {});
+  }
+
+  function syncPaymentStepUi() {
+    const requiresDeposit = !!(bookingConfig && bookingConfig.requireDeposit);
+    const currentRoomId = selectedRoomId();
+    const hasHold = !!(currentRoomId && hasActiveHoldFor(currentRoomId) && !holdError);
+    const paymentMissing = bookingDepositNeedsPaymentSetup(bookingConfig);
+    if (!requiresDeposit) {
+      depositPanel.style.display = 'none';
+      if (startPaymentBtn) {
+        startPaymentBtn.style.display = 'none';
+        startPaymentBtn.disabled = true;
+      }
+      return;
+    }
+    depositPanel.style.display = hasHold ? 'block' : 'none';
+    if (startPaymentBtn) {
+      const canStart = !!(currentRoomId && !hasHold && !holdBusy && !paymentMissing && !bookingDisabledReason && !submitting);
+      startPaymentBtn.style.display = currentRoomId && !hasHold ? 'inline-block' : 'none';
+      startPaymentBtn.disabled = !canStart;
+      startPaymentBtn.textContent = holdBusy ? 'กำลังล็อกห้อง...' : 'ล็อกห้องและไปชำระค่าจอง';
+    }
+  }
+
+  function clearHold(options = {}) {
+    if (options.release === true) {
+      releaseCurrentHold(options.reason || 'client_clear');
+    }
     holdRequestSeq += 1;
     holdToken = '';
     holdExpiresAt = '';
@@ -558,10 +613,13 @@
     holdTimerId = null;
     holdTimer.textContent = '';
     setHoldRetry(false);
+    resetDepositSlipSelection();
     updateSubmitState();
   }
 
   function updateSubmitState() {
+    syncPaymentStepUi();
+    setRoomPickerDisabled(submitting);
     if (submitting) {
       btn.disabled = true;
       return;
@@ -569,13 +627,14 @@
     const cfg = bookingConfig;
     const requiresHold = !!(cfg && cfg.requireDeposit);
     const paymentMissing = bookingDepositNeedsPaymentSetup(cfg);
+    const activeHoldOk = !requiresHold || hasActiveHoldFor(selectedRoomId());
     btn.disabled = !!(
       bookingDisabledReason ||
       paymentMissing ||
       holdBusy ||
       depositSlipReading ||
       depositSlipError ||
-      (requiresHold && (!selectedRoomId() || !holdToken || holdError))
+      (requiresHold && (!selectedRoomId() || !holdToken || holdError || !activeHoldOk))
     );
   }
 
@@ -588,10 +647,8 @@
     if (!Number.isFinite(expires)) return;
     const ms = expires - Date.now();
     if (ms <= 0) {
-      const expiredRoomId = selectedRoomId();
-      clearHold();
-      suppressAutoHoldForRoom = expiredRoomId;
-      showError('เวลาล็อกห้องหมดแล้ว กรุณากดเลือกห้องอีกครั้งเพื่อเริ่มล็อกใหม่');
+      clearHold({ release: false });
+      showError('เวลาล็อกห้องหมดแล้ว กรุณากดล็อกห้องและไปชำระค่าจองอีกครั้ง');
       loadAvailableRooms({ autoHold: false });
       return;
     }
@@ -607,28 +664,31 @@
   }
 
   function selectBookingRoom(room, options = {}) {
+    if (submitting) return;
     if (!room || !room.id) return;
+    const nextRoomId = String(room.id).slice(0, 32);
+    const currentRoomId = selectedRoomId();
+    const roomChanged = !!(currentRoomId && currentRoomId !== nextRoomId);
+    const keepCurrentHold = !roomChanged && hasActiveHoldFor(nextRoomId);
     roomRow.style.display = 'block';
-    roomIdInput.value = String(room.id).slice(0, 32);
+    roomIdInput.value = nextRoomId;
     setSelectValue('floor', room.floor ? String(room.floor) : '', 'ชั้น');
     setSelectValue('roomType', room.type || '', 'ประเภท');
-    clearHold();
-    suppressAutoHoldForRoom = '';
+    if (!keepCurrentHold) {
+      clearHold({ release: roomChanged, reason: 'room_changed' });
+    }
     if (!options.keepAlert) clearAlert();
     renderRoomPicker();
-    if (options.autoHold !== false
-      && bookingConfig && bookingConfig.requireDeposit && roomPickerReady
-      && !bookingDepositNeedsPaymentSetup(bookingConfig)) {
-      requestRoomHold(room.id);
-    } else {
-      updateSubmitState();
-    }
+    roomPickerStatus.textContent = bookingConfig && bookingConfig.requireDeposit
+      ? 'เลือกห้องแล้ว ระบบจะล็อกห้องเมื่อกดไปขั้นชำระค่าจอง'
+      : 'เลือกห้องแล้ว ตรวจสอบข้อมูลและส่งคำขอจองได้เลย';
+    updateSubmitState();
   }
 
   function clearSelectedRoom() {
     roomIdInput.value = '';
     roomRow.style.display = 'none';
-    clearHold();
+    clearHold({ release: true, reason: 'room_cleared' });
     renderRoomPicker();
   }
 
@@ -665,6 +725,7 @@
       const option = document.createElement('button');
       option.type = 'button';
       option.className = `room-option${current === String(room.id) ? ' selected' : ''}`;
+      option.disabled = submitting;
       option.setAttribute('role', 'option');
       option.setAttribute('aria-selected', current === String(room.id) ? 'true' : 'false');
       const title = document.createElement('strong');
@@ -684,7 +745,6 @@
   async function loadAvailableRooms(options = {}) {
     const seq = ++roomsLoadSeq;
     roomsLoading = true;
-    const autoHold = options.autoHold !== false;
     try {
       roomPickerTitle.textContent = 'กำลังโหลดห้องว่าง...';
       roomPickerStatus.textContent = 'กำลังตรวจสอบสถานะห้องล่าสุด';
@@ -707,23 +767,15 @@
         : null;
       if (current && !selectedStillBookable && !hasActiveHoldFor(current)) {
         clearSelectedRoom();
-        suppressAutoHoldForRoom = '';
         showError('ห้องที่เลือกไม่ว่างแล้ว หรือถูกล็อกโดยผู้จองก่อนหน้า กรุณาเลือกห้องว่างจากรายการ');
       } else if (roomIdParam && !current) {
         const match = availableRooms.find((room) => String(room.id) === roomIdParam);
         if (match) {
-          selectBookingRoom(match, { keepAlert: true, autoHold });
+          selectBookingRoom(match, { keepAlert: true, autoHold: false });
         } else if (!holdToken && !holdBusy) {
           clearSelectedRoom();
           showError('ห้องที่เลือกจากลิงก์ไม่ว่างแล้ว หรือถูกล็อกโดยผู้จองก่อนหน้า กรุณาเลือกห้องว่างจากรายการ');
         }
-      }
-      const activeRoomId = selectedRoomId();
-      if (autoHold && bookingConfig && bookingConfig.requireDeposit && activeRoomId
-          && !holdToken && !holdBusy && !holdError
-          && suppressAutoHoldForRoom !== activeRoomId
-          && !bookingDepositNeedsPaymentSetup(bookingConfig)) {
-        requestRoomHold(activeRoomId);
       }
       updateSubmitState();
     } catch (err) {
@@ -753,9 +805,9 @@
     bookingConfig = cfg || null;
     if (!bookingConfig || !bookingConfig.requireDeposit) {
       depositPanel.style.display = 'none';
+      syncPaymentStepUi();
       return;
     }
-    depositPanel.style.display = 'block';
     document.getElementById('depositAmount').textContent = `฿${money(bookingConfig.depositAmount)}`;
     const depositHintParts = [
       `ระบบจะล็อกห้อง ${bookingConfig.holdMinutes || 15} นาทีระหว่างชำระค่าจอง`,
@@ -800,6 +852,7 @@
         : 'ส่งคำขอได้โดยไม่ต้องแนบสลิป แอดมินจะตรวจค่าจองแบบ manual review');
     }
     document.getElementById('depositBank').textContent = parts.join(' · ');
+    syncPaymentStepUi();
   }
 
   async function requestRoomHold(roomId = selectedRoomId()) {
@@ -827,6 +880,7 @@
     holdToken = '';
     holdExpiresAt = '';
     holdTimer.textContent = 'กำลังล็อกห้อง...';
+    roomPickerStatus.textContent = `กำลังล็อกห้อง ${roomId} เพื่อเข้าสู่ขั้นชำระค่าจอง...`;
     setHoldRetry(false);
     updateSubmitState();
     try {
@@ -841,7 +895,7 @@
         holdError = res.status === 429
           ? rateLimitMessage(res, out, 'ล็อกห้อง')
           : bookingServerError(out, 'ล็อกห้องไม่สำเร็จ กรุณาเลือกห้องใหม่');
-        suppressAutoHoldForRoom = roomId;
+        roomPickerStatus.textContent = holdError;
         holdTimer.textContent = holdError;
         setHoldRetry(true);
         showError(holdError);
@@ -851,14 +905,16 @@
       if (out.hold && out.hold.token) {
         holdToken = out.hold.token;
         holdExpiresAt = out.hold.expiresAt || '';
-        suppressAutoHoldForRoom = '';
+        roomPickerStatus.textContent = `ล็อกห้อง ${roomId} แล้ว กรุณาชำระและแนบสลิปภายในเวลาที่กำหนด`;
         setHoldRetry(false);
         startHoldTimer();
+        syncPaymentStepUi();
+        depositPanel.scrollIntoView({ block: 'start', behavior: 'smooth' });
       }
     } catch {
       if (seq !== holdRequestSeq || selectedRoomId() !== roomId) return;
       holdError = 'ล็อกห้องไม่สำเร็จ กรุณาลองใหม่';
-      suppressAutoHoldForRoom = roomId;
+      roomPickerStatus.textContent = holdError;
       holdTimer.textContent = holdError;
       setHoldRetry(true);
       showError(holdError);
@@ -887,12 +943,7 @@
         return;
       }
       if (d.booking.requireDeposit && !selectedRoomId()) {
-        roomPickerStatus.textContent = 'เลือกห้องว่างก่อน ระบบจึงจะล็อกห้องและเปิดให้ส่งคำขอจอง';
-      }
-      const activeRoomId = selectedRoomId();
-      if (activeRoomId && roomPickerReady && !holdToken && !holdBusy && !holdError
-          && suppressAutoHoldForRoom !== activeRoomId) {
-        requestRoomHold(activeRoomId);
+        roomPickerStatus.textContent = 'เลือกห้องว่างก่อน แล้วกดล็อกห้องและไปชำระค่าจองเมื่อพร้อม';
       }
       updateSubmitState();
     })
@@ -903,8 +954,15 @@
   if (roomPickerRetryBtn) {
     roomPickerRetryBtn.addEventListener('click', () => {
       clearAlert();
-      suppressAutoHoldForRoom = '';
-      loadAvailableRooms({ autoHold: true });
+      loadAvailableRooms({ autoHold: false });
+    });
+  }
+
+  if (startPaymentBtn) {
+    startPaymentBtn.addEventListener('click', () => {
+      clearAlert();
+      holdError = '';
+      requestRoomHold(selectedRoomId());
     });
   }
 
@@ -912,7 +970,6 @@
     holdRetryBtn.addEventListener('click', () => {
       clearAlert();
       holdError = '';
-      suppressAutoHoldForRoom = '';
       requestRoomHold(selectedRoomId());
     });
   }
@@ -1024,8 +1081,7 @@
         return;
       }
       if (!holdToken) {
-        showError('ยังล็อกห้องไม่สำเร็จ กรุณากดเลือกห้องอีกครั้งแล้วรอให้ระบบล็อกห้อง');
-        requestRoomHold(data.roomId);
+        showError('กรุณากด "ล็อกห้องและไปชำระค่าจอง" ก่อนส่งคำขอ');
         return;
       }
       if (depositSlipReading) {
@@ -1071,8 +1127,7 @@
         submitting = false;
         btn.textContent = 'ส่งคำขอจอง';
         if (result && (result.code === 'ROOM_HELD' || result.code === 'ROOM_NOT_VACANT' || result.code === 'BOOKING_HOLD_EXPIRED')) {
-          suppressAutoHoldForRoom = data.roomId || selectedRoomId();
-          clearHold();
+          clearHold({ release: false });
           loadAvailableRooms({ autoHold: false });
         } else {
           updateSubmitState();

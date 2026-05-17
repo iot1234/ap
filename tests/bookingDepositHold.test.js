@@ -76,6 +76,12 @@ test('public booking supports expiring room holds before deposit submission', ()
     'booking submission must have its own limiter instead of sharing the hold limiter');
   assert.match(server, /app\.post\('\/api\/bookings\/public\/hold', sameOrigin, rateLimitBookingHold/,
     'public hold endpoint must use the hold-specific limiter');
+  assert.match(server, /app\.post\('\/api\/bookings\/public\/hold\/release', sameOrigin, rateLimitBookingHold/,
+    'public hold release endpoint must let the browser free a held room when the booker changes room');
+  assert.match(server, /BOOKING_HOLD_NOT_OWNED/,
+    'hold release must be token-guarded and idempotent when the browser no longer owns the room');
+  assert.match(server, /booking\.hold_release/,
+    'explicit hold release must be audit logged');
   assert.match(server, /app\.post\('\/api\/bookings\/public', sameOrigin, rateLimitBookingSubmit/,
     'public booking submission must use the submit-specific limiter');
   assert.match(server, /retryAfterSeconds/,
@@ -212,8 +218,14 @@ test('public booking page and admin features expose deposit controls', () => {
     'public page must render a vacant-room picker');
   assert.match(booking, /function selectBookingRoom/,
     'public page must bind room selection to the booking form');
-  assert.match(booking, /suppressAutoHoldForRoom/,
-    'public page must prevent failed holds from auto-retrying in a reload loop');
+  assert.match(booking, /id="startPaymentBtn"/,
+    'public page must use an explicit payment-step action before locking a room');
+  assert.match(booking, /syncPaymentStepUi/,
+    'public page must hide the payment/slip step until a room hold is active');
+  assert.match(booking, /releaseCurrentHold/,
+    'public page must release a previous hold when a booker changes room after entering payment');
+  assert.match(booking, /setRoomPickerDisabled/,
+    'public page must block room switching while a booking submission is being finalized');
   assert.match(booking, /loadAvailableRooms\(\{ autoHold: false \}\)/,
     'public page must refresh room inventory after hold conflicts without immediately re-holding the same room');
   assert.match(booking, /AbortController/,
@@ -226,8 +238,12 @@ test('public booking page and admin features expose deposit controls', () => {
     'public page must offer an explicit hold retry action after recoverable hold failures');
   assert.match(booking, /\/api\/bookings\/public\/hold/,
     'public page must create a room hold');
-  assert.match(booking, /requestRoomHold\(room\.id\)/,
-    'public page must create the hold for the currently selected room');
+  assert.match(booking, /\/api\/bookings\/public\/hold\/release/,
+    'public page must release an owned hold instead of leaving the room locked until timeout');
+  assert.match(booking, /requestRoomHold\(selectedRoomId\(\)\)/,
+    'public page must create the hold only from the explicit payment-step action');
+  assert.doesNotMatch(booking, /requestRoomHold\(room\.id\)/,
+    'public page must not lock a room while the booker is only browsing/selecting rooms');
   assert.match(publicApp, /bookingHref\(room, \{ includeRoomId: canBookRoom \}\)/,
     'public room detail must only deep-link a concrete room when it is vacant');
   assert.match(publicApp, /useState\('vacant'\)/,

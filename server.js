@@ -1784,6 +1784,59 @@ app.post('/api/bookings/public/hold', sameOrigin, rateLimitBookingHold, async (r
   }
 });
 
+app.post('/api/bookings/public/hold/release', sameOrigin, rateLimitBookingHold, async (req, res) => {
+  const roomId = String(req.body?.roomId || '').trim().slice(0, 32);
+  const holdToken = String(req.body?.holdToken || '').trim().slice(0, 200);
+  const reason = String(req.body?.reason || 'client_release').trim().slice(0, 64);
+  if (!roomId) return res.status(400).json({ error: 'roomId required', code: 'ROOM_REQUIRED' });
+  if (!holdToken) return res.status(400).json({ error: 'holdToken required', code: 'BOOKING_HOLD_TOKEN_REQUIRED' });
+  const tokenHash = bookingHoldHash(holdToken);
+  if (!tokenHash) return res.status(400).json({ error: 'holdToken invalid', code: 'BOOKING_HOLD_TOKEN_INVALID' });
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await releaseExpiredPublicBookingHolds(client);
+    const rRes = await client.query(
+      `SELECT value FROM app_data WHERE key='baankarn_rooms_v1' FOR UPDATE`
+    );
+    const rooms = rRes.rows.length && rRes.rows[0].value && typeof rRes.rows[0].value === 'object'
+      ? rRes.rows[0].value
+      : {};
+    const room = rooms[roomId] || null;
+    const ownsHold = room && isPublicHoldRoom(room) && room.reservedBy === `hold:${tokenHash}`;
+    if (!ownsHold) {
+      await client.query('COMMIT');
+      res.setHeader('Cache-Control', 'no-store');
+      return res.json({ ok: true, released: false, code: 'BOOKING_HOLD_NOT_OWNED' });
+    }
+    rooms[roomId] = releaseHoldShape(room);
+    await client.query(
+      `INSERT INTO app_data (key, value, updated_by) VALUES ($1, $2, 'public-hold-release')
+         ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW(), updated_by='public-hold-release'`,
+      ['baankarn_rooms_v1', JSON.stringify(rooms)]
+    );
+    try {
+      await client.query(
+        `UPDATE rooms_v2 SET status='vacant', updated_at=NOW()
+           WHERE room_code=$1 AND status='reserved' AND deleted_at IS NULL`,
+        [roomId]
+      );
+    } catch (err) {
+      if (err.code !== '42P01') throw err;
+    }
+    await client.query('COMMIT');
+    audit(req, 'booking.hold_release', 'room', roomId, { reason }, 'public').catch(() => {});
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ ok: true, released: true });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('public booking hold release error:', err);
+    res.status(500).json({ error: 'internal error', code: 'DB_ERROR' });
+  } finally {
+    client.release();
+  }
+});
+
 app.post('/api/bookings/public', sameOrigin, rateLimitBookingSubmit, validateBody(schemas.publicBooking), async (req, res) => {
   const b = req.body;
   // Length / type sanity. Strings only, capped to reasonable lengths to keep
