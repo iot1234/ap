@@ -125,12 +125,13 @@ function roomPhotos(room) {
   return [set[0], set[(offset % (set.length - 1)) + 1], set[((offset + 1) % (set.length - 1)) + 1]];
 }
 
-function bookingHref(room) {
+function bookingHref(room, options = {}) {
+  const includeRoomId = options.includeRoomId !== false;
   const qs = new URLSearchParams({
-    roomId: room.id,
     floor: String(room.floor || ''),
     roomType: room.type || 'standard',
   });
+  if (includeRoomId && room.id) qs.set('roomId', room.id);
   return `/book?${qs.toString()}`;
 }
 
@@ -507,6 +508,7 @@ function DetailPanel({ room, onClose }) {
 
   const t = getRoomType(room);
   const status = getRoomStatus(room);
+  const canBookRoom = status === 'vacant';
   const s = STATUS[status];
   const photos = roomPhotos(room);
   const photoCount = realRoomPhotos(room).length;
@@ -547,14 +549,14 @@ function DetailPanel({ room, onClose }) {
             padding: '5px 10px', borderRadius: 999,
           }}>{t.beds} เตียง · {t.ac ? 'แอร์' : 'พัดลม'}</span>
         </div>
-        <a href={bookingHref(room)} style={{
+        <a href={bookingHref(room, { includeRoomId: canBookRoom })} style={{
           marginTop: 14, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
           height: 42, borderRadius: 10, textDecoration: 'none',
-          background: status === 'vacant' ? C.accent : C.dark,
+          background: canBookRoom ? C.accent : C.dark,
           color: '#fff', fontSize: 13, fontWeight: 700,
-          boxShadow: `0 10px 24px -18px ${status === 'vacant' ? C.accent : C.dark}`,
+          boxShadow: `0 10px 24px -18px ${canBookRoom ? C.accent : C.dark}`,
         }}>
-          <span>{status === 'vacant' ? 'จองห้องนี้' : 'สอบถามห้องนี้'}</span>
+          <span>{canBookRoom ? 'จองห้องนี้' : 'ดูห้องว่างประเภทนี้'}</span>
           <span aria-hidden="true">→</span>
         </a>
       </div>
@@ -908,11 +910,16 @@ function App() {
   // configuration). Falls back to floor 1 for an empty-rooms first paint.
   const [floor, setFloor] = useState(() => {
     const fs = getAllFloors(rooms);
+    const floorWithVacancy = fs
+      .map((f) => ({ f, count: Object.values(rooms).filter((r) => r.floor === f && r.status === 'vacant').length }))
+      .filter((x) => x.count > 0)
+      .sort((a, b) => b.count - a.count || a.f - b.f)[0];
+    if (floorWithVacancy) return floorWithVacancy.f;
     return fs[Math.floor(fs.length / 2)] || 1;
   });
   const [selectedId, setSelectedId] = useState(null);
   const [search, setSearch] = useState('');
-  const [filter, setFilter] = useState('all');
+  const [filter, setFilter] = useState('vacant');
   const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 

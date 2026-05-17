@@ -56,6 +56,12 @@ test('public booking supports expiring room holds before deposit submission', ()
   const server = read('server.js');
   assert.match(server, /app\.post\('\/api\/bookings\/public\/hold'/,
     'public hold endpoint must exist');
+  assert.match(server, /app\.get\('\/api\/bookings\/public\/rooms'/,
+    'public booking page must have a safe vacant-room feed');
+  assert.match(server, /function publicBookableRooms/,
+    'public vacant-room feed must be centralized and testable');
+  assert.match(server, /relationalStatus && relationalStatus !== 'vacant'/,
+    'public vacant-room feed must not publish rooms that rooms_v2 marks unavailable');
   assert.match(server, /reservationExpiresAt: expiresAt\.toISOString\(\)/,
     'hold must stamp an expiry on the room reservation');
   assert.match(server, /reservedBy: `hold:\$\{tokenHash\}`/,
@@ -153,6 +159,7 @@ test('orphan slip cleanup preserves booking deposit slips', () => {
 
 test('public booking page and admin features expose deposit controls', () => {
   const booking = read('project/booking.html');
+  const publicApp = read('project/app.jsx');
   const features = read('project/admin/page-features.jsx');
   const depositSettings = read('project/admin/page-booking-deposit-settings.jsx');
   const adminHtml = read('project/Admin Dashboard.html');
@@ -161,8 +168,20 @@ test('public booking page and admin features expose deposit controls', () => {
   const adminBookings = read('project/admin/page-bookings.jsx');
   assert.match(booking, /\/api\/bookings\/public\/config/,
     'public page must load deposit config');
+  assert.match(booking, /\/api\/bookings\/public\/rooms/,
+    'public page must load selectable vacant rooms');
+  assert.match(booking, /id="roomPicker"/,
+    'public page must render a vacant-room picker');
+  assert.match(booking, /function selectBookingRoom/,
+    'public page must bind room selection to the booking form');
   assert.match(booking, /\/api\/bookings\/public\/hold/,
     'public page must create a room hold');
+  assert.match(booking, /requestRoomHold\(room\.id\)/,
+    'public page must create the hold for the currently selected room');
+  assert.match(publicApp, /bookingHref\(room, \{ includeRoomId: canBookRoom \}\)/,
+    'public room detail must only deep-link a concrete room when it is vacant');
+  assert.match(publicApp, /useState\('vacant'\)/,
+    'public room board should land visitors on available rooms first');
   assert.match(booking, /id="depositSlip"/,
     'public page must let the booker attach a deposit slip');
   assert.match(booking, /data\.holdToken = holdToken/,

@@ -588,6 +588,59 @@ function maskRoomsPublic(roomsObj, config) {
   return out;
 }
 
+function publicBookableRooms(roomsObj, config, v2Rows = []) {
+  const byId = new Map();
+  const v2Status = new Map();
+  if (roomsObj && typeof roomsObj === 'object') {
+    for (const [id, room] of Object.entries(roomsObj)) {
+      if (!room || typeof room !== 'object') continue;
+      const roomId = String(room.id || id || '').trim();
+      if (!roomId) continue;
+      byId.set(roomId, { ...room, id: roomId });
+    }
+  }
+  for (const row of Array.isArray(v2Rows) ? v2Rows : []) {
+    const room = roomFromV2(row);
+    if (!room || !room.id) continue;
+    const roomId = String(room.id).trim();
+    if (!roomId) continue;
+    v2Status.set(roomId, room.status || 'vacant');
+    const legacy = byId.get(roomId);
+    byId.set(roomId, {
+      ...(legacy || {}),
+      ...room,
+      id: roomId,
+      // A held room is written to the legacy blob first, so never let a
+      // stale rooms_v2 "vacant" value publish it as bookable.
+      status: legacy && legacy.status ? legacy.status : (room.status || 'vacant'),
+      view: (legacy && legacy.view) || room.view || '',
+    });
+  }
+
+  const out = [];
+  for (const [roomId, room] of byId.entries()) {
+    const blobStatus = room.status || 'vacant';
+    const relationalStatus = v2Status.get(roomId);
+    if (blobStatus !== 'vacant' || (relationalStatus && relationalStatus !== 'vacant')) continue;
+    const masked = maskRoomsPublic({ [roomId]: room }, config)?.[roomId];
+    if (!masked || masked.status !== 'vacant') continue;
+    out.push({
+      id: String(masked.id || roomId),
+      floor: masked.floor,
+      no: masked.no,
+      type: masked.type || 'standard',
+      view: masked.view || '',
+      status: 'vacant',
+      rent: Number.isFinite(Number(masked.rent)) ? Number(masked.rent) : 0,
+    });
+  }
+  return out.sort((a, b) => (
+    (Number(a.floor) || 0) - (Number(b.floor) || 0)
+    || (Number(a.no) || 0) - (Number(b.no) || 0)
+    || String(a.id).localeCompare(String(b.id), 'th')
+  ));
+}
+
 // Hard allowlist of fields safe to expose to unauthenticated visitors of
 // the public room board. Switched from a denylist (delete users/notification/
 // automation) to a strict allowlist so any new sensitive field admin adds to
@@ -1469,6 +1522,36 @@ app.get('/api/bookings/public/config', async (_req, res) => {
   } catch (err) {
     console.error('public booking config error:', err);
     res.status(500).json({ error: 'internal error' });
+  }
+});
+
+app.get('/api/bookings/public/rooms', async (_req, res) => {
+  try {
+    await releaseExpiredPublicBookingHolds(pool);
+    const { rows } = await pool.query(
+      `SELECT key, value FROM app_data WHERE key = ANY($1)`,
+      [['baankarn_rooms_v1', 'baankarn_config_v1']]
+    );
+    const rawRooms = rows.find((r) => r.key === 'baankarn_rooms_v1')?.value || {};
+    const rawConfig = rows.find((r) => r.key === 'baankarn_config_v1')?.value || null;
+    let v2Rows = [];
+    try {
+      const v2 = await pool.query(
+        `SELECT room_code, room_type, floor, room_no, rent_price, deposit_price, wifi_fee, status
+           FROM rooms_v2
+          WHERE deleted_at IS NULL
+          ORDER BY floor NULLS LAST, room_no NULLS LAST, room_code`
+      );
+      v2Rows = v2.rows;
+    } catch (err) {
+      if (err.code !== '42P01') throw err;
+    }
+    const rooms = publicBookableRooms(rawRooms, rawConfig, v2Rows);
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ ok: true, count: rooms.length, rooms });
+  } catch (err) {
+    console.error('public booking rooms error:', err);
+    res.status(500).json({ error: 'internal error', code: 'ROOMS_LOAD_FAILED' });
   }
 });
 
