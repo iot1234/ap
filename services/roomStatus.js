@@ -246,7 +246,8 @@ async function deriveFacts(client, roomId) {
             value->$1->'tenant' IS NOT NULL
               AND value->$1->'tenant' <> 'null'::jsonb
               AND value->$1->'tenant' <> '{}'::jsonb AS has_tenant,
-            value->$1->>'reservedBy' AS reserved_by
+            value->$1->>'reservedBy' AS reserved_by,
+            value->$1->>'reservationExpiresAt' AS reservation_expires_at
        FROM app_data WHERE key='baankarn_rooms_v1' LIMIT 1`,
     [roomId]
   );
@@ -343,6 +344,10 @@ async function deriveFacts(client, roomId) {
           else throw err;
         }
       }
+    } else if (reservedBy.startsWith('hold:')) {
+      const expires = Date.parse(blob.reservation_expires_at || '');
+      hasActiveReservation = Number.isFinite(expires) && expires > Date.now();
+      reservationChecked = true;
     } else {
       // Booking-id pointer — check the bookings blob.
       try {

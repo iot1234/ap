@@ -174,6 +174,13 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
     completed: { label: 'เสร็จสิ้น',   color: 'neutral' },
     cancelled: { label: 'ยกเลิก',     color: 'neutral' },
   };
+  const depositStatusLabel = (s) => ({
+    pending_review: 'รอตรวจสลิป',
+    verified: 'ยืนยันแล้ว',
+    rejected: 'สลิปไม่ผ่าน',
+    awaiting_slip: 'รอสลิป',
+    not_required: 'ไม่ต้องมัดจำ',
+  })[s] || s || '—';
 
   const columns = [
     {
@@ -222,7 +229,12 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
     },
     {
       key: 'deposit', label: 'มัดจำ', align: 'right', minWidth: 100,
-      render: b => <span style={{ fontWeight: 600 }}>{fmtCurrency(b.deposit)}</span>,
+      render: b => (
+        <div style={{ textAlign: 'right' }}>
+          <div style={{ fontWeight: 600 }}>{fmtCurrency(b.bookingFee ?? b.deposit)}</div>
+          <div style={{ fontSize: 11, color: C.muted }}>{depositStatusLabel(b.depositStatus)}</div>
+        </div>
+      ),
     },
     {
       key: 'createdAt', label: 'จองเมื่อ', minWidth: 110,
@@ -449,6 +461,13 @@ function BookingDetail({ b }) {
     cancelled: { label: 'ยกเลิก',     color: 'neutral' },
   };
   const meta = statusMap[b.status] || { label: b.status || 'unknown', color: 'neutral' };
+  const depositStatusLabel = (s) => ({
+    pending_review: 'รอตรวจสลิปค่าจอง',
+    verified: 'ยืนยันสลิปแล้ว',
+    rejected: 'สลิปไม่ผ่าน',
+    awaiting_slip: 'รอสลิป',
+    not_required: 'ไม่ต้องมัดจำ',
+  })[s] || s || '—';
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
@@ -473,7 +492,11 @@ function BookingDetail({ b }) {
             { label: 'ชั้นที่ต้องการ', value: b.wantFloor ? `ชั้น ${b.wantFloor}` : 'ไม่ระบุ' },
             { label: 'ระยะเวลาเช่า',  value: b.months ? `${b.months} เดือน` : '—' },
             { label: 'วันที่ย้ายเข้า', value: b.moveIn ? fmtDateTH(b.moveIn) : '—' },
-            { label: 'เงินมัดจำ',      value: fmtCurrency(b.deposit || 0), bold: true },
+            { label: 'เงินมัดจำ',      value: fmtCurrency(b.bookingFee ?? b.deposit ?? 0), bold: true },
+            { label: 'สถานะสลิปค่าจอง', value: depositStatusLabel(b.depositStatus) },
+            ...(b.depositSlipUrl ? [{ label: 'สลิปค่าจอง', value: <a href={b.depositSlipUrl} target="_blank" rel="noopener noreferrer" style={{ color: C.accent }}>เปิดดูสลิป</a> }] : []),
+            ...(b.reservedAt ? [{ label: 'ล็อกห้องเมื่อ', value: relTime(b.reservedAt) }] : []),
+            ...(b.holdExpiresAt ? [{ label: 'hold เดิมหมดอายุ', value: fmtDateTH(String(b.holdExpiresAt).slice(0, 10)) }] : []),
             { label: 'จองเมื่อ',         value: relTime(b.createdAt) },
             ...(b.email ? [{ label: 'อีเมล', value: b.email }] : []),
             ...(b.message ? [{ label: 'ข้อความ', value: b.message }] : []),

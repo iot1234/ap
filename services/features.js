@@ -49,6 +49,18 @@ const DEFAULTS = Object.freeze({
     maxBytes: 1_500_000,
     storage: 'local',            // local | s3
   },
+  roomBooking: {
+    enabled: true,
+    // Public booking deposit. When requireDeposit=true, the public form
+    // must hold a specific room, collect exactly this booking fee, and
+    // attach a slip before the booking becomes pending for admin review.
+    requireDeposit: false,
+    depositAmount: 500,
+    requireSlip: true,
+    holdMinutes: 15,
+    maxBytes: 1_500_000,
+    allowedMimes: ['image/jpeg', 'image/png', 'image/webp'],
+  },
   meterIot: {
     enabled: false,
     mode: 'manual',              // manual | simulator; mqtt is reserved until integration exists
@@ -228,6 +240,7 @@ function disabledPayload(name, req) {
     tenantPortal: 'Tenant portal',
     slipUpload: 'Slip upload',
     photoUpload: 'Photo upload',
+    roomBooking: 'Room booking',
     meterIot: 'Meter readings',
     accessControl: 'Access control',
     recurringCharges: 'Recurring charges',

@@ -107,6 +107,28 @@
     font-family: 'Sora', "IBM Plex Sans Thai", system-ui, sans-serif;
     font-weight: 600;
   }
+  .deposit-panel {
+    background: #fffaf2;
+    border: 1px solid #ead7b7;
+    border-radius: 12px;
+    padding: 16px;
+  }
+  .deposit-head {
+    display: flex; justify-content: space-between; gap: 12px;
+    align-items: flex-start; margin-bottom: 12px;
+  }
+  .deposit-amount {
+    font-family: 'Sora', "IBM Plex Sans Thai", system-ui, sans-serif;
+    font-weight: 700; font-size: 22px; color: #8a5a22;
+  }
+  .deposit-qr {
+    width: 148px; height: 148px; object-fit: contain;
+    background: #fff; border: 1px solid #ead7b7; border-radius: 10px;
+    padding: 8px;
+  }
+  .hold-note {
+    color: #8a5a22; font-size: 12.5px; margin-top: 8px;
+  }
   button[type=submit] {
     width: 100%; height: 46px; margin-top: 12px;
     background: #14231d; color: #fff;
@@ -226,6 +248,24 @@
         </div>
       </div>
 
+      <div class="row" id="depositPanel" style="display:none">
+        <div class="deposit-panel">
+          <div class="deposit-head">
+            <div>
+              <label id="depositTitle">ค่าจองห้อง</label>
+              <div class="deposit-amount" id="depositAmount">฿0</div>
+              <div class="hint" id="depositHint">ระบบจะล็อกห้องไว้ชั่วคราวระหว่างแนบสลิป</div>
+              <div class="hold-note" id="holdTimer"></div>
+            </div>
+            <img id="depositQr" class="deposit-qr" alt="QR ค่าจอง" style="display:none"/>
+          </div>
+          <div id="depositBank" class="hint" style="margin-bottom:10px"></div>
+          <label for="depositSlip" id="depositSlipLabel">แนบสลิปค่าจอง</label>
+          <input type="file" id="depositSlip" accept="image/jpeg,image/png,image/webp"/>
+          <div class="hint">รองรับ JPG, PNG, WebP ขนาดตามที่แอดมินตั้งไว้ ระบบจะตรวจสลิปซ้ำก่อนรับคำขอ</div>
+        </div>
+      </div>
+
       <div class="row">
         <div>
           <label for="message">ข้อความเพิ่มเติม</label>
@@ -257,6 +297,12 @@
   const btn = document.getElementById('submitBtn');
   const alert = document.getElementById('alert');
   const container = document.getElementById('formContainer');
+  const depositPanel = document.getElementById('depositPanel');
+  const depositSlipInput = document.getElementById('depositSlip');
+  let bookingConfig = null;
+  let holdToken = '';
+  let holdExpiresAt = '';
+  let depositSlipDataUrl = '';
 
   // Default check-in date: 7 days from today
   const dt = new Date();
@@ -268,6 +314,10 @@
   const roomIdParam = (params.get('roomId') || '').trim().slice(0, 32);
   const floorParam = (params.get('floor') || '').trim().slice(0, 2);
   const roomTypeParam = (params.get('roomType') || '').trim().slice(0, 32);
+
+  function money(n) {
+    return Number(n || 0).toLocaleString('th-TH', { minimumFractionDigits: 2 });
+  }
 
   function setSelectValue(id, value, labelPrefix) {
     if (!value) return;
@@ -288,6 +338,87 @@
   }
   setSelectValue('floor', floorParam, 'ชั้น');
   setSelectValue('roomType', roomTypeParam, 'ประเภท');
+
+  function renderBookingConfig(cfg) {
+    bookingConfig = cfg || null;
+    if (!bookingConfig || !bookingConfig.requireDeposit) {
+      depositPanel.style.display = 'none';
+      return;
+    }
+    depositPanel.style.display = 'block';
+    document.getElementById('depositAmount').textContent = `฿${money(bookingConfig.depositAmount)}`;
+    document.getElementById('depositHint').textContent =
+      `ระบบจะล็อกห้อง ${bookingConfig.holdMinutes || 15} นาทีระหว่างชำระค่าจอง`;
+    document.getElementById('depositSlipLabel').textContent =
+      bookingConfig.requireSlip ? 'แนบสลิปค่าจอง *' : 'แนบสลิปค่าจอง (ถ้ามี)';
+    const qr = document.getElementById('depositQr');
+    if (bookingConfig.payment && bookingConfig.payment.qrDataUrl) {
+      qr.src = bookingConfig.payment.qrDataUrl;
+      qr.style.display = 'block';
+    }
+    const bank = bookingConfig.payment && bookingConfig.payment.bankInfo;
+    const parts = [];
+    if (bookingConfig.payment && bookingConfig.payment.promptpayName) parts.push(`ชื่อบัญชี/พร้อมเพย์: ${bookingConfig.payment.promptpayName}`);
+    if (bookingConfig.payment && bookingConfig.payment.targetLast4) parts.push(`พร้อมเพย์ท้าย ${bookingConfig.payment.targetLast4}`);
+    if (bank) parts.push(`${bank.bank || 'ธนาคาร'} ${bank.account || ''} ${bank.name || ''}`.trim());
+    document.getElementById('depositBank').textContent = parts.join(' · ');
+  }
+
+  async function requestRoomHold() {
+    if (!roomIdParam || !bookingConfig || !bookingConfig.requireDeposit) return;
+    try {
+      const res = await fetch('/api/bookings/public/hold', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ roomId: roomIdParam }),
+      });
+      const out = await res.json().catch(() => ({}));
+      if (!res.ok || !out.ok) {
+        showError(out.error || 'ล็อกห้องไม่สำเร็จ กรุณาเลือกห้องใหม่');
+        btn.disabled = true;
+        return;
+      }
+      if (out.hold && out.hold.token) {
+        holdToken = out.hold.token;
+        holdExpiresAt = out.hold.expiresAt || '';
+        document.getElementById('holdTimer').textContent =
+          holdExpiresAt ? `ล็อกห้องไว้ถึง ${new Date(holdExpiresAt).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })}` : '';
+      }
+    } catch {
+      showError('ล็อกห้องไม่สำเร็จ กรุณาลองใหม่');
+      btn.disabled = true;
+    }
+  }
+
+  fetch('/api/bookings/public/config')
+    .then((r) => r.json())
+    .then((d) => {
+      if (!d || !d.ok || !d.booking) return;
+      renderBookingConfig(d.booking);
+      if (d.booking.requireDeposit && !roomIdParam) {
+        showError('การจองแบบมีค่าจองต้องเลือกห้องจากหน้าห้องว่างก่อน เพื่อให้ระบบล็อกห้องได้ถูกต้อง');
+        btn.disabled = true;
+        return;
+      }
+      requestRoomHold();
+    })
+    .catch(() => {});
+
+  depositSlipInput.addEventListener('change', () => {
+    depositSlipDataUrl = '';
+    const file = depositSlipInput.files && depositSlipInput.files[0];
+    if (!file) return;
+    const maxBytes = Number(bookingConfig && bookingConfig.maxBytes) || 1500000;
+    if (file.size > maxBytes) {
+      showError(`ไฟล์สลิปใหญ่เกินไป (สูงสุด ${(maxBytes / 1048576).toFixed(1)} MB)`);
+      depositSlipInput.value = '';
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => { depositSlipDataUrl = String(reader.result || ''); };
+    reader.onerror = () => showError('อ่านไฟล์สลิปไม่สำเร็จ กรุณาเลือกไฟล์ใหม่');
+    reader.readAsDataURL(file);
+  });
 
   function showError(msg) {
     alert.textContent = msg;
@@ -314,6 +445,11 @@
       roomType: document.getElementById('roomType').value || undefined,
       message: document.getElementById('message').value.trim(),
     };
+    if (bookingConfig && bookingConfig.requireDeposit) {
+      data.expectedDeposit = bookingConfig.depositAmount;
+      data.holdToken = holdToken || undefined;
+      if (depositSlipDataUrl) data.depositSlip = depositSlipDataUrl;
+    }
     // Strip empty strings so the JSON payload only carries real values —
     // server's Zod schema treats `undefined` as "not provided" but treats
     // `''` as a string-type value that fails .max() / .email() checks.
@@ -322,6 +458,17 @@
     if (!data.tenantName || !data.phone || !data.checkInDate) {
       showError('กรุณากรอกข้อมูลที่จำเป็นให้ครบถ้วน');
       return;
+    }
+
+    if (bookingConfig && bookingConfig.requireDeposit) {
+      if (!data.roomId) {
+        showError('การจองแบบมีค่าจองต้องเลือกห้องก่อน');
+        return;
+      }
+      if (bookingConfig.requireSlip && !data.depositSlip) {
+        showError('กรุณาแนบสลิปค่าจองก่อนส่งคำขอ');
+        return;
+      }
     }
 
     btn.disabled = true;

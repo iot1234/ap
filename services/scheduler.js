@@ -1519,7 +1519,7 @@ async function tickPruneFailedNotifications(pool, _flags, now, state) {
 // the Node process itself died (Railway restart, OOM kill, deploy mid-
 // request) leaving file orphans on R2 / local disk + a dead file_uploads
 // row. Conservative: only prune slip-category uploads older than 24h with
-// no referencing payment.
+// no referencing payment or booking-deposit slip.
 async function tickPruneOrphanSlips(pool, _flags, now, state) {
   const todayKey = now.toISOString().slice(0, 10);
   if (state.lastOrphanSlipPruneAt === todayKey) return;
@@ -1531,8 +1531,10 @@ async function tickPruneOrphanSlips(pool, _flags, now, state) {
       SELECT fu.id, fu.url
         FROM file_uploads fu
         LEFT JOIN payments p ON p.slip_url = fu.url
+        LEFT JOIN bookings b ON b.deposit_slip_file_id = fu.id
        WHERE fu.category = 'slip'
          AND p.id IS NULL
+         AND b.id IS NULL
          AND fu.uploaded_at < NOW() - INTERVAL '24 hours'
        LIMIT 200
     `);

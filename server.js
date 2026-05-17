@@ -628,6 +628,9 @@ app.get('/api/data/:key', async (req, res) => {
     return res.status(401).json({ error: 'unauthorized' });
   }
   try {
+    if (key === 'baankarn_rooms_v1') {
+      await releaseExpiredPublicBookingHolds(pool);
+    }
     const { rows } = await pool.query('SELECT value FROM app_data WHERE key=$1', [key]);
     let value = rows.length ? rows[0].value : null;
     if (!isAuth && key === 'baankarn_rooms_v1') {
@@ -654,6 +657,9 @@ app.get('/api/data', async (req, res) => {
   const isAuth = !!(req.session && req.session.user);
   try {
     const keys = isAuth ? Array.from(ALLOWED_KEYS) : Array.from(PUBLIC_KEYS);
+    if (keys.includes('baankarn_rooms_v1')) {
+      await releaseExpiredPublicBookingHolds(pool);
+    }
     const { rows } = await pool.query(
       'SELECT key, value FROM app_data WHERE key = ANY($1)',
       [keys]
@@ -1064,6 +1070,291 @@ function lookupJitter(_req, _res, next) {
   setTimeout(next, ms);
 }
 
+function roomBookingSettings(flags) {
+  const raw = (flags && flags.roomBooking) || {};
+  const amount = Number(raw.depositAmount);
+  const holdMinutes = Number(raw.holdMinutes);
+  const maxBytes = Number(raw.maxBytes);
+  return {
+    enabled: raw.enabled !== false,
+    requireDeposit: raw.requireDeposit === true,
+    requireSlip: raw.requireSlip !== false,
+    depositAmount: Number.isFinite(amount) && amount >= 0
+      ? Math.min(amount, 1_000_000)
+      : 500,
+    holdMinutes: Number.isFinite(holdMinutes) && holdMinutes > 0
+      ? Math.min(Math.max(Math.trunc(holdMinutes), 1), 120)
+      : 15,
+    maxBytes: Number.isFinite(maxBytes) && maxBytes > 0
+      ? Math.min(maxBytes, 5_000_000)
+      : 1_500_000,
+    allowedMimes: Array.isArray(raw.allowedMimes) && raw.allowedMimes.length
+      ? raw.allowedMimes
+      : ['image/jpeg', 'image/png', 'image/webp'],
+  };
+}
+
+function bookingHoldHash(token) {
+  if (!token || typeof token !== 'string') return null;
+  return cryptoSvc.hmac(`booking-hold:${token}`);
+}
+
+function roomFromV2(row) {
+  if (!row) return null;
+  return {
+    id: row.room_code,
+    type: row.room_type,
+    floor: row.floor,
+    no: row.room_no,
+    rent: Number(row.rent_price),
+    deposit: Number(row.deposit_price || 0),
+    wifi: Number(row.wifi_fee || 0),
+    status: row.status || 'vacant',
+  };
+}
+
+function isPublicHoldRoom(room) {
+  return !!(room && room.status === 'reserved'
+    && typeof room.reservedBy === 'string'
+    && room.reservedBy.startsWith('hold:'));
+}
+
+function isExpiredHold(room, now = Date.now()) {
+  if (!isPublicHoldRoom(room)) return false;
+  const expires = Date.parse(room.reservationExpiresAt || room.holdExpiresAt || '');
+  return Number.isFinite(expires) && expires <= now;
+}
+
+function releaseHoldShape(room) {
+  if (!room || typeof room !== 'object') return room;
+  const {
+    tenant,
+    reservedBy,
+    reservedAt,
+    reservationExpiresAt,
+    reservationMode,
+    holdExpiresAt,
+    holdTokenHash,
+    ...rest
+  } = room;
+  return { ...rest, status: 'vacant' };
+}
+
+async function releaseExpiredPublicBookingHolds(dbOrClient) {
+  const ownClient = typeof dbOrClient.connect === 'function';
+  const client = ownClient ? await dbOrClient.connect() : dbOrClient;
+  const released = [];
+  try {
+    if (ownClient) await client.query('BEGIN');
+    const rRes = await client.query(
+      `SELECT value FROM app_data WHERE key='baankarn_rooms_v1' FOR UPDATE`
+    );
+    const rooms = rRes.rows.length && rRes.rows[0].value && typeof rRes.rows[0].value === 'object'
+      ? rRes.rows[0].value
+      : {};
+    let changed = false;
+    for (const [roomId, room] of Object.entries(rooms)) {
+      if (!isExpiredHold(room)) continue;
+      rooms[roomId] = releaseHoldShape(room);
+      released.push(roomId);
+      changed = true;
+      try {
+        await client.query(
+          `UPDATE rooms_v2 SET status='vacant', updated_at=NOW()
+             WHERE room_code=$1 AND status='reserved' AND deleted_at IS NULL`,
+          [roomId]
+        );
+      } catch (err) {
+        if (err.code !== '42P01') throw err;
+      }
+    }
+    if (changed) {
+      await client.query(
+        `INSERT INTO app_data (key, value, updated_by) VALUES ($1, $2, 'booking-hold-sweeper')
+           ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW(), updated_by='booking-hold-sweeper'`,
+        ['baankarn_rooms_v1', JSON.stringify(rooms)]
+      );
+    }
+    if (ownClient) await client.query('COMMIT');
+    return { released };
+  } catch (err) {
+    if (ownClient) await client.query('ROLLBACK').catch(() => {});
+    console.warn('[booking-hold] release expired failed:', err.message);
+    return { released, error: err.message };
+  } finally {
+    if (ownClient) client.release();
+  }
+}
+
+async function publicBookingDepositInfo() {
+  const flags = await features.load(pool);
+  const settings = roomBookingSettings(flags);
+  let payment = null;
+  if (settings.requireDeposit) {
+    const { paymentBlock } = await loadEffectivePaymentBlock();
+    const amount = settings.depositAmount;
+    const bankInfo = paymentBlock.bankInfo && paymentBlock.bankInfo.account
+      ? paymentBlock.bankInfo
+      : null;
+    payment = {
+      amount,
+      promptpayName: paymentBlock.promptpayName || paymentBlock.promptpayDisplayName || null,
+      targetLast4: paymentBlock.promptpayTarget ? String(paymentBlock.promptpayTarget).slice(-4) : null,
+      bankInfo,
+      qrDataUrl: null,
+    };
+    if (paymentBlock.promptpayTarget && Number.isFinite(amount) && amount > 0) {
+      try {
+        const target = normaliseTarget(paymentBlock.promptpayTarget);
+        if (!isDemoTarget(target)) {
+          payment.qrDataUrl = await renderQrDataUrl(target, amount);
+        }
+      } catch { /* display bank/manual transfer fallback */ }
+    }
+    payment.ready = !!(payment.qrDataUrl || bankInfo);
+  }
+  return { settings, payment };
+}
+
+app.get('/api/bookings/public/config', async (_req, res) => {
+  try {
+    await releaseExpiredPublicBookingHolds(pool);
+    const { settings, payment } = await publicBookingDepositInfo();
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({
+      ok: true,
+      booking: {
+        enabled: settings.enabled,
+        requireDeposit: settings.requireDeposit,
+        requireSlip: settings.requireSlip,
+        depositAmount: settings.depositAmount,
+        holdMinutes: settings.holdMinutes,
+        maxBytes: settings.maxBytes,
+        allowedMimes: settings.allowedMimes,
+        payment,
+      },
+    });
+  } catch (err) {
+    console.error('public booking config error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+app.post('/api/bookings/public/hold', sameOrigin, rateLimitBooking, async (req, res) => {
+  const roomId = String(req.body?.roomId || '').trim().slice(0, 32);
+  if (!roomId) return res.status(400).json({ error: 'roomId required', code: 'ROOM_REQUIRED' });
+  let settings, payment;
+  try {
+    ({ settings, payment } = await publicBookingDepositInfo());
+  } catch (err) {
+    console.error('public booking hold config error:', err);
+    return res.status(500).json({ error: 'internal error', code: 'CONFIG_ERROR' });
+  }
+  if (!settings.enabled) {
+    return res.status(503).json({ error: 'room booking is disabled', code: 'ROOM_BOOKING_DISABLED' });
+  }
+  if (!settings.requireDeposit) {
+    return res.json({ ok: true, holdRequired: false, booking: { requireDeposit: false } });
+  }
+  if (settings.requireDeposit && payment && payment.ready === false) {
+    return res.status(503).json({
+      error: 'ยังไม่ได้ตั้งค่าบัญชีรับเงินค่าจอง',
+      code: 'BOOKING_DEPOSIT_PAYMENT_NOT_CONFIGURED',
+      hint: 'ตั้งค่า PromptPay หรือบัญชีธนาคารในหน้า Settings → วิธีรับเงิน',
+    });
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await releaseExpiredPublicBookingHolds(client);
+    const rRes = await client.query(
+      `SELECT value FROM app_data WHERE key='baankarn_rooms_v1' FOR UPDATE`
+    );
+    const rooms = rRes.rows.length && rRes.rows[0].value && typeof rRes.rows[0].value === 'object'
+      ? rRes.rows[0].value
+      : {};
+    let room = rooms[roomId] || null;
+    let v2Room = null;
+    try {
+      const v2 = await client.query(
+        `SELECT room_code, room_type, floor, room_no, rent_price, deposit_price, wifi_fee, status
+           FROM rooms_v2
+          WHERE room_code=$1 AND deleted_at IS NULL
+          FOR UPDATE`,
+        [roomId]
+      );
+      v2Room = v2.rows[0] || null;
+      if (!room && v2Room) room = roomFromV2(v2Room);
+    } catch (err) {
+      if (err.code !== '42P01') throw err;
+    }
+    if (!room) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'ไม่พบห้องนี้', code: 'ROOM_NOT_FOUND' });
+    }
+    if (room.status !== 'vacant' || (v2Room && v2Room.status !== 'vacant')) {
+      await client.query('ROLLBACK');
+      const expiresAt = isPublicHoldRoom(room) ? (room.reservationExpiresAt || null) : null;
+      return res.status(409).json({
+        error: expiresAt ? 'ห้องนี้ถูกล็อกโดยผู้จองก่อนหน้าอยู่' : 'ห้องนี้ไม่ว่างสำหรับจอง',
+        code: expiresAt ? 'ROOM_HELD' : 'ROOM_NOT_VACANT',
+        expiresAt,
+      });
+    }
+    const token = require('crypto').randomBytes(24).toString('base64url');
+    const tokenHash = bookingHoldHash(token);
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + settings.holdMinutes * 60_000);
+    rooms[roomId] = {
+      ...room,
+      id: room.id || roomId,
+      status: 'reserved',
+      reservedBy: `hold:${tokenHash}`,
+      reservedAt: now.toISOString(),
+      reservationExpiresAt: expiresAt.toISOString(),
+      reservationMode: 'public_booking_hold',
+      holdTokenHash: tokenHash,
+    };
+    await client.query(
+      `INSERT INTO app_data (key, value, updated_by) VALUES ($1, $2, 'public-hold')
+         ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW(), updated_by='public-hold'`,
+      ['baankarn_rooms_v1', JSON.stringify(rooms)]
+    );
+    try {
+      await client.query(
+        `UPDATE rooms_v2 SET status='reserved', updated_at=NOW()
+           WHERE room_code=$1 AND status='vacant' AND deleted_at IS NULL`,
+        [roomId]
+      );
+    } catch (err) {
+      if (err.code !== '42P01') throw err;
+    }
+    await client.query('COMMIT');
+    audit(req, 'booking.hold_create', 'room', roomId, {
+      holdMinutes: settings.holdMinutes,
+      expiresAt: expiresAt.toISOString(),
+    }, 'public').catch(() => {});
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({
+      ok: true,
+      holdRequired: true,
+      hold: { token, roomId, expiresAt: expiresAt.toISOString() },
+      booking: {
+        requireDeposit: true,
+        depositAmount: settings.depositAmount,
+        holdMinutes: settings.holdMinutes,
+        payment,
+      },
+    });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('public booking hold error:', err);
+    res.status(500).json({ error: 'internal error', code: 'DB_ERROR' });
+  } finally {
+    client.release();
+  }
+});
+
 app.post('/api/bookings/public', sameOrigin, rateLimitBooking, validateBody(schemas.publicBooking), async (req, res) => {
   const b = req.body;
   // Length / type sanity. Strings only, capped to reasonable lengths to keep
@@ -1080,10 +1371,44 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBooking, validateBody(sche
     message:     str(b.message, 500),
     citizenIdTail:  str(b.citizenIdTail, 4),
     expectedDeposit: b.expectedDeposit != null ? Number(b.expectedDeposit) : null,
+    holdToken: str(b.holdToken, 200),
+    depositSlip: typeof b.depositSlip === 'string' ? b.depositSlip : '',
     agreedTermsVersion: str(b.agreedTermsVersion, 64),
   };
   if (!cleaned.tenantName.trim()) {
     return res.status(400).json({ error: 'tenantName required' });
+  }
+  let bookingSettings, bookingPayment;
+  try {
+    ({ settings: bookingSettings, payment: bookingPayment } = await publicBookingDepositInfo());
+  } catch (err) {
+    console.error('public booking config load error:', err);
+    return res.status(500).json({ error: 'internal error', code: 'CONFIG_ERROR' });
+  }
+  if (!bookingSettings.enabled) {
+    return res.status(503).json({ error: 'room booking is disabled', code: 'ROOM_BOOKING_DISABLED' });
+  }
+  if (bookingSettings.requireDeposit) {
+    if (!cleaned.roomId) {
+      return res.status(400).json({
+        error: 'ต้องเลือกห้องก่อนจองแบบมีค่าจอง',
+        code: 'ROOM_REQUIRED_FOR_BOOKING_DEPOSIT',
+        hint: 'เปิดหน้าห้องว่างแล้วกดจองจากห้องที่ต้องการ เพื่อให้ระบบล็อกห้องได้ถูกต้อง',
+      });
+    }
+    if (bookingPayment && bookingPayment.ready === false) {
+      return res.status(503).json({
+        error: 'ยังไม่ได้ตั้งค่าบัญชีรับเงินค่าจอง',
+        code: 'BOOKING_DEPOSIT_PAYMENT_NOT_CONFIGURED',
+        hint: 'ตั้งค่า PromptPay หรือบัญชีธนาคารในหน้า Settings → วิธีรับเงิน',
+      });
+    }
+    if (bookingSettings.requireSlip && !cleaned.depositSlip) {
+      return res.status(400).json({
+        error: 'กรุณาแนบสลิปค่าจองก่อนส่งคำขอ',
+        code: 'BOOKING_DEPOSIT_SLIP_REQUIRED',
+      });
+    }
   }
   // Sanity-check expected move-in date if supplied — same window as the
   // checkin endpoint so we don't accept bookings for "next year" by typo.
@@ -1126,16 +1451,83 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBooking, validateBody(sche
   const VALID_TYPES = ['standard', 'deluxe', 'suite', 'studio'];
   const wantType = VALID_TYPES.includes(cleaned.roomType) ? cleaned.roomType : 'standard';
   const wantFloor = Number(cleaned.floor) || null;
+  const bookingId = 'BK-PUB-' + require('crypto').randomBytes(6).toString('hex');
+  const holdTokenHash = bookingHoldHash(cleaned.holdToken);
+  let depositSlipFile = null;
+  let depositSlipHash = null;
+  if (bookingSettings.requireDeposit && cleaned.depositSlip) {
+    try {
+      const rawBuf = Buffer.from(String(cleaned.depositSlip).replace(/^data:[^;]+;base64,/, ''), 'base64');
+      if (!rawBuf.length) {
+        return res.status(400).json({ error: 'สลิปค่าจองไม่ถูกต้อง', code: 'INVALID_BOOKING_DEPOSIT_SLIP' });
+      }
+      depositSlipHash = cryptoSvc.hmac(rawBuf);
+      const dupPayment = await pool.query(
+        `SELECT id FROM payments WHERE slip_hash=$1 LIMIT 1`,
+        [depositSlipHash]
+      );
+      if (dupPayment.rows.length) {
+        return res.status(409).json({
+          error: 'สลิปนี้ถูกใช้กับการชำระเงินรายการอื่นแล้ว',
+          code: 'DUPLICATE_BOOKING_DEPOSIT_SLIP',
+        });
+      }
+      try {
+        const dupBooking = await pool.query(
+          `SELECT external_id FROM bookings WHERE deposit_slip_hash=$1 LIMIT 1`,
+          [depositSlipHash]
+        );
+        if (dupBooking.rows.length) {
+          return res.status(409).json({
+            error: 'สลิปนี้ถูกใช้กับการจองก่อนหน้าแล้ว',
+            code: 'DUPLICATE_BOOKING_DEPOSIT_SLIP',
+            bookingId: dupBooking.rows[0].external_id,
+          });
+        }
+      } catch (err) {
+        if (err.code !== '42703') throw err;
+      }
+      depositSlipFile = await storage.saveBase64({
+        pool,
+        category: 'slip',
+        dataUrl: cleaned.depositSlip,
+        refId: bookingId,
+        uploadedBy: `public-booking:${bookingId}`,
+        maxBytes: bookingSettings.maxBytes,
+        allowedMimes: bookingSettings.allowedMimes,
+      });
+    } catch (err) {
+      const msg = String(err.message || '');
+      const isUserFacing = /expected string|unrecognized file type|mime mismatch|mime not allowed|unknown mime|file too large/i.test(msg);
+      return res.status(isUserFacing ? 400 : 500).json({
+        error: isUserFacing ? msg : 'อัปโหลดสลิปค่าจองไม่สำเร็จ กรุณาลองใหม่',
+        code: isUserFacing ? 'INVALID_BOOKING_DEPOSIT_SLIP' : 'BOOKING_DEPOSIT_UPLOAD_FAILED',
+      });
+    }
+  }
   const newBooking = {
-    id: 'BK-PUB-' + require('crypto').randomBytes(6).toString('hex'),
+    id: bookingId,
     name: cleaned.tenantName,
     phone: cleaned.phone,
     wantType,
     wantFloor,
     moveIn: cleaned.checkInDate || null,
     months: 12,
-    deposit: cleaned.expectedDeposit != null && Number.isFinite(cleaned.expectedDeposit)
-      ? cleaned.expectedDeposit : 0,
+    deposit: bookingSettings.requireDeposit
+      ? bookingSettings.depositAmount
+      : (cleaned.expectedDeposit != null && Number.isFinite(cleaned.expectedDeposit)
+          ? cleaned.expectedDeposit : 0),
+    depositRequired: bookingSettings.requireDeposit,
+    bookingFee: bookingSettings.requireDeposit ? bookingSettings.depositAmount : 0,
+    depositStatus: bookingSettings.requireDeposit
+      ? (depositSlipFile ? 'pending_review' : 'awaiting_slip')
+      : 'not_required',
+    depositSlipUrl: depositSlipFile ? depositSlipFile.url : null,
+    depositSlipFileId: depositSlipFile ? depositSlipFile.id : null,
+    depositSlipHash: depositSlipHash || null,
+    holdTokenHash: holdTokenHash || null,
+    holdExpiresAt: null,
+    reservedAt: null,
     status: 'pending',
     createdAt: new Date().toISOString(),
     email: cleaned.email,
@@ -1148,6 +1540,11 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBooking, validateBody(sche
     agreedTermsAt: cleaned.agreedTermsVersion ? new Date().toISOString() : null,
   };
   const client = await pool.connect();
+  const cleanupDepositSlip = async () => {
+    if (depositSlipFile && depositSlipFile.id) {
+      try { await storage.remove(pool, depositSlipFile.id); } catch { /* best effort */ }
+    }
+  };
   try {
     // Read-modify-write inside a transaction with SELECT FOR UPDATE so two
     // simultaneous public submissions can't both see the same list and
@@ -1159,6 +1556,112 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBooking, validateBody(sche
       ['baankarn_bookings_v1']
     );
     const list = (rows.length && Array.isArray(rows[0].value)) ? rows[0].value : [];
+    if (cleaned.roomId) {
+      await releaseExpiredPublicBookingHolds(client);
+      const roomRow = await client.query(
+        `SELECT value FROM app_data WHERE key='baankarn_rooms_v1' FOR UPDATE`
+      );
+      const rooms = roomRow.rows.length && roomRow.rows[0].value && typeof roomRow.rows[0].value === 'object'
+        ? roomRow.rows[0].value
+        : {};
+      let room = rooms[cleaned.roomId] || null;
+      let v2Room = null;
+      try {
+        const v2 = await client.query(
+          `SELECT room_code, room_type, floor, room_no, rent_price, deposit_price, wifi_fee, status
+             FROM rooms_v2
+            WHERE room_code=$1 AND deleted_at IS NULL
+            FOR UPDATE`,
+          [cleaned.roomId]
+        );
+        v2Room = v2.rows[0] || null;
+        if (!room && v2Room) room = roomFromV2(v2Room);
+      } catch (err) {
+        if (err.code !== '42P01') throw err;
+      }
+      if (!room) {
+        await client.query('ROLLBACK');
+        await cleanupDepositSlip();
+        return res.status(404).json({ error: 'ไม่พบห้องนี้', code: 'ROOM_NOT_FOUND' });
+      }
+      const sameHold = bookingSettings.requireDeposit
+        && holdTokenHash
+        && room.reservedBy === `hold:${holdTokenHash}`
+        && !isExpiredHold(room);
+      const vacant = room.status === 'vacant' && (!v2Room || v2Room.status === 'vacant');
+      if (!sameHold && !vacant) {
+        await client.query('ROLLBACK');
+        await cleanupDepositSlip();
+        return res.status(409).json({
+          error: isPublicHoldRoom(room) ? 'ห้องนี้ถูกล็อกโดยผู้จองก่อนหน้าอยู่' : 'ห้องนี้ไม่ว่างสำหรับจอง',
+          code: isPublicHoldRoom(room) ? 'ROOM_HELD' : 'ROOM_NOT_VACANT',
+          expiresAt: isPublicHoldRoom(room) ? (room.reservationExpiresAt || null) : null,
+        });
+      }
+      if (bookingSettings.requireDeposit && !sameHold && holdTokenHash) {
+        // The browser had a hold token, but it no longer owns this room.
+        // Surface a clean conflict instead of silently creating a booking
+        // on a room another person may now be paying for.
+        await client.query('ROLLBACK');
+        await cleanupDepositSlip();
+        return res.status(409).json({
+          error: 'เวลาล็อกห้องหมดแล้ว กรุณาเลือกห้องอีกครั้ง',
+          code: 'BOOKING_HOLD_EXPIRED',
+        });
+      }
+      const reservedAt = new Date().toISOString();
+      newBooking.reservedAt = reservedAt;
+      newBooking.holdExpiresAt = sameHold ? (room.reservationExpiresAt || null) : null;
+      newBooking.roomId = cleaned.roomId;
+      newBooking.assignedRoomId = cleaned.roomId;
+      rooms[cleaned.roomId] = {
+        ...room,
+        id: room.id || cleaned.roomId,
+        status: 'reserved',
+        tenant: {
+          name: cleaned.tenantName,
+          phone: cleaned.phone || '',
+          email: cleaned.email || '',
+          occupation: '',
+          score: 'A',
+          since: new Date().toISOString().slice(0, 10),
+        },
+        reservedBy: newBooking.id,
+        reservedAt,
+        reservationMode: bookingSettings.requireDeposit ? 'public_booking_deposit' : 'public_booking',
+        depositStatus: newBooking.depositStatus,
+      };
+      delete rooms[cleaned.roomId].reservationExpiresAt;
+      delete rooms[cleaned.roomId].holdExpiresAt;
+      delete rooms[cleaned.roomId].holdTokenHash;
+      await client.query(
+        `INSERT INTO app_data (key, value, updated_by) VALUES ($1, $2, 'public-booking')
+           ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW(), updated_by='public-booking'`,
+        ['baankarn_rooms_v1', JSON.stringify(rooms)]
+      );
+      try {
+        if (!sameHold) {
+          const reserveV2 = await client.query(
+            `UPDATE rooms_v2 SET status='reserved', updated_at=NOW()
+               WHERE room_code=$1 AND status='vacant' AND deleted_at IS NULL`,
+            [cleaned.roomId]
+          );
+          if (v2Room && reserveV2.rowCount !== 1) {
+            throw Object.assign(new Error('room no longer vacant'), { code: 'ROOM_NOT_VACANT' });
+          }
+        }
+      } catch (err) {
+        if (err.code === '42P01') {
+          // legacy deploy without rooms_v2: the JSONB reservation above is enough
+        } else if (err.code === 'ROOM_NOT_VACANT') {
+          await client.query('ROLLBACK');
+          await cleanupDepositSlip();
+          return res.status(409).json({ error: 'ห้องนี้ไม่ว่างสำหรับจอง', code: 'ROOM_NOT_VACANT' });
+        } else {
+          throw err;
+        }
+      }
+    }
     list.unshift(newBooking);
     // Cap at 500 newest entries to prevent unbounded JSONB growth.
     const capped = list.slice(0, 500);
@@ -1179,10 +1682,13 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBooking, validateBody(sche
             (external_id, name, phone, email, want_type, want_floor,
              move_in, months, deposit, status, source, message, room_id,
              citizen_id_tail, citizen_id_image_front_id, expected_deposit,
+             deposit_required, booking_fee, deposit_status, deposit_slip_file_id,
+             deposit_slip_hash, hold_token_hash, hold_expires_at, reserved_at,
              agreed_terms_at, agreed_terms_version)
           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'pending','public-form',$10,$11,
                   $12,$13,$14,
-                  CASE WHEN $15::text IS NOT NULL THEN NOW() ELSE NULL END, $15)
+                  $15,$16,$17,$18,$19,$20,$21,$22,
+                  CASE WHEN $23::text IS NOT NULL THEN NOW() ELSE NULL END, $23)
           ON CONFLICT (external_id) DO NOTHING`,
         [
           newBooking.id, newBooking.name, newBooking.phone || null,
@@ -1191,10 +1697,26 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBooking, validateBody(sche
           cleaned.message || null, cleaned.roomId || null,
           cleaned.citizenIdTail || null, frontFileId,
           cleaned.expectedDeposit != null && Number.isFinite(cleaned.expectedDeposit) ? cleaned.expectedDeposit : null,
+          bookingSettings.requireDeposit,
+          newBooking.bookingFee || 0,
+          newBooking.depositStatus || null,
+          newBooking.depositSlipFileId || null,
+          newBooking.depositSlipHash || null,
+          newBooking.holdTokenHash || null,
+          newBooking.holdExpiresAt || null,
+          newBooking.reservedAt || null,
           cleaned.agreedTermsVersion || null,
         ]
       );
     } catch (err) {
+      if (err.code === '23505' && /deposit_slip_hash/.test(String(err.constraint || err.detail || ''))) {
+        await client.query('ROLLBACK').catch(() => {});
+        await cleanupDepositSlip();
+        return res.status(409).json({
+          error: 'สลิปนี้ถูกใช้กับการจองก่อนหน้าแล้ว',
+          code: 'DUPLICATE_BOOKING_DEPOSIT_SLIP',
+        });
+      }
       // Older deployments (pre-migration) fall back to the legacy column set.
       if (err.code === '42703') {
         try {
@@ -1220,7 +1742,12 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBooking, validateBody(sche
     }
     await client.query('COMMIT');
     audit(req, 'booking.public_create', 'booking', newBooking.id,
-      { phone: cleaned.phone, roomId: cleaned.roomId, wantType, wantFloor },
+      {
+        phone: cleaned.phone, roomId: cleaned.roomId, wantType, wantFloor,
+        depositRequired: bookingSettings.requireDeposit,
+        bookingFee: newBooking.bookingFee,
+        depositStatus: newBooking.depositStatus,
+      },
       `public:${cleaned.phone || 'anon'}`).catch(() => {});
 
     // Multi-channel owner notify (LINE → email fallback) + log to
@@ -1229,13 +1756,14 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBooking, validateBody(sche
       const flags = await features.load(pool);
       notifier.notifyOwner({ pool, features: flags }, {
         subject: '📋 ผู้เช่าใหม่ขอจอง',
-        text: `ชื่อ: ${cleaned.tenantName}\nโทร: ${cleaned.phone || '-'}\nห้อง: ${cleaned.roomId || '-'}\nวันเข้าพัก: ${cleaned.checkInDate || '-'}\nรหัสการจอง: ${newBooking.id}`,
+        text: `ชื่อ: ${cleaned.tenantName}\nโทร: ${cleaned.phone || '-'}\nห้อง: ${cleaned.roomId || '-'}\nวันเข้าพัก: ${cleaned.checkInDate || '-'}\nค่าจอง: ${newBooking.bookingFee ? `฿${Number(newBooking.bookingFee).toLocaleString('th-TH')}` : '-'} (${newBooking.depositStatus || 'not_required'})\nรหัสการจอง: ${newBooking.id}`,
       }).catch(() => {});
     } catch { /* ignore */ }
 
     res.json({ ok: true, booking: newBooking });
   } catch (err) {
     try { await client.query('ROLLBACK'); } catch { /* already rolled back */ }
+    await cleanupDepositSlip();
     console.error('public booking error:', err);
     res.status(500).json({ error: 'internal error' });
   } finally {
@@ -11160,6 +11688,7 @@ app.use('/api', (req, res) => {
 // is independent so we can age out audit aggressively while keeping
 // notifications shorter.
 let _prunerInterval = null;
+let _bookingHoldInterval = null;
 function startAuditPruner() {
   const prune = async () => {
     const stats = {};
@@ -11205,6 +11734,10 @@ function startAuditPruner() {
                SELECT 1 FROM payments p
                 WHERE p.slip_url = '/files/' || file_uploads.id::text
              )
+             AND NOT EXISTS (
+               SELECT 1 FROM bookings b
+                WHERE b.deposit_slip_file_id = file_uploads.id
+             )
            LIMIT 50`
       );
       let cleaned = 0;
@@ -11229,6 +11762,23 @@ function startAuditPruner() {
 function stopAuditPruner() {
   if (_prunerInterval) clearInterval(_prunerInterval);
   _prunerInterval = null;
+}
+
+function startBookingHoldSweeper() {
+  const sweep = async () => {
+    const out = await releaseExpiredPublicBookingHolds(pool);
+    if (out.released && out.released.length) {
+      console.log(`[booking-hold] released expired holds: ${out.released.join(',')}`);
+    }
+  };
+  sweep();
+  _bookingHoldInterval = setInterval(sweep, 60 * 1000);
+  _bookingHoldInterval.unref();
+}
+
+function stopBookingHoldSweeper() {
+  if (_bookingHoldInterval) clearInterval(_bookingHoldInterval);
+  _bookingHoldInterval = null;
 }
 
 migrate()
@@ -11389,6 +11939,7 @@ migrate()
       console.warn('[server] background jobs disabled via DISABLE_BACKGROUND_JOBS=1');
     } else {
       startAuditPruner();
+      startBookingHoldSweeper();
       scheduler.start(pool);
       notifQueue.start(pool, () => features.load(pool));
     }
@@ -11399,6 +11950,7 @@ migrate()
       console.log(`[server] ${signal} received, shutting down gracefully`);
       // Cancel the background pruner so its DELETE doesn't race with pool.end()
       stopAuditPruner();
+      stopBookingHoldSweeper();
       scheduler.stop();
       notifQueue.stop();
       server.close(() => {

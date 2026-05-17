@@ -248,6 +248,8 @@ schemas.publicBooking = z.object({
   citizenIdTail: z.string().regex(/^\d{4}$/, '4 ตัวท้ายของบัตร').optional(),
   citizenIdImageFront: z.string().min(20).max(3_000_000).optional(),
   expectedDeposit: z.coerce.number().nonnegative().max(1_000_000).optional(),
+  holdToken: z.string().max(200).optional(),
+  depositSlip: z.string().min(20).max(3_000_000).optional(),
   // Legal trail: when the applicant ticks the "I agree to terms" checkbox,
   // the client sends the version string of the displayed T&C document.
   // Version is just an opaque label — a future revision can still match

@@ -773,6 +773,17 @@ async function migrate(pool, opts = {}) {
     ALTER TABLE bookings ADD COLUMN IF NOT EXISTS citizen_id_tail TEXT;
     ALTER TABLE bookings ADD COLUMN IF NOT EXISTS citizen_id_image_front_id BIGINT REFERENCES file_uploads(id) ON DELETE SET NULL;
     ALTER TABLE bookings ADD COLUMN IF NOT EXISTS expected_deposit NUMERIC(10,2);
+    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS deposit_required BOOLEAN DEFAULT FALSE;
+    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS booking_fee NUMERIC(10,2) DEFAULT 0;
+    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS deposit_status TEXT;
+    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS deposit_slip_file_id BIGINT REFERENCES file_uploads(id) ON DELETE SET NULL;
+    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS deposit_slip_hash TEXT;
+    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS hold_token_hash TEXT;
+    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS hold_expires_at TIMESTAMPTZ;
+    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS reserved_at TIMESTAMPTZ;
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_bookings_deposit_slip_hash
+      ON bookings(deposit_slip_hash)
+      WHERE deposit_slip_hash IS NOT NULL;
     -- Legal trail: the timestamp at which the applicant clicked through the
     -- terms-and-conditions checkbox + the version of those terms (so if the
     -- terms text changes later we know which version they accepted).

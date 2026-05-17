@@ -18,6 +18,10 @@ const FEATURE_HELP = {
     'ใช้กับรูปห้อง ลายเซ็น สัญญา และเอกสารยืนยันตัวตน',
     'ปิดแล้วไฟล์เดิมยังอยู่ แต่ admin/tenant จะอัปโหลดเพิ่มไม่ได้',
   ],
+  roomBooking: [
+    'ควบคุมหน้าจองสาธารณะ: เปิดค่าจอง, จำนวนเงิน, เวลาล็อกห้อง และการบังคับแนบสลิป',
+    'ถ้าเปิดมัดจำ ผู้จองต้องเลือกห้องจริง ระบบจะล็อกห้องชั่วคราวตามเวลาที่ตั้งไว้ และปล่อยอัตโนมัติถ้าไม่ส่งจองสำเร็จ',
+  ],
   lateFee: [
     'ใช้คำนวณค่าปรับจากบิลค้างชำระจริงใน backend',
     'ถ้าปิด ระบบจะไม่เพิ่มค่าปรับในบิลใหม่ แม้บิลก่อนหน้าจะ overdue',
@@ -468,6 +472,21 @@ function PageFeatures({ setToast, embedded = false, currentUser = null }) {
           title="อัปโหลดรูปภาพ"
           desc="รูปห้อง / ลายเซ็นสัญญา / สำเนาบัตร">
           <Field id="photoUpload" field="maxBytes" label="ขนาดสูงสุด (bytes)" type="number" />
+        </Row>
+        <Row id="roomBooking"
+          title="ค่าจองห้องสาธารณะ"
+          desc="ตั้งค่ามัดจำ/สลิป และเวลาล็อกห้องชั่วคราวก่อนผู้จองส่งคำขอสำเร็จ">
+          <ToggleField id="roomBooking" field="requireDeposit"
+            label="บังคับเก็บค่าจองก่อนส่งคำขอ"
+            features={features} setField={setField}
+            disabled={!canEdit || busy} disabledReason={readOnlyReason} />
+          <ToggleField id="roomBooking" field="requireSlip"
+            label="ต้องแนบสลิปค่าจอง"
+            features={features} setField={setField}
+            disabled={!canEdit || busy} disabledReason={readOnlyReason} />
+          <Field id="roomBooking" field="depositAmount" label="ค่าจอง (บาท)" type="number" />
+          <Field id="roomBooking" field="holdMinutes" label="ล็อกห้องชั่วคราว (นาที)" type="number" />
+          <Field id="roomBooking" field="maxBytes" label="ขนาดสลิปสูงสุด (bytes)" type="number" />
         </Row>
       </Card>
 
