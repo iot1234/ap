@@ -1104,6 +1104,18 @@ test('slip upload returns structured verifier results to tenant/public UIs', () 
     'server notice must explain receiver mismatches');
   assert.match(server, /attempts:\s*Array\.isArray\(verifyResult\?\.attempts\)/,
     'server notice must include provider attempt trail');
+  assert.match(server, /TRANSIENT_CODES\.has\(verifyResult\.code\)[\s\S]{0,200}initialStatus = 'pending'/,
+    'transient verifier/provider failures must stay pending for manual admin review');
+  assert.match(server, /ระบบตรวจสลิปอัตโนมัติยังไม่สามารถยืนยันผลได้ในขณะนี้[\s\S]{0,500}บิลจะยังไม่ถูกทำเครื่องหมายว่าชำระแล้วจนกว่าแอดมินจะอนุมัติ/,
+    'tenant-facing verifier outage notice must clearly say the bill is not paid yet');
+  assert.match(server, /กรุณาติดต่อแอดมิน\/สำนักงานพร้อมเลขบิลและรหัสอ้างอิง/,
+    'tenant-facing verifier outage notice must tell the tenant to contact admin/office');
+  assert.match(server, /สลิปถูกส่งให้แอดมิน\/สำนักงานตรวจแล้ว/,
+    'tenant acknowledgement must tell the tenant the slip is in the admin queue');
+  assert.match(server, /พร้อมแจ้งบิล \$\{billNo\}/,
+    'tenant acknowledgement must tell the tenant to contact admin/office with bill details');
+  assert.match(server, /ระบบตรวจสลิปอัตโนมัติยังยืนยันไม่ได้ ให้แอดมินเปิด \/admin#payments ตรวจสลิปด้วยมือ/,
+    'owner notification must tell admins how to handle verifier outages');
   assert.match(server, /const verifyDetailLines = \[/,
     'owner payment notification must build a detailed verifier section');
   assert.match(server, /ยอดที่บริการอ่านจากสลิป/,
