@@ -154,7 +154,6 @@ function PagePricing({ config, setConfig, rooms, addActivity, setToast, embedded
   const [tab, setTab] = useState('rates');
   const [draft, setDraft] = useState(config);
   const [confirmReset, setConfirmReset] = useState(false);
-  const [confirmSave, setConfirmSave] = useState(false);
   const [saving, setSaving] = useState(false);
   const lastConfigJsonRef = React.useRef(JSON.stringify(config));
 
@@ -222,7 +221,6 @@ function PagePricing({ config, setConfig, rooms, addActivity, setToast, embedded
       lastConfigJsonRef.current = nextJson;
       setDraft(next);
       setConfig(next);
-      setConfirmSave(false);
       if (options.closeReset) setConfirmReset(false);
       addActivity && addActivity({
         icon: options.activityIcon || '💰',
@@ -256,10 +254,6 @@ function PagePricing({ config, setConfig, rooms, addActivity, setToast, embedded
     }
   }
 
-  const commitPricingDraft = async () => {
-    const next = clonePricingValue(draft);
-    await savePricingDraft(next);
-  };
   const handleSave = async () => {
     if (review.issues.length) {
       setToast && setToast({
@@ -269,10 +263,6 @@ function PagePricing({ config, setConfig, rooms, addActivity, setToast, embedded
           description: review.issues.slice(0, 5).join('\n'),
         },
       });
-      return;
-    }
-    if (review.warnings.length || review.impact.length) {
-      setConfirmSave(true);
       return;
     }
     const next = clonePricingValue(draft);
@@ -394,52 +384,6 @@ function PagePricing({ config, setConfig, rooms, addActivity, setToast, embedded
       {tab === 'utils'    && <TabUtils    draft={draft} updatePath={updatePath} />}
       {tab === 'discount' && <TabDiscount draft={draft} updatePath={updatePath} />}
       {tab === 'fees'     && <TabFees     draft={draft} updatePath={updatePath} />}
-
-      <Modal
-        open={confirmSave}
-        onClose={() => setConfirmSave(false)}
-        title="ตรวจสอบก่อนบันทึกการตั้งค่าราคา"
-        footer={
-          <>
-            <Btn variant="ghost" onClick={() => setConfirmSave(false)}>ยกเลิก</Btn>
-            <Btn variant="primary" tone="finance" icon="✓" onClick={commitPricingDraft} disabled={saving || review.issues.length > 0}>
-              {saving ? 'กำลังบันทึก...' : 'ยืนยันบันทึกราคา'}
-            </Btn>
-          </>
-        }
-      >
-        <div style={{ fontSize: 13.5, color: C.ink2, lineHeight: 1.65 }}>
-          {review.issues.length > 0 ? (
-            <div style={{ padding: 12, background: C.dangerSoft, border: `1px solid ${C.danger}44`, borderRadius: 8, color: C.dangerInk }}>
-              <b>ยังบันทึกไม่ได้</b>
-              {review.issues.slice(0, 8).map((it, idx) => <div key={idx}>• {it}</div>)}
-            </div>
-          ) : (
-            <>
-              <div style={{ marginBottom: 10 }}>
-                ระบบจะบันทึกค่าราคากลางชุดนี้และนำไปใช้กับห้องว่าง สัญญาใหม่ และบิลใหม่ที่ยังไม่ได้ lock ราคาเดิม
-              </div>
-              {review.warnings.length > 0 ? (
-                <div style={{ marginBottom: 10, padding: 12, background: C.warningSoft, border: `1px solid ${C.warning}44`, borderRadius: 8, color: C.warningInk }}>
-                  <b>คำเตือน</b>
-                  {review.warnings.map((it, idx) => <div key={idx}>• {it}</div>)}
-                </div>
-              ) : null}
-              {review.impact.length > 0 ? (
-                <div style={{ padding: 12, background: C.surfaceAlt, border: `1px solid ${C.borderSoft}`, borderRadius: 8 }}>
-                  <b>ตัวอย่างห้องที่ค่าเช่าตามสูตรจะเปลี่ยน</b>
-                  {review.impact.slice(0, 8).map((it) => (
-                    <div key={it.id}>
-                      ห้อง {it.id}: {fmtMoney(it.before)} → {fmtMoney(it.after)}
-                    </div>
-                  ))}
-                  {review.impact.length > 8 ? <div>…อีก {review.impact.length - 8} ห้อง</div> : null}
-                </div>
-              ) : null}
-            </>
-          )}
-        </div>
-      </Modal>
 
       {/* Reset confirm */}
       <Modal

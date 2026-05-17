@@ -273,10 +273,11 @@ test('pricing reset only resets pricing sections', () => {
     'Pricing draft reset must not wipe unrelated config sections');
 });
 
-test('pricing save validates issues and shows impact review before commit', () => {
+test('pricing save validates issues, shows impact review, and persists from one save path', () => {
   const fs = require('node:fs');
   const path = require('node:path');
   const pricing = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-pricing.jsx'), 'utf8');
+  const settings = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-settings.jsx'), 'utf8');
   const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
 
   assert.match(pricing, /function buildPricingReview\(draft, current, rooms\)/,
@@ -291,12 +292,18 @@ test('pricing save validates issues and shows impact review before commit', () =
     'pricing page must save baankarn_config_v1 directly instead of relying on background localStorage sync');
   assert.match(pricing, /const handleSave = async \(\)/,
     'pricing save button must wait for server persistence before showing success');
+  assert.match(pricing, /await savePricingDraft\(next, \{/,
+    'pricing save must persist with the same one-click path even when warnings are visible');
   assert.match(pricing, /const handleReset = async \(\)/,
     'pricing reset must also persist through the server before reporting success');
-  assert.match(pricing, /setConfirmSave\(true\)/,
-    'pricing page must open a confirmation modal when warnings or room impact exist');
-  assert.match(pricing, /review\.impact\.slice\(0, 8\)/,
-    'pricing confirmation must show examples of affected rooms');
+  assert.doesNotMatch(pricing, /setConfirmSave\(true\)|confirmSave|commitPricingDraft/,
+    'pricing page must not create a second confirmation-save path');
+  assert.match(pricing, /review\.impact\.slice\(0, 5\)/,
+    'pricing inline review must show examples of affected rooms before the single save button is clicked');
+  assert.match(settings, /tab === 'pricing' \? \([\s\S]{0,160}<Pill color="finance">/,
+    'settings page must not show the parent save button while embedded pricing manages its own draft');
+  assert.match(settings, /lastConfigJsonRef[\s\S]{0,520}prevJson === lastConfigJsonRef\.current \? safeClone\(config\) : prev/,
+    'settings draft must follow child pricing saves so a later settings save cannot restore stale prices');
   assert.match(pricing, /if \(!cur\[parts\[i\]\] \|\| typeof cur\[parts\[i\]\] !== 'object'\) cur\[parts\[i\]\] = \{\}/,
     'pricing updatePath must create missing nested config sections instead of crashing');
   assert.match(server, /configWarnings = warnings/,

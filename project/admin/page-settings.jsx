@@ -17,6 +17,18 @@ function PageSettings({ rooms, setRooms, config, setConfig, bookings, setBooking
   const [draft, setDraft] = useState(() => safeClone(config));
   const [confirmReset, setConfirmReset] = useState(false);
   const [saving, setSaving] = useState(false);
+  const lastConfigJsonRef = React.useRef(safeFingerprint(config));
+
+  React.useEffect(() => {
+    const nextJson = safeFingerprint(config);
+    if (nextJson === lastConfigJsonRef.current) return;
+    setDraft(prev => {
+      const prevJson = safeFingerprint(prev);
+      if (!prevJson) return safeClone(config);
+      return prevJson === lastConfigJsonRef.current ? safeClone(config) : prev;
+    });
+    lastConfigJsonRef.current = nextJson;
+  }, [config]);
 
   // Try-cloned dirty check. If either side fails to stringify (extremely
   // rare — only happens if rogue code injected a DOM/event), fall back to
@@ -69,6 +81,14 @@ function PageSettings({ rooms, setRooms, config, setConfig, bookings, setBooking
   function safeClone(v) {
     try { return JSON.parse(JSON.stringify(v)); }
     catch { return {}; }
+  }
+  function safeFingerprint(v) {
+    try {
+      const out = JSON.stringify(v);
+      return typeof out === 'string' ? out : '';
+    } catch {
+      return '';
+    }
   }
 
   const handleSave = async () => {
@@ -133,7 +153,9 @@ function PageSettings({ rooms, setRooms, config, setConfig, bookings, setBooking
     setTimeout(() => location.reload(), 1200);
   };
 
-  const headerActions = tab === 'bookingDeposit' ? (
+  const headerActions = tab === 'pricing' ? (
+    <Pill color="finance">บันทึกจากกล่องตั้งราคาด้านล่าง</Pill>
+  ) : tab === 'bookingDeposit' ? (
     <Pill color="rooms">บันทึกจากกล่องจอง/มัดจำด้านล่าง</Pill>
   ) : (
     <>
