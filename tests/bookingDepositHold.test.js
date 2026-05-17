@@ -176,6 +176,14 @@ test('public booking page and admin features expose deposit controls', () => {
     'public page must render a vacant-room picker');
   assert.match(booking, /function selectBookingRoom/,
     'public page must bind room selection to the booking form');
+  assert.match(booking, /suppressAutoHoldForRoom/,
+    'public page must prevent failed holds from auto-retrying in a reload loop');
+  assert.match(booking, /loadAvailableRooms\(\{ autoHold: false \}\)/,
+    'public page must refresh room inventory after hold conflicts without immediately re-holding the same room');
+  assert.match(booking, /AbortController/,
+    'public page must timeout room inventory loading instead of leaving the picker stuck forever');
+  assert.match(booking, /roomPickerRetryBtn/,
+    'public page must offer a manual retry when room inventory loading fails');
   assert.match(booking, /\/api\/bookings\/public\/hold/,
     'public page must create a room hold');
   assert.match(booking, /requestRoomHold\(room\.id\)/,
