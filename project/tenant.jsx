@@ -1921,7 +1921,8 @@ function PaymentsView({ locale, payments, syncErrors, goto }) {
   };
   return (
     <div className="anim-in">
-      <SectionHeader title={t('paymentHistory')} subtitle={t('paymentHistorySub')} />
+      <SectionHeader title={t('paymentHistory')}
+        subtitle={`${t('filterAll')} ${items.length} · ${t('paymentPending')} ${counts.pending}`} />
       {/* Filter chips render unconditionally so the content below them
           doesn't shift up when the payments list arrives from the API.
           Counts read as "ทั้งหมด 0" until data lands — same pattern bills /
