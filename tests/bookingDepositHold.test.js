@@ -90,6 +90,10 @@ test('public booking deposit requires a room, a slip, and deduplicates slips', (
     'booking rows must snapshot the minimum booking-fee policy');
   assert.match(server, /depositCreditAmount = bookingSettings\.requireDeposit && bookingSettings\.applyBookingFeeToDeposit/,
     'public booking must estimate the deposit credit when the policy is enabled');
+  assert.match(server, /function bookingDepositStatus\(settings, hasSlip\)/,
+    'deposit status must be centralised so no-slip booking deposits get a clear state');
+  assert.match(server, /settings\.requireSlip \? 'awaiting_slip' : 'manual_review'/,
+    'when slips are optional, deposit bookings must be marked for manual review, not waiting for a slip');
 });
 
 test('rejected public booking reservations release their room lock', () => {
@@ -153,6 +157,8 @@ test('public booking page and admin features expose deposit controls', () => {
     'public page must explain whether the booking fee is credited to deposit');
   assert.match(adminBookings, /depositStatusLabel/,
     'admin booking page must show booking deposit status');
+  assert.match(adminBookings, /manual_review/,
+    'admin booking page must label no-slip deposit bookings as manual review');
   assert.match(adminBookings, /depositSlipUrl/,
     'admin booking detail must link the deposit slip when present');
   assert.match(adminBookings, /depositBalanceDue/,

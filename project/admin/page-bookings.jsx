@@ -179,6 +179,7 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
     verified: 'ยืนยันแล้ว',
     rejected: 'สลิปไม่ผ่าน',
     awaiting_slip: 'รอสลิป',
+    manual_review: 'ตรวจด้วยมือ',
     not_required: 'ไม่ต้องมัดจำ',
   })[s] || s || '—';
 
@@ -468,6 +469,7 @@ function BookingDetail({ b }) {
     verified: 'ยืนยันสลิปแล้ว',
     rejected: 'สลิปไม่ผ่าน',
     awaiting_slip: 'รอสลิป',
+    manual_review: 'ตรวจด้วยมือ',
     not_required: 'ไม่ต้องมัดจำ',
   })[s] || s || '—';
 

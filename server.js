@@ -1104,6 +1104,12 @@ function roomBookingSettings(flags) {
   };
 }
 
+function bookingDepositStatus(settings, hasSlip) {
+  if (!settings || !settings.requireDeposit) return 'not_required';
+  if (hasSlip) return 'pending_review';
+  return settings.requireSlip ? 'awaiting_slip' : 'manual_review';
+}
+
 function bookingHoldHash(token) {
   if (!token || typeof token !== 'string') return null;
   return cryptoSvc.hmac(`booking-hold:${token}`);
@@ -1539,9 +1545,7 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBooking, validateBody(sche
     depositCreditAmount: 0,
     depositBalanceDue: null,
     contractDepositEstimate: null,
-    depositStatus: bookingSettings.requireDeposit
-      ? (depositSlipFile ? 'pending_review' : 'awaiting_slip')
-      : 'not_required',
+    depositStatus: bookingDepositStatus(bookingSettings, !!depositSlipFile),
     depositSlipUrl: depositSlipFile ? depositSlipFile.url : null,
     depositSlipFileId: depositSlipFile ? depositSlipFile.id : null,
     depositSlipHash: depositSlipHash || null,
