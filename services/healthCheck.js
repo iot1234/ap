@@ -514,24 +514,40 @@ async function checkFeatureDependencies(features, pool) {
         fix: `ตั้ง ${missing.map(labelKeys).join(', ')} ใน Settings → Secrets หรือเอาชื่อนี้ออกจาก providers`,
       });
     }
-    // Receiver-account match needs PROMPTPAY_TARGET to be set — without it
-    // we can't safely auto-accept (any slip paid to ANY account would pass
-    // amount-only check).
-    let promptpayTarget = secrets.get('PROMPTPAY_TARGET');
-    if (!promptpayTarget && pool) {
+    // Receiver-account match needs at least one configured receiver target.
+    // PromptPay is ideal for QR, but bank transfer and TrueMoney Wallet are
+    // valid manual receivers too. Keep this aligned with server.js
+    // paymentBlockReceiverTargets() so health diagnostics match upload
+    // behaviour.
+    const receiverTargets = [];
+    const addReceiverDigits = (value) => {
+      const digits = String(value || '').replace(/[^0-9]/g, '');
+      if (digits.length >= 4) receiverTargets.push(digits);
+    };
+    addReceiverDigits(secrets.get('PROMPTPAY_TARGET'));
+    if (pool) {
       try {
         const cfgQ = await pool.query(
           `SELECT value FROM app_data WHERE key='baankarn_config_v1' LIMIT 1`
         );
         const cfg = cfgQ.rows[0]?.value || {};
-        promptpayTarget = cfg?.payment?.promptpay || cfg?.payment?.promptpayTarget || null;
+        addReceiverDigits(cfg?.payment?.promptpay || cfg?.payment?.promptpayTarget || null);
+        addReceiverDigits(cfg?.payment?.bankAcc || null);
+        if (cfg?.payment?.truemoney === true) {
+          addReceiverDigits(
+            cfg?.payment?.truemoneyPhone
+            || cfg?.payment?.trueMoneyPhone
+            || cfg?.payment?.walletPhone
+            || null
+          );
+        }
       } catch { /* keep env fallback result */ }
     }
-    if (ready.length > 0 && !promptpayTarget) {
+    if (ready.length > 0 && receiverTargets.length === 0) {
       warnings.push({
         flag: 'slipUpload.autoVerify',
-        issue: 'autoVerify เปิด แต่ PROMPTPAY_TARGET ไม่ตั้ง — auto-verify ไม่สามารถตรวจสอบบัญชีปลายทาง',
-        fix: 'ตั้ง PromptPay ใน Settings → การชำระเงิน หรือ PROMPTPAY_TARGET ใน Secrets เพื่อให้ระบบยืนยันว่าโอนเข้าบัญชีหอพัก',
+        issue: 'autoVerify เปิด แต่ยังไม่มี PromptPay/บัญชีธนาคาร/TrueMoney Wallet ที่ตรวจเป็นปลายทางรับเงินได้ — auto-verify ไม่สามารถตรวจสอบบัญชีปลายทาง',
+        fix: 'ตั้ง PromptPay, บัญชีธนาคาร หรือ TrueMoney Wallet ใน Settings → การชำระเงิน เพื่อให้ระบบยืนยันว่าโอนเข้าบัญชีหอพัก',
       });
     }
   }

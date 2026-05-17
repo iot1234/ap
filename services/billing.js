@@ -410,9 +410,10 @@ function buildUtilityItem(label, usage, rate, amount) {
 
 /**
  * Extract a unified payment block from config.payment so PDFs and tenant
- * portal both see the same shape. Includes PromptPay (primary), bank transfer
- * details, and the toggles for LINE Pay / TrueMoney / credit card so they can
- * be advertised on the invoice even though we don't process them in-app.
+ * portal both see the same shape. Includes PromptPay QR, bank transfer,
+ * TrueMoney Wallet receiver details, and other offline/advertised methods.
+ * TrueMoney is manual-only: the tenant transfers to the configured wallet
+ * phone and uploads a slip for admin/auto-verifier handling.
  */
 function buildPaymentBlock(config) {
   const p = (config && config.payment) || {};
@@ -423,16 +424,38 @@ function buildPaymentBlock(config) {
     account: p.bankAcc || '',
     name: p.bankName || '',
   } : null;
+  const trueMoneyPhone = String(p.truemoneyPhone || p.trueMoneyPhone || p.walletPhone || '')
+    .replace(/[\s-]/g, '');
+  const trueMoneyReady = p.truemoney === true && /^0\d{9}$/.test(trueMoneyPhone);
+  const walletInfo = trueMoneyReady ? {
+    provider: 'TrueMoney Wallet',
+    phone: trueMoneyPhone,
+    name: p.truemoneyName || p.trueMoneyName || p.bankName || '',
+    note: p.truemoneyNote || p.trueMoneyNote || 'โอนผ่าน TrueMoney Wallet แล้วแนบสลิปในระบบ',
+  } : null;
   const methods = [];
   if (promptpayTarget) methods.push({ key: 'promptpay', label: 'PromptPay', enabled: true });
   if (bank && bank.account) methods.push({ key: 'bank', label: `${bank.bank} • ${bank.account}`, enabled: true });
   if (p.linePay)    methods.push({ key: 'linePay',    label: 'LINE Pay',          enabled: true });
-  if (p.truemoney)  methods.push({ key: 'truemoney',  label: 'TrueMoney Wallet',  enabled: true });
+  if (p.truemoney) {
+    methods.push({
+      key: 'truemoney',
+      label: walletInfo ? `TrueMoney Wallet • ${walletInfo.phone}` : 'TrueMoney Wallet (ต้องตั้งเบอร์)',
+      enabled: !!walletInfo,
+      provider: 'TrueMoney Wallet',
+      phone: walletInfo ? walletInfo.phone : '',
+      name: walletInfo ? walletInfo.name : '',
+      note: walletInfo ? walletInfo.note : '',
+      requiresSlip: true,
+      manualOnly: true,
+    });
+  }
   if (p.creditCard) methods.push({ key: 'creditCard', label: 'บัตรเครดิต/เดบิต', enabled: true });
   return {
     promptpayTarget,
     promptpayName,
     bankInfo: bank,
+    walletInfo,
     paymentMethods: methods,
   };
 }

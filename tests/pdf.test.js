@@ -112,6 +112,7 @@ test('renderBillPdf with paymentMethods list renders without throwing', async ()
       { key: 'promptpay', label: 'PromptPay', enabled: true },
       { key: 'bank', label: 'SCB 123-456789-0', enabled: true },
       { key: 'linePay', label: 'LINE Pay', enabled: true },
+      { key: 'truemoney', label: 'TrueMoney Wallet • 0812345678', enabled: true },
     ],
   }, sink);
   assert.ok(sink.getBuffer().length > 1000);

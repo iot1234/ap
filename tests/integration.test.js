@@ -531,18 +531,19 @@ test('slipVerifier rejects auto-verify when provider omits receiver account', ()
     'missing receiver account should be classified as RECEIVER_UNREADABLE');
 });
 
-test('slipVerifier accepts the configured bank account as a secondary receiver target', () => {
+test('slipVerifier accepts configured manual receivers as secondary receiver targets', () => {
   const fs = require('node:fs');
   const path = require('node:path');
   const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'slipVerifier.js'), 'utf8');
 
-  // The invoice's bank account (config.payment.bankAcc) must be forwarded
-  // to slipVerifier as a fallback receiver, so a tenant who pays the bank
-  // account directly (instead of scanning the PromptPay QR) isn't falsely
-  // rejected with RECEIVER_MISMATCH.
+  // The invoice's manual receiver channels (bank account and TrueMoney Wallet)
+  // must be forwarded to slipVerifier as fallback receivers, so a tenant who
+  // pays a visible non-QR channel isn't falsely rejected with RECEIVER_MISMATCH.
   assert.match(server, /paymentBlock\.bankInfo && paymentBlock\.bankInfo\.account/,
     'upload handler must read the invoice bank account from paymentBlock');
+  assert.match(server, /paymentBlock\.walletInfo && paymentBlock\.walletInfo\.phone/,
+    'upload handler must read the invoice TrueMoney Wallet phone from paymentBlock');
   assert.match(server, /additionalReceiverTargets:\s*extraTargets/,
     'upload handler must pass extra receiver targets to slipVerifier');
   assert.match(src, /additionalReceiverTargets/,
@@ -924,6 +925,20 @@ test('healthCheck flags duplicate verified payments and invalid ledger rows', ()
     'health check must count invalid bill status/amount rows');
   assert.match(src, /invalid_payment_rows/,
     'health check must count invalid payment status/amount rows');
+});
+
+test('healthCheck autoVerify receiver audit accepts manual payment targets', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'healthCheck.js'), 'utf8');
+  assert.match(src, /receiverTargets = \[\]/,
+    'health check must build the same receiver-target set as the upload handler');
+  assert.match(src, /cfg\?\.payment\?\.bankAcc/,
+    'bank account must count as a receiver target for autoVerify diagnostics');
+  assert.match(src, /cfg\?\.payment\?\.truemoney === true/,
+    'TrueMoney must count as a receiver target only when the channel is enabled');
+  assert.match(src, /PromptPay\/บัญชีธนาคาร\/TrueMoney Wallet/,
+    'operator-facing warning must name every supported receiver channel');
 });
 
 test('/api/tenant/payments does not auto-approve unverified slips by default', () => {
@@ -1447,10 +1462,10 @@ test('tenant payment readiness controls QR and slip upload state', () => {
   assert.match(route, /requireTenant/, 'pay-readiness must require tenant auth');
   assert.match(route, /Number\(bill\.tenant_id\) !== Number\(req\.tenant\.tenant_id\)/,
     'pay-readiness must enforce bill ownership');
-  assert.match(route, /promptpayReadyForPayment = true/,
-    'readiness must only mark PromptPay ready after validation');
-  assert.match(route, /flags\.slipUpload\.autoVerify && ready\.length > 0 && promptpayReadyForPayment/,
-    'autoVerify channel must require a validated real PromptPay target');
+  assert.match(route, /autoVerifyReceiverReady = true/,
+    'readiness must only mark auto-verify receiver readiness after a usable receiver target exists');
+  assert.match(route, /flags\.slipUpload\.autoVerify && ready\.length > 0 && autoVerifyReceiverReady/,
+    'autoVerify channel must require a configured provider and a validated receiver target');
   assert.match(route, /loadBillPaymentAttemptSummary/,
     'readiness must load persisted slip upload attempts');
   assert.match(route, /slipBlockReadinessIssue/,
@@ -1597,6 +1612,50 @@ test('tenant payment readiness reports orphan bills with BILL_NOT_LINKED', () =>
     'orphan bills must be handled before ownership mismatch');
 });
 
+test('payment channels surface configured TrueMoney Wallet across tenant, public pay, booking, and readiness', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const tenant = fs.readFileSync(path.join(__dirname, '..', 'project', 'tenant.jsx'), 'utf8');
+  const pay = fs.readFileSync(path.join(__dirname, '..', 'project', 'pay.jsx'), 'utf8');
+  const settings = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-settings.jsx'), 'utf8');
+  const shared = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'shared.jsx'), 'utf8');
+  const booking = fs.readFileSync(path.join(__dirname, '..', 'project', 'booking.html'), 'utf8');
+
+  assert.match(shared, /truemoneyPhone:\s*''/,
+    'default config must persist the TrueMoney Wallet phone field');
+  assert.match(settings, /payment\.truemoneyPhone/,
+    'admin settings must let operators configure the TrueMoney Wallet phone');
+  assert.match(settings, /apiCall\('\/api\/data\/baankarn_config_v1'/,
+    'admin settings save must wait for the server PUT instead of silently relying on localStorage sync');
+  assert.match(settings, /payment\.truemoney === true[\s\S]{0,180}\^0\\d\{9\}\$/,
+    'admin settings must block enabling TrueMoney with an invalid wallet phone');
+  assert.match(settings, /TrueMoney Wallet[\s\S]{0,260}พร้อมใช้งาน/,
+    'admin settings must show readiness for the TrueMoney channel');
+  assert.match(server, /payment\.truemoney === true[\s\S]{0,260}payment\.truemoneyPhone/,
+    'server config validation must reject enabled TrueMoney without a valid receiver phone');
+  assert.match(server, /serialised = JSON\.stringify\(value\);[\s\S]{0,60}\n  \}/,
+    'server must re-serialise config after normalising payment receiver fields before saving');
+  assert.match(server, /walletInfo:\s*paymentBlock\.walletInfo \|\| null/,
+    'public booking deposit config must include walletInfo');
+  assert.match(server, /payment\.ready = !!\(payment\.qrDataUrl \|\| bankInfo \|\| payment\.walletInfo\)/,
+    'booking deposit payment readiness must accept a configured wallet channel');
+  assert.match(server, /channels = \{ qr: false, slip: false, autoVerify: false, bank: false, wallet: false \}/,
+    'tenant pay-readiness must model bank and wallet channels explicitly');
+  assert.match(server, /channels\.wallet = isBillPayable && !!\(paymentBlock\.walletInfo && paymentBlock\.walletInfo\.phone\)/,
+    'wallet channel should only be enabled when TrueMoney has a valid phone');
+  assert.match(server, /TRUEMONEY_PHONE_MISSING/,
+    'billing readiness must warn when TrueMoney is toggled on without a phone');
+  assert.match(tenant, /pay\?\.walletInfo && pay\.walletInfo\.phone/,
+    'tenant bill modal must render the configured wallet details');
+  assert.match(tenant, /const showQrPane = !!\(qrUrl \|\| qrFallback \|\| \(!hasManualPaymentChannel && !paymentInfoError\)\)/,
+    'tenant bill modal must not force a PromptPay QR placeholder when bank or wallet payment is available');
+  assert.match(pay, /data\.payment\.walletInfo && data\.payment\.walletInfo\.phone/,
+    'public pay page must render the configured wallet details');
+  assert.match(booking, /wallet && wallet\.phone/,
+    'public booking deposit panel must render the configured wallet details');
+});
+
 test('admin billing readiness backs bill issue and payment preflights', () => {
   const fs = require('node:fs');
   const path = require('node:path');
@@ -1617,6 +1676,7 @@ test('admin billing readiness backs bill issue and payment preflights', () => {
     'NO_WATER_RATE',
     'NO_ELEC_RATE',
     'AUTOVERIFY_NO_PROVIDER',
+    'TRUEMONEY_PHONE_MISSING',
     'NO_LINE_OA',
     'BIG_VERIFY_QUEUE',
   ]) {

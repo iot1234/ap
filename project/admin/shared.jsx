@@ -156,6 +156,9 @@ const DEFAULT_CONFIG = {
     bankName:   '',
     linePay:    false,
     truemoney:  false,
+    truemoneyPhone: '',
+    truemoneyName:  '',
+    truemoneyNote:  '',
     creditCard: false,
   },
   notify: {

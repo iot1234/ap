@@ -285,6 +285,13 @@ function App() {
   const paid = !!(data && data.paid);
   const uploadState = data && data.upload;
   const canUpload = !!(data && data.channels && data.channels.slip && !paid && (!uploadState || uploadState.canUpload !== false));
+  const hasWalletChannel = !!(data?.payment?.walletInfo && data.payment.walletInfo.phone);
+  const hasBankChannel = !!(data?.payment?.bankInfo && data.payment.bankInfo.account);
+  const paymentEyebrow = hasWalletChannel
+    ? 'Wallet / transfer payment'
+    : hasBankChannel
+      ? 'Bank transfer payment'
+      : 'PromptPay payment';
   const qrFallbackImageSrc = qrFallback && qrFallback.dataUrl
     ? qrFallback.dataUrl
     : qrFallback && qrFallback.svg
@@ -303,7 +310,7 @@ function App() {
     <main className="tenant-public-shell" style={wrap}>
       <section className="tenant-public-hero">
         <div>
-          <div className="tenant-public-eyebrow">PromptPay payment</div>
+          <div className="tenant-public-eyebrow">{paymentEyebrow}</div>
           <h1 className="tenant-public-title">ชำระบิล</h1>
           <p className="tenant-public-lead">
             ตรวจยอด สแกน QR แล้วแนบสลิปจากหน้านี้เพื่อให้ระบบตรวจสอบรายการชำระเงิน
@@ -430,6 +437,26 @@ function App() {
                 <div>{data.payment.bankInfo.bank || '-'}</div>
                 <div style={{ fontFamily: 'Sora, monospace', fontWeight: 600 }}>{data.payment.bankInfo.account}</div>
                 {data.payment.bankInfo.name ? <div style={muted}>{data.payment.bankInfo.name}</div> : null}
+              </div>
+            ) : null}
+
+            {!paid && data.payment && data.payment.walletInfo && data.payment.walletInfo.phone ? (
+              <div style={card}>
+                <div style={{ fontWeight: 600 }}>TrueMoney Wallet</div>
+                <div style={{ fontFamily: 'Sora, monospace', fontWeight: 600 }}>{data.payment.walletInfo.phone}</div>
+                {data.payment.walletInfo.name ? <div style={muted}>{data.payment.walletInfo.name}</div> : null}
+                {data.payment.walletInfo.note ? <div style={muted}>{data.payment.walletInfo.note}</div> : null}
+                <div style={{ ...muted, marginTop: 6 }}>Transfer to this wallet, then upload the slip below.</div>
+              </div>
+            ) : null}
+
+            {!paid && data.payment && Array.isArray(data.payment.paymentMethods)
+              && data.payment.paymentMethods.some((m) => m && m.enabled && !['promptpay', 'bank', 'truemoney'].includes(m.key)) ? (
+              <div style={card}>
+                <div style={{ fontWeight: 600 }}>ช่องทางอื่นที่รับชำระ</div>
+                {data.payment.paymentMethods
+                  .filter((m) => m && m.enabled && !['promptpay', 'bank', 'truemoney'].includes(m.key))
+                  .map((m) => <div key={m.key} style={muted}>{m.label}</div>)}
               </div>
             ) : null}
 

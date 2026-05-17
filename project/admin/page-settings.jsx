@@ -16,6 +16,7 @@ function PageSettings({ rooms, setRooms, config, setConfig, bookings, setBooking
   // a circular structure) can't crash the whole settings page on render.
   const [draft, setDraft] = useState(() => safeClone(config));
   const [confirmReset, setConfirmReset] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   // Try-cloned dirty check. If either side fails to stringify (extremely
   // rare — only happens if rogue code injected a DOM/event), fall back to
@@ -70,10 +71,52 @@ function PageSettings({ rooms, setRooms, config, setConfig, bookings, setBooking
     catch { return {}; }
   }
 
-  const handleSave = () => {
-    setConfig(draft);
-    addActivity && addActivity({ icon: '⚙️', text: 'อัปเดตการตั้งค่าระบบ', type: 'system' });
-    setToast && setToast({ kind: 'success', message: 'บันทึกการตั้งค่าเรียบร้อย' });
+  const handleSave = async () => {
+    const next = safeClone(draft);
+    const payment = next.payment && typeof next.payment === 'object' ? next.payment : null;
+    if (payment) {
+      const trueMoneyPhone = String(payment.truemoneyPhone || payment.trueMoneyPhone || payment.walletPhone || '')
+        .replace(/[\s-]/g, '');
+      if (payment.truemoney === true && !/^0\d{9}$/.test(trueMoneyPhone)) {
+        setTab('payment');
+        setToast && setToast({
+          kind: 'error',
+          message: 'กรุณากรอกเบอร์ TrueMoney Wallet ให้ถูกต้อง 10 หลักและขึ้นต้นด้วย 0 ก่อนบันทึก',
+        });
+        return;
+      }
+      if (trueMoneyPhone) payment.truemoneyPhone = trueMoneyPhone;
+      if (typeof payment.truemoneyName === 'string') payment.truemoneyName = payment.truemoneyName.trim();
+      if (typeof payment.truemoneyNote === 'string') payment.truemoneyNote = payment.truemoneyNote.trim();
+    }
+
+    const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
+    if (!apiCall) {
+      setToast && setToast({ kind: 'error', message: 'ระบบ API ยังไม่พร้อม กรุณารีเฟรชหน้าแล้วลองอีกครั้ง' });
+      return;
+    }
+
+    setSaving(true);
+    try {
+      await apiCall('/api/data/baankarn_config_v1', {
+        method: 'PUT',
+        body: JSON.stringify({ value: next }),
+      });
+      setDraft(next);
+      setConfig(next);
+      addActivity && addActivity({ icon: '⚙️', text: 'อัปเดตการตั้งค่าระบบ', type: 'system' });
+      setToast && setToast({ kind: 'success', message: 'บันทึกการตั้งค่าเรียบร้อย' });
+    } catch (err) {
+      const issues = Array.isArray(err && err.issues) && err.issues.length
+        ? `: ${err.issues.slice(0, 3).join(', ')}`
+        : '';
+      setToast && setToast({
+        kind: 'error',
+        message: `${err && err.message ? err.message : 'บันทึกการตั้งค่าไม่สำเร็จ'}${issues}`,
+      });
+    } finally {
+      setSaving(false);
+    }
   };
 
   const handleResetAll = () => {
@@ -89,9 +132,9 @@ function PageSettings({ rooms, setRooms, config, setConfig, bookings, setBooking
         subtitle="ข้อมูลตึก, การชำระเงิน, การแจ้งเตือน และอื่นๆ"
         actions={
           <>
-            <Btn variant="secondary" onClick={() => setDraft(config)} disabled={!dirty}>ยกเลิก</Btn>
-            <Btn variant="primary" icon="✓" onClick={handleSave} disabled={!dirty}>
-              {dirty ? 'บันทึก' : 'บันทึกแล้ว'}
+            <Btn variant="secondary" onClick={() => setDraft(config)} disabled={saving || !dirty}>ยกเลิก</Btn>
+            <Btn variant="primary" icon="✓" onClick={handleSave} disabled={saving || !dirty}>
+              {saving ? 'กำลังบันทึก...' : dirty ? 'บันทึก' : 'บันทึกแล้ว'}
             </Btn>
           </>
         }
@@ -249,6 +292,8 @@ function TabPayment({ draft, updatePath }) {
   const ppCheck = validatePromptpay(draft.payment.promptpay);
   const isDemoPp   = (draft.payment.promptpay || '').replace(/[\s-]/g, '') === DEMO_PROMPTPAY;
   const isDemoBank = (draft.payment.bankAcc || '') === DEMO_BANK_ACC;
+  const trueMoneyPhone = String(draft.payment.truemoneyPhone || '').replace(/[\s-]/g, '');
+  const trueMoneyReady = draft.payment.truemoney === true && /^0\d{9}$/.test(trueMoneyPhone);
   const promptpayDisplayHint = ppCheck.ok
     ? (ppCheck.kind === 'phone' ? '✓ รูปแบบเบอร์โทรศัพท์' : '✓ รูปแบบเลขบัตรประชาชน')
     : ppCheck.reason;
@@ -310,7 +355,48 @@ function TabPayment({ draft, updatePath }) {
       <Card>
         <SectionHeading title="ช่องทางอื่นๆ" subtitle="ปรากฏในบิล PDF เพื่อแจ้งผู้เช่าว่าหอพักรับช่องทางใดบ้าง" level={3} />
         <Toggle label="LINE Pay"          hint="แจ้งผู้เช่าว่ารับชำระผ่าน LINE Pay (ต้องประสานกับร้านค้า LINE Pay เอง)" checked={draft.payment.linePay}    onChange={(v) => updatePath('payment.linePay', v)} />
-        <Toggle label="TrueMoney Wallet" hint="แจ้งผู้เช่าว่ารับชำระผ่าน TrueMoney (ต้องประสานกับ Ascend เอง)"      checked={draft.payment.truemoney}  onChange={(v) => updatePath('payment.truemoney', v)} />
+        <Toggle label="TrueMoney Wallet" hint="แสดงช่องทางรับชำระผ่าน TrueMoney Wallet แบบโอนเอง + แนบสลิป ต้องกรอกเบอร์วอลเล็ตด้านล่างก่อนใช้งานจริง"      checked={draft.payment.truemoney}  onChange={(v) => updatePath('payment.truemoney', v)} />
+        {draft.payment.truemoney ? (
+          <div style={{
+            margin: '8px 0 10px',
+            padding: 12,
+            background: trueMoneyReady ? (C.successSoft || '#eaf7ef') : (C.warningSoft || '#fff7e0'),
+            borderRadius: 8,
+            border: `1px solid ${trueMoneyReady ? (C.success || '#2f8f5b') : (C.warning || '#d79519')}33`,
+          }}>
+            <SectionHeading title="TrueMoney Wallet" subtitle="ใช้เป็นช่องทาง manual payment ผู้เช่าโอนเข้าเบอร์นี้ แล้วแนบสลิปให้แอดมิน/ระบบตรวจ" level={4}
+              action={trueMoneyReady
+                ? <Pill color="success" icon="✓">พร้อมใช้งาน</Pill>
+                : <Pill color="warning" icon="⚠">ต้องตั้งเบอร์</Pill>} />
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
+              <Input
+                label="เบอร์ TrueMoney Wallet"
+                value={draft.payment.truemoneyPhone || ''}
+                onChange={(v) => updatePath('payment.truemoneyPhone', v)}
+                placeholder="0812345678"
+                hint={trueMoneyReady ? '✓ รูปแบบเบอร์มือถือ 10 หลักถูกต้อง' : 'ต้องเป็นเบอร์มือถือ 10 หลักขึ้นต้น 0'}
+              />
+              <Input
+                label="ชื่อวอลเล็ต/ชื่อผู้รับ"
+                value={draft.payment.truemoneyName || ''}
+                onChange={(v) => updatePath('payment.truemoneyName', v)}
+                placeholder="ชื่อที่ผู้เช่าควรเห็นก่อนโอน"
+              />
+              <Input
+                label="หมายเหตุที่แสดงให้ผู้เช่า"
+                value={draft.payment.truemoneyNote || ''}
+                onChange={(v) => updatePath('payment.truemoneyNote', v)}
+                placeholder="โอนแล้วแนบสลิปในระบบ"
+                style={{ gridColumn: '1 / -1' }}
+              />
+            </div>
+            {!trueMoneyReady ? (
+              <div style={{ marginTop: 8, fontSize: 12.5, color: C.warningInk || '#7a5a00' }}>
+                เปิด TrueMoney ไว้แต่ยังไม่มีเบอร์ที่ถูกต้อง ระบบจะไม่แสดงเป็นช่องทางใช้งานจริงใน tenant/public pay/PDF และจะแจ้งเตือนใน Billing readiness
+              </div>
+            ) : null}
+          </div>
+        ) : null}
         <Toggle label="บัตรเครดิต/เดบิต"   hint="แจ้งผู้เช่าว่ารับชำระด้วยบัตรที่ออฟฟิศ"                                       checked={draft.payment.creditCard} onChange={(v) => updatePath('payment.creditCard', v)} />
         <div style={{ marginTop: 10, padding: 10, background: C.surfaceAlt, borderRadius: 8, fontSize: 12, color: C.muted }}>
           💡 ระบบนี้ไม่ได้เชื่อมตรงกับ LINE Pay / TrueMoney / payment gateway —

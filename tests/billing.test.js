@@ -465,10 +465,45 @@ test('buildPaymentBlock: bank info + extra channels surface in paymentMethods', 
   assert.equal(block.promptpayName, 'นางกาญจนา ศรีสุข');
 });
 
+test('buildPaymentBlock: TrueMoney Wallet requires toggle plus valid phone', () => {
+  const off = billing.buildPaymentBlock({
+    payment: { truemoney: false, truemoneyPhone: '0812345678' },
+  });
+  assert.equal(off.walletInfo, null);
+  assert.equal(off.paymentMethods.some((m) => m.key === 'truemoney'), false);
+
+  const missingPhone = billing.buildPaymentBlock({
+    payment: { truemoney: true, truemoneyPhone: '' },
+  });
+  assert.equal(missingPhone.walletInfo, null);
+  assert.equal(missingPhone.paymentMethods.find((m) => m.key === 'truemoney').enabled, false);
+
+  const ready = billing.buildPaymentBlock({
+    payment: {
+      truemoney: true,
+      truemoneyPhone: '081-234-5678',
+      truemoneyName: 'หอพัก ก.',
+      truemoneyNote: 'โอนแล้วแนบสลิป',
+    },
+  });
+  assert.deepEqual(ready.walletInfo, {
+    provider: 'TrueMoney Wallet',
+    phone: '0812345678',
+    name: 'หอพัก ก.',
+    note: 'โอนแล้วแนบสลิป',
+  });
+  const method = ready.paymentMethods.find((m) => m.key === 'truemoney');
+  assert.equal(method.enabled, true);
+  assert.equal(method.manualOnly, true);
+  assert.equal(method.requiresSlip, true);
+  assert.match(method.label, /0812345678/);
+});
+
 test('buildPaymentBlock: empty config returns empty block (no nulls in spread)', () => {
   const block = billing.buildPaymentBlock({});
   assert.equal(block.promptpayTarget, undefined);
   assert.equal(block.bankInfo, null);
+  assert.equal(block.walletInfo, null);
   assert.deepEqual(block.paymentMethods, []);
 });
 

@@ -1674,6 +1674,20 @@ function BillDetailBody({ bill, locale, refresh, slipFeature }) {
     ? (readiness.issues || []).filter((i) => i.sev !== 'high' && i.code !== 'BILL_ALREADY_PAID')
     : [];
   if (readinessError && !readinessHardError) advisoryIssues.push(readinessError);
+  const hasBankChannel = !!(pay?.bankInfo && pay.bankInfo.account);
+  const hasWalletChannel = !!(pay?.walletInfo && pay.walletInfo.phone);
+  const otherEnabledMethods = Array.isArray(pay?.paymentMethods)
+    ? pay.paymentMethods.filter((m) => m && m.enabled && !['promptpay', 'bank', 'truemoney'].includes(m.key))
+    : [];
+  const hasManualPaymentChannel = hasBankChannel || hasWalletChannel || otherEnabledMethods.length > 0;
+  const showQrPane = !!(qrUrl || qrFallback || (!hasManualPaymentChannel && !paymentInfoError));
+  const primaryPaymentLabel = (qrUrl || qrFallback)
+    ? 'PromptPay'
+    : hasWalletChannel
+      ? 'TrueMoney Wallet'
+      : hasBankChannel
+        ? t('bankTransfer')
+        : (locale === 'th' ? 'ช่องทางชำระเงิน' : 'Payment channel');
   const readinessLoading = !readiness && !readinessError;
   const slipUploadBlocked = readinessLoading
     || readiness?.channels?.slip === false
@@ -1826,8 +1840,12 @@ function BillDetailBody({ bill, locale, refresh, slipFeature }) {
             borderRadius: 16, padding: 18, textAlign: 'center',
             display: 'flex', flexDirection: 'column', gap: 10, alignItems: 'center',
           }}>
-            <Pill tone="accent">PromptPay</Pill>
-            <div style={{ fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 14 }}>{t('scanToPay')}</div>
+            <Pill tone="accent">{primaryPaymentLabel}</Pill>
+            <div style={{ fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 14 }}>
+              {showQrPane ? t('scanToPay') : (locale === 'th' ? 'โอนผ่านช่องทางด้านล่าง' : 'Transfer using a channel below')}
+            </div>
+            {showQrPane ? (
+              <>
             {qrUrl && !qrBroken ? (
               <img src={qrUrl} alt="PromptPay QR" width="180" height="180"
                 style={{ borderRadius: 12, padding: 8, background: '#fff', border: '1px solid var(--line)' }}
@@ -1869,6 +1887,14 @@ function BillDetailBody({ bill, locale, refresh, slipFeature }) {
             <div style={{ fontSize: 12.5, color: 'var(--muted)' }}>
               {t('openBankApp')}{pay?.promptpayName ? ` · ${pay.promptpayName}` : ''}
             </div>
+              </>
+            ) : (
+              <div style={{ fontSize: 12.5, color: 'var(--muted)', lineHeight: 1.6 }}>
+                {locale === 'th'
+                  ? 'โอนผ่านบัญชี/Wallet ที่แสดงไว้ แล้วแนบสลิปในระบบเพื่อให้ตรวจสอบรายการ'
+                  : 'Transfer to the bank or wallet shown here, then upload the slip for verification.'}
+              </div>
+            )}
             {pay?.bankInfo && pay.bankInfo.account ? (
               <div style={{
                 background: 'var(--surface)', borderRadius: 10, padding: '10px 12px',
@@ -1878,6 +1904,28 @@ function BillDetailBody({ bill, locale, refresh, slipFeature }) {
                 <div style={{ fontSize: 14, fontWeight: 600 }}>{pay.bankInfo.bank}</div>
                 <div style={{ fontSize: 14, fontFamily: 'var(--font-mono)' }}>{pay.bankInfo.account}</div>
                 {pay.bankInfo.name ? <div style={{ fontSize: 12, color: 'var(--muted)' }}>{pay.bankInfo.name}</div> : null}
+              </div>
+            ) : null}
+            {pay?.walletInfo && pay.walletInfo.phone ? (
+              <div style={{
+                background: 'var(--surface)', borderRadius: 10, padding: '10px 12px',
+                border: '1px solid var(--line)', textAlign: 'left', width: '100%',
+              }}>
+                <div style={{ fontSize: 12, color: 'var(--muted)' }}>TrueMoney Wallet</div>
+                <div style={{ fontSize: 14, fontWeight: 600 }}>{pay.walletInfo.phone}</div>
+                {pay.walletInfo.name ? <div style={{ fontSize: 12, color: 'var(--muted)' }}>{pay.walletInfo.name}</div> : null}
+                {pay.walletInfo.note ? <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 4 }}>{pay.walletInfo.note}</div> : null}
+              </div>
+            ) : null}
+            {Array.isArray(pay?.paymentMethods) && pay.paymentMethods.some((m) => m && m.enabled && !['promptpay', 'bank', 'truemoney'].includes(m.key)) ? (
+              <div style={{
+                background: 'var(--surface)', borderRadius: 10, padding: '10px 12px',
+                border: '1px solid var(--line)', textAlign: 'left', width: '100%',
+              }}>
+                <div style={{ fontSize: 12, color: 'var(--muted)' }}>{locale === 'th' ? 'ช่องทางอื่นที่รับชำระ' : 'Other accepted methods'}</div>
+                {pay.paymentMethods.filter((m) => m && m.enabled && !['promptpay', 'bank', 'truemoney'].includes(m.key)).map((m) => (
+                  <div key={m.key} style={{ fontSize: 13.5, fontWeight: 600 }}>{m.label}</div>
+                ))}
               </div>
             ) : null}
           </div>

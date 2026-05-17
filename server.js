@@ -814,6 +814,33 @@ app.put('/api/data/:key', sameOrigin, csrfGuard, requireAuth, requireRole('owner
         issues.push(`utilities.${k} = ${v} (ต่ำผิดปกติ — อัตราจริงต่อหน่วยควร ≥ ${MIN_SENSIBLE_UTILITY}฿)`);
       }
     }
+    const payment = value.payment && typeof value.payment === 'object' ? value.payment : null;
+    if (payment) {
+      const trueMoneyPhone = String(payment.truemoneyPhone || payment.trueMoneyPhone || payment.walletPhone || '')
+        .replace(/[\s-]/g, '');
+      if (payment.truemoney === true) {
+        if (!/^0\d{9}$/.test(trueMoneyPhone)) {
+          issues.push('payment.truemoneyPhone = ต้องเป็นเบอร์มือถือ 10 หลักและขึ้นต้นด้วย 0 เมื่อเปิด TrueMoney Wallet');
+        } else {
+          payment.truemoneyPhone = trueMoneyPhone;
+        }
+      } else if (trueMoneyPhone && /^0\d{9}$/.test(trueMoneyPhone)) {
+        payment.truemoneyPhone = trueMoneyPhone;
+      }
+      for (const [field, max] of Object.entries({ truemoneyName: 120, truemoneyNote: 240 })) {
+        if (payment[field] === null || payment[field] === undefined) continue;
+        if (typeof payment[field] !== 'string') {
+          issues.push(`payment.${field} ต้องเป็นข้อความ`);
+          continue;
+        }
+        const trimmed = payment[field].trim();
+        if (trimmed.length > max) {
+          issues.push(`payment.${field} ยาวเกิน ${max} ตัวอักษร`);
+          continue;
+        }
+        payment[field] = trimmed;
+      }
+    }
     // floorPremium / viewPremium / featurePremium are ADDITIVE deltas —
     // they can legitimately be 0, but negative values can't be intended
     // unless admin really wants a "discount per floor" which we don't
@@ -836,6 +863,7 @@ app.put('/api/data/:key', sameOrigin, csrfGuard, requireAuth, requireRole('owner
         hint: 'แก้ค่าที่หน้า /admin#pricing แล้วบันทึกใหม่ ระบบจะไม่รับค่าราคาที่ผิดปกติเพื่อป้องกันสัญญาและบิลผิด',
       });
     }
+    serialised = JSON.stringify(value);
   }
   try {
     await pool.query(
@@ -1110,7 +1138,6 @@ function bookingDepositStatus(settings, hasSlip) {
   return settings.requireSlip ? 'awaiting_slip' : 'manual_review';
 }
 
-
 const ROOM_BOOKING_EDITABLE_FIELDS = new Set([
   'enabled',
   'requireDeposit',
@@ -1163,7 +1190,7 @@ function parseRoomBookingEditableSettings(input, currentRaw) {
     issues.push({
       field: 'roomBooking',
       code: 'BOOKING_DEPOSIT_UNKNOWN_FIELD',
-      message: 'ไม่รองรับค่า: ' + unknown.join(', '),
+      message: `ไม่รองรับค่า: ${unknown.join(', ')}`,
     });
   }
   const boolField = (field) => {
@@ -1172,7 +1199,7 @@ function parseRoomBookingEditableSettings(input, currentRaw) {
     issues.push({
       field,
       code: 'BOOKING_DEPOSIT_INVALID_BOOLEAN',
-      message: field + ' ต้องเป็น true หรือ false',
+      message: `${field} ต้องเป็น true หรือ false`,
     });
     return current[field] === true;
   };
@@ -1183,7 +1210,7 @@ function parseRoomBookingEditableSettings(input, currentRaw) {
       issues.push({
         field,
         code,
-        message: field + ' ต้องอยู่ระหว่าง ' + min + ' ถึง ' + max,
+        message: `${field} ต้องอยู่ระหว่าง ${min} ถึง ${max}`,
       });
       return fallback;
     }
@@ -1377,6 +1404,8 @@ async function publicBookingDepositInfo() {
       promptpayName: paymentBlock.promptpayName || paymentBlock.promptpayDisplayName || null,
       targetLast4: paymentBlock.promptpayTarget ? String(paymentBlock.promptpayTarget).slice(-4) : null,
       bankInfo,
+      walletInfo: paymentBlock.walletInfo || null,
+      paymentMethods: Array.isArray(paymentBlock.paymentMethods) ? paymentBlock.paymentMethods : [],
       qrDataUrl: null,
     };
     if (paymentBlock.promptpayTarget && Number.isFinite(amount) && amount > 0) {
@@ -1387,11 +1416,10 @@ async function publicBookingDepositInfo() {
         }
       } catch { /* display bank/manual transfer fallback */ }
     }
-    payment.ready = !!(payment.qrDataUrl || bankInfo);
+    payment.ready = !!(payment.qrDataUrl || bankInfo || payment.walletInfo);
   }
   return { settings, payment };
 }
-
 
 async function bookingDepositAdminPaymentReadiness(amount) {
   const { paymentBlock } = await loadEffectivePaymentBlock();
@@ -2525,7 +2553,6 @@ app.get('/api/admin/features', requireAuth, requireRole('owner', 'manager', 'sta
   }
 });
 
-
 app.get('/api/admin/booking-deposit-settings', requireAuth, requireRole('owner', 'manager', 'staff'), async (req, res) => {
   try {
     const f = await features.load(pool);
@@ -2902,8 +2929,9 @@ app.get('/api/tenant/payment-info', requireTenant, async (_req, res) => {
 // what payment channels actually work for THIS bill, plus a structured list
 // of issues with sev/code/msg/fix so the BillDetail screen can show the
 // tenant a clear "ทำไมจ่าย QR ไม่ได้" message before they tap the button.
-// Channels: qr (PromptPay QR renderable), slip (slipUpload enabled),
-// autoVerify (provider configured). Issues are HINTS, not hard blocks —
+// Channels: qr (PromptPay QR renderable), bank/wallet (manual receiver
+// details present), slip (slipUpload enabled), autoVerify (provider configured
+// with at least one validated receiver target). Issues are HINTS, not hard blocks —
 // admin may accept payments through channels we can't auto-detect here.
 app.get('/api/tenant/pay-readiness/:billId', requireTenant, async (req, res) => {
   const id = Number(req.params.billId);
@@ -2939,8 +2967,8 @@ app.get('/api/tenant/pay-readiness/:billId', requireTenant, async (req, res) => 
     const promptpay = require('./services/promptpay');
     const slipVerifier = require('./services/slipVerifier');
     const issues = [];
-    const channels = { qr: false, slip: false, autoVerify: false };
-    let promptpayReadyForPayment = false;
+    const channels = { qr: false, slip: false, autoVerify: false, bank: false, wallet: false };
+    let autoVerifyReceiverReady = false;
 
     if (bill.status === 'paid') {
       issues.push({
@@ -2958,6 +2986,8 @@ app.get('/api/tenant/pay-readiness/:billId', requireTenant, async (req, res) => 
 
     const billTotal = Number(bill.total);
     const isBillPayable = bill.status === 'pending' || bill.status === 'overdue';
+    channels.bank = isBillPayable && !!(paymentBlock.bankInfo && paymentBlock.bankInfo.account);
+    channels.wallet = isBillPayable && !!(paymentBlock.walletInfo && paymentBlock.walletInfo.phone);
     if (!Number.isFinite(billTotal) || billTotal <= 0) {
       issues.push({
         sev: 'high', code: 'INVALID_BILL_TOTAL',
@@ -2972,12 +3002,15 @@ app.get('/api/tenant/pay-readiness/:billId', requireTenant, async (req, res) => 
       });
     }
 
+    const manualPaymentAvailable = channels.bank || channels.wallet;
     if (!paymentBlock.promptpayTarget) {
       if (isBillPayable) {
         issues.push({
-          sev: 'high', code: 'PROMPTPAY_NOT_CONFIGURED',
-          msg: 'หอพักยังไม่ตั้งค่า PromptPay — สแกน QR เพื่อจ่ายไม่ได้',
-          fix: 'โอนตามหมายเลขบัญชีที่บิลแจ้ง หรือติดต่อสำนักงาน',
+          sev: manualPaymentAvailable ? 'med' : 'high', code: 'PROMPTPAY_NOT_CONFIGURED',
+          msg: manualPaymentAvailable
+            ? 'หอพักยังไม่ตั้งค่า PromptPay — สแกน QR ไม่ได้ แต่ยังชำระผ่านบัญชี/Wallet ที่แสดงในบิลได้'
+            : 'หอพักยังไม่ตั้งค่า PromptPay และยังไม่มีช่องทางโอนอื่น — กรุณาติดต่อสำนักงาน',
+          fix: manualPaymentAvailable ? 'โอนตามช่องทางที่แสดง แล้วแนบสลิปในระบบ' : 'ติดต่อสำนักงาน',
         });
       }
     } else {
@@ -2990,7 +3023,7 @@ app.get('/api/tenant/pay-readiness/:billId', requireTenant, async (req, res) => 
             fix: 'แจ้งสำนักงานให้ตั้งบัญชีจริงก่อน',
           });
         } else {
-          promptpayReadyForPayment = true;
+          autoVerifyReceiverReady = true;
           if (Number.isFinite(billTotal) && billTotal > 0 && billTotal <= MAX_AMOUNT && isBillPayable) {
             channels.qr = true;
           }
@@ -3002,6 +3035,9 @@ app.get('/api/tenant/pay-readiness/:billId', requireTenant, async (req, res) => 
           fix: 'แจ้งสำนักงานให้แก้ที่ Settings → การชำระเงิน',
         });
       }
+    }
+    if (!autoVerifyReceiverReady && paymentBlockReceiverTargets(paymentBlock).length > 0) {
+      autoVerifyReceiverReady = true;
     }
 
     let uploadAttempts = null;
@@ -3025,7 +3061,7 @@ app.get('/api/tenant/pay-readiness/:billId', requireTenant, async (req, res) => 
       } else {
         channels.slip = true;
         const ready = slipVerifier.getConfiguredProviders(flags);
-        if (flags.slipUpload.autoVerify && ready.length > 0 && promptpayReadyForPayment) {
+        if (flags.slipUpload.autoVerify && ready.length > 0 && autoVerifyReceiverReady) {
           channels.autoVerify = true;
         } else if (flags.slipUpload.autoVerify && ready.length === 0) {
           issues.push({
@@ -3160,11 +3196,19 @@ app.get('/api/admin/billing-readiness',
         }
       }
 
+      const hasManualPaymentChannel = !!(
+        (paymentBlock.bankInfo && paymentBlock.bankInfo.account)
+        || (paymentBlock.walletInfo && paymentBlock.walletInfo.phone)
+      );
       if (!paymentBlock.promptpayTarget) {
         issues.push({
-          sev: 'high', code: 'NO_PROMPTPAY', area: ['issue', 'payment'],
-          msg: 'ยังไม่ได้ตั้ง PromptPay — บิล PDF จะไม่มี QR และ auto-verify ตรวจบัญชีปลายทางไม่ได้',
-          fix: '/admin#settings → การชำระเงิน หรือใส่ PROMPTPAY_TARGET ใน /admin#secrets',
+          sev: hasManualPaymentChannel ? 'med' : 'high', code: 'NO_PROMPTPAY', area: ['issue', 'payment'],
+          msg: hasManualPaymentChannel
+            ? 'ยังไม่ได้ตั้ง PromptPay — บิล PDF จะไม่มี QR แต่ยังมีช่องทางโอน manual ให้ผู้เช่าใช้'
+            : 'ยังไม่ได้ตั้ง PromptPay และยังไม่มีช่องทางโอน manual — ผู้เช่าจะไม่มีปลายทางรับเงินที่ชัดเจน',
+          fix: hasManualPaymentChannel
+            ? '/admin#settings → การชำระเงิน หากต้องการ QR ให้ตั้ง PromptPay เพิ่ม'
+            : '/admin#settings → การชำระเงิน ตั้ง PromptPay หรือบัญชีธนาคาร/TrueMoney Wallet',
         });
       } else {
         try {
@@ -3183,6 +3227,21 @@ app.get('/api/admin/billing-readiness',
             fix: '/admin#settings → การชำระเงิน',
           });
         }
+      }
+
+      const trueMoneyEnabled = cfg?.payment?.truemoney === true;
+      const trueMoneyPhone = String(
+        cfg?.payment?.truemoneyPhone
+        || cfg?.payment?.trueMoneyPhone
+        || cfg?.payment?.walletPhone
+        || ''
+      ).replace(/[\s-]/g, '');
+      if (trueMoneyEnabled && !/^0\d{9}$/.test(trueMoneyPhone)) {
+        issues.push({
+          sev: 'med', code: 'TRUEMONEY_PHONE_MISSING', area: ['payment'],
+          msg: 'เปิด TrueMoney Wallet แล้ว แต่ยังไม่ได้ตั้งเบอร์วอลเล็ต 10 หลัก — ผู้เช่าจะใช้ช่องทางนี้ไม่ได้',
+          fix: '/admin#settings → การชำระเงิน → TrueMoney Wallet',
+        });
       }
 
       const wRate = Number(cfg?.utilities?.waterRate);
@@ -3836,6 +3895,21 @@ function publicPartyForSlipNotice(party) {
   };
 }
 
+function paymentBlockReceiverTargets(paymentBlock) {
+  const targets = [];
+  const addDigits = (value) => {
+    const digits = String(value || '').replace(/[^0-9]/g, '');
+    if (digits.length >= 4) targets.push(digits);
+  };
+  if (paymentBlock && paymentBlock.bankInfo && paymentBlock.bankInfo.account) {
+    addDigits(paymentBlock.bankInfo.account);
+  }
+  if (paymentBlock && paymentBlock.walletInfo && paymentBlock.walletInfo.phone) {
+    addDigits(paymentBlock.walletInfo.phone);
+  }
+  return Array.from(new Set(targets));
+}
+
 function slipRejectCopy(code, fallback) {
   const map = {
     AMOUNT_MISMATCH: {
@@ -4130,6 +4204,8 @@ app.get('/api/public/bills/:billId/payment', rateLimitPublicPayment, async (req,
       channels: {
         slip: !slipBlock,
         qr: !!qrUrl,
+        bank: payable && !!(paymentBlock.bankInfo && paymentBlock.bankInfo.account),
+        wallet: payable && !!(paymentBlock.walletInfo && paymentBlock.walletInfo.phone),
       },
       upload: {
         ...attempts,
@@ -5094,22 +5170,21 @@ async function tenantPaymentUploadHandler(req, res) {
       try {
         const { paymentBlock } = await loadEffectivePaymentBlock();
         let ppTarget = null;
+        let promptpayConfigError = null;
         if (paymentBlock.promptpayTarget) {
           try {
             ppTarget = normaliseTarget(paymentBlock.promptpayTarget);
           } catch (err) {
-            verifyResult = {
-              ok: false,
-              error: 'PromptPay target is invalid, so receiver account cannot be verified',
-              code: 'NOT_CONFIGURED',
-              attempts: [],
-            };
+            promptpayConfigError = 'PromptPay target is invalid';
           }
         }
-        if (!ppTarget && !verifyResult) {
+        const extraTargets = paymentBlockReceiverTargets(paymentBlock);
+        if (!ppTarget && extraTargets.length === 0) {
           verifyResult = {
             ok: false,
-            error: 'PromptPay target is not configured, so receiver account cannot be verified',
+            error: promptpayConfigError
+              ? `${promptpayConfigError}, and no bank/TrueMoney receiver is configured for fallback verification`
+              : 'No PromptPay, bank account, or TrueMoney Wallet receiver is configured for verification',
             code: 'NOT_CONFIGURED',
             attempts: [],
           };
@@ -5126,24 +5201,17 @@ async function tenantPaymentUploadHandler(req, res) {
         // billTotal here closes the remaining ±1฿ drift between the two
         // tolerances and means slipVerifier's amount-mismatch reasoning is
         // pinned to the same number the bill is invoiced at.
-        if (ppTarget) {
-          // The invoice can advertise BOTH PromptPay AND a regular bank
-          // account (config.payment.bankAcc). Some tenants ignore the QR
-          // and key the bank account into their banking app — the slip's
-          // receiver.account then matches the bank account, not the
-          // PromptPay number, and we'd false-reject with RECEIVER_MISMATCH.
-          // Pass the bank account as a secondary acceptable receiver tail.
-          const extraTargets = [];
-          if (paymentBlock.bankInfo && paymentBlock.bankInfo.account) {
-            const bankDigits = String(paymentBlock.bankInfo.account).replace(/[^0-9]/g, '');
-            if (bankDigits.length >= 4) extraTargets.push(bankDigits);
-          }
+        if (!verifyResult) {
+          // The invoice can advertise multiple receiver channels (PromptPay,
+          // bank transfer, TrueMoney Wallet). Tenants may pay any visible
+          // channel, so every configured receiver tail must be accepted by
+          // auto-verify to avoid false RECEIVER_MISMATCH rejections.
           verifyResult = await slipVerifier.verifyWithFallback(
             rawBuf,
             {
               amount: billTotal,
               billId,
-              promptpayTarget: ppTarget,
+              promptpayTarget: ppTarget || null,
               additionalReceiverTargets: extraTargets,
             },
             req.features

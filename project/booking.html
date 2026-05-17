@@ -367,10 +367,12 @@
       qr.style.display = 'block';
     }
     const bank = bookingConfig.payment && bookingConfig.payment.bankInfo;
+    const wallet = bookingConfig.payment && bookingConfig.payment.walletInfo;
     const parts = [];
     if (bookingConfig.payment && bookingConfig.payment.promptpayName) parts.push(`ชื่อบัญชี/พร้อมเพย์: ${bookingConfig.payment.promptpayName}`);
     if (bookingConfig.payment && bookingConfig.payment.targetLast4) parts.push(`พร้อมเพย์ท้าย ${bookingConfig.payment.targetLast4}`);
     if (bank) parts.push(`${bank.bank || 'ธนาคาร'} ${bank.account || ''} ${bank.name || ''}`.trim());
+    if (wallet && wallet.phone) parts.push(`TrueMoney Wallet ${wallet.phone}${wallet.name ? ' ' + wallet.name : ''}`);
     document.getElementById('depositBank').textContent = parts.join(' · ');
   }
 
