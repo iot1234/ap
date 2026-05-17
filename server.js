@@ -281,14 +281,16 @@ app.use((err, _req, res, next) => {
   next(err);
 });
 
-// Security headers. React pages now load prebuilt JS from /build, so the CSP
-// no longer needs eval privileges for browser-side JSX compilation.
+// Security headers. CSP is permissive for the React-via-CDN + Babel-standalone
+// approach this app uses today; tighten when migrating to a build pipeline.
 app.use(helmet({
   contentSecurityPolicy: {
     useDefaults: true,
     directives: {
       defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "'unsafe-inline'", 'https://unpkg.com'],
+      // unsafe-eval is required by Babel-standalone runtime (in-browser JSX
+      // transpile). Migrate to a build pipeline + script nonces to remove it.
+      scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'", 'https://unpkg.com'],
       // Block inline event handlers (onclick=…) — modern XSS payloads still
       // try them since 'unsafe-inline' on script-src doesn't allow attrs.
       scriptSrcAttr: ["'none'"],
@@ -10953,12 +10955,16 @@ app.get('/health/live', (_req, res) => {
 
 // --- Static + routes ------------------------------------------------------
 // Asset caching policy:
-//   - Build/runtime JS changes every deploy, so let the browser store it but
-//     force revalidation. This avoids stale admin bundles without forcing a
-//     full no-store transfer every reload.
+//   - .jsx (transpiled in browser, changes every deploy) → no-cache so the
+//     browser may keep a local copy but must revalidate before use. This
+//     preserves fast fixes while allowing 304 responses instead of
+//     redownloading megabytes of admin JSX on every reload.
 //   - Other static assets (fonts, images) → 1h TTL since they rarely change.
 app.use((req, res, next) => {
-  if (/\.jsx$/i.test(req.path) || /^\/build\/.*\.js$/i.test(req.path) || req.path === '/api-client.js') {
+  if (/\.jsx$/i.test(req.path)) {
+    // Revalidate on every reload, but do not block the browser from storing
+    // the file. `no-store` forced a full transfer every time and made the
+    // Babel-in-browser boot path much slower than necessary.
     res.setHeader('Cache-Control', 'no-cache, must-revalidate');
   } else if (/\.(js|css|png|jpg|jpeg|gif|svg|woff2?|ttf)$/i.test(req.path)) {
     res.setHeader('Cache-Control', 'public, max-age=3600');

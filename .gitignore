@@ -10,4 +10,3 @@ backups/
 .scheduler-state.json
 .claude/
 .tmp-*/
-project/build/

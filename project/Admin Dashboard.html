@@ -267,21 +267,25 @@
 </style>
 </head>
 <body>
-<!-- Preload hints: compiled admin scripts execute
-     sequentially so each page registers window.PageX before shell.js mounts
-     React. The bytes can still download in
+<!-- Preload hints: the <script type="text/babel"> tags below execute
+     sequentially (Babel needs them in order to register window.PageX
+     before shell.jsx mounts React). But the BYTES can download in
      parallel — these preload hints kick off the network fetches early
      so by the time Babel reaches each script, the body is already in
-     the browser cache. With it, total download time approaches the slowest
-     single file rather than the sum. -->
+     the browser cache. Without this, Babel waits ~50-300ms per script
+     on a cold load. With it, total download time approaches the slowest
+     single file rather than the sum. crossorigin="anonymous" matches
+     what <script> uses by default for same-origin static assets. -->
 <link rel="preload" as="script" href="/api-client.js">
-<link rel="preload" as="script" href="/build/admin/shared.js">
-<link rel="preload" as="script" href="/build/admin/ui.js">
-<link rel="preload" as="script" href="/build/admin/hooks.js">
-<link rel="preload" as="script" href="/build/admin/shell.js">
+<link rel="preload" as="script" href="/admin/shared.jsx">
+<link rel="preload" as="script" href="/admin/ui.jsx">
+<link rel="preload" as="script" href="/admin/hooks.jsx">
+<link rel="preload" as="script" href="/admin/shell.jsx">
 <!-- The 28 page-*.jsx files don't all need to preload — only the
-     foundation files + shell.js are critical-path. Page files stay regular
-     scripts so the network prioritises the boot path first. -->
+     foundation files + shell.jsx are critical-path. Pages load on demand
+     after the foundation registers their parent components. We
+     intentionally DON'T preload every page file here to avoid wasting
+     mobile bandwidth on routes the user never visits. -->
 
 <div id="root"></div>
 
@@ -291,45 +295,46 @@
 <!-- B6: production build is ~6 KB vs ~120 KB development build, no dev panels exposed. -->
 <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" integrity="sha384-DGyLxAyjq0f9SPpVevD6IgztCFlnMF6oW/XQGmfe+IsZ8TqEiDrcHkMLKI6fiB/Z" crossorigin="anonymous"></script>
 <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" integrity="sha384-gTGxhz21lVGYNMcdJOyq01Edg0jhn/c22nsx0kyqP0TxaV5WVdsSH1fSDUf5YJj1" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
 
 <!-- Foundation: must load first -->
-<script src="/build/admin/shared.js"></script>
-<script src="/build/admin/ui.js"></script>
-<script src="/build/admin/hooks.js"></script>
+<script type="text/babel" src="/admin/shared.jsx"></script>
+<script type="text/babel" src="/admin/ui.jsx"></script>
+<script type="text/babel" src="/admin/hooks.jsx"></script>
 
 <!-- Pages: each independent, attach to window.Page* -->
-<script src="/build/admin/page-overview.js"></script>
-<script src="/build/admin/page-rooms.js"></script>
-<script src="/build/admin/page-pricing.js"></script>
-<script src="/build/admin/page-tenants.js"></script>
-<script src="/build/admin/page-bookings.js"></script>
-<script src="/build/admin/page-contracts.js"></script>
-<script src="/build/admin/page-contract-templates.js"></script>
-<script src="/build/admin/page-contract-invitations.js"></script>
-<script src="/build/admin/page-maintenance.js"></script>
-<script src="/build/admin/page-billing.js"></script>
-<script src="/build/admin/page-reports.js"></script>
-<script src="/build/admin/page-settings.js"></script>
+<script type="text/babel" src="/admin/page-overview.jsx"></script>
+<script type="text/babel" src="/admin/page-rooms.jsx"></script>
+<script type="text/babel" src="/admin/page-pricing.jsx"></script>
+<script type="text/babel" src="/admin/page-tenants.jsx"></script>
+<script type="text/babel" src="/admin/page-bookings.jsx"></script>
+<script type="text/babel" src="/admin/page-contracts.jsx"></script>
+<script type="text/babel" src="/admin/page-contract-templates.jsx"></script>
+<script type="text/babel" src="/admin/page-contract-invitations.jsx"></script>
+<script type="text/babel" src="/admin/page-maintenance.jsx"></script>
+<script type="text/babel" src="/admin/page-billing.jsx"></script>
+<script type="text/babel" src="/admin/page-reports.jsx"></script>
+<script type="text/babel" src="/admin/page-settings.jsx"></script>
 
 <!-- v2 pages (feature-flag gated on the server side) -->
-<script src="/build/admin/page-features.js"></script>
-<script src="/build/admin/page-payments.js"></script>
-<script src="/build/admin/page-meters.js"></script>
-<script src="/build/admin/page-access.js"></script>
-<script src="/build/admin/page-notifications.js"></script>
-<script src="/build/admin/page-secrets.js"></script>
-<script src="/build/admin/page-slip-verify.js"></script>
-<script src="/build/admin/page-line-bindings.js"></script>
-<script src="/build/admin/page-line-oas.js"></script>
-<script src="/build/admin/page-notifications-queue.js"></script>
-<script src="/build/admin/page-security-events.js"></script>
-<script src="/build/admin/page-access-devices.js"></script>
-<script src="/build/admin/page-reports-v2.js"></script>
-<script src="/build/admin/page-recurring-charges.js"></script>
-<script src="/build/admin/page-health.js"></script>
-<script src="/build/admin/page-production-readiness.js"></script>
+<script type="text/babel" src="/admin/page-features.jsx"></script>
+<script type="text/babel" src="/admin/page-payments.jsx"></script>
+<script type="text/babel" src="/admin/page-meters.jsx"></script>
+<script type="text/babel" src="/admin/page-access.jsx"></script>
+<script type="text/babel" src="/admin/page-notifications.jsx"></script>
+<script type="text/babel" src="/admin/page-secrets.jsx"></script>
+<script type="text/babel" src="/admin/page-slip-verify.jsx"></script>
+<script type="text/babel" src="/admin/page-line-bindings.jsx"></script>
+<script type="text/babel" src="/admin/page-line-oas.jsx"></script>
+<script type="text/babel" src="/admin/page-notifications-queue.jsx"></script>
+<script type="text/babel" src="/admin/page-security-events.jsx"></script>
+<script type="text/babel" src="/admin/page-access-devices.jsx"></script>
+<script type="text/babel" src="/admin/page-reports-v2.jsx"></script>
+<script type="text/babel" src="/admin/page-recurring-charges.jsx"></script>
+<script type="text/babel" src="/admin/page-health.jsx"></script>
+<script type="text/babel" src="/admin/page-production-readiness.jsx"></script>
 
 <!-- Shell: must load last (uses everything above + renders) -->
-<script src="/build/admin/shell.js"></script>
+<script type="text/babel" src="/admin/shell.jsx"></script>
 </body>
 </html>

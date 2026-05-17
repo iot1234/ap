@@ -26,10 +26,6 @@ ENV NODE_ENV=production \
 COPY --from=deps /app/node_modules ./node_modules
 COPY --chown=node:node . .
 
-# Build frontend JSX into plain JS for the static HTML shells. The container
-# starts with `node server.js`, so npm lifecycle hooks will not run here.
-RUN npm run build
-
 # Pre-create writable dirs so the non-root user can use them without
 # having to chmod a Railway volume mounted on top.
 RUN mkdir -p /app/uploads /app/backups && \
