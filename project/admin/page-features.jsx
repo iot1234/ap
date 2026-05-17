@@ -484,7 +484,12 @@ function PageFeatures({ setToast, embedded = false, currentUser = null }) {
             label="ต้องแนบสลิปค่าจอง"
             features={features} setField={setField}
             disabled={!canEdit || busy} disabledReason={readOnlyReason} />
+          <ToggleField id="roomBooking" field="applyBookingFeeToDeposit"
+            label="นำค่าจองไปหัก/นับรวมกับเงินมัดจำสัญญา"
+            features={features} setField={setField}
+            disabled={!canEdit || busy} disabledReason={readOnlyReason} />
           <Field id="roomBooking" field="depositAmount" label="ค่าจอง (บาท)" type="number" />
+          <Field id="roomBooking" field="minimumAmount" label="ขั้นต่ำค่าจอง (0 = ไม่กำหนด)" type="number" />
           <Field id="roomBooking" field="holdMinutes" label="ล็อกห้องชั่วคราว (นาที)" type="number" />
           <Field id="roomBooking" field="maxBytes" label="ขนาดสลิปสูงสุด (bytes)" type="number" />
         </Row>

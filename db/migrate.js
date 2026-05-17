@@ -775,6 +775,10 @@ async function migrate(pool, opts = {}) {
     ALTER TABLE bookings ADD COLUMN IF NOT EXISTS expected_deposit NUMERIC(10,2);
     ALTER TABLE bookings ADD COLUMN IF NOT EXISTS deposit_required BOOLEAN DEFAULT FALSE;
     ALTER TABLE bookings ADD COLUMN IF NOT EXISTS booking_fee NUMERIC(10,2) DEFAULT 0;
+    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS booking_fee_applies_to_deposit BOOLEAN DEFAULT FALSE;
+    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS deposit_credit_amount NUMERIC(10,2) DEFAULT 0;
+    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS deposit_balance_due NUMERIC(10,2);
+    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS deposit_minimum_amount NUMERIC(10,2) DEFAULT 0;
     ALTER TABLE bookings ADD COLUMN IF NOT EXISTS deposit_status TEXT;
     ALTER TABLE bookings ADD COLUMN IF NOT EXISTS deposit_slip_file_id BIGINT REFERENCES file_uploads(id) ON DELETE SET NULL;
     ALTER TABLE bookings ADD COLUMN IF NOT EXISTS deposit_slip_hash TEXT;
@@ -784,6 +788,9 @@ async function migrate(pool, opts = {}) {
     CREATE UNIQUE INDEX IF NOT EXISTS uq_bookings_deposit_slip_hash
       ON bookings(deposit_slip_hash)
       WHERE deposit_slip_hash IS NOT NULL;
+
+    ALTER TABLE contracts ADD COLUMN IF NOT EXISTS booking_fee_credit NUMERIC(10,2) DEFAULT 0;
+    ALTER TABLE contracts ADD COLUMN IF NOT EXISTS deposit_balance_due NUMERIC(10,2);
     -- Legal trail: the timestamp at which the applicant clicked through the
     -- terms-and-conditions checkbox + the version of those terms (so if the
     -- terms text changes later we know which version they accepted).

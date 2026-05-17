@@ -56,6 +56,8 @@ const DEFAULTS = Object.freeze({
     // attach a slip before the booking becomes pending for admin review.
     requireDeposit: false,
     depositAmount: 500,
+    minimumAmount: 0,             // 0 = no minimum; positive values are at least 1 baht
+    applyBookingFeeToDeposit: false,
     requireSlip: true,
     holdMinutes: 15,
     maxBytes: 1_500_000,

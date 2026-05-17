@@ -228,11 +228,13 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
       render: b => <span style={{ fontSize: 12.5, color: C.ink2 }}>{fmtDateTH(b.moveIn)}</span>,
     },
     {
-      key: 'deposit', label: 'มัดจำ', align: 'right', minWidth: 100,
+      key: 'deposit', label: 'ค่าจอง', align: 'right', minWidth: 120,
       render: b => (
         <div style={{ textAlign: 'right' }}>
           <div style={{ fontWeight: 600 }}>{fmtCurrency(b.bookingFee ?? b.deposit)}</div>
-          <div style={{ fontSize: 11, color: C.muted }}>{depositStatusLabel(b.depositStatus)}</div>
+          <div style={{ fontSize: 11, color: C.muted }}>
+            {b.bookingFeeAppliesToDeposit ? 'หักมัดจำ' : depositStatusLabel(b.depositStatus)}
+          </div>
         </div>
       ),
     },
@@ -492,7 +494,10 @@ function BookingDetail({ b }) {
             { label: 'ชั้นที่ต้องการ', value: b.wantFloor ? `ชั้น ${b.wantFloor}` : 'ไม่ระบุ' },
             { label: 'ระยะเวลาเช่า',  value: b.months ? `${b.months} เดือน` : '—' },
             { label: 'วันที่ย้ายเข้า', value: b.moveIn ? fmtDateTH(b.moveIn) : '—' },
-            { label: 'เงินมัดจำ',      value: fmtCurrency(b.bookingFee ?? b.deposit ?? 0), bold: true },
+            { label: 'ค่าจอง',      value: fmtCurrency(b.bookingFee ?? b.deposit ?? 0), bold: true },
+            { label: 'นโยบายค่าจอง', value: b.bookingFeeAppliesToDeposit ? 'นำไปหัก/นับรวมกับเงินมัดจำสัญญา' : 'แยกจากเงินมัดจำสัญญา' },
+            ...(b.depositCreditAmount ? [{ label: 'เครดิตมัดจำจากค่าจอง', value: fmtCurrency(b.depositCreditAmount) }] : []),
+            ...(b.depositBalanceDue != null ? [{ label: 'เงินมัดจำคงเหลือที่ต้องเก็บ', value: fmtCurrency(b.depositBalanceDue) }] : []),
             { label: 'สถานะสลิปค่าจอง', value: depositStatusLabel(b.depositStatus) },
             ...(b.depositSlipUrl ? [{ label: 'สลิปค่าจอง', value: <a href={b.depositSlipUrl} target="_blank" rel="noopener noreferrer" style={{ color: C.accent }}>เปิดดูสลิป</a> }] : []),
             ...(b.reservedAt ? [{ label: 'ล็อกห้องเมื่อ', value: relTime(b.reservedAt) }] : []),

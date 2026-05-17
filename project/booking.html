@@ -347,8 +347,18 @@
     }
     depositPanel.style.display = 'block';
     document.getElementById('depositAmount').textContent = `฿${money(bookingConfig.depositAmount)}`;
-    document.getElementById('depositHint').textContent =
-      `ระบบจะล็อกห้อง ${bookingConfig.holdMinutes || 15} นาทีระหว่างชำระค่าจอง`;
+    const depositHintParts = [
+      `ระบบจะล็อกห้อง ${bookingConfig.holdMinutes || 15} นาทีระหว่างชำระค่าจอง`,
+    ];
+    if (Number(bookingConfig.minimumAmount) > 0) {
+      depositHintParts.push(`ขั้นต่ำค่าจอง ฿${money(bookingConfig.minimumAmount)}`);
+    }
+    depositHintParts.push(
+      bookingConfig.applyBookingFeeToDeposit
+        ? 'ค่าจองนี้จะนับเป็นส่วนหนึ่งของเงินมัดจำสัญญา'
+        : 'ค่าจองนี้แยกจากเงินมัดจำสัญญา'
+    );
+    document.getElementById('depositHint').textContent = depositHintParts.join(' · ');
     document.getElementById('depositSlipLabel').textContent =
       bookingConfig.requireSlip ? 'แนบสลิปค่าจอง *' : 'แนบสลิปค่าจอง (ถ้ามี)';
     const qr = document.getElementById('depositQr');

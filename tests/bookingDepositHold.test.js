@@ -11,6 +11,8 @@ test('roomBooking feature defaults define deposit and 15-minute hold policy', ()
   assert.equal(DEFAULTS.roomBooking.enabled, true);
   assert.equal(DEFAULTS.roomBooking.requireDeposit, false);
   assert.equal(DEFAULTS.roomBooking.depositAmount, 500);
+  assert.equal(DEFAULTS.roomBooking.minimumAmount, 0);
+  assert.equal(DEFAULTS.roomBooking.applyBookingFeeToDeposit, false);
   assert.equal(DEFAULTS.roomBooking.requireSlip, true);
   assert.equal(DEFAULTS.roomBooking.holdMinutes, 15);
 });
@@ -20,6 +22,10 @@ test('booking migration stores deposit slip and hold audit fields', () => {
   for (const col of [
     'deposit_required',
     'booking_fee',
+    'booking_fee_applies_to_deposit',
+    'deposit_credit_amount',
+    'deposit_balance_due',
+    'deposit_minimum_amount',
     'deposit_status',
     'deposit_slip_file_id',
     'deposit_slip_hash',
@@ -32,6 +38,10 @@ test('booking migration stores deposit slip and hold audit fields', () => {
   }
   assert.match(migrate, /uq_bookings_deposit_slip_hash/,
     'booking deposit slip hash must be unique when present');
+  assert.match(migrate, /ALTER TABLE contracts ADD COLUMN IF NOT EXISTS booking_fee_credit/,
+    'contracts must remember how much booking fee was credited to the deposit');
+  assert.match(migrate, /ALTER TABLE contracts ADD COLUMN IF NOT EXISTS deposit_balance_due/,
+    'contracts must remember the remaining security-deposit balance');
 });
 
 test('public booking schema accepts hold token and deposit slip', () => {
@@ -74,6 +84,12 @@ test('public booking deposit requires a room, a slip, and deduplicates slips', (
     'booking deposit slip upload must be attributable to the booking id');
   assert.match(server, /reservationMode: bookingSettings\.requireDeposit \? 'public_booking_deposit' : 'public_booking'/,
     'successful booking must convert the hold into a real booking reservation');
+  assert.match(server, /bookingFeeAppliesToDeposit: bookingSettings\.applyBookingFeeToDeposit/,
+    'booking rows must snapshot whether the booking fee is credited to contract deposit');
+  assert.match(server, /depositMinimumAmount: bookingSettings\.minimumAmount/,
+    'booking rows must snapshot the minimum booking-fee policy');
+  assert.match(server, /depositCreditAmount = bookingSettings\.requireDeposit && bookingSettings\.applyBookingFeeToDeposit/,
+    'public booking must estimate the deposit credit when the policy is enabled');
 });
 
 test('rejected public booking reservations release their room lock', () => {
@@ -84,6 +100,20 @@ test('rejected public booking reservations release their room lock', () => {
     'the release path must document the public booking reservation case');
   assert.match(server, /room\.reservedBy === id/,
     'room release must still be guarded by reservedBy=booking id');
+});
+
+test('booking approval and contract handoff understand preclaimed deposit bookings', () => {
+  const server = read('server.js');
+  assert.match(server, /preclaimedCandidate/,
+    'approval must accept a room already reserved by the same public booking');
+  assert.match(server, /String\(candidateRoom\.reservedBy \|\| ''\) === id/,
+    'preclaimed approval must still be guarded by reservedBy=booking id');
+  assert.match(server, /bookingFeeCredit = creditToDeposit \? Math\.min\(bookingFee, Math\.max\(deposit, 0\)\) : 0/,
+    'quick-invite must convert credited booking fees into a bounded deposit credit');
+  assert.match(server, /booking_fee_credit, deposit_balance_due/,
+    'quick-invite must persist deposit credit and remaining balance on contracts');
+  assert.match(server, /deposit_credit_amount=\$3,[\s\S]{0,80}deposit_balance_due=\$4/,
+    'booking completion must persist credited amount and balance for audit');
 });
 
 test('orphan slip cleanup preserves booking deposit slips', () => {
@@ -113,10 +143,18 @@ test('public booking page and admin features expose deposit controls', () => {
     'admin features page must expose room booking settings');
   assert.match(features, /field="depositAmount"/,
     'admin must be able to set the booking deposit amount');
+  assert.match(features, /field="minimumAmount"/,
+    'admin must be able to set no minimum or a booking-fee minimum');
+  assert.match(features, /field="applyBookingFeeToDeposit"/,
+    'admin must be able to choose whether booking fee credits contract deposit');
   assert.match(features, /field="holdMinutes"/,
     'admin must be able to set the room hold duration');
+  assert.match(booking, /applyBookingFeeToDeposit/,
+    'public page must explain whether the booking fee is credited to deposit');
   assert.match(adminBookings, /depositStatusLabel/,
     'admin booking page must show booking deposit status');
   assert.match(adminBookings, /depositSlipUrl/,
     'admin booking detail must link the deposit slip when present');
+  assert.match(adminBookings, /depositBalanceDue/,
+    'admin booking detail must show the remaining deposit balance');
 });

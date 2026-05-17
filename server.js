@@ -1073,15 +1073,25 @@ function lookupJitter(_req, _res, next) {
 function roomBookingSettings(flags) {
   const raw = (flags && flags.roomBooking) || {};
   const amount = Number(raw.depositAmount);
+  const minimumRaw = Number(raw.minimumAmount);
   const holdMinutes = Number(raw.holdMinutes);
   const maxBytes = Number(raw.maxBytes);
+  const minimumAmount = Number.isFinite(minimumRaw) && minimumRaw > 0
+    ? Math.min(Math.max(minimumRaw, 1), 1_000_000)
+    : 0;
+  const configuredAmount = Number.isFinite(amount) && amount >= 0
+    ? Math.min(amount, 1_000_000)
+    : 500;
   return {
     enabled: raw.enabled !== false,
     requireDeposit: raw.requireDeposit === true,
     requireSlip: raw.requireSlip !== false,
-    depositAmount: Number.isFinite(amount) && amount >= 0
-      ? Math.min(amount, 1_000_000)
-      : 500,
+    depositAmount: minimumAmount > 0
+      ? Math.max(configuredAmount, minimumAmount)
+      : configuredAmount,
+    configuredDepositAmount: configuredAmount,
+    minimumAmount,
+    applyBookingFeeToDeposit: raw.applyBookingFeeToDeposit === true,
     holdMinutes: Number.isFinite(holdMinutes) && holdMinutes > 0
       ? Math.min(Math.max(Math.trunc(holdMinutes), 1), 120)
       : 15,
@@ -1228,6 +1238,9 @@ app.get('/api/bookings/public/config', async (_req, res) => {
         requireDeposit: settings.requireDeposit,
         requireSlip: settings.requireSlip,
         depositAmount: settings.depositAmount,
+        configuredDepositAmount: settings.configuredDepositAmount,
+        minimumAmount: settings.minimumAmount,
+        applyBookingFeeToDeposit: settings.applyBookingFeeToDeposit,
         holdMinutes: settings.holdMinutes,
         maxBytes: settings.maxBytes,
         allowedMimes: settings.allowedMimes,
@@ -1342,6 +1355,8 @@ app.post('/api/bookings/public/hold', sameOrigin, rateLimitBooking, async (req, 
       booking: {
         requireDeposit: true,
         depositAmount: settings.depositAmount,
+        minimumAmount: settings.minimumAmount,
+        applyBookingFeeToDeposit: settings.applyBookingFeeToDeposit,
         holdMinutes: settings.holdMinutes,
         payment,
       },
@@ -1519,6 +1534,11 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBooking, validateBody(sche
           ? cleaned.expectedDeposit : 0),
     depositRequired: bookingSettings.requireDeposit,
     bookingFee: bookingSettings.requireDeposit ? bookingSettings.depositAmount : 0,
+    bookingFeeAppliesToDeposit: bookingSettings.applyBookingFeeToDeposit,
+    depositMinimumAmount: bookingSettings.minimumAmount,
+    depositCreditAmount: 0,
+    depositBalanceDue: null,
+    contractDepositEstimate: null,
     depositStatus: bookingSettings.requireDeposit
       ? (depositSlipFile ? 'pending_review' : 'awaiting_slip')
       : 'not_required',
@@ -1609,6 +1629,15 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBooking, validateBody(sche
           code: 'BOOKING_HOLD_EXPIRED',
         });
       }
+      const contractDepositEstimate = Math.max(0, Number(room.deposit ?? v2Room?.deposit_price ?? 0) || 0);
+      const depositCreditAmount = bookingSettings.requireDeposit && bookingSettings.applyBookingFeeToDeposit
+        ? Math.min(Number(newBooking.bookingFee) || 0, contractDepositEstimate)
+        : 0;
+      newBooking.contractDepositEstimate = contractDepositEstimate;
+      newBooking.depositCreditAmount = depositCreditAmount;
+      newBooking.depositBalanceDue = contractDepositEstimate > 0
+        ? Math.max(contractDepositEstimate - depositCreditAmount, 0)
+        : null;
       const reservedAt = new Date().toISOString();
       newBooking.reservedAt = reservedAt;
       newBooking.holdExpiresAt = sameHold ? (room.reservationExpiresAt || null) : null;
@@ -1630,6 +1659,10 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBooking, validateBody(sche
         reservedAt,
         reservationMode: bookingSettings.requireDeposit ? 'public_booking_deposit' : 'public_booking',
         depositStatus: newBooking.depositStatus,
+        bookingFee: newBooking.bookingFee,
+        bookingFeeAppliesToDeposit: newBooking.bookingFeeAppliesToDeposit,
+        depositCreditAmount: newBooking.depositCreditAmount,
+        depositBalanceDue: newBooking.depositBalanceDue,
       };
       delete rooms[cleaned.roomId].reservationExpiresAt;
       delete rooms[cleaned.roomId].holdExpiresAt;
@@ -1682,13 +1715,15 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBooking, validateBody(sche
             (external_id, name, phone, email, want_type, want_floor,
              move_in, months, deposit, status, source, message, room_id,
              citizen_id_tail, citizen_id_image_front_id, expected_deposit,
-             deposit_required, booking_fee, deposit_status, deposit_slip_file_id,
+             deposit_required, booking_fee, booking_fee_applies_to_deposit,
+             deposit_credit_amount, deposit_balance_due, deposit_minimum_amount,
+             deposit_status, deposit_slip_file_id,
              deposit_slip_hash, hold_token_hash, hold_expires_at, reserved_at,
              agreed_terms_at, agreed_terms_version)
           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'pending','public-form',$10,$11,
                   $12,$13,$14,
-                  $15,$16,$17,$18,$19,$20,$21,$22,
-                  CASE WHEN $23::text IS NOT NULL THEN NOW() ELSE NULL END, $23)
+                  $15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,
+                  CASE WHEN $27::text IS NOT NULL THEN NOW() ELSE NULL END, $27)
           ON CONFLICT (external_id) DO NOTHING`,
         [
           newBooking.id, newBooking.name, newBooking.phone || null,
@@ -1699,6 +1734,10 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBooking, validateBody(sche
           cleaned.expectedDeposit != null && Number.isFinite(cleaned.expectedDeposit) ? cleaned.expectedDeposit : null,
           bookingSettings.requireDeposit,
           newBooking.bookingFee || 0,
+          newBooking.bookingFeeAppliesToDeposit === true,
+          newBooking.depositCreditAmount || 0,
+          newBooking.depositBalanceDue,
+          newBooking.depositMinimumAmount || 0,
           newBooking.depositStatus || null,
           newBooking.depositSlipFileId || null,
           newBooking.depositSlipHash || null,
@@ -1756,7 +1795,7 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBooking, validateBody(sche
       const flags = await features.load(pool);
       notifier.notifyOwner({ pool, features: flags }, {
         subject: '📋 ผู้เช่าใหม่ขอจอง',
-        text: `ชื่อ: ${cleaned.tenantName}\nโทร: ${cleaned.phone || '-'}\nห้อง: ${cleaned.roomId || '-'}\nวันเข้าพัก: ${cleaned.checkInDate || '-'}\nค่าจอง: ${newBooking.bookingFee ? `฿${Number(newBooking.bookingFee).toLocaleString('th-TH')}` : '-'} (${newBooking.depositStatus || 'not_required'})\nรหัสการจอง: ${newBooking.id}`,
+        text: `ชื่อ: ${cleaned.tenantName}\nโทร: ${cleaned.phone || '-'}\nห้อง: ${cleaned.roomId || '-'}\nวันเข้าพัก: ${cleaned.checkInDate || '-'}\nค่าจอง: ${newBooking.bookingFee ? `฿${Number(newBooking.bookingFee).toLocaleString('th-TH')}` : '-'} (${newBooking.depositStatus || 'not_required'})\nนโยบาย: ${newBooking.bookingFeeAppliesToDeposit ? 'นำค่าจองไปหัก/นับรวมกับเงินมัดจำ' : 'ค่าจองแยกจากเงินมัดจำ'}\nมัดจำคงเหลือโดยประมาณ: ${newBooking.depositBalanceDue != null ? `฿${Number(newBooking.depositBalanceDue).toLocaleString('th-TH')}` : '-'}\nรหัสการจอง: ${newBooking.id}`,
       }).catch(() => {});
     } catch { /* ignore */ }
 
@@ -3630,9 +3669,14 @@ function buildSlipVerificationNotice({
       message = 'บริการตรวจสลิปยืนยันรายการแล้ว แต่ระบบตั้งค่าให้แอดมินตรวจทานก่อนปิดบิล';
       nextAction = 'รอแอดมินอนุมัติ ระบบจะแจ้งผลเมื่อดำเนินการแล้ว';
     } else if (autoVerifyAttempted) {
-      title = 'รับสลิปแล้ว แต่ยังตรวจอัตโนมัติไม่สำเร็จ';
-      message = fallback || 'บริการตรวจสลิปยังไม่สามารถยืนยันผลได้ในขณะนี้ สลิปถูกส่งเข้าแถวรอแอดมินตรวจ';
-      nextAction = 'ไม่ต้องอัปโหลดซ้ำระหว่างรอตรวจ หากต้องการความช่วยเหลือให้ติดต่อแอดมิน';
+      const attemptCount = Array.isArray(verifyResult?.attempts) ? verifyResult.attempts.length : 0;
+      const attemptText = attemptCount > 0
+        ? ` ระบบได้ลองตรวจผ่านผู้ให้บริการที่ตั้งค่าไว้ ${attemptCount} รายการแล้ว แต่ยังไม่ได้ผลยืนยันที่ปลอดภัย`
+        : '';
+      const refText = code ? ` รหัสอ้างอิงสำหรับแจ้งแอดมิน: ${code}.` : '';
+      title = 'รับสลิปแล้ว ระบบส่งให้แอดมินตรวจ';
+      message = `ระบบตรวจสลิปอัตโนมัติยังไม่สามารถยืนยันผลได้ในขณะนี้${attemptText}${refText} สลิปถูกส่งให้แอดมินตรวจสอบแล้ว บิลจะยังไม่ถูกทำเครื่องหมายว่าชำระแล้วจนกว่าแอดมินจะอนุมัติ หากต้องการความช่วยเหลือหรือเร่งตรวจ กรุณาติดต่อแอดมิน/สำนักงานพร้อมเลขบิลและรหัสอ้างอิง`;
+      nextAction = 'รอแอดมินตรวจสอบจากคิว Payments ไม่ต้องอัปโหลดซ้ำระหว่างรอตรวจ หากต้องการเร่งด่วนให้ติดต่อแอดมิน/สำนักงาน';
     } else {
       title = 'รับสลิปแล้ว รอแอดมินตรวจสอบ';
       message = 'ระบบยังไม่ได้เปิดหรือยังไม่พร้อมใช้การตรวจสลิปอัตโนมัติ สลิปถูกส่งให้แอดมินตรวจ';
@@ -4890,7 +4934,7 @@ async function tenantPaymentUploadHandler(req, res) {
         // Provider couldn't talk → fall back to pending so admin handles
         // it manually rather than stranding the tenant with a false reject.
         initialStatus = 'pending';
-        initialReason = `auto-verify ตกชั่วคราว (${verifyResult.code}) — รอเจ้าหน้าที่ตรวจสอบ`;
+        initialReason = `ระบบตรวจสลิปอัตโนมัติยังยืนยันไม่ได้ (${verifyResult.code}) — ส่งเข้าคิวแอดมินตรวจด้วยมือ`;
       } else {
         // Verifier confirmed the slip is bad: amount mismatch, receiver
         // mismatch, provider explicitly rejected (fake / expired / replay
@@ -5254,9 +5298,11 @@ async function tenantPaymentUploadHandler(req, res) {
         '', // blank line before action
         initialStatus === 'verified'
           ? '✅ ระบบทำเครื่องหมายบิลเป็น "ชำระแล้ว" ให้แล้ว ไม่ต้องดำเนินการเพิ่ม'
-          : initialStatus === 'pending'
-            ? '👉 ที่ต้องทำ: เข้า /admin#payments เพื่อตรวจสลิป — บิลยังเป็น "ยังไม่ชำระ" จนกว่าจะอนุมัติ'
-            : '👉 ที่ต้องทำ: เข้า /admin#payments เพื่อดูเหตุผลที่ระบบปฏิเสธ และติดต่อผู้เช่าหากจำเป็น — บิลยังไม่ถูกชำระ',
+          : initialStatus === 'pending' && autoVerifyAttempted && !verifyResult?.ok
+            ? '👉 ที่ต้องทำ: ระบบตรวจสลิปอัตโนมัติยังยืนยันไม่ได้ ให้แอดมินเปิด /admin#payments ตรวจสลิปด้วยมือและติดต่อผู้เช่าหากต้องการข้อมูลเพิ่ม — บิลยังเป็น "ยังไม่ชำระ" จนกว่าจะอนุมัติ'
+            : initialStatus === 'pending'
+              ? '👉 ที่ต้องทำ: เข้า /admin#payments เพื่อตรวจสลิป — บิลยังเป็น "ยังไม่ชำระ" จนกว่าจะอนุมัติ'
+              : '👉 ที่ต้องทำ: เข้า /admin#payments เพื่อดูเหตุผลที่ระบบปฏิเสธ และติดต่อผู้เช่าหากจำเป็น — บิลยังไม่ถูกชำระ',
       ].filter((l) => l !== null && l !== undefined);
       // Lead with the most important facts (who + how much + room) on
       // line 1 so a glance at the LINE preview already tells the owner
@@ -5363,7 +5409,12 @@ async function tenantPaymentUploadHandler(req, res) {
         } else if (autoVerifyAttempted) {
           // Transient error path — be honest that the auto-check didn't
           // get a clean answer. Don't surface "fake slip" wording.
-          extra = `\nℹ️ ระบบตรวจอัตโนมัติไม่สามารถยืนยันได้ในขณะนี้ — เจ้าหน้าที่จะตรวจให้`;
+          const verifierCode = verifyResult?.code || 'VERIFIER_UNAVAILABLE';
+          const attemptCount = Array.isArray(verifyResult?.attempts) ? verifyResult.attempts.length : 0;
+          const attemptText = attemptCount > 0
+            ? ` ระบบลองตรวจผ่านผู้ให้บริการที่ตั้งค่าไว้ ${attemptCount} รายการแล้วแต่ยังไม่ได้ผลยืนยัน`
+            : '';
+          extra = `\n⚠️ ระบบตรวจสลิปอัตโนมัติยังไม่สามารถยืนยันผลได้ในขณะนี้ (รหัส ${verifierCode}) — สลิปถูกส่งให้แอดมิน/สำนักงานตรวจแล้ว${attemptText}`;
         }
         tenantNotice = {
           subject: '📥 ได้รับสลิปแล้ว — กำลังตรวจสอบ',
@@ -5377,7 +5428,7 @@ async function tenantPaymentUploadHandler(req, res) {
             `🔍 เจ้าหน้าที่กำลังตรวจสอบ — ปกติใช้เวลาภายใน 24 ชั่วโมง${extra}`,
             `📩 จะแจ้งผลการตรวจสอบกลับ (ผ่าน LINE/อีเมลนี้) เมื่อยืนยันแล้ว`,
             ``,
-            `หากมีข้อสงสัย ติดต่อ ${buildingName}`,
+            `หากต้องการความช่วยเหลือหรือเร่งตรวจ กรุณาติดต่อแอดมิน/สำนักงานของ ${buildingName} พร้อมแจ้งบิล ${billNo} และจำนวน ฿${amtStr}`,
           ].join('\n'),
         };
       }
@@ -5955,6 +6006,34 @@ app.post('/api/bookings/:id/approve-and-assign', sameOrigin, csrfGuard, requireA
       (!booking.wantType || r.type === booking.wantType) &&
       (!booking.wantFloor || Number(r.floor) === Number(booking.wantFloor))
     );
+    let preclaimedCandidate = null;
+    const preclaimedRoomId = String(booking.assignedRoomId || booking.roomId || '').trim();
+    if (preclaimedRoomId) {
+      const blobPreclaimed = rooms && rooms[preclaimedRoomId]
+        ? { id: rooms[preclaimedRoomId].id || preclaimedRoomId, ...rooms[preclaimedRoomId] }
+        : null;
+      let v2Preclaimed = null;
+      try {
+        const v2Pre = await client.query(
+          `SELECT room_code, room_type, floor, room_no, rent_price, deposit_price, wifi_fee, status
+             FROM rooms_v2
+             WHERE room_code=$1 AND deleted_at IS NULL
+             FOR UPDATE`,
+          [preclaimedRoomId]
+        );
+        v2Preclaimed = v2Pre.rows[0] || null;
+      } catch (err) {
+        if (err.code !== '42P01') throw err;
+      }
+      const candidateRoom = blobPreclaimed || (v2Preclaimed ? roomFromV2(v2Preclaimed) : null);
+      const ownedByThisBooking = candidateRoom
+        && candidateRoom.status === 'reserved'
+        && String(candidateRoom.reservedBy || '') === id;
+      const v2Compatible = !v2Preclaimed || ['reserved', 'vacant'].includes(v2Preclaimed.status);
+      if (ownedByThisBooking && v2Compatible && want(candidateRoom)) {
+        preclaimedCandidate = { ...candidateRoom, _source: 'preclaimed' };
+      }
+    }
     const rawBlobCandidates = Object.entries(rooms || {})
       .map(([roomCode, room]) => ({ id: room?.id || roomCode, ...(room || {}) }))
       .filter((r) => r && r.status === 'vacant' && want(r));
@@ -5995,29 +6074,31 @@ app.post('/api/bookings/:id/approve-and-assign', sameOrigin, csrfGuard, requireA
     // against stale JSONB would double-reserve an occupied/reserved room.
     const sortedCandidates = [...rawBlobCandidates, ...v2Candidates]
       .sort((a, b) => String(a.id).localeCompare(String(b.id)));
-    let candidate = null;
-    const seenRoomIds = new Set();
-    for (const cand of sortedCandidates) {
-      const roomId = String(cand.id || '').trim();
-      if (!roomId || seenRoomIds.has(roomId)) continue;
-      seenRoomIds.add(roomId);
-      if (cand._source !== 'v2') {
-        try {
-          const v2State = await client.query(
-            `SELECT status FROM rooms_v2
-               WHERE room_code=$1 AND deleted_at IS NULL
-               FOR UPDATE`,
-            [roomId]
-          );
-          if (v2State.rows.length && v2State.rows[0].status !== 'vacant') {
-            continue;
+    let candidate = preclaimedCandidate;
+    if (!candidate) {
+      const seenRoomIds = new Set();
+      for (const cand of sortedCandidates) {
+        const roomId = String(cand.id || '').trim();
+        if (!roomId || seenRoomIds.has(roomId)) continue;
+        seenRoomIds.add(roomId);
+        if (cand._source !== 'v2') {
+          try {
+            const v2State = await client.query(
+              `SELECT status FROM rooms_v2
+                 WHERE room_code=$1 AND deleted_at IS NULL
+                 FOR UPDATE`,
+              [roomId]
+            );
+            if (v2State.rows.length && v2State.rows[0].status !== 'vacant') {
+              continue;
+            }
+          } catch (err) {
+            if (err.code !== '42P01') throw err;
           }
-        } catch (err) {
-          if (err.code !== '42P01') throw err;
         }
+        candidate = cand;
+        break;
       }
-      candidate = cand;
-      break;
     }
 
     let assignedRoomId = null;
@@ -7564,6 +7645,7 @@ app.get('/api/contracts', requireAuth, async (req, res) => {
         `SELECT c.id, c.contract_no, c.tenant_id, c.room_id,
                 c.start_date, c.end_date, c.term_months,
                 c.monthly_rent, c.deposit, c.discount_pct,
+                c.booking_fee_credit, c.deposit_balance_due,
                 c.status, c.signed_at, c.created_at,
                 c.closed_at, c.closed_by, c.closed_reason, c.closed_type,
                 c.locked_at, c.locked_by, c.template_id,
@@ -8665,7 +8747,8 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
     const tenantPhone = rawPhone.replace(/[\s-]/g, '');
     const roomId = String(b.roomId || '').slice(0, 32).trim();
     const monthlyRent = Number(b.monthlyRent);
-    const deposit = Number(b.deposit) || 0;
+    const depositRaw = Number(b.deposit);
+    const deposit = Number.isFinite(depositRaw) ? depositRaw : 0;
     const moveInDate = String(b.moveInDate || '').slice(0, 16).trim();
     if (!tenantName) return res.status(400).json({ error: 'tenantName required', code: 'NAME_REQUIRED' });
     if (!tenantPhone || !/^[\d+]{8,20}$/.test(tenantPhone)) {
@@ -8674,6 +8757,9 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
     if (!roomId) return res.status(400).json({ error: 'roomId required', code: 'ROOM_REQUIRED' });
     if (!Number.isFinite(monthlyRent) || monthlyRent <= 0) {
       return res.status(400).json({ error: 'monthlyRent ต้อง > 0', code: 'INVALID_RENT' });
+    }
+    if (!Number.isFinite(deposit) || deposit < 0) {
+      return res.status(400).json({ error: 'deposit ต้องไม่ติดลบ', code: 'INVALID_DEPOSIT' });
     }
     if (!/^\d{4}-\d{2}-\d{2}$/.test(moveInDate)) {
       return res.status(400).json({ error: 'moveInDate ต้องเป็น YYYY-MM-DD', code: 'INVALID_DATE' });
@@ -8943,6 +9029,8 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
       let bookingCarryoverList = null;
       let bookingCarryoverIdx = -1;
       let bookingForInvite = null;
+      let bookingFeeCredit = 0;
+      let contractDepositBalanceDue = Math.max(deposit, 0);
       if (bookingIdForRoom) {
         const bookingBlobQ = await client.query(
           `SELECT value FROM app_data WHERE key='baankarn_bookings_v1' FOR UPDATE`
@@ -8993,6 +9081,10 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
             hint: 'กลับไปเปิดจาก booking/ผู้เช่าคนเดียวกัน หรือสร้างสัญญาแบบไม่อ้าง booking ถ้าเป็นงานแก้ข้อมูลย้อนหลัง',
           });
         }
+        const bookingFee = Math.max(0, Number(bookingForInvite.bookingFee) || 0);
+        const creditToDeposit = bookingForInvite.bookingFeeAppliesToDeposit === true;
+        bookingFeeCredit = creditToDeposit ? Math.min(bookingFee, Math.max(deposit, 0)) : 0;
+        contractDepositBalanceDue = Math.max(Math.max(deposit, 0) - bookingFeeCredit, 0);
       }
 
       const roomBlobQ = await client.query(
@@ -9134,12 +9226,14 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
                        + Math.random().toString(36).slice(2, 6).toUpperCase();
       const cIns = await client.query(
         `INSERT INTO contracts (contract_no, tenant_id, room_id, start_date, end_date,
-                                monthly_rent, deposit, status, term_months, discount_pct)
-         VALUES ($1, $2, $3, $4::date, $5::date, $6, $7, 'active', $8, $9)
+                                monthly_rent, deposit, status, term_months, discount_pct,
+                                booking_fee_credit, deposit_balance_due)
+         VALUES ($1, $2, $3, $4::date, $5::date, $6, $7, 'active', $8, $9, $10, $11)
          RETURNING id, contract_no, tenant_id, room_id, start_date, end_date,
-                   monthly_rent, deposit, status`,
+                   monthly_rent, deposit, status, booking_fee_credit, deposit_balance_due`,
         [contractNo, tenantId, roomId, moveInDate, endDate,
-         monthlyRent, deposit, effectiveTermMonths || null, discountPct]
+         monthlyRent, deposit, effectiveTermMonths || null, discountPct,
+         bookingFeeCredit, contractDepositBalanceDue]
       );
       const contract = cIns.rows[0];
 
@@ -9250,10 +9344,13 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
           try {
             await client.query(
               `UPDATE bookings
-                  SET status='completed', updated_at=NOW()
+                  SET status='completed',
+                      deposit_credit_amount=$3,
+                      deposit_balance_due=$4,
+                      updated_at=NOW()
                 WHERE external_id=$1
                   AND status = ANY($2::text[])`,
-              [bookingId, allowedFromForQuickInvite]
+              [bookingId, allowedFromForQuickInvite, bookingFeeCredit, contractDepositBalanceDue]
             );
           } catch (err) {
             if (err.code !== '42703' && err.code !== '42P01') throw err;
@@ -9268,6 +9365,9 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
               assignedRoomId: roomId,
               tenantId,
               contractId: contract.id,
+              contractDepositAmount: deposit,
+              depositCreditAmount: bookingFeeCredit,
+              depositBalanceDue: contractDepositBalanceDue,
               completedAt: new Date().toISOString(),
               updatedAt: new Date().toISOString(),
               updatedBy: req.session.user.username,
