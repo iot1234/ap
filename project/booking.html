@@ -461,6 +461,8 @@
   const roomIdParam = (params.get('roomId') || '').trim().slice(0, 32);
   const floorParam = (params.get('floor') || '').trim().slice(0, 2);
   const roomTypeParam = (params.get('roomType') || '').trim().slice(0, 32);
+  const REQUEST_TIMEOUT_MS = 15000;
+  const SUBMIT_TIMEOUT_MS = 45000;
 
   function money(n) {
     return Number(n || 0).toLocaleString('th-TH', { minimumFractionDigits: 2 });
@@ -543,6 +545,25 @@
       ? `ประมาณ ${Math.ceil(seconds / 60)} นาที`
       : `${seconds} วินาที`;
     return `${actionText}ถี่เกินไป กรุณารอ ${waitText} แล้วลองใหม่`;
+  }
+
+  async function fetchJsonWithTimeout(url, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, { ...options, signal: controller.signal });
+      const out = await res.json().catch(() => ({}));
+      return { res, out };
+    } catch (err) {
+      if (err && err.name === 'AbortError') {
+        const timeoutErr = new Error('request timeout');
+        timeoutErr.code = 'REQUEST_TIMEOUT';
+        throw timeoutErr;
+      }
+      throw err;
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 
   function clearAlert() {
@@ -661,6 +682,21 @@
     if (holdTimerId) clearInterval(holdTimerId);
     renderHoldTimer();
     holdTimerId = setInterval(renderHoldTimer, 1000);
+  }
+
+  function validateHoldReadyForSubmit(roomId) {
+    if (!bookingConfig || !bookingConfig.requireDeposit) return true;
+    if (!roomId) {
+      showError('การจองแบบมีค่าจองต้องเลือกห้องก่อน');
+      return false;
+    }
+    if (!hasActiveHoldFor(roomId)) {
+      clearHold({ release: false });
+      showError('เวลาล็อกห้องหมดแล้ว กรุณากด "ล็อกห้องและไปชำระค่าจอง" อีกครั้งก่อนส่งคำขอ');
+      loadAvailableRooms({ autoHold: false });
+      return false;
+    }
+    return true;
   }
 
   function selectBookingRoom(room, options = {}) {
@@ -884,12 +920,11 @@
     setHoldRetry(false);
     updateSubmitState();
     try {
-      const res = await fetch('/api/bookings/public/hold', {
+      const { res, out } = await fetchJsonWithTimeout('/api/bookings/public/hold', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ roomId }),
       });
-      const out = await res.json().catch(() => ({}));
       if (seq !== holdRequestSeq || selectedRoomId() !== roomId) return;
       if (!res.ok || !out.ok) {
         holdError = res.status === 429
@@ -911,9 +946,11 @@
         syncPaymentStepUi();
         depositPanel.scrollIntoView({ block: 'start', behavior: 'smooth' });
       }
-    } catch {
+    } catch (err) {
       if (seq !== holdRequestSeq || selectedRoomId() !== roomId) return;
-      holdError = 'ล็อกห้องไม่สำเร็จ กรุณาลองใหม่';
+      holdError = err && err.code === 'REQUEST_TIMEOUT'
+        ? 'ล็อกห้องใช้เวลานานเกินไป กรุณากดล็อกห้องอีกครั้ง'
+        : 'ล็อกห้องไม่สำเร็จ กรุณาลองใหม่';
       roomPickerStatus.textContent = holdError;
       holdTimer.textContent = holdError;
       setHoldRetry(true);
@@ -961,6 +998,10 @@
   if (startPaymentBtn) {
     startPaymentBtn.addEventListener('click', () => {
       clearAlert();
+      if (!selectedRoomId()) {
+        showError('กรุณาเลือกห้องว่างก่อนเข้าสู่ขั้นชำระค่าจอง');
+        return;
+      }
       holdError = '';
       requestRoomHold(selectedRoomId());
     });
@@ -1039,6 +1080,7 @@
 
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
+    if (submitting) return;
     alert.style.display = 'none';
     if (bookingDisabledReason) {
       showError(bookingDisabledReason);
@@ -1084,6 +1126,9 @@
         showError('กรุณากด "ล็อกห้องและไปชำระค่าจอง" ก่อนส่งคำขอ');
         return;
       }
+      if (!validateHoldReadyForSubmit(data.roomId)) {
+        return;
+      }
       if (depositSlipReading) {
         showError('ระบบกำลังอ่านไฟล์สลิป กรุณารอสักครู่แล้วกดส่งอีกครั้ง');
         return;
@@ -1108,12 +1153,11 @@
     }
 
     try {
-      const res = await fetch('/api/bookings/public', {
+      const { res, out: result } = await fetchJsonWithTimeout('/api/bookings/public', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data),
-      });
-      const result = await res.json().catch(() => ({}));
+      }, SUBMIT_TIMEOUT_MS);
 
       if (res.status === 429) {
         showError(rateLimitMessage(res, result, 'ส่งคำขอจอง'));
@@ -1153,7 +1197,9 @@
       }
       window.scrollTo({ top: 0, behavior: 'smooth' });
     } catch (err) {
-      showError('เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ กรุณาลองใหม่');
+      showError(err && err.code === 'REQUEST_TIMEOUT'
+        ? 'ส่งคำขอใช้เวลานานเกินไป กรุณาตรวจสอบสถานะกับเจ้าหน้าที่ก่อนส่งซ้ำ'
+        : 'เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ กรุณาลองใหม่');
       submitting = false;
       btn.textContent = 'ส่งคำขอจอง';
       updateSubmitState();

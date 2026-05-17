@@ -234,6 +234,10 @@ test('public booking page and admin features expose deposit controls', () => {
     'public page must offer a manual retry when room inventory loading fails');
   assert.match(booking, /rateLimitMessage/,
     'public page must turn 429 responses into actionable wait-and-retry guidance');
+  assert.match(booking, /fetchJsonWithTimeout/,
+    'public page must timeout hold and submit requests instead of leaving the UI stuck');
+  assert.match(booking, /REQUEST_TIMEOUT/,
+    'public page must surface timeout failures with a stable client-side code path');
   assert.match(booking, /id="holdRetryBtn"/,
     'public page must offer an explicit hold retry action after recoverable hold failures');
   assert.match(booking, /\/api\/bookings\/public\/hold/,
@@ -242,6 +246,8 @@ test('public booking page and admin features expose deposit controls', () => {
     'public page must release an owned hold instead of leaving the room locked until timeout');
   assert.match(booking, /requestRoomHold\(selectedRoomId\(\)\)/,
     'public page must create the hold only from the explicit payment-step action');
+  assert.match(booking, /validateHoldReadyForSubmit/,
+    'public page must revalidate an active, unexpired hold at submit time');
   assert.doesNotMatch(booking, /requestRoomHold\(room\.id\)/,
     'public page must not lock a room while the booker is only browsing/selecting rooms');
   assert.match(publicApp, /bookingHref\(room, \{ includeRoomId: canBookRoom \}\)/,
