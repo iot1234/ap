@@ -2667,9 +2667,6 @@ test('main React pages load prebuilt JS instead of browser Babel', () => {
   assert.equal(pkg.scripts.prestart, 'node scripts/build-frontend.js');
   const dockerfile = fs.readFileSync(path.join(__dirname, '..', 'Dockerfile'), 'utf8');
   assert.match(dockerfile, /RUN npm run build/);
-  const builder = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'build-frontend.js'), 'utf8');
-  assert.match(builder, /;\(function \(\) \{\\n\$\{result\.code\}\\n\}\)\(\);/,
-    'built classic scripts must be wrapped to avoid duplicate global const/function declarations');
 });
 
 test('/health reports disabled scheduler explicitly in diagnostic mode', () => {

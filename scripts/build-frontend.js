@@ -32,9 +32,8 @@ function buildFile(src) {
     compact: false,
     filename: rel,
   });
-  const wrapped = `;(function () {\n${result.code}\n})();\n`;
   fs.mkdirSync(path.dirname(dest), { recursive: true });
-  fs.writeFileSync(dest, wrapped, 'utf8');
+  fs.writeFileSync(dest, `${result.code}\n`, 'utf8');
   return outRel.replace(/\\/g, '/');
 }
 
