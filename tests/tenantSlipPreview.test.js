@@ -7,7 +7,7 @@ const serverSource = () => fs.readFileSync(path.join(__dirname, '..', 'server.js
 const tenantSource = () => fs.readFileSync(path.join(__dirname, '..', 'project', 'tenant.jsx'), 'utf8');
 const tenantHtml = () => fs.readFileSync(path.join(__dirname, '..', 'project', 'tenant.html'), 'utf8');
 
-test('tenant payments list does not return raw slip_url', () => {
+test('tenant payments list does not return raw slip_url and only flags previewable slips', () => {
   const src = serverSource();
   const m = src.match(
     /app\.get\('\/api\/tenant\/payments',[\s\S]*?const \{ rows \} = await pool\.query\(\s*`([\s\S]*?)`/
@@ -18,6 +18,14 @@ test('tenant payments list does not return raw slip_url', () => {
     'tenant list must not select raw slip_url');
   assert.match(sql, /has_slip/i,
     'tenant list should expose only a has_slip boolean');
+  assert.match(sql, /LEFT JOIN file_uploads sf ON p\.slip_url = '\/files\/' \|\| sf\.id::text/,
+    'has_slip must be based on the canonical file_uploads row');
+  assert.match(sql, /sf\.category='slip'/,
+    'has_slip must only be true for slip files');
+  assert.match(sql, /public-pay:/,
+    'has_slip must also cover slips uploaded through the tenant public-pay link');
+  assert.match(sql, /lower\(COALESCE\(sf\.mime_type, ''\)\) IN \('image\/jpeg','image\/png','image\/webp'\)/,
+    'has_slip must only be true for previewable image types');
 });
 
 test('tenant slip preview route is ownership checked and inline image only', () => {
@@ -31,8 +39,12 @@ test('tenant slip preview route is ownership checked and inline image only', () 
     'route must scope payment lookup to current tenant');
   assert.match(route, /f\.category !== 'slip'/,
     'route must require slip file category');
-  assert.match(route, /f\.uploaded_by !== tenantUploader/,
-    'route must require same tenant uploader');
+  assert.match(route, /allowedUploaders = new Set/,
+    'route must build an explicit allow-list of tenant-owned upload sources');
+  assert.match(route, /public-pay:\$\{req\.tenant\.tenant_id\}/,
+    'route must allow slips submitted through the tenant public-pay link');
+  assert.match(route, /!allowedUploaders\.has\(f\.uploaded_by\)/,
+    'route must reject uploads not owned by this tenant');
   assert.match(route, /\['image\/jpeg', 'image\/png', 'image\/webp'\]\.includes\(mime\)/,
     'route must only preview supported image MIME types');
   assert.match(route, /Content-Disposition', `inline;/,

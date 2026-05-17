@@ -3992,9 +3992,13 @@ app.get('/api/tenant/payments', requireTenant, async (req, res) => {
     const { rows } = await pool.query(
       `SELECT p.id, p.bill_id, p.amount, p.method,
               p.status, p.verified_at, p.rejected_reason, p.created_at,
-              CASE WHEN p.slip_url IS NOT NULL THEN true ELSE false END AS has_slip,
+              (sf.id IS NOT NULL
+               AND sf.category='slip'
+               AND sf.uploaded_by IN ('tenant:' || p.tenant_id::text, 'public-pay:' || p.tenant_id::text)
+               AND lower(COALESCE(sf.mime_type, '')) IN ('image/jpeg','image/png','image/webp')) AS has_slip,
               b.bill_no, b.period
          FROM payments p
+         LEFT JOIN file_uploads sf ON p.slip_url = '/files/' || sf.id::text
          LEFT JOIN bills b ON b.id = p.bill_id AND b.deleted_at IS NULL
          WHERE p.tenant_id=$1
          ORDER BY p.created_at DESC LIMIT $2 OFFSET $3`,
@@ -4012,7 +4016,8 @@ app.get('/api/tenant/payments', requireTenant, async (req, res) => {
 // The UI needs an inline image inside a modal, so this endpoint re-checks:
 //   1) the payment belongs to the current tenant,
 //   2) the slip_url points at a canonical file_uploads row,
-//   3) the file is an image slip uploaded by the same tenant.
+//   3) the file is an image slip uploaded by the same tenant, either from
+//      the tenant portal or that tenant's tokenized public-pay link.
 app.get('/api/tenant/payments/:id/slip', requireTenant, async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
@@ -4028,8 +4033,11 @@ app.get('/api/tenant/payments/:id/slip', requireTenant, async (req, res) => {
     );
     if (!rows.length) return res.status(404).json({ error: 'not found' });
     const f = rows[0];
-    const tenantUploader = `tenant:${req.tenant.tenant_id}`;
-    if (!f.file_id || f.category !== 'slip' || f.uploaded_by !== tenantUploader) {
+    const allowedUploaders = new Set([
+      `tenant:${req.tenant.tenant_id}`,
+      `public-pay:${req.tenant.tenant_id}`,
+    ]);
+    if (!f.file_id || f.category !== 'slip' || !allowedUploaders.has(f.uploaded_by)) {
       return res.status(404).json({ error: 'slip not found' });
     }
     const mime = String(f.mime_type || '').toLowerCase();
@@ -4985,10 +4993,13 @@ app.get('/api/payments', requireAuth, requireRole('owner', 'manager', 'staff'), 
               p.status, p.verified_by, p.verified_at, p.rejected_reason,
               p.verify_provider, p.transaction_ref, p.created_at,
               COUNT(*) OVER (PARTITION BY p.bill_id, p.tenant_id)::int AS upload_attempts,
-              CASE WHEN p.slip_url IS NOT NULL THEN true ELSE false END AS has_slip,
+              (sf.id IS NOT NULL
+               AND sf.category='slip'
+               AND lower(COALESCE(sf.mime_type, '')) IN ('image/jpeg','image/png','image/webp')) AS has_slip,
               b.bill_no, b.period, b.room_id, b.status AS bill_status, b.total AS bill_total,
               t.full_name AS tenant_name, t.phone AS tenant_phone
          FROM payments p
+         LEFT JOIN file_uploads sf ON p.slip_url = '/files/' || sf.id::text
          LEFT JOIN bills b ON b.id = p.bill_id
          LEFT JOIN tenants t ON t.id = p.tenant_id
          ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
