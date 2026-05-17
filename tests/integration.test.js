@@ -282,15 +282,19 @@ test('pricing save validates issues and shows impact review before commit', () =
   assert.match(pricing, /function buildPricingReview\(draft, current, rooms\)/,
     'pricing page must run a review before saving config');
   assert.match(pricing, /review\.issues\.length/,
-    'pricing review must block abnormal values before save');
+    'pricing review must still block structurally invalid values before save');
+  assert.match(pricing, /warnings\.push\(`ค่าเช่า \$\{th\}: ต่ำกว่า 100 บาท/,
+    'pricing review must warn, not block, when rent is unusually low');
   assert.match(pricing, /setConfirmSave\(true\)/,
     'pricing page must open a confirmation modal when warnings or room impact exist');
   assert.match(pricing, /review\.impact\.slice\(0, 8\)/,
     'pricing confirmation must show examples of affected rooms');
   assert.match(pricing, /if \(!cur\[parts\[i\]\] \|\| typeof cur\[parts\[i\]\] !== 'object'\) cur\[parts\[i\]\] = \{\}/,
     'pricing updatePath must create missing nested config sections instead of crashing');
-  assert.match(server, /ระบบจะไม่รับค่าราคาที่ผิดปกติเพื่อป้องกันสัญญาและบิลผิด/,
-    'server INVALID_CONFIG hint must not advertise a non-existent unsafe force override');
+  assert.match(server, /configWarnings = warnings/,
+    'server must return unusual pricing as warnings while still saving deliberate values');
+  assert.doesNotMatch(server, /ระบบจะไม่รับค่าราคาที่ผิดปกติ/,
+    'server must not block deliberate unusual pricing such as promo rent or waived deposit');
 });
 
 test('room add flows use pricing formula and preserve manual rent overrides', () => {
@@ -1628,6 +1632,8 @@ test('payment channels surface configured TrueMoney Wallet across tenant, public
     'admin settings must let operators configure the TrueMoney Wallet phone');
   assert.match(settings, /apiCall\('\/api\/data\/baankarn_config_v1'/,
     'admin settings save must wait for the server PUT instead of silently relying on localStorage sync');
+  assert.match(settings, /out && out\.warnings/,
+    'admin settings must surface non-blocking config warnings returned by the server');
   assert.match(settings, /payment\.truemoney === true[\s\S]{0,180}\^0\\d\{9\}\$/,
     'admin settings must block enabling TrueMoney with an invalid wallet phone');
   assert.match(settings, /TrueMoney Wallet[\s\S]{0,260}พร้อมใช้งาน/,

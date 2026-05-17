@@ -778,40 +778,36 @@ app.put('/api/data/:key', sameOrigin, csrfGuard, requireAuth, requireRole('owner
     serialised = JSON.stringify(value);
   }
   // === Semantic validation for baankarn_config_v1 ==========================
-  // Real-world bug found in prod (May 2026): admin accidentally typed
-  // rates.standard.rent=1 (probably meant 4500). The system happily
-  // accepted it; only the pricing resolver's contract-lock prevented
-  // existing tenants from being billed ฿200 instead of ฿4500. This guard
-  // rejects obvious typos at the server layer so the same mistake can't
-  // happen again.
-  //
-  // MIN_SENSIBLE_RENT: lower bound for "looks like real money". A real
-  // Thai dorm rent is at least a few thousand baht; anything under 100฿
-  // is almost certainly a typo. Admin can still set 0 (interpreted as
-  // "type not configured yet") — we reject only POSITIVE-but-implausible
-  // values.
+  // Pricing can legitimately be unusual (promo room, test contract, waived
+  // deposit). Do not block those saves. Instead, return warnings so the UI
+  // can make the operator confirm while still preserving deliberate values.
+  // Keep hard rejects only for data that would make downstream features
+  // ambiguous or broken, such as an enabled payment receiver with no valid
+  // target.
+  let configWarnings = [];
   if (key === 'baankarn_config_v1') {
     const MIN_SENSIBLE_RENT = 100;
     const MIN_SENSIBLE_DEPOSIT = 100;
     const MIN_SENSIBLE_UTILITY = 1;
-    const issues = [];
+    const hardIssues = [];
+    const warnings = [];
     const rates = value.rates && typeof value.rates === 'object' ? value.rates : {};
     for (const [type, r] of Object.entries(rates)) {
       if (!r || typeof r !== 'object') continue;
       const rent = Number(r.rent);
       if (Number.isFinite(rent) && rent > 0 && rent < MIN_SENSIBLE_RENT) {
-        issues.push(`rates.${type}.rent = ${rent} (ต่ำผิดปกติ — ค่าเช่าจริงควร ≥ ${MIN_SENSIBLE_RENT}฿; ถ้าตั้งใจให้ต่ำขนาดนี้ตั้ง = 0 แทน)`);
+        warnings.push(`rates.${type}.rent = ${rent} (ต่ำผิดปกติ — ตรวจสอบว่าตั้งใจใช้ค่านี้จริงก่อนออกสัญญา/บิล)`);
       }
       const dep = Number(r.deposit);
       if (Number.isFinite(dep) && dep > 0 && dep < MIN_SENSIBLE_DEPOSIT) {
-        issues.push(`rates.${type}.deposit = ${dep} (ต่ำผิดปกติ — ถ้าตั้งใจไม่เก็บมัดจำตั้ง = 0)`);
+        warnings.push(`rates.${type}.deposit = ${dep} (ต่ำผิดปกติ — ตรวจสอบว่าตั้งใจเก็บมัดจำค่านี้จริง)`);
       }
     }
     const u = value.utilities && typeof value.utilities === 'object' ? value.utilities : {};
     for (const k of ['waterRate', 'elecRate']) {
       const v = Number(u[k]);
       if (Number.isFinite(v) && v > 0 && v < MIN_SENSIBLE_UTILITY) {
-        issues.push(`utilities.${k} = ${v} (ต่ำผิดปกติ — อัตราจริงต่อหน่วยควร ≥ ${MIN_SENSIBLE_UTILITY}฿)`);
+        warnings.push(`utilities.${k} = ${v} (ต่ำผิดปกติ — บิลค่าน้ำ/ค่าไฟอาจต่ำกว่าที่คาด)`);
       }
     }
     const payment = value.payment && typeof value.payment === 'object' ? value.payment : null;
@@ -820,7 +816,7 @@ app.put('/api/data/:key', sameOrigin, csrfGuard, requireAuth, requireRole('owner
         .replace(/[\s-]/g, '');
       if (payment.truemoney === true) {
         if (!/^0\d{9}$/.test(trueMoneyPhone)) {
-          issues.push('payment.truemoneyPhone = ต้องเป็นเบอร์มือถือ 10 หลักและขึ้นต้นด้วย 0 เมื่อเปิด TrueMoney Wallet');
+          hardIssues.push('payment.truemoneyPhone = ต้องเป็นเบอร์มือถือ 10 หลักและขึ้นต้นด้วย 0 เมื่อเปิด TrueMoney Wallet');
         } else {
           payment.truemoneyPhone = trueMoneyPhone;
         }
@@ -830,12 +826,12 @@ app.put('/api/data/:key', sameOrigin, csrfGuard, requireAuth, requireRole('owner
       for (const [field, max] of Object.entries({ truemoneyName: 120, truemoneyNote: 240 })) {
         if (payment[field] === null || payment[field] === undefined) continue;
         if (typeof payment[field] !== 'string') {
-          issues.push(`payment.${field} ต้องเป็นข้อความ`);
+          hardIssues.push(`payment.${field} ต้องเป็นข้อความ`);
           continue;
         }
         const trimmed = payment[field].trim();
         if (trimmed.length > max) {
-          issues.push(`payment.${field} ยาวเกิน ${max} ตัวอักษร`);
+          hardIssues.push(`payment.${field} ยาวเกิน ${max} ตัวอักษร`);
           continue;
         }
         payment[field] = trimmed;
@@ -851,18 +847,19 @@ app.put('/api/data/:key', sameOrigin, csrfGuard, requireAuth, requireRole('owner
       for (const [name, raw] of Object.entries(obj)) {
         const n = Number(raw);
         if (Number.isFinite(n) && n < 0) {
-          issues.push(`${k}.${name} = ${n} (ลบ — ยังไม่รองรับส่วนลดต่อชั้น/วิว/ฟีเจอร์)`);
+          warnings.push(`${k}.${name} = ${n} (ลบ — ตรวจสอบว่านี่คือส่วนลดที่ตั้งใจให้มีผลกับสูตรราคา)`);
         }
       }
     }
-    if (issues.length) {
+    if (hardIssues.length) {
       return res.status(400).json({
         error: 'ค่า config ไม่ผ่านการตรวจสอบ',
         code: 'INVALID_CONFIG',
-        issues,
-        hint: 'แก้ค่าที่หน้า /admin#pricing แล้วบันทึกใหม่ ระบบจะไม่รับค่าราคาที่ผิดปกติเพื่อป้องกันสัญญาและบิลผิด',
+        issues: hardIssues,
+        hint: 'แก้ค่าที่หน้า /admin#settings แล้วบันทึกใหม่ ระบบจะบล็อกเฉพาะข้อมูลที่ทำให้ระบบทำงานต่อไม่ได้',
       });
     }
+    configWarnings = warnings;
     serialised = JSON.stringify(value);
   }
   try {
@@ -922,7 +919,7 @@ app.put('/api/data/:key', sameOrigin, csrfGuard, requireAuth, requireRole('owner
         }
       });
     }
-    res.json({ ok: true, key, roomSync: roomSyncResult });
+    res.json({ ok: true, key, roomSync: roomSyncResult, warnings: configWarnings });
   } catch (err) {
     console.error('data PUT error:', err);
     res.status(500).json({ error: 'internal error' });
@@ -1491,11 +1488,11 @@ app.post('/api/bookings/public/hold', sameOrigin, rateLimitBooking, async (req, 
   if (!settings.requireDeposit) {
     return res.json({ ok: true, holdRequired: false, booking: { requireDeposit: false } });
   }
-  if (settings.requireDeposit && payment && payment.ready === false) {
+  if (settings.requireDeposit && settings.requireSlip && payment && payment.ready === false) {
     return res.status(503).json({
       error: 'ยังไม่ได้ตั้งค่าบัญชีรับเงินค่าจอง',
       code: 'BOOKING_DEPOSIT_PAYMENT_NOT_CONFIGURED',
-      hint: 'ตั้งค่า PromptPay หรือบัญชีธนาคารในหน้า Settings → วิธีรับเงิน',
+      hint: 'ตั้งค่า PromptPay/บัญชีธนาคาร หรือปิดการบังคับแนบสลิปค่าจองเพื่อรับจองแบบ manual review',
     });
   }
   const client = await pool.connect();
@@ -1633,11 +1630,11 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBooking, validateBody(sche
         hint: 'เปิดหน้าห้องว่างแล้วกดจองจากห้องที่ต้องการ เพื่อให้ระบบล็อกห้องได้ถูกต้อง',
       });
     }
-    if (bookingPayment && bookingPayment.ready === false) {
+    if (bookingSettings.requireSlip && bookingPayment && bookingPayment.ready === false) {
       return res.status(503).json({
         error: 'ยังไม่ได้ตั้งค่าบัญชีรับเงินค่าจอง',
         code: 'BOOKING_DEPOSIT_PAYMENT_NOT_CONFIGURED',
-        hint: 'ตั้งค่า PromptPay หรือบัญชีธนาคารในหน้า Settings → วิธีรับเงิน',
+        hint: 'ตั้งค่า PromptPay/บัญชีธนาคาร หรือปิดการบังคับแนบสลิปค่าจองเพื่อรับจองแบบ manual review',
       });
     }
     if (bookingSettings.requireSlip && !cleaned.depositSlip) {

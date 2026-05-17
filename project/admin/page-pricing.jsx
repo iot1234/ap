@@ -46,7 +46,7 @@ function inspectPricingBucket(bucketName, obj, issues, warnings) {
     if (!Number.isFinite(n)) {
       issues.push(`${bucketName}.${key}: ตัวเลขไม่ถูกต้อง`);
     } else if (n < 0) {
-      issues.push(`${bucketName}.${key}: ห้ามติดลบ เพราะระบบยังไม่รองรับส่วนลดแบบลบในสูตรราคา`);
+      warnings.push(`${bucketName}.${key}: เป็นค่าติดลบ ตรวจสอบว่านี่คือส่วนลด/การลดราคาที่ตั้งใจ`);
     } else if (n > 1000000) {
       warnings.push(`${bucketName}.${key}: จำนวนสูงผิดปกติ (${n.toLocaleString()} บาท) ตรวจสอบก่อนบันทึก`);
     }
@@ -68,11 +68,11 @@ function buildPricingReview(draft, current, rooms) {
     const rent = pricingNumber(rate.rent);
     const deposit = pricingNumber(rate.deposit);
     if (!Number.isFinite(rent)) issues.push(`ค่าเช่า ${th}: ตัวเลขไม่ถูกต้อง`);
-    else if (rent > 0 && rent < 100) issues.push(`ค่าเช่า ${th}: ต่ำกว่า 100 บาท ระบบอาจออกสัญญา/บิลผิด`);
+    else if (rent > 0 && rent < 100) warnings.push(`ค่าเช่า ${th}: ต่ำกว่า 100 บาท ตรวจสอบว่าตั้งใจใช้ราคานี้จริงก่อนออกสัญญา/บิล`);
     else if (rent === 0) warnings.push(`ค่าเช่า ${th}: เป็น 0 บาท ห้องประเภทนี้จะไม่มีค่าเช่าถ้าใช้สูตรราคา`);
 
     if (!Number.isFinite(deposit)) issues.push(`เงินมัดจำ ${th}: ตัวเลขไม่ถูกต้อง`);
-    else if (deposit > 0 && deposit < 100) issues.push(`เงินมัดจำ ${th}: ต่ำกว่า 100 บาท ตรวจสอบก่อนออกสัญญา`);
+    else if (deposit > 0 && deposit < 100) warnings.push(`เงินมัดจำ ${th}: ต่ำกว่า 100 บาท ตรวจสอบว่าตั้งใจใช้ค่านี้จริงก่อนออกสัญญา`);
     else if (rent > 0 && deposit > rent * 4) warnings.push(`เงินมัดจำ ${th}: สูงกว่า 4 เดือน (${fmtCurrency(deposit)})`);
   }
 
@@ -81,7 +81,7 @@ function buildPricingReview(draft, current, rooms) {
     const n = pricingNumber(utilities[key]);
     const label = key === 'waterRate' ? 'ค่าน้ำ/หน่วย' : 'ค่าไฟ/หน่วย';
     if (!Number.isFinite(n)) issues.push(`${label}: ตัวเลขไม่ถูกต้อง`);
-    else if (n > 0 && n < 1) issues.push(`${label}: ต่ำกว่า 1 บาท/หน่วย ผิดปกติและจะทำให้บิลต่ำเกินจริง`);
+    else if (n > 0 && n < 1) warnings.push(`${label}: ต่ำกว่า 1 บาท/หน่วย บิลอาจต่ำกว่าที่คาด ตรวจสอบก่อนบันทึก`);
     else if (n === 0) warnings.push(`${label}: เป็น 0 บาท บิลค่าน้ำ/ค่าไฟจะไม่คิดเงินส่วนนี้`);
   }
   for (const key of ['wifi', 'commonFee', 'waterMin', 'elecMin']) {

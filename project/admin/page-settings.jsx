@@ -98,14 +98,22 @@ function PageSettings({ rooms, setRooms, config, setConfig, bookings, setBooking
 
     setSaving(true);
     try {
-      await apiCall('/api/data/baankarn_config_v1', {
+      const out = await apiCall('/api/data/baankarn_config_v1', {
         method: 'PUT',
         body: JSON.stringify({ value: next }),
       });
       setDraft(next);
       setConfig(next);
       addActivity && addActivity({ icon: '⚙️', text: 'อัปเดตการตั้งค่าระบบ', type: 'system' });
-      setToast && setToast({ kind: 'success', message: 'บันทึกการตั้งค่าเรียบร้อย' });
+      const warnings = Array.isArray(out && out.warnings) ? out.warnings : [];
+      if (warnings.length) {
+        setToast && setToast({
+          kind: 'warning',
+          message: `บันทึกแล้ว แต่มีคำเตือน: ${warnings.slice(0, 3).join(', ')}`,
+        });
+      } else {
+        setToast && setToast({ kind: 'success', message: 'บันทึกการตั้งค่าเรียบร้อย' });
+      }
     } catch (err) {
       const issues = Array.isArray(err && err.issues) && err.issues.length
         ? `: ${err.issues.slice(0, 3).join(', ')}`
