@@ -56,6 +56,16 @@ test('public booking supports expiring room holds before deposit submission', ()
   const server = read('server.js');
   assert.match(server, /app\.post\('\/api\/bookings\/public\/hold'/,
     'public hold endpoint must exist');
+  assert.match(server, /const rateLimitBookingHold = makeIpLimiter\(\{[\s\S]{0,90}max: 12/,
+    'room holds must allow normal room selection retries without exhausting booking submission quota');
+  assert.match(server, /const rateLimitBookingSubmit = makeIpLimiter\(\{[\s\S]{0,110}max: 8/,
+    'booking submission must have its own limiter instead of sharing the hold limiter');
+  assert.match(server, /app\.post\('\/api\/bookings\/public\/hold', sameOrigin, rateLimitBookingHold/,
+    'public hold endpoint must use the hold-specific limiter');
+  assert.match(server, /app\.post\('\/api\/bookings\/public', sameOrigin, rateLimitBookingSubmit/,
+    'public booking submission must use the submit-specific limiter');
+  assert.match(server, /retryAfterSeconds/,
+    'rate-limited booking responses must tell the UI how long to wait before retrying');
   assert.match(server, /app\.get\('\/api\/bookings\/public\/rooms'/,
     'public booking page must have a safe vacant-room feed');
   assert.match(server, /function publicBookableRooms/,
@@ -68,6 +78,8 @@ test('public booking supports expiring room holds before deposit submission', ()
     'hold must store only the token hash, not the raw token');
   assert.match(server, /releaseExpiredPublicBookingHolds/,
     'expired holds must be releasable by shared cleanup');
+  assert.match(server, /typeof dbOrClient\.release !== 'function'/,
+    'expired-hold cleanup must not reconnect an already checked-out pg client inside hold/submit transactions');
   assert.match(server, /startBookingHoldSweeper/,
     'server must run a background sweeper for expired holds');
   assert.match(server, /setInterval\(sweep, 60 \* 1000\)/,
@@ -184,6 +196,10 @@ test('public booking page and admin features expose deposit controls', () => {
     'public page must timeout room inventory loading instead of leaving the picker stuck forever');
   assert.match(booking, /roomPickerRetryBtn/,
     'public page must offer a manual retry when room inventory loading fails');
+  assert.match(booking, /rateLimitMessage/,
+    'public page must turn 429 responses into actionable wait-and-retry guidance');
+  assert.match(booking, /id="holdRetryBtn"/,
+    'public page must offer an explicit hold retry action after recoverable hold failures');
   assert.match(booking, /\/api\/bookings\/public\/hold/,
     'public page must create a room hold');
   assert.match(booking, /requestRoomHold\(room\.id\)/,

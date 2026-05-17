@@ -1102,7 +1102,7 @@ app.delete('/api/data/:key', sameOrigin, csrfGuard, requireAuth, requireRole('ow
 //
 // We do periodic sweep cleanup roughly once every ~5 minutes (probabilistic)
 // so a flood of unique IPs can't pile up between sweeps.
-function makeIpLimiter({ windowMs, max, message = 'too many requests' }) {
+function makeIpLimiter({ windowMs, max, message = 'too many requests', code = 'RATE_LIMIT' }) {
   const hits = new Map();
   let lastSweep = Date.now();
   return function limiter(req, res, next) {
@@ -1113,7 +1113,13 @@ function makeIpLimiter({ windowMs, max, message = 'too many requests' }) {
     const ip = clientIp(req) || 'unknown';
     const now = Date.now();
     const arr = (hits.get(ip) || []).filter((t) => now - t < windowMs);
-    if (arr.length >= max) return res.status(429).json({ error: message });
+    res.setHeader('X-RateLimit-Limit', max);
+    res.setHeader('X-RateLimit-Remaining', Math.max(0, max - arr.length - 1));
+    if (arr.length >= max) {
+      const retryAfterSeconds = Math.max(1, Math.ceil((windowMs - (now - arr[0])) / 1000));
+      res.setHeader('Retry-After', retryAfterSeconds);
+      return res.status(429).json({ error: message, code, retryAfterSeconds });
+    }
     arr.push(now);
     hits.set(ip, arr);
     if (now - lastSweep > 5 * 60_000) {
@@ -1131,7 +1137,16 @@ function makeIpLimiter({ windowMs, max, message = 'too many requests' }) {
 // when /api/promptpay/qr was wired before the limiter const had been
 // initialised — moving every limiter to a single block makes the order
 // obvious and prevents recurrence).
-const rateLimitBooking = makeIpLimiter({ windowMs: 60_000, max: 3 });
+const rateLimitBookingHold = makeIpLimiter({
+  windowMs: 60_000,
+  max: 12,
+  message: 'ล็อกห้องถี่เกินไป กรุณารอสักครู่แล้วลองใหม่',
+});
+const rateLimitBookingSubmit = makeIpLimiter({
+  windowMs: 5 * 60_000,
+  max: 8,
+  message: 'ส่งคำขอจองถี่เกินไป กรุณารอสักครู่แล้วลองใหม่',
+});
 const rateLimitTicket  = makeIpLimiter({ windowMs: 60_000, max: 3 });
 const rateLimitQr      = makeIpLimiter({ windowMs: 60_000, max: 30 });
 const rateLimitPublicPayment = makeIpLimiter({ windowMs: 60_000, max: 10 });
@@ -1394,7 +1409,8 @@ function releaseHoldShape(room) {
 }
 
 async function releaseExpiredPublicBookingHolds(dbOrClient) {
-  const ownClient = typeof dbOrClient.connect === 'function';
+  const ownClient = typeof dbOrClient.connect === 'function'
+    && typeof dbOrClient.release !== 'function';
   const client = ownClient ? await dbOrClient.connect() : dbOrClient;
   const released = [];
   try {
@@ -1555,7 +1571,7 @@ app.get('/api/bookings/public/rooms', async (_req, res) => {
   }
 });
 
-app.post('/api/bookings/public/hold', sameOrigin, rateLimitBooking, async (req, res) => {
+app.post('/api/bookings/public/hold', sameOrigin, rateLimitBookingHold, async (req, res) => {
   const roomId = String(req.body?.roomId || '').trim().slice(0, 32);
   if (!roomId) return res.status(400).json({ error: 'roomId required', code: 'ROOM_REQUIRED' });
   let settings, payment;
@@ -1672,7 +1688,7 @@ app.post('/api/bookings/public/hold', sameOrigin, rateLimitBooking, async (req, 
   }
 });
 
-app.post('/api/bookings/public', sameOrigin, rateLimitBooking, validateBody(schemas.publicBooking), async (req, res) => {
+app.post('/api/bookings/public', sameOrigin, rateLimitBookingSubmit, validateBody(schemas.publicBooking), async (req, res) => {
   const b = req.body;
   // Length / type sanity. Strings only, capped to reasonable lengths to keep
   // the JSONB blob bounded and prevent payload-bomb attacks.

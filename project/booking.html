@@ -208,6 +208,14 @@
   .hold-note {
     color: #8a5a22; font-size: 12.5px; margin-top: 8px;
   }
+  .hold-actions {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 8px;
+  }
+  .hold-actions .hold-note { margin-top: 0; }
   button[type=submit] {
     width: 100%; height: 46px; margin-top: 12px;
     background: #14231d; color: #fff;
@@ -348,7 +356,10 @@
               <label id="depositTitle">ค่าจองห้อง</label>
               <div class="deposit-amount" id="depositAmount">฿0</div>
               <div class="hint" id="depositHint">ระบบจะล็อกห้องไว้ชั่วคราวระหว่างแนบสลิป</div>
-              <div class="hold-note" id="holdTimer"></div>
+              <div class="hold-actions">
+                <div class="hold-note" id="holdTimer"></div>
+                <button type="button" id="holdRetryBtn" class="room-picker-action" style="display:none">ล็อกห้องอีกครั้ง</button>
+              </div>
             </div>
             <img id="depositQr" class="deposit-qr" alt="QR ค่าจอง" style="display:none"/>
           </div>
@@ -401,6 +412,7 @@
   const roomPickerStatus = document.getElementById('roomPickerStatus');
   const roomPickerRetryBtn = document.getElementById('roomPickerRetryBtn');
   const holdTimer = document.getElementById('holdTimer');
+  const holdRetryBtn = document.getElementById('holdRetryBtn');
   let bookingConfig = null;
   let holdToken = '';
   let holdExpiresAt = '';
@@ -481,6 +493,27 @@
     roomPickerRetryBtn.style.display = visible ? 'inline-block' : 'none';
   }
 
+  function setHoldRetry(visible) {
+    if (!holdRetryBtn) return;
+    holdRetryBtn.style.display = visible ? 'inline-block' : 'none';
+  }
+
+  function retryAfterSeconds(res, out) {
+    const fromBody = Number(out && out.retryAfterSeconds);
+    if (Number.isFinite(fromBody) && fromBody > 0) return Math.ceil(fromBody);
+    const header = res && res.headers ? Number(res.headers.get('Retry-After')) : 0;
+    if (Number.isFinite(header) && header > 0) return Math.ceil(header);
+    return 60;
+  }
+
+  function rateLimitMessage(res, out, actionText) {
+    const seconds = retryAfterSeconds(res, out);
+    const waitText = seconds >= 90
+      ? `ประมาณ ${Math.ceil(seconds / 60)} นาที`
+      : `${seconds} วินาที`;
+    return `${actionText}ถี่เกินไป กรุณารอ ${waitText} แล้วลองใหม่`;
+  }
+
   function clearAlert() {
     alert.textContent = '';
     alert.style.display = 'none';
@@ -496,6 +529,7 @@
     if (holdTimerId) clearInterval(holdTimerId);
     holdTimerId = null;
     holdTimer.textContent = '';
+    setHoldRetry(false);
     updateSubmitState();
   }
 
@@ -754,6 +788,7 @@
     holdToken = '';
     holdExpiresAt = '';
     holdTimer.textContent = 'กำลังล็อกห้อง...';
+    setHoldRetry(false);
     updateSubmitState();
     try {
       const res = await fetch('/api/bookings/public/hold', {
@@ -764,22 +799,29 @@
       const out = await res.json().catch(() => ({}));
       if (seq !== holdRequestSeq || selectedRoomId() !== roomId) return;
       if (!res.ok || !out.ok) {
-        holdError = bookingServerError(out, 'ล็อกห้องไม่สำเร็จ กรุณาเลือกห้องใหม่');
+        holdError = res.status === 429
+          ? rateLimitMessage(res, out, 'ล็อกห้อง')
+          : bookingServerError(out, 'ล็อกห้องไม่สำเร็จ กรุณาเลือกห้องใหม่');
         suppressAutoHoldForRoom = roomId;
+        holdTimer.textContent = holdError;
+        setHoldRetry(true);
         showError(holdError);
-        loadAvailableRooms({ autoHold: false });
+        if (res.status !== 429) loadAvailableRooms({ autoHold: false });
         return;
       }
       if (out.hold && out.hold.token) {
         holdToken = out.hold.token;
         holdExpiresAt = out.hold.expiresAt || '';
         suppressAutoHoldForRoom = '';
+        setHoldRetry(false);
         startHoldTimer();
       }
     } catch {
       if (seq !== holdRequestSeq || selectedRoomId() !== roomId) return;
       holdError = 'ล็อกห้องไม่สำเร็จ กรุณาลองใหม่';
       suppressAutoHoldForRoom = roomId;
+      holdTimer.textContent = holdError;
+      setHoldRetry(true);
       showError(holdError);
     } finally {
       if (seq === holdRequestSeq) {
@@ -824,6 +866,15 @@
       clearAlert();
       suppressAutoHoldForRoom = '';
       loadAvailableRooms({ autoHold: true });
+    });
+  }
+
+  if (holdRetryBtn) {
+    holdRetryBtn.addEventListener('click', () => {
+      clearAlert();
+      holdError = '';
+      suppressAutoHoldForRoom = '';
+      requestRoomHold(selectedRoomId());
     });
   }
 
@@ -924,10 +975,10 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data),
       });
-      const result = await res.json();
+      const result = await res.json().catch(() => ({}));
 
       if (res.status === 429) {
-        showError('คำขอมากเกินไป กรุณาลองใหม่อีกครั้งใน 1 นาที');
+        showError(rateLimitMessage(res, result, 'ส่งคำขอจอง'));
         submitting = false;
         btn.textContent = 'ส่งคำขอจอง';
         updateSubmitState();
