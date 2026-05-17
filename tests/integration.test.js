@@ -2634,6 +2634,20 @@ test('static assets do not intercept /admin auth route with directory redirect',
   assert.match(server, /express\.static\(path\.join\(__dirname,\s*'project'\),\s*\{\s*redirect:\s*false\s*\}\)/);
 });
 
+test('static frontend assets use compression and cacheable JSX revalidation', () => {
+  // The app still serves JSX source and compiles it in the browser. Until a
+  // build pipeline lands, the server must at least compress text responses
+  // and allow cached JSX to revalidate instead of forcing a full no-store
+  // transfer on every reload.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(server, /const compression = require\('compression'\)/);
+  assert.match(server, /app\.use\(compression\(\{[\s\S]{0,120}threshold: 1024/);
+  assert.match(server, /Cache-Control', 'no-cache, must-revalidate'/);
+  assert.doesNotMatch(server, /Cache-Control', 'no-cache, no-store, must-revalidate'/);
+});
+
 test('/health reports disabled scheduler explicitly in diagnostic mode', () => {
   // DISABLE_BACKGROUND_JOBS is used for safe production diagnostics. /health
   // must not read stale .scheduler-state.json errors from a previous run and

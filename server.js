@@ -12,6 +12,7 @@ const bcrypt = require('bcryptjs');
 const session = require('express-session');
 const PgSession = require('connect-pg-simple')(session);
 const helmet = require('helmet');
+const compression = require('compression');
 const rateLimit = require('express-rate-limit');
 const { renderBillPdf } = require('./services/pdf');
 const { renderQrPng, renderQrDataUrl, renderQrSvg, renderQrWithFallback, buildPayload: buildPromptPayPayload, MAX_AMOUNT, isDemoTarget, normaliseTarget } = require('./services/promptpay');
@@ -313,6 +314,13 @@ app.use(helmet({
   hidePoweredBy: true,
 }));
 app.disable('x-powered-by');
+
+// Compress text responses and static source files. The current frontend still
+// serves JSX directly to the browser, so gzip materially reduces cold-load
+// transfer size until the app moves to a real build/bundle pipeline.
+app.use(compression({
+  threshold: 1024,
+}));
 
 // Rate-limit login attempts per IP — 5 per 15 minutes is plenty for humans
 // while frustrating brute-force scripts. Per-account lockout (middleware/
@@ -10947,17 +10955,17 @@ app.get('/health/live', (_req, res) => {
 
 // --- Static + routes ------------------------------------------------------
 // Asset caching policy:
-//   - .jsx (transpiled in browser, changes every deploy) → no-cache so a fix
-//     deployed to Railway is visible the moment the user reloads. Without
-//     this, operators who hit a bug then deploy a fix still see the bug for
-//     up to an hour because Cache-Control: max-age=3600 holds the old file.
+//   - .jsx (transpiled in browser, changes every deploy) → no-cache so the
+//     browser may keep a local copy but must revalidate before use. This
+//     preserves fast fixes while allowing 304 responses instead of
+//     redownloading megabytes of admin JSX on every reload.
 //   - Other static assets (fonts, images) → 1h TTL since they rarely change.
 app.use((req, res, next) => {
   if (/\.jsx$/i.test(req.path)) {
-    // Force-revalidate on every reload — JSX files are the SPA's source of truth.
-    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-    res.setHeader('Pragma', 'no-cache');
-    res.setHeader('Expires', '0');
+    // Revalidate on every reload, but do not block the browser from storing
+    // the file. `no-store` forced a full transfer every time and made the
+    // Babel-in-browser boot path much slower than necessary.
+    res.setHeader('Cache-Control', 'no-cache, must-revalidate');
   } else if (/\.(js|css|png|jpg|jpeg|gif|svg|woff2?|ttf)$/i.test(req.path)) {
     res.setHeader('Cache-Control', 'public, max-age=3600');
   }
