@@ -1713,6 +1713,13 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBooking, validateBody(sche
         hint: 'เปิดหน้าห้องว่างแล้วกดจองจากห้องที่ต้องการ เพื่อให้ระบบล็อกห้องได้ถูกต้อง',
       });
     }
+    if (!cleaned.holdToken) {
+      return res.status(400).json({
+        error: 'ต้องล็อกห้องก่อนส่งคำขอจองแบบมีค่าจอง',
+        code: 'BOOKING_HOLD_REQUIRED',
+        hint: 'เลือกห้องว่างจากหน้าจอง แล้วรอให้ระบบล็อกห้องสำเร็จก่อนส่งคำขอ',
+      });
+    }
     if (bookingSettings.requireSlip && bookingPayment && bookingPayment.ready === false) {
       return res.status(503).json({
         error: 'ยังไม่ได้ตั้งค่าบัญชีรับเงินค่าจอง',

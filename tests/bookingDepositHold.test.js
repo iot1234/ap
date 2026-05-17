@@ -78,6 +78,8 @@ test('public booking deposit requires a room, a slip, and deduplicates slips', (
   const server = read('server.js');
   assert.match(server, /ROOM_REQUIRED_FOR_BOOKING_DEPOSIT/,
     'deposit booking must require a specific room so it can lock the right room');
+  assert.match(server, /BOOKING_HOLD_REQUIRED/,
+    'deposit booking must require a server-issued hold token and not trust client-only room selection');
   assert.match(server, /BOOKING_DEPOSIT_SLIP_REQUIRED/,
     'deposit booking must require a slip when configured');
   assert.match(server, /settings\.requireDeposit && settings\.requireSlip && payment && payment\.ready === false/,
