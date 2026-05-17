@@ -1357,7 +1357,7 @@ function BillsView({ locale, bills, refresh, slipFeature, openId, setOpenId }) {
     <div className="anim-in">
       <SectionHeader title={t('myBills')}
         subtitle={`${t('billsAll')} ${bills.length} · ${t('billsUnpaid')} ${unpaidCount}`} />
-      <div className="no-scrollbar" style={{ display: 'flex', gap: 8, marginBottom: 14, overflowX: 'auto' }}>
+      <div className="filter-chips" style={{ display: 'flex', gap: 8, marginBottom: 'var(--sp-4)', flexWrap: 'wrap' }}>
         {[
           { id: 'all',    label: t('billsAll'),    count: bills.length },
           { id: 'unpaid', label: t('billsUnpaid'), count: unpaidCount },
@@ -1914,7 +1914,7 @@ function PaymentsView({ locale, payments, syncErrors, goto }) {
     <div className="anim-in">
       <SectionHeader title={t('paymentHistory')} subtitle={t('paymentHistorySub')} />
       {items.length > 0 ? (
-        <div className="no-scrollbar" style={{ display: 'flex', gap: 8, marginBottom: 'var(--sp-4)', overflowX: 'auto' }}>
+        <div className="filter-chips" style={{ display: 'flex', gap: 8, marginBottom: 'var(--sp-4)', flexWrap: 'wrap' }}>
           {filters.map((f) => (
             <button key={f.id} onClick={() => setFilter(f.id)} style={{
               padding: '8px 14px', borderRadius: 999, fontFamily: 'inherit',
@@ -2113,7 +2113,7 @@ function MaintenanceView({ locale, tenant, tickets, refresh }) {
       <SectionHeader title={t('maintenance')}
         subtitle={`${t('allTickets')} ${tickets.length} · ${t('ongoing')} ${tickets.filter((x) => !['completed', 'cancelled'].includes(x.status)).length}`}
         action={<Button icon="plus" onClick={() => setShowForm(true)}>{t('submitTicket')}</Button>} />
-      <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>
+      <div className="filter-chips" style={{ display: 'flex', gap: 8, marginBottom: 'var(--sp-4)', flexWrap: 'wrap' }}>
         {[{ id: 'all', l: t('allTickets') }, { id: 'open', l: t('ongoing') }, { id: 'done', l: t('done') }].map((f) => (
           <button key={f.id} onClick={() => setTab(f.id)} style={{
             padding: '8px 14px', borderRadius: 999, fontFamily: 'inherit',
@@ -2961,15 +2961,18 @@ function App() {
         @media (max-width: 640px) {
           .bottom-nav { display: flex !important; }
           .home-grid { grid-template-columns: 1fr !important; }
-          /* log.md #5 — section header action (e.g. "แจ้งซ่อมใหม่") no
-             longer overlaps the title on narrow screens; it stacks under
-             the title and grows full-width so the tap target stays large. */
+          /* On phones the action (e.g. "แจ้งซ่อมใหม่") stacks under the
+             title so it never overlaps it, but stays at its natural width
+             aligned to the start. The previous rule forced 100% width
+             which made the maintenance page's primary CTA look much
+             louder than the contract / profile / payments pages, none of
+             which use an action button. Tap target is still ≥44px tall
+             via the Button size tokens. */
           .section-header {
             flex-direction: column !important;
-            align-items: stretch !important;
+            align-items: flex-start !important;
             gap: var(--sp-3) !important;
           }
-          .section-header > :last-child button { width: 100% !important; }
           .tenant-main {
             padding: var(--sp-4) var(--sp-3)
               calc(env(safe-area-inset-bottom,0px) + var(--bottomnav-h) + var(--sp-5)) !important;
