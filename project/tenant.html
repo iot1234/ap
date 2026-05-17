@@ -97,6 +97,11 @@
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; }
+  /* Always reserve the scrollbar's column so a long page (e.g. payments
+     history) and a short page (profile when no prefs section) line up
+     horizontally — without this, switching pages caused a ~15px width
+     shift on desktop whenever the scrollbar appeared or disappeared. */
+  html { scrollbar-gutter: stable; }
   body {
     font-family: var(--font-sans);
     background: var(--bg);

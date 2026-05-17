@@ -1913,19 +1913,21 @@ function PaymentsView({ locale, payments, syncErrors, goto }) {
   return (
     <div className="anim-in">
       <SectionHeader title={t('paymentHistory')} subtitle={t('paymentHistorySub')} />
-      {items.length > 0 ? (
-        <div className="filter-chips" style={{ display: 'flex', gap: 8, marginBottom: 'var(--sp-4)', flexWrap: 'wrap' }}>
-          {filters.map((f) => (
-            <button key={f.id} onClick={() => setFilter(f.id)} style={{
-              padding: '8px 14px', borderRadius: 999, fontFamily: 'inherit',
-              border: '1px solid ' + (filter === f.id ? 'var(--ink)' : 'var(--line-2)'),
-              background: filter === f.id ? 'var(--ink)' : 'var(--surface)',
-              color: filter === f.id ? 'var(--bg)' : 'var(--ink-2)',
-              fontSize: 'var(--fs-sm)', fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap',
-            }}>{f.label} <span style={{ opacity: 0.6, marginLeft: 4 }}>{f.count}</span></button>
-          ))}
-        </div>
-      ) : null}
+      {/* Filter chips render unconditionally so the content below them
+          doesn't shift up when the payments list arrives from the API.
+          Counts read as "ทั้งหมด 0" until data lands — same pattern bills /
+          maintenance already use. */}
+      <div className="filter-chips" style={{ display: 'flex', gap: 8, marginBottom: 'var(--sp-4)', flexWrap: 'wrap' }}>
+        {filters.map((f) => (
+          <button key={f.id} onClick={() => setFilter(f.id)} style={{
+            padding: '8px 14px', borderRadius: 999, fontFamily: 'inherit',
+            border: '1px solid ' + (filter === f.id ? 'var(--ink)' : 'var(--line-2)'),
+            background: filter === f.id ? 'var(--ink)' : 'var(--surface)',
+            color: filter === f.id ? 'var(--bg)' : 'var(--ink-2)',
+            fontSize: 'var(--fs-sm)', fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap',
+          }}>{f.label} <span style={{ opacity: 0.6, marginLeft: 4 }}>{f.count}</span></button>
+        ))}
+      </div>
       {filtered.length === 0 ? <Empty icon="payments" title={paymentError ? t('nothingHere') : t('noPayments')} />
         : (
         <Card pad={0}>
@@ -2776,6 +2778,16 @@ function App() {
   };
 
   useEffect(() => { document.body.dataset.theme = theme; }, [theme]);
+
+  // Reset scroll to top when the tenant switches tabs. Without this, a
+  // tenant who is scrolled halfway down a long list ("ประวัติชำระเงิน",
+  // 20 rows) and then clicks "โปรไฟล์" lands in the middle of the
+  // profile page — every page feels like it starts somewhere different
+  // because the browser preserves scroll across page state changes.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try { window.scrollTo({ top: 0, behavior: 'auto' }); } catch { window.scrollTo(0, 0); }
+  }, [page]);
 
   useEffect(() => onAuthExpired(() => {
     refreshSeq.current++;
