@@ -7,6 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
 <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700&family=IBM+Plex+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"/>
+<link rel="stylesheet" href="/tenant-pages.css"/>
 <style>
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; min-height: 100%; }
@@ -145,7 +146,7 @@
   .ref { font-family: 'JetBrains Mono', monospace; color: #2f8a70; }
 </style>
 </head>
-<body>
+<body class="tenant-public-page tenant-booking-page">
 <div class="wrap">
   <div class="topbar">
     <div class="brand">
@@ -155,8 +156,19 @@
     <a href="/">← กลับหน้าแรก</a>
   </div>
 
-  <h1>จองห้องพัก</h1>
-  <p class="lead">กรอกข้อมูลเพื่อขอจองห้องพัก เจ้าหน้าที่จะติดต่อกลับภายใน 24 ชั่วโมง</p>
+  <section class="tenant-public-hero">
+    <div>
+      <div class="tenant-public-eyebrow">Booking request</div>
+      <h1>จองห้องพัก</h1>
+      <p class="lead">กรอกข้อมูลเพื่อขอจองห้องพัก เจ้าหน้าที่จะติดต่อกลับภายใน 24 ชั่วโมง</p>
+      <div class="tenant-guide-list" aria-label="ขั้นตอนการจอง">
+        <span class="tenant-guide-chip">เลือกวันเข้าพัก</span>
+        <span class="tenant-guide-chip">ระบุห้องที่สนใจ</span>
+        <span class="tenant-guide-chip">รอเจ้าหน้าที่ยืนยัน</span>
+      </div>
+    </div>
+    <img class="tenant-public-art" src="/assets/tenant/mascot-contract.png" alt="" loading="eager"/>
+  </section>
 
   <div id="formContainer">
     <form id="bookingForm" class="card" novalidate>

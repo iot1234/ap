@@ -121,6 +121,18 @@ const TR = {
     lineOfficial: 'LINE Official', manual: 'คู่มือการใช้', read: 'เปิดอ่าน',
     email: 'อีเมล',
     sinceDate: 'ผู้เช่าตั้งแต่',
+    guideHomeTitle: 'ผู้ช่วยพอร์ทัลของคุณ',
+    guideHomeText: 'ดูยอดค้าง ชำระบิล และติดตามเรื่องซ่อมได้จากการ์ดด้านล่าง',
+    guideBillsTitle: 'ชำระบิลอย่างปลอดภัย',
+    guideBillsText: 'เปิดบิลที่ต้องชำระ สแกน PromptPay แล้วแนบสลิปที่คมชัด',
+    guidePaymentsTitle: 'ตรวจประวัติการชำระ',
+    guidePaymentsText: 'ดูสถานะสลิป ใบเสร็จ และรายการที่ต้องอัปโหลดใหม่ได้จากหน้านี้',
+    guideContractTitle: 'ข้อมูลสัญญาเช่า',
+    guideContractText: 'ตรวจระยะสัญญา ค่าเช่า เงินมัดจำ และดาวน์โหลด PDF เมื่อสัญญาพร้อมใช้งาน',
+    guideMaintenanceTitle: 'แจ้งซ่อมและติดตามงาน',
+    guideMaintenanceText: 'แจ้งปัญหาพร้อมรายละเอียด แล้วติดตามสถานะงานซ่อมได้ในหน้าเดียว',
+    guideProfileTitle: 'ข้อมูลผู้เช่าและการติดต่อ',
+    guideProfileText: 'จัดการภาษา โหมดสี และช่องทางติดต่อหอพักจากโปรไฟล์ของคุณ',
 
     // status
     pending: 'รอชำระ', paid: 'ชำระแล้ว', overdue: 'เกินกำหนด', void: 'ยกเลิก',
@@ -239,6 +251,18 @@ const TR = {
     lineOfficial: 'LINE Official', manual: 'User manual', read: 'Open',
     email: 'Email',
     sinceDate: 'Tenant since',
+    guideHomeTitle: 'Your portal assistant',
+    guideHomeText: 'Check balances, pay bills and follow repair requests from the cards below.',
+    guideBillsTitle: 'Pay bills securely',
+    guideBillsText: 'Open the bill, scan PromptPay and upload a clear payment slip.',
+    guidePaymentsTitle: 'Review payment history',
+    guidePaymentsText: 'See slip status, receipts and any payments that need another upload.',
+    guideContractTitle: 'Lease information',
+    guideContractText: 'Review term dates, rent, deposit and download the PDF when the lease is ready.',
+    guideMaintenanceTitle: 'Report and track repairs',
+    guideMaintenanceText: 'Send the issue details and follow repair status in one place.',
+    guideProfileTitle: 'Profile and dorm contact',
+    guideProfileText: 'Manage language, theme and dorm contact channels from your profile.',
 
     pending: 'pending', paid: 'paid', overdue: 'overdue', void: 'void',
     verified: 'verified', rejected: 'rejected', open: 'open',
@@ -733,6 +757,85 @@ function Empty({ icon = 'spark', title, hint, action }) {
   );
 }
 
+const TENANT_MASCOTS = {
+  welcome: '/assets/tenant/mascot-welcome.png',
+  payment: '/assets/tenant/mascot-payment.png',
+  maintenance: '/assets/tenant/mascot-maintenance.png',
+  contract: '/assets/tenant/mascot-contract.png',
+};
+
+function MascotImage({ type = 'welcome', className = '', style }) {
+  const src = TENANT_MASCOTS[type] || TENANT_MASCOTS.welcome;
+  return (
+    <img
+      className={className}
+      src={src}
+      alt=""
+      loading="lazy"
+      style={{
+        display: 'block',
+        width: '100%',
+        maxWidth: 168,
+        height: 150,
+        objectFit: 'contain',
+        filter: 'drop-shadow(0 18px 16px rgba(42, 31, 21, 0.16))',
+        pointerEvents: 'none',
+        userSelect: 'none',
+        ...style,
+      }}
+    />
+  );
+}
+
+function PageGuide({ type = 'welcome', title, text }) {
+  return (
+    <Card className="page-guide" pad={0} style={{
+      marginBottom: 'var(--sp-5)',
+      overflow: 'hidden',
+      display: 'grid',
+      gridTemplateColumns: 'minmax(0, 1fr) 190px',
+      alignItems: 'center',
+      minHeight: 142,
+      background: 'linear-gradient(135deg, var(--surface) 0%, var(--surface-2) 100%)',
+    }}>
+      <div className="page-guide-copy" style={{ padding: 'var(--sp-5) var(--sp-6)', minWidth: 0 }}>
+        <div style={{
+          color: 'var(--accent-2)',
+          fontSize: 'var(--fs-xs)',
+          fontWeight: 700,
+          letterSpacing: 0,
+          textTransform: 'uppercase',
+          marginBottom: 8,
+        }}>Guide</div>
+        <div style={{
+          color: 'var(--ink)',
+          fontFamily: 'var(--font-display)',
+          fontWeight: 700,
+          fontSize: 'var(--fs-lg)',
+          lineHeight: 1.3,
+        }}>{title}</div>
+        <div style={{
+          color: 'var(--muted)',
+          fontSize: 'var(--fs-sm)',
+          lineHeight: 1.65,
+          marginTop: 6,
+          maxWidth: 620,
+        }}>{text}</div>
+      </div>
+      <div className="page-guide-art" style={{
+        height: '100%',
+        minHeight: 142,
+        display: 'grid',
+        placeItems: 'center',
+        background: 'linear-gradient(135deg, rgba(196,106,62,0.08) 0%, rgba(31,122,122,0.09) 100%)',
+        borderLeft: '1px solid var(--line)',
+      }}>
+        <MascotImage type={type} />
+      </div>
+    </Card>
+  );
+}
+
 function SyncBanner({ errors = [], syncing, onRetry, locale }) {
   if (!errors.length) return null;
   const th = locale !== 'en';
@@ -1037,6 +1140,8 @@ function LoginView({ locale, setLocale, onLoggedIn, portalEnabled }) {
               {t('loginIntroP')}
             </p>
           </div>
+          <MascotImage type="welcome" className="login-mascot"
+            style={{ position: 'relative', maxWidth: 210, height: 210, alignSelf: 'center' }} />
           <div style={{ position: 'relative', display: 'flex', gap: 18, opacity: 0.78, fontSize: 12.5 }}>
             <span>v3</span><span>·</span><span>{t('secure')}</span><span>·</span><span>th / en</span>
           </div>
@@ -1089,9 +1194,15 @@ function LoginView({ locale, setLocale, onLoggedIn, portalEnabled }) {
         </form>
       </div>
       <style>{`
-        @media (max-width: 768px) { .login-grid { grid-template-columns: 1fr !important; } }
+        @media (max-width: 768px) {
+          .login-grid { grid-template-columns: 1fr !important; min-width: 0 !important; }
+          .login-hero, .login-form { min-width: 0 !important; }
+          .login-mascot { height: 150px !important; max-width: 150px !important; }
+        }
         @media (max-width: 480px) {
+          .login-grid { width: calc(100vw - 48px) !important; max-width: calc(100vw - 48px) !important; }
           .login-hero, .login-form { padding: 28px 22px !important; }
+          .login-mascot { height: 122px !important; max-width: 122px !important; }
         }
       `}</style>
     </div>
@@ -1179,6 +1290,7 @@ function HomeView({ tenant, locale, bills, tickets, contract, goto }) {
           band on the other views), which reads as a page-jump even after
           window.scrollTo(0,0) reset the scroll. */}
       <SectionHeader title={t('overview')} subtitle={t('overviewSub')} />
+      <PageGuide type="welcome" title={t('guideHomeTitle')} text={t('guideHomeText')} />
       {unpaid ? (
         <div className="home-grid" style={{ display: 'grid', gap: 'var(--sp-4)', gridTemplateColumns: 'minmax(0,1.4fr) minmax(0,1fr)' }}>
           <Card pad={0} style={{ overflow: 'hidden' }}>
@@ -1366,6 +1478,7 @@ function BillsView({ locale, bills, refresh, slipFeature, openId, setOpenId }) {
     <div className="anim-in">
       <SectionHeader title={t('myBills')}
         subtitle={`${t('billsAll')} ${bills.length} · ${t('billsUnpaid')} ${unpaidCount}`} />
+      <PageGuide type="payment" title={t('guideBillsTitle')} text={t('guideBillsText')} />
       <div className="filter-chips" style={{ display: 'flex', gap: 8, marginBottom: 'var(--sp-4)', flexWrap: 'wrap' }}>
         {[
           { id: 'all',    label: t('billsAll'),    count: bills.length },
@@ -1923,6 +2036,7 @@ function PaymentsView({ locale, payments, syncErrors, goto }) {
     <div className="anim-in">
       <SectionHeader title={t('paymentHistory')}
         subtitle={`${t('filterAll')} ${items.length} · ${t('paymentPending')} ${counts.pending}`} />
+      <PageGuide type="payment" title={t('guidePaymentsTitle')} text={t('guidePaymentsText')} />
       {/* Filter chips render unconditionally so the content below them
           doesn't shift up when the payments list arrives from the API.
           Counts read as "ทั้งหมด 0" until data lands — same pattern bills /
@@ -1992,6 +2106,7 @@ function ContractView({ locale, tenant, contract }) {
             not a lease has loaded — otherwise the page jumps by ~20px
             the moment the contract API returns. */}
         <SectionHeader title={t('myContract')} subtitle={`${t('contractNo')} —`} />
+        <PageGuide type="contract" title={t('guideContractTitle')} text={t('guideContractText')} />
         <Empty icon="contract" title={t('noContract')} />
       </div>
     );
@@ -2010,6 +2125,7 @@ function ContractView({ locale, tenant, contract }) {
   return (
     <div className="anim-in">
       <SectionHeader title={t('myContract')} subtitle={`${t('contractNo')} ${c.contract_no || '—'}`} />
+      <PageGuide type="contract" title={t('guideContractTitle')} text={t('guideContractText')} />
       <div className="contract-grid" style={{ display: 'grid', gap: 'var(--sp-4)', gridTemplateColumns: 'minmax(0,1.3fr) minmax(0,1fr)' }}>
         <Card pad={0} style={{ overflow: 'hidden' }}>
           <div style={{
@@ -2108,6 +2224,7 @@ function MaintenanceView({ locale, tenant, tickets, refresh }) {
       <SectionHeader title={t('maintenance')}
         subtitle={`${t('allTickets')} ${tickets.length} · ${t('ongoing')} ${tickets.filter((x) => !['completed', 'cancelled'].includes(x.status)).length}`}
         action={<Button icon="plus" onClick={() => setShowForm(true)}>{t('submitTicket')}</Button>} />
+      <PageGuide type="maintenance" title={t('guideMaintenanceTitle')} text={t('guideMaintenanceText')} />
       <div className="filter-chips" style={{ display: 'flex', gap: 8, marginBottom: 'var(--sp-4)', flexWrap: 'wrap' }}>
         {[
           { id: 'all',  label: t('allTickets'), count: tickets.length },
@@ -2348,6 +2465,7 @@ function ProfileView({ tenant, locale, setLocale, theme, setTheme, onLogout, fea
   return (
     <div className="anim-in">
       <SectionHeader title={t('accountSettings')} subtitle={t('accountSub')} />
+      <PageGuide type="welcome" title={t('guideProfileTitle')} text={t('guideProfileText')} />
       <Card pad={0}>
         <div style={{
           padding: 24, display: 'flex', alignItems: 'center', gap: 18,
@@ -2949,6 +3067,10 @@ function App() {
            ONLY these widths — no auto-fit/auto-fill in user-facing layouts
            so column counts never silently jump as the viewport changes. */
 
+        .page-guide {
+          grid-template-columns: minmax(0, 1fr) 190px !important;
+        }
+
         /* Tablet landscape — hide the sidebar, show drawer trigger. */
         @media (max-width: 960px) {
           .portal-shell { grid-template-columns: 1fr !important; }
@@ -2959,6 +3081,9 @@ function App() {
           }
           /* Shortcuts cap at 2-up on tablet so the cards don't look stretched. */
           .shortcuts-grid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+          .page-guide { grid-template-columns: minmax(0, 1fr) 160px !important; }
+          .page-guide-art { min-height: 132px !important; }
+          .page-guide-art img { max-width: 136px !important; height: 126px !important; }
         }
 
         /* Tablet portrait — cards stack to 1 col, breakdown stays 3-up. */
@@ -3018,6 +3143,17 @@ function App() {
           /* Contact cards stay 1 col on phone — values can wrap to 2 lines. */
           .contact-grid { grid-template-columns: 1fr !important; }
           .maintenance-ticket-row { flex-direction: column !important; }
+          .page-guide {
+            grid-template-columns: 1fr !important;
+            min-height: 0 !important;
+          }
+          .page-guide-copy { padding: var(--sp-4) var(--sp-4) var(--sp-3) !important; }
+          .page-guide-art {
+            min-height: 112px !important;
+            border-left: 0 !important;
+            border-top: 1px solid var(--line) !important;
+          }
+          .page-guide-art img { max-width: 122px !important; height: 108px !important; }
           /* Modal becomes a slide-up bottom-sheet: stuck to the bottom
              edge, top corners only, safe-area padding so no content sits
              under the iOS home indicator. */
@@ -3040,6 +3176,8 @@ function App() {
           .modal-body { padding: var(--sp-4) var(--sp-3) var(--sp-5) !important; }
           /* Shortcuts shrink further only at 480, never between 481-639. */
           .shortcuts-grid { grid-template-columns: 1fr !important; }
+          .page-guide-copy { padding: var(--sp-4) var(--sp-3) var(--sp-3) !important; }
+          .page-guide-art img { max-width: 108px !important; height: 96px !important; }
         }
 
         /* Landscape phone — short-but-wide viewport. Reclaim the top air

@@ -300,8 +300,24 @@ function App() {
         : infoBox;
 
   return (
-    <main style={wrap}>
-      <section style={panel}>
+    <main className="tenant-public-shell" style={wrap}>
+      <section className="tenant-public-hero">
+        <div>
+          <div className="tenant-public-eyebrow">PromptPay payment</div>
+          <h1 className="tenant-public-title">ชำระบิล</h1>
+          <p className="tenant-public-lead">
+            ตรวจยอด สแกน QR แล้วแนบสลิปจากหน้านี้เพื่อให้ระบบตรวจสอบรายการชำระเงิน
+          </p>
+          <div className="tenant-guide-list" aria-label="ขั้นตอนชำระเงิน">
+            <span className="tenant-guide-chip">สแกน QR</span>
+            <span className="tenant-guide-chip">แนบสลิปชัดเจน</span>
+            <span className="tenant-guide-chip">รอสถานะยืนยัน</span>
+          </div>
+        </div>
+        <img className="tenant-public-art" src="/assets/tenant/mascot-payment.png" alt="" loading="eager" />
+      </section>
+
+      <section className="tenant-pay-panel" style={panel}>
         <div style={topline}>ชำระบิล</div>
         {loading ? <p style={muted}>กำลังโหลดข้อมูลบิล...</p> : null}
         {err ? <div style={errorBox}>{err}</div> : null}
@@ -458,13 +474,11 @@ function App() {
 
 const wrap = {
   minHeight: '100vh',
-  display: 'grid',
-  placeItems: 'start center',
-  padding: '24px 14px',
+  padding: '28px 0 80px',
 };
 const panel = {
   width: '100%',
-  maxWidth: 560,
+  maxWidth: 640,
   background: 'var(--card)',
   border: '1px solid var(--border)',
   borderRadius: 8,

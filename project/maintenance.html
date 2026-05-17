@@ -7,6 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
 <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700&family=IBM+Plex+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"/>
+<link rel="stylesheet" href="/tenant-pages.css"/>
 <style>
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; min-height: 100%; }
@@ -106,7 +107,7 @@
   .ref { font-family: 'JetBrains Mono', monospace; color: #c46a3e; }
 </style>
 </head>
-<body>
+<body class="tenant-public-page tenant-maintenance-page">
 <div class="wrap">
   <div class="topbar">
     <div class="brand">
@@ -116,8 +117,19 @@
     <a href="/">← กลับหน้าแรก</a>
   </div>
 
-  <h1>แจ้งซ่อม</h1>
-  <p class="lead">แจ้งปัญหาภายในห้องพัก เจ้าหน้าที่จะติดต่อกลับโดยเร็ว</p>
+  <section class="tenant-public-hero">
+    <div>
+      <div class="tenant-public-eyebrow">Maintenance support</div>
+      <h1>แจ้งซ่อม</h1>
+      <p class="lead">แจ้งปัญหาภายในห้องพัก เจ้าหน้าที่จะติดต่อกลับโดยเร็ว</p>
+      <div class="tenant-guide-list" aria-label="ขั้นตอนแจ้งซ่อม">
+        <span class="tenant-guide-chip">เลือกหมวดปัญหา</span>
+        <span class="tenant-guide-chip">ระบุอาการให้ชัด</span>
+        <span class="tenant-guide-chip">ติดตามสถานะได้ทันที</span>
+      </div>
+    </div>
+    <img class="tenant-public-art" src="/assets/tenant/mascot-maintenance.png" alt="" loading="eager"/>
+  </section>
 
   <div class="tabs">
     <button id="tabSubmit" class="tab active">แจ้งใหม่</button>

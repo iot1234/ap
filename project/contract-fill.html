@@ -7,6 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
 <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700&family=IBM+Plex+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"/>
+<link rel="stylesheet" href="/tenant-pages.css"/>
 <style>
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; min-height: 100%; }
@@ -83,7 +84,7 @@
   }
 </style>
 </head>
-<body>
+<body class="tenant-public-page tenant-contract-page">
 <div class="wrap" id="root">
   <div class="card"><div class="muted">กำลังโหลด...</div></div>
 </div>
@@ -329,17 +330,26 @@ function App() {
 
 function Header({ view, savedAt }) {
   return (
-    <div className="card">
-      <h1>📝 สัญญาเช่าห้องพัก</h1>
-      <div className="muted">
-        {view.building?.name || 'หอพัก'} · ห้อง {view.contract.roomId || '—'}
-      </div>
-      {savedAt ? (
-        <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>
-          ✓ บันทึกอัตโนมัติเมื่อ {savedAt.toLocaleTimeString('th-TH')}
+    <section className="tenant-public-hero">
+      <div>
+        <div className="tenant-public-eyebrow">Contract fill</div>
+        <h1>📝 สัญญาเช่าห้องพัก</h1>
+        <div className="tenant-public-lead">
+          {view.building?.name || 'หอพัก'} · ห้อง {view.contract.roomId || '—'}
         </div>
-      ) : null}
-    </div>
+        <div className="tenant-guide-list" aria-label="ขั้นตอนกรอกสัญญา">
+          <span className="tenant-guide-chip">ตรวจข้อมูลสัญญา</span>
+          <span className="tenant-guide-chip">อัปโหลดบัตร</span>
+          <span className="tenant-guide-chip">ลงนามส่งตรวจ</span>
+        </div>
+        {savedAt ? (
+          <div className="muted" style={{ fontSize: 12, marginTop: 10 }}>
+            ✓ บันทึกอัตโนมัติเมื่อ {savedAt.toLocaleTimeString('th-TH')}
+          </div>
+        ) : null}
+      </div>
+      <img className="tenant-public-art" src="/assets/tenant/mascot-contract.png" alt="" loading="eager"/>
+    </section>
   );
 }
 
