@@ -94,6 +94,22 @@ test('public booking deposit requires a room, a slip, and deduplicates slips', (
     'deposit status must be centralised so no-slip booking deposits get a clear state');
   assert.match(server, /settings\.requireSlip \? 'awaiting_slip' : 'manual_review'/,
     'when slips are optional, deposit bookings must be marked for manual review, not waiting for a slip');
+  assert.match(server, /app\.get\('\/api\/admin\/booking-deposit-settings'/,
+    'admin must have a dedicated booking deposit settings read endpoint');
+  assert.match(server, /app\.put\('\/api\/admin\/booking-deposit-settings'[\s\S]{0,120}requireRole\('owner', 'manager'\)/,
+    'dedicated booking deposit settings save must support owner and manager roles');
+  assert.match(server, /parseRoomBookingEditableSettings/,
+    'dedicated booking deposit settings must validate and normalize input before saving');
+  assert.match(server, /bookingDepositAdminPaymentReadiness/,
+    'admin settings page must preflight payment readiness before operators enable deposits');
+  assert.match(server, /BOOKING_DEPOSIT_SETTINGS_INVALID/,
+    'invalid booking deposit settings must return a stable error code');
+  assert.match(server, /BOOKING_DEPOSIT_AMOUNT_REQUIRED/,
+    'server must reject enabling deposits with an effective zero amount');
+  assert.match(server, /BOOKING_DEPOSIT_HOLD_MINUTES_RANGE/,
+    'server must guard the room hold duration range');
+  assert.match(server, /BOOKING_DEPOSIT_MAX_BYTES_RANGE/,
+    'server must guard the slip upload size range');
 });
 
 test('rejected public booking reservations release their room lock', () => {
@@ -167,8 +183,10 @@ test('public booking page and admin features expose deposit controls', () => {
     'settings hub must expose booking deposit settings as a first-class tab');
   assert.match(depositSettings, /function PageBookingDepositSettings/,
     'dedicated admin page must register a booking deposit settings component');
-  assert.match(depositSettings, /\/api\/admin\/features/,
-    'dedicated admin page must persist through the feature settings API');
+  assert.match(depositSettings, /\/api\/admin\/booking-deposit-settings/,
+    'dedicated admin page must persist through the guarded booking deposit settings API');
+  assert.doesNotMatch(depositSettings, /PUT'[\s\S]{0,120}\/api\/admin\/features/,
+    'dedicated admin page must not bypass booking-deposit validation by saving directly to generic features');
   assert.match(depositSettings, /minimumAmount/,
     'dedicated admin page must expose the no-minimum or minimum booking-fee rule');
   assert.match(depositSettings, /applyBookingFeeToDeposit/,

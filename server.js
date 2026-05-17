@@ -1110,6 +1110,166 @@ function bookingDepositStatus(settings, hasSlip) {
   return settings.requireSlip ? 'awaiting_slip' : 'manual_review';
 }
 
+
+const ROOM_BOOKING_EDITABLE_FIELDS = new Set([
+  'enabled',
+  'requireDeposit',
+  'depositAmount',
+  'minimumAmount',
+  'applyBookingFeeToDeposit',
+  'requireSlip',
+  'holdMinutes',
+  'maxBytes',
+  'allowedMimes',
+]);
+const ROOM_BOOKING_ALLOWED_MIMES = new Set(['image/jpeg', 'image/png', 'image/webp']);
+
+function normalizeRoomBookingEditableSettings(raw) {
+  const base = {
+    ...features.DEFAULTS.roomBooking,
+    ...(raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}),
+  };
+  const effective = roomBookingSettings({ roomBooking: base });
+  return {
+    enabled: effective.enabled,
+    requireDeposit: effective.requireDeposit,
+    requireSlip: effective.requireSlip,
+    depositAmount: effective.configuredDepositAmount,
+    minimumAmount: effective.minimumAmount,
+    applyBookingFeeToDeposit: effective.applyBookingFeeToDeposit,
+    holdMinutes: effective.holdMinutes,
+    maxBytes: effective.maxBytes,
+    allowedMimes: Array.isArray(base.allowedMimes) && base.allowedMimes.length
+      ? base.allowedMimes.filter((m) => ROOM_BOOKING_ALLOWED_MIMES.has(m))
+      : [...ROOM_BOOKING_ALLOWED_MIMES],
+  };
+}
+
+function parseRoomBookingEditableSettings(input, currentRaw) {
+  const current = normalizeRoomBookingEditableSettings(currentRaw);
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    return {
+      ok: false,
+      issues: [{
+        field: 'roomBooking',
+        code: 'BOOKING_DEPOSIT_SETTINGS_REQUIRED',
+        message: 'ต้องส่งค่า roomBooking เป็น object',
+      }],
+    };
+  }
+  const issues = [];
+  const unknown = Object.keys(input).filter((k) => !ROOM_BOOKING_EDITABLE_FIELDS.has(k));
+  if (unknown.length) {
+    issues.push({
+      field: 'roomBooking',
+      code: 'BOOKING_DEPOSIT_UNKNOWN_FIELD',
+      message: 'ไม่รองรับค่า: ' + unknown.join(', '),
+    });
+  }
+  const boolField = (field) => {
+    if (input[field] === undefined) return current[field] === true;
+    if (typeof input[field] === 'boolean') return input[field];
+    issues.push({
+      field,
+      code: 'BOOKING_DEPOSIT_INVALID_BOOLEAN',
+      message: field + ' ต้องเป็น true หรือ false',
+    });
+    return current[field] === true;
+  };
+  const numField = (field, min, max, fallback, code) => {
+    if (input[field] === undefined) return fallback;
+    const n = Number(input[field]);
+    if (!Number.isFinite(n) || n < min || n > max) {
+      issues.push({
+        field,
+        code,
+        message: field + ' ต้องอยู่ระหว่าง ' + min + ' ถึง ' + max,
+      });
+      return fallback;
+    }
+    return Math.round(n);
+  };
+  const depositAmount = numField(
+    'depositAmount',
+    0,
+    1_000_000,
+    current.depositAmount,
+    'BOOKING_DEPOSIT_AMOUNT_RANGE'
+  );
+  let minimumAmount = 0;
+  if (input.minimumAmount === undefined) {
+    minimumAmount = current.minimumAmount;
+  } else {
+    const n = Number(input.minimumAmount);
+    if (!Number.isFinite(n) || n < 0 || n > 1_000_000 || (n > 0 && n < 1)) {
+      issues.push({
+        field: 'minimumAmount',
+        code: 'BOOKING_DEPOSIT_MINIMUM_RANGE',
+        message: 'ขั้นต่ำต้องเป็น 0 หรืออย่างน้อย 1 บาท และไม่เกิน 1,000,000 บาท',
+      });
+      minimumAmount = current.minimumAmount;
+    } else {
+      minimumAmount = n > 0 ? Math.round(n) : 0;
+    }
+  }
+  const next = {
+    enabled: boolField('enabled'),
+    requireDeposit: boolField('requireDeposit'),
+    requireSlip: boolField('requireSlip'),
+    depositAmount,
+    minimumAmount,
+    applyBookingFeeToDeposit: boolField('applyBookingFeeToDeposit'),
+    holdMinutes: numField(
+      'holdMinutes',
+      1,
+      120,
+      current.holdMinutes,
+      'BOOKING_DEPOSIT_HOLD_MINUTES_RANGE'
+    ),
+    maxBytes: numField(
+      'maxBytes',
+      100_000,
+      5_000_000,
+      current.maxBytes,
+      'BOOKING_DEPOSIT_MAX_BYTES_RANGE'
+    ),
+    allowedMimes: current.allowedMimes,
+  };
+  if (input.allowedMimes !== undefined) {
+    if (!Array.isArray(input.allowedMimes) || input.allowedMimes.length === 0) {
+      issues.push({
+        field: 'allowedMimes',
+        code: 'BOOKING_DEPOSIT_MIME_REQUIRED',
+        message: 'allowedMimes ต้องเป็น array ที่มีชนิดไฟล์อย่างน้อย 1 รายการ',
+      });
+    } else {
+      const cleaned = input.allowedMimes
+        .map((m) => String(m || '').trim())
+        .filter((m) => ROOM_BOOKING_ALLOWED_MIMES.has(m));
+      if (cleaned.length !== input.allowedMimes.length) {
+        issues.push({
+          field: 'allowedMimes',
+          code: 'BOOKING_DEPOSIT_MIME_UNSUPPORTED',
+          message: 'รองรับเฉพาะ image/jpeg, image/png, image/webp',
+        });
+      } else {
+        next.allowedMimes = [...new Set(cleaned)];
+      }
+    }
+  }
+  const effectiveAmount = next.minimumAmount > 0
+    ? Math.max(next.depositAmount, next.minimumAmount)
+    : next.depositAmount;
+  if (next.requireDeposit && effectiveAmount <= 0) {
+    issues.push({
+      field: 'depositAmount',
+      code: 'BOOKING_DEPOSIT_AMOUNT_REQUIRED',
+      message: 'เมื่อเปิดเก็บค่าจอง ยอดค่าจองที่ใช้จริงต้องมากกว่า 0 บาท',
+    });
+  }
+  return issues.length ? { ok: false, issues } : { ok: true, settings: next };
+}
+
 function bookingHoldHash(token) {
   if (!token || typeof token !== 'string') return null;
   return cryptoSvc.hmac(`booking-hold:${token}`);
@@ -1230,6 +1390,34 @@ async function publicBookingDepositInfo() {
     payment.ready = !!(payment.qrDataUrl || bankInfo);
   }
   return { settings, payment };
+}
+
+
+async function bookingDepositAdminPaymentReadiness(amount) {
+  const { paymentBlock } = await loadEffectivePaymentBlock();
+  const bankInfo = paymentBlock.bankInfo && paymentBlock.bankInfo.account
+    ? paymentBlock.bankInfo
+    : null;
+  let promptpayReady = false;
+  if (paymentBlock.promptpayTarget && Number.isFinite(amount) && amount > 0) {
+    try {
+      const target = normaliseTarget(paymentBlock.promptpayTarget);
+      promptpayReady = !isDemoTarget(target);
+    } catch {
+      promptpayReady = false;
+    }
+  }
+  const walletInfo = paymentBlock.walletInfo || null;
+  return {
+    amount,
+    ready: !!(promptpayReady || bankInfo || walletInfo),
+    promptpayReady,
+    promptpayName: paymentBlock.promptpayName || paymentBlock.promptpayDisplayName || null,
+    targetLast4: paymentBlock.promptpayTarget ? String(paymentBlock.promptpayTarget).slice(-4) : null,
+    bankInfo,
+    walletInfo,
+    paymentMethods: Array.isArray(paymentBlock.paymentMethods) ? paymentBlock.paymentMethods : [],
+  };
 }
 
 app.get('/api/bookings/public/config', async (_req, res) => {
@@ -2336,6 +2524,71 @@ app.get('/api/admin/features', requireAuth, requireRole('owner', 'manager', 'sta
     res.status(500).json({ error: 'internal error' });
   }
 });
+
+
+app.get('/api/admin/booking-deposit-settings', requireAuth, requireRole('owner', 'manager', 'staff'), async (req, res) => {
+  try {
+    const f = await features.load(pool);
+    const role = req.session.user.role;
+    const effectiveSettings = roomBookingSettings(f);
+    const payment = await bookingDepositAdminPaymentReadiness(effectiveSettings.depositAmount);
+    res.json({
+      ok: true,
+      settings: normalizeRoomBookingEditableSettings(f.roomBooking),
+      effectiveSettings,
+      defaults: normalizeRoomBookingEditableSettings(features.DEFAULTS.roomBooking),
+      payment,
+      role,
+      canEdit: ['owner', 'manager'].includes(role),
+    });
+  } catch (err) {
+    console.error('booking deposit settings GET error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+app.put('/api/admin/booking-deposit-settings',
+  sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'),
+  async (req, res) => {
+    try {
+      const current = await features.load(pool);
+      const input = req.body && req.body.roomBooking ? req.body.roomBooking : req.body;
+      const parsed = parseRoomBookingEditableSettings(input, current.roomBooking);
+      if (!parsed.ok) {
+        return res.status(400).json({
+          error: 'ตั้งค่าจอง/มัดจำไม่ถูกต้อง',
+          code: 'BOOKING_DEPOSIT_SETTINGS_INVALID',
+          issues: parsed.issues,
+        });
+      }
+      const next = await features.save(
+        pool,
+        { roomBooking: parsed.settings },
+        req.session.user.username
+      );
+      audit(req, 'booking_deposit_settings.update', 'config', 'roomBooking', {
+        keys: Object.keys(input || {}),
+        requireDeposit: parsed.settings.requireDeposit,
+        depositAmount: parsed.settings.depositAmount,
+        minimumAmount: parsed.settings.minimumAmount,
+        holdMinutes: parsed.settings.holdMinutes,
+      });
+      const effectiveSettings = roomBookingSettings(next);
+      const payment = await bookingDepositAdminPaymentReadiness(effectiveSettings.depositAmount);
+      res.json({
+        ok: true,
+        settings: normalizeRoomBookingEditableSettings(next.roomBooking),
+        effectiveSettings,
+        payment,
+        role: req.session.user.role,
+        canEdit: true,
+      });
+    } catch (err) {
+      console.error('booking deposit settings PUT error:', err);
+      res.status(500).json({ error: 'internal error' });
+    }
+  }
+);
 
 app.put('/api/admin/features', sameOrigin, csrfGuard, requireAuth, requireRole('owner'), async (req, res) => {
   const partial = req.body && req.body.features ? req.body.features : req.body;

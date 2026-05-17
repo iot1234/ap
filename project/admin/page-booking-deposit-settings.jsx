@@ -100,26 +100,20 @@ function PageBookingDepositSettings({ setToast, embedded = false, currentUser = 
   const load = useCallback(async () => {
     setErr('');
     try {
-      const [featuresRes, publicRes] = await Promise.all([
-        fetch('/api/admin/features', { credentials: 'same-origin' }),
-        fetch('/api/bookings/public/config', { credentials: 'same-origin' }),
-      ]);
-      const [featuresJson, publicJson] = await Promise.all([
-        featuresRes.json(),
-        publicRes.json().catch(() => null),
-      ]);
-      if (!featuresRes.ok) throw new Error(featuresJson.error || 'load features failed');
-      const featureDefaults = normalizeBookingDepositFeature(featuresJson.defaults?.roomBooking);
+      const settingsRes = await fetch('/api/admin/booking-deposit-settings', { credentials: 'same-origin' });
+      const settingsJson = await settingsRes.json();
+      if (!settingsRes.ok) throw new Error(settingsJson.error || 'load booking deposit settings failed');
+      const featureDefaults = normalizeBookingDepositFeature(settingsJson.defaults);
       const feature = normalizeBookingDepositFeature({
         ...featureDefaults,
-        ...(featuresJson.features?.roomBooking || {}),
+        ...(settingsJson.settings || {}),
       });
       setDefaults(featureDefaults);
       setSaved(feature);
       setDraft(feature);
-      if (typeof featuresJson.canEdit === 'boolean') setCanEdit(featuresJson.canEdit);
-      if (featuresJson.role) setViewerRole(featuresJson.role);
-      if (publicRes.ok && publicJson) setPublicConfig(publicJson.booking || null);
+      if (typeof settingsJson.canEdit === 'boolean') setCanEdit(settingsJson.canEdit);
+      if (settingsJson.role) setViewerRole(settingsJson.role);
+      setPublicConfig({ payment: settingsJson.payment || null });
     } catch (e) {
       setErr(e.message);
       setToast && setToast({ kind: 'error', message: e.message });
@@ -140,7 +134,7 @@ function PageBookingDepositSettings({ setToast, embedded = false, currentUser = 
   const effectiveAmount = bookingDepositEffectiveAmount(draft || defaults);
   const paymentReady = publicConfig?.payment?.ready;
   const paymentKnown = publicConfig?.payment && typeof paymentReady === 'boolean';
-  const readOnlyReason = canEdit ? '' : `บัญชี ${viewerRole || 'ปัจจุบัน'} ดูได้เท่านั้น ต้องใช้ role owner เพื่อบันทึก`;
+  const readOnlyReason = canEdit ? '' : `บัญชี ${viewerRole || 'ปัจจุบัน'} ดูได้เท่านั้น ต้องใช้ role owner หรือ manager เพื่อบันทึก`;
 
   function patchDraft(patch) {
     setDraft((prev) => normalizeBookingDepositFeature({ ...(prev || defaults), ...patch }));
@@ -151,7 +145,7 @@ function PageBookingDepositSettings({ setToast, embedded = false, currentUser = 
     if (!canEdit) {
       const message = {
         title: 'ไม่มีสิทธิ์บันทึกการตั้งค่าค่าจอง',
-        description: 'การแก้ค่าจอง/มัดจำเป็นการตั้งค่าระบบ ต้องใช้บัญชี owner',
+        description: 'การแก้ค่าจอง/มัดจำต้องใช้บัญชี owner หรือ manager',
       };
       setToast && setToast({ kind: 'warning', message });
       setErr(message.description);
@@ -160,15 +154,21 @@ function PageBookingDepositSettings({ setToast, embedded = false, currentUser = 
     const clean = normalizeBookingDepositFeature(draft);
     setBusy(true); setErr('');
     try {
-      const r = await apiFetch('/api/admin/features', {
+      const r = await apiFetch('/api/admin/booking-deposit-settings', {
         method: 'PUT',
-        body: JSON.stringify({ features: { roomBooking: clean } }),
+        body: JSON.stringify({ roomBooking: clean }),
       });
       const d = await r.json();
-      if (!r.ok) throw new Error(d.error || 'save failed');
-      const next = normalizeBookingDepositFeature(d.features?.roomBooking || clean);
+      if (!r.ok) {
+        const issue = Array.isArray(d.issues) && d.issues[0] ? d.issues[0] : null;
+        throw new Error(issue ? `${d.error}: ${issue.message}` : (d.error || 'save failed'));
+      }
+      const next = normalizeBookingDepositFeature(d.settings || clean);
       setSaved(next);
       setDraft(next);
+      if (typeof d.canEdit === 'boolean') setCanEdit(d.canEdit);
+      if (d.role) setViewerRole(d.role);
+      setPublicConfig({ payment: d.payment || null });
       setToast && setToast({
         kind: 'success',
         message: {
