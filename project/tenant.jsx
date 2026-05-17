@@ -1106,7 +1106,7 @@ function HomeView({ tenant, locale, bills, tickets, contract, goto }) {
   // a current outstanding bill — keeps the dashboard useful for paid-up
   // tenants too, instead of leaving them with just an empty-state banner.
   const summaryCards = (
-    <div style={{ display: 'grid', gap: 14, gridTemplateRows: 'auto auto' }}>
+    <div style={{ display: 'grid', gap: 'var(--sp-3)', gridTemplateRows: 'auto auto' }}>
       <Card hoverable onClick={() => goto('contract')}>
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between' }}>
           <div>
@@ -1171,7 +1171,7 @@ function HomeView({ tenant, locale, bills, tickets, contract, goto }) {
   return (
     <div className="anim-in">
       {unpaid ? (
-        <div className="home-grid" style={{ display: 'grid', gap: 18, gridTemplateColumns: 'minmax(0,1.4fr) minmax(0,1fr)' }}>
+        <div className="home-grid" style={{ display: 'grid', gap: 'var(--sp-4)', gridTemplateColumns: 'minmax(0,1.4fr) minmax(0,1fr)' }}>
           <Card pad={0} style={{ overflow: 'hidden' }}>
             <div style={{
               padding: '24px 24px 22px',
@@ -1220,7 +1220,7 @@ function HomeView({ tenant, locale, bills, tickets, contract, goto }) {
           {summaryCards}
         </div>
       ) : (
-        <div className="home-grid" style={{ display: 'grid', gap: 18, gridTemplateColumns: 'minmax(0,1.4fr) minmax(0,1fr)' }}>
+        <div className="home-grid" style={{ display: 'grid', gap: 'var(--sp-4)', gridTemplateColumns: 'minmax(0,1.4fr) minmax(0,1fr)' }}>
           <Empty icon="check" title={t('nothingDue')} hint={t('nothingDueSub')} />
           {summaryCards}
         </div>
@@ -1228,7 +1228,7 @@ function HomeView({ tenant, locale, bills, tickets, contract, goto }) {
 
       <SectionHeader style={{ marginTop: 'var(--sp-7)' }} title={t('shortcuts')} subtitle={t('shortcutsSub')} />
       <div className="shortcuts-grid" style={{
-        display: 'grid', gap: 12,
+        display: 'grid', gap: 'var(--sp-3)',
         gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
       }}>
         <QuickAction icon="qr" tone="accent" label={t('qa_pay')} sub={t('qa_pay_sub')}
@@ -1376,10 +1376,10 @@ function BillsView({ locale, bills, refresh, slipFeature, openId, setOpenId }) {
       {filtered.length === 0 ? (
         <Empty icon="bills" title={t('nothingHere')} />
       ) : (
-        <div style={{ display: 'grid', gap: 12 }}>
+        <div style={{ display: 'grid', gap: 'var(--sp-3)' }}>
           {filtered.map((b) => (
             <Card key={b.id} hoverable pad={0} onClick={() => setOpenId(b.id)}>
-              <div className="bill-card-main" style={{ padding: '18px 20px', display: 'grid', gridTemplateColumns: '1fr auto', gap: 18, alignItems: 'center' }}>
+              <div className="bill-card-main" style={{ padding: 'var(--sp-4) var(--sp-5)', display: 'grid', gridTemplateColumns: '1fr auto', gap: 'var(--sp-4)', alignItems: 'center' }}>
                 <div style={{ minWidth: 0 }}>
                   <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
                     <div style={{ fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 16 }}>{b.bill_no}</div>
@@ -2015,7 +2015,7 @@ function ContractView({ locale, tenant, contract }) {
   return (
     <div className="anim-in">
       <SectionHeader title={t('myContract')} subtitle={`${t('contractNo')} ${c.contract_no || '—'}`} />
-      <div className="contract-grid" style={{ display: 'grid', gap: 18, gridTemplateColumns: 'minmax(0,1.3fr) minmax(0,1fr)' }}>
+      <div className="contract-grid" style={{ display: 'grid', gap: 'var(--sp-4)', gridTemplateColumns: 'minmax(0,1.3fr) minmax(0,1fr)' }}>
         <Card pad={0} style={{ overflow: 'hidden' }}>
           <div style={{
             padding: '24px 24px 22px',
@@ -2127,7 +2127,7 @@ function MaintenanceView({ locale, tenant, tickets, refresh }) {
       {filtered.length === 0 ? (
         <Empty icon="maint" title={t('noTickets')} />
       ) : (
-        <div style={{ display: 'grid', gap: 12 }}>
+        <div style={{ display: 'grid', gap: 'var(--sp-3)' }}>
           {filtered.map((x) => {
             const cat = MAINT_CATS.find((c) => c.id === x.category);
             return (
@@ -2402,7 +2402,7 @@ function ProfileView({ tenant, locale, setLocale, theme, setTheme, onLogout, fea
       ) : null}
 
       <SectionHeader style={{ marginTop: 'var(--sp-7)' }} title={t('contactDorm')} subtitle={buildingName} />
-      <div className="contact-grid" style={{ display: 'grid', gap: 12, gridTemplateColumns: 'repeat(2, minmax(0, 1fr))' }}>
+      <div className="contact-grid" style={{ display: 'grid', gap: 'var(--sp-3)', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))' }}>
         {buildingPhone ? (
           <a href={`tel:${String(buildingPhone).replace(/[^+\d]/g, '')}`} style={{ textDecoration: 'none' }}>
             <ContactCard icon="phone" tone="accent" label={t('telephone')} value={buildingPhone} />
