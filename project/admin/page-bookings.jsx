@@ -234,7 +234,7 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
         <div style={{ textAlign: 'right' }}>
           <div style={{ fontWeight: 600 }}>{fmtCurrency(b.bookingFee ?? b.deposit)}</div>
           <div style={{ fontSize: 11, color: C.muted }}>
-            {b.bookingFeeAppliesToDeposit ? 'หักมัดจำ' : depositStatusLabel(b.depositStatus)}
+            {depositStatusLabel(b.depositStatus)}{b.bookingFeeAppliesToDeposit ? ' · หักมัดจำ' : ''}
           </div>
         </div>
       ),
@@ -501,6 +501,10 @@ function BookingDetail({ b }) {
             ...(b.depositCreditAmount ? [{ label: 'เครดิตมัดจำจากค่าจอง', value: fmtCurrency(b.depositCreditAmount) }] : []),
             ...(b.depositBalanceDue != null ? [{ label: 'เงินมัดจำคงเหลือที่ต้องเก็บ', value: fmtCurrency(b.depositBalanceDue) }] : []),
             { label: 'สถานะสลิปค่าจอง', value: depositStatusLabel(b.depositStatus) },
+            ...(b.depositVerifyProvider ? [{ label: 'ตรวจสลิปโดย', value: b.depositVerifyProvider }] : []),
+            ...(b.depositVerifyCode ? [{ label: 'รหัสผลตรวจสลิป', value: b.depositVerifyCode }] : []),
+            ...(b.depositTransactionRef ? [{ label: 'เลขอ้างอิงรายการโอน', value: b.depositTransactionRef }] : []),
+            ...(b.depositVerifyReason ? [{ label: 'หมายเหตุผลตรวจ', value: b.depositVerifyReason }] : []),
             ...(b.depositSlipUrl ? [{ label: 'สลิปค่าจอง', value: <a href={b.depositSlipUrl} target="_blank" rel="noopener noreferrer" style={{ color: C.accent }}>เปิดดูสลิป</a> }] : []),
             ...(b.reservedAt ? [{ label: 'ล็อกห้องเมื่อ', value: relTime(b.reservedAt) }] : []),
             ...(b.holdExpiresAt ? [{ label: 'hold เดิมหมดอายุ', value: fmtDateTH(String(b.holdExpiresAt).slice(0, 10)) }] : []),

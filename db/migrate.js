@@ -782,12 +782,22 @@ async function migrate(pool, opts = {}) {
     ALTER TABLE bookings ADD COLUMN IF NOT EXISTS deposit_status TEXT;
     ALTER TABLE bookings ADD COLUMN IF NOT EXISTS deposit_slip_file_id BIGINT REFERENCES file_uploads(id) ON DELETE SET NULL;
     ALTER TABLE bookings ADD COLUMN IF NOT EXISTS deposit_slip_hash TEXT;
+    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS deposit_verify_provider TEXT;
+    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS deposit_verify_code TEXT;
+    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS deposit_verify_reason TEXT;
+    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS deposit_verify_attempts JSONB DEFAULT '[]'::jsonb;
+    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS deposit_verified_at TIMESTAMPTZ;
+    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS deposit_transaction_ref TEXT;
+    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS deposit_payment_method TEXT;
     ALTER TABLE bookings ADD COLUMN IF NOT EXISTS hold_token_hash TEXT;
     ALTER TABLE bookings ADD COLUMN IF NOT EXISTS hold_expires_at TIMESTAMPTZ;
     ALTER TABLE bookings ADD COLUMN IF NOT EXISTS reserved_at TIMESTAMPTZ;
     CREATE UNIQUE INDEX IF NOT EXISTS uq_bookings_deposit_slip_hash
       ON bookings(deposit_slip_hash)
       WHERE deposit_slip_hash IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_bookings_deposit_transaction_ref
+      ON bookings(deposit_transaction_ref)
+      WHERE deposit_transaction_ref IS NOT NULL;
 
     ALTER TABLE contracts ADD COLUMN IF NOT EXISTS booking_fee_credit NUMERIC(10,2) DEFAULT 0;
     ALTER TABLE contracts ADD COLUMN IF NOT EXISTS deposit_balance_due NUMERIC(10,2);

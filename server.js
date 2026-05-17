@@ -1197,10 +1197,88 @@ function roomBookingSettings(flags) {
   };
 }
 
-function bookingDepositStatus(settings, hasSlip) {
+function bookingDepositStatus(settings, hasSlip, verification = {}) {
   if (!settings || !settings.requireDeposit) return 'not_required';
+  if (verification && verification.status) return verification.status;
   if (hasSlip) return 'pending_review';
   return settings.requireSlip ? 'awaiting_slip' : 'manual_review';
+}
+
+function bookingDepositVerificationNotice({
+  status,
+  verifyResult,
+  autoVerifyAttempted,
+  requireVerification,
+}) {
+  const code = verifyResult?.code || null;
+  const provider = verifyResult?.provider || null;
+  const attemptCount = Array.isArray(verifyResult?.attempts) ? verifyResult.attempts.length : 0;
+  const base = {
+    status,
+    attempted: !!autoVerifyAttempted,
+    ok: !!(verifyResult && verifyResult.ok),
+    provider,
+    code,
+    transactionRef: verifyResult?.transRef || null,
+    amount: verifyResult?.amount ?? null,
+    sender: publicPartyForSlipNotice(verifyResult?.sender),
+    receiver: publicPartyForSlipNotice(verifyResult?.receiver),
+    transDate: verifyResult?.transDate || null,
+    attempts: Array.isArray(verifyResult?.attempts) ? verifyResult.attempts : [],
+  };
+  if (status === 'verified') {
+    return {
+      ...base,
+      severity: 'success',
+      title: 'ตรวจสลิปค่าจองผ่านแล้ว',
+      message: 'ระบบยืนยันแล้วว่าสลิปค่าจองเป็นรายการจริง ยอดและบัญชีปลายทางตรงกับที่ตั้งไว้',
+      nextAction: 'ห้องถูกล็อกเป็นการจองแล้ว รอแอดมินตรวจข้อมูลและอนุมัติสัญญา',
+    };
+  }
+  if (status === 'pending_review') {
+    if (verifyResult?.ok && requireVerification) {
+      return {
+        ...base,
+        severity: 'pending',
+        title: 'สลิปค่าจองตรวจผ่าน รอแอดมินยืนยัน',
+        message: 'บริการตรวจสลิปยืนยันรายการแล้ว แต่ระบบตั้งค่าให้แอดมินตรวจทานก่อนสรุปผล',
+        nextAction: 'ห้องถูกล็อกเป็นการจองแล้ว รอแอดมินตรวจข้อมูล ไม่ต้องส่งสลิปซ้ำ',
+      };
+    }
+    if (autoVerifyAttempted) {
+      return {
+        ...base,
+        severity: 'pending',
+        title: 'รับสลิปค่าจองแล้ว รอแอดมินตรวจ',
+        message: `ระบบลองตรวจสลิปอัตโนมัติแล้ว${attemptCount ? ` ${attemptCount} provider` : ''} แต่ยังไม่ได้ผลยืนยันที่ปลอดภัย${code ? ` (รหัส ${code})` : ''}`,
+        nextAction: 'ห้องถูกล็อกเป็นการจองแล้ว แอดมินต้องเปิดดูสลิปและตรวจยอดก่อนอนุมัติ',
+      };
+    }
+    return {
+      ...base,
+      severity: 'pending',
+      title: 'รับสลิปค่าจองแล้ว',
+      message: 'ระบบยังไม่ได้เปิดหรือยังไม่พร้อมใช้การตรวจสลิปอัตโนมัติ จึงส่งรายการให้แอดมินตรวจด้วยมือ',
+      nextAction: 'ห้องถูกล็อกเป็นการจองแล้ว รอแอดมินตรวจยอดโอนและติดต่อกลับ',
+    };
+  }
+  if (status === 'manual_review') {
+    return {
+      ...base,
+      severity: 'pending',
+      title: 'รับคำขอจองแล้ว',
+      message: 'การตั้งค่านี้ไม่บังคับแนบสลิป แอดมินจะตรวจค่าจองหรือรับชำระด้วยมือ',
+      nextAction: 'รอแอดมินติดต่อกลับเพื่อยืนยันยอดและขั้นตอนถัดไป',
+    };
+  }
+  const copy = slipRejectCopy(code, verifyResult?.error || 'สลิปค่าจองไม่ผ่านการตรวจสอบ');
+  return {
+    ...base,
+    severity: 'error',
+    title: copy.title,
+    message: copy.message,
+    nextAction: copy.nextAction,
+  };
 }
 
 const ROOM_BOOKING_EDITABLE_FIELDS = new Set([
@@ -1459,8 +1537,9 @@ async function publicBookingDepositInfo() {
   const flags = await features.load(pool);
   const settings = roomBookingSettings(flags);
   let payment = null;
+  let paymentBlock = null;
   if (settings.requireDeposit) {
-    const { paymentBlock } = await loadEffectivePaymentBlock();
+    ({ paymentBlock } = await loadEffectivePaymentBlock());
     const amount = settings.depositAmount;
     const bankInfo = paymentBlock.bankInfo && paymentBlock.bankInfo.account
       ? paymentBlock.bankInfo
@@ -1474,6 +1553,23 @@ async function publicBookingDepositInfo() {
       paymentMethods: Array.isArray(paymentBlock.paymentMethods) ? paymentBlock.paymentMethods : [],
       qrDataUrl: null,
     };
+    try {
+      const slipVerifier = require('./services/slipVerifier');
+      const providers = slipVerifier.getConfiguredProviders(flags);
+      payment.slipAutoVerify = {
+        enabled: flags?.slipUpload?.enabled !== false && flags?.slipUpload?.autoVerify === true,
+        ready: providers.length > 0,
+        requireAdminConfirmation: flags?.slipUpload?.requireVerification === true,
+        providers: providers.map((p) => ({ id: p.id, label: p.label })),
+      };
+    } catch {
+      payment.slipAutoVerify = {
+        enabled: false,
+        ready: false,
+        requireAdminConfirmation: true,
+        providers: [],
+      };
+    }
     if (paymentBlock.promptpayTarget && Number.isFinite(amount) && amount > 0) {
       try {
         const target = normaliseTarget(paymentBlock.promptpayTarget);
@@ -1484,7 +1580,7 @@ async function publicBookingDepositInfo() {
     }
     payment.ready = !!(payment.qrDataUrl || bankInfo || payment.walletInfo);
   }
-  return { settings, payment };
+  return { settings, payment, flags, paymentBlock };
 }
 
 async function bookingDepositAdminPaymentReadiness(amount) {
@@ -1711,9 +1807,14 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBookingSubmit, validateBod
   if (!cleaned.tenantName.trim()) {
     return res.status(400).json({ error: 'tenantName required' });
   }
-  let bookingSettings, bookingPayment;
+  let bookingSettings, bookingPayment, bookingFlags, bookingPaymentBlock;
   try {
-    ({ settings: bookingSettings, payment: bookingPayment } = await publicBookingDepositInfo());
+    ({
+      settings: bookingSettings,
+      payment: bookingPayment,
+      flags: bookingFlags,
+      paymentBlock: bookingPaymentBlock,
+    } = await publicBookingDepositInfo());
   } catch (err) {
     console.error('public booking config load error:', err);
     return res.status(500).json({ error: 'internal error', code: 'CONFIG_ERROR' });
@@ -1795,6 +1896,11 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBookingSubmit, validateBod
   const holdTokenHash = bookingHoldHash(cleaned.holdToken);
   let depositSlipFile = null;
   let depositSlipHash = null;
+  let depositVerifyResult = null;
+  let depositAutoVerifyAttempted = false;
+  let depositVerificationStatus = null;
+  let depositVerificationReason = null;
+  let depositPaymentMethod = null;
   if (bookingSettings.requireDeposit && cleaned.depositSlip) {
     try {
       const rawBuf = Buffer.from(String(cleaned.depositSlip).replace(/^data:[^;]+;base64,/, ''), 'base64');
@@ -1827,6 +1933,102 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBookingSubmit, validateBod
       } catch (err) {
         if (err.code !== '42703') throw err;
       }
+      const slipVerifier = require('./services/slipVerifier');
+      const autoVerifyReady = bookingFlags?.slipUpload?.enabled !== false
+        && slipVerifier.isConfigured(bookingFlags);
+      if (autoVerifyReady) {
+        depositAutoVerifyAttempted = true;
+        try {
+          let ppTarget = null;
+          if (bookingPaymentBlock?.promptpayTarget) {
+            try {
+              const normalised = normaliseTarget(bookingPaymentBlock.promptpayTarget);
+              ppTarget = isDemoTarget(normalised) ? null : normalised;
+            } catch { ppTarget = null; }
+          }
+          const extraTargets = paymentBlockReceiverTargetEntries(bookingPaymentBlock)
+            .filter((target) => target.method !== 'promptpay');
+          if (!ppTarget && extraTargets.length === 0) {
+            depositVerifyResult = {
+              ok: false,
+              error: 'ยังไม่ได้ตั้งค่าบัญชีปลายทางที่ใช้ตรวจสลิปค่าจอง',
+              code: 'NOT_CONFIGURED',
+              attempts: [],
+            };
+          } else {
+            depositVerifyResult = await slipVerifier.verifyWithFallback(
+              rawBuf,
+              {
+                amount: bookingSettings.depositAmount,
+                billId: bookingId,
+                promptpayTarget: ppTarget || null,
+                additionalReceiverTargets: extraTargets,
+              },
+              bookingFlags
+            );
+          }
+        } catch (err) {
+          depositVerifyResult = { ok: false, error: err.message, code: 'VERIFIER_THREW', attempts: [] };
+        }
+        const transient = depositVerifyResult && slipVerifier.TRANSIENT_CODES.has(depositVerifyResult.code);
+        if (depositVerifyResult?.ok) {
+          depositVerificationStatus = bookingFlags?.slipUpload?.requireVerification
+            ? 'pending_review'
+            : 'verified';
+          depositVerificationReason = depositVerificationStatus === 'verified'
+            ? 'auto-verified booking deposit slip'
+            : 'auto-verified, pending admin confirmation';
+        } else if (transient) {
+          depositVerificationStatus = 'pending_review';
+          depositVerificationReason = `auto-verify inconclusive: ${depositVerifyResult.code}`;
+        } else {
+          const notice = bookingDepositVerificationNotice({
+            status: 'rejected',
+            verifyResult: depositVerifyResult,
+            autoVerifyAttempted: true,
+            requireVerification: bookingFlags?.slipUpload?.requireVerification === true,
+          });
+          return res.status(400).json({
+            error: notice.message,
+            code: 'INVALID_BOOKING_DEPOSIT_SLIP',
+            slipVerification: notice,
+          });
+        }
+      } else {
+        depositVerificationStatus = 'pending_review';
+        depositVerificationReason = 'auto-verify not configured for booking deposit';
+      }
+      if (depositVerifyResult?.transRef) {
+        const dupPaymentRef = await pool.query(
+          `SELECT id FROM payments WHERE transaction_ref=$1 AND status IN ('pending','verified') LIMIT 1`,
+          [depositVerifyResult.transRef]
+        );
+        if (dupPaymentRef.rows.length) {
+          return res.status(409).json({
+            error: 'สลิปนี้ถูกใช้กับการชำระเงินรายการอื่นแล้ว',
+            code: 'DUPLICATE_BOOKING_DEPOSIT_SLIP',
+          });
+        }
+        try {
+          const dupBookingRef = await pool.query(
+            `SELECT external_id FROM bookings WHERE deposit_transaction_ref=$1 LIMIT 1`,
+            [depositVerifyResult.transRef]
+          );
+          if (dupBookingRef.rows.length) {
+            return res.status(409).json({
+              error: 'สลิปนี้ถูกใช้กับการจองก่อนหน้าแล้ว',
+              code: 'DUPLICATE_BOOKING_DEPOSIT_SLIP',
+              bookingId: dupBookingRef.rows[0].external_id,
+            });
+          }
+        } catch (err) {
+          if (err.code !== '42703') throw err;
+        }
+      }
+      depositPaymentMethod = inferSlipPaymentMethod(bookingPaymentBlock, depositVerifyResult, {
+        promptpayTarget: bookingPaymentBlock?.promptpayTarget || null,
+        defaultMethod: bookingPaymentBlock?.promptpayTarget ? 'promptpay' : 'transfer',
+      });
       depositSlipFile = await storage.saveBase64({
         pool,
         category: 'slip',
@@ -1864,10 +2066,23 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBookingSubmit, validateBod
     depositCreditAmount: 0,
     depositBalanceDue: null,
     contractDepositEstimate: null,
-    depositStatus: bookingDepositStatus(bookingSettings, !!depositSlipFile),
+    depositStatus: bookingDepositStatus(bookingSettings, !!depositSlipFile, { status: depositVerificationStatus }),
     depositSlipUrl: depositSlipFile ? depositSlipFile.url : null,
     depositSlipFileId: depositSlipFile ? depositSlipFile.id : null,
     depositSlipHash: depositSlipHash || null,
+    depositVerifyProvider: depositVerifyResult?.provider || null,
+    depositVerifyCode: depositVerifyResult?.code || null,
+    depositVerifyReason: depositVerificationReason || null,
+    depositVerifyAttempts: Array.isArray(depositVerifyResult?.attempts) ? depositVerifyResult.attempts : [],
+    depositVerifiedAt: depositVerificationStatus === 'verified' ? new Date().toISOString() : null,
+    depositTransactionRef: depositVerifyResult?.transRef || null,
+    depositPaymentMethod: depositPaymentMethod || null,
+    depositVerification: depositSlipFile ? bookingDepositVerificationNotice({
+      status: bookingDepositStatus(bookingSettings, !!depositSlipFile, { status: depositVerificationStatus }),
+      verifyResult: depositVerifyResult,
+      autoVerifyAttempted: depositAutoVerifyAttempted,
+      requireVerification: bookingFlags?.slipUpload?.requireVerification === true,
+    }) : null,
     holdTokenHash: holdTokenHash || null,
     holdExpiresAt: null,
     reservedAt: null,
@@ -2041,12 +2256,15 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBookingSubmit, validateBod
              deposit_required, booking_fee, booking_fee_applies_to_deposit,
              deposit_credit_amount, deposit_balance_due, deposit_minimum_amount,
              deposit_status, deposit_slip_file_id,
-             deposit_slip_hash, hold_token_hash, hold_expires_at, reserved_at,
+             deposit_slip_hash, deposit_verify_provider, deposit_verify_code,
+             deposit_verify_reason, deposit_verify_attempts, deposit_verified_at,
+             deposit_transaction_ref, deposit_payment_method,
+             hold_token_hash, hold_expires_at, reserved_at,
              agreed_terms_at, agreed_terms_version)
           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'pending','public-form',$10,$11,
                   $12,$13,$14,
-                  $15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,
-                  CASE WHEN $27::text IS NOT NULL THEN NOW() ELSE NULL END, $27)
+                  $15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27::jsonb,$28,$29,$30,$31,$32,$33,
+                  CASE WHEN $34::text IS NOT NULL THEN NOW() ELSE NULL END, $34)
           ON CONFLICT (external_id) DO NOTHING`,
         [
           newBooking.id, newBooking.name, newBooking.phone || null,
@@ -2064,6 +2282,13 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBookingSubmit, validateBod
           newBooking.depositStatus || null,
           newBooking.depositSlipFileId || null,
           newBooking.depositSlipHash || null,
+          newBooking.depositVerifyProvider || null,
+          newBooking.depositVerifyCode || null,
+          newBooking.depositVerifyReason || null,
+          JSON.stringify(newBooking.depositVerifyAttempts || []),
+          newBooking.depositVerifiedAt || null,
+          newBooking.depositTransactionRef || null,
+          newBooking.depositPaymentMethod || null,
           newBooking.holdTokenHash || null,
           newBooking.holdExpiresAt || null,
           newBooking.reservedAt || null,
@@ -2071,7 +2296,7 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBookingSubmit, validateBod
         ]
       );
     } catch (err) {
-      if (err.code === '23505' && /deposit_slip_hash/.test(String(err.constraint || err.detail || ''))) {
+      if (err.code === '23505' && /deposit_(slip_hash|transaction_ref)/.test(String(err.constraint || err.detail || ''))) {
         await client.query('ROLLBACK').catch(() => {});
         await cleanupDepositSlip();
         return res.status(409).json({
@@ -2109,6 +2334,9 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBookingSubmit, validateBod
         depositRequired: bookingSettings.requireDeposit,
         bookingFee: newBooking.bookingFee,
         depositStatus: newBooking.depositStatus,
+        depositVerifyCode: newBooking.depositVerifyCode,
+        depositVerifyProvider: newBooking.depositVerifyProvider,
+        depositTransactionRef: newBooking.depositTransactionRef,
       },
       `public:${cleaned.phone || 'anon'}`).catch(() => {});
 
@@ -2118,7 +2346,7 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBookingSubmit, validateBod
       const flags = await features.load(pool);
       notifier.notifyOwner({ pool, features: flags }, {
         subject: '📋 ผู้เช่าใหม่ขอจอง',
-        text: `ชื่อ: ${cleaned.tenantName}\nโทร: ${cleaned.phone || '-'}\nห้อง: ${cleaned.roomId || '-'}\nวันเข้าพัก: ${cleaned.checkInDate || '-'}\nค่าจอง: ${newBooking.bookingFee ? `฿${Number(newBooking.bookingFee).toLocaleString('th-TH')}` : '-'} (${newBooking.depositStatus || 'not_required'})\nนโยบาย: ${newBooking.bookingFeeAppliesToDeposit ? 'นำค่าจองไปหัก/นับรวมกับเงินมัดจำ' : 'ค่าจองแยกจากเงินมัดจำ'}\nมัดจำคงเหลือโดยประมาณ: ${newBooking.depositBalanceDue != null ? `฿${Number(newBooking.depositBalanceDue).toLocaleString('th-TH')}` : '-'}\nรหัสการจอง: ${newBooking.id}`,
+        text: `ชื่อ: ${cleaned.tenantName}\nโทร: ${cleaned.phone || '-'}\nห้อง: ${cleaned.roomId || '-'}\nวันเข้าพัก: ${cleaned.checkInDate || '-'}\nค่าจอง: ${newBooking.bookingFee ? `฿${Number(newBooking.bookingFee).toLocaleString('th-TH')}` : '-'} (${newBooking.depositStatus || 'not_required'})\nผลตรวจสลิป: ${newBooking.depositVerification?.title || newBooking.depositVerifyCode || '-'}\nนโยบาย: ${newBooking.bookingFeeAppliesToDeposit ? 'นำค่าจองไปหัก/นับรวมกับเงินมัดจำ' : 'ค่าจองแยกจากเงินมัดจำ'}\nมัดจำคงเหลือโดยประมาณ: ${newBooking.depositBalanceDue != null ? `฿${Number(newBooking.depositBalanceDue).toLocaleString('th-TH')}` : '-'}\nรหัสการจอง: ${newBooking.id}`,
       }).catch(() => {});
     } catch { /* ignore */ }
 
@@ -6485,6 +6713,16 @@ app.post('/api/bookings/:id/approve-and-assign', sameOrigin, csrfGuard, requireA
         error: `cannot approve from status "${booking.status}"`,
         code: 'BAD_TRANSITION',
         allowed: ['pending', 'reviewing'],
+      });
+    }
+    if (booking.depositRequired && ['awaiting_slip', 'rejected'].includes(booking.depositStatus)) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        error: booking.depositStatus === 'rejected'
+          ? 'สลิปค่าจองไม่ผ่าน ไม่สามารถอนุมัติการจองได้'
+          : 'ยังไม่มีสลิปค่าจอง ไม่สามารถอนุมัติการจองได้',
+        code: 'BOOKING_DEPOSIT_NOT_READY',
+        hint: 'ให้ผู้จองส่งสลิปใหม่ หรือเปลี่ยนสถานะเป็นตรวจสอบหลังแอดมินตรวจยอดด้วยมือแล้ว',
       });
     }
 

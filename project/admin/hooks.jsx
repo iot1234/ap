@@ -601,6 +601,10 @@
       title: 'ยังไม่มีห้องว่างตรงเงื่อนไข',
       description: (e) => e.hint || 'รอห้องว่าง เปลี่ยนเงื่อนไข booking หรือจัดห้องด้วยตนเองก่อนอนุมัติ',
     },
+    BOOKING_DEPOSIT_NOT_READY: {
+      title: 'ค่าจองยังไม่พร้อมอนุมัติ',
+      description: (e) => e.hint || 'ตรวจสลิปค่าจองหรือให้ผู้จองส่งสลิปใหม่ก่อนอนุมัติ',
+    },
     BOOKING_NOT_FOUND: {
       title: 'ไม่พบ booking ต้นทาง',
       description: (e) => e.hint || 'กลับไปหน้า booking แล้วเริ่มจากรายการล่าสุดอีกครั้ง',

@@ -38,6 +38,20 @@ test('booking migration stores deposit slip and hold audit fields', () => {
   }
   assert.match(migrate, /uq_bookings_deposit_slip_hash/,
     'booking deposit slip hash must be unique when present');
+  for (const col of [
+    'deposit_verify_provider',
+    'deposit_verify_code',
+    'deposit_verify_reason',
+    'deposit_verify_attempts',
+    'deposit_verified_at',
+    'deposit_transaction_ref',
+    'deposit_payment_method',
+  ]) {
+    assert.match(migrate, new RegExp(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS ${col}`),
+      `migration must add bookings.${col}`);
+  }
+  assert.match(migrate, /uq_bookings_deposit_transaction_ref/,
+    'booking deposit transaction reference must be unique when verifier returns one');
   assert.match(migrate, /ALTER TABLE contracts ADD COLUMN IF NOT EXISTS booking_fee_credit/,
     'contracts must remember how much booking fee was credited to the deposit');
   assert.match(migrate, /ALTER TABLE contracts ADD COLUMN IF NOT EXISTS deposit_balance_due/,
@@ -104,6 +118,16 @@ test('public booking deposit requires a room, a slip, and deduplicates slips', (
     'booking deposit slip must be checked against prior booking slips');
   assert.match(server, /DUPLICATE_BOOKING_DEPOSIT_SLIP/,
     'duplicate booking deposit slip must return a stable error code');
+  assert.match(server, /slipVerifier\.verifyWithFallback/,
+    'booking deposit slips must use the same auto-verifier as bill payments when configured');
+  assert.match(server, /paymentBlockReceiverTargetEntries\(bookingPaymentBlock\)/,
+    'booking deposit verification must accept the visible PromptPay, bank, or wallet receiver targets');
+  assert.match(server, /depositVerificationStatus = bookingFlags\?\.slipUpload\?\.requireVerification/,
+    'auto-verified booking deposits must respect the admin-confirmation setting');
+  assert.match(server, /deposit_transaction_ref/,
+    'verified booking deposits must persist the bank transaction reference for replay protection');
+  assert.match(server, /BOOKING_DEPOSIT_NOT_READY/,
+    'admin approval must guard bookings whose required deposit slip is missing or rejected');
   assert.match(server, /uploadedBy: `public-booking:\$\{bookingId\}`/,
     'booking deposit slip upload must be attributable to the booking id');
   assert.match(server, /reservationMode: bookingSettings\.requireDeposit \? 'public_booking_deposit' : 'public_booking'/,
@@ -114,7 +138,7 @@ test('public booking deposit requires a room, a slip, and deduplicates slips', (
     'booking rows must snapshot the minimum booking-fee policy');
   assert.match(server, /depositCreditAmount = bookingSettings\.requireDeposit && bookingSettings\.applyBookingFeeToDeposit/,
     'public booking must estimate the deposit credit when the policy is enabled');
-  assert.match(server, /function bookingDepositStatus\(settings, hasSlip\)/,
+  assert.match(server, /function bookingDepositStatus\(settings, hasSlip, verification = \{\}\)/,
     'deposit status must be centralised so no-slip booking deposits get a clear state');
   assert.match(server, /settings\.requireSlip \? 'awaiting_slip' : 'manual_review'/,
     'when slips are optional, deposit bookings must be marked for manual review, not waiting for a slip');
@@ -210,6 +234,12 @@ test('public booking page and admin features expose deposit controls', () => {
     'public room board should land visitors on available rooms first');
   assert.match(booking, /id="depositSlip"/,
     'public page must let the booker attach a deposit slip');
+  assert.match(booking, /depositSlipReading/,
+    'public page must block submit while the selected slip file is still being read');
+  assert.match(booking, /successDepositNotice/,
+    'public page must explain what happened after the transfer/slip submission succeeds');
+  assert.match(booking, /slipAutoVerify/,
+    'public page must explain whether the booking slip will be auto-verified or admin-reviewed');
   assert.match(booking, /data\.holdToken = holdToken/,
     'public page must submit the hold token with the booking');
   assert.match(features, /<Row id="roomBooking"/,
@@ -260,6 +290,8 @@ test('public booking page and admin features expose deposit controls', () => {
     'admin booking page must label no-slip deposit bookings as manual review');
   assert.match(adminBookings, /depositSlipUrl/,
     'admin booking detail must link the deposit slip when present');
+  assert.match(adminBookings, /depositTransactionRef/,
+    'admin booking detail must show the booking deposit transaction reference when verifier returns it');
   assert.match(adminBookings, /depositBalanceDue/,
     'admin booking detail must show the remaining deposit balance');
 });
