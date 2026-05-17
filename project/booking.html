@@ -319,6 +319,17 @@
     return Number(n || 0).toLocaleString('th-TH', { minimumFractionDigits: 2 });
   }
 
+  function bookingDepositNeedsPaymentSetup(cfg) {
+    return !!(cfg && cfg.requireDeposit && cfg.requireSlip
+      && cfg.payment && cfg.payment.ready === false);
+  }
+
+  function bookingServerError(out, fallback) {
+    if (!out || typeof out !== 'object') return fallback;
+    const base = out.error || fallback;
+    return out.hint ? `${base} — ${out.hint}` : base;
+  }
+
   function setSelectValue(id, value, labelPrefix) {
     if (!value) return;
     const select = document.getElementById(id);
@@ -362,6 +373,8 @@
     document.getElementById('depositSlipLabel').textContent =
       bookingConfig.requireSlip ? 'แนบสลิปค่าจอง *' : 'แนบสลิปค่าจอง (ถ้ามี)';
     const qr = document.getElementById('depositQr');
+    qr.removeAttribute('src');
+    qr.style.display = 'none';
     if (bookingConfig.payment && bookingConfig.payment.qrDataUrl) {
       qr.src = bookingConfig.payment.qrDataUrl;
       qr.style.display = 'block';
@@ -373,6 +386,11 @@
     if (bookingConfig.payment && bookingConfig.payment.targetLast4) parts.push(`พร้อมเพย์ท้าย ${bookingConfig.payment.targetLast4}`);
     if (bank) parts.push(`${bank.bank || 'ธนาคาร'} ${bank.account || ''} ${bank.name || ''}`.trim());
     if (wallet && wallet.phone) parts.push(`TrueMoney Wallet ${wallet.phone}${wallet.name ? ' ' + wallet.name : ''}`);
+    if (!parts.length) {
+      parts.push(bookingDepositNeedsPaymentSetup(bookingConfig)
+        ? 'ยังไม่ได้ตั้งค่าบัญชีรับเงินค่าจอง กรุณาติดต่อเจ้าหน้าที่ก่อนจอง'
+        : 'ส่งคำขอได้โดยไม่ต้องแนบสลิป แอดมินจะตรวจค่าจองแบบ manual review');
+    }
     document.getElementById('depositBank').textContent = parts.join(' · ');
   }
 
@@ -386,7 +404,7 @@
       });
       const out = await res.json().catch(() => ({}));
       if (!res.ok || !out.ok) {
-        showError(out.error || 'ล็อกห้องไม่สำเร็จ กรุณาเลือกห้องใหม่');
+        showError(bookingServerError(out, 'ล็อกห้องไม่สำเร็จ กรุณาเลือกห้องใหม่'));
         btn.disabled = true;
         return;
       }
@@ -409,6 +427,11 @@
       renderBookingConfig(d.booking);
       if (d.booking.requireDeposit && !roomIdParam) {
         showError('การจองแบบมีค่าจองต้องเลือกห้องจากหน้าห้องว่างก่อน เพื่อให้ระบบล็อกห้องได้ถูกต้อง');
+        btn.disabled = true;
+        return;
+      }
+      if (bookingDepositNeedsPaymentSetup(d.booking)) {
+        showError('ยังไม่ได้ตั้งค่าบัญชีรับเงินค่าจอง กรุณาติดต่อเจ้าหน้าที่ หรือให้แอดมินปิดบังคับสลิปเพื่อรับจองแบบ manual review');
         btn.disabled = true;
         return;
       }
@@ -501,7 +524,7 @@
         return;
       }
       if (!res.ok || !result.ok) {
-        showError(result.error || 'ส่งคำขอไม่สำเร็จ กรุณาลองใหม่');
+        showError(bookingServerError(result, 'ส่งคำขอไม่สำเร็จ กรุณาลองใหม่'));
         btn.disabled = false;
         btn.textContent = 'ส่งคำขอจอง';
         return;

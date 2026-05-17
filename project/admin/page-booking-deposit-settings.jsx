@@ -71,6 +71,14 @@ function bookingDepositMoney(value) {
   return '฿' + Number(value || 0).toLocaleString('th-TH');
 }
 
+function bookingDepositCanEditRole(role) {
+  return role === 'owner' || role === 'manager';
+}
+
+function bookingDepositNeedsPaymentSetup(draft, paymentKnown, paymentReady) {
+  return !!(draft && draft.requireDeposit && draft.requireSlip && paymentKnown && !paymentReady);
+}
+
 function PageBookingDepositSettings({ setToast, embedded = false, currentUser = null }) {
   const C = window.ADMIN_C;
   const { Card, SectionHeading, Btn, Pill, PageContainer, PageHeader, Toggle, Input } = window;
@@ -86,7 +94,7 @@ function PageBookingDepositSettings({ setToast, embedded = false, currentUser = 
   const [saved, setSaved] = useState(null);
   const [defaults, setDefaults] = useState(BOOKING_DEPOSIT_DEFAULTS);
   const [publicConfig, setPublicConfig] = useState(null);
-  const [canEdit, setCanEdit] = useState(currentUser?.role === 'owner');
+  const [canEdit, setCanEdit] = useState(bookingDepositCanEditRole(currentUser?.role));
   const [viewerRole, setViewerRole] = useState(currentUser?.role || '');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
@@ -94,7 +102,7 @@ function PageBookingDepositSettings({ setToast, embedded = false, currentUser = 
   useEffect(() => {
     if (!currentUser?.role) return;
     setViewerRole(currentUser.role);
-    setCanEdit(currentUser.role === 'owner');
+    setCanEdit(bookingDepositCanEditRole(currentUser.role));
   }, [currentUser?.role]);
 
   const load = useCallback(async () => {
@@ -164,18 +172,28 @@ function PageBookingDepositSettings({ setToast, embedded = false, currentUser = 
         throw new Error(issue ? `${d.error}: ${issue.message}` : (d.error || 'save failed'));
       }
       const next = normalizeBookingDepositFeature(d.settings || clean);
+      const returnedPayment = d.payment || null;
+      const savedNeedsPaymentSetup = bookingDepositNeedsPaymentSetup(
+        next,
+        returnedPayment && typeof returnedPayment.ready === 'boolean',
+        returnedPayment?.ready
+      );
       setSaved(next);
       setDraft(next);
       if (typeof d.canEdit === 'boolean') setCanEdit(d.canEdit);
       if (d.role) setViewerRole(d.role);
-      setPublicConfig({ payment: d.payment || null });
+      setPublicConfig({ payment: returnedPayment });
       setToast && setToast({
-        kind: 'success',
+        kind: savedNeedsPaymentSetup ? 'warning' : 'success',
         message: {
-          title: 'บันทึกค่าจอง/มัดจำแล้ว',
-          description: clean.requireDeposit
-            ? `ผู้จองต้องชำระ ${bookingDepositMoney(bookingDepositEffectiveAmount(clean))} และห้องจะถูกล็อก ${clean.holdMinutes} นาที`
-            : 'ปิดการเก็บค่าจองก่อนส่งคำขอแล้ว',
+          title: savedNeedsPaymentSetup
+            ? 'บันทึกแล้ว แต่ยังรับสลิปค่าจองไม่ได้'
+            : 'บันทึกค่าจอง/มัดจำแล้ว',
+          description: savedNeedsPaymentSetup
+            ? 'ต้องตั้งค่า PromptPay/บัญชีธนาคาร หรือปิด "ต้องแนบสลิปค่าจอง" เพื่อให้หน้า booking จองต่อได้'
+            : (clean.requireDeposit
+                ? `ผู้จองต้องชำระ ${bookingDepositMoney(bookingDepositEffectiveAmount(clean))} และห้องจะถูกล็อก ${clean.holdMinutes} นาที`
+                : 'ปิดการเก็บค่าจองก่อนส่งคำขอแล้ว'),
         },
       });
       load();
@@ -216,11 +234,18 @@ function PageBookingDepositSettings({ setToast, embedded = false, currentUser = 
       detail: 'ผู้สนใจจะส่งคำขอจองห้องไม่ได้จนกว่าจะเปิดใช้งาน',
     });
   }
-  if (draft.requireDeposit && paymentKnown && !paymentReady) {
+  if (bookingDepositNeedsPaymentSetup(draft, paymentKnown, paymentReady)) {
     warnings.push({
       color: 'danger',
       title: 'ยังไม่พร้อมรับเงินค่าจอง',
-      detail: 'ตั้งค่า PromptPay หรือบัญชีธนาคารใน ตั้งค่าระบบ > การชำระเงิน ก่อนเปิดใช้จริง',
+      detail: 'ตอนนี้บังคับแนบสลิป แต่ยังไม่มี PromptPay/บัญชีธนาคารให้ผู้จองโอน ระบบจะบล็อกการจองจนกว่าจะตั้งค่ารับเงิน หรือปิดบังคับสลิปเพื่อ manual review',
+    });
+  }
+  if (draft.requireDeposit && !draft.requireSlip && paymentKnown && !paymentReady) {
+    warnings.push({
+      color: 'warning',
+      title: 'รับจองแบบ manual review',
+      detail: 'ยังไม่มีบัญชีรับเงินในระบบ แต่ผู้จองยังส่งคำขอได้เพราะไม่บังคับแนบสลิป แอดมินต้องตรวจยอดโอน/รับเงินเองก่อนอนุมัติ',
     });
   }
   if (draft.requireDeposit && draft.minimumAmount > draft.depositAmount) {

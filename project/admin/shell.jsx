@@ -83,7 +83,7 @@ const NAV_GROUPS = [
       { id: 'rooms',         label: 'ห้องพัก',     icon: '🏠' },
       { id: 'tenants',       label: 'ผู้เช่า',     icon: '👥' },
       { id: 'bookings',      label: 'การจอง',      icon: '📋' },
-      { id: 'booking-deposit-settings', label: 'ตั้งค่าจอง/มัดจำ', icon: '💰', minRole: 'owner' },
+      { id: 'booking-deposit-settings', label: 'ตั้งค่าจอง/มัดจำ', icon: '💰', minRole: 'manager' },
       { id: 'contracts',            label: 'สัญญา',            icon: '📜', minRole: 'manager' },
       { id: 'contract-invitations', label: 'ใบเชิญผู้เช่ากรอก', icon: '📨', minRole: 'manager' },
       { id: 'contract-templates',   label: 'เทมเพลตสัญญา',     icon: '📝', minRole: 'manager' },
