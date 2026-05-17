@@ -2129,14 +2129,18 @@ function MaintenanceView({ locale, tenant, tickets, refresh }) {
         subtitle={`${t('allTickets')} ${tickets.length} · ${t('ongoing')} ${tickets.filter((x) => !['completed', 'cancelled'].includes(x.status)).length}`}
         action={<Button icon="plus" onClick={() => setShowForm(true)}>{t('submitTicket')}</Button>} />
       <div className="filter-chips" style={{ display: 'flex', gap: 8, marginBottom: 'var(--sp-4)', flexWrap: 'wrap' }}>
-        {[{ id: 'all', l: t('allTickets') }, { id: 'open', l: t('ongoing') }, { id: 'done', l: t('done') }].map((f) => (
+        {[
+          { id: 'all',  label: t('allTickets'), count: tickets.length },
+          { id: 'open', label: t('ongoing'),    count: tickets.filter((x) => !['completed', 'cancelled'].includes(x.status)).length },
+          { id: 'done', label: t('done'),        count: tickets.filter((x) => x.status === 'completed').length },
+        ].map((f) => (
           <button key={f.id} onClick={() => setTab(f.id)} style={{
             padding: '8px 14px', borderRadius: 999, fontFamily: 'inherit',
             border: '1px solid ' + (tab === f.id ? 'var(--ink)' : 'var(--line-2)'),
             background: tab === f.id ? 'var(--ink)' : 'var(--surface)',
             color: tab === f.id ? 'var(--bg)' : 'var(--ink-2)',
             fontSize: 'var(--fs-sm)', fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap',
-          }}>{f.l}</button>
+          }}>{f.label} <span style={{ opacity: 0.6, marginLeft: 4 }}>{f.count}</span></button>
         ))}
       </div>
       {filtered.length === 0 ? (
