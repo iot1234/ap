@@ -102,6 +102,7 @@ function PageSettings({ rooms, setRooms, config, setConfig, bookings, setBooking
           { value: 'building', label: 'ข้อมูลตึก',     icon: '🏢' },
           { value: 'payment',  label: 'การชำระเงิน', icon: '💳' },
           { value: 'pricing',  label: 'ตั้งราคา',     icon: '💰' },
+          { value: 'bookingDeposit', label: 'จอง/มัดจำ', icon: '🧾' },
           { value: 'notify',   label: 'การแจ้งเตือน', icon: '🔔' },
           { value: 'auto',     label: 'อัตโนมัติ',     icon: '🤖' },
           { value: 'features', label: 'ฟีเจอร์ระบบ',   icon: '🎛' },
@@ -125,6 +126,9 @@ function PageSettings({ rooms, setRooms, config, setConfig, bookings, setBooking
       {tab === 'pricing'  && window.PagePricing
         ? <window.PagePricing config={config} setConfig={setConfig} rooms={rooms}
                               addActivity={addActivity} setToast={setToast} embedded />
+        : null}
+      {tab === 'bookingDeposit' && window.PageBookingDepositSettings
+        ? <window.PageBookingDepositSettings setToast={setToast} embedded currentUser={currentUser} />
         : null}
       {tab === 'notify'   && <TabNotify   draft={draft} updatePath={updatePath} />}
       {tab === 'auto'     && <TabAuto     />}

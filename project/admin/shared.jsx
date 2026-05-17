@@ -68,7 +68,7 @@ const PAGE_TONE = {
   // Overview
   overview: 'overview', health: 'overview', 'production-readiness': 'overview',
   // Rooms & tenants
-  rooms: 'rooms', tenants: 'rooms', bookings: 'rooms',
+  rooms: 'rooms', tenants: 'rooms', bookings: 'rooms', 'booking-deposit-settings': 'rooms',
   contracts: 'rooms', 'contract-templates': 'rooms', 'contract-invitations': 'rooms',
   'line-bindings': 'rooms', 'line-oas': 'rooms',
   // Finance
@@ -306,6 +306,8 @@ function buildActivities() { return []; }
 //   อัตราค่าเช่า + ส่วนเพิ่ม   /admin#settings (tab)   app_data.baankarn_config_v1.rates+premium+...
 //   เทมเพลตแจ้งเตือน          /admin#settings (tab)   app_data.baankarn_config_v1.notify
 //   ออกบิลอัตโนมัติ            /admin#settings (tab)   app_data.baankarn_features_v1.billAutoGenerate
+//   ค่าจอง/มัดจำห้อง           /admin#settings (tab) + /admin#booking-deposit-settings
+//                                                     app_data.baankarn_features_v1.roomBooking
 //   ฟีเจอร์ระบบ                /admin#settings (tab)   app_data.baankarn_features_v1.*
 //   API / Keys (secrets)       /admin#settings (tab)   secrets table (AES-256-GCM)
 //   ผู้ใช้งาน (admin staff)     /admin#settings (tab)   auth_users

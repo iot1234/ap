@@ -134,6 +134,10 @@ test('orphan slip cleanup preserves booking deposit slips', () => {
 test('public booking page and admin features expose deposit controls', () => {
   const booking = read('project/booking.html');
   const features = read('project/admin/page-features.jsx');
+  const depositSettings = read('project/admin/page-booking-deposit-settings.jsx');
+  const adminHtml = read('project/Admin Dashboard.html');
+  const shell = read('project/admin/shell.jsx');
+  const settings = read('project/admin/page-settings.jsx');
   const adminBookings = read('project/admin/page-bookings.jsx');
   assert.match(booking, /\/api\/bookings\/public\/config/,
     'public page must load deposit config');
@@ -153,6 +157,26 @@ test('public booking page and admin features expose deposit controls', () => {
     'admin must be able to choose whether booking fee credits contract deposit');
   assert.match(features, /field="holdMinutes"/,
     'admin must be able to set the room hold duration');
+  assert.match(adminHtml, /page-booking-deposit-settings\.jsx/,
+    'admin dashboard must load the dedicated booking deposit settings page');
+  assert.match(shell, /'booking-deposit-settings': window\.PageBookingDepositSettings/,
+    'admin shell must route the dedicated booking deposit settings page');
+  assert.match(shell, /id: 'booking-deposit-settings'/,
+    'admin sidebar must expose a direct booking deposit settings entry');
+  assert.match(settings, /bookingDeposit/,
+    'settings hub must expose booking deposit settings as a first-class tab');
+  assert.match(depositSettings, /function PageBookingDepositSettings/,
+    'dedicated admin page must register a booking deposit settings component');
+  assert.match(depositSettings, /\/api\/admin\/features/,
+    'dedicated admin page must persist through the feature settings API');
+  assert.match(depositSettings, /minimumAmount/,
+    'dedicated admin page must expose the no-minimum or minimum booking-fee rule');
+  assert.match(depositSettings, /applyBookingFeeToDeposit/,
+    'dedicated admin page must expose the booking-fee-to-contract-deposit policy');
+  assert.match(depositSettings, /bookingDepositEffectiveAmount/,
+    'dedicated admin page must show the effective amount after minimum policy');
+  assert.match(depositSettings, /maxBytes/,
+    'dedicated admin page must expose the slip upload size limit');
   assert.match(booking, /applyBookingFeeToDeposit/,
     'public page must explain whether the booking fee is credited to deposit');
   assert.match(adminBookings, /depositStatusLabel/,
