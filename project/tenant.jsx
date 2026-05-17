@@ -1209,7 +1209,7 @@ function HomeView({ tenant, locale, bills, tickets, contract, goto }) {
                 </a>
               </div>
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', borderTop: '1px solid var(--line)' }}>
+            <div className="home-breakdown" style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', borderTop: '1px solid var(--line)' }}>
               <BreakdownCell label={t('rentRoom')} value={`฿${fmtMoney(unpaid.rent)}`} />
               <BreakdownCell label={`${t('waterFull')} · ${Number(unpaid.water_units) || 0} ${t('units')}`} value={`฿${fmtMoney(unpaid.water_amount)}`} divider />
               <BreakdownCell label={`${t('elecFull')} · ${Number(unpaid.elec_units) || 0} ${t('units')}`} value={`฿${fmtMoney(unpaid.elec_amount)}`} divider />
@@ -1226,9 +1226,9 @@ function HomeView({ tenant, locale, bills, tickets, contract, goto }) {
       )}
 
       <SectionHeader style={{ marginTop: 'var(--sp-7)' }} title={t('shortcuts')} subtitle={t('shortcutsSub')} />
-      <div style={{
+      <div className="shortcuts-grid" style={{
         display: 'grid', gap: 12,
-        gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))',
+        gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
       }}>
         <QuickAction icon="qr" tone="accent" label={t('qa_pay')} sub={t('qa_pay_sub')}
           onClick={() => goto('bills', unpaid?.id)} />
@@ -2371,7 +2371,7 @@ function ProfileView({ tenant, locale, setLocale, theme, setTheme, onLogout, fea
       ) : null}
 
       <SectionHeader style={{ marginTop: 'var(--sp-7)' }} title={t('contactDorm')} subtitle={buildingName} />
-      <div style={{ display: 'grid', gap: 12, gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))' }}>
+      <div className="contact-grid" style={{ display: 'grid', gap: 12, gridTemplateColumns: 'repeat(2, minmax(0, 1fr))' }}>
         {buildingPhone ? (
           <a href={`tel:${String(buildingPhone).replace(/[^+\d]/g, '')}`} style={{ textDecoration: 'none' }}>
             <ContactCard icon="phone" tone="accent" label={t('telephone')} value={buildingPhone} />
@@ -2512,6 +2512,10 @@ function TopBar({ page, locale, tenant, openMenu, unpaidCount, openTickets, onBe
       backdropFilter: 'blur(10px)', WebkitBackdropFilter: 'blur(10px)',
       borderBottom: '1px solid var(--line)',
       padding: '14px 20px', display: 'flex', alignItems: 'center', gap: 14,
+      // Pin the height so the row never grows when a short page name (e.g.
+      // "Home") is replaced by a long one ("Maintenance"). Keeps the main
+      // content from shifting up/down on every page change.
+      minHeight: 'var(--topbar-h)', boxSizing: 'border-box',
     }}>
       <button onClick={openMenu} className="topbar-menu-btn" aria-label="menu" style={{
         width: 40, height: 40, borderRadius: 10, border: '1px solid var(--line-2)',
@@ -2519,8 +2523,14 @@ function TopBar({ page, locale, tenant, openMenu, unpaidCount, openTickets, onBe
         display: 'none', placeItems: 'center',
       }}><Icon name="menu" /></button>
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ color: 'var(--muted)', fontSize: 12 }}>{t('welcome')} {nicknameOf(tenant.fullName) || '—'}</div>
-        <div style={{ fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 17, letterSpacing: '-.01em' }}>{t(page)}</div>
+        <div style={{
+          color: 'var(--muted)', fontSize: 12,
+          whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+        }}>{t('welcome')} {nicknameOf(tenant.fullName) || '—'}</div>
+        <div style={{
+          fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 17, letterSpacing: '-.01em',
+          whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+        }}>{t(page)}</div>
       </div>
       <button onClick={onBellClick} title={t('bills')} aria-label={t('bills')} style={{
         position: 'relative', width: 40, height: 40, borderRadius: 10,
@@ -2895,7 +2905,9 @@ function App() {
              ≤640   phone                   (bottom-tab nav, modal → sheet)
              ≤480   small phone             (extra-tight paddings)
            No other widths are used so resizing the window never produces
-           an in-between "snap" zone. */
+           an in-between "snap" zone. Every responsive grid below also uses
+           ONLY these widths — no auto-fit/auto-fill in user-facing layouts
+           so column counts never silently jump as the viewport changes. */
 
         /* Tablet landscape — hide the sidebar, show drawer trigger. */
         @media (max-width: 960px) {
@@ -2905,6 +2917,13 @@ function App() {
           .tenant-main {
             padding: var(--sp-5) var(--sp-4) calc(var(--bottomnav-h) + var(--sp-5)) !important;
           }
+          /* Shortcuts cap at 2-up on tablet so the cards don't look stretched. */
+          .shortcuts-grid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+        }
+
+        /* Tablet portrait — cards stack to 1 col, breakdown stays 3-up. */
+        @media (max-width: 768px) {
+          .home-breakdown { grid-template-columns: repeat(3, minmax(0, 1fr)) !important; }
         }
 
         /* Phone — bottom-tab nav appears and modal turns into a bottom-sheet. */
@@ -2925,13 +2944,36 @@ function App() {
               calc(env(safe-area-inset-bottom,0px) + var(--bottomnav-h) + var(--sp-5)) !important;
           }
           .sync-banner { flex-direction: column !important; align-items: stretch !important; }
-          .bill-row { grid-template-columns: 1fr !important; gap: var(--sp-2) !important; padding: var(--sp-3) var(--sp-4) !important; }
-          .bill-row > * { justify-self: start !important; text-align: left !important; min-width: 0 !important; }
+          /* Bill row on phone — use grid-areas so the most important info
+             (bill number + amount) stays on row 1 and the secondary chrome
+             (period, status pill, chevron) tucks below. The previous rule
+             stacked every child to one column, which buried the amount. */
+          .bill-row {
+            grid-template-columns: 1fr auto !important;
+            grid-template-areas: "info amount" "meta meta" "pill chev" !important;
+            gap: var(--sp-2) var(--sp-3) !important;
+            padding: var(--sp-3) var(--sp-4) !important;
+          }
+          .bill-row > *:nth-child(1) { grid-area: info; min-width: 0 !important; }
+          .bill-row > *:nth-child(2) { grid-area: pill; justify-self: start !important; }
+          .bill-row > *:nth-child(3) { grid-area: amount; justify-self: end !important; text-align: right !important; min-width: 0 !important; }
+          .bill-row > *:nth-child(4) { grid-area: chev;  justify-self: end !important; }
           .bill-card-main { grid-template-columns: 1fr !important; gap: var(--sp-3) !important; }
           .bill-card-amount { text-align: left !important; }
           .mini-cells { grid-template-columns: 1fr !important; }
           .mini-cell { border-left: 0 !important; border-top: 1px solid var(--line) !important; }
           .mini-cell:first-child { border-top: 0 !important; }
+          /* Home breakdown collapses to 1 col so unit labels ("ค่าน้ำ · 12
+             หน่วย") render in full instead of being clipped to "ค่าน้ำ ·…"
+             inside a 100px-wide cell. */
+          .home-breakdown { grid-template-columns: 1fr !important; }
+          .home-breakdown > * { border-left: 0 !important; border-top: 1px solid var(--line) !important; }
+          .home-breakdown > *:first-child { border-top: 0 !important; }
+          /* Shortcuts grid drops to 2 columns on phone — keeps tap targets
+             comfortable without forcing a 1-col stack that scrolls forever. */
+          .shortcuts-grid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+          /* Contact cards stay 1 col on phone — values can wrap to 2 lines. */
+          .contact-grid { grid-template-columns: 1fr !important; }
           .maintenance-ticket-row { flex-direction: column !important; }
           /* Modal becomes a slide-up bottom-sheet: stuck to the bottom
              edge, top corners only, safe-area padding so no content sits
@@ -2953,6 +2995,8 @@ function App() {
         @media (max-width: 480px) {
           .modal-panel { border-radius: 18px 18px 0 0 !important; }
           .modal-body { padding: var(--sp-4) var(--sp-3) var(--sp-5) !important; }
+          /* Shortcuts shrink further only at 480, never between 481-639. */
+          .shortcuts-grid { grid-template-columns: 1fr !important; }
         }
 
         /* Landscape phone — short-but-wide viewport. Reclaim the top air
