@@ -230,6 +230,18 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       params.push(String(req.query.roomId).slice(0, 32));
       where.push(`b.room_id=$${params.length}`);
     }
+    if (req.query.tenantId) {
+      const tenantId = Number(req.query.tenantId);
+      if (!Number.isInteger(tenantId) || tenantId < 1) {
+        return res.status(400).json({
+          error: 'tenantId must be a positive integer',
+          code: 'INVALID_TENANT_ID',
+          hint: 'ใช้ tenant_id จาก /api/tenants หรือปล่อยว่างแล้วใช้ roomId เฉพาะข้อมูล legacy เท่านั้น',
+        });
+      }
+      params.push(tenantId);
+      where.push(`b.tenant_id=$${params.length}`);
+    }
     if (req.query.period) {
       params.push(String(req.query.period).slice(0, 16));
       where.push(`b.period=$${params.length}`);

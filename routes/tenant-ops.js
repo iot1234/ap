@@ -167,26 +167,65 @@ module.exports = function buildTenantOpsRouter(ctx) {
       const q = String(req.query.q || '').trim().toLowerCase();
       const status = req.query.status;
       const params = [];
-      const where = ['deleted_at IS NULL'];
+      const where = ['t.deleted_at IS NULL'];
       if (status && VALID_TENANT_STATUS.has(String(status))) {
-        params.push(status); where.push(`status = $${params.length}`);
+        params.push(status); where.push(`t.status = $${params.length}`);
       }
       if (q) {
         params.push(`%${q}%`);
-        where.push(`(LOWER(full_name) LIKE $${params.length} OR phone LIKE $${params.length} OR LOWER(COALESCE(email,'')) LIKE $${params.length})`);
+        where.push(`(
+          LOWER(t.full_name) LIKE $${params.length}
+          OR t.phone LIKE $${params.length}
+          OR LOWER(COALESCE(t.email,'')) LIKE $${params.length}
+          OR LOWER(COALESCE(lc.room_id,'')) LIKE $${params.length}
+          OR LOWER(COALESCE(lc.contract_no,'')) LIKE $${params.length}
+        )`);
       }
       const { rows } = await pool.query(
-        `SELECT id, full_name, phone, email, line_user_id, current_room_id, status,
-                citizen_id_tail, locale, created_at
-           FROM tenants
+        `SELECT t.id, t.full_name, t.phone, t.email, t.line_user_id,
+                t.current_room_id, t.status, t.citizen_id_tail, t.locale,
+                t.created_at, t.updated_at,
+                lc.room_id AS last_room_id,
+                lc.contract_no AS last_contract_no,
+                lc.start_date AS last_contract_start_date,
+                lc.end_date AS last_contract_end_date,
+                lc.status AS last_contract_status,
+                lc.monthly_rent AS last_monthly_rent,
+                COALESCE(ledger.outstanding_count, 0) AS outstanding_count,
+                COALESCE(ledger.outstanding_total, 0) AS outstanding_total
+           FROM tenants t
+           LEFT JOIN LATERAL (
+             SELECT c.room_id, c.contract_no, c.start_date, c.end_date,
+                    c.status, c.monthly_rent, c.created_at
+               FROM contracts c
+              WHERE c.tenant_id = t.id
+                AND c.deleted_at IS NULL
+              ORDER BY
+                CASE c.status WHEN 'active' THEN 0 WHEN 'expired' THEN 1 ELSE 2 END,
+                c.start_date DESC NULLS LAST,
+                c.created_at DESC
+              LIMIT 1
+           ) lc ON TRUE
+           LEFT JOIN LATERAL (
+             SELECT COUNT(*)::int AS outstanding_count,
+                    COALESCE(SUM(b.total), 0)::numeric AS outstanding_total
+               FROM bills b
+              WHERE b.tenant_id = t.id
+                AND b.deleted_at IS NULL
+                AND b.status IN ('pending','overdue')
+           ) ledger ON TRUE
            WHERE ${where.join(' AND ')}
-           ORDER BY created_at DESC LIMIT 500`,
+           ORDER BY t.created_at DESC LIMIT 500`,
         params
       );
       res.json({ ok: true, tenants: rows });
     } catch (err) {
       console.error('tenants list error:', err);
-      res.status(500).json({ error: 'internal error' });
+      res.status(500).json({
+        error: 'โหลดรายชื่อผู้เช่าไม่สำเร็จ',
+        code: 'DB_ERROR',
+        hint: 'ตรวจการเชื่อมต่อฐานข้อมูลและตาราง tenants/contracts/bills แล้วลองรีเฟรชหน้าแอดมินอีกครั้ง',
+      });
     }
   });
 

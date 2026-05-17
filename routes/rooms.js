@@ -330,15 +330,51 @@ module.exports = function buildRoomsRouter(ctx) {
   // GET /api/rooms/:id/history — tenant history for the room
   r.get('/:id/history', requireAuth, async (req, res) => {
     const id = Number(req.params.id);
-    if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+    if (!Number.isInteger(id) || id < 1) {
+      return res.status(400).json({ error: 'invalid room id', code: 'INVALID_ROOM_ID' });
+    }
     try {
       const room = await pool.query(`SELECT room_code FROM rooms_v2 WHERE id=$1`, [id]);
-      if (!room.rows.length) return res.status(404).json({ error: 'not found' });
+      if (!room.rows.length) return res.status(404).json({ error: 'ไม่พบห้องนี้ใน rooms_v2', code: 'ROOM_NOT_FOUND' });
       const code = room.rows[0].room_code;
       const tenants = await pool.query(
-        `SELECT id, full_name, phone, email, status, created_at, deleted_at
-           FROM tenants WHERE current_room_id=$1
-           ORDER BY created_at DESC LIMIT 100`,
+        `SELECT *
+           FROM (
+             SELECT t.id, t.full_name, t.phone, t.email, t.status,
+                    t.current_room_id, t.created_at, t.deleted_at,
+                    c.id AS contract_id, c.contract_no, c.status AS contract_status,
+                    c.start_date AS move_in_date, c.end_date AS move_out_date,
+                    c.monthly_rent, c.deposit,
+                    COALESCE(c.start_date::timestamptz, c.created_at) AS sort_at,
+                    'contract' AS source
+               FROM contracts c
+               LEFT JOIN tenants t ON t.id = c.tenant_id
+              WHERE c.room_id=$1
+                AND c.deleted_at IS NULL
+             UNION ALL
+             SELECT t.id, t.full_name, t.phone, t.email, t.status,
+                    t.current_room_id, t.created_at, t.deleted_at,
+                    NULL::bigint AS contract_id,
+                    NULL::text AS contract_no,
+                    NULL::text AS contract_status,
+                    NULL::date AS move_in_date,
+                    NULL::date AS move_out_date,
+                    NULL::numeric AS monthly_rent,
+                    NULL::numeric AS deposit,
+                    t.created_at AS sort_at,
+                    'current_room' AS source
+               FROM tenants t
+              WHERE t.current_room_id=$1
+                AND t.deleted_at IS NULL
+                AND NOT EXISTS (
+                  SELECT 1 FROM contracts c
+                   WHERE c.tenant_id=t.id
+                     AND c.room_id=$1
+                     AND c.deleted_at IS NULL
+                )
+           ) h
+          ORDER BY sort_at DESC NULLS LAST, id DESC NULLS LAST
+          LIMIT 100`,
         [code]
       );
       const bills = await pool.query(
@@ -347,10 +383,14 @@ module.exports = function buildRoomsRouter(ctx) {
            ORDER BY created_at DESC LIMIT 50`,
         [code]
       );
-      res.json({ ok: true, code, tenants: tenants.rows, bills: bills.rows });
+      res.json({ ok: true, code, tenants: tenants.rows, occupancies: tenants.rows, bills: bills.rows });
     } catch (err) {
       console.error('rooms history error:', err);
-      res.status(500).json({ error: 'internal error', code: 'DB_ERROR' });
+      res.status(500).json({
+        error: 'โหลดประวัติห้องไม่สำเร็จ',
+        code: 'DB_ERROR',
+        hint: 'ตรวจตาราง rooms_v2/contracts/tenants/bills เพราะประวัติห้องต้องรวมทั้งผู้เช่าปัจจุบันและผู้เช่าเก่า',
+      });
     }
   });
 

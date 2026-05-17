@@ -23,31 +23,92 @@ function PageTenants({ rooms, setRooms, config, addActivity, setToast }) {
   const [addOpen, setAddOpen] = useState(false);
   const [initialAddRoomId, setInitialAddRoomId] = useState('');
   const [busy, setBusy] = useState(false);
+  const [tenantRows, setTenantRows] = useState([]);
+  const [tenantLoadError, setTenantLoadError] = useState(null);
 
-  // Build tenants list from rooms
+  const refreshTenants = React.useCallback(async () => {
+    setTenantLoadError(null);
+    try {
+      const d = await (window.requireApiCall ? window.requireApiCall() : window.apiCall)('/api/tenants');
+      setTenantRows(Array.isArray(d.tenants) ? d.tenants : []);
+    } catch (err) {
+      setTenantLoadError(err);
+    }
+  }, []);
+
+  React.useEffect(() => { refreshTenants(); }, [refreshTenants]);
+
+  // Build tenants list from the relational tenants table, then decorate with
+  // the room blob for current-room display data. This keeps moved_out tenants
+  // searchable while preserving the existing room-card UI for active tenants.
   const tenants = useMemo(() => {
-    return Object.values(rooms)
-      .filter(r => r.tenant)
-      .map(r => ({
-        ...r.tenant,
-        roomId: r.id,
-        floor: r.floor,
-        type: r.type,
-        rent: resolveRoomRent ? resolveRoomRent(r, config).rent : r.rent,
-        since: r.since,
-        contractEnd: r.contractEnd,
-        status: r.status,
-        room: r,
-      }))
-      .sort((a, b) => a.roomId.localeCompare(b.roomId));
-  }, [rooms, config]);
+    const byPhoneRoom = new Map();
+    for (const r of Object.values(rooms || {})) {
+      if (!r || !r.tenant) continue;
+      const phone = String(r.tenant.phone || '').replace(/[\s-]/g, '');
+      if (phone) byPhoneRoom.set(`${phone}:${r.id}`, r);
+    }
+    return (tenantRows || []).map((row) => {
+      const currentRoomId = row.current_room_id || '';
+      const lastRoomId = row.last_room_id || '';
+      const roomId = currentRoomId || lastRoomId || '';
+      const cleanPhone = String(row.phone || '').replace(/[\s-]/g, '');
+      const room = currentRoomId
+        ? (rooms && rooms[currentRoomId])
+        : ((rooms && rooms[lastRoomId]) || byPhoneRoom.get(`${cleanPhone}:${lastRoomId}`) || null);
+      const roomTenant = room && room.tenant ? room.tenant : {};
+      const type = (room && room.type) || 'standard';
+      const rent = row.last_monthly_rent != null
+        ? Number(row.last_monthly_rent)
+        : (room ? (resolveRoomRent ? resolveRoomRent(room, config).rent : room.rent) : 0);
+      const tenantStatus = row.status || 'active';
+      const outstandingTotal = Number(row.outstanding_total || 0);
+      return {
+        ...roomTenant,
+        rowKey: `tenant:${row.id}`,
+        dbId: row.id,
+        tenantId: row.id,
+        name: row.full_name || roomTenant.name || '-',
+        phone: row.phone || roomTenant.phone || '',
+        email: row.email || roomTenant.email || '',
+        occupation: roomTenant.occupation || '',
+        score: roomTenant.score || (outstandingTotal > 0 ? 'B' : 'A'),
+        roomId,
+        currentRoomId,
+        lastRoomId,
+        floor: room ? room.floor : '-',
+        type,
+        rent,
+        since: row.last_contract_start_date || room?.since || row.created_at,
+        contractEnd: row.last_contract_end_date || room?.contractEnd || null,
+        lastContractNo: row.last_contract_no || null,
+        lastContractStatus: row.last_contract_status || null,
+        tenantStatus,
+        status: tenantStatus,
+        roomStatus: room ? room.status : null,
+        outstandingCount: Number(row.outstanding_count || 0),
+        outstandingTotal,
+        room,
+      };
+    }).sort((a, b) => {
+      if (a.tenantStatus !== b.tenantStatus) {
+        if (a.tenantStatus === 'active') return -1;
+        if (b.tenantStatus === 'active') return 1;
+      }
+      return String(a.roomId || '').localeCompare(String(b.roomId || ''))
+        || String(a.name || '').localeCompare(String(b.name || ''));
+    });
+  }, [tenantRows, rooms, config]);
 
   const filtered = useMemo(() => tenants.filter(t => {
-    if (filter === 'overdue' && t.status !== 'overdue') return false;
+    if (filter === 'active' && t.tenantStatus !== 'active') return false;
+    if (filter === 'moved_out' && t.tenantStatus !== 'moved_out') return false;
+    if (filter === 'blacklist' && t.tenantStatus !== 'blacklist') return false;
+    if (filter === 'overdue' && !(t.roomStatus === 'overdue' || t.outstandingTotal > 0)) return false;
     if (filter === 'aPlus' && t.score !== 'A') return false;
     if (search) {
       const q = search.toLowerCase();
-      const hay = `${t.name} ${t.roomId} ${t.phone} ${t.email} ${t.occupation}`.toLowerCase();
+      const hay = `${t.name} ${t.roomId} ${t.currentRoomId} ${t.lastRoomId} ${t.phone} ${t.email} ${t.occupation} ${t.lastContractNo || ''}`.toLowerCase();
       if (!hay.includes(q)) return false;
     }
     return true;
@@ -55,14 +116,21 @@ function PageTenants({ rooms, setRooms, config, addActivity, setToast }) {
 
   const counts = useMemo(() => ({
     all: tenants.length,
-    overdue: tenants.filter(t => t.status === 'overdue').length,
+    active: tenants.filter(t => t.tenantStatus === 'active').length,
+    moved_out: tenants.filter(t => t.tenantStatus === 'moved_out').length,
+    blacklist: tenants.filter(t => t.tenantStatus === 'blacklist').length,
+    overdue: tenants.filter(t => t.roomStatus === 'overdue' || t.outstandingTotal > 0).length,
     aPlus: tenants.filter(t => t.score === 'A').length,
   }), [tenants]);
 
-  const active = activeId ? tenants.find(t => t.roomId === activeId) : null;
+  const active = activeId ? tenants.find(t =>
+    t.rowKey === activeId
+    || String(t.dbId || '') === String(activeId)
+    || (t.roomId && t.roomId === activeId)
+  ) : null;
 
   React.useEffect(() => {
-    const validTabs = new Set(['profile', 'portal', 'contract', 'bills', 'notes']);
+    const validTabs = new Set(['profile', 'portal', 'contract', 'bills', 'history', 'notes']);
     const applyTenantRoute = () => {
       const raw = String(window.location.hash || '').replace(/^#/, '');
       const [pathPart, queryPart = ''] = raw.split('?');
@@ -86,9 +154,12 @@ function PageTenants({ rooms, setRooms, config, addActivity, setToast }) {
         return;
       }
 
-      if (!roomId) return;
-      if (tenants.some((t) => t.roomId === roomId)) {
-        setActiveId(roomId);
+      const found = tenants.find((t) =>
+        (tenantRef && String(t.dbId || '') === String(tenantRef))
+        || (roomId && t.roomId === roomId)
+      );
+      if (found) {
+        setActiveId(found.rowKey);
         const tab = params.get('tab');
         setDrawerTab(validTabs.has(tab) ? tab : 'profile');
       }
@@ -157,8 +228,8 @@ function PageTenants({ rooms, setRooms, config, addActivity, setToast }) {
       key: 'roomId', label: 'ห้อง', minWidth: 100,
       render: t => (
         <div>
-          <div style={{ fontSize: 13, fontWeight: 600, color: C.ink, fontFamily: 'IBM Plex Sans Thai, sans-serif' }}>{t.roomId}</div>
-          <div style={{ fontSize: 11, color: C.muted }}>{ADMIN_ROOM_TYPES[t.type].th}</div>
+          <div style={{ fontSize: 13, fontWeight: 600, color: C.ink, fontFamily: 'IBM Plex Sans Thai, sans-serif' }}>{t.roomId || '-'}</div>
+          <div style={{ fontSize: 11, color: C.muted }}>{t.currentRoomId ? (((ADMIN_ROOM_TYPES[t.type] || ADMIN_ROOM_TYPES.standard || {}).th) || t.type || '-') : (t.lastRoomId ? 'ห้องล่าสุด' : '-')}</div>
         </div>
       ),
     },
@@ -181,7 +252,14 @@ function PageTenants({ rooms, setRooms, config, addActivity, setToast }) {
     },
     {
       key: 'status', label: 'สถานะ', minWidth: 110,
-      render: t => <StatusBadge status={t.status} size="sm" />,
+      render: t => (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start' }}>
+          <StatusBadge status={t.tenantStatus} size="sm" />
+          {t.outstandingTotal > 0 ? (
+            <span style={{ fontSize: 11, color: C.danger }}>ค้าง ฿{fmtCurrency(t.outstandingTotal)}</span>
+          ) : null}
+        </div>
+      ),
     },
     {
       key: 'actions', label: '', align: 'right', minWidth: 80,
@@ -200,6 +278,7 @@ function PageTenants({ rooms, setRooms, config, addActivity, setToast }) {
         subtitle={`มีผู้เช่าทั้งหมด ${tenants.length} คน · แสดง ${filtered.length} คน`}
         actions={
           <>
+            <Btn variant="secondary" icon="↻" onClick={refreshTenants}>รีเฟรช</Btn>
             <Btn variant="secondary" icon="📤" onClick={() => {
               if (window.exportTenantsCSV(rooms)) {
                 addActivity && addActivity({ icon: '📤', text: `ส่งออกข้อมูลผู้เช่า ${tenants.length} คน เป็น CSV`, type: 'system' });
@@ -215,16 +294,28 @@ function PageTenants({ rooms, setRooms, config, addActivity, setToast }) {
         <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
           <SearchInput value={search} onChange={setSearch} placeholder="ค้นหาชื่อ / ห้อง / เบอร์..." />
           <div style={{ width: 1, height: 28, background: C.border, margin: '0 4px' }} />
+          <FilterChip label="กำลังอยู่" active={filter === 'active'} onClick={() => setFilter('active')} count={counts.active} color={C.success} />
+          <FilterChip label="ย้ายออก" active={filter === 'moved_out'} onClick={() => setFilter('moved_out')} count={counts.moved_out} color={C.muted} />
+          <FilterChip label="แบล็คลิสต์" active={filter === 'blacklist'} onClick={() => setFilter('blacklist')} count={counts.blacklist} color={C.danger} />
           <FilterChip label="ทั้งหมด" active={filter === 'all'} onClick={() => setFilter('all')} count={counts.all} />
           <FilterChip label="ค้างชำระ" active={filter === 'overdue'} onClick={() => setFilter('overdue')} count={counts.overdue} color={C.danger} />
           <FilterChip label="เครดิต A" active={filter === 'aPlus'} onClick={() => setFilter('aPlus')} count={counts.aPlus} color={C.success} />
         </div>
+        {tenantLoadError ? (
+          <div style={{ marginTop: 10, display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap' }}>
+            <div style={{ fontSize: 12.5, color: C.danger, lineHeight: 1.5 }}>
+              โหลดรายชื่อผู้เช่าจากฐานข้อมูลไม่สำเร็จ: {tenantLoadError.message || String(tenantLoadError)}
+              <div style={{ color: C.muted }}>ระบบยังไม่ใช้ข้อมูลเก่าจาก rooms blob แทน เพราะอาจทำให้ผู้เช่าเก่าหายหรือบิลปนกัน</div>
+            </div>
+            <Btn variant="secondary" size="sm" onClick={refreshTenants}>ลองโหลดใหม่</Btn>
+          </div>
+        ) : null}
       </Card>
 
       <DataTable
         columns={columns}
         rows={filtered}
-        onRowClick={(t) => { setActiveId(t.roomId); setDrawerTab('profile'); }}
+        onRowClick={(t) => { setActiveId(t.rowKey); setDrawerTab('profile'); }}
         empty="ไม่พบผู้เช่าที่ตรงกับเงื่อนไข"
       />
 
@@ -243,12 +334,16 @@ function PageTenants({ rooms, setRooms, config, addActivity, setToast }) {
         addActivity={addActivity}
         setToast={setToast}
         apiFetch={apiFetch}
-        onTenantCreated={(roomId) => {
+        onTenantCreated={(roomId, tenant) => {
+          refreshTenants();
           // Auto-open the new tenant's drawer on the contract tab so admin
           // can send the link immediately — all fields auto-pulled from
           // the row they just created. Closes the "ข้ามไปมา" gap on the
           // tenant-onboarding flow.
-          if (roomId) {
+          if (tenant && tenant.id) {
+            setActiveId(`tenant:${tenant.id}`);
+            setDrawerTab('contract');
+          } else if (roomId) {
             setActiveId(roomId);
             setDrawerTab('contract');
           }
@@ -271,8 +366,10 @@ function PageTenants({ rooms, setRooms, config, addActivity, setToast }) {
         {active && (
           <>
             <TenantHeader t={active} />
+            <TenantFlowNotice t={active} setDrawerTab={setDrawerTab} />
             <Tabs
               items={[
+                { value: 'history',  label: 'ย้อนหลัง',       icon: '↺' },
                 { value: 'profile',  label: 'โปรไฟล์',  icon: '👤' },
                 { value: 'portal',   label: 'Portal Access', icon: '🔑' },
                 { value: 'contract', label: 'สัญญา',     icon: '📄' },
@@ -285,8 +382,9 @@ function PageTenants({ rooms, setRooms, config, addActivity, setToast }) {
             />
             {drawerTab === 'profile'  && <TabProfile  t={active} />}
             {drawerTab === 'portal'   && <TabPortal   t={active} setToast={setToast} addActivity={addActivity} apiFetch={apiFetch} />}
-            {drawerTab === 'contract' && <TabContract t={active} setToast={setToast} addActivity={addActivity} setRooms={setRooms} onClosed={() => setActiveId(null)} />}
+            {drawerTab === 'contract' && <TabContract t={active} setToast={setToast} addActivity={addActivity} setRooms={setRooms} onTenantChanged={refreshTenants} onClosed={() => setActiveId(null)} />}
             {drawerTab === 'bills'    && <TabBills    t={active} />}
+            {drawerTab === 'history'  && <TabHistory  t={active} />}
             {drawerTab === 'notes'    && <TabNotes    t={active} setRooms={setRooms} setToast={setToast} addActivity={addActivity} />}
           </>
         )}
@@ -452,7 +550,7 @@ function AddTenantModal({ open, onClose, rooms, setRooms, busy, setBusy, initial
       // Bubble the assigned roomId back to PageTenants so it can open the
       // drawer on the contract tab. Tenant data is already in the rooms
       // blob (via setRooms above) so TabContract will resolve it on render.
-      if (form.roomId && onTenantCreated) onTenantCreated(form.roomId);
+      if (onTenantCreated) onTenantCreated(form.roomId || '', d.tenant || null);
       onClose && onClose();
     } catch (err) {
       window.toastError
@@ -520,6 +618,7 @@ function TenantHeader({ t }) {
   const C = window.ADMIN_C;
   const ADMIN_ROOM_TYPES = window.ADMIN_ROOM_TYPES;
   const { Avatar, Pill, StatusBadge } = window;
+  const roomType = ADMIN_ROOM_TYPES[t.type] || ADMIN_ROOM_TYPES.standard || {};
   return (
     <div style={{
       padding: 16, background: C.surfaceAlt, borderRadius: 12,
@@ -533,12 +632,81 @@ function TenantHeader({ t }) {
         <div style={{ fontSize: 12.5, color: C.muted, marginBottom: 6 }}>{t.occupation}</div>
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
           <Pill color="accent" size="sm">ห้อง {t.roomId}</Pill>
-          <Pill color="neutral" size="sm">{ADMIN_ROOM_TYPES[t.type].th}</Pill>
+          <Pill color="neutral" size="sm">{roomType.th || t.type || '-'}</Pill>
           <Pill color={t.score === 'A' ? 'success' : 'warning'} size="sm">เครดิต {t.score}</Pill>
-          <StatusBadge status={t.status} size="sm" />
+          <StatusBadge status={t.tenantStatus || t.status} size="sm" />
         </div>
       </div>
     </div>
+  );
+}
+
+function TenantFlowNotice({ t, setDrawerTab }) {
+  const C = window.ADMIN_C;
+  const { Card, Btn, Pill } = window;
+  const status = t.tenantStatus || t.status || 'active';
+  const outstanding = Number(t.outstandingTotal || 0);
+  const hasCurrentRoom = !!t.currentRoomId;
+  const hasContract = !!(t.lastContractNo || t.lastContractStatus);
+  let tone = 'info';
+  let title = 'พร้อมใช้งานต่อ';
+  let detail = 'ข้อมูลผู้เช่า สัญญา บิล และประวัติย้อนหลังผูกกับ tenant_id แล้ว สามารถตรวจต่อได้จากแท็บด้านล่าง';
+  let actionTab = 'history';
+  let actionLabel = 'ดูย้อนหลัง';
+
+  if (status !== 'active') {
+    tone = outstanding > 0 ? 'warning' : 'neutral';
+    title = status === 'moved_out' ? 'ผู้เช่าย้ายออกแล้ว' : `สถานะผู้เช่า: ${status}`;
+    detail = outstanding > 0
+      ? `ยังมียอดค้าง ${outstanding.toLocaleString('th-TH', { minimumFractionDigits: 2 })} บาท ให้ตรวจบิลและ audit ก่อนปิดเคส`
+      : 'ปิด portal/check-in ซ้ำแล้ว ให้ใช้แท็บย้อนหลังเพื่อตรวจสัญญา บิล การชำระ และ audit';
+    actionTab = outstanding > 0 ? 'bills' : 'history';
+    actionLabel = outstanding > 0 ? 'ดูบิลค้าง' : 'ดูย้อนหลัง';
+  } else if (!hasCurrentRoom) {
+    tone = 'warning';
+    title = 'ผู้เช่ายังไม่มีห้องปัจจุบัน';
+    detail = 'ต้อง check-in หรือผูกห้องก่อน ระบบจึงจะเปิด portal, LINE binding, สัญญา และการออกบิลรายเดือนได้ถูกต้อง';
+    actionTab = 'contract';
+    actionLabel = 'ไปเช็คอิน/สัญญา';
+  } else if (!hasContract) {
+    tone = 'warning';
+    title = 'ยังไม่มีสัญญาที่ตรวจย้อนหลังได้';
+    detail = 'ควรสร้างสัญญาหรือส่งลิงก์ให้ผู้เช่ากรอก เพื่อให้ค่าเช่า ระยะสัญญา และหลักฐานถูกล็อกในระบบ';
+    actionTab = 'contract';
+    actionLabel = 'สร้าง/ส่งสัญญา';
+  } else if (String(t.lastContractStatus || '').match(/draft|pending|submitted/i)) {
+    tone = 'warning';
+    title = 'สัญญายังไม่จบขั้นตอน';
+    detail = `สัญญา ${t.lastContractNo || ''} อยู่สถานะ ${t.lastContractStatus}; ตรวจคำขอหรืออนุมัติให้จบก่อนเริ่มรอบบิลถัดไป`;
+    actionTab = 'contract';
+    actionLabel = 'ตรวจสัญญา';
+  } else if (outstanding > 0) {
+    tone = 'warning';
+    title = 'มีบิลค้างชำระ';
+    detail = `ยอดค้างรวม ${outstanding.toLocaleString('th-TH', { minimumFractionDigits: 2 })} บาท ระบบแยกตาม tenant_id แล้วเพื่อไม่ปนกับผู้เช่าห้องเดียวกันคนอื่น`;
+    actionTab = 'bills';
+    actionLabel = 'ดูบิล';
+  }
+
+  const palette = {
+    info: { bg: C.infoSoft || '#E8F0FE', border: C.info || '#2563EB', fg: C.infoInk || '#1E3A8A' },
+    warning: { bg: C.warningSoft || '#FCEFDB', border: C.warning || '#D97706', fg: C.warningInk || '#78350F' },
+    neutral: { bg: C.surfaceAlt, border: C.border, fg: C.muted },
+  }[tone] || {};
+
+  return (
+    <Card style={{ padding: 12, marginTop: 10, border: `1px solid ${palette.border}`, background: palette.bg }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', marginBottom: 4 }}>
+            <Pill color={tone === 'warning' ? 'warning' : 'info'} size="sm">{title}</Pill>
+            {t.lastContractNo ? <span style={{ fontSize: 12, color: palette.fg }}>สัญญาล่าสุด {t.lastContractNo}</span> : null}
+          </div>
+          <div style={{ fontSize: 12.5, color: palette.fg, lineHeight: 1.55 }}>{detail}</div>
+        </div>
+        <Btn variant="secondary" size="sm" onClick={() => setDrawerTab(actionTab)}>{actionLabel}</Btn>
+      </div>
+    </Card>
   );
 }
 
@@ -586,10 +754,34 @@ function TabPortal({ t, setToast, addActivity, apiFetch }) {
   const [bindingErr, setBindingErr] = React.useState(null);
   const [bindBusy, setBindBusy] = React.useState(false);
 
+  async function loadBinding(exact) {
+    setTenantRow(exact);
+    const r2 = await fetch(`/api/admin/line-bindings/tenants/${exact.id}`,
+      { credentials: 'same-origin' });
+    if (r2.ok) {
+      const d2 = await r2.json();
+      setBinding(d2);
+    } else if (r2.status !== 404) {
+      const d2 = await r2.json().catch(() => ({}));
+      setBindingErr(new Error(d2.error || `HTTP ${r2.status}`));
+    }
+  }
+
   async function load() {
     setTenantErr(null);
     setBindingErr(null);
+    setBinding(null);
     try {
+      if (t.dbId) {
+        await loadBinding({
+          id: t.dbId,
+          full_name: t.name,
+          phone: t.phone,
+          current_room_id: t.currentRoomId || t.roomId,
+          status: t.tenantStatus || 'active',
+        });
+        return;
+      }
       // Search by phone — server's tenants list endpoint accepts ?q=<text>
       // and matches across full_name / phone / email. Using the phone here
       // because it's the most uniquely-matching field for a single person.
@@ -610,23 +802,36 @@ function TabPortal({ t, setToast, addActivity, apiFetch }) {
         setTenantErr(new Error('ยังไม่มี tenant row สำหรับเบอร์นี้ — บันทึกห้องก่อนเพื่อให้ระบบสร้างให้อัตโนมัติ'));
         return;
       }
-      setTenantRow(exact);
       // Now fetch binding status — this endpoint already returns full state
       // (pending code / bound user / blocked) in one call.
-      const r2 = await fetch(`/api/admin/line-bindings/tenants/${exact.id}`,
-        { credentials: 'same-origin' });
-      if (r2.ok) {
-        const d2 = await r2.json();
-        setBinding(d2);
-      } else if (r2.status !== 404) {
-        const d2 = await r2.json().catch(() => ({}));
-        setBindingErr(new Error(d2.error || `HTTP ${r2.status}`));
-      }
+      await loadBinding(exact);
     } catch (err) {
       setTenantErr(err);
     }
   }
-  React.useEffect(() => { load(); /* eslint-disable-next-line */ }, [t.roomId, t.phone]);
+  React.useEffect(() => {
+    if (t.tenantStatus && t.tenantStatus !== 'active') {
+      setTenantRow(null);
+      setBinding(null);
+      setTenantErr(null);
+      setBindingErr(null);
+      return;
+    }
+    load(); /* eslint-disable-next-line */
+  }, [t.dbId, t.roomId, t.phone, t.tenantStatus]);
+
+  if (t.tenantStatus && t.tenantStatus !== 'active') {
+    return (
+      <Card style={{ padding: 16, background: C.surfaceAlt }}>
+        <div style={{ fontSize: 13, color: C.muted, lineHeight: 1.6, marginBottom: 10 }}>
+          ผู้เช่ารายนี้ไม่ได้ active แล้ว ระบบจึงปิด portal/LINE binding สำหรับการใช้งานปัจจุบันเพื่อป้องกันการส่งบิลหรือเปิดสิทธิ์ให้ผู้เช่าเก่า
+        </div>
+        <Btn variant="secondary" size="sm" onClick={() => { window.location.hash = `#tenants?tenantId=${encodeURIComponent(t.dbId || t.tenantId || '')}&tab=history`; }}>
+          ดูประวัติย้อนหลัง
+        </Btn>
+      </Card>
+    );
+  }
 
   // === LINE binding actions ============================================
   async function issueBinding() {
@@ -754,7 +959,7 @@ function TabPortal({ t, setToast, addActivity, apiFetch }) {
 // review / approve / sign — no jumping to /admin#contracts or
 // /admin#contract-invitations. Room + rent are auto-mapped from the tenant's
 // current room (`t.roomId`, `t.rent`) so admin doesn't re-pick the room.
-function TabContract({ t, setToast, addActivity, setRooms, onClosed }) {
+function TabContract({ t, setToast, addActivity, setRooms, onTenantChanged, onClosed }) {
   const C = window.ADMIN_C;
   const { fmtCurrency } = window;
   const { Card, DefList, Btn, Pill } = window;
@@ -798,9 +1003,14 @@ function TabContract({ t, setToast, addActivity, setRooms, onClosed }) {
   const reload = React.useCallback(async () => {
     setLoading(true);
     try {
+      if (t.tenantStatus && t.tenantStatus !== 'active') {
+        setTenantDbId(t.dbId || null);
+        setContract(null);
+        return;
+      }
       const normalisePhone = (s) => String(s || '').replace(/[\s-]/g, '');
-      let tid = null;
-      try {
+      let tid = t.dbId || null;
+      if (!tid) try {
         const phone = normalisePhone(t.phone);
         const tRes = await apiCall(`/api/tenants?q=${encodeURIComponent(phone)}`);
         const match = (tRes.tenants || []).find((x) => normalisePhone(x.phone) === phone);
@@ -811,7 +1021,7 @@ function TabContract({ t, setToast, addActivity, setRooms, onClosed }) {
       const d = await apiCall(`/api/contracts?tenantId=${tid}&status=active`);
       setContract((d.contracts || [])[0] || null);
     } finally { setLoading(false); }
-  }, [t.phone]);
+  }, [t.dbId, t.phone, t.tenantStatus]);
   React.useEffect(() => { reload(); }, [reload]);
 
   const fmtDate = (s) => s ? new Date(s).toLocaleDateString('th-TH') : '-';
@@ -849,6 +1059,7 @@ function TabContract({ t, setToast, addActivity, setRooms, onClosed }) {
       addActivity && addActivity({ icon: '📨',
         text: `ส่งลิงก์สัญญาให้ ${t.name} (ห้อง ${t.roomId})`, type: 'contract' });
       reload();
+      if (onTenantChanged) onTenantChanged();
     } catch (err) {
       setToast && setToast({ kind: 'danger', message: 'สร้างลิงก์ล้มเหลว: ' + err.message });
     } finally { setBusy(false); }
@@ -983,6 +1194,7 @@ function TabContract({ t, setToast, addActivity, setRooms, onClosed }) {
         window.open(result.nextActions.pdfUrl, '_blank', 'noopener');
       }
       reload();
+      if (onTenantChanged) onTenantChanged();
     } catch (err) {
       // Server responses (CITIZEN_ID_DUPLICATE / ROOM_OCCUPIED / BAD_STATUS)
       // carry both error + hint; surface them inline in the review panel
@@ -1058,6 +1270,7 @@ function TabContract({ t, setToast, addActivity, setRooms, onClosed }) {
           return next;
         });
       }
+      if (onTenantChanged) onTenantChanged();
       // Drawer becomes detached anyway once `tenants` recomputes (this row
       // no longer has r.tenant). Close it explicitly so admin doesn't see
       // an empty drawer hanging open.
@@ -1086,6 +1299,19 @@ function TabContract({ t, setToast, addActivity, setRooms, onClosed }) {
       setToast && setToast({ kind: 'danger', message: 'ส่งกลับล้มเหลว: ' + err.message });
     } finally { setBusy(false); }
   };
+
+  if (t.tenantStatus && t.tenantStatus !== 'active') {
+    return (
+      <Card style={{ padding: 16, background: C.surfaceAlt }}>
+        <div style={{ fontSize: 13, color: C.muted, lineHeight: 1.6, marginBottom: 10 }}>
+          ผู้เช่าย้ายออกแล้ว สัญญาปัจจุบันจึงไม่เปิดให้ check-in/ยกเลิกซ้ำ ระบบป้องกันการสร้างสัญญาซ้อนและการเปิดห้องเดิมผิดคน
+        </div>
+        <Btn variant="secondary" size="sm" onClick={() => { window.location.hash = `#tenants?tenantId=${encodeURIComponent(t.dbId || t.tenantId || '')}&tab=history`; }}>
+          ดูสัญญาเก่า/บิล/audit
+        </Btn>
+      </Card>
+    );
+  }
 
   if (loading) {
     return <div style={{ padding: 20, color: C.muted }}>กำลังโหลด…</div>;
@@ -1182,7 +1408,7 @@ function TabContract({ t, setToast, addActivity, setRooms, onClosed }) {
             tenantId={tenantDbId}
             tenant={t}
             onClose={() => setShowCheckin(false)}
-            onDone={() => { setShowCheckin(false); reload();
+            onDone={() => { setShowCheckin(false); reload(); if (onTenantChanged) onTenantChanged();
               setToast && setToast({ kind: 'success', message: `เช็คอิน ${t.name} เรียบร้อย` });
               addActivity && addActivity({ icon: '🔑', text: `เช็คอิน ${t.name} (ห้อง ${t.roomId})`, type: 'contract' });
             }}
@@ -1942,18 +2168,22 @@ const inInp = {
 function TabBills({ t }) {
   const C = window.ADMIN_C;
   const { fmtCurrency, fmtMonthTH } = window;
-  const { DataTable, Pill, EmptyState } = window;
+  const { Card, DataTable, Pill, EmptyState } = window;
 
-  // Real bill history from /api/bills?roomId=X. Replaces a hardcoded
-  // 6-month fake history that lied to admins about payment status.
+  // Real bill history. Prefer tenantId so a current tenant never sees bills
+  // from the previous occupant of the same room; fall back to roomId for
+  // legacy rows that predate tenants.id wiring.
   const [bills, setBills] = React.useState(null);   // null = loading
   const [err, setErr] = React.useState(null);
   React.useEffect(() => {
-    if (!t.roomId) { setBills([]); return; }
+    if (!t.dbId && !t.roomId) { setBills([]); return; }
     let cancel = false;
     setBills(null);
     setErr(null);
-    fetch(`/api/bills?roomId=${encodeURIComponent(t.roomId)}&limit=24`, { credentials: 'same-origin' })
+    const qs = t.dbId
+      ? `tenantId=${encodeURIComponent(t.dbId)}`
+      : `roomId=${encodeURIComponent(t.roomId)}`;
+    fetch(`/api/bills?${qs}&limit=24`, { credentials: 'same-origin' })
       .then(async (r) => {
         const d = await r.json().catch(() => ({}));
         if (cancel) return;
@@ -1962,7 +2192,7 @@ function TabBills({ t }) {
       })
       .catch((e) => { if (!cancel) { setErr(e.message || 'network error'); setBills([]); } });
     return () => { cancel = true; };
-  }, [t.roomId]);
+  }, [t.dbId, t.roomId]);
 
   const periodTH = (period) => {
     if (!period || typeof period !== 'string') return period || '';
@@ -1987,16 +2217,193 @@ function TabBills({ t }) {
     return <div style={{ padding: 24, textAlign: 'center', color: C.muted, fontSize: 13 }}>กำลังโหลดประวัติบิล...</div>;
   }
   if (err) {
-    return <div style={{ padding: 16, color: C.danger || '#a23', fontSize: 13 }}>โหลดประวัติบิลไม่สำเร็จ: {err}</div>;
+    return (
+      <Card style={{ padding: 16, color: C.danger || '#a23', fontSize: 13, lineHeight: 1.6 }}>
+        โหลดประวัติบิลไม่สำเร็จ: {err}
+        <div style={{ color: C.muted, marginTop: 4 }}>ยังไม่แสดงข้อมูล fallback เพื่อป้องกันบิลของผู้เช่าเก่าหรือผู้เช่าคนใหม่ในห้องเดียวกันปนกัน</div>
+      </Card>
+    );
   }
   if (bills.length === 0) {
     return EmptyState
-      ? <EmptyState title="ยังไม่มีประวัติบิล" description="เมื่อออกบิลให้ห้องนี้แล้ว ประวัติจะแสดงที่นี่" />
-      : <div style={{ padding: 16, color: C.muted, fontSize: 13 }}>ยังไม่มีประวัติบิลสำหรับห้องนี้</div>;
+      ? <EmptyState title="ยังไม่มีประวัติบิล" description={t.dbId ? 'ยังไม่พบบิลที่ผูกกับผู้เช่าคนนี้' : 'ยังไม่พบบิลจาก roomId fallback'} />
+      : <div style={{ padding: 16, color: C.muted, fontSize: 13 }}>ยังไม่มีประวัติบิลสำหรับผู้เช่าคนนี้</div>;
   }
   return (
-    <div>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <Card style={{ padding: 12, background: C.surfaceAlt }}>
+        <div style={{ fontSize: 12.5, color: C.muted, lineHeight: 1.5 }}>
+          {t.dbId
+            ? `แสดงเฉพาะบิลที่ผูก tenant_id=${t.dbId} เพื่อไม่ปนกับผู้เช่าคนอื่นในห้อง ${t.roomId || '-'}`
+            : `ข้อมูลเก่าไม่มี tenant_id จึง fallback ด้วย roomId=${t.roomId || '-'} โปรดตรวจเลขห้องก่อนใช้อ้างอิง`}
+        </div>
+      </Card>
       <DataTable columns={columns} rows={bills} density="compact" stickyHeader={false} />
+    </div>
+  );
+}
+
+function TabHistory({ t }) {
+  const C = window.ADMIN_C;
+  const { Card, DataTable, Pill } = window;
+  const [history, setHistory] = React.useState(null);
+  const [err, setErr] = React.useState(null);
+
+  React.useEffect(() => {
+    if (!t.dbId) { setHistory(null); return; }
+    let cancel = false;
+    setHistory(null);
+    setErr(null);
+    fetch(`/api/tenants/${encodeURIComponent(t.dbId)}/history`, { credentials: 'same-origin' })
+      .then(async (r) => {
+        const d = await r.json().catch(() => ({}));
+        if (cancel) return;
+        if (!r.ok) { setErr(d.error || `HTTP ${r.status}`); setHistory(null); return; }
+        setHistory(d);
+      })
+      .catch((e) => { if (!cancel) setErr(e.message || 'network error'); });
+    return () => { cancel = true; };
+  }, [t.dbId]);
+
+  if (!t.dbId) {
+    return <Card style={{ padding: 16, color: C.muted }}>ยังไม่มี tenant_id สำหรับเปิดประวัติย้อนหลัง</Card>;
+  }
+  if (err) {
+    return <Card style={{ padding: 16, color: C.danger }}>โหลดประวัติย้อนหลังไม่สำเร็จ: {err}</Card>;
+  }
+  if (!history) {
+    return <div style={{ padding: 24, color: C.muted, textAlign: 'center' }}>กำลังโหลดประวัติย้อนหลัง...</div>;
+  }
+
+  const totals = history.totals || {};
+  const activeCards = Number(totals.accessCardsActive || 0);
+  const outstanding = Number(totals.billsOutstanding || 0);
+  const contracts = Array.isArray(history.contracts) ? history.contracts : [];
+  const alerts = [];
+  if (t.tenantStatus !== 'active' && activeCards > 0) {
+    alerts.push({
+      tone: 'danger',
+      title: 'ผู้เช่าเก่ายังมีบัตร active',
+      detail: 'ควร revoke บัตรทันทีที่หน้า Access Control หรือเช็ก checkout cascade เพราะเป็นความเสี่ยงด้านสิทธิ์เข้าออก',
+    });
+  }
+  if (outstanding > 0) {
+    alerts.push({
+      tone: 'warning',
+      title: 'ยังมียอดค้างชำระ',
+      detail: `ยอดค้างรวม ${outstanding.toLocaleString('th-TH', { minimumFractionDigits: 2 })} บาท ใช้ตารางบิลด้านล่างตรวจรอบบิลก่อนติดตามผู้เช่า`,
+    });
+  }
+  if (contracts.length === 0) {
+    alerts.push({
+      tone: 'warning',
+      title: 'ไม่พบสัญญาในประวัติ',
+      detail: 'ผู้เช่านี้อาจเป็นข้อมูลเก่าก่อนเปิดระบบสัญญา ควรตรวจ audit/บิลและเพิ่มบันทึกภายในถ้าต้องใช้อ้างอิง',
+    });
+  }
+  if (t.tenantStatus === 'active' && !(history.identity?.front_url && history.identity?.back_url)) {
+    alerts.push({
+      tone: 'info',
+      title: 'เอกสารยืนยันตัวยังไม่ครบ',
+      detail: 'ถ้าจะทำสัญญาใหม่หรืออนุมัติสัญญา ควรอัปโหลดภาพบัตรประชาชนหน้า/หลังให้ครบก่อน',
+    });
+  }
+
+  const contractCols = [
+    { key: 'contract_no', label: 'สัญญา', minWidth: 120 },
+    { key: 'room_id', label: 'ห้อง', minWidth: 70 },
+    { key: 'start_date', label: 'เริ่ม', minWidth: 95, render: c => String(c.start_date || '-').slice(0, 10) },
+    { key: 'end_date', label: 'สิ้นสุด', minWidth: 95, render: c => String(c.end_date || '-').slice(0, 10) },
+    { key: 'status', label: 'สถานะ', minWidth: 90, render: c => <Pill size="sm" color={c.status === 'active' ? 'success' : 'muted'}>{c.status}</Pill> },
+  ];
+  const billCols = [
+    { key: 'bill_no', label: 'บิล', minWidth: 130 },
+    { key: 'room_id', label: 'ห้อง', minWidth: 70 },
+    { key: 'period', label: 'รอบ', minWidth: 80 },
+    { key: 'total', label: 'ยอด', align: 'right', minWidth: 90, render: b => Number(b.total || 0).toLocaleString('th-TH', { minimumFractionDigits: 2 }) },
+    { key: 'status', label: 'สถานะ', minWidth: 90, render: b => <Pill size="sm" color={b.status === 'paid' ? 'success' : (b.status === 'void' ? 'muted' : 'warning')}>{b.status}</Pill> },
+  ];
+  const auditCols = [
+    { key: 'created_at', label: 'เวลา', minWidth: 130, render: a => String(a.created_at || '').slice(0, 19).replace('T', ' ') },
+    { key: 'action', label: 'เหตุการณ์', minWidth: 160 },
+    { key: 'user_id', label: 'ผู้ทำรายการ', minWidth: 100, render: a => a.user_id || '-' },
+  ];
+  const paymentCols = [
+    { key: 'bill_no', label: 'บิล', minWidth: 130, render: p => p.bill_no || `#${p.bill_id || '-'}` },
+    { key: 'amount', label: 'ยอดชำระ', align: 'right', minWidth: 95, render: p => Number(p.amount || 0).toLocaleString('th-TH', { minimumFractionDigits: 2 }) },
+    { key: 'method', label: 'วิธี', minWidth: 90, render: p => p.method || '-' },
+    { key: 'status', label: 'สถานะ', minWidth: 90, render: p => <Pill size="sm" color={p.status === 'verified' ? 'success' : (p.status === 'rejected' ? 'danger' : 'warning')}>{p.status}</Pill> },
+    { key: 'created_at', label: 'เวลา', minWidth: 130, render: p => String(p.created_at || '').slice(0, 19).replace('T', ' ') },
+  ];
+  const cardCols = [
+    { key: 'card_id', label: 'บัตร', minWidth: 120 },
+    { key: 'room_id', label: 'ห้อง', minWidth: 70 },
+    { key: 'status', label: 'สถานะ', minWidth: 90, render: c => <Pill size="sm" color={c.status === 'active' ? 'success' : 'muted'}>{c.status}</Pill> },
+    { key: 'issued_at', label: 'ออกบัตร', minWidth: 130, render: c => String(c.issued_at || '').slice(0, 19).replace('T', ' ') },
+    { key: 'revoked_at', label: 'ยกเลิก', minWidth: 130, render: c => c.revoked_at ? String(c.revoked_at).slice(0, 19).replace('T', ' ') : '-' },
+  ];
+  const ticketCols = [
+    { key: 'ticket_no', label: 'งานซ่อม', minWidth: 120 },
+    { key: 'room_id', label: 'ห้อง', minWidth: 70 },
+    { key: 'title', label: 'เรื่อง', minWidth: 160, render: x => x.title || x.category || '-' },
+    { key: 'status', label: 'สถานะ', minWidth: 90, render: x => <Pill size="sm" color={x.status === 'completed' ? 'success' : (x.status === 'cancelled' ? 'muted' : 'warning')}>{x.status}</Pill> },
+    { key: 'created_at', label: 'แจ้งเมื่อ', minWidth: 130, render: x => String(x.created_at || '').slice(0, 19).replace('T', ' ') },
+  ];
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      {alerts.map((a, idx) => {
+        const color = a.tone === 'danger' ? C.danger : (a.tone === 'warning' ? C.warning : (C.info || C.muted));
+        const bg = a.tone === 'danger' ? C.dangerSoft : (a.tone === 'warning' ? C.warningSoft : (C.infoSoft || C.surfaceAlt));
+        return (
+          <Card key={idx} style={{ padding: 12, border: `1px solid ${color}`, background: bg }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color }}>{a.title}</div>
+            <div style={{ fontSize: 12.5, color: C.ink, lineHeight: 1.55, marginTop: 4 }}>{a.detail}</div>
+          </Card>
+        );
+      })}
+      <Card style={{ padding: 14 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(118px, 1fr))', gap: 10 }}>
+          <HistoryMetric label="สัญญา" value={totals.contracts || 0} C={C} />
+          <HistoryMetric label="บิลค้าง" value={outstanding.toLocaleString('th-TH', { minimumFractionDigits: 2 })} C={C} />
+          <HistoryMetric label="จ่ายแล้ว" value={Number(totals.paymentsTotal || 0).toLocaleString('th-TH', { minimumFractionDigits: 2 })} C={C} />
+          <HistoryMetric label="บัตร active" value={activeCards} C={C} />
+          <HistoryMetric label="งานซ่อมเปิด" value={totals.ticketsOpen || 0} C={C} />
+        </div>
+      </Card>
+      <Card style={{ padding: 14 }}>
+        <div style={{ fontWeight: 600, marginBottom: 8 }}>สัญญาทั้งหมด</div>
+        <DataTable columns={contractCols} rows={contracts} density="compact" stickyHeader={false} empty="ไม่มีประวัติสัญญา" />
+      </Card>
+      <Card style={{ padding: 14 }}>
+        <div style={{ fontWeight: 600, marginBottom: 8 }}>บิลของผู้เช่าคนนี้</div>
+        <DataTable columns={billCols} rows={history.bills || []} density="compact" stickyHeader={false} empty="ไม่มีบิล" />
+      </Card>
+      <Card style={{ padding: 14 }}>
+        <div style={{ fontWeight: 600, marginBottom: 8 }}>การชำระเงิน</div>
+        <DataTable columns={paymentCols} rows={history.payments || []} density="compact" stickyHeader={false} empty="ไม่มีประวัติการชำระ" />
+      </Card>
+      <Card style={{ padding: 14 }}>
+        <div style={{ fontWeight: 600, marginBottom: 8 }}>บัตรเข้าออก</div>
+        <DataTable columns={cardCols} rows={history.accessCards || []} density="compact" stickyHeader={false} empty="ไม่มีบัตรเข้าออก" />
+      </Card>
+      <Card style={{ padding: 14 }}>
+        <div style={{ fontWeight: 600, marginBottom: 8 }}>งานซ่อมที่เกี่ยวข้อง</div>
+        <DataTable columns={ticketCols} rows={history.tickets || []} density="compact" stickyHeader={false} empty="ไม่มีงานซ่อม" />
+      </Card>
+      <Card style={{ padding: 14 }}>
+        <div style={{ fontWeight: 600, marginBottom: 8 }}>Audit ล่าสุด</div>
+        <DataTable columns={auditCols} rows={history.auditLog || []} density="compact" stickyHeader={false} empty="ไม่มี audit log" />
+      </Card>
+    </div>
+  );
+}
+
+function HistoryMetric({ label, value, C }) {
+  return (
+    <div style={{ padding: 10, border: `1px solid ${C.border}`, borderRadius: 8, background: C.surfaceAlt }}>
+      <div style={{ fontSize: 11, color: C.muted, marginBottom: 4 }}>{label}</div>
+      <div style={{ fontSize: 16, fontWeight: 700, color: C.ink }}>{value}</div>
     </div>
   );
 }

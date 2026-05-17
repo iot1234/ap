@@ -786,6 +786,23 @@ test('/api/bills create validates input and refuses to mutate paid/verified ledg
     'computed recurring line items must be persisted in bills.other');
 });
 
+test('GET /api/bills can be scoped by tenantId so old room bills do not bleed into a new tenant', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const route = fs.readFileSync(path.join(__dirname, '..', 'routes', 'bills-extras.js'), 'utf8');
+  const idx = route.indexOf("r.get('/', requireAuth");
+  assert.ok(idx > 0, 'should find bill list handler');
+  const body = route.slice(idx, route.indexOf("  // POST /api/bills", idx));
+  assert.match(body, /req\.query\.tenantId/,
+    'bill list must accept tenantId');
+  assert.match(body, /tenantId must be a positive integer[\s\S]{0,140}INVALID_TENANT_ID/,
+    'invalid tenantId must fail with a machine-readable error');
+  assert.match(body, /hint: 'ใช้ tenant_id จาก \/api\/tenants/,
+    'invalid tenantId response must tell admin how to recover');
+  assert.match(body, /where\.push\(`b\.tenant_id=\$\$\{params\.length\}`\)/,
+    'tenantId filter must constrain bills by bills.tenant_id');
+});
+
 test('/api/notify/bill resolves the tenant instead of notifying only the owner', () => {
   const fs = require('node:fs');
   const path = require('node:path');
@@ -2385,6 +2402,46 @@ test('TabContract resolves tenant phone with the same normaliser the DB uses', (
   assert.match(tenants,
     /normalisePhone\s*=\s*\([^)]+\)\s*=>\s*[\s\S]{0,80}\.replace\(\s*\/\[\\s-\]\/g\s*,/,
     'normaliser must strip whitespace + dashes (matches mirrorRoomsToTenants)');
+});
+
+test('admin tenants page uses tenant rows as source of truth and has audit history tab', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const tenants = fs.readFileSync(
+    path.join(__dirname, '..', 'project', 'admin', 'page-tenants.jsx'), 'utf8'
+  );
+  assert.match(tenants, /const \[tenantRows, setTenantRows\] = useState\(\[\]\)/,
+    'tenants page must keep API tenant rows, not only room blob tenants');
+  assert.match(tenants, /'\/api\/tenants'/,
+    'tenants page must load /api/tenants');
+  assert.match(tenants, /\(tenantRows \|\| \[\]\)\.map/,
+    'tenant table must be built from tenantRows');
+  assert.match(tenants, /filter === 'moved_out'[\s\S]{0,120}t\.tenantStatus !== 'moved_out'/,
+    'tenant table must filter moved-out tenants');
+  assert.match(tenants, /value: 'history'/,
+    'drawer tabs must include history');
+  assert.match(tenants, /drawerTab === 'history'\s+&& <TabHistory\s+t=\{active\}/,
+    'drawer must render the history tab for the selected tenant');
+  assert.match(tenants, /function TenantFlowNotice\(\{ t, setDrawerTab \}\)/,
+    'drawer must show an operator-facing next-step/guard notice');
+  assert.match(tenants, /ระบบยังไม่ใช้ข้อมูลเก่าจาก rooms blob แทน/,
+    'tenant-list load failure must clearly explain why stale fallback is blocked');
+  assert.match(tenants, /t\.tenantStatus && t\.tenantStatus !== 'active'[\s\S]{0,260}setTenantRow\(null\)[\s\S]{0,260}return/,
+    'portal tab must not keep loading or binding moved-out tenants');
+  assert.match(tenants, /if \(t\.tenantStatus && t\.tenantStatus !== 'active'\)[\s\S]{0,200}setContract\(null\)/,
+    'contract tab must stop active-contract work for moved-out tenants');
+  assert.match(tenants, /function TabHistory\(\{ t \}\)[\s\S]{0,400}\/api\/tenants\/\$\{encodeURIComponent\(t\.dbId\)\}\/history/,
+    'history tab must call the tenant history endpoint by tenant id');
+  assert.match(tenants, /tenantId=\$\{encodeURIComponent\(t\.dbId\)\}[\s\S]{0,160}\/api\/bills\?\$\{qs\}&limit=24/,
+    'bill tab must prefer tenantId so room turnover does not mix ledgers');
+  assert.match(tenants, /ผู้เช่าเก่ายังมีบัตร active[\s\S]{0,260}ยอดค้างรวม/,
+    'history tab must surface high-risk follow-up alerts');
+  assert.match(tenants, /การชำระเงิน/,
+    'history tab must show payments');
+  assert.match(tenants, /บัตรเข้าออก/,
+    'history tab must show access cards');
+  assert.match(tenants, /งานซ่อมที่เกี่ยวข้อง/,
+    'history tab must show tickets, not only bills/contracts');
 });
 
 test('admin booking-to-contract handoff preserves booking reservation context', () => {
@@ -5213,6 +5270,24 @@ test('contract PDF embeds online signature when available', () => {
     'must hand the buffer to the renderer');
 });
 
+test('GET /api/tenants list includes last contract and outstanding ledger for audit/search', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'tenant-ops.js'), 'utf8');
+  const block = src.match(/r\.get\('\/', requireAuth[\s\S]+?r\.get\('\/lookup-by-citizen-id'/);
+  assert.ok(block, 'tenant list handler must exist before lookup route');
+  assert.match(block[0], /LEFT JOIN LATERAL \([\s\S]{0,500}FROM contracts c[\s\S]{0,300}WHERE c\.tenant_id = t\.id/,
+    'tenant list must join latest contract even when current_room_id is null');
+  assert.match(block[0], /lc\.room_id AS last_room_id[\s\S]{0,220}lc\.contract_no AS last_contract_no/,
+    'tenant list must expose last room and contract number');
+  assert.match(block[0], /COALESCE\(ledger\.outstanding_count, 0\)[\s\S]{0,160}COALESCE\(ledger\.outstanding_total, 0\)/,
+    'tenant list must expose outstanding bill totals');
+  assert.match(block[0], /LOWER\(COALESCE\(lc\.room_id,''\)\)[\s\S]{0,160}LOWER\(COALESCE\(lc\.contract_no,''\)\)/,
+    'tenant search must cover old room id and contract number');
+  assert.match(block[0], /โหลดรายชื่อผู้เช่าไม่สำเร็จ[\s\S]{0,240}ตาราง tenants\/contracts\/bills/,
+    'tenant list DB failures must return an actionable Thai hint');
+});
+
 test('GET /api/tenants/:id/history returns combined view (works on moved_out)', () => {
   // Moved to routes/tenant-ops.js in round 9.
   const fs = require('node:fs');
@@ -5230,6 +5305,28 @@ test('GET /api/tenants/:id/history returns combined view (works on moved_out)', 
   assert.match(src, /paymentsTotal/, 'totals must include verified-payments sum');
   assert.match(src, /accessCardsActive[\s\S]{0,200}accessCardsRevoked/,
     'totals must include card-status counts');
+});
+
+test('GET /api/rooms/:id/history reads contract history, not only current_room_id', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'rooms.js'), 'utf8');
+  const block = src.match(/r\.get\('\/:id\/history'[\s\S]+?return r;/);
+  assert.ok(block, 'room history endpoint must exist');
+  assert.match(block[0], /FROM contracts c[\s\S]{0,300}WHERE c\.room_id=\$1/,
+    'room history must include moved-out occupants from contracts.room_id');
+  assert.match(block[0], /UNION ALL[\s\S]{0,800}FROM tenants t[\s\S]{0,300}t\.current_room_id=\$1/,
+    'room history must retain current-room fallback for legacy tenants without contracts');
+  assert.match(block[0], /contract_no[\s\S]{0,180}contract_status[\s\S]{0,180}move_in_date[\s\S]{0,180}move_out_date/,
+    'history rows must expose contract audit fields');
+  assert.match(block[0], /occupancies: tenants\.rows/,
+    'response must expose occupancies while preserving tenants for backward compatibility');
+  assert.match(block[0], /INVALID_ROOM_ID/,
+    'room history invalid id must be machine-readable');
+  assert.match(block[0], /ROOM_NOT_FOUND/,
+    'room history missing room must be machine-readable');
+  assert.match(block[0], /โหลดประวัติห้องไม่สำเร็จ[\s\S]{0,240}rooms_v2\/contracts\/tenants\/bills/,
+    'room history DB failure must be actionable');
 });
 
 test('GET /api/tenants/lookup-by-citizen-id finds active and moved_out records', () => {

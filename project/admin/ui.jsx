@@ -358,6 +358,7 @@ const EXTRA_STATUS = {
   // Tenant lifecycle
   active:       { th: 'ใช้งาน',     dot: '#059669', soft: '#E3F5EC', ink: '#064E3B' },
   moved_out:    { th: 'ย้ายออก',    dot: '#6B7280', soft: '#F0F2F7', ink: '#1F2937' },
+  blacklist:    { th: 'แบล็คลิสต์', dot: '#DC2626', soft: '#FCE7E7', ink: '#7F1D1D' },
   blacklisted:  { th: 'แบล็คลิสต์', dot: '#DC2626', soft: '#FCE7E7', ink: '#7F1D1D' },
   // Contract lifecycle
   signed:       { th: 'เซ็นแล้ว',   dot: '#059669', soft: '#E3F5EC', ink: '#064E3B' },
