@@ -32,6 +32,7 @@ const TR = {
     secure: 'ปลอดภัย',
 
     // Home
+    overview: 'ภาพรวม', overviewSub: 'สรุปสถานะห้องและรายการล่าสุดของคุณ',
     currentBill: 'บิลปัจจุบัน', payPromptpay: 'จ่ายด้วย PromptPay',
     downloadPdf: 'ดาวน์โหลด PDF', receipt: 'ใบเสร็จ',
     yourRoom: 'ห้องของคุณ', floor: 'ชั้น', remainingContract: 'สัญญาเหลือ',
@@ -154,6 +155,7 @@ const TR = {
     loginIntroP: 'See bills, pay with PromptPay, check your lease and report repairs — all in one place.',
     secure: 'Secure',
 
+    overview: 'Overview', overviewSub: 'Your room status and latest activity at a glance',
     currentBill: 'Current bill', payPromptpay: 'Pay with PromptPay',
     downloadPdf: 'Download PDF', receipt: 'Receipt',
     yourRoom: 'Your room', floor: 'Floor', remainingContract: 'Contract left',
@@ -1170,6 +1172,13 @@ function HomeView({ tenant, locale, bills, tickets, contract, goto }) {
 
   return (
     <div className="anim-in">
+      {/* Every other tenant view starts with a SectionHeader (title +
+          subtitle), so Home needs one too — otherwise switching from
+          Bills/Payments/Contract/Maintenance/Profile to Home shifts the
+          first row of real content up by ~70px (the height of the header
+          band on the other views), which reads as a page-jump even after
+          window.scrollTo(0,0) reset the scroll. */}
+      <SectionHeader title={t('overview')} subtitle={t('overviewSub')} />
       {unpaid ? (
         <div className="home-grid" style={{ display: 'grid', gap: 'var(--sp-4)', gridTemplateColumns: 'minmax(0,1.4fr) minmax(0,1fr)' }}>
           <Card pad={0} style={{ overflow: 'hidden' }}>
@@ -1368,7 +1377,7 @@ function BillsView({ locale, bills, refresh, slipFeature, openId, setOpenId }) {
             border: '1px solid ' + (filter === f.id ? 'var(--ink)' : 'var(--line-2)'),
             background: filter === f.id ? 'var(--ink)' : 'var(--surface)',
             color: filter === f.id ? 'var(--bg)' : 'var(--ink-2)',
-            fontSize: 13, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap',
+            fontSize: 'var(--fs-sm)', fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap',
           }}>{f.label} <span style={{ opacity: 0.6, marginLeft: 4 }}>{f.count}</span></button>
         ))}
       </div>
@@ -1998,7 +2007,11 @@ function ContractView({ locale, tenant, contract }) {
   if (!c) {
     return (
       <div className="anim-in">
-        <SectionHeader title={t('myContract')} />
+        {/* Keep the same title + subtitle line as the active-contract
+            branch so the header band has identical height whether or
+            not a lease has loaded — otherwise the page jumps by ~20px
+            the moment the contract API returns. */}
+        <SectionHeader title={t('myContract')} subtitle={`${t('contractNo')} —`} />
         <Empty icon="contract" title={t('noContract')} />
       </div>
     );
@@ -2122,7 +2135,7 @@ function MaintenanceView({ locale, tenant, tickets, refresh }) {
             border: '1px solid ' + (tab === f.id ? 'var(--ink)' : 'var(--line-2)'),
             background: tab === f.id ? 'var(--ink)' : 'var(--surface)',
             color: tab === f.id ? 'var(--bg)' : 'var(--ink-2)',
-            fontSize: 13, fontWeight: 600, cursor: 'pointer',
+            fontSize: 'var(--fs-sm)', fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap',
           }}>{f.l}</button>
         ))}
       </div>
