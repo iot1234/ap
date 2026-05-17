@@ -33,6 +33,10 @@ const ROOM_TYPE_DEFAULTS = Object.freeze({
   studio:   { rent: 6800, ac: true },
 });
 
+const MIN_SENSIBLE_RENT = 100;
+const MIN_SENSIBLE_CONTRACT_RENT = 1000;
+const CONTRACT_RENT_REFERENCE_RATIO = 0.5;
+
 function roomTypeOf(room) {
   return String(room?.type || room?.room_type || room?.roomType || 'standard');
 }
@@ -45,6 +49,29 @@ function positiveNumberOrNull(v) {
   if (v === undefined || v === null || v === '') return null;
   const n = Number(v);
   return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function isImplausiblyLowRent(v, min = MIN_SENSIBLE_RENT) {
+  if (v === undefined || v === null || v === '') return false;
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 && n < min;
+}
+
+function hasImplausiblyLowConfiguredRate(config, type) {
+  const r = config?.rates?.[type];
+  return !!(r && Object.prototype.hasOwnProperty.call(r, 'rent')
+    && isImplausiblyLowRent(r.rent, MIN_SENSIBLE_RENT));
+}
+
+function getConfiguredBaseRent(config, type, typeDefault) {
+  const r = config?.rates?.[type];
+  if (!r || !Object.prototype.hasOwnProperty.call(r, 'rent') || r.rent === null || r.rent === '') {
+    return typeDefault.rent;
+  }
+  const n = Number(r.rent);
+  if (!Number.isFinite(n)) return typeDefault.rent;
+  if (isImplausiblyLowRent(n, MIN_SENSIBLE_RENT)) return typeDefault.rent;
+  return n;
 }
 
 /**
@@ -68,9 +95,7 @@ function computeFromFormula(room, config) {
   // type-default acts as a safety net ONLY when admin hasn't configured
   // this type yet (fresh deploy day 1).
   const typeDefault = ROOM_TYPE_DEFAULTS[type] || ROOM_TYPE_DEFAULTS.standard;
-  const base = r && r.rent != null && Number.isFinite(Number(r.rent))
-    ? Number(r.rent)
-    : typeDefault.rent;
+  const base = getConfiguredBaseRent(cfg, type, typeDefault);
 
   const floor = (cfg.floorPremium || {})[room.floor] || 0;
   const view  = (cfg.viewPremium  || {})[roomViewOf(room)]  || 0;
@@ -155,7 +180,18 @@ function resolveBillingRent({ room, contract, config }) {
   if (hasUsableType && hasConfiguredRate) {
     const formula = computeFromFormula(room, config);
     if (formula > 0) {
-      return { rent: formula, source: 'formula' };
+      return {
+        rent: formula,
+        source: 'formula',
+        warning: hasImplausiblyLowConfiguredRate(config, type)
+          ? {
+              code: 'CONFIG_RENT_TOO_LOW_IGNORED',
+              type,
+              configuredRent: Number(config.rates[type].rent),
+              fallbackBaseRent: (ROOM_TYPE_DEFAULTS[type] || ROOM_TYPE_DEFAULTS.standard).rent,
+            }
+          : undefined,
+      };
     }
   }
 
@@ -176,6 +212,55 @@ function resolveBillingRent({ room, contract, config }) {
     if (fallback > 0) return { rent: fallback, source: 'formula' };
   }
   return { rent: 0, source: 'legacy' };
+}
+
+function resolveExpectedRoomRent({ room, config }) {
+  return resolveBillingRent({ room, config });
+}
+
+function assessContractRent({ monthlyRent, room = null, config = null } = {}) {
+  const rent = Number(monthlyRent);
+  if (!Number.isFinite(rent) || rent <= 0) {
+    return {
+      ok: false,
+      code: 'CONTRACT_RENT_INVALID',
+      field: 'monthlyRent',
+      rent: Number.isFinite(rent) ? rent : null,
+      message: 'monthlyRent must be a positive number',
+      hint: 'Enter the real monthly rent before creating or approving the contract.',
+    };
+  }
+
+  const reference = room ? resolveExpectedRoomRent({ room, config }) : { rent: 0, source: 'none' };
+  const referenceRent = Number(reference.rent) || 0;
+  const referenceFloor = referenceRent > 0
+    ? Math.round(referenceRent * CONTRACT_RENT_REFERENCE_RATIO * 100) / 100
+    : 0;
+  const minimumRent = Math.max(MIN_SENSIBLE_CONTRACT_RENT, referenceFloor);
+
+  if (rent < minimumRent) {
+    return {
+      ok: false,
+      code: 'CONTRACT_RENT_TOO_LOW',
+      field: 'monthlyRent',
+      rent,
+      minimumRent,
+      referenceRent,
+      referenceSource: reference.source || null,
+      message: referenceRent > 0
+        ? `monthlyRent ${rent} is suspiciously low for this room; expected at least ${minimumRent} from ${reference.source} rent ${referenceRent}`
+        : `monthlyRent ${rent} is suspiciously low; expected at least ${minimumRent}`,
+      hint: 'Check for missing zeros or stale pricing config. Use force only for a deliberate legacy migration.',
+    };
+  }
+
+  return {
+    ok: true,
+    rent,
+    minimumRent,
+    referenceRent,
+    referenceSource: reference.source || null,
+  };
 }
 
 /**
@@ -206,7 +291,14 @@ function previewImpact(rooms, oldConfig, newConfig) {
 
 module.exports = {
   resolveBillingRent,
+  resolveExpectedRoomRent,
+  assessContractRent,
   computeFromFormula,
   previewImpact,
+  isImplausiblyLowRent,
+  hasImplausiblyLowConfiguredRate,
+  MIN_SENSIBLE_RENT,
+  MIN_SENSIBLE_CONTRACT_RENT,
+  CONTRACT_RENT_REFERENCE_RATIO,
   ROOM_TYPE_DEFAULTS,
 };

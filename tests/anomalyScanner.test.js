@@ -185,6 +185,34 @@ test('detector: contract without monthly_rent → CONTRACT_NO_RENT', async () =>
   assert.ok(a.fix.includes('backfill-contract-rents'));
 });
 
+test('detector: low active contract rent -> CONTRACT_RENT_TOO_LOW', async () => {
+  const pool = stubPool({
+    'monthly_rent < $1::numeric': [
+      { id: 19, contract_no: 'C-2026-0019', tenant_id: 19, room_id: '103', monthly_rent: 201, reference_rent: 4500 },
+    ],
+    'baankarn_config_v1': [{ value: { rates: { standard: { rent: 4500 } }, utilities: { waterRate: 18, elecRate: 8 } } }],
+  });
+  const out = await scanner.scan(pool);
+  const a = out.items.find((i) => i.id === 'CONTRACT_RENT_TOO_LOW');
+  assert.ok(a);
+  assert.strictEqual(a.severity, 'critical');
+  assert.strictEqual(a.domain, 'contract');
+  assert.match(a.items[0].label, /201/);
+});
+
+test('detector: signed but unlocked contract -> CONTRACT_SIGNED_NOT_LOCKED', async () => {
+  const pool = stubPool({
+    'signed_at IS NOT NULL': [
+      { id: 1, contract_no: 'C-2026-0001', tenant_id: 1, room_id: '101', signed_at: '2026-05-10' },
+    ],
+    'baankarn_config_v1': [{ value: { rates: { standard: { rent: 4500 } }, utilities: { waterRate: 18, elecRate: 8 } } }],
+  });
+  const out = await scanner.scan(pool);
+  const a = out.items.find((i) => i.id === 'CONTRACT_SIGNED_NOT_LOCKED');
+  assert.ok(a);
+  assert.strictEqual(a.severity, 'warn');
+});
+
 test('detector: expired-still-active contract → CONTRACT_EXPIRED_ACTIVE', async () => {
   const pool = stubPool({
     "end_date < CURRENT_DATE - INTERVAL '7 days'": [

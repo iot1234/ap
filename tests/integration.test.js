@@ -3543,6 +3543,8 @@ test('checkin enforces moveInDate window + deposit cap + double-occupancy', () =
   assert.match(src, /DEPOSIT_TOO_LARGE/, 'deposit-too-large guard must exist');
   assert.match(src, /TENANT_ALREADY_ACTIVE/, 'tenant-already-active-elsewhere guard must exist');
   assert.match(src, /ROOM_OCCUPIED/, 'room-occupied-by-other-tenant guard must exist');
+  assert.match(src, /pricing\.assessContractRent/, 'rent sanity guard must use the shared pricing helper');
+  assert.match(src, /CONTRACT_RENT_TOO_LOW/, 'positive-but-too-low rent must be rejected');
   assert.match(src, /IDENTITY_INCOMPLETE/, 'identity-completeness guard must exist');
   // Force-bypass must record an audit + owner notify so abuses are visible.
   assert.match(src, /forced: isForced/, 'force-bypass must be audit-logged');
@@ -4014,6 +4016,10 @@ test('quick-invite has moveInDate window + deposit cap (parity with checkin)', (
     'quick-invite must surface MOVE_IN_OUT_OF_WINDOW like checkin');
   assert.match(block, /DEPOSIT_TOO_LARGE/,
     'quick-invite must surface DEPOSIT_TOO_LARGE like checkin');
+  assert.match(block, /pricing\.assessContractRent/,
+    'quick-invite must use the shared rent sanity guard');
+  assert.match(block, /CONTRACT_RENT_TOO_LOW/,
+    'quick-invite must reject positive but suspiciously low contract rents');
   assert.match(block, /tenancy\.moveInPastDays \?\? 30/);
   assert.match(block, /tenancy\.depositMaxMonths \?\? 3/);
   // Force-bypass mirrors checkin
@@ -4433,6 +4439,7 @@ test('approve preflight blocks invalid contract targets before tenant-room sync'
   assert.match(block, /CONTRACT_APPROVAL_TARGET_INVALID/);
   assert.match(src, /CONTRACT_TENANT_MISMATCH/);
   assert.match(src, /CONTRACT_RENT_INVALID/);
+  assert.match(src, /CONTRACT_RENT_TOO_LOW/);
 });
 
 test('contract admin lists expire stale pending invites and return warnings', () => {
@@ -4444,6 +4451,7 @@ test('contract admin lists expire stale pending invites and return warnings', ()
   assert.match(src, /await expirePendingContractInvitations\(pool\)/);
   assert.match(src, /function buildContractWarnings/);
   assert.match(src, /TENANT_ROOM_MISMATCH/);
+  assert.match(src, /CONTRACT_RENT_TOO_LOW/);
   assert.match(src, /CONTRACT_IDENTITY_INCOMPLETE/);
   assert.match(src, /LOCKED_CONTRACT_MISSING_TERMS_SNAPSHOT/);
   assert.match(src, /warning_severity: contractWarningSeverity\(warnings\)/);

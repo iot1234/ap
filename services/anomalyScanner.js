@@ -58,7 +58,7 @@ async function detectPricingConfig(pool) {
   for (const [type, r] of Object.entries(rates)) {
     if (!r || typeof r !== 'object') continue;
     const rent = Number(r.rent);
-    if (Number.isFinite(rent) && rent > 0 && rent < 100) {
+    if (Number.isFinite(rent) && pricing.isImplausiblyLowRent(rent, pricing.MIN_SENSIBLE_RENT)) {
       lowRent.push({ id: type, label: `${type} = ฿${rent}` });
     }
   }
@@ -241,6 +241,75 @@ async function detectContractAnomalies(pool) {
       count: noRent.rows.length,
       items: noRent.rows.slice(0, 10).map((c) => ({ id: c.contract_no, label: `${c.contract_no} ห้อง ${c.room_id}` })),
       fix: 'railway run node scripts/backfill-contract-rents.js --apply',
+    });
+  }
+  const lowRent = await pool.query(`
+    WITH blob_rooms AS (
+      SELECT rec.key AS room_code, rec.val AS room
+        FROM app_data ad
+        CROSS JOIN LATERAL jsonb_each(ad.value) AS rec(key, val)
+       WHERE ad.key='baankarn_rooms_v1'
+         AND jsonb_typeof(ad.value)='object'
+    ), contract_refs AS (
+      SELECT c.id, c.contract_no, c.tenant_id, c.room_id,
+             c.monthly_rent::numeric AS monthly_rent,
+             COALESCE(
+               CASE WHEN (br.room->>'rent') ~ '^[0-9]+(\\.[0-9]+)?$' THEN (br.room->>'rent')::numeric END,
+               rv.rent_price::numeric,
+               0
+             ) AS reference_rent
+        FROM contracts c
+        LEFT JOIN rooms_v2 rv ON rv.room_code = c.room_id AND rv.deleted_at IS NULL
+        LEFT JOIN blob_rooms br ON br.room_code = c.room_id
+       WHERE c.status='active' AND c.deleted_at IS NULL
+    )
+    SELECT *
+      FROM contract_refs
+     WHERE monthly_rent > 0
+       AND (
+         monthly_rent < $1::numeric
+         OR (reference_rent > 0 AND monthly_rent < reference_rent * $2::numeric)
+       )
+     ORDER BY id ASC
+     LIMIT 20`,
+    [pricing.MIN_SENSIBLE_CONTRACT_RENT, pricing.CONTRACT_RENT_REFERENCE_RATIO]
+  );
+  if (lowRent.rows.length) {
+    items.push({
+      id: 'CONTRACT_RENT_TOO_LOW',
+      severity: 'critical',
+      domain: 'contract',
+      message: `${lowRent.rows.length} สัญญา active ค่าเช่าต่ำผิดปกติ`,
+      detail: `monthly_rent ต่ำกว่า ฿${pricing.MIN_SENSIBLE_CONTRACT_RENT} หรือ ต่ำกว่า ${Math.round(pricing.CONTRACT_RENT_REFERENCE_RATIO * 100)}% ของราคาอ้างอิงห้อง — บิลเดือนถัดไปจะผิดถ้าไม่แก้สัญญา`,
+      count: lowRent.rows.length,
+      items: lowRent.rows.slice(0, 10).map((c) => ({
+        id: c.contract_no,
+        label: `${c.contract_no} ห้อง ${c.room_id} — ค่าเช่า ฿${c.monthly_rent} (อ้างอิง ฿${c.reference_rent || '-'})`,
+      })),
+      fix: '/admin#contracts',
+    });
+  }
+  const signedUnlocked = await pool.query(`
+    SELECT id, contract_no, room_id, tenant_id, signed_at
+      FROM contracts
+     WHERE status='active' AND deleted_at IS NULL
+       AND signed_at IS NOT NULL
+       AND locked_at IS NULL
+     ORDER BY signed_at ASC
+     LIMIT 20`);
+  if (signedUnlocked.rows.length) {
+    items.push({
+      id: 'CONTRACT_SIGNED_NOT_LOCKED',
+      severity: 'warn',
+      domain: 'contract',
+      message: `${signedUnlocked.rows.length} สัญญาเซ็นแล้วแต่ยังไม่ lock`,
+      detail: 'ผู้เช่าลงนามแล้ว แต่ admin ยังไม่ approve/lock ทำให้ snapshot เงื่อนไขและสถานะห้องยังค้างอยู่ในสถานะรอตรวจ',
+      count: signedUnlocked.rows.length,
+      items: signedUnlocked.rows.slice(0, 10).map((c) => ({
+        id: c.contract_no,
+        label: `${c.contract_no} ห้อง ${c.room_id} signed_at=${c.signed_at}`,
+      })),
+      fix: '/admin#contracts',
     });
   }
   // Active contract past end_date by > 7 days

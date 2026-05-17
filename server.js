@@ -20,6 +20,7 @@ const features = require('./services/features');
 const cryptoSvc = require('./services/crypto');
 const storage = require('./services/storage');
 const billing = require('./services/billing');
+const pricing = require('./services/pricing');
 const notifier = require('./services/notifier');
 const meter = require('./services/meter');
 const sentry = require('./services/sentry');
@@ -548,7 +549,6 @@ const PUBLIC_KEYS = new Set(['baankarn_rooms_v1', 'baankarn_config_v1']);
 // yet; the per-key GET path always passes config.
 function maskRoomsPublic(roomsObj, config) {
   if (!roomsObj || typeof roomsObj !== 'object') return roomsObj;
-  const pricing = require('./services/pricing');
   const out = {};
   for (const [id, r] of Object.entries(roomsObj)) {
     if (!r || typeof r !== 'object') continue;
@@ -6647,6 +6647,20 @@ function buildContractWarnings(row) {
       'แก้ค่าเช่าก่อน lock/ออกบิล หรือสร้างสัญญาใหม่ด้วยค่าเช่าที่ถูกต้อง'
     ));
   }
+  const rentAssessment = pricing.assessContractRent({ monthlyRent: row.monthly_rent });
+  if (isActive && !rentAssessment.ok && rentAssessment.code === 'CONTRACT_RENT_TOO_LOW') {
+    warnings.push(contractWarning(
+      'CONTRACT_RENT_TOO_LOW',
+      'error',
+      'ค่าเช่าในสัญญาต่ำผิดปกติ',
+      `ค่าเช่า ${rentAssessment.rent} ต่ำกว่าขั้นต่ำที่ระบบยอมรับ (${rentAssessment.minimumRent}) อาจเกิดจากพิมพ์ตกศูนย์หรือ config ราคาเก่าค้าง`,
+      'ตรวจค่าเช่าในสัญญาและสร้างฉบับใหม่/แก้ข้อมูลก่อนอนุมัติหรือออกบิล',
+      {
+        monthlyRent: rentAssessment.rent,
+        minimumRent: rentAssessment.minimumRent,
+      }
+    ));
+  }
   if (isActive && Number(row.deposit) < 0) {
     warnings.push(contractWarning(
       'CONTRACT_DEPOSIT_INVALID',
@@ -6866,13 +6880,27 @@ function validateContractApprovalTarget(inv, contract) {
       action: 'ใช้เฉพาะสัญญา active หรือสร้างสัญญาใหม่',
     });
   }
-  if (Number(contract.monthly_rent) <= 0) {
+  const rentAssessment = pricing.assessContractRent({ monthlyRent: contract.monthly_rent });
+  if (rentAssessment.code === 'CONTRACT_RENT_INVALID') {
     issues.push({
       code: 'CONTRACT_RENT_INVALID',
       field: 'monthly_rent',
       label: 'ค่าเช่าไม่ถูกต้อง',
       consequence: 'บิลแรกและบิลรายเดือนอาจเป็น 0 หรือไม่ตรงกับที่ตกลงในสัญญา',
       action: 'แก้ค่าเช่าให้ถูกต้องก่อน approve',
+    });
+  }
+  if (rentAssessment.code === 'CONTRACT_RENT_TOO_LOW') {
+    issues.push({
+      code: 'CONTRACT_RENT_TOO_LOW',
+      field: 'monthly_rent',
+      label: 'ค่าเช่าต่ำผิดปกติ',
+      consequence: `ค่าเช่า ${rentAssessment.rent} ต่ำกว่าขั้นต่ำที่ระบบยอมรับ (${rentAssessment.minimumRent}) ถ้า approve ต่อ บิลรายเดือนจะต่ำผิดจริง`,
+      action: 'ตรวจว่าพิมพ์ตกศูนย์หรือไม่ แล้วสร้าง/แก้สัญญาด้วยค่าเช่าที่ถูกต้องก่อน approve',
+      detail: {
+        monthlyRent: rentAssessment.rent,
+        minimumRent: rentAssessment.minimumRent,
+      },
     });
   }
   if (Number(contract.deposit) < 0) {
@@ -8442,6 +8470,34 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
           currentStatus: roomState,
           reservedBy: currentReservationOwner,
           hint: 'เปิดจาก booking/สัญญาที่จองห้องนี้ไว้ หรือยกเลิก reservation เดิมก่อน',
+        });
+      }
+
+      let pricingConfig = {};
+      try {
+        const cfgQ = await client.query(
+          `SELECT value FROM app_data WHERE key='baankarn_config_v1' LIMIT 1`
+        );
+        pricingConfig = cfgQ.rows[0]?.value || {};
+      } catch { /* keep default pricing reference */ }
+      const rentAssessment = pricing.assessContractRent({
+        monthlyRent,
+        room: blobRoom || roomV2,
+        config: pricingConfig,
+      });
+      if (!isForced && !rentAssessment.ok) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({
+          error: rentAssessment.referenceRent > 0
+            ? `ค่าเช่า ${monthlyRent} ต่ำผิดปกติสำหรับห้อง ${roomId} (ราคาอ้างอิง ${rentAssessment.referenceRent}, ขั้นต่ำที่ยอมรับ ${rentAssessment.minimumRent})`
+            : `ค่าเช่า ${monthlyRent} ต่ำผิดปกติ (ขั้นต่ำที่ยอมรับ ${rentAssessment.minimumRent})`,
+          code: rentAssessment.code || 'CONTRACT_RENT_TOO_LOW',
+          field: rentAssessment.field,
+          monthlyRent: rentAssessment.rent,
+          minimumRent: rentAssessment.minimumRent,
+          referenceRent: rentAssessment.referenceRent,
+          referenceSource: rentAssessment.referenceSource,
+          hint: 'ตรวจว่าพิมพ์ตกศูนย์หรือไม่ ถ้าเป็นงาน migrate ข้อมูลเก่าจริง ๆ ให้ส่ง { force: true } และระบบจะ audit-log',
         });
       }
 
@@ -10696,7 +10752,23 @@ app.get('/api/admin/production-readiness', requireAuth, requireRole('owner'), as
           WHERE deleted_at IS NULL
             AND status IN ('pending','overdue')
             AND tenant_id IS NULL) AS orphan_payable_bills,
-        (SELECT COUNT(*)::int FROM notifications_queue WHERE status='failed') AS failed_notifications`);
+        (SELECT COUNT(*)::int FROM tenants
+          WHERE deleted_at IS NULL
+            AND status='active'
+            AND (current_room_id IS NULL OR current_room_id='')) AS active_tenants_without_room,
+        (SELECT COUNT(*)::int FROM contracts
+          WHERE deleted_at IS NULL
+            AND status='active'
+            AND monthly_rent > 0
+            AND monthly_rent < $1::numeric) AS active_contract_low_rent,
+        (SELECT COUNT(*)::int FROM contracts
+          WHERE deleted_at IS NULL
+            AND status='active'
+            AND signed_at IS NOT NULL
+            AND locked_at IS NULL) AS signed_unlocked_contracts,
+        (SELECT COUNT(*)::int FROM notifications_queue WHERE status='failed') AS failed_notifications`,
+      [pricing.MIN_SENSIBLE_CONTRACT_RENT]
+    );
     const x = d.rows[0] || {};
     if (Number(x.legacy_rooms) > 0 && Number(x.rooms_v2) === 0) {
       fail('rooms_sync', 'Rooms sync',
@@ -10711,6 +10783,27 @@ app.get('/api/admin/production-readiness', requireAuth, requireRole('owner'), as
         'Reconcile tenant.current_room_id / rooms blob first, then link only unambiguous bills');
     } else {
       ok('orphan_bills', 'Bill ownership', 'No payable orphan bills');
+    }
+    if (Number(x.active_tenants_without_room) > 0) {
+      fail('active_tenant_room', 'Tenant room assignment',
+        `${x.active_tenants_without_room} active tenants have no current_room_id`,
+        'Open /admin#tenants, assign the correct room or run checkout/reconcile so tenant portal and billing can target the right room');
+    } else {
+      ok('active_tenant_room', 'Tenant room assignment', 'Every active tenant has a room');
+    }
+    if (Number(x.active_contract_low_rent) > 0) {
+      fail('contract_rent_guard', 'Contract rent sanity',
+        `${x.active_contract_low_rent} active contracts have monthly_rent below ฿${pricing.MIN_SENSIBLE_CONTRACT_RENT}`,
+        'Create corrected contracts or migrate the rows deliberately with force only after confirming the signed amount');
+    } else {
+      ok('contract_rent_guard', 'Contract rent sanity', 'No active contracts below the rent floor');
+    }
+    if (Number(x.signed_unlocked_contracts) > 0) {
+      warn('signed_unlocked_contracts', 'Contract approval state',
+        `${x.signed_unlocked_contracts} active contracts are signed but not locked`,
+        'Approve, reject, or expire the invitation so the legal snapshot and room state stop drifting');
+    } else {
+      ok('signed_unlocked_contracts', 'Contract approval state', 'No signed-but-unlocked contracts');
     }
     if (Number(x.failed_notifications) > 50) {
       warn('notification_backlog', 'Notification backlog',

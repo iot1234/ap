@@ -18,6 +18,12 @@ test('formula: uses config.rates over hardcoded default', () => {
   assert.strictEqual(r, 6500);
 });
 
+test('formula: ignores typo-tier configured rent and falls back to type default', () => {
+  const cfg = { rates: { standard: { rent: 1 } }, floorPremium: { 3: 900 } };
+  const r = pricing.computeFromFormula({ type: 'standard', floor: 3 }, cfg);
+  assert.strictEqual(r, 5400);
+});
+
 test('formula: stacks floorPremium + viewPremium + featurePremium', () => {
   const cfg = {
     rates: { deluxe: { rent: 6000 } },
@@ -155,6 +161,16 @@ test('resolver: formula when no contract + no override', () => {
   assert.strictEqual(out.source, 'formula');
 });
 
+test('resolver: stale low config rent is ignored before public/billing rent is resolved', () => {
+  const out = pricing.resolveBillingRent({
+    room: { id: '301', type: 'standard', floor: 3, rent: 4500 },
+    config: { rates: { standard: { rent: 1 } }, floorPremium: { 3: 900 } },
+  });
+  assert.strictEqual(out.source, 'formula');
+  assert.strictEqual(out.rent, 5400);
+  assert.strictEqual(out.warning.code, 'CONFIG_RENT_TOO_LOW_IGNORED');
+});
+
 test('resolver: legacy fallback when formula returns 0 AND room.rent is set', () => {
   // To hit this branch we need config to actively override the type
   // default to 0 (admin explicitly entered 0) AND no premiums apply.
@@ -188,6 +204,37 @@ test('resolver: nothing usable anywhere → returns 0 (signals caller to skip)',
   });
   assert.strictEqual(out.rent, 0);
   assert.strictEqual(out.source, 'legacy');
+});
+
+// === assessContractRent ===================================================
+
+test('assessContractRent: rejects positive but implausibly low rent', () => {
+  const out = pricing.assessContractRent({ monthlyRent: 555 });
+  assert.strictEqual(out.ok, false);
+  assert.strictEqual(out.code, 'CONTRACT_RENT_TOO_LOW');
+  assert.strictEqual(out.minimumRent, pricing.MIN_SENSIBLE_CONTRACT_RENT);
+});
+
+test('assessContractRent: rejects rent far below the room reference', () => {
+  const out = pricing.assessContractRent({
+    monthlyRent: 2000,
+    room: { id: '301', type: 'standard', floor: 3, rent: 4500 },
+    config: { rates: { standard: { rent: 4500 } }, floorPremium: { 3: 900 } },
+  });
+  assert.strictEqual(out.ok, false);
+  assert.strictEqual(out.code, 'CONTRACT_RENT_TOO_LOW');
+  assert.strictEqual(out.referenceRent, 5400);
+  assert.strictEqual(out.minimumRent, 2700);
+});
+
+test('assessContractRent: accepts rent at or above the guarded floor', () => {
+  const out = pricing.assessContractRent({
+    monthlyRent: 4500,
+    room: { id: '101', type: 'standard', floor: 1, rent: 4500 },
+    config: { rates: { standard: { rent: 4500 } } },
+  });
+  assert.strictEqual(out.ok, true);
+  assert.strictEqual(out.referenceRent, 4500);
 });
 
 // === previewImpact ========================================================

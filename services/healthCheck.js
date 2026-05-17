@@ -18,6 +18,7 @@ const fs = require('fs');
 const path = require('path');
 const features = require('./features');
 const secrets = require('./secrets');
+const pricing = require('./pricing');
 
 const SEVERITY_RANK = { ok: 0, warn: 1, error: 2 };
 
@@ -599,6 +600,10 @@ async function checkDataIntegrity(pool) {
             AND t.current_room_id IS NOT NULL
             AND t.current_room_id <> ''
             AND rv.status NOT IN ('occupied','overdue')) AS active_tenant_room_status_mismatch,
+        (SELECT COUNT(*)::int FROM tenants t
+          WHERE t.deleted_at IS NULL
+            AND t.status = 'active'
+            AND (t.current_room_id IS NULL OR t.current_room_id = '')) AS active_tenants_without_room,
         (SELECT COUNT(*)::int FROM rooms_v2 rv
           WHERE rv.deleted_at IS NULL
             AND rv.status IN ('occupied','overdue')
@@ -661,6 +666,37 @@ async function checkDataIntegrity(pool) {
           WHERE status='pending'
             AND expires_at IS NOT NULL
             AND expires_at <= NOW()) AS expired_pending_contract_invitations,
+        (WITH blob_rooms AS (
+           SELECT rec.key AS room_code, rec.val AS room
+             FROM app_data ad
+             CROSS JOIN LATERAL jsonb_each(ad.value) AS rec(key, val)
+            WHERE ad.key='baankarn_rooms_v1'
+              AND jsonb_typeof(ad.value) = 'object'
+         ), contract_refs AS (
+           SELECT c.id, c.monthly_rent::numeric AS monthly_rent,
+                  COALESCE(
+                    CASE WHEN (br.room->>'rent') ~ '^[0-9]+(\\.[0-9]+)?$' THEN (br.room->>'rent')::numeric END,
+                    rv.rent_price::numeric,
+                    0
+                  ) AS reference_rent
+             FROM contracts c
+             LEFT JOIN rooms_v2 rv ON rv.room_code = c.room_id AND rv.deleted_at IS NULL
+             LEFT JOIN blob_rooms br ON br.room_code = c.room_id
+            WHERE c.deleted_at IS NULL
+              AND c.status = 'active'
+         )
+         SELECT COUNT(*)::int FROM contract_refs
+          WHERE monthly_rent > 0
+            AND (
+              monthly_rent < $1::numeric
+              OR (reference_rent > 0 AND monthly_rent < reference_rent * $2::numeric)
+            )
+        ) AS active_contract_low_rent,
+        (SELECT COUNT(*)::int FROM contracts
+          WHERE deleted_at IS NULL
+            AND status = 'active'
+            AND signed_at IS NOT NULL
+            AND locked_at IS NULL) AS signed_unlocked_contracts,
         (SELECT CASE WHEN EXISTS (
                   SELECT 1 FROM contract_templates
                    WHERE deleted_at IS NULL AND enabled = TRUE
@@ -716,7 +752,9 @@ async function checkDataIntegrity(pool) {
                  AND c.status = 'active'
                  AND c.deleted_at IS NULL
             )
-        ) AS rooms_reserved_by_ghost_contract`);
+        ) AS rooms_reserved_by_ghost_contract`,
+      [pricing.MIN_SENSIBLE_CONTRACT_RENT, pricing.CONTRACT_RENT_REFERENCE_RATIO]
+    );
     const counts = countsQ.rows[0] || {};
 
     const dupRoomsQ = await pool.query(`
@@ -743,6 +781,15 @@ async function checkDataIntegrity(pool) {
          AND t.current_room_id <> ''
          AND rv.status NOT IN ('occupied','overdue')
        ORDER BY t.id ASC
+       LIMIT 10`);
+
+    const activeTenantsWithoutRoomQ = await pool.query(`
+      SELECT id, full_name, phone, status
+        FROM tenants
+       WHERE deleted_at IS NULL
+         AND status='active'
+         AND (current_room_id IS NULL OR current_room_id='')
+       ORDER BY id ASC
        LIMIT 10`);
 
     const busyRoomsWithoutTenantQ = await pool.query(`
@@ -814,6 +861,49 @@ async function checkDataIntegrity(pool) {
        ORDER BY due_date ASC, id ASC
        LIMIT 10`);
 
+    const activeContractLowRentQ = await pool.query(`
+      WITH blob_rooms AS (
+        SELECT rec.key AS room_code, rec.val AS room
+          FROM app_data ad
+          CROSS JOIN LATERAL jsonb_each(ad.value) AS rec(key, val)
+         WHERE ad.key='baankarn_rooms_v1'
+           AND jsonb_typeof(ad.value) = 'object'
+      ), contract_refs AS (
+        SELECT c.id, c.contract_no, c.room_id, c.tenant_id,
+               c.monthly_rent::numeric AS monthly_rent,
+               COALESCE(
+                 CASE WHEN (br.room->>'rent') ~ '^[0-9]+(\\.[0-9]+)?$' THEN (br.room->>'rent')::numeric END,
+                 rv.rent_price::numeric,
+                 0
+               ) AS reference_rent
+          FROM contracts c
+          LEFT JOIN rooms_v2 rv ON rv.room_code = c.room_id AND rv.deleted_at IS NULL
+          LEFT JOIN blob_rooms br ON br.room_code = c.room_id
+         WHERE c.deleted_at IS NULL
+           AND c.status = 'active'
+      )
+      SELECT *
+        FROM contract_refs
+       WHERE monthly_rent > 0
+         AND (
+           monthly_rent < $1::numeric
+           OR (reference_rent > 0 AND monthly_rent < reference_rent * $2::numeric)
+         )
+       ORDER BY id ASC
+       LIMIT 10`,
+      [pricing.MIN_SENSIBLE_CONTRACT_RENT, pricing.CONTRACT_RENT_REFERENCE_RATIO]
+    );
+
+    const signedUnlockedContractsQ = await pool.query(`
+      SELECT id, contract_no, room_id, tenant_id, signed_at
+        FROM contracts
+       WHERE deleted_at IS NULL
+         AND status='active'
+         AND signed_at IS NOT NULL
+         AND locked_at IS NULL
+       ORDER BY signed_at ASC
+       LIMIT 10`);
+
     const detail = {
       counts: {
         legacy_rooms: Number(counts.legacy_rooms) || 0,
@@ -825,22 +915,28 @@ async function checkDataIntegrity(pool) {
         invalid_bill_rows: Number(counts.invalid_bill_rows) || 0,
         invalid_payment_rows: Number(counts.invalid_payment_rows) || 0,
         active_tenant_room_status_mismatch: Number(counts.active_tenant_room_status_mismatch) || 0,
+        active_tenants_without_room: Number(counts.active_tenants_without_room) || 0,
         busy_rooms_without_active_tenant: Number(counts.busy_rooms_without_active_tenant) || 0,
         reserved_rooms_without_hold: Number(counts.reserved_rooms_without_hold) || 0,
         moved_out_with_active_contract: Number(counts.moved_out_with_active_contract) || 0,
         active_contract_identity_incomplete: Number(counts.active_contract_identity_incomplete) || 0,
         locked_contract_missing_terms_snapshot: Number(counts.locked_contract_missing_terms_snapshot) || 0,
         expired_pending_contract_invitations: Number(counts.expired_pending_contract_invitations) || 0,
+        active_contract_low_rent: Number(counts.active_contract_low_rent) || 0,
+        signed_unlocked_contracts: Number(counts.signed_unlocked_contracts) || 0,
         missing_default_contract_template: Number(counts.missing_default_contract_template) || 0,
         stranded_occupied_rooms: Number(counts.stranded_occupied_rooms) || 0,
         rooms_reserved_by_ghost_contract: Number(counts.rooms_reserved_by_ghost_contract) || 0,
       },
       duplicate_active_room_assignments: dupRoomsQ.rows,
       active_tenant_room_status_mismatch_samples: activeTenantRoomStatusQ.rows,
+      active_tenants_without_room_samples: activeTenantsWithoutRoomQ.rows,
       busy_rooms_without_active_tenant_samples: busyRoomsWithoutTenantQ.rows,
       reserved_rooms_without_hold_samples: reservedRoomsWithoutHoldQ.rows,
       active_tenants_missing_room: missingRoomsQ.rows,
       orphan_payable_bill_samples: orphanBillsQ.rows,
+      active_contract_low_rent_samples: activeContractLowRentQ.rows,
+      signed_unlocked_contract_samples: signedUnlockedContractsQ.rows,
     };
 
     // Sample list of the orphaned contract pairs so admin can act directly
@@ -917,6 +1013,12 @@ async function checkDataIntegrity(pool) {
     if (detail.counts.active_tenant_room_status_mismatch > 0) {
       errors.push('active tenants are assigned to rooms not marked occupied/overdue');
     }
+    if (detail.counts.active_tenants_without_room > 0) {
+      errors.push(
+        `${detail.counts.active_tenants_without_room} active tenant(s) have no current_room_id - ` +
+        `tenant portal, billing targeting, and room reconciliation cannot work until assigned or checked out`
+      );
+    }
     if (detail.counts.busy_rooms_without_active_tenant > 0) {
       errors.push('rooms are marked occupied/overdue without an active tenant');
     }
@@ -952,6 +1054,18 @@ async function checkDataIntegrity(pool) {
       errors.push(
         `${detail.counts.locked_contract_missing_terms_snapshot} locked contract(s) are missing terms_template_snapshot — ` +
         `PDF terms may change after template edits; backfill the intended snapshot before relying on the PDF as immutable evidence`
+      );
+    }
+    if (detail.counts.active_contract_low_rent > 0) {
+      errors.push(
+        `${detail.counts.active_contract_low_rent} active contract(s) have suspiciously low monthly_rent - ` +
+        `future bills will inherit the bad contract amount unless the contract is corrected`
+      );
+    }
+    if (detail.counts.signed_unlocked_contracts > 0) {
+      warnings.push(
+        `${detail.counts.signed_unlocked_contracts} active contract(s) are signed but not locked - ` +
+        `approve/reject/expire the invitation so the legal snapshot and room state stop drifting`
       );
     }
     if (detail.counts.active_contract_identity_incomplete > 0) {
@@ -1172,7 +1286,7 @@ async function checkConfigSanity(pool) {
     }
     const cfg = rows[0].value || {};
     const issues = [];
-    const MIN_RENT = 100;
+    const MIN_RENT = pricing.MIN_SENSIBLE_RENT;
     const rates = cfg.rates || {};
     for (const [type, r] of Object.entries(rates)) {
       if (!r || typeof r !== 'object') continue;

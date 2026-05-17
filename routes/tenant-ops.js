@@ -28,6 +28,7 @@ const { schemas } = require('../schemas');
 const { validateBody } = require('../middleware/validate');
 const billing = require('../services/billing');
 const features = require('../services/features');
+const pricing = require('../services/pricing');
 const notifier = require('../services/notifier');
 const cryptoSvc = require('../services/crypto');
 const lineNotify = require('../services/line');
@@ -1582,7 +1583,71 @@ module.exports = function buildTenantOpsRouter(ctx) {
           }
         }
 
-        // (5) Identity / address / emergency contact required when the
+        // (5) Rent sanity against the locked room price. Positive-but-tiny
+        // values (201/555) are more dangerous than 0 because they pass the
+        // old "must be >0" checks and then become the legal monthly_rent.
+        // Compare the entered rent with the room resolver reference before
+        // writing tenant/room/contract state.
+        let pricingConfig = {};
+        try {
+          const cfgQ = await client.query(
+            `SELECT value FROM app_data WHERE key='baankarn_config_v1' LIMIT 1`
+          );
+          pricingConfig = cfgQ.rows[0]?.value || {};
+        } catch { /* keep default pricing reference */ }
+        let blobRoomForRent = null;
+        const roomBlobQ = await client.query(
+          `SELECT value FROM app_data WHERE key='baankarn_rooms_v1' FOR UPDATE`
+        );
+        const roomsForRent = roomBlobQ.rows.length && roomBlobQ.rows[0].value
+          && typeof roomBlobQ.rows[0].value === 'object'
+          ? roomBlobQ.rows[0].value
+          : {};
+        blobRoomForRent = roomsForRent[roomId] || null;
+        let roomV2ForRent = null;
+        try {
+          const roomV2Q = await client.query(
+            `SELECT room_code, room_type, floor, room_no, rent_price, deposit_price,
+                    wifi_fee, status, rent_override, rent_override_reason
+               FROM rooms_v2
+              WHERE room_code=$1 AND deleted_at IS NULL
+              FOR UPDATE`,
+            [roomId]
+          );
+          roomV2ForRent = roomV2Q.rows[0] || null;
+        } catch (err) {
+          if (err.code !== '42P01') throw err;
+        }
+        if (!blobRoomForRent && !roomV2ForRent && !isForced) {
+          await client.query('ROLLBACK');
+          return res.status(404).json({
+            error: `ไม่พบห้อง ${roomId} ในระบบ — ตรวจเลขห้องก่อน check-in`,
+            code: 'ROOM_NOT_FOUND',
+            requestedRoom: roomId,
+          });
+        }
+        const rentAssessment = pricing.assessContractRent({
+          monthlyRent,
+          room: blobRoomForRent || roomV2ForRent,
+          config: pricingConfig,
+        });
+        if (!isForced && !rentAssessment.ok) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({
+            error: rentAssessment.referenceRent > 0
+              ? `ค่าเช่า ${monthlyRent} ต่ำผิดปกติสำหรับห้อง ${roomId} (ราคาอ้างอิง ${rentAssessment.referenceRent}, ขั้นต่ำที่ยอมรับ ${rentAssessment.minimumRent})`
+              : `ค่าเช่า ${monthlyRent} ต่ำผิดปกติ (ขั้นต่ำที่ยอมรับ ${rentAssessment.minimumRent})`,
+            code: rentAssessment.code || 'CONTRACT_RENT_TOO_LOW',
+            field: rentAssessment.field,
+            monthlyRent: rentAssessment.rent,
+            minimumRent: rentAssessment.minimumRent,
+            referenceRent: rentAssessment.referenceRent,
+            referenceSource: rentAssessment.referenceSource,
+            hint: 'ตรวจว่าพิมพ์ตกศูนย์หรือไม่ ถ้าเป็นงาน migrate ข้อมูลเก่าจริง ๆ ให้ส่ง { force: true } และระบบจะ audit-log',
+          });
+        }
+
+        // (6) Identity / address / emergency contact required when the
         // feature flag insists. Lookup uses the FOR UPDATE-locked row.
         // Identity images: split into two distinct missing markers so admin
         // knows which side still needs uploading (the most common confusion
