@@ -79,6 +79,9 @@ const TR = {
     colBill: 'บิล', colDate: 'วันที่ส่ง', colMethod: 'ช่องทาง', colAmount: 'ยอด', colAction: 'การจัดการ',
     noPayments: 'ยังไม่มีประวัติการชำระเงิน',
     viewSlip: 'ดูสลิป', reuploadSlip: 'อัปโหลดสลิปใหม่',
+    slipPreviewTitle: 'สลิปการชำระเงิน',
+    slipPreviewLoading: 'กำลังโหลดสลิป…',
+    slipPreviewError: 'ไม่สามารถแสดงสลิปนี้ได้ กรุณาลองใหม่หรือติดต่อแอดมิน',
     filterAll: 'ทั้งหมด',
 
     // Contract
@@ -212,6 +215,9 @@ const TR = {
     colBill: 'Bill', colDate: 'Submitted', colMethod: 'Method', colAmount: 'Amount', colAction: 'Actions',
     noPayments: 'No payment history yet',
     viewSlip: 'View slip', reuploadSlip: 'Re-upload slip',
+    slipPreviewTitle: 'Payment slip',
+    slipPreviewLoading: 'Loading slip…',
+    slipPreviewError: 'Could not display this slip. Try again or contact admin.',
     filterAll: 'All',
 
     myContract: 'My lease', contractNo: 'No.',
@@ -620,6 +626,9 @@ function Pill({ tone = 'muted', children, size = 'sm', style }) {
 function Card({ children, style, pad = 20, className = '', as: Tag = 'div', onClick, hoverable }) {
   return (
     <Tag onClick={onClick} className={className} style={{
+      boxSizing: 'border-box',
+      minWidth: 0,
+      maxWidth: '100%',
       background: 'var(--surface)',
       border: '1px solid var(--line)',
       borderRadius: 'var(--r-lg)',
@@ -792,14 +801,15 @@ function PageGuide({ type = 'welcome', title, text }) {
     <Card className="page-guide" pad={0} style={{
       marginBottom: 'var(--sp-5)',
       overflow: 'hidden',
+      position: 'relative',
       display: 'grid',
-      gridTemplateColumns: 'minmax(0, 1fr) 190px',
-      alignItems: 'center',
-      minHeight: 142,
-      background: 'linear-gradient(135deg, var(--surface) 0%, var(--surface-2) 100%)',
+      gridTemplateColumns: 'minmax(0, 1fr) minmax(176px, 210px)',
+      alignItems: 'stretch',
+      minHeight: 154,
+      background: 'linear-gradient(135deg, var(--surface) 0%, var(--surface-2) 58%, rgba(196,106,62,0.08) 100%)',
     }}>
       <div className="page-guide-copy" style={{ padding: 'var(--sp-5) var(--sp-6)', minWidth: 0 }}>
-        <div style={{
+        <div className="page-guide-kicker" style={{
           color: 'var(--accent-2)',
           fontSize: 'var(--fs-xs)',
           fontWeight: 700,
@@ -807,14 +817,14 @@ function PageGuide({ type = 'welcome', title, text }) {
           textTransform: 'uppercase',
           marginBottom: 8,
         }}>Guide</div>
-        <div style={{
+        <div className="page-guide-title" style={{
           color: 'var(--ink)',
           fontFamily: 'var(--font-display)',
           fontWeight: 700,
           fontSize: 'var(--fs-lg)',
           lineHeight: 1.3,
         }}>{title}</div>
-        <div style={{
+        <div className="page-guide-text" style={{
           color: 'var(--muted)',
           fontSize: 'var(--fs-sm)',
           lineHeight: 1.65,
@@ -824,13 +834,33 @@ function PageGuide({ type = 'welcome', title, text }) {
       </div>
       <div className="page-guide-art" style={{
         height: '100%',
-        minHeight: 142,
+        minHeight: 154,
         display: 'grid',
         placeItems: 'center',
-        background: 'linear-gradient(135deg, rgba(196,106,62,0.08) 0%, rgba(31,122,122,0.09) 100%)',
+        padding: 'var(--sp-3)',
+        background: 'linear-gradient(145deg, rgba(196,106,62,0.10) 0%, rgba(31,122,122,0.08) 100%)',
         borderLeft: '1px solid var(--line)',
       }}>
-        <MascotImage type={type} />
+        <div className="page-guide-stage" style={{
+          width: 154,
+          maxWidth: '100%',
+          aspectRatio: '1 / 1',
+          display: 'grid',
+          placeItems: 'center',
+          borderRadius: 26,
+          background: 'linear-gradient(155deg, rgba(255,255,255,0.78) 0%, rgba(255,255,255,0.28) 52%, rgba(255,255,255,0.08) 100%)',
+          boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.7), 0 18px 36px -26px rgba(40,28,12,0.45)',
+        }}>
+          <MascotImage
+            type={type}
+            className="page-guide-mascot"
+            style={{
+              maxWidth: 148,
+              height: 138,
+              filter: 'drop-shadow(0 20px 18px rgba(42,31,21,0.20))',
+            }}
+          />
+        </div>
       </div>
     </Card>
   );
@@ -908,9 +938,14 @@ function Modal({ open, onClose, children, title, size = 'md' }) {
       position: document.body.style.position,
       top: document.body.style.top,
       width: document.body.style.width,
+      paddingRight: document.body.style.paddingRight,
     };
     document.body.style.overflow = 'hidden';
     const isMobile = window.matchMedia && window.matchMedia('(max-width: 640px)').matches;
+    const scrollbarGap = Math.max(0, window.innerWidth - document.documentElement.clientWidth);
+    if (!isMobile && scrollbarGap > 0) {
+      document.body.style.paddingRight = `${scrollbarGap}px`;
+    }
     if (isMobile) {
       document.body.style.position = 'fixed';
       document.body.style.top = `-${scrollY}px`;
@@ -948,6 +983,7 @@ function Modal({ open, onClose, children, title, size = 'md' }) {
       document.body.style.position = prev.position;
       document.body.style.top = prev.top;
       document.body.style.width = prev.width;
+      document.body.style.paddingRight = prev.paddingRight;
       if (isMobile && scrollY) window.scrollTo(0, scrollY);
       window.clearTimeout(focusTimer);
       window.removeEventListener('keydown', onKey);
@@ -961,7 +997,7 @@ function Modal({ open, onClose, children, title, size = 'md' }) {
   }, [open, onClose]);
 
   if (!open) return null;
-  const widths = { sm: 420, md: 560, lg: 760 };
+  const widths = { sm: 420, md: 560, lg: 760, xl: 920 };
   const ui = (
     <div className="modal-overlay" onClick={onClose} style={{
       position: 'fixed', inset: 0, background: 'rgba(28,18,8,0.45)',
@@ -974,6 +1010,7 @@ function Modal({ open, onClose, children, title, size = 'md' }) {
       padding: '24px 16px',
       overflowY: 'auto', overflowX: 'hidden',
       WebkitOverflowScrolling: 'touch',
+      overscrollBehavior: 'contain',
     }}>
       <div
         ref={panelRef}
@@ -987,8 +1024,8 @@ function Modal({ open, onClose, children, title, size = 'md' }) {
           background: 'var(--surface)', color: 'var(--ink)',
           width: '100%',
           // log.md #3 — keep dialogs off the screen edge even on the
-          // widest panel size; 92vw is enough breathing room on phones.
-          maxWidth: `min(${widths[size]}px, 92vw)`,
+          // widest panel size; CSS below makes phone sheets full-bleed.
+          maxWidth: `min(${widths[size]}px, calc(100vw - 32px))`,
           borderRadius: 22, boxShadow: 'var(--shadow-lg)',
           // 100dvh tracks mobile UI chrome / on-screen keyboards; 100vh
           // fallback keeps the cap working on browsers without dvh support.
@@ -1022,9 +1059,10 @@ function Modal({ open, onClose, children, title, size = 'md' }) {
           </div>
         ) : null}
         <div className="modal-body" style={{
-          overflow: 'auto', overflowX: 'hidden', flex: 1,
+          overflow: 'auto', overflowX: 'hidden', flex: 1, minHeight: 0,
           padding: '20px 22px 24px',
           WebkitOverflowScrolling: 'touch',
+          overscrollBehavior: 'contain',
         }}>{children}</div>
       </div>
     </div>
@@ -1294,7 +1332,7 @@ function HomeView({ tenant, locale, bills, tickets, contract, goto }) {
       {unpaid ? (
         <div className="home-grid" style={{ display: 'grid', gap: 'var(--sp-4)', gridTemplateColumns: 'minmax(0,1.4fr) minmax(0,1fr)' }}>
           <Card pad={0} style={{ overflow: 'hidden' }}>
-            <div style={{
+            <div className="current-bill-hero" style={{
               padding: '24px 24px 22px',
               background: 'linear-gradient(135deg, #2a1f15 0%, #3a2c1f 60%, #4a3826 100%)',
               color: '#f6efde', position: 'relative',
@@ -1320,7 +1358,7 @@ function HomeView({ tenant, locale, bills, tickets, contract, goto }) {
               <div style={{ color: '#e0d2b6', fontSize: 13.5, marginTop: 4 }}>
                 {unpaid.bill_no} · {t('billPeriod')} {fmtPeriod(unpaid.period, locale)} · {t('dueDate')} {fmtDate(unpaid.due_date, locale)}
               </div>
-              <div style={{ display: 'flex', gap: 10, marginTop: 22, flexWrap: 'wrap' }}>
+              <div className="home-bill-actions" style={{ display: 'flex', gap: 10, marginTop: 22, flexWrap: 'wrap' }}>
                 <Button variant="primary" size="md" icon="qr" onClick={() => goto('bills', unpaid.id)}>{t('payPromptpay')}</Button>
                 <a href={`/api/tenant/bills/${unpaid.id}/pdf`} target="_blank" rel="noopener"
                   style={{ textDecoration: 'none' }}>
@@ -2004,6 +2042,7 @@ function PaymentsView({ locale, payments, syncErrors, goto }) {
   const t = (k) => tr(locale, k);
   const items = payments || [];
   const [filter, setFilter] = useState('all');
+  const [slipPreview, setSlipPreview] = useState(null);
   const paymentError = (syncErrors || []).find((e) => e.key === 'payments');
   const statusLabel = (s) => s === 'verified' ? t('paymentVerified')
                            : s === 'pending' ? t('paymentPending')
@@ -2025,13 +2064,6 @@ function PaymentsView({ locale, payments, syncErrors, goto }) {
     { id: 'pending',  label: t('paymentPending'),    count: counts.pending },
     { id: 'rejected', label: t('paymentRejected'),   count: counts.rejected },
   ];
-  // Server returns absolute storage URLs in p.slip_url (admin storage
-  // endpoint, gated by the same tenant cookie). Open in a new tab.
-  const openSlip = (url) => {
-    if (!url) return;
-    try { window.open(String(url), '_blank', 'noopener,noreferrer'); }
-    catch { /* popup-blocker — best-effort */ }
-  };
   return (
     <div className="anim-in">
       <SectionHeader title={t('paymentHistory')}
@@ -2058,7 +2090,7 @@ function PaymentsView({ locale, payments, syncErrors, goto }) {
         <div style={{ display: 'grid', gap: 'var(--sp-3)' }}>
           {filtered.map((p) => (
             <Card key={p.id} hoverable pad={0}>
-              <div style={{ padding: 'var(--sp-4) var(--sp-5)', display: 'grid', gridTemplateColumns: '1fr auto', gap: 'var(--sp-4)', alignItems: 'center' }}>
+              <div className="payment-card-main" style={{ padding: 'var(--sp-4) var(--sp-5)', display: 'grid', gridTemplateColumns: '1fr auto', gap: 'var(--sp-4)', alignItems: 'center' }}>
                 <div style={{ minWidth: 0 }}>
                   <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
                     <div style={{ fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 16 }}>{p.bill_no || `#${p.bill_id || '—'}`}</div>
@@ -2074,11 +2106,11 @@ function PaymentsView({ locale, payments, syncErrors, goto }) {
                     </div>
                   ) : null}
                 </div>
-                <div style={{ textAlign: 'right' }}>
+                <div className="payment-card-side" style={{ textAlign: 'right', minWidth: 0 }}>
                   <div style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 22 }}>฿{fmtMoney(p.amount)}</div>
-                  <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end', marginTop: 6, flexWrap: 'wrap' }}>
-                    {p.slip_url ? (
-                      <Button size="sm" variant="ghost" onClick={() => openSlip(p.slip_url)}>{t('viewSlip')}</Button>
+                  <div className="payment-card-actions" style={{ display: 'flex', gap: 6, justifyContent: 'flex-end', marginTop: 6, flexWrap: 'wrap' }}>
+                    {(p.has_slip || p.slip_url) ? (
+                      <Button size="sm" variant="ghost" onClick={() => setSlipPreview(p)}>{t('viewSlip')}</Button>
                     ) : null}
                     {p.status === 'rejected' && p.bill_id && goto ? (
                       <Button size="sm" variant="soft" onClick={() => goto('bills', p.bill_id)}>{t('reuploadSlip')}</Button>
@@ -2090,7 +2122,86 @@ function PaymentsView({ locale, payments, syncErrors, goto }) {
           ))}
         </div>
       )}
+      <SlipPreviewModal payment={slipPreview} locale={locale} onClose={() => setSlipPreview(null)} />
     </div>
+  );
+}
+
+function SlipPreviewModal({ payment, locale, onClose }) {
+  const t = (k) => tr(locale, k);
+  const [state, setState] = useState('loading');
+  useEffect(() => { if (payment) setState('loading'); }, [payment && payment.id]);
+  const src = payment ? `/api/tenant/payments/${encodeURIComponent(payment.id)}/slip` : '';
+  const title = payment
+    ? `${t('slipPreviewTitle')} · ${payment.bill_no || `#${payment.bill_id || payment.id}`}`
+    : t('slipPreviewTitle');
+  return (
+    <Modal open={!!payment} onClose={onClose} title={title} size="xl">
+      <div className="slip-preview" style={{
+        position: 'relative',
+        minHeight: 240,
+        height: 'min(68vh, 720px)',
+        maxHeight: 'calc(100dvh - 220px)',
+        padding: 12,
+        display: 'grid',
+        placeItems: 'center',
+        background: 'linear-gradient(145deg, var(--surface-2) 0%, rgba(196,106,62,0.08) 100%)',
+        border: '1px solid var(--line)',
+        borderRadius: 16,
+        overflow: 'hidden',
+      }}>
+        {payment && state !== 'error' ? (
+          <img
+            key={payment.id}
+            src={src}
+            alt={title}
+            onLoad={() => setState('ready')}
+            onError={() => setState('error')}
+            style={{
+              display: state === 'ready' ? 'block' : 'none',
+              width: 'auto',
+              height: 'auto',
+              maxWidth: '100%',
+              maxHeight: '100%',
+              objectFit: 'contain',
+              background: '#fff',
+              borderRadius: 10,
+              boxShadow: '0 18px 42px -28px rgba(40,28,12,0.45)',
+            }}
+          />
+        ) : null}
+        {state === 'loading' ? (
+          <div style={{ color: 'var(--muted)', fontSize: 'var(--fs-sm)', padding: 24 }}>
+            {t('slipPreviewLoading')}
+          </div>
+        ) : null}
+        {state === 'error' ? (
+          <div role="alert" style={{
+            color: 'var(--red)',
+            fontSize: 'var(--fs-sm)',
+            lineHeight: 1.6,
+            padding: 24,
+            textAlign: 'center',
+          }}>
+            {t('slipPreviewError')}
+          </div>
+        ) : null}
+      </div>
+      {payment ? (
+        <div style={{
+          marginTop: 12,
+          display: 'flex',
+          justifyContent: 'space-between',
+          gap: 12,
+          flexWrap: 'wrap',
+          color: 'var(--muted)',
+          fontSize: 'var(--fs-xs)',
+        }}>
+          <span>{payment.bill_no || `#${payment.bill_id || payment.id}`}</span>
+          <span>{fmtDateTime(payment.created_at, locale)}</span>
+        </div>
+      ) : null}
+    </Modal>
   );
 }
 
@@ -3020,7 +3131,7 @@ function App() {
     <>
       <div className="portal-shell" style={{
         display: 'grid', gridTemplateColumns: 'var(--sidebar-w) 1fr',
-        minHeight: '100vh', background: 'var(--bg)',
+        boxSizing: 'border-box', width: '100%', minWidth: 0, minHeight: '100vh', background: 'var(--bg)',
       }}>
         <Sidebar page={page} setPage={setPage} locale={locale} unpaidCount={unpaidCount}
           tenant={tenant} onLogout={onLogout} />
@@ -3030,7 +3141,7 @@ function App() {
             onBellClick={() => setPage(unpaidCount > 0 ? 'bills' : openTickets > 0 ? 'maintenance' : 'bills')} />
           <main className="tenant-main" style={{
             padding: 'var(--sp-6) var(--sp-7) calc(var(--bottomnav-h) + var(--sp-6))',
-            maxWidth: 'var(--max-content)', width: '100%', margin: '0 auto',
+            boxSizing: 'border-box', maxWidth: 'var(--max-content)', width: '100%', margin: '0 auto',
           }}>
             <SyncBanner errors={syncErrors} syncing={syncing}
               onRetry={triggerRefresh} locale={locale} />
@@ -3068,22 +3179,42 @@ function App() {
            so column counts never silently jump as the viewport changes. */
 
         .page-guide {
-          grid-template-columns: minmax(0, 1fr) 190px !important;
+          width: 100% !important;
+          max-width: 100% !important;
+          grid-template-columns: minmax(0, calc(100% - 210px)) minmax(176px, 210px) !important;
+        }
+        .page-guide-copy,
+        .page-guide-art,
+        .page-guide-stage {
+          min-width: 0 !important;
         }
 
         /* Tablet landscape — hide the sidebar, show drawer trigger. */
         @media (max-width: 960px) {
-          .portal-shell { grid-template-columns: 1fr !important; }
+          .portal-shell {
+            grid-template-columns: 1fr !important;
+            width: 100vw !important;
+            max-width: 100vw !important;
+            overflow-x: hidden !important;
+          }
           .portal-sidebar { display: none !important; }
           .topbar-menu-btn { display: grid !important; }
           .tenant-main {
+            width: 100vw !important;
+            max-width: 100vw !important;
             padding: var(--sp-5) var(--sp-4) calc(var(--bottomnav-h) + var(--sp-5)) !important;
+            overflow-x: clip !important;
+          }
+          .tenant-main > .anim-in {
+            width: calc(100vw - 32px) !important;
+            max-width: calc(100vw - 32px) !important;
           }
           /* Shortcuts cap at 2-up on tablet so the cards don't look stretched. */
           .shortcuts-grid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
-          .page-guide { grid-template-columns: minmax(0, 1fr) 160px !important; }
-          .page-guide-art { min-height: 132px !important; }
-          .page-guide-art img { max-width: 136px !important; height: 126px !important; }
+          .page-guide { grid-template-columns: minmax(0, calc(100% - 160px)) 160px !important; }
+          .page-guide-art { min-height: 140px !important; }
+          .page-guide-stage { width: 132px !important; border-radius: 22px !important; }
+          .page-guide-mascot { max-width: 132px !important; height: 122px !important; }
         }
 
         /* Tablet portrait — cards stack to 1 col, breakdown stays 3-up. */
@@ -3110,6 +3241,11 @@ function App() {
           .tenant-main {
             padding: var(--sp-4) var(--sp-3)
               calc(env(safe-area-inset-bottom,0px) + var(--bottomnav-h) + var(--sp-5)) !important;
+            overflow-x: clip !important;
+          }
+          .tenant-main > .anim-in {
+            width: calc(100vw - 24px) !important;
+            max-width: calc(100vw - 24px) !important;
           }
           .sync-banner { flex-direction: column !important; align-items: stretch !important; }
           /* Bill row on phone — use grid-areas so the most important info
@@ -3128,6 +3264,23 @@ function App() {
           .bill-row > *:nth-child(4) { grid-area: chev;  justify-self: end !important; }
           .bill-card-main { grid-template-columns: 1fr !important; gap: var(--sp-3) !important; }
           .bill-card-amount { text-align: left !important; }
+          .current-bill-hero { padding: var(--sp-5) var(--sp-4) !important; }
+          .home-bill-actions {
+            flex-direction: column !important;
+            align-items: stretch !important;
+          }
+          .home-bill-actions > a,
+          .home-bill-actions > button,
+          .home-bill-actions button {
+            width: 100% !important;
+          }
+          .payment-card-main {
+            grid-template-columns: 1fr !important;
+            gap: var(--sp-3) !important;
+            padding: var(--sp-4) !important;
+          }
+          .payment-card-side { text-align: left !important; }
+          .payment-card-actions { justify-content: flex-start !important; }
           .mini-cells { grid-template-columns: 1fr !important; }
           .mini-cell { border-left: 0 !important; border-top: 1px solid var(--line) !important; }
           .mini-cell:first-child { border-top: 0 !important; }
@@ -3144,25 +3297,42 @@ function App() {
           .contact-grid { grid-template-columns: 1fr !important; }
           .maintenance-ticket-row { flex-direction: column !important; }
           .page-guide {
-            grid-template-columns: 1fr !important;
-            min-height: 0 !important;
+            grid-template-columns: minmax(0, calc(100% - 116px)) 116px !important;
+            min-height: 128px !important;
           }
-          .page-guide-copy { padding: var(--sp-4) var(--sp-4) var(--sp-3) !important; }
+          .page-guide-copy { padding: var(--sp-4) var(--sp-3) !important; }
+          .page-guide-kicker { margin-bottom: 4px !important; }
+          .page-guide-title { font-size: var(--fs-md) !important; line-height: 1.28 !important; }
+          .page-guide-text { font-size: var(--fs-xs) !important; line-height: 1.55 !important; margin-top: 5px !important; }
           .page-guide-art {
-            min-height: 112px !important;
-            border-left: 0 !important;
-            border-top: 1px solid var(--line) !important;
+            min-height: 128px !important;
+            padding: var(--sp-2) !important;
+            border-left: 1px solid var(--line) !important;
+            border-top: 0 !important;
           }
-          .page-guide-art img { max-width: 122px !important; height: 108px !important; }
+          .page-guide-stage { width: 96px !important; border-radius: 20px !important; }
+          .page-guide-mascot { max-width: 104px !important; height: 96px !important; }
+          .slip-preview {
+            min-height: 220px !important;
+            height: clamp(220px, 62dvh, 560px) !important;
+            max-height: calc(100dvh - 180px) !important;
+            padding: var(--sp-2) !important;
+            border-radius: 14px !important;
+          }
           /* Modal becomes a slide-up bottom-sheet: stuck to the bottom
              edge, top corners only, safe-area padding so no content sits
              under the iOS home indicator. */
           .modal-overlay {
             align-items: flex-end !important;
-            justify-content: stretch !important;
+            justify-content: center !important;
             padding: var(--sp-6) 0 0 !important;
+            width: 100vw !important;
+            max-width: 100vw !important;
           }
           .modal-panel {
+            width: 100vw !important;
+            max-width: 100vw !important;
+            min-width: 0 !important;
             margin: 0 !important;
             border-radius: 22px 22px 0 0 !important;
             max-height: min(calc(100vh - 24px), calc(100dvh - 24px)) !important;
@@ -3176,8 +3346,14 @@ function App() {
           .modal-body { padding: var(--sp-4) var(--sp-3) var(--sp-5) !important; }
           /* Shortcuts shrink further only at 480, never between 481-639. */
           .shortcuts-grid { grid-template-columns: 1fr !important; }
-          .page-guide-copy { padding: var(--sp-4) var(--sp-3) var(--sp-3) !important; }
-          .page-guide-art img { max-width: 108px !important; height: 96px !important; }
+          .page-guide {
+            grid-template-columns: minmax(0, calc(100% - 96px)) 96px !important;
+            min-height: 116px !important;
+          }
+          .page-guide-copy { padding: var(--sp-3) var(--sp-3) !important; }
+          .page-guide-art { min-height: 116px !important; }
+          .page-guide-stage { width: 82px !important; border-radius: 18px !important; }
+          .page-guide-mascot { max-width: 92px !important; height: 84px !important; }
         }
 
         /* Landscape phone — short-but-wide viewport. Reclaim the top air
@@ -3185,6 +3361,11 @@ function App() {
         @media (max-height: 520px) and (max-width: 960px) {
           .modal-overlay { padding-top: var(--sp-3) !important; }
           .modal-panel { max-height: min(calc(100vh - 12px), calc(100dvh - 12px)) !important; }
+          .slip-preview {
+            min-height: 160px !important;
+            height: min(54dvh, 260px) !important;
+            max-height: calc(100dvh - 152px) !important;
+          }
         }
       `}</style>
     </>

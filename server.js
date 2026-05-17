@@ -3985,10 +3985,14 @@ app.get('/api/tenant/payments', requireTenant, async (req, res) => {
   try {
     // Filter b.deleted_at IS NULL on the JOIN so payments tied to a
     // soft-deleted bill don't surface in the tenant's history with
-    // dangling bill metadata.
+    // dangling bill metadata. Do not return slip_url here: old rows can
+    // contain base64 data URLs, and even normal /files/<id> URLs are PII
+    // handles. The tenant UI fetches the actual image lazily through the
+    // ownership-checked preview endpoint below.
     const { rows } = await pool.query(
-      `SELECT p.id, p.bill_id, p.amount, p.method, p.slip_url,
+      `SELECT p.id, p.bill_id, p.amount, p.method,
               p.status, p.verified_at, p.rejected_reason, p.created_at,
+              CASE WHEN p.slip_url IS NOT NULL THEN true ELSE false END AS has_slip,
               b.bill_no, b.period
          FROM payments p
          LEFT JOIN bills b ON b.id = p.bill_id AND b.deleted_at IS NULL
@@ -4000,6 +4004,50 @@ app.get('/api/tenant/payments', requireTenant, async (req, res) => {
   } catch (err) {
     console.error('tenant payments list error:', err);
     res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// Tenant slip preview. This intentionally does not reuse /files/:id because
+// /files forces Content-Disposition: attachment for sensitive categories.
+// The UI needs an inline image inside a modal, so this endpoint re-checks:
+//   1) the payment belongs to the current tenant,
+//   2) the slip_url points at a canonical file_uploads row,
+//   3) the file is an image slip uploaded by the same tenant.
+app.get('/api/tenant/payments/:id/slip', requireTenant, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+  try {
+    const { rows } = await pool.query(
+      `SELECT p.id AS payment_id, p.slip_url,
+              f.id AS file_id, f.category, f.filename, f.mime_type, f.uploaded_by, f.storage
+         FROM payments p
+         LEFT JOIN file_uploads f
+           ON p.slip_url = '/files/' || f.id::text
+        WHERE p.id=$1 AND p.tenant_id=$2`,
+      [id, req.tenant.tenant_id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'not found' });
+    const f = rows[0];
+    const tenantUploader = `tenant:${req.tenant.tenant_id}`;
+    if (!f.file_id || f.category !== 'slip' || f.uploaded_by !== tenantUploader) {
+      return res.status(404).json({ error: 'slip not found' });
+    }
+    const mime = String(f.mime_type || '').toLowerCase();
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(mime)) {
+      return res.status(415).json({ error: 'unsupported slip type' });
+    }
+    const buf = await storage.readFile(f);
+    if (!buf) return res.status(404).json({ error: 'slip not found' });
+    const safeName = String(f.filename || `slip-${id}`).replace(/[^\w.\-]/g, '_').slice(0, 80);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Content-Type', mime);
+    res.setHeader('Content-Disposition', `inline; filename="${safeName}"`);
+    res.end(buf);
+  } catch (err) {
+    console.error('tenant slip preview error:', err);
+    if (!res.headersSent) res.status(500).json({ error: 'internal error' });
   }
 });
 

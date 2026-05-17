@@ -101,7 +101,7 @@
      history) and a short page (profile when no prefs section) line up
      horizontally — without this, switching pages caused a ~15px width
      shift on desktop whenever the scrollbar appeared or disappeared. */
-  html { scrollbar-gutter: stable; }
+  html { overflow-y: scroll; scrollbar-gutter: stable; }
   body {
     font-family: var(--font-sans);
     background: var(--bg);
@@ -109,6 +109,7 @@
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
     min-height: 100vh;
+    overflow-x: hidden;
   }
   button { font-family: inherit; }
   input, select, textarea { font-family: inherit; }
@@ -117,11 +118,19 @@
   .no-scrollbar { scrollbar-width: none; }
   @keyframes slide-up { from { transform: translateY(12px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
   @keyframes fade-in  { from { opacity: 0; } to { opacity: 1; } }
-  .anim-in { animation: slide-up .26s ease both; }
+  .anim-in { animation: fade-in .14s ease both; }
   .ph-stripe {
     background-image: repeating-linear-gradient(135deg,
       var(--surface-2) 0 8px, transparent 8px 16px);
     background-color: var(--surface);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      scroll-behavior: auto !important;
+      transition-duration: 0.001ms !important;
+    }
   }
 </style>
 </head>
