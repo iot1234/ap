@@ -697,16 +697,17 @@ function KV({ label, value, mono, bold, hi, last }) {
   return (
     <div style={{
       display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
-      gap: 12, padding: '8px 0',
-      borderBottom: last ? 'none' : '1px dashed var(--line)',
+      gap: 12, padding: '10px 0',
+      borderBottom: last ? 'none' : '1px solid var(--line)',
     }}>
-      <span style={{ color: 'var(--muted)', fontSize: 13.5 }}>{label}</span>
+      <span style={{ color: 'var(--muted)', fontSize: 13.5, minWidth: 0 }}>{label}</span>
       <span style={{
         fontFamily: mono ? 'var(--font-mono)' : 'var(--font-display)',
         fontWeight: bold ? 700 : 500,
         fontSize: hi ? 16 : 14,
         color: hi ? 'var(--accent-2)' : 'var(--ink)',
         textAlign: 'right',
+        minWidth: 0, overflowWrap: 'anywhere',
       }}>{value}</span>
     </div>
   );
@@ -1752,25 +1753,55 @@ function BillDetailBody({ bill, locale, refresh, slipFeature }) {
           ) : null}
           <div style={{ height: 12 }} />
           <Label>{t('slipField')}</Label>
-          <input key={fileInputKey} type="file" accept="image/jpeg,image/png,image/webp"
-            onChange={(e) => {
-              const f = e.target.files[0];
-              if (f && !['image/jpeg', 'image/png', 'image/webp'].includes(f.type)) {
-                setNotice({ kind: 'error', title: t('slipField'),
-                  message: locale === 'th'
-                    ? 'รองรับเฉพาะ JPG, PNG หรือ WebP เท่านั้น'
-                    : 'Only JPG, PNG or WebP images are supported.' });
-                e.target.value = ''; setFile(null); return;
-              }
-              if (f && f.size > 5 * 1024 * 1024) {
-                setNotice({ kind: 'error', title: t('slipField'),
-                  message: locale === 'th' ? 'ไฟล์ใหญ่เกินไป (เกิน 5 MB)' : 'File is too large (over 5 MB).' });
-                e.target.value = ''; setFile(null); return;
-              }
-              setFile(f);
-            }}
-            style={{ marginBottom: 6 }} />
-          <div style={{ fontSize: 11.5, color: 'var(--muted)', marginBottom: 12 }}>{t('slipHint')}</div>
+          {/* Custom file picker — the native "Choose File" button is
+              unstyled across browsers and looks out of place next to the
+              rest of the tenant portal chrome. Wrap a visually-hidden
+              <input> inside a styled <label> so we control the look while
+              keeping keyboard + screen-reader behaviour intact. */}
+          <label className="slip-picker" style={{
+            display: 'flex', alignItems: 'center', gap: 12,
+            padding: '10px 12px', borderRadius: 12,
+            background: 'var(--surface-2)', border: '1px solid var(--line-2)',
+            cursor: 'pointer', minWidth: 0,
+          }}>
+            <input key={fileInputKey} type="file" accept="image/jpeg,image/png,image/webp"
+              onChange={(e) => {
+                const f = e.target.files[0];
+                if (f && !['image/jpeg', 'image/png', 'image/webp'].includes(f.type)) {
+                  setNotice({ kind: 'error', title: t('slipField'),
+                    message: locale === 'th'
+                      ? 'รองรับเฉพาะ JPG, PNG หรือ WebP เท่านั้น'
+                      : 'Only JPG, PNG or WebP images are supported.' });
+                  e.target.value = ''; setFile(null); return;
+                }
+                if (f && f.size > 5 * 1024 * 1024) {
+                  setNotice({ kind: 'error', title: t('slipField'),
+                    message: locale === 'th' ? 'ไฟล์ใหญ่เกินไป (เกิน 5 MB)' : 'File is too large (over 5 MB).' });
+                  e.target.value = ''; setFile(null); return;
+                }
+                setFile(f);
+              }}
+              style={{
+                // Visually hidden but still focusable + clickable through the
+                // wrapping <label> so keyboard users can Tab here.
+                position: 'absolute', width: 1, height: 1, padding: 0, margin: -1,
+                overflow: 'hidden', clip: 'rect(0,0,0,0)', whiteSpace: 'nowrap', border: 0,
+              }} />
+            <span style={{
+              display: 'inline-flex', alignItems: 'center', gap: 6,
+              padding: '8px 14px', borderRadius: 999,
+              background: 'var(--ink)', color: 'var(--bg)',
+              fontSize: 13, fontWeight: 600, flex: '0 0 auto',
+            }}>
+              <Icon name="upload" size={14} /> {t('chooseFile')}
+            </span>
+            <span style={{
+              fontSize: 13, color: file ? 'var(--ink)' : 'var(--muted)',
+              whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+              minWidth: 0, flex: 1,
+            }}>{file ? file.name : t('noFileChosen')}</span>
+          </label>
+          <div style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 6, marginBottom: 12 }}>{t('slipHint')}</div>
 
           {advisoryIssues.length > 0 ? (
             <div style={{
