@@ -2234,7 +2234,7 @@ test('contracts page-contracts.jsx is registered + script-loaded', () => {
   const html = fs.readFileSync(
     path.join(__dirname, '..', 'project', 'Admin Dashboard.html'), 'utf8'
   );
-  assert.match(html, /page-contracts\.jsx/, 'HTML must include page-contracts');
+  assert.match(html, /\/build\/admin\/page-contracts\.js/, 'HTML must include built page-contracts script');
   const page = fs.readFileSync(
     path.join(__dirname, '..', 'project', 'admin', 'page-contracts.jsx'), 'utf8'
   );
@@ -2634,18 +2634,39 @@ test('static assets do not intercept /admin auth route with directory redirect',
   assert.match(server, /express\.static\(path\.join\(__dirname,\s*'project'\),\s*\{\s*redirect:\s*false\s*\}\)/);
 });
 
-test('static frontend assets use compression and cacheable JSX revalidation', () => {
-  // The app still serves JSX source and compiles it in the browser. Until a
-  // build pipeline lands, the server must at least compress text responses
-  // and allow cached JSX to revalidate instead of forcing a full no-store
-  // transfer on every reload.
+test('static frontend assets use compression and cacheable build revalidation', () => {
   const fs = require('node:fs');
   const path = require('node:path');
   const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   assert.match(server, /const compression = require\('compression'\)/);
   assert.match(server, /app\.use\(compression\(\{[\s\S]{0,120}threshold: 1024/);
+  assert.match(server, /\^\\\/build\\\/\.\*\\\.js\$/);
+  assert.match(server, /req\.path === '\/api-client\.js'/);
   assert.match(server, /Cache-Control', 'no-cache, must-revalidate'/);
   assert.doesNotMatch(server, /Cache-Control', 'no-cache, no-store, must-revalidate'/);
+  assert.doesNotMatch(server, /'unsafe-eval'/);
+});
+
+test('main React pages load prebuilt JS instead of browser Babel', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const pages = [
+    'Admin Dashboard.html',
+    'Dorm Status Dashboard.html',
+    'tenant.html',
+    'pay.html',
+    'contract-fill.html',
+  ];
+  for (const page of pages) {
+    const html = fs.readFileSync(path.join(__dirname, '..', 'project', page), 'utf8');
+    assert.doesNotMatch(html, /@babel\/standalone|type="text\/babel"/, `${page} must not compile JSX in the browser`);
+    assert.match(html, /\/build\/[A-Za-z0-9_./-]+\.js/, `${page} must load built JS`);
+  }
+  const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+  assert.equal(pkg.scripts.build, 'node scripts/build-frontend.js');
+  assert.equal(pkg.scripts.prestart, 'node scripts/build-frontend.js');
+  const dockerfile = fs.readFileSync(path.join(__dirname, '..', 'Dockerfile'), 'utf8');
+  assert.match(dockerfile, /RUN npm run build/);
 });
 
 test('/health reports disabled scheduler explicitly in diagnostic mode', () => {
@@ -4262,16 +4283,16 @@ test('contracts quick-invite uses vacant room inventory and auto-fills room pric
     'submit must be disabled when selected room is not available');
 });
 
-test('contract-fill HTML reads view.rejectionReason (camelCase, not snake_case)', () => {
+test('contract-fill source reads view.rejectionReason (camelCase, not snake_case)', () => {
   // Server's buildPublicView returns rejectionReason; the HTML used to read
   // view.rejection_reason → reject reason was invisible to the tenant.
   const fs = require('node:fs');
   const path = require('node:path');
-  const html = fs.readFileSync(path.join(__dirname, '..', 'project', 'contract-fill.html'), 'utf8');
-  assert.match(html, /view\.rejectionReason/,
-    'HTML must read view.rejectionReason (camelCase)');
-  assert.ok(!/view\.rejection_reason/.test(html),
-    'HTML must NOT read view.rejection_reason (snake_case mismatch)');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'contract-fill.jsx'), 'utf8');
+  assert.match(src, /view\.rejectionReason/,
+    'contract-fill source must read view.rejectionReason (camelCase)');
+  assert.ok(!/view\.rejection_reason/.test(src),
+    'contract-fill source must NOT read view.rejection_reason (snake_case mismatch)');
 });
 
 test('contracts list selects locked_at + active_invitation_status', () => {
@@ -4537,9 +4558,9 @@ test('public fill: uploads are persisted into draft before submit can race', () 
 test('admin UI: contract-invitations page registered + script-loaded', () => {
   const fs = require('node:fs');
   const path = require('node:path');
-  // HTML loads the new JSX
+  // HTML loads the built page script
   const html = fs.readFileSync(path.join(__dirname, '..', 'project', 'Admin Dashboard.html'), 'utf8');
-  assert.match(html, /\/admin\/page-contract-invitations\.jsx/);
+  assert.match(html, /\/build\/admin\/page-contract-invitations\.js/);
   // shell wires the page into PAGES + NAV + PAGE_TITLES
   const shell = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'shell.jsx'), 'utf8');
   assert.match(shell, /'contract-invitations':\s+window\.PageContractInvitations/);
@@ -4655,21 +4676,23 @@ test('contracts page hides manual signing for locked contracts', () => {
     'locked contracts must not offer manual signature replacement');
 });
 
-test('public contract-fill HTML page exists + has expected steps', () => {
+test('public contract-fill page exists + source has expected steps', () => {
   const fs = require('node:fs');
   const path = require('node:path');
   const html = fs.readFileSync(path.join(__dirname, '..', 'project', 'contract-fill.html'), 'utf8');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'contract-fill.jsx'), 'utf8');
+  assert.match(html, /\/build\/contract-fill\.js/);
   // Multi-step wizard
-  assert.match(html, /Step1Welcome/);
-  assert.match(html, /Step2Personal/);
-  assert.match(html, /Step3Identity/);
-  assert.match(html, /Step4Sign/);
+  assert.match(src, /Step1Welcome/);
+  assert.match(src, /Step2Personal/);
+  assert.match(src, /Step3Identity/);
+  assert.match(src, /Step4Sign/);
   // Auto-save draft
-  assert.match(html, /useDebouncedSave/);
+  assert.match(src, /useDebouncedSave/);
   // Token extracted from URL path
-  assert.match(html, /\\\/contract\\\/fill\\\//);
+  assert.match(src, /\\\/contract\\\/fill\\\//);
   // Submit endpoint — uses `${tokenFromUrl}` template literal in this file.
-  assert.match(html, /\/contract-fill\/\$\{tokenFromUrl\}\/submit/);
+  assert.match(src, /\/contract-fill\/\$\{tokenFromUrl\}\/submit/);
   // Server route serves this file
   const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   assert.match(server,
@@ -4679,18 +4702,18 @@ test('public contract-fill HTML page exists + has expected steps', () => {
 test('public contract-fill submit sends the just-uploaded signature id', () => {
   const fs = require('node:fs');
   const path = require('node:path');
-  const html = fs.readFileSync(path.join(__dirname, '..', 'project', 'contract-fill.html'), 'utf8');
-  assert.match(html, /const submit = async \(draftOverride = null\)/,
+  const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'contract-fill.jsx'), 'utf8');
+  assert.match(src, /const submit = async \(draftOverride = null\)/,
     'submit must accept an override draft from the signature step');
-  assert.match(html, /body: draftOverride \|\| draft/,
+  assert.match(src, /body: draftOverride \|\| draft/,
     'submit must post the override draft when supplied');
-  assert.match(html, /if \(hasInk\)[\s\S]{0,120}saveSignature\(\)/,
+  assert.match(src, /if \(hasInk\)[\s\S]{0,120}saveSignature\(\)/,
     'redrawing the signature must upload a fresh signature even when an old id exists');
-  assert.match(html, /signatureFileId: sigId/,
+  assert.match(src, /signatureFileId: sigId/,
     'submit override must carry the newly uploaded signature id');
-  assert.match(html, /agreedTermsVersion: draft\.agreedTermsVersion \|\| 'tenant-fill-v1'/,
+  assert.match(src, /agreedTermsVersion: draft\.agreedTermsVersion \|\| 'tenant-fill-v1'/,
     'submit override must carry a durable terms version');
-  assert.match(html, /\(!hasInk && !draft\.signatureFileId\)/,
+  assert.match(src, /\(!hasInk && !draft\.signatureFileId\)/,
     'existing saved signatures must allow submit after page reload');
 });
 
@@ -4910,14 +4933,14 @@ test('admin UI: contract template variables insert by button instead of manual t
 });
 
 test('admin UI: contract-templates page registered + script-loaded', () => {
-  // The new page-contract-templates.jsx must be loaded by the dashboard
+  // The built contract-templates page must be loaded by the dashboard
   // HTML AND wired into the shell PAGES + NAV map. Otherwise admin clicks
   // "เทมเพลตสัญญา" → white screen.
   const fs = require('node:fs');
   const path = require('node:path');
   const html = fs.readFileSync(path.join(__dirname, '..', 'project', 'Admin Dashboard.html'), 'utf8');
-  assert.match(html, /\/admin\/page-contract-templates\.jsx/,
-    'HTML must load page-contract-templates.jsx');
+  assert.match(html, /\/build\/admin\/page-contract-templates\.js/,
+    'HTML must load built page-contract-templates script');
   const shell = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'shell.jsx'), 'utf8');
   assert.match(shell, /'contract-templates':\s*window\.PageContractTemplates/,
     'shell PAGES map must register contract-templates');

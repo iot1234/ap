@@ -1216,6 +1216,9 @@ function App() {
 // Wait for hydration AND verify auth BEFORE mounting. Without this gate the
 // admin UI would render with sensitive tenant data and only redirect to /login
 // after the page already painted (visible flash + cached in browser history).
+// AP.ready already performs the auth check, so do not call /api/auth/me again
+// here; the duplicate request made every admin load slower without improving
+// the gate.
 const __mount = () => {
   const root = ReactDOM.createRoot(document.getElementById('root'));
   // ErrorBoundary catches render-time exceptions in any page; OfflineBanner
@@ -1239,14 +1242,6 @@ const __bootAdmin = async () => {
   // Hard auth gate: if not authenticated, replace location with /login and
   // never mount React.
   if (window.AP && window.AP.isAuthenticated && !window.AP.isAuthenticated()) {
-    __redirectToLogin();
-    return;
-  }
-  // Belt-and-braces: re-check via /api/auth/me directly
-  try {
-    const me = await (window.AP && window.AP.me ? window.AP.me() : Promise.resolve({}));
-    if (!me || !me.user) { __redirectToLogin(); return; }
-  } catch {
     __redirectToLogin();
     return;
   }

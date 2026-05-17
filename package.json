@@ -4,6 +4,8 @@
   "description": "Dormitory management dashboard - production",
   "main": "server.js",
   "scripts": {
+    "build": "node scripts/build-frontend.js",
+    "prestart": "node scripts/build-frontend.js",
     "start": "node server.js",
     "test": "node --test tests/*.test.js",
     "backup": "node scripts/backup.js"
@@ -12,6 +14,8 @@
     "node": ">=18"
   },
   "dependencies": {
+    "@babel/core": "^7.29.0",
+    "@babel/preset-react": "^7.28.5",
     "bcryptjs": "^2.4.3",
     "compression": "^1.8.1",
     "connect-pg-simple": "^9.0.1",

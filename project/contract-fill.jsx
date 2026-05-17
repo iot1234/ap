@@ -1,0 +1,596 @@
+﻿'use strict';
+const { useState, useEffect, useRef, useMemo, useCallback } = React;
+
+// ============== Helpers ==============
+const apiBase = '';   // same-origin
+const tokenFromUrl = (() => {
+  // /contract/fill/<token>
+  const m = window.location.pathname.match(/\/contract\/fill\/([A-Za-z0-9_-]+)/);
+  return m ? m[1] : '';
+})();
+
+async function api(path, opts = {}) {
+  const init = {
+    method: opts.method || 'GET',
+    headers: { 'Content-Type': 'application/json' },
+    body: opts.body != null ? JSON.stringify(opts.body) : undefined,
+  };
+  const r = await fetch(apiBase + path, init);
+  let j = null;
+  try { j = await r.json(); } catch {}
+  if (!r.ok) {
+    const err = new Error((j && j.error) || `HTTP ${r.status}`);
+    err.status = r.status;
+    err.code = j && j.code;
+    err.body = j;
+    throw err;
+  }
+  return j;
+}
+
+function fmtTHB(n) {
+  return Number(n || 0).toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+function fmtThaiDate(s) {
+  if (!s) return '—';
+  try {
+    const d = new Date(s);
+    return d.toLocaleDateString('th-TH', { year: 'numeric', month: 'long', day: 'numeric' });
+  } catch { return s; }
+}
+
+// Debounced auto-save (typing → save 800ms after last edit). On terminal
+// failure (link revoked / expired / approved while filling), surface
+// a banner via onFatal — without it the tenant fills the whole form, hits
+// submit, and only THEN learns the link is dead. The auto-save failing
+// is the earliest signal we have that something changed server-side.
+function useDebouncedSave(token, draft, status, onSaved, onFatal) {
+  const lastJSONRef = useRef('');
+  useEffect(() => {
+    if (status !== 'pending') return;
+    const json = JSON.stringify(draft);
+    if (json === lastJSONRef.current) return;
+    const t = setTimeout(async () => {
+      try {
+        await api(`/api/contract-fill/${token}`, { method: 'PUT', body: draft });
+        lastJSONRef.current = json;
+        onSaved && onSaved();
+      } catch (err) {
+        console.warn('auto-save failed:', err.message);
+        // Terminal codes mean the link is dead. Surface to the parent so
+        // it can show a banner and stop the tenant wasting time.
+        if (err.code === 'REVOKED' || err.code === 'EXPIRED'
+            || err.code === 'ALREADY_APPROVED' || err.code === 'TOKEN_INVALID') {
+          onFatal && onFatal(err);
+        }
+      }
+    }, 800);
+    return () => clearTimeout(t);
+  }, [token, draft, status]);
+}
+
+// Map server error codes → friendly Thai messages with the right "what
+// can the tenant do next" copy. Falls back to the raw message for codes
+// we haven't mapped yet so dev tooling still surfaces the underlying
+// reason instead of hiding it.
+function friendlyErrorText(err) {
+  const code = err && err.code;
+  const map = {
+    REVOKED: 'ลิงก์นี้ถูกยกเลิกโดยเจ้าของหอพัก — กรุณาติดต่อเจ้าของหอพักเพื่อขอลิงก์ใหม่',
+    EXPIRED: 'ลิงก์หมดอายุแล้ว — กรุณาติดต่อเจ้าของหอพักเพื่อขอลิงก์ใหม่',
+    ALREADY_APPROVED: 'สัญญาได้รับการอนุมัติแล้ว — คุณไม่ต้องดำเนินการต่อ',
+    TOKEN_INVALID: 'ลิงก์นี้ใช้ไม่ได้ — กรุณาติดต่อเจ้าของหอพัก',
+    NOT_EDITABLE: 'ส่งสัญญาให้ตรวจสอบแล้ว — รอเจ้าของหอพักรีวิว',
+  };
+  return map[code] || (err && err.message) || 'เกิดข้อผิดพลาด';
+}
+
+// ============== Main app ==============
+function App() {
+  const [view, setView] = useState(null);    // server payload
+  const [draft, setDraft] = useState({});
+  const [step, setStep] = useState(1);        // 1..4
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const [errorCode, setErrorCode] = useState(null);
+  const [savedAt, setSavedAt] = useState(null);
+  const [submitted, setSubmitted] = useState(false);
+
+  // Load on mount
+  useEffect(() => {
+    if (!tokenFromUrl) {
+      setError('ลิงก์ไม่ถูกต้อง');
+      setErrorCode('TOKEN_INVALID');
+      return;
+    }
+    api(`/api/contract-fill/${tokenFromUrl}`)
+      .then((d) => {
+        setView(d.view);
+        setDraft(d.view.draft || {});
+        if (d.view.status === 'submitted') setSubmitted(true);
+      })
+      .catch((err) => {
+        setError(friendlyErrorText(err));
+        setErrorCode(err.code || null);
+      });
+  }, []);
+
+  // When the auto-save discovers the link is dead, abort the form.
+  const handleFatalAutoSave = (err) => {
+    setError(friendlyErrorText(err));
+    setErrorCode(err.code || null);
+  };
+
+  useDebouncedSave(tokenFromUrl, draft,
+    view ? view.status : 'pending',
+    () => setSavedAt(new Date()),
+    handleFatalAutoSave);
+
+  if (error) {
+    // Tailor the alert text by error code — generic "หมดอายุ/ถูกอนุมัติ/
+    // ถูกยกเลิก" was the original bug that hid which one actually happened.
+    const alertText = (() => {
+      switch (errorCode) {
+        case 'ALREADY_APPROVED':
+          return <>✅ สัญญาของคุณได้รับการอนุมัติเรียบร้อยแล้ว<br/>
+            กรุณาติดต่อเจ้าของหอพักเพื่อรับสำเนา PDF</>;
+        case 'REVOKED':
+          return <>เจ้าของหอพักได้ยกเลิกลิงก์นี้แล้ว<br/>
+            กรุณาติดต่อเจ้าของหอพักเพื่อขอลิงก์ใหม่</>;
+        case 'EXPIRED':
+          return <>ลิงก์นี้หมดอายุแล้ว<br/>
+            กรุณาติดต่อเจ้าของหอพักเพื่อขอต่ออายุหรือลิงก์ใหม่</>;
+        default:
+          return <>ลิงก์อาจหมดอายุ ถูกอนุมัติแล้ว หรือถูกยกเลิก<br/>
+            กรุณาติดต่อเจ้าของหอพักเพื่อขอลิงก์ใหม่</>;
+      }
+    })();
+    const isApproved = errorCode === 'ALREADY_APPROVED';
+    return (
+      <div className="card">
+        <h1>{isApproved ? '✅ ' : '⚠ '}{isApproved ? 'สัญญาเสร็จสมบูรณ์แล้ว' : 'ลิงก์นี้ใช้ไม่ได้'}</h1>
+        <div className="muted" style={{ marginTop: 8 }}>{error}</div>
+        <div className={`alert ${isApproved ? 'alert-success' : 'alert-info'}`} style={{ marginTop: 16 }}>
+          {alertText}
+        </div>
+      </div>
+    );
+  }
+  if (!view) {
+    return <div className="card"><div className="muted">กำลังโหลด...</div></div>;
+  }
+
+  if (view.status === 'submitted' || submitted) {
+    return <SubmittedView view={view} />;
+  }
+
+  const setField = (k, v) => setDraft((d) => ({ ...d, [k]: v }));
+  const goNext = () => setStep((s) => Math.min(4, s + 1));
+  const goBack = () => setStep((s) => Math.max(1, s - 1));
+
+  const submit = async (draftOverride = null) => {
+    setBusy(true);
+    setError(null);
+    setErrorCode(null);
+    try {
+      const result = await api(`/api/contract-fill/${tokenFromUrl}/submit`, {
+        method: 'POST', body: draftOverride || draft,
+      });
+      // Idempotent: server returns ok:true even on already-submitted.
+      // Either way the data is captured — show SubmittedView.
+      setSubmitted(true);
+      window.scrollTo(0, 0);
+    } catch (err) {
+      // INCOMPLETE has its own structure — keep the field-specific hint.
+      // Terminal codes (REVOKED/EXPIRED/ALREADY_APPROVED) take over the
+      // whole page via the error block; setting errorCode triggers the
+      // tailored copy above.
+      if (err.code === 'INCOMPLETE' && err.body && err.body.missing) {
+        setError(err.message + ` (ขาด: ${err.body.missing.join(', ')})`);
+      } else {
+        setError(friendlyErrorText(err));
+        setErrorCode(err.code || null);
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <Header view={view} savedAt={savedAt} />
+      <StepBar step={step} />
+      {view.rejectionReason ? (
+        <div className="alert alert-warn">
+          <b>เจ้าของหอพักขอให้แก้ไข:</b><br/>
+          {view.rejectionReason}
+        </div>
+      ) : null}
+      {error ? <div className="alert alert-danger">{error}</div> : null}
+
+      {step === 1 ? <Step1Welcome view={view} onNext={goNext} /> : null}
+      {step === 2 ? (
+        <Step2Personal draft={draft} setField={setField}
+          onBack={goBack} onNext={goNext} />
+      ) : null}
+      {step === 3 ? (
+        <Step3Identity draft={draft} setField={setField}
+          token={tokenFromUrl} onBack={goBack} onNext={goNext}
+          onError={setError} />
+      ) : null}
+      {step === 4 ? (
+        <Step4Sign draft={draft} setField={setField}
+          token={tokenFromUrl}
+          view={view}
+          busy={busy}
+          onBack={goBack}
+          onSubmit={submit}
+          onError={setError} />
+      ) : null}
+    </>
+  );
+}
+
+function Header({ view, savedAt }) {
+  return (
+    <div className="card">
+      <h1>📝 สัญญาเช่าห้องพัก</h1>
+      <div className="muted">
+        {view.building?.name || 'หอพัก'} · ห้อง {view.contract.roomId || '—'}
+      </div>
+      {savedAt ? (
+        <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>
+          ✓ บันทึกอัตโนมัติเมื่อ {savedAt.toLocaleTimeString('th-TH')}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function StepBar({ step }) {
+  const steps = ['ภาพรวม', 'ข้อมูลส่วนตัว', 'บัตรประชาชน', 'ลงนาม'];
+  return (
+    <div className="step-bar">
+      {steps.map((s, i) => (
+        <div key={i} className={`step-pill ${i + 1 === step ? 'active' : (i + 1 < step ? 'done' : '')}`}>
+          {i + 1 < step ? '✓' : (i + 1)}. {s}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function Step1Welcome({ view, onNext }) {
+  return (
+    <div className="card">
+      <h2>สรุปสัญญา</h2>
+      <ul className="info-list">
+        <li><span className="k">เลขที่สัญญา</span><span className="v">{view.contract.contractNo || '—'}</span></li>
+        <li><span className="k">ห้องเลขที่</span><span className="v">{view.contract.roomId || '—'}</span></li>
+        <li><span className="k">ค่าเช่ารายเดือน</span><span className="v">฿ {fmtTHB(view.contract.monthlyRent)}</span></li>
+        <li><span className="k">เงินมัดจำ</span><span className="v">฿ {fmtTHB(view.contract.deposit)}</span></li>
+        <li><span className="k">วันเริ่มเช่า</span><span className="v">{fmtThaiDate(view.contract.startDate)}</span></li>
+        {view.contract.endDate ? (
+          <li><span className="k">วันสิ้นสุด</span><span className="v">{fmtThaiDate(view.contract.endDate)}</span></li>
+        ) : null}
+        {view.contract.termMonths ? (
+          <li><span className="k">ระยะเวลา</span><span className="v">{view.contract.termMonths} เดือน</span></li>
+        ) : null}
+      </ul>
+      <div className="alert alert-info" style={{ marginTop: 16 }}>
+        ขั้นตอนต่อไปคุณจะกรอก:<br/>
+        1️⃣ ที่อยู่และผู้ติดต่อฉุกเฉิน<br/>
+        2️⃣ ถ่ายภาพบัตรประชาชน หน้าและหลัง<br/>
+        3️⃣ ลงนาม (เซ็นด้วยนิ้วบนมือถือ หรือเมาส์บนคอมฯ)<br/>
+        4️⃣ ส่งให้เจ้าของหอพักตรวจสอบ
+      </div>
+      <button className="btn btn-primary" style={{ width: '100%', marginTop: 16 }} onClick={onNext}>
+        เริ่มกรอก →
+      </button>
+    </div>
+  );
+}
+
+function Step2Personal({ draft, setField, onBack, onNext }) {
+  return (
+    <div className="card">
+      <h2>ข้อมูลส่วนตัว</h2>
+      <div className="row single">
+        <div>
+          <label>ที่อยู่ปัจจุบัน *</label>
+          <textarea rows={3} maxLength={500}
+            placeholder="เลขที่ ถนน แขวง/ตำบล เขต/อำเภอ จังหวัด รหัสไปรษณีย์"
+            value={draft.address || ''}
+            onChange={(e) => setField('address', e.target.value)} />
+        </div>
+      </div>
+      <h2 style={{ marginTop: 20 }}>ผู้ติดต่อฉุกเฉิน</h2>
+      <div className="muted" style={{ marginBottom: 12, fontSize: 12 }}>
+        บุคคลที่หอพักจะติดต่อเมื่อเกิดเหตุฉุกเฉินหรือติดต่อคุณไม่ได้
+      </div>
+      <div className="row">
+        <div>
+          <label>ชื่อ-นามสกุล *</label>
+          <input maxLength={200}
+            value={draft.emergencyContactName || ''}
+            onChange={(e) => setField('emergencyContactName', e.target.value)} />
+        </div>
+        <div>
+          <label>เบอร์โทร *</label>
+          <input maxLength={20} placeholder="0812345678"
+            value={draft.emergencyContactPhone || ''}
+            onChange={(e) => setField('emergencyContactPhone', e.target.value)} />
+        </div>
+      </div>
+      <div className="row single">
+        <div>
+          <label>ความสัมพันธ์ (ทางเลือก)</label>
+          <input maxLength={64} placeholder="แม่ / พ่อ / พี่ / เพื่อน / สามี"
+            value={draft.emergencyContactRelation || ''}
+            onChange={(e) => setField('emergencyContactRelation', e.target.value)} />
+        </div>
+      </div>
+      <div style={{ display: 'flex', gap: 8, marginTop: 20 }}>
+        <button className="btn btn-ghost" onClick={onBack}>← ย้อนกลับ</button>
+        <button className="btn btn-primary" style={{ flex: 1 }}
+          disabled={!draft.address || !draft.emergencyContactName || !draft.emergencyContactPhone}
+          onClick={onNext}>ถัดไป →</button>
+      </div>
+    </div>
+  );
+}
+
+function Step3Identity({ draft, setField, token, onBack, onNext, onError }) {
+  const upload = async (kind, file) => {
+    if (!file) return;
+    if (file.size > 1_500_000) {
+      onError('ไฟล์ใหญ่เกิน 1.5MB — ลองถ่ายใหม่ในความละเอียดต่ำลง');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = async (ev) => {
+      try {
+        const out = await api(`/api/contract-fill/${token}/upload`, {
+          method: 'POST',
+          body: { kind, dataUrl: ev.target.result },
+        });
+        setField(
+          kind === 'front' ? 'citizenIdImageFrontId' : 'citizenIdImageBackId',
+          out.file.id
+        );
+      } catch (err) {
+        onError('อัปโหลดล้มเหลว: ' + err.message);
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
+  return (
+    <div className="card">
+      <h2>เลขบัตรประชาชน + ภาพถ่าย</h2>
+      <div className="row single">
+        <div>
+          <label>เลขบัตรประชาชน 13 หลัก *</label>
+          <input inputMode="numeric" maxLength={17} placeholder="X-XXXX-XXXXX-XX-X"
+            value={draft.citizenId || ''}
+            onChange={(e) => setField('citizenId', e.target.value)} />
+        </div>
+      </div>
+      <div className="row">
+        <UploadBox label="หน้าบัตร *" kind="front"
+          fileId={draft.citizenIdImageFrontId}
+          onPick={(f) => upload('front', f)} />
+        <UploadBox label="หลังบัตร *" kind="back"
+          fileId={draft.citizenIdImageBackId}
+          onPick={(f) => upload('back', f)} />
+      </div>
+      <div className="alert alert-info" style={{ marginTop: 12, fontSize: 13 }}>
+        💡 ตรวจให้ภาพคมชัด มองเห็นเลขบัตรครบทุกหลัก ไฟล์ละไม่เกิน 1.5MB
+      </div>
+      <div style={{ display: 'flex', gap: 8, marginTop: 20 }}>
+        <button className="btn btn-ghost" onClick={onBack}>← ย้อนกลับ</button>
+        <button className="btn btn-primary" style={{ flex: 1 }}
+          disabled={!draft.citizenIdImageFrontId || !draft.citizenIdImageBackId
+                    || !draft.citizenId || draft.citizenId.replace(/[^0-9]/g, '').length !== 13}
+          onClick={onNext}>ถัดไป →</button>
+      </div>
+    </div>
+  );
+}
+
+function UploadBox({ label, kind, fileId, onPick }) {
+  const inputRef = useRef(null);
+  const [preview, setPreview] = useState(null);
+  const onFile = (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => setPreview(ev.target.result);
+    reader.readAsDataURL(f);
+    onPick(f);
+  };
+  return (
+    <div>
+      <label>{label}</label>
+      <div className="upload-box" onClick={() => inputRef.current && inputRef.current.click()}>
+        {preview ? (
+          <img src={preview} alt={label} />
+        ) : fileId ? (
+          <div>✓ อัปโหลดแล้ว · กดเพื่อเปลี่ยน</div>
+        ) : (
+          <>📷<br/><span className="muted">กดเพื่อถ่าย / เลือกรูป</span></>
+        )}
+        <input ref={inputRef} type="file"
+          accept="image/jpeg,image/png,image/webp" capture="environment"
+          style={{ display: 'none' }} onChange={onFile} />
+      </div>
+    </div>
+  );
+}
+
+function Step4Sign({ draft, setField, token, view, busy, onBack, onSubmit, onError }) {
+  const canvasRef = useRef(null);
+  const [hasInk, setHasInk] = useState(false);
+  const [agreed, setAgreed] = useState(false);
+
+  // Canvas drawing setup
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    canvas.width = 600; canvas.height = 200;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.strokeStyle = '#1a1208';
+    ctx.lineWidth = 2.5; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    let drawing = false, lastX = 0, lastY = 0;
+    const pos = (e) => {
+      const rect = canvas.getBoundingClientRect();
+      const t = e.touches ? e.touches[0] : e;
+      return {
+        x: (t.clientX - rect.left) * (canvas.width / rect.width),
+        y: (t.clientY - rect.top) * (canvas.height / rect.height),
+      };
+    };
+    const start = (e) => { e.preventDefault(); drawing = true; const p = pos(e); lastX = p.x; lastY = p.y; };
+    const move = (e) => {
+      if (!drawing) return;
+      e.preventDefault();
+      const p = pos(e);
+      ctx.beginPath(); ctx.moveTo(lastX, lastY); ctx.lineTo(p.x, p.y); ctx.stroke();
+      lastX = p.x; lastY = p.y;
+      setHasInk(true);
+    };
+    const end = () => { drawing = false; };
+    canvas.addEventListener('mousedown', start);
+    canvas.addEventListener('mousemove', move);
+    canvas.addEventListener('mouseup', end);
+    canvas.addEventListener('mouseleave', end);
+    canvas.addEventListener('touchstart', start, { passive: false });
+    canvas.addEventListener('touchmove', move, { passive: false });
+    canvas.addEventListener('touchend', end);
+    return () => {
+      canvas.removeEventListener('mousedown', start);
+      canvas.removeEventListener('mousemove', move);
+      canvas.removeEventListener('mouseup', end);
+      canvas.removeEventListener('mouseleave', end);
+      canvas.removeEventListener('touchstart', start);
+      canvas.removeEventListener('touchmove', move);
+      canvas.removeEventListener('touchend', end);
+    };
+  }, []);
+
+  const clearCanvas = () => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    setHasInk(false);
+  };
+
+  const saveSignature = async () => {
+    const canvas = canvasRef.current;
+    if (!canvas || !hasInk) return null;
+    const dataUrl = canvas.toDataURL('image/png');
+    try {
+      const out = await api(`/api/contract-fill/${token}/upload`, {
+        method: 'POST',
+        body: { kind: 'signature', dataUrl },
+      });
+      setField('signatureFileId', out.file.id);
+      return out.file.id;
+    } catch (err) {
+      onError('บันทึกลายเซ็นล้มเหลว: ' + err.message);
+      return null;
+    }
+  };
+
+  const submitWithSignature = async () => {
+    let sigId = draft.signatureFileId;
+    if (hasInk) {
+      sigId = await saveSignature();
+      if (!sigId) return;
+    }
+    if (!agreed) {
+      onError('กรุณาติ๊กยืนยันการอ่านสัญญาก่อน');
+      return;
+    }
+    if (!sigId) {
+      onError('กรุณาเซ็นชื่อก่อน');
+      return;
+    }
+    onSubmit({
+      ...draft,
+      signatureFileId: sigId,
+      agreedTermsVersion: draft.agreedTermsVersion || 'tenant-fill-v1',
+    });
+  };
+
+  return (
+    <div className="card">
+      <h2>ลงนาม</h2>
+      <div className="muted" style={{ marginBottom: 12, fontSize: 13 }}>
+        เซ็นด้วยนิ้วบนมือถือ หรือเมาส์บนคอมพิวเตอร์
+      </div>
+      <canvas ref={canvasRef} className="signature-canvas" />
+      <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 8 }}>
+        <button className="btn btn-ghost" onClick={clearCanvas} disabled={!hasInk}>
+          ล้าง
+        </button>
+      </div>
+
+      <div style={{ marginTop: 20 }}>
+        <h2>ข้อตกลงและกฎข้อบังคับ</h2>
+        <div className="terms-box">
+          1. ผู้เช่าตกลงเช่าห้องพักตามรายละเอียดในสัญญาฉบับนี้<br/>
+          2. ค่าเช่ารายเดือน {fmtTHB(view.contract.monthlyRent)} บาท
+             ชำระภายในวันที่ 15 ของทุกเดือน หากชำระล่าช้าจะคิดค่าปรับตามอัตราที่กำหนด<br/>
+          3. ผู้เช่าวางเงินมัดจำ {fmtTHB(view.contract.deposit)} บาท<br/>
+          4. ผู้เช่าใช้ห้องพักเพื่ออยู่อาศัย ห้ามใช้ประกอบกิจการผิดกฎหมาย
+             ห้ามดัดแปลงโครงสร้าง ห้ามสูบบุหรี่ในห้อง<br/>
+          5. รายละเอียดข้อบังคับเพิ่มเติมจะปรากฏในไฟล์ PDF เต็มที่
+             เจ้าของหอพักจะมอบให้หลังการอนุมัติ
+        </div>
+        <label style={{ display: 'flex', gap: 8, marginTop: 12, cursor: 'pointer' }}>
+          <input type="checkbox" checked={agreed} onChange={(e) => setAgreed(e.target.checked)} />
+          <span style={{ fontSize: 14 }}>
+            ข้าพเจ้าได้อ่านและเข้าใจข้อตกลงและกฎข้อบังคับของหอพักโดยตลอดแล้ว
+            และยินยอมปฏิบัติตามทุกประการ
+          </span>
+        </label>
+      </div>
+
+      <div style={{ display: 'flex', gap: 8, marginTop: 20 }}>
+        <button className="btn btn-ghost" onClick={onBack} disabled={busy}>← ย้อนกลับ</button>
+        <button className="btn btn-primary" style={{ flex: 1 }}
+          disabled={busy || (!hasInk && !draft.signatureFileId) || !agreed}
+          onClick={submitWithSignature}>
+          {busy ? 'กำลังส่ง...' : 'ส่งให้ตรวจสอบ ✓'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function SubmittedView({ view }) {
+  return (
+    <div className="card">
+      <h1>✅ ส่งสัญญาเรียบร้อย</h1>
+      <div className="alert alert-success" style={{ marginTop: 12 }}>
+        ระบบได้รับข้อมูลของคุณแล้ว — ขอเวลาเจ้าของหอพักตรวจสอบและอนุมัติ
+      </div>
+      <ul className="info-list" style={{ marginTop: 16 }}>
+        <li><span className="k">สัญญา</span><span className="v">{view.contract.contractNo || '—'}</span></li>
+        <li><span className="k">ห้อง</span><span className="v">{view.contract.roomId || '—'}</span></li>
+        <li><span className="k">สถานะ</span><span className="v">รอการตรวจสอบจากเจ้าของหอพัก</span></li>
+      </ul>
+      <div className="alert alert-info" style={{ marginTop: 16, fontSize: 13 }}>
+        💡 หลังจากเจ้าของหอพักอนุมัติแล้ว สัญญาจะถูก lock และคุณจะไม่สามารถแก้ไขได้
+        — ติดต่อเจ้าของหอพักหากต้องการแก้ไขใดๆ
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
