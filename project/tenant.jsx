@@ -1938,65 +1938,44 @@ function PaymentsView({ locale, payments, syncErrors, goto }) {
           }}>{f.label} <span style={{ opacity: 0.6, marginLeft: 4 }}>{f.count}</span></button>
         ))}
       </div>
-      {filtered.length === 0 ? <Empty icon="payments" title={paymentError ? t('nothingHere') : t('noPayments')} />
-        : (
-        <Card pad={0}>
-          <div className="pay-head" style={{
-            display: 'grid', gridTemplateColumns: '1.4fr 0.9fr 0.9fr 0.8fr 1.1fr',
-            padding: '14px 22px', borderBottom: '1px solid var(--line)',
-            color: 'var(--muted)', fontSize: 'var(--fs-xs)', fontWeight: 600,
-            letterSpacing: '.04em', textTransform: 'uppercase',
-          }}>
-            <div>{t('colBill')}</div>
-            <div>{t('colDate')}</div>
-            <div>{t('colMethod')}</div>
-            <div style={{ textAlign: 'right' }}>{t('colAmount')}</div>
-            <div style={{ textAlign: 'right' }}>{t('colAction')}</div>
-          </div>
-          {filtered.map((p, i) => (
-            <div key={p.id} className="pay-row" style={{
-              display: 'grid', gridTemplateColumns: '1.4fr 0.9fr 0.9fr 0.8fr 1.1fr',
-              padding: '18px 22px', borderTop: i === 0 ? 0 : '1px solid var(--line)',
-              alignItems: 'center', gap: 14,
-            }}>
-              <div style={{ minWidth: 0 }}>
-                <div style={{ fontWeight: 600, fontSize: 'var(--fs-md)' }}>{p.bill_no || `#${p.bill_id || '—'}`}</div>
-                {p.period ? <div style={{ fontSize: 'var(--fs-xs)', color: 'var(--muted)', marginTop: 2 }}>{fmtPeriod(p.period, locale)}</div> : null}
-                {p.status === 'rejected' && p.rejected_reason ? (
-                  <div style={{ marginTop: 4, fontSize: 'var(--fs-xs)', color: 'var(--red)', lineHeight: 1.5, wordBreak: 'break-word' }}>
-                    {tenantRejectedReason(p.rejected_reason)}
+      {filtered.length === 0 ? (
+        <Empty icon="payments" title={paymentError ? t('nothingHere') : t('noPayments')} />
+      ) : (
+        <div style={{ display: 'grid', gap: 'var(--sp-3)' }}>
+          {filtered.map((p) => (
+            <Card key={p.id} hoverable pad={0}>
+              <div style={{ padding: 'var(--sp-4) var(--sp-5)', display: 'grid', gridTemplateColumns: '1fr auto', gap: 'var(--sp-4)', alignItems: 'center' }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+                    <div style={{ fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 16 }}>{p.bill_no || `#${p.bill_id || '—'}`}</div>
+                    <Pill tone={STATUS_TONE[p.status]}>{statusLabel(p.status)}</Pill>
+                    {p.method ? <span style={{ fontSize: 'var(--fs-xs)', color: 'var(--muted)' }}>{p.method}</span> : null}
                   </div>
-                ) : null}
+                  <div style={{ color: 'var(--muted)', fontSize: 13, marginTop: 4 }}>
+                    {fmtDateTime(p.created_at, locale)}{p.period ? ` · ${fmtPeriod(p.period, locale)}` : ''}
+                  </div>
+                  {p.status === 'rejected' && p.rejected_reason ? (
+                    <div style={{ marginTop: 4, fontSize: 'var(--fs-xs)', color: 'var(--red)', lineHeight: 1.5, wordBreak: 'break-word' }}>
+                      {tenantRejectedReason(p.rejected_reason)}
+                    </div>
+                  ) : null}
+                </div>
+                <div style={{ textAlign: 'right' }}>
+                  <div style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 22 }}>฿{fmtMoney(p.amount)}</div>
+                  <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end', marginTop: 6, flexWrap: 'wrap' }}>
+                    {p.slip_url ? (
+                      <Button size="sm" variant="ghost" onClick={() => openSlip(p.slip_url)}>{t('viewSlip')}</Button>
+                    ) : null}
+                    {p.status === 'rejected' && p.bill_id && goto ? (
+                      <Button size="sm" variant="soft" onClick={() => goto('bills', p.bill_id)}>{t('reuploadSlip')}</Button>
+                    ) : null}
+                  </div>
+                </div>
               </div>
-              <div style={{ fontSize: 'var(--fs-sm)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                {fmtDateTime(p.created_at, locale)}
-              </div>
-              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', minWidth: 0 }}>
-                <Pill tone={STATUS_TONE[p.status]}>{statusLabel(p.status)}</Pill>
-                {p.method ? <span style={{ fontSize: 'var(--fs-xs)', color: 'var(--muted)' }}>{p.method}</span> : null}
-              </div>
-              <div style={{ textAlign: 'right', fontFamily: 'var(--font-display)', fontWeight: 600 }}>฿{fmtMoney(p.amount)}</div>
-              <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
-                {p.slip_url ? (
-                  <Button size="sm" variant="ghost" onClick={() => openSlip(p.slip_url)}>{t('viewSlip')}</Button>
-                ) : null}
-                {p.status === 'rejected' && p.bill_id && goto ? (
-                  <Button size="sm" variant="soft" onClick={() => goto('bills', p.bill_id)}>{t('reuploadSlip')}</Button>
-                ) : null}
-              </div>
-            </div>
+            </Card>
           ))}
-        </Card>
+        </div>
       )}
-      <style>{`@media (max-width: 768px){
-        .pay-head{display:none!important}
-        .pay-row{grid-template-columns:1fr auto!important;grid-template-areas:"name amt" "date method" "act act"!important;gap:8px!important}
-        .pay-row > *:nth-child(1){grid-area:name}
-        .pay-row > *:nth-child(2){grid-area:date;color:var(--muted);font-size:var(--fs-xs)!important}
-        .pay-row > *:nth-child(3){grid-area:method;justify-self:start}
-        .pay-row > *:nth-child(4){grid-area:amt;align-self:start}
-        .pay-row > *:nth-child(5){grid-area:act;justify-content:flex-start!important;margin-top:4px}
-      }`}</style>
     </div>
   );
 }
