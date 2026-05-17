@@ -565,10 +565,14 @@ test('slipVerifier accepts configured manual receivers as secondary receiver tar
     'upload handler must read the invoice TrueMoney Wallet phone from paymentBlock');
   assert.match(server, /additionalReceiverTargets:\s*extraTargets/,
     'upload handler must pass extra receiver targets to slipVerifier');
+  assert.match(server, /paymentBlockReceiverTargetEntries\(paymentBlock\)/,
+    'upload handler must preserve receiver channel metadata for later ledger method classification');
   assert.match(src, /additionalReceiverTargets/,
     'slipVerifier must accept additionalReceiverTargets in expected');
-  assert.match(src, /acceptableTargets\.push/,
-    'slipVerifier must accumulate every acceptable receiver target before matching');
+  assert.match(src, /typeof value === 'object'[\s\S]{0,160}value\.target \|\| value\.account \|\| value\.phone/,
+    'slipVerifier must accept structured additional receiver targets');
+  assert.match(src, /result\.receiverMatch = matchDetail/,
+    'slipVerifier must return which receiver target matched the slip');
 });
 
 test('slipVerifier.getConfiguredProviders gates by API-key presence', () => {
@@ -746,11 +750,11 @@ test('/api/bills/:id/verify-slip matches owner-manager payment verification poli
   const route = fs.readFileSync(path.join(__dirname, '..', 'routes', 'bills-extras.js'), 'utf8');
   const idx = route.indexOf("r.post('/:id/verify-slip'");
   assert.ok(idx > 0, 'should find bill verify-slip handler');
-  // 4000 char window — handler grew when REJECT_REASON_TOO_LONG validation
+  // 7000 char window — handler grew when REJECT_REASON_TOO_LONG validation
   // + verifier session-fallback guard were added. The handler boundary is
   // the next `r.post(` or end-of-file, but slicing a generous fixed window
   // keeps the test simple while still bounded.
-  const body = route.slice(idx, idx + 4000);
+  const body = route.slice(idx, idx + 7000);
   assert.match(body, /requireRole\('owner', 'manager'\)/,
     'bill-id verify path must use the same owner/manager policy as payment-id verify');
   assert.doesNotMatch(body, /requireRole\('owner', 'manager', 'staff'\)/,
@@ -759,6 +763,12 @@ test('/api/bills/:id/verify-slip matches owner-manager payment verification poli
     'bill-id verify path must fail closed when the bill is not payable');
   assert.match(body, /PAYMENT_AMOUNT_MISMATCH/,
     'bill-id verify path must reject amount mismatches');
+  assert.match(body, /SELECT id, amount, tenant_id FROM payments/,
+    'bill-id verify path must retain tenant_id for post-payment access-card restore');
+  assert.match(body, /RETURNING id, room_id/,
+    'bill-id verify path must return the paid bill room for immediate room-status sync');
+  assert.match(route, /restoreAccessCardsAfterPayment\(pool, paidTenantId/,
+    'bill-id verify path must restore access cards immediately after payment clears overdue balance');
 });
 
 test('/api/bills/:id/pay records offline payments in the payment ledger', () => {
@@ -769,7 +779,7 @@ test('/api/bills/:id/pay records offline payments in the payment ledger', () => 
   assert.ok(idx > 0, 'should find bill manual-pay handler');
   // 8000 char window — the handler grew when we added optional slip upload
   // (storage.saveBase64 call + rollback cleanup) ahead of the INSERT.
-  const body = route.slice(idx, idx + 8000);
+  const body = route.slice(idx, idx + 11000);
   assert.match(body, /requireRole\('owner', 'manager'\)/,
     'manual pay must be owner/manager only');
   assert.match(body, /SELECT id, bill_no, period, total, status, tenant_id[\s\S]*FOR UPDATE/,
@@ -782,6 +792,8 @@ test('/api/bills/:id/pay records offline payments in the payment ledger', () => 
     'manual pay must reject mismatches and duplicate verified payments');
   assert.match(body, /notifyManualPayment/,
     'manual pay must notify tenant after recording an offline payment');
+  assert.match(body, /restoreAccessCardsAfterPayment\(pool, row\.tenant_id/,
+    'manual pay must restore access cards immediately after payment clears overdue balance');
 });
 
 test('/api/bills create validates input and refuses to mutate paid/verified ledger rows', () => {
@@ -990,6 +1002,28 @@ test('/api/tenant/payments auto-verify checks the effective PromptPay target', (
     'auto-verify must pass the verified receiver target to slipVerifier');
   assert.doesNotMatch(body, /const ppTarget = require\('\.\/services\/secrets'\)\.get\('PROMPTPAY_TARGET'\)/,
     'auto-verify must not ignore Settings payment config');
+});
+
+test('/api/tenant/payments records method from the matched receiver channel', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const idx = server.indexOf('async function tenantPaymentUploadHandler');
+  assert.ok(idx > 0, 'should find tenant payment upload handler');
+  const end = server.indexOf('// Atomic:', idx);
+  const body = server.slice(idx, end > idx ? end : idx + 16000);
+  assert.match(server, /function inferSlipPaymentMethod\(paymentBlock, verifyResult/,
+    'server must derive ledger payment method from slip receiver match');
+  assert.match(body, /const paymentMethod = inferSlipPaymentMethod/,
+    'tenant upload must compute method before inserting payment row');
+  assert.match(server, /verifyResult\?\.receiverMatch\?\.method/,
+    'method inference must prefer slipVerifier receiverMatch metadata');
+  assert.match(server, /raw === 'truemoney' \|\| raw === 'wallet'/,
+    'TrueMoney uploads must be representable distinctly from PromptPay');
+  assert.match(server, /VALUES \(\$1,\$2,\$3,\$4,\$5,\$6/,
+    'payment INSERT must bind method as a parameter');
+  assert.doesNotMatch(server, /VALUES \(\$1,\$2,\$3,'promptpay'/,
+    'tenant slip upload must not hard-code every slip as PromptPay');
 });
 
 test('/api/tenant/payments refuses orphan bills (BILL_NOT_LINKED)', () => {

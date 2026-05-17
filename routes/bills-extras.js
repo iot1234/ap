@@ -77,6 +77,29 @@ function getRenderBillId(req, bill) {
   return null;
 }
 
+async function restoreAccessCardsAfterPayment(pool, tenantId, flagsHint, reason) {
+  if (!tenantId) return;
+  try {
+    const flags = flagsHint || await features.load(pool).catch(() => ({}));
+    const rawThreshold = Number(flags?.accessControl?.overdueDaysThreshold);
+    const threshold = Number.isFinite(rawThreshold) ? rawThreshold : 30;
+    await require('../services/scheduler').restoreAccessCardsForTenantIfClear(pool, tenantId, {
+      threshold,
+      notifier,
+      flags,
+      audit: async (entry) => {
+        await pool.query(
+          `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, detail)
+           VALUES ($1, $2, $3, $4, $5::jsonb)`,
+          [entry.actor, entry.action, entry.entity, entry.entityId, JSON.stringify(entry.details || {})]
+        ).catch(() => {});
+      },
+    });
+  } catch (err) {
+    console.warn(`[bills.${reason || 'payment'}] access-card restore failed:`, err.message);
+  }
+}
+
 function buildStoredBillPdfObject(b, config, paymentBlock) {
   const items = [
     { label: 'ค่าเช่าห้องพัก', qty: '1 เดือน', amount: Number(b.rent) || 0 },
@@ -2146,6 +2169,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           require('../services/roomStatus').syncRoom(pool, billRoomId, { reason: 'manual-pay' })
             .catch((err) => console.warn(`[bills.pay] room sync failed:`, err.message));
         }
+        restoreAccessCardsAfterPayment(pool, row.tenant_id, null, 'pay').catch(() => {});
         res.json({ ok: true, bill: paid.rows[0], payment: payment.rows[0] });
       } catch (err) {
         await client.query('ROLLBACK').catch(() => {});
@@ -2194,6 +2218,8 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       // would crash the UPDATE with 500.
       const verifier = req.session?.user?.username || 'admin:unknown';
       const client = await pool.connect();
+      let paidRoomId = null;
+      let paidTenantId = null;
       try {
         await client.query('BEGIN');
         const bill = await client.query(
@@ -2205,7 +2231,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           return res.status(404).json({ error: 'bill not found' });
         }
         const pres = await client.query(
-          `SELECT id, amount FROM payments
+          `SELECT id, amount, tenant_id FROM payments
              WHERE bill_id=$1 AND status='pending' ORDER BY created_at DESC LIMIT 1
              FOR UPDATE`,
           [id]
@@ -2245,6 +2271,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             await client.query('ROLLBACK');
             return res.status(404).json({ error: 'no pending slip for this bill' });
           }
+          paidTenantId = upd.rows[0].tenant_id || pres.rows[0].tenant_id || null;
           // Reject any OTHER pending payments on this bill in the same
           // transaction. The handler previously selected only the most
           // recent pending row and verified it — if the tenant uploaded
@@ -2265,7 +2292,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             // match 'void', re-animating a bill the admin already cancelled.
             `UPDATE bills SET status='paid', paid_at=NOW()
                WHERE id=$1 AND status IN ('pending','overdue')
-               RETURNING id`,
+               RETURNING id, room_id`,
             [id]
           );
           if (paid.rowCount !== 1) {
@@ -2275,6 +2302,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
               code: 'BILL_MARK_PAID_FAILED',
             });
           }
+          paidRoomId = paid.rows[0]?.room_id || null;
         } else {
           const rejected = await client.query(
             `UPDATE payments SET status='rejected', verified_by=$1, verified_at=NOW(), rejected_reason=$2
@@ -2290,20 +2318,15 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         audit(req, accept ? 'slip.verify' : 'slip.reject', 'bill', String(id), { paymentId: pid, reason });
         // Auto-cascade room status when a bill was accepted/paid. The
         // verify-slip endpoint's bill id maps to the room via bills.room_id;
-        // we already have the bill row in scope (status='paid' after the
-        // UPDATE), so look up the room and sync. Reject path doesn't change
-        // the bill state so room status doesn't move.
+        // capture it from UPDATE ... RETURNING so the post-commit sync uses
+        // the same paid row and doesn't need a second lookup. Reject path
+        // doesn't change the bill state so room/access status doesn't move.
         if (accept) {
-          try {
-            const rQ = await pool.query(`SELECT room_id FROM bills WHERE id=$1 LIMIT 1`, [id]);
-            const rid = rQ.rows[0]?.room_id;
-            if (rid) {
-              require('../services/roomStatus').syncRoom(pool, rid, { reason: 'slip-verify' })
-                .catch((err) => console.warn(`[bills.verify-slip] room sync failed:`, err.message));
-            }
-          } catch (err) {
-            console.warn(`[bills.verify-slip] room lookup failed:`, err.message);
+          if (paidRoomId) {
+            require('../services/roomStatus').syncRoom(pool, paidRoomId, { reason: 'slip-verify' })
+              .catch((err) => console.warn(`[bills.verify-slip] room sync failed:`, err.message));
           }
+          restoreAccessCardsAfterPayment(pool, paidTenantId, null, 'verify-slip').catch(() => {});
         }
         // Fire-and-forget tenant notification with the verdict
         try {

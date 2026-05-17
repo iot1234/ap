@@ -374,13 +374,26 @@ async function verifyOne(providerId, buffer, expected) {
   // copies the bank account number instead of scanning the PromptPay QR
   // will produce a slip whose receiver.account is the bank account, NOT
   // the PromptPay digits — so we need to accept either. Caller passes
-  // any extras via expected.additionalReceiverTargets (array of strings,
-  // already in raw account-number form).
+  // any extras via expected.additionalReceiverTargets. Entries may be raw
+  // strings or objects ({ target/account/phone, method }) so callers can
+  // audit which visible payment channel actually matched the slip.
   const acceptableTargets = [];
-  if (expected.promptpayTarget) acceptableTargets.push(expected.promptpayTarget);
+  const addAcceptableTarget = (value, meta = {}) => {
+    const raw = value && typeof value === 'object'
+      ? (value.target || value.account || value.phone || value.value)
+      : value;
+    const digits = String(raw || '').replace(/[^0-9]/g, '');
+    if (!digits) return;
+    acceptableTargets.push({
+      digits,
+      method: meta.method || (value && typeof value === 'object' ? value.method : null) || null,
+      label: meta.label || (value && typeof value === 'object' ? value.label : null) || null,
+    });
+  };
+  if (expected.promptpayTarget) addAcceptableTarget(expected.promptpayTarget, { method: 'promptpay', label: 'PromptPay' });
   if (Array.isArray(expected.additionalReceiverTargets)) {
     for (const t of expected.additionalReceiverTargets) {
-      if (t) acceptableTargets.push(t);
+      addAcceptableTarget(t);
     }
   }
 
@@ -412,9 +425,10 @@ async function verifyOne(providerId, buffer, expected) {
     // Bumping from 4 → 6 drops collision odds from 1e-4 to 1e-6.
     // We try every acceptable target; PASS if ANY matches.
     let matched = false;
+    let matchDetail = null;
     const expectedTails = [];
     for (const target of acceptableTargets) {
-      const expectedDigits = String(target).replace(/[^0-9]/g, '');
+      const expectedDigits = target.digits;
       if (!expectedDigits) continue;
       const compareLen = Math.min(6, expectedDigits.length, actualDigits.length);
       const expectedTail = expectedDigits.slice(-compareLen);
@@ -422,6 +436,13 @@ async function verifyOne(providerId, buffer, expected) {
       expectedTails.push(expectedTail);
       if (expectedTail && actualTail && expectedTail === actualTail) {
         matched = true;
+        matchDetail = {
+          method: target.method || null,
+          label: target.label || null,
+          compareLen,
+          expectedTail,
+          actualTail,
+        };
         break;
       }
     }
@@ -436,6 +457,9 @@ async function verifyOne(providerId, buffer, expected) {
         raw: result.raw,
         provider: providerId,
       };
+    }
+    if (matchDetail) {
+      result.receiverMatch = matchDetail;
     }
   }
   return result;

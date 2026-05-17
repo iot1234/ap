@@ -3997,6 +3997,54 @@ function paymentBlockReceiverTargets(paymentBlock) {
   return Array.from(new Set(targets));
 }
 
+function paymentBlockReceiverTargetEntries(paymentBlock, promptpayTarget = null) {
+  const entries = [];
+  const seen = new Set();
+  const add = (method, value, label) => {
+    const digits = String(value || '').replace(/[^0-9]/g, '');
+    if (digits.length < 4) return;
+    const key = `${method}:${digits}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    entries.push({ method, target: digits, label });
+  };
+  if (promptpayTarget || paymentBlock?.promptpayTarget) {
+    add('promptpay', promptpayTarget || paymentBlock.promptpayTarget, 'PromptPay');
+  }
+  if (paymentBlock?.bankInfo?.account) {
+    add('transfer', paymentBlock.bankInfo.account, paymentBlock.bankInfo.bank || 'Bank transfer');
+  }
+  if (paymentBlock?.walletInfo?.phone) {
+    add('truemoney', paymentBlock.walletInfo.phone, 'TrueMoney Wallet');
+  }
+  return entries;
+}
+
+function normalizeUploadedSlipMethod(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (raw === 'promptpay') return 'promptpay';
+  if (raw === 'truemoney' || raw === 'wallet') return 'truemoney';
+  if (raw === 'bank' || raw === 'transfer') return 'transfer';
+  return null;
+}
+
+function inferSlipPaymentMethod(paymentBlock, verifyResult, opts = {}) {
+  const requested = normalizeUploadedSlipMethod(opts.requestedMethod);
+  if (requested) return requested;
+  if (verifyResult?.receiverMatch?.method) return verifyResult.receiverMatch.method;
+  const actualDigits = String(verifyResult?.receiver?.account || '').replace(/[^0-9]/g, '');
+  if (actualDigits.length >= 4) {
+    for (const target of paymentBlockReceiverTargetEntries(paymentBlock, opts.promptpayTarget)) {
+      const targetDigits = String(target.target || '').replace(/[^0-9]/g, '');
+      const compareLen = Math.min(6, targetDigits.length, actualDigits.length);
+      if (compareLen >= 4 && targetDigits.slice(-compareLen) === actualDigits.slice(-compareLen)) {
+        return target.method;
+      }
+    }
+  }
+  return opts.defaultMethod || (opts.promptpayTarget || paymentBlock?.promptpayTarget ? 'promptpay' : 'transfer');
+}
+
 function slipRejectCopy(code, fallback) {
   const map = {
     AMOUNT_MISMATCH: {
@@ -5252,20 +5300,25 @@ async function tenantPaymentUploadHandler(req, res) {
     const slipVerifier = require('./services/slipVerifier');
     let verifyResult = null;
     let autoVerifyAttempted = false;
+    let effectivePaymentBlock = null;
+    let effectivePromptpayTarget = null;
     if (slipVerifier.isConfigured(req.features)) {
       autoVerifyAttempted = true;
       try {
         const { paymentBlock } = await loadEffectivePaymentBlock();
+        effectivePaymentBlock = paymentBlock;
         let ppTarget = null;
         let promptpayConfigError = null;
         if (paymentBlock.promptpayTarget) {
           try {
             ppTarget = normaliseTarget(paymentBlock.promptpayTarget);
+            effectivePromptpayTarget = ppTarget;
           } catch (err) {
             promptpayConfigError = 'PromptPay target is invalid';
           }
         }
-        const extraTargets = paymentBlockReceiverTargets(paymentBlock);
+        const extraTargets = paymentBlockReceiverTargetEntries(paymentBlock)
+          .filter((target) => target.method !== 'promptpay');
         if (!ppTarget && extraTargets.length === 0) {
           verifyResult = {
             ok: false,
@@ -5366,6 +5419,19 @@ async function tenantPaymentUploadHandler(req, res) {
         && req.features.slipUpload.autoVerify !== true;
       initialStatus = allowUnverifiedAutoApprove ? 'verified' : 'pending';
     }
+    if (!effectivePaymentBlock) {
+      try {
+        const loaded = await loadEffectivePaymentBlock();
+        effectivePaymentBlock = loaded.paymentBlock;
+        if (effectivePaymentBlock?.promptpayTarget) {
+          try { effectivePromptpayTarget = normaliseTarget(effectivePaymentBlock.promptpayTarget); } catch { /* method fallback only */ }
+        }
+      } catch { /* method fallback only */ }
+    }
+    const paymentMethod = inferSlipPaymentMethod(effectivePaymentBlock, verifyResult, {
+      promptpayTarget: effectivePromptpayTarget,
+      requestedMethod: b.method || b.paymentMethod,
+    });
 
     // Atomic: payment INSERT + (optional) bill mark-paid run in one tx so
     // we never end up with a verified payment row pointing at a bill still
@@ -5475,6 +5541,7 @@ async function tenantPaymentUploadHandler(req, res) {
             amount: verifyResult.amount,
             sender: verifyResult.sender,
             receiver: verifyResult.receiver,
+            receiverMatch: verifyResult.receiverMatch || null,
             transDate: verifyResult.transDate,
             error: verifyResult.error,
             attempts: verifyResult.attempts || [],
@@ -5484,10 +5551,10 @@ async function tenantPaymentUploadHandler(req, res) {
         const ins = await client.query(
           `INSERT INTO payments (bill_id, tenant_id, amount, method, slip_url, slip_hash,
                                  status, rejected_reason, transaction_ref, verify_provider, verify_payload, verified_by, verified_at)
-           VALUES ($1,$2,$3,'promptpay',$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,$13)
            RETURNING *`,
           [
-            billId, req.tenant.tenant_id, amount, slip.url, slipHash,
+            billId, req.tenant.tenant_id, amount, paymentMethod, slip.url, slipHash,
             initialStatus, initialReason,
             verifyResult?.transRef || null,
             verifyResult?.provider || null,
@@ -5497,6 +5564,7 @@ async function tenantPaymentUploadHandler(req, res) {
               amount: verifyResult.amount,
               sender: verifyResult.sender,
               receiver: verifyResult.receiver,
+              receiverMatch: verifyResult.receiverMatch || null,
               transDate: verifyResult.transDate,
               error: verifyResult.error,
               // Per-provider attempt trail (multi-provider fallback chain).
