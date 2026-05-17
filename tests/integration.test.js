@@ -285,6 +285,14 @@ test('pricing save validates issues and shows impact review before commit', () =
     'pricing review must still block structurally invalid values before save');
   assert.match(pricing, /warnings\.push\(`ค่าเช่า \$\{th\}: ต่ำกว่า 100 บาท/,
     'pricing review must warn, not block, when rent is unusually low');
+  assert.match(pricing, /async function savePricingDraft\(next/,
+    'pricing page must persist saves through an awaited server call');
+  assert.match(pricing, /apiCall\('\/api\/data\/baankarn_config_v1'/,
+    'pricing page must save baankarn_config_v1 directly instead of relying on background localStorage sync');
+  assert.match(pricing, /const handleSave = async \(\)/,
+    'pricing save button must wait for server persistence before showing success');
+  assert.match(pricing, /const handleReset = async \(\)/,
+    'pricing reset must also persist through the server before reporting success');
   assert.match(pricing, /setConfirmSave\(true\)/,
     'pricing page must open a confirmation modal when warnings or room impact exist');
   assert.match(pricing, /review\.impact\.slice\(0, 8\)/,

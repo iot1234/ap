@@ -155,6 +155,7 @@ function PagePricing({ config, setConfig, rooms, addActivity, setToast, embedded
   const [draft, setDraft] = useState(config);
   const [confirmReset, setConfirmReset] = useState(false);
   const [confirmSave, setConfirmSave] = useState(false);
+  const [saving, setSaving] = useState(false);
   const lastConfigJsonRef = React.useRef(JSON.stringify(config));
 
   useEffect(() => {
@@ -205,13 +206,61 @@ function PagePricing({ config, setConfig, rooms, addActivity, setToast, embedded
       return next;
     });
   };
-  const commitPricingDraft = () => {
-    setConfig(draft);
-    setConfirmSave(false);
-    addActivity && addActivity({ icon: '💰', text: 'อัปเดตการตั้งค่าราคาห้องพัก', type: 'system' });
-    setToast && setToast({ kind: 'success', message: 'บันทึกการตั้งค่าราคาเรียบร้อย' });
+  async function savePricingDraft(next, options = {}) {
+    const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
+    if (!apiCall) {
+      setToast && setToast({ kind: 'error', message: 'ระบบ API ยังไม่พร้อม กรุณารีเฟรชหน้าแล้วลองอีกครั้ง' });
+      return false;
+    }
+    setSaving(true);
+    try {
+      const out = await apiCall('/api/data/baankarn_config_v1', {
+        method: 'PUT',
+        body: JSON.stringify({ value: next }),
+      });
+      const nextJson = JSON.stringify(next);
+      lastConfigJsonRef.current = nextJson;
+      setDraft(next);
+      setConfig(next);
+      setConfirmSave(false);
+      if (options.closeReset) setConfirmReset(false);
+      addActivity && addActivity({
+        icon: options.activityIcon || '💰',
+        text: options.activityText || 'อัปเดตการตั้งค่าราคาห้องพัก',
+        type: 'system',
+      });
+      const serverWarnings = Array.isArray(out && out.warnings) ? out.warnings : [];
+      if (serverWarnings.length) {
+        setToast && setToast({
+          kind: 'warning',
+          message: `บันทึกแล้ว แต่มีคำเตือน: ${serverWarnings.slice(0, 3).join(', ')}`,
+        });
+      } else {
+        setToast && setToast({
+          kind: 'success',
+          message: options.successMessage || 'บันทึกการตั้งค่าราคาเรียบร้อย',
+        });
+      }
+      return true;
+    } catch (err) {
+      const issues = Array.isArray(err && err.issues) && err.issues.length
+        ? `: ${err.issues.slice(0, 3).join(', ')}`
+        : '';
+      setToast && setToast({
+        kind: 'error',
+        message: `${err && err.message ? err.message : 'บันทึกการตั้งค่าราคาไม่สำเร็จ'}${issues}`,
+      });
+      return false;
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const commitPricingDraft = async () => {
+    const next = clonePricingValue(draft);
+    await savePricingDraft(next);
   };
-  const handleSave = () => {
+  const handleSave = async () => {
     if (review.issues.length) {
       setToast && setToast({
         kind: 'danger',
@@ -226,17 +275,20 @@ function PagePricing({ config, setConfig, rooms, addActivity, setToast, embedded
       setConfirmSave(true);
       return;
     }
-    setConfig(draft);
-    addActivity && addActivity({ icon: '💰', text: 'อัปเดตการตั้งราคาห้องพัก', type: 'system' });
-    setToast && setToast({ kind: 'success', message: 'บันทึกการตั้งราคาเรียบร้อย' });
+    const next = clonePricingValue(draft);
+    await savePricingDraft(next, {
+      activityText: 'อัปเดตการตั้งราคาห้องพัก',
+      successMessage: 'บันทึกการตั้งราคาเรียบร้อย',
+    });
   };
-  const handleReset = () => {
+  const handleReset = async () => {
     const next = resetPricingSections(config);
-    setDraft(next);
-    setConfig(next);
-    setConfirmReset(false);
-    addActivity && addActivity({ icon: '↺', text: 'รีเซ็ตการตั้งราคาเป็นค่าเริ่มต้น', type: 'system' });
-    setToast && setToast({ kind: 'info', message: 'รีเซ็ตเป็นค่าเริ่มต้นแล้ว' });
+    await savePricingDraft(next, {
+      closeReset: true,
+      activityIcon: '↺',
+      activityText: 'รีเซ็ตการตั้งราคาเป็นค่าเริ่มต้น',
+      successMessage: 'รีเซ็ตเป็นค่าเริ่มต้นแล้ว',
+    });
   };
 
   return (
@@ -246,10 +298,10 @@ function PagePricing({ config, setConfig, rooms, addActivity, setToast, embedded
         subtitle="กำหนดราคาฐาน, ค่าน้ำ-ไฟ, ส่วนลด และค่าธรรมเนียมต่างๆ อย่างครบถ้วน"
         actions={
           <>
-            <Btn variant="ghost" onClick={() => setConfirmReset(true)}>↺ รีเซ็ต</Btn>
-            <Btn variant="secondary" onClick={() => setDraft(config)} disabled={!dirty}>ยกเลิกการแก้ไข</Btn>
-            <Btn variant="primary" tone="finance" icon="✓" onClick={handleSave} disabled={!dirty || review.issues.length > 0}>
-              {dirty ? 'บันทึกการเปลี่ยนแปลง' : 'บันทึกแล้ว'}
+            <Btn variant="ghost" onClick={() => setConfirmReset(true)} disabled={saving}>↺ รีเซ็ต</Btn>
+            <Btn variant="secondary" onClick={() => setDraft(config)} disabled={saving || !dirty}>ยกเลิกการแก้ไข</Btn>
+            <Btn variant="primary" tone="finance" icon="✓" onClick={handleSave} disabled={saving || !dirty || review.issues.length > 0}>
+              {saving ? 'กำลังบันทึก...' : dirty ? 'บันทึกการเปลี่ยนแปลง' : 'บันทึกแล้ว'}
             </Btn>
           </>
         }
@@ -263,10 +315,10 @@ function PagePricing({ config, setConfig, rooms, addActivity, setToast, embedded
           display: 'flex', alignItems: 'center', gap: 8,
           flexWrap: 'wrap', marginBottom: 14,
         }}>
-          <Btn variant="ghost" size="sm" onClick={() => setConfirmReset(true)}>↺ รีเซ็ต</Btn>
-          <Btn variant="secondary" size="sm" onClick={() => setDraft(config)} disabled={!dirty}>ยกเลิกการแก้ไข</Btn>
-          <Btn variant="primary" tone="finance" size="sm" icon="✓" onClick={handleSave} disabled={!dirty || review.issues.length > 0}>
-            {dirty ? 'บันทึกการเปลี่ยนแปลง' : 'บันทึกแล้ว'}
+          <Btn variant="ghost" size="sm" onClick={() => setConfirmReset(true)} disabled={saving}>↺ รีเซ็ต</Btn>
+          <Btn variant="secondary" size="sm" onClick={() => setDraft(config)} disabled={saving || !dirty}>ยกเลิกการแก้ไข</Btn>
+          <Btn variant="primary" tone="finance" size="sm" icon="✓" onClick={handleSave} disabled={saving || !dirty || review.issues.length > 0}>
+            {saving ? 'กำลังบันทึก...' : dirty ? 'บันทึกการเปลี่ยนแปลง' : 'บันทึกแล้ว'}
           </Btn>
         </div>
       )}
@@ -350,8 +402,8 @@ function PagePricing({ config, setConfig, rooms, addActivity, setToast, embedded
         footer={
           <>
             <Btn variant="ghost" onClick={() => setConfirmSave(false)}>ยกเลิก</Btn>
-            <Btn variant="primary" tone="finance" icon="✓" onClick={commitPricingDraft} disabled={review.issues.length > 0}>
-              ยืนยันบันทึกราคา
+            <Btn variant="primary" tone="finance" icon="✓" onClick={commitPricingDraft} disabled={saving || review.issues.length > 0}>
+              {saving ? 'กำลังบันทึก...' : 'ยืนยันบันทึกราคา'}
             </Btn>
           </>
         }
@@ -397,7 +449,7 @@ function PagePricing({ config, setConfig, rooms, addActivity, setToast, embedded
         footer={
           <>
             <Btn variant="ghost" onClick={() => setConfirmReset(false)}>ยกเลิก</Btn>
-            <Btn variant="danger" onClick={handleReset}>รีเซ็ต</Btn>
+            <Btn variant="danger" onClick={handleReset} disabled={saving}>{saving ? 'กำลังบันทึก...' : 'รีเซ็ต'}</Btn>
           </>
         }
       >
