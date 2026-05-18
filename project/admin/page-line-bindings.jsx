@@ -314,6 +314,19 @@ function DetailModal({ C, Modal, Btn, Pill, detail, tenantId, oas, busy, onClose
       if (el) { el.innerText = '✓ คัดลอกแล้ว'; setTimeout(() => { el.innerText = 'คัดลอก'; }, 1500); }
     });
   }
+  function resolveLineAddUrl() {
+    const list = Array.isArray(oas) ? oas : [];
+    const targetId = pending && (pending.target_oa_id || pending.targetOaId);
+    if (targetId) {
+      const target = list.find((o) => String(o.id) === String(targetId));
+      return target && target.addFriendUrl ? target.addFriendUrl : '';
+    }
+    const defaultOa = list.find((o) => o.isDefault && o.addFriendUrl);
+    if (defaultOa) return defaultOa.addFriendUrl;
+    const first = list.find((o) => o.addFriendUrl);
+    return first ? first.addFriendUrl : '';
+  }
+  const lineAddUrl = resolveLineAddUrl();
 
   return (
     <Modal open={true} onClose={onClose} title={`${t.full_name}${t.current_room_id ? ' · ห้อง ' + t.current_room_id : ''}`}>
@@ -352,6 +365,17 @@ function DetailModal({ C, Modal, Btn, Pill, detail, tenantId, oas, busy, onClose
                 padding: '8px 14px', background: '#fff', borderRadius: 6, border: '1px solid ' + C.border,
               }}>{pending.code}</code>
               <button id={`copy-${pending.code}`} onClick={() => copyCode(pending.code)} style={btnLink(C)}>คัดลอก</button>
+              {lineAddUrl ? (
+                <a href={lineAddUrl} target="_blank" rel="noreferrer"
+                  style={{ ...btnLink(C), background: C.accent || '#2f8a70', color: '#fff', textDecoration: 'none' }}>
+                  เปิด LINE OA
+                </a>
+              ) : (
+                <button onClick={() => { window.location.hash = '#line-oas'; }}
+                  style={{ ...btnLink(C), border: '1px solid ' + C.border }}>
+                  ตั้งลิงก์ LINE
+                </button>
+              )}
             </div>
             <div style={{ marginTop: 12 }}>
               <img src={`/api/admin/line-bindings/tenants/${tenantId}/qr`}
@@ -360,7 +384,7 @@ function DetailModal({ C, Modal, Btn, Pill, detail, tenantId, oas, busy, onClose
             </div>
             <div style={{ marginTop: 8, fontSize: 12, color: C.muted, lineHeight: 1.6 }}>
               📋 ขั้นตอนสำหรับผู้เช่า:<br/>
-              1) Add LINE OA เป็นเพื่อน<br/>
+              1) กด “เปิด LINE OA” หรือ Add LINE OA เป็นเพื่อน<br/>
               2) ส่งข้อความ <code>{pending.code}</code> ในแชต<br/>
               3) ระบบจะตอบกลับ "ผูกบัญชีสำเร็จ" และเริ่มส่งบิล/แจ้งเตือน
             </div>

@@ -157,6 +157,7 @@ module.exports = function buildAdminLineOasRouter(ctx) {
         name: body.name,
         description: body.description,
         botBasicId: body.botBasicId,
+        addFriendUrl: body.addFriendUrl,
         channelId: body.channelId,
         ownerUserId: body.ownerUserId,
         channelAccessToken: body.channelAccessToken,

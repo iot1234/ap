@@ -29,6 +29,7 @@ const scheduler = require('./services/scheduler');
 const roomSync = require('./services/roomSync');
 const billPayments = require('./services/billPayments');
 const lineBinding = require('./services/lineBinding');
+const lineOa = require('./services/lineOa');
 const { schemas } = require('./schemas');
 const { validateBody } = require('./middleware/validate');
 
@@ -2421,6 +2422,7 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBookingSubmit, validateBod
     }
     await client.query('COMMIT');
     try {
+      const defaultOa = await lineOa.getDefault(pool).catch(() => null);
       const binding = await lineBinding.issueBooking(pool, {
         bookingId: newBooking.id,
         ttlDays: 7,
@@ -2430,6 +2432,7 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBookingSubmit, validateBod
         code: binding.code,
         expiresAt: binding.expiresAt,
         bookingId: binding.bookingId,
+        addFriendUrl: defaultOa?.addFriendUrl || null,
       };
     } catch (err) {
       console.warn('[booking] LINE binding code issue skipped:', err.message);
@@ -7015,12 +7018,23 @@ async function enrichBookingLineBindingStatus(pool, booking) {
       'none', 'error', 'expired', 'revoked', 'blocked',
     ].includes(effectiveStatus);
 
+    let addFriendUrl = existing.addFriendUrl || existing.add_friend_url || null;
+    if (!addFriendUrl) {
+      const addFriendOaId = pending?.target_oa_id || pending?.oa_id || bound?.oa_id
+        || latest?.target_oa_id || latest?.oa_id || null;
+      const oa = addFriendOaId
+        ? await lineOa.getById(pool, addFriendOaId).catch(() => null)
+        : await lineOa.getDefault(pool).catch(() => null);
+      addFriendUrl = oa?.addFriendUrl || null;
+    }
+
     out.lineBinding = {
       ...existing,
       status: effectiveStatus,
       lastStatus: latest?.status || existing.status || null,
       code: pending?.code || (activeBookingStatus ? existing.code : null) || null,
       expiresAt,
+      addFriendUrl,
       boundAt: bound?.bound_at || existing.boundAt || existing.bound_at || null,
       boundCount,
       lineRecipientCount: boundCount,

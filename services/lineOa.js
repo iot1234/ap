@@ -52,6 +52,34 @@ function asCount(value, fallback = 0) {
   return Number.isFinite(n) ? n : fallback;
 }
 
+function normaliseLineAddUrl(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== 'https:') return null;
+    const host = u.hostname.toLowerCase();
+    const allowed = host === 'line.me' || host.endsWith('.line.me')
+      || host === 'lin.ee' || host.endsWith('.lin.ee');
+    if (!allowed) return null;
+    u.hash = '';
+    return u.toString().slice(0, 300);
+  } catch {
+    return null;
+  }
+}
+
+function buildLineAddUrl(botBasicId) {
+  const id = String(botBasicId || '').trim();
+  if (!/^@?[a-zA-Z0-9._-]{2,60}$/.test(id)) return null;
+  const withAt = id.startsWith('@') ? id : `@${id}`;
+  return `https://line.me/R/ti/p/${encodeURIComponent(withAt).replace(/^%40/, '@')}`;
+}
+
+function resolveLineAddUrl(row) {
+  return normaliseLineAddUrl(row?.add_friend_url) || buildLineAddUrl(row?.bot_basic_id);
+}
+
 // Internal: turn a DB row into a public-safe object (no secrets exposed
 // unless the caller explicitly asks for the decrypted token).
 function rowToPublic(row, includeSecrets = false) {
@@ -75,6 +103,7 @@ function rowToPublic(row, includeSecrets = false) {
     name: row.name,
     description: row.description || '',
     botBasicId: row.bot_basic_id || '',
+    addFriendUrl: resolveLineAddUrl(row) || '',
     channelId: row.channel_id || '',
     enabled: !!row.enabled,
     isDefault: !!row.is_default,
@@ -128,6 +157,8 @@ function _envOa() {
     slug: 'env',
     name: 'LINE OA (env vars)',
     description: 'Legacy single-OA configured via environment variables',
+    botBasicId: '',
+    addFriendUrl: '',
     enabled: true,
     isDefault: true,
     ownerUserId: owner || '',
@@ -327,6 +358,12 @@ async function create(pool, input, createdBy) {
   const secretEnc = input.channelSecret
     ? encryption.encryptString(String(input.channelSecret))
     : null;
+  const addFriendUrl = input.addFriendUrl
+    ? normaliseLineAddUrl(input.addFriendUrl)
+    : null;
+  if (input.addFriendUrl && !addFriendUrl) {
+    throw new Error('LINE add friend URL ต้องเป็น https://line.me หรือ https://lin.ee เท่านั้น');
+  }
 
   const client = await pool.connect();
   try {
@@ -340,8 +377,8 @@ async function create(pool, input, createdBy) {
       `INSERT INTO line_oas
          (slug, name, description, bot_basic_id, channel_id,
           channel_secret_encrypted, channel_access_token_encrypted,
-          enabled, is_default, owner_user_id, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+          enabled, is_default, owner_user_id, add_friend_url, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
        RETURNING *`,
       [
         slug, name,
@@ -352,6 +389,7 @@ async function create(pool, input, createdBy) {
         input.enabled !== false,
         !!input.isDefault,
         input.ownerUserId ? String(input.ownerUserId).slice(0, 60) : null,
+        addFriendUrl,
         createdBy || null,
       ]
     );
@@ -376,6 +414,14 @@ async function update(pool, id, patch, updatedBy) {
   if (patch.name !== undefined) { sets.push(`name=$${i++}`); params.push(String(patch.name).slice(0, 120)); }
   if (patch.description !== undefined) { sets.push(`description=$${i++}`); params.push(patch.description ? String(patch.description).slice(0, 500) : null); }
   if (patch.botBasicId !== undefined) { sets.push(`bot_basic_id=$${i++}`); params.push(patch.botBasicId ? String(patch.botBasicId).slice(0, 60) : null); }
+  if (patch.addFriendUrl !== undefined) {
+    const addFriendUrl = patch.addFriendUrl ? normaliseLineAddUrl(patch.addFriendUrl) : null;
+    if (patch.addFriendUrl && !addFriendUrl) {
+      throw new Error('LINE add friend URL ต้องเป็น https://line.me หรือ https://lin.ee เท่านั้น');
+    }
+    sets.push(`add_friend_url=$${i++}`);
+    params.push(addFriendUrl);
+  }
   if (patch.channelId !== undefined) { sets.push(`channel_id=$${i++}`); params.push(patch.channelId ? String(patch.channelId).slice(0, 60) : null); }
   if (patch.ownerUserId !== undefined) { sets.push(`owner_user_id=$${i++}`); params.push(patch.ownerUserId ? String(patch.ownerUserId).slice(0, 60) : null); }
   if (patch.enabled !== undefined) { sets.push(`enabled=$${i++}`); params.push(!!patch.enabled); }
@@ -552,6 +598,6 @@ module.exports = {
   list, getById, getBySlug, getDefault, resolveForTenant,
   create, update, remove, refreshBoundCount, getBindingStats, testConnection,
   verifyWebhookSignature, invalidateCache,
-  normalizeSlug, isValidSlug,
+  normalizeSlug, isValidSlug, normaliseLineAddUrl, buildLineAddUrl, resolveLineAddUrl,
   _envOa,
 };

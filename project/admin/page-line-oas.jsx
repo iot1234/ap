@@ -58,7 +58,7 @@ function PageLineOas({ setToast }) {
   function openAdd() {
     setEditing({
       id: null, slug: '', name: '', description: '',
-      botBasicId: '', channelId: '', ownerUserId: '',
+      botBasicId: '', addFriendUrl: '', channelId: '', ownerUserId: '',
       channelAccessToken: '', channelSecret: '',
       enabled: true, isDefault: items.length === 0,
     });
@@ -66,7 +66,7 @@ function PageLineOas({ setToast }) {
   function openEdit(o) {
     setEditing({
       id: o.id, slug: o.slug, name: o.name, description: o.description || '',
-      botBasicId: o.botBasicId || '', channelId: o.channelId || '',
+      botBasicId: o.botBasicId || '', addFriendUrl: o.addFriendUrl || '', channelId: o.channelId || '',
       ownerUserId: o.ownerUserId || '',
       channelAccessToken: '',  // never re-fetched; empty = leave unchanged
       channelSecret: '',
@@ -121,6 +121,7 @@ function PageLineOas({ setToast }) {
         name: editing.name,
         description: editing.description,
         botBasicId: editing.botBasicId,
+        addFriendUrl: editing.addFriendUrl,
         channelId: editing.channelId,
         ownerUserId: editing.ownerUserId,
         enabled: editing.enabled,
@@ -303,6 +304,14 @@ function PageLineOas({ setToast }) {
                   </div>
                   <div style={{ marginTop: 8, fontSize: 11.5, color: C.muted }}>
                     {o.botBasicId && <span>Bot ID: {o.botBasicId} · </span>}
+                    {o.addFriendUrl && (
+                      <span>
+                        <a href={o.addFriendUrl} target="_blank" rel="noreferrer" style={{ color: C.accent, fontWeight: 600 }}>
+                          เปิดหน้า LINE OA
+                        </a>
+                        {' · '}
+                      </span>
+                    )}
                     {o.lastSeenAt && <span>เห็นล่าสุด: {new Date(o.lastSeenAt).toLocaleString('th-TH')}</span>}
                     {o.lastError && (
                       <span style={{ color: C.danger, marginLeft: 8 }}>⚠ {o.lastError}</span>
@@ -405,6 +414,11 @@ function PageLineOas({ setToast }) {
                    onChange={(v) => setEditing({ ...editing, botBasicId: v })}
                    placeholder="@baankarn"
                    hint="ใช้สร้างลิงก์ add friend (อยากให้ผู้เช่ากด add ได้ทันที)" />
+            <Input label="ลิงก์เปิด LINE OA / Add friend (ไม่บังคับ)"
+                   value={editing.addFriendUrl}
+                   onChange={(v) => setEditing({ ...editing, addFriendUrl: v })}
+                   placeholder="https://lin.ee/xxxx หรือ https://line.me/R/ti/p/@your_oa"
+                   hint="ถ้าใส่ค่านี้ ระบบจะใช้เป็นปุ่มเปิด LINE ในหน้าผูก LINE; ถ้าเว้นว่างจะสร้างจาก Bot Basic ID อัตโนมัติ" />
             <Input label="LINE userId ของเจ้าของ OA นี้ (ไม่บังคับ)"
                    value={editing.ownerUserId}
                    onChange={(v) => setEditing({ ...editing, ownerUserId: v })}

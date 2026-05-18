@@ -51,6 +51,16 @@ test('isValidSlug: 2-40 chars, allows alnum + _ -', () => {
   assert.equal(lineOa.isValidSlug('a'.repeat(41)), false);
 });
 
+test('LINE add-friend URL helpers accept only LINE HTTPS links', () => {
+  assert.equal(lineOa.normaliseLineAddUrl('https://lin.ee/abc123'), 'https://lin.ee/abc123');
+  assert.equal(lineOa.normaliseLineAddUrl('https://line.me/R/ti/p/@demo'), 'https://line.me/R/ti/p/@demo');
+  assert.equal(lineOa.normaliseLineAddUrl('http://line.me/R/ti/p/@demo'), null);
+  assert.equal(lineOa.normaliseLineAddUrl('javascript:alert(1)'), null);
+  assert.equal(lineOa.normaliseLineAddUrl('https://example.com/line'), null);
+  assert.equal(lineOa.buildLineAddUrl('@baankarn'), 'https://line.me/R/ti/p/@baankarn');
+  assert.equal(lineOa.buildLineAddUrl('baankarn'), 'https://line.me/R/ti/p/@baankarn');
+});
+
 // ---- list / getById / getDefault: env fallback --------------------------
 
 test('list: returns env OA when DB empty + env vars set', async () => {
@@ -218,6 +228,18 @@ test('create: encrypts tokens before insert', async () => {
   // params[6] is access token, params[5] is secret per the SQL column order
   assert.notEqual(insertCall.params[6], 'plaintext-token', 'token must be encrypted');
   assert.notEqual(insertCall.params[5], 'plaintext-secret', 'secret must be encrypted');
+});
+
+test('create: rejects non-LINE add friend URLs', async () => {
+  const pool = buildFakePool();
+  await assert.rejects(
+    () => lineOa.create(pool, {
+      slug: 'main',
+      name: 'Main',
+      addFriendUrl: 'https://example.com/not-line',
+    }, 'admin'),
+    /LINE add friend URL/
+  );
 });
 
 // ---- HMAC verify --------------------------------------------------------

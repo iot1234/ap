@@ -525,6 +525,7 @@ async function migrate(pool, opts = {}) {
     -- Track which OA a binding was created through. NULL = legacy env-OA.
     ALTER TABLE line_bindings ADD COLUMN IF NOT EXISTS oa_id BIGINT;
     ALTER TABLE line_bindings ADD COLUMN IF NOT EXISTS target_oa_id BIGINT;
+    ALTER TABLE line_oas ADD COLUMN IF NOT EXISTS add_friend_url TEXT;
     -- The active-user uniqueness must be scoped per OA — a single human has
     -- a different LINE userId in each OA they're friends with, so the same
     -- userId across two OAs would collide on the old global index.

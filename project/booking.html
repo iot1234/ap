@@ -287,8 +287,24 @@
   .line-bind-box.line-bind-error h3 {
     color: #7f1d1d;
   }
+  .line-recover-box {
+    max-width: none;
+    margin: 0 0 14px;
+  }
+  .line-recover-box h3 {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .line-recover-meta {
+    color: #6b7a70;
+    font-size: 12px;
+    font-weight: 500;
+  }
   .line-bind-code {
     display: flex;
+    flex-wrap: wrap;
     gap: 8px;
     align-items: center;
     margin: 10px 0;
@@ -313,6 +329,17 @@
     padding: 10px 12px;
     font-size: 13px;
     cursor: pointer;
+  }
+  .line-open-btn {
+    display: none;
+    border: 0;
+    border-radius: 8px;
+    background: #2f8a70;
+    color: #ffffff;
+    padding: 10px 12px;
+    font-size: 13px;
+    font-weight: 700;
+    text-decoration: none;
   }
   .line-bind-box p {
     margin: 6px 0 0;
@@ -404,6 +431,19 @@
   </section>
 
   <div id="formContainer">
+    <div class="line-bind-box line-recover-box" id="lineRecoverBox" style="display:none">
+      <h3>
+        <span>คีย์ LINE ล่าสุดจากเครื่องนี้</span>
+        <span class="line-recover-meta" id="lineRecoverMeta"></span>
+      </h3>
+      <p>ถ้าเพิ่ง refresh หรือปิดหน้าหลังจอง ให้ใช้คีย์นี้ส่งใน LINE OA เพื่อรับแจ้งผลจอง สัญญา และบิล</p>
+      <div class="line-bind-code">
+        <code id="lineRecoverCode"></code>
+        <button type="button" class="line-copy-btn" id="lineRecoverCopyBtn">คัดลอก</button>
+        <a class="line-open-btn" id="lineRecoverOpenBtn" target="_blank" rel="noreferrer">เปิด LINE OA</a>
+      </div>
+      <p id="lineRecoverHint"></p>
+    </div>
     <form id="bookingForm" class="card" novalidate>
       <div class="row cols-2">
         <div>
@@ -557,6 +597,7 @@
         <div class="line-bind-code">
           <code id="lineBindCode"></code>
           <button type="button" class="line-copy-btn" id="lineBindCopyBtn">คัดลอก</button>
+          <a class="line-open-btn" id="lineOpenBtn" target="_blank" rel="noreferrer">เปิด LINE OA</a>
         </div>
         <p id="lineBindHint">หลังผูกแล้ว ระบบจะใช้ LINE นี้แจ้งผลจอง สัญญา และบิลของห้องนี้</p>
       </div>
@@ -571,6 +612,12 @@
   const btn = document.getElementById('submitBtn');
   const alert = document.getElementById('alert');
   const container = document.getElementById('formContainer');
+  const lineRecoverBox = document.getElementById('lineRecoverBox');
+  const lineRecoverCode = document.getElementById('lineRecoverCode');
+  const lineRecoverCopy = document.getElementById('lineRecoverCopyBtn');
+  const lineRecoverOpen = document.getElementById('lineRecoverOpenBtn');
+  const lineRecoverMeta = document.getElementById('lineRecoverMeta');
+  const lineRecoverHint = document.getElementById('lineRecoverHint');
   const depositPanel = document.getElementById('depositPanel');
   const depositSlipInput = document.getElementById('depositSlip');
   const depositSlipHint = document.getElementById('depositSlipHint');
@@ -616,10 +663,120 @@
   const roomTypeParam = (params.get('roomType') || '').trim().slice(0, 32);
   const REQUEST_TIMEOUT_MS = 15000;
   const SUBMIT_TIMEOUT_MS = 45000;
+  const LINE_BINDING_CACHE_KEY = 'baankarn:lastBookingLineBinding';
 
   function money(n) {
     return Number(n || 0).toLocaleString('th-TH', { minimumFractionDigits: 2 });
   }
+
+  function safeLineAddFriendUrl(value) {
+    try {
+      const u = new URL(String(value || '').trim(), window.location.origin);
+      if (u.protocol !== 'https:') return '';
+      if (!['line.me', 'lin.ee'].includes(u.hostname)) return '';
+      return u.href;
+    } catch {
+      return '';
+    }
+  }
+
+  function clearLastBookingLineBinding() {
+    try {
+      window.localStorage && window.localStorage.removeItem(LINE_BINDING_CACHE_KEY);
+    } catch { /* localStorage may be disabled */ }
+  }
+
+  function readLastBookingLineBinding() {
+    try {
+      const raw = window.localStorage && window.localStorage.getItem(LINE_BINDING_CACHE_KEY);
+      if (!raw) return null;
+      const data = JSON.parse(raw);
+      if (!data || !data.code) {
+        clearLastBookingLineBinding();
+        return null;
+      }
+      const expiresMs = data.expiresAt ? Date.parse(data.expiresAt) : NaN;
+      if (Number.isFinite(expiresMs) && expiresMs <= Date.now()) {
+        clearLastBookingLineBinding();
+        return null;
+      }
+      return {
+        bookingId: String(data.bookingId || '').slice(0, 64),
+        code: String(data.code || '').trim().slice(0, 80),
+        expiresAt: data.expiresAt || null,
+        addFriendUrl: safeLineAddFriendUrl(data.addFriendUrl),
+        savedAt: data.savedAt || null,
+      };
+    } catch {
+      clearLastBookingLineBinding();
+      return null;
+    }
+  }
+
+  function saveLastBookingLineBinding(booking, lineBinding) {
+    if (!lineBinding || !lineBinding.code) {
+      clearLastBookingLineBinding();
+      return;
+    }
+    const expiresAt = lineBinding.expiresAt || null;
+    const expiresMs = expiresAt ? Date.parse(expiresAt) : NaN;
+    if (Number.isFinite(expiresMs) && expiresMs <= Date.now()) {
+      clearLastBookingLineBinding();
+      return;
+    }
+    try {
+      window.localStorage && window.localStorage.setItem(LINE_BINDING_CACHE_KEY, JSON.stringify({
+        bookingId: String((booking && booking.id) || lineBinding.bookingId || '').slice(0, 64),
+        code: String(lineBinding.code).trim().slice(0, 80),
+        expiresAt,
+        addFriendUrl: safeLineAddFriendUrl(lineBinding.addFriendUrl),
+        savedAt: new Date().toISOString(),
+      }));
+    } catch { /* localStorage may be full or disabled */ }
+  }
+
+  function renderLineBindingRecovery() {
+    if (!lineRecoverBox) return;
+    const cached = readLastBookingLineBinding();
+    if (!cached) {
+      lineRecoverBox.style.display = 'none';
+      return;
+    }
+    lineRecoverBox.style.display = 'block';
+    if (lineRecoverCode) lineRecoverCode.textContent = cached.code;
+    if (lineRecoverMeta) {
+      lineRecoverMeta.textContent = cached.bookingId ? `อ้างอิง ${cached.bookingId}` : 'คีย์ล่าสุด';
+    }
+    if (lineRecoverHint) {
+      const exp = cached.expiresAt ? new Date(cached.expiresAt) : null;
+      lineRecoverHint.textContent = exp && Number.isFinite(exp.getTime())
+        ? `คีย์หมดอายุ ${exp.toLocaleString('th-TH')} ถ้าผู้จองหาไม่เจอ แอดมินสามารถดูคีย์เดียวกันได้ที่รายละเอียดการจอง`
+        : 'ถ้าผู้จองหาไม่เจอ แอดมินสามารถดูคีย์เดียวกันได้ที่รายละเอียดการจอง';
+    }
+    if (lineRecoverOpen) {
+      if (cached.addFriendUrl) {
+        lineRecoverOpen.href = cached.addFriendUrl;
+        lineRecoverOpen.style.display = 'inline-flex';
+      } else {
+        lineRecoverOpen.removeAttribute('href');
+        lineRecoverOpen.style.display = 'none';
+      }
+    }
+    if (lineRecoverCopy) {
+      lineRecoverCopy.onclick = async () => {
+        try {
+          await navigator.clipboard.writeText(cached.code);
+          lineRecoverCopy.textContent = 'คัดลอกแล้ว';
+          setTimeout(() => { lineRecoverCopy.textContent = 'คัดลอก'; }, 1800);
+        } catch {
+          lineRecoverCopy.textContent = 'เลือกคัดลอก';
+          lineRecoverCode && lineRecoverCode.focus && lineRecoverCode.focus();
+        }
+      };
+    }
+  }
+
+  renderLineBindingRecovery();
 
   function bookingDepositNeedsPaymentSetup(cfg) {
     return !!(cfg && cfg.requireDeposit && cfg.requireSlip
@@ -1349,9 +1506,15 @@
         next.textContent = verification.nextAction;
       }
       const lineBinding = result.booking && result.booking.lineBinding;
+      if (lineBinding && lineBinding.code) {
+        saveLastBookingLineBinding(result.booking, lineBinding);
+      } else {
+        clearLastBookingLineBinding();
+      }
       const lineBox = document.getElementById('lineBindBox');
       const lineCode = document.getElementById('lineBindCode');
       const lineCopy = document.getElementById('lineBindCopyBtn');
+      const lineOpen = document.getElementById('lineOpenBtn');
       const lineHint = document.getElementById('lineBindHint');
       const lineFlowStep = document.getElementById('lineFlowStep');
       const lineFlowText = document.getElementById('lineFlowText');
@@ -1360,6 +1523,16 @@
         lineBox.classList.remove('line-bind-error');
         lineCode.textContent = lineBinding.code;
         if (lineCopy) lineCopy.style.display = '';
+        if (lineOpen) {
+          const addFriendUrl = safeLineAddFriendUrl(lineBinding.addFriendUrl);
+          if (addFriendUrl) {
+            lineOpen.href = addFriendUrl;
+            lineOpen.style.display = 'inline-flex';
+          } else {
+            lineOpen.removeAttribute('href');
+            lineOpen.style.display = 'none';
+          }
+        }
         if (lineFlowStep) lineFlowStep.className = '';
         if (lineFlowText) {
           lineFlowText.textContent = 'คัดลอกรหัสด้านล่างแล้วส่งใน LINE OA ของหอพัก ถ้าจองให้เพื่อน ให้เพื่อนส่งรหัสด้วย LINE ของเพื่อนเอง';
@@ -1387,6 +1560,7 @@
         lineBox.classList.add('line-bind-error');
         lineCode.textContent = lineBinding.error;
         if (lineCopy) lineCopy.style.display = 'none';
+        if (lineOpen) lineOpen.style.display = 'none';
         if (lineFlowStep) lineFlowStep.className = 'warn';
         if (lineFlowText) {
           lineFlowText.textContent = 'ระบบออกคีย์ LINE ไม่สำเร็จ เจ้าหน้าที่จะออกคีย์ใหม่หรือโทรแจ้งสถานะโดยตรง';

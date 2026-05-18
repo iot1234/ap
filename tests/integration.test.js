@@ -3308,6 +3308,14 @@ test('booking-stage LINE binding is issued, guarded, and carried into contract h
     'booking submit must fail soft if LINE key issuance is unavailable');
   assert.match(bookingRoute, /lineBindingError: newBooking\.lineBinding && newBooking\.lineBinding\.error/,
     'booking audit must record LINE code issuance failures');
+  assert.match(bookingRoute, /lineOa\.getDefault\(pool\)/,
+    'public booking must resolve the configured LINE OA link for the applicant button');
+  assert.match(bookingRoute, /addFriendUrl: defaultOa\?\.addFriendUrl \|\| null/,
+    'public booking response must include the configured LINE add-friend URL when available');
+  assert.match(server, /addFriendOaId = pending\?\.target_oa_id \|\| pending\?\.oa_id/,
+    'booking detail enrichment must recover the correct LINE OA link for pending keys');
+  assert.match(server, /out\.lineBinding = \{[\s\S]{0,260}addFriendUrl,/,
+    'booking detail API must return the LINE add-friend URL so admins can resend lost keys');
   assert.match(bookingRoute, /LINE: สร้างรหัสผูก LINE ไม่สำเร็จ/,
     'owner notification must surface when booking LINE code issuance failed');
   assert.match(server, /function summariseBookingApplicantNotify[\s\S]{0,700}lineRecipientCount/,
@@ -3333,6 +3341,18 @@ test('booking-stage LINE binding is issued, guarded, and carried into contract h
     'public booking success page must show a clear next-step flow after submit');
   assert.match(bookingHtml, /lineFlowText/,
     'public booking success flow must update the LINE step based on key issuance success/failure');
+  assert.match(bookingHtml, /id="lineOpenBtn"/,
+    'public booking success page must include a button that opens the configured LINE OA');
+  assert.match(bookingHtml, /lineBinding\.addFriendUrl/,
+    'public booking success page must show the LINE button only when backend returned a safe link');
+  assert.match(bookingHtml, /id="lineRecoverBox"/,
+    'public booking page must show a same-browser recovery panel when a user refreshed after receiving a LINE key');
+  assert.match(bookingHtml, /LINE_BINDING_CACHE_KEY/,
+    'public booking page must persist the latest LINE key locally so refresh does not lose it');
+  assert.match(bookingHtml, /localStorage\.setItem\(LINE_BINDING_CACHE_KEY/,
+    'successful booking must save the LINE key to localStorage before the user leaves the page');
+  assert.match(bookingHtml, /safeLineAddFriendUrl\(lineBinding\.addFriendUrl\)/,
+    'public booking page must validate cached/backend LINE OA links before opening them');
   assert.match(bookingHtml, /จองให้เพื่อน/,
     'public booking LINE flow must warn that friend bookings should use the friend LINE account');
 
@@ -3414,6 +3434,12 @@ test('tenant LINE notifications fan out to every bound LINE account', () => {
   const bindingsPage = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-line-bindings.jsx'), 'utf8');
   assert.match(bindingsPage, /ส่งแจ้งเตือนถึงทุกบัญชีที่ผูกไว้/,
     'LINE bindings UI must explain multi-recipient bill notification behaviour');
+  assert.match(bindingsPage, /resolveLineAddUrl/,
+    'LINE bindings detail must resolve the configured LINE add-friend link');
+  assert.match(bindingsPage, /เปิด LINE OA/,
+    'LINE bindings detail must provide a button that opens LINE directly');
+  assert.match(bindingsPage, /#line-oas/,
+    'LINE bindings detail must guide admins to configure the LINE link when missing');
   assert.match(bindingsPage, /counts\.boundAccounts/,
     'LINE bindings overview must show the total number of bound LINE accounts');
   assert.match(bindingsPage, /label: `[\s\S]{0,80}\$\{boundCount\}[\s\S]{0,40}`/,
@@ -3424,6 +3450,24 @@ test('tenant LINE notifications fan out to every bound LINE account', () => {
     'admin LINE bindings API must return the total bound account counter');
   assert.match(adminLineBindings, /boundCount > 0/,
     'admin LINE bindings API must treat rows with bound_count as bound even if the tenant cache is stale');
+
+  const lineOasPage = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-line-oas.jsx'), 'utf8');
+  assert.match(lineOasPage, /addFriendUrl/,
+    'LINE OA admin UI must let owners configure the add-friend link');
+  assert.match(lineOasPage, /https:\/\/lin\.ee/,
+    'LINE OA admin UI must show a lin.ee example for the add-friend link');
+
+  const lineOaService = fs.readFileSync(path.join(__dirname, '..', 'services', 'lineOa.js'), 'utf8');
+  assert.match(lineOaService, /function normaliseLineAddUrl/,
+    'LINE OA service must sanitize add-friend URLs centrally');
+  assert.match(lineOaService, /host === 'line\.me'[\s\S]{0,120}host === 'lin\.ee'/,
+    'LINE OA service must only accept LINE-owned add-friend hosts');
+  assert.match(lineOaService, /buildLineAddUrl/,
+    'LINE OA service must be able to derive the add-friend link from Bot Basic ID');
+
+  const migrate = fs.readFileSync(path.join(__dirname, '..', 'db', 'migrate.js'), 'utf8');
+  assert.match(migrate, /ADD COLUMN IF NOT EXISTS add_friend_url TEXT/,
+    'migration must persist the configurable LINE add-friend link');
 
   const webhooks = fs.readFileSync(path.join(__dirname, '..', 'routes', 'webhooks.js'), 'utf8');
   assert.match(webhooks, /bindingCountLine/,
@@ -4281,6 +4325,14 @@ test('bookings admin UI handles terminal statuses and uses valid reopen/cancel t
     'booking rows must open through the latest-detail loader');
   assert.match(src, /function BookingFlowChecklist/,
     'booking detail drawer must show a single flow checklist from request to contract/bill');
+  assert.match(src, /<BookingLineKeyPanel b=\{b\} \/>/,
+    'booking detail drawer must show the recoverable LINE key near the booking flow');
+  assert.match(src, /function BookingLineKeyPanel/,
+    'booking detail drawer must have a dedicated LINE key recovery panel');
+  assert.match(src, /navigator\.clipboard\.writeText\(code\)/,
+    'admin LINE key recovery panel must let admins copy the unbound key');
+  assert.match(src, /href=\{addFriendUrl\}[\s\S]{0,420}เปิด LINE OA/,
+    'admin LINE key recovery panel must open the configured LINE OA link when available');
   assert.match(src, /Flow การจองจนถึงสัญญา/,
     'booking flow checklist title must be visible to admins');
   assert.match(src, /lineStepState = lineCount > 0 \? 'done' : \(lineFailed \|\| lineLookupError \|\| lineNeedsReissue \|\| linePending \? 'warn' : 'wait'\)/,

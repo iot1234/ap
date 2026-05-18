@@ -602,6 +602,7 @@ function BookingDetail({ b }) {
       )}
 
       <BookingFlowChecklist b={b} depositStatusLabel={depositStatusLabel} />
+      <BookingLineKeyPanel b={b} />
 
       <div>
         <SectionHeading title="รายละเอียดการจอง" level={3} />
@@ -644,6 +645,123 @@ function BookingDetail({ b }) {
           <li>กำหนดห้องที่ตรงกับความต้องการ</li>
         </ul>
       </div>
+    </div>
+  );
+}
+
+function BookingLineKeyPanel({ b }) {
+  const C = window.ADMIN_C;
+  const [copied, setCopied] = useState(false);
+  const lineBinding = b.lineBinding || b.line_binding || null;
+  if (!lineBinding) return null;
+
+  const code = String(lineBinding.code || '').trim();
+  const status = String(lineBinding.status || '').toLowerCase();
+  const lineCount = Number(lineBinding.boundCount || lineBinding.bound_count || lineBinding.lineRecipientCount || 0) || 0;
+  const expiresAt = lineBinding.expiresAt || lineBinding.expires_at || null;
+  const expiresMs = expiresAt ? Date.parse(expiresAt) : NaN;
+  const expired = !!(lineBinding.expired || status === 'expired' || (Number.isFinite(expiresMs) && expiresMs <= Date.now() && lineCount <= 0));
+  const blocked = ['revoked', 'blocked', 'error'].includes(status) || !!lineBinding.error;
+  const needsReissue = !!lineBinding.needsReissue || expired || blocked;
+  const addFriendUrl = lineBinding.addFriendUrl || lineBinding.add_friend_url || '';
+  const canRecoverKey = !!code && lineCount <= 0 && !needsReissue;
+
+  const copyCode = async () => {
+    if (!code) return;
+    try {
+      await navigator.clipboard.writeText(code);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1800);
+    } catch {
+      window.prompt && window.prompt('คัดลอกคีย์ LINE', code);
+    }
+  };
+
+  const tone = lineCount > 0
+    ? { bg: C.successSoft || '#e6f4ec', border: C.success || '#2f8f5b', fg: C.success || '#2f8f5b' }
+    : needsReissue
+      ? { bg: C.dangerSoft || '#fef2f2', border: C.danger || '#b91c1c', fg: C.danger || '#b91c1c' }
+      : { bg: C.warningSoft || '#fff7ed', border: C.warning || '#b45309', fg: C.warning || '#b45309' };
+
+  const expiresText = Number.isFinite(expiresMs)
+    ? new Date(expiresMs).toLocaleString('th-TH')
+    : null;
+  const title = lineCount > 0
+    ? `LINE ผูกกับห้อง/การจองนี้แล้ว ${lineCount} บัญชี`
+    : canRecoverKey
+      ? 'คีย์ LINE ของการจองนี้ (ยังไม่ผูก)'
+      : 'คีย์ LINE ต้องตรวจสอบ';
+  const detail = lineCount > 0
+    ? 'ทุกบัญชีที่ผูกไว้จะรับแจ้งผลจอง สัญญา และบิลของห้องนี้ ไม่ต้องส่งคีย์ซ้ำ'
+    : canRecoverKey
+      ? 'ถ้าผู้จอง refresh หรือปิดหน้าจอไปก่อนคัดลอก ให้แอดมินคัดลอกคีย์นี้ส่งให้ผู้จอง แล้วให้ผู้จองส่งคีย์ใน LINE OA'
+      : (lineBinding.lookupError
+        ? 'อ่านสถานะ LINE ล่าสุดไม่สำเร็จ ให้ refresh รายละเอียดการจองหรือเปิดหน้า LINE Binding ก่อนแจ้งผล'
+        : 'คีย์หมดอายุ ถูกยกเลิก หรือออกคีย์ไม่สำเร็จ ต้องออกคีย์ใหม่จากหน้า LINE Binding หรือโทรแจ้งผู้จองโดยตรง');
+
+  return (
+    <div style={{
+      padding: 14,
+      border: `1px solid ${tone.border}44`,
+      borderLeft: `3px solid ${tone.border}`,
+      borderRadius: 10,
+      background: tone.bg,
+      color: C.ink2,
+      fontSize: 12.5,
+      lineHeight: 1.55,
+    }}>
+      <div style={{ display: 'flex', gap: 10, alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+        <div style={{ fontWeight: 700, color: C.ink }}>{title}</div>
+        <span style={{
+          color: tone.fg,
+          border: `1px solid ${tone.border}55`,
+          background: '#fff',
+          borderRadius: 999,
+          padding: '2px 8px',
+          fontSize: 11,
+          whiteSpace: 'nowrap',
+        }}>
+          {lineCount > 0 ? `${lineCount} LINE` : (status || 'pending')}
+        </span>
+      </div>
+      {canRecoverKey && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+          <code style={{
+            flex: '1 1 180px',
+            padding: '9px 10px',
+            border: `1px solid ${C.border || '#dfe9e2'}`,
+            borderRadius: 8,
+            background: '#fff',
+            color: C.ink,
+            fontSize: 14,
+            overflowWrap: 'anywhere',
+          }}>{code}</code>
+          <button type="button" onClick={copyCode} style={{
+            border: 0,
+            borderRadius: 8,
+            background: C.ink || '#102019',
+            color: '#fff',
+            padding: '9px 12px',
+            fontSize: 12,
+            cursor: 'pointer',
+          }}>{copied ? 'คัดลอกแล้ว' : 'คัดลอกคีย์'}</button>
+          {addFriendUrl && (
+            <a href={addFriendUrl} target="_blank" rel="noopener noreferrer" style={{
+              borderRadius: 8,
+              background: C.accent || '#2f8a70',
+              color: '#fff',
+              padding: '9px 12px',
+              fontSize: 12,
+              fontWeight: 700,
+              textDecoration: 'none',
+            }}>เปิด LINE OA</a>
+          )}
+        </div>
+      )}
+      <div>{detail}</div>
+      {canRecoverKey && expiresText && (
+        <div style={{ marginTop: 4, color: C.muted }}>คีย์หมดอายุ: {expiresText}</div>
+      )}
     </div>
   );
 }
