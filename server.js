@@ -8848,6 +8848,7 @@ function buildContractWarnings(row) {
   if (!row.address) missingIdentity.push('address');
   if (!row.emergency_contact_name) missingIdentity.push('emergencyContactName');
   if (!row.emergency_contact_phone) missingIdentity.push('emergencyContactPhone');
+  if (!row.citizen_id_tail) missingIdentity.push('citizenId');
   if (!row.citizen_id_image_front_id) missingIdentity.push('citizenIdFront');
   if (!row.citizen_id_image_back_id) missingIdentity.push('citizenIdBack');
   if (isActive && missingIdentity.length) {
@@ -8993,13 +8994,17 @@ function validateContractApprovalDraft(draft) {
     ['address', 'address', 'ที่อยู่ผู้เช่า', 'สัญญาจะถูก lock โดยไม่มีที่อยู่สำหรับอ้างอิงตามเอกสาร'],
     ['emergencyContactName', 'emergencyContactName', 'ชื่อผู้ติดต่อฉุกเฉิน', 'ทีมงานจะไม่มีคนติดต่อเมื่อเกิดเหตุฉุกเฉิน'],
     ['emergencyContactPhone', 'emergencyContactPhone', 'เบอร์ผู้ติดต่อฉุกเฉิน', 'ทีมงานจะโทรหาผู้ติดต่อฉุกเฉินไม่ได้'],
+    ['citizenId', 'citizenId', 'เลขบัตรประชาชน 13 หลัก', 'สัญญาจะถูก lock โดยไม่มีเลขบัตรประชาชนสำหรับยืนยันตัวตนและตรวจซ้ำ'],
     ['citizenIdImageFrontId', 'citizenIdFront', 'รูปบัตรประชาชนด้านหน้า', 'ตรวจตัวตนย้อนหลังไม่ได้ครบถ้วน'],
     ['citizenIdImageBackId', 'citizenIdBack', 'รูปบัตรประชาชนด้านหลัง', 'เอกสารยืนยันตัวตนไม่ครบทั้งสองด้าน'],
   ];
   const issues = [];
+  const thaiId = require('./services/thaiId');
   for (const [field, code, label, consequence] of required) {
     const value = draft && draft[field];
-    const missing = field.endsWith('Id')
+    const missing = field === 'citizenId'
+      ? !thaiId.normalize(value)
+      : field.endsWith('Id')
       ? (!Number.isInteger(Number(value)) || Number(value) < 1)
       : !String(value || '').trim();
     if (missing) {
@@ -9009,6 +9014,66 @@ function validateContractApprovalDraft(draft) {
         label,
         consequence,
         action: 'reject ใบเชิญนี้กลับให้ผู้เช่าแก้ไข แล้ว approve ใหม่เมื่อข้อมูลครบ',
+      });
+    }
+  }
+  return issues;
+}
+
+async function validateContractDraftFiles(db, invitationId, draft) {
+  const expectedRef = `invitation-${invitationId}`;
+  const checks = [
+    {
+      field: 'signatureFileId',
+      code: 'signatureFile',
+      label: 'ไฟล์ลายเซ็นผู้เช่า',
+      category: 'contract_signature',
+      side: null,
+      consequence: 'ลายเซ็นใน draft ไม่ได้มาจากลิงก์ invitation นี้ จึงอาจเป็นไฟล์ผิดคนหรือไฟล์ที่ถูกเดา id',
+    },
+    {
+      field: 'citizenIdImageFrontId',
+      code: 'citizenIdFrontFile',
+      label: 'ไฟล์บัตรประชาชนด้านหน้า',
+      category: 'citizen_id_image',
+      side: 'front',
+      consequence: 'รูปบัตรด้านหน้าใน draft ไม่ได้มาจากลิงก์ invitation นี้ จึงอาจเป็นไฟล์ผิดคนหรือผิดด้าน',
+    },
+    {
+      field: 'citizenIdImageBackId',
+      code: 'citizenIdBackFile',
+      label: 'ไฟล์บัตรประชาชนด้านหลัง',
+      category: 'citizen_id_image',
+      side: 'back',
+      consequence: 'รูปบัตรด้านหลังใน draft ไม่ได้มาจากลิงก์ invitation นี้ จึงอาจเป็นไฟล์ผิดคนหรือผิดด้าน',
+    },
+  ];
+  const issues = [];
+  for (const check of checks) {
+    const id = Number(draft && draft[check.field]);
+    if (!Number.isInteger(id) || id < 1) continue;
+    const params = [id, check.category, expectedRef];
+    let sideSql = '';
+    if (check.side) {
+      params.push(check.side);
+      sideSql = ` AND (side=$4 OR side IS NULL)`;
+    }
+    const { rows } = await db.query(
+      `SELECT id FROM file_uploads
+        WHERE id=$1
+          AND category=$2
+          AND ref_id=$3
+          ${sideSql}
+        FOR UPDATE`,
+      params
+    );
+    if (!rows.length) {
+      issues.push({
+        field: check.field,
+        code: check.code,
+        label: check.label,
+        consequence: check.consequence,
+        action: 'ให้ผู้เช่าอัปโหลดไฟล์ใหม่ผ่านลิงก์สัญญานี้เท่านั้น แล้วส่งตรวจสอบอีกครั้ง',
       });
     }
   }
@@ -9131,6 +9196,7 @@ app.get('/api/contracts', requireAuth, async (req, res) => {
                 t.full_name AS tenant_name, t.phone AS tenant_phone,
                 t.status AS tenant_status, t.current_room_id AS tenant_current_room_id,
                 t.address, t.emergency_contact_name, t.emergency_contact_phone,
+                t.citizen_id_tail,
                 t.citizen_id_image_front_id, t.citizen_id_image_back_id,
                 CASE WHEN c.end_date IS NULL THEN NULL
                      ELSE (c.end_date - CURRENT_DATE)::int
@@ -9614,11 +9680,10 @@ app.put('/api/contracts/:id', sameOrigin, csrfGuard, requireAuth, requireRole('o
 // POST /api/contracts/:id/sign
 // body: { signatureDataUrl, agreedTermsVersion? }
 //
-// Records the contract signature image + signed_at + agreed_terms_at on the
-// contract row. The signature image is uploaded via storage.saveBase64
-// under category=contract_signature so it lives alongside other auth-gated
-// files at /files/:id. Once signed, contracts.signature_image_id is locked
-// from re-set unless the operator explicitly passes { force: true }.
+// Records the contract signature image + signed_at + agreed_terms_at, then
+// locks the contract with an immutable terms snapshot. The signature image
+// is uploaded via storage.saveBase64 under category=contract_signature so it
+// lives alongside other auth-gated files at /files/:id.
 app.post('/api/contracts/:id/sign', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'),
   features.requireFeature('photoUpload'),
   validateBody(schemas.contractSign),
@@ -9630,7 +9695,8 @@ app.post('/api/contracts/:id/sign', sameOrigin, csrfGuard, requireAuth, requireR
 
     // Verify the contract exists + is active before storing the photo.
     const cQ = await pool.query(
-      `SELECT id, contract_no, status, signature_image_id, tenant_id, locked_at
+      `SELECT id, contract_no, status, signature_image_id, tenant_id,
+              locked_at, template_id
          FROM contracts WHERE id=$1 AND deleted_at IS NULL`,
       [id]
     );
@@ -9654,6 +9720,17 @@ app.post('/api/contracts/:id/sign', sameOrigin, csrfGuard, requireAuth, requireR
         error: 'สัญญาฉบับนี้ลงนามแล้ว — ส่ง { force: true } เพื่อแทนที่ลายเซ็น',
         code: 'ALREADY_SIGNED',
         signatureFileId: contract.signature_image_id,
+      });
+    }
+
+    let termsSnapshot;
+    try {
+      termsSnapshot = await loadContractTermsSnapshot(pool, contract);
+    } catch (err) {
+      console.error('contract sign terms snapshot error:', err);
+      return res.status(500).json({
+        error: 'ไม่สามารถ snapshot เงื่อนไขสัญญาก่อนลงนามได้',
+        code: 'TERMS_SNAPSHOT_FAILED',
       });
     }
 
@@ -9683,14 +9760,26 @@ app.post('/api/contracts/:id/sign', sameOrigin, csrfGuard, requireAuth, requireR
         `UPDATE contracts
             SET signature_image_id=$1, signed_at=NOW(), signature_url=$2,
                 agreed_terms_at = COALESCE(agreed_terms_at, NOW()),
-                agreed_terms_version = COALESCE($3, agreed_terms_version)
+                agreed_terms_version = COALESCE($3, agreed_terms_version),
+                locked_at=NOW(),
+                locked_by=$6,
+                terms_template_snapshot=$7::jsonb,
+                updated_at=NOW()
           WHERE id=$4 AND deleted_at IS NULL
             AND locked_at IS NULL
             AND (status='active' OR $5::boolean)
             AND (signature_image_id IS NULL OR $5::boolean)
           RETURNING id, contract_no, signed_at, agreed_terms_at, agreed_terms_version,
-                    signature_image_id`,
-        [savedFile.id, savedFile.url, termsVersion, id, force]
+                    signature_image_id, locked_at, locked_by`,
+        [
+          savedFile.id,
+          savedFile.url,
+          termsVersion,
+          id,
+          force,
+          req.session.user.username,
+          JSON.stringify(termsSnapshot.snapshot),
+        ]
       );
       if (!rows.length) {
         // Rolling back the upload preserves storage cleanliness.
@@ -9736,6 +9825,9 @@ app.post('/api/contracts/:id/sign', sameOrigin, csrfGuard, requireAuth, requireR
         replacedFileId: contract.signature_image_id,
         forced: force,
         termsVersion,
+        locked: true,
+        templateId: termsSnapshot.templateId || null,
+        snapshotVersion: termsSnapshot.snapshot?.snapshotVersion || null,
       });
       // Owner notify — same legal-trail rationale as identity capture: a
       // third party sees contract signature activity in real time.
@@ -9745,6 +9837,7 @@ app.post('/api/contracts/:id/sign', sameOrigin, csrfGuard, requireAuth, requireR
           subject: `✍️ ลงนามสัญญา ${contract.contract_no}`,
           text: `admin ${req.session.user.username} บันทึกลายเซ็นสัญญา\n`
             + `contract id=${id} tenantId=${contract.tenant_id}\n`
+            + `สัญญาถูก lock และ snapshot เงื่อนไขแล้ว\n`
             + (termsVersion ? `terms version: ${termsVersion}\n` : '')
             + (force ? '⚠️ ใช้ force=true แทนที่ลายเซ็นเดิม' : ''),
         }).catch(() => {});
@@ -10867,18 +10960,18 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
       // index is satisfied without the revoke step.
       const contractInvitation = require('./services/contractInvitation');
       const tk = contractInvitation.generateToken();
-      const expiresAt = new Date(Date.now() + Math.max(1, Math.min(720, expiresInHours)) * 3600_000);
+      const inviteHours = Math.max(1, Math.min(720, expiresInHours));
       const invIns = await client.query(
         `INSERT INTO contract_invitations
             (contract_id, tenant_id, token_hash, expires_at, created_by)
-         VALUES ($1, $2, $3, $4, $5)
-         RETURNING id`,
-        [contract.id, tenantId, tk.hash, expiresAt, req.session.user.username]
+         VALUES ($1, $2, $3, NOW() + ($4::int || ' hours')::interval, $5)
+         RETURNING id, expires_at`,
+        [contract.id, tenantId, tk.hash, inviteHours, req.session.user.username]
       );
       const invitation = {
         id: invIns.rows[0].id,
         token: tk.token,
-        expiresAt,
+        expiresAt: invIns.rows[0].expires_at,
       };
       await client.query('COMMIT');
 
@@ -11058,9 +11151,20 @@ app.get('/api/admin/contract-invitations/:id',
            FROM contract_invitations i
            LEFT JOIN contracts c ON c.id = i.contract_id
            LEFT JOIN tenants   t ON t.id = i.tenant_id
-           LEFT JOIN file_uploads ff ON ff.id = (i.draft->>'citizenIdImageFrontId')::bigint
-           LEFT JOIN file_uploads bf ON bf.id = (i.draft->>'citizenIdImageBackId')::bigint
-           LEFT JOIN file_uploads sf ON sf.id = (i.draft->>'signatureFileId')::bigint
+           LEFT JOIN file_uploads ff
+                  ON ff.id = (i.draft->>'citizenIdImageFrontId')::bigint
+                 AND ff.category='citizen_id_image'
+                 AND ff.ref_id = ('invitation-' || i.id::text)
+                 AND (ff.side='front' OR ff.side IS NULL)
+           LEFT JOIN file_uploads bf
+                  ON bf.id = (i.draft->>'citizenIdImageBackId')::bigint
+                 AND bf.category='citizen_id_image'
+                 AND bf.ref_id = ('invitation-' || i.id::text)
+                 AND (bf.side='back' OR bf.side IS NULL)
+           LEFT JOIN file_uploads sf
+                  ON sf.id = (i.draft->>'signatureFileId')::bigint
+                 AND sf.category='contract_signature'
+                 AND sf.ref_id = ('invitation-' || i.id::text)
           WHERE i.id=$1`,
         [id]
       );
@@ -11127,6 +11231,20 @@ app.post('/api/admin/contract-invitations/:id/approve',
           nextActions: {
             rejectInvitation: true,
             hint: 'กด "ขอให้แก้" พร้อมระบุรายการที่ขาด แล้วให้ผู้เช่าส่งกลับมาใหม่',
+          },
+        });
+      }
+      const fileIssues = await validateContractDraftFiles(client, inv.id, draft);
+      if (fileIssues.length) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'ไฟล์ที่แนบกับสัญญาไม่ตรงกับ invitation นี้ จึง approve ไม่ได้',
+          code: 'CONTRACT_APPROVAL_FILE_PRECHECK_FAILED',
+          issues: fileIssues,
+          consequences: fileIssues.map((x) => x.consequence),
+          nextActions: {
+            rejectInvitation: true,
+            hint: 'กด "ขอให้แก้" แล้วให้ผู้เช่าอัปโหลดไฟล์ผ่านลิงก์เดิมใหม่ทั้งหมด',
           },
         });
       }
@@ -11214,6 +11332,20 @@ app.post('/api/admin/contract-invitations/:id/approve',
             });
           }
         }
+        const identityFileIds = [
+          Number(draft.citizenIdImageFrontId),
+          Number(draft.citizenIdImageBackId),
+        ].filter((n) => Number.isInteger(n) && n > 0);
+        if (identityFileIds.length) {
+          await client.query(
+            `UPDATE file_uploads
+                SET ref_id=$1
+              WHERE id = ANY($2::bigint[])
+                AND category='citizen_id_image'
+                AND ref_id=$3`,
+            [String(inv.tenant_id), identityFileIds, `invitation-${inv.id}`]
+          );
+        }
       }
 
       // Apply signature → contracts row + lock the contract.
@@ -11287,6 +11419,16 @@ app.post('/api/admin/contract-invitations/:id/approve',
       if (!contract) {
         await client.query('ROLLBACK');
         return res.status(409).json({ error: 'contract is already locked', code: 'CONTRACT_LOCKED' });
+      }
+      if (draft.signatureFileId) {
+        await client.query(
+          `UPDATE file_uploads
+              SET ref_id=$1
+            WHERE id=$2
+              AND category='contract_signature'
+              AND ref_id=$3`,
+          [String(contract.id), Number(draft.signatureFileId), `invitation-${inv.id}`]
+        );
       }
 
       // ============== INTEGRATION: link tenant ↔ room ==============
@@ -12005,16 +12147,26 @@ app.post('/api/contract-fill/:token/submit', rateLimitContractFill, sameOrigin, 
     // Required fields at submit time. The renderer needs at minimum the
     // signature + the legal trail (terms version) to produce a valid PDF.
     const missing = [];
+    const thaiId = require('./services/thaiId');
     if (!draft.signatureFileId) missing.push('signature');
     if (!draft.address) missing.push('address');
     if (!draft.emergencyContactName) missing.push('emergencyContactName');
     if (!draft.emergencyContactPhone) missing.push('emergencyContactPhone');
+    if (!thaiId.normalize(draft.citizenId)) missing.push('citizenId');
     if (!draft.citizenIdImageFrontId) missing.push('citizenIdFront');
     if (!draft.citizenIdImageBackId) missing.push('citizenIdBack');
     if (missing.length > 0) {
       return res.status(400).json({
         error: `กรอกไม่ครบ — ขาด: ${missing.join(', ')}`,
         code: 'INCOMPLETE', missing,
+      });
+    }
+    const fileIssues = await validateContractDraftFiles(pool, inv.id, draft);
+    if (fileIssues.length > 0) {
+      return res.status(400).json({
+        error: 'ไฟล์แนบไม่ตรงกับลิงก์สัญญานี้ — กรุณาอัปโหลดใหม่จากหน้านี้',
+        code: 'INVALID_UPLOADS',
+        issues: fileIssues,
       });
     }
     // Extend expires_at to give admin a generous review window. Without

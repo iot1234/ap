@@ -85,6 +85,7 @@ schemas.checkIn = z.object({
 schemas.contractSign = z.object({
   signatureDataUrl: z.string().min(20).max(3_000_000),
   agreedTermsVersion: z.string().max(64).optional(),
+  force: z.boolean().optional(),
 });
 
 schemas.uploadIdentity = z.object({

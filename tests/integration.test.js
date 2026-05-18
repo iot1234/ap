@@ -3504,6 +3504,12 @@ test('tenant LINE notifications fan out to every bound LINE account', () => {
     'LINE bindings UI must be able to issue an additional key without invalidating existing pending keys');
   assert.match(bindingsPage, /issuedCodeNotice/,
     'LINE bindings UI must keep the latest issued key visible after the toast disappears');
+  assert.match(bindingsPage, /setShowIssueModal\(\{ tenantId: id, replacePending, issued \}\)/,
+    'LINE bindings UI must keep the issue modal open as a result screen after creating a key');
+  assert.match(bindingsPage, /คีย์ LINE ที่สร้างสำเร็จ/,
+    'LINE bindings issue modal must switch to a clear success title after issuing a key');
+  assert.match(bindingsPage, /ระบบสร้างคีย์แล้วและจะแสดงค้างในกล่องนี้/,
+    'LINE bindings issue modal must explicitly tell admins the key will stay visible');
   assert.match(bindingsPage, /mergeIssuedCodeIntoDetail/,
     'LINE bindings UI must optimistically merge a newly issued key into the open detail modal');
   assert.match(bindingsPage, /detailHasCode/,
@@ -4185,12 +4191,20 @@ test('contract sign endpoint exists + rejects already-signed without force', () 
   assert.match(block,
     /UPDATE contracts[\s\S]{0,600}signature_image_id IS NULL OR \$5::boolean/,
     'signature update must re-check signature_image_id atomically to close double-click/admin race');
+  assert.match(block, /loadContractTermsSnapshot\(pool, contract\)/,
+    'manual signing must snapshot the effective terms before locking');
+  assert.match(block, /locked_at=NOW\(\)/,
+    'manual signing must lock the contract so terms cannot be edited after signature');
+  assert.match(block, /terms_template_snapshot=\$7::jsonb/,
+    'manual signing must persist the immutable terms snapshot');
   assert.match(block, /CONTRACT_SIGN_CONFLICT/,
     'sign race must return a clean conflict instead of silently overwriting');
   // Schema must require a non-trivially-empty signature data URL.
   const sch = fs.readFileSync(path.join(__dirname, '..', 'schemas', 'index.js'), 'utf8');
   assert.match(sch, /schemas\.contractSign = z\.object\([\s\S]{0,200}signatureDataUrl/,
     'contractSign schema must validate signature data URL');
+  assert.match(sch, /schemas\.contractSign = z\.object\([\s\S]{0,220}force: z\.boolean\(\)\.optional\(\)/,
+    'contractSign schema must preserve force=true for controlled legacy replacement');
 });
 
 test('admin tenant create validates Thai checksum + dedup hash', () => {
@@ -4828,6 +4842,12 @@ test('quick-invite endpoint exists + creates tenant + contract + invitation atom
   // Token + invitation must be inlined in the same transaction (no
   // nested BEGIN — the helper would crash inside an open tx).
   assert.match(block, /INSERT INTO contract_invitations/);
+  assert.match(block, /NOW\(\) \+ \(\$4::int \|\| ' hours'\)::interval/,
+    'quick-invite invitation expiry must use DB time, not Node wallclock');
+  assert.match(block, /RETURNING id, expires_at/,
+    'quick-invite must return the DB-stamped expiry used by token resolution');
+  assert.doesNotMatch(block, /Date\.now\(\) \+ Math\.max\(1, Math\.min\(720, expiresInHours\)\) \* 3600_000/,
+    'quick-invite must not mix Node clock expiry with DB NOW() comparisons');
   assert.match(block, /tryNotifyTenantContractInvitation/,
     'quick-invite must attempt to send the generated link after commit');
   assert.match(block, /delivery,[\s\S]{0,120}invitation:/,
@@ -5148,8 +5168,35 @@ test('public fill: submit requires all critical fields before flipping status', 
   assert.match(src, /missing\.push\('address'\)/);
   assert.match(src, /missing\.push\('emergencyContactName'\)/);
   assert.match(src, /missing\.push\('emergencyContactPhone'\)/);
+  assert.match(src, /missing\.push\('citizenId'\)/);
   assert.match(src, /missing\.push\('citizenIdFront'\)/);
   assert.match(src, /missing\.push\('citizenIdBack'\)/);
+});
+
+test('public fill: file ids must belong to the same invitation before submit/approve', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(src, /async function validateContractDraftFiles/,
+    'server must validate draft file ownership before accepting legal uploads');
+  assert.match(src, /expectedRef = `invitation-\$\{invitationId\}`/,
+    'file ownership must be scoped to the invitation that uploaded it');
+  assert.match(src, /category='citizen_id_image'/,
+    'citizen ID files must be checked by category');
+  assert.match(src, /category='contract_signature'/,
+    'signature files must be checked by category');
+  assert.match(src, /side=\$4 OR side IS NULL/,
+    'front/back files must be checked by side while tolerating legacy rows');
+  assert.match(src, /const fileIssues = await validateContractDraftFiles\(pool, inv\.id, draft\)/,
+    'public submit must reject guessed or cross-invitation file ids');
+  assert.match(src, /const fileIssues = await validateContractDraftFiles\(client, inv\.id, draft\)/,
+    'admin approve must re-check file ownership inside the approve transaction');
+  assert.match(src, /CONTRACT_APPROVAL_FILE_PRECHECK_FAILED/,
+    'admin approve must return an actionable file-precheck error');
+  assert.match(src, /UPDATE file_uploads[\s\S]{0,160}SET ref_id=\$1[\s\S]{0,260}category='citizen_id_image'[\s\S]{0,120}ref_id=\$3/,
+    'approved identity files must be retargeted from invitation to tenant');
+  assert.match(src, /UPDATE file_uploads[\s\S]{0,160}SET ref_id=\$1[\s\S]{0,220}category='contract_signature'[\s\S]{0,120}ref_id=\$3/,
+    'approved signature file must be retargeted from invitation to contract');
 });
 
 test('public fill: uploads are persisted into draft before submit can race', () => {
@@ -5198,6 +5245,10 @@ test('admin UI: contract review shows approval consequences and disables incompl
   const path = require('node:path');
   const page = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-contract-invitations.jsx'), 'utf8');
   assert.match(page, /function approvalPrecheckWarnings/);
+  assert.match(page, /\['citizenId', 'เลขบัตรประชาชน 13 หลัก'/,
+    'admin review must block approval when the citizen ID number itself is missing');
+  assert.match(page, /field === 'citizenId'[\s\S]{0,120}replace\(\/\[\^0-9\]\/g, ''\)\.length !== 13/,
+    'admin review must treat short/non-13-digit citizen IDs as incomplete');
   assert.match(page, /approvalWarnings\.length/);
   assert.match(page, /disabled=\{busy \|\| approvalWarnings\.length > 0\}/);
   assert.match(page, /ถ้าฝืนอนุมัติ/);
@@ -5231,6 +5282,16 @@ test('contracts page displays server-side contract warnings', () => {
   assert.match(src, /Array\.isArray\(c\.warnings\)/);
   assert.match(src, /c\.warning_severity === 'error'/);
   assert.match(src, /w\.consequence/);
+});
+
+test('contracts list warns when locked contract is missing citizen ID number', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(src, /t\.citizen_id_tail,/,
+    'contracts list must select citizen_id_tail for identity completeness warnings');
+  assert.match(src, /!row\.citizen_id_tail\) missingIdentity\.push\('citizenId'\)/,
+    'identity completeness warnings must include the citizen ID number, not just the photos');
 });
 
 test('contracts edit modal keeps locked contracts closable without material edits', () => {

@@ -180,11 +180,13 @@ function approvalPrecheckWarnings(detail) {
     ['address', 'ที่อยู่ผู้เช่า', 'ถ้าอนุมัติต่อ สัญญาจะไม่มีที่อยู่อ้างอิง'],
     ['emergencyContactName', 'ชื่อผู้ติดต่อฉุกเฉิน', 'ทีมงานจะไม่มีชื่อผู้ติดต่อเมื่อเกิดเหตุฉุกเฉิน'],
     ['emergencyContactPhone', 'เบอร์ผู้ติดต่อฉุกเฉิน', 'ทีมงานจะติดต่อฉุกเฉินไม่ได้'],
+    ['citizenId', 'เลขบัตรประชาชน 13 หลัก', 'สัญญาจะไม่มีเลขบัตรประชาชนสำหรับยืนยันตัวตนและตรวจซ้ำ'],
     ['citizenIdImageFrontId', 'รูปบัตรประชาชนด้านหน้า', 'ตรวจตัวตนย้อนหลังไม่ครบ'],
     ['citizenIdImageBackId', 'รูปบัตรประชาชนด้านหลัง', 'เอกสารยืนยันตัวตนไม่ครบทั้งสองด้าน'],
   ];
   return checks.filter(([field]) => {
     const value = draft[field];
+    if (field === 'citizenId') return String(value || '').replace(/[^0-9]/g, '').length !== 13;
     return field.endsWith('Id')
       ? (!Number.isInteger(Number(value)) || Number(value) < 1)
       : !String(value || '').trim();
