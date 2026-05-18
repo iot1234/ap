@@ -515,6 +515,82 @@ test('storage.parseBase64: handles both data URL and raw base64', () => {
 });
 
 // =====================================================================
+// LINE BINDING — revokeBookingBindings behaviour
+// =====================================================================
+//
+// The PUT /api/bookings/:id endpoint calls this when a booking flips to
+// cancelled/rejected. Pin the actual runtime behaviour (not just source
+// shape) so a future refactor to the SQL or the return shape surfaces here.
+
+test('revokeBookingBindings: rejects empty bookingId synchronously', async () => {
+  const lineBinding = require('../services/lineBinding');
+  // Empty / falsy values must fail FAST before opening a pool connection
+  // — caller passes `bookingId: id` and if id is '' we want a clear error,
+  // not a wasted DB round-trip.
+  await assert.rejects(
+    () => lineBinding.revokeBookingBindings({ connect: () => { throw new Error('should not connect'); } }, { bookingId: '' }),
+    /bookingId required/);
+  await assert.rejects(
+    () => lineBinding.revokeBookingBindings({ connect: () => { throw new Error('should not connect'); } }, {}),
+    /bookingId required/);
+});
+
+test('revokeBookingBindings: runs scoped UPDATE + reports oaIds', async () => {
+  const lineBinding = require('../services/lineBinding');
+  const m = makeMockPool();
+  // Simulate 3 affected rows on 2 different OAs (one duplicate is fine —
+  // refreshOaBoundCounts dedupes internally via Set).
+  m.on('UPDATE line_bindings\n          SET status=\'revoked\'', () => ({
+    rows: [{ oa_id: 3 }, { oa_id: 3 }, { oa_id: 5 }],
+    rowCount: 3,
+  }));
+  // refreshOaBoundCounts will fire one UPDATE line_oas per unique oa_id.
+  m.on('UPDATE line_oas SET bound_count', () => ({ rowCount: 1 }));
+  const out = await lineBinding.revokeBookingBindings(m.pool, { bookingId: 'BK-PUB-abc' });
+  assert.equal(out.revoked, 3, 'rowCount surfaces from the UPDATE');
+  assert.deepEqual(out.oaIds.sort(), [3, 3, 5], 'oaIds reflect every affected row (refreshOa dedupes internally)');
+  // Scope check — the UPDATE must filter by booking_id + tenant_id IS NULL +
+  // status IN ('pending','bound'). If a future edit weakens any of these,
+  // the runtime call still works but this assertion catches the regression.
+  const updateCall = m.calls.find((c) => /UPDATE line_bindings/.test(c.text)
+                                       && /status='revoked'/.test(c.text));
+  assert.ok(updateCall, 'must issue an UPDATE line_bindings');
+  assert.match(updateCall.text, /WHERE booking_id=\$1/);
+  assert.match(updateCall.text, /AND tenant_id IS NULL/);
+  assert.match(updateCall.text, /AND status IN \('pending', 'bound'\)/);
+  assert.deepEqual(updateCall.params, ['BK-PUB-abc']);
+});
+
+test('revokeBookingBindings: idempotent — second call returns revoked=0', async () => {
+  const lineBinding = require('../services/lineBinding');
+  const m = makeMockPool();
+  // Empty result set — nothing matched the WHERE filter on the second call
+  // (everything was already revoked).
+  m.on('UPDATE line_bindings', () => ({ rows: [], rowCount: 0 }));
+  const out = await lineBinding.revokeBookingBindings(m.pool, { bookingId: 'BK-PUB-already-revoked' });
+  assert.equal(out.revoked, 0);
+  assert.deepEqual(out.oaIds, []);
+  // refreshOaBoundCounts must NOT be called when no rows changed — pinpoint
+  // by checking we never issued an UPDATE line_oas.
+  const refreshCalls = m.calls.filter((c) => /UPDATE line_oas SET bound_count/.test(c.text));
+  assert.equal(refreshCalls.length, 0,
+    'no oa count refresh needed when revoked=0');
+});
+
+test('revokeBookingBindings: caps bookingId at 64 chars (defense)', async () => {
+  // Booking external_id is "BK-PUB-" + 12 hex (~19 chars) so 64 is generous;
+  // the slice is purely defensive — a poisoned caller can't push gigabytes
+  // through to the SQL layer.
+  const lineBinding = require('../services/lineBinding');
+  const m = makeMockPool();
+  m.on('UPDATE line_bindings', () => ({ rows: [], rowCount: 0 }));
+  const huge = 'X'.repeat(10_000);
+  await lineBinding.revokeBookingBindings(m.pool, { bookingId: huge });
+  const call = m.calls.find((c) => /UPDATE line_bindings/.test(c.text));
+  assert.equal(call.params[0].length, 64, 'bookingId must be sliced to 64 chars');
+});
+
+// =====================================================================
 // 11. ENCRYPTION — versioned cipher round-trip
 // =====================================================================
 

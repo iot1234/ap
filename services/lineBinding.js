@@ -13,6 +13,13 @@ const CODE_PREFIX = 'BIND-';
 const CODE_LEN = 8;       // hex chars
 const DEFAULT_TTL_DAYS = 7;
 
+function lineBindingError(message, code, status = 400) {
+  const err = new Error(message);
+  err.code = code;
+  err.status = status;
+  return err;
+}
+
 function generateCode() {
   return CODE_PREFIX + crypto.randomBytes(CODE_LEN / 2).toString('hex').toUpperCase();
 }
@@ -32,28 +39,60 @@ async function refreshOaBoundCounts(pool, oaIds = []) {
   }
 }
 
+async function syncTenantLineCacheFromLatest(client, tenantId) {
+  const latest = await client.query(
+    `SELECT line_user_id, oa_id
+       FROM line_bindings
+      WHERE tenant_id=$1
+        AND status='bound'
+        AND line_user_id IS NOT NULL
+      ORDER BY bound_at DESC NULLS LAST, updated_at DESC NULLS LAST, id DESC
+      LIMIT 1`,
+    [tenantId]
+  );
+  const row = latest.rows[0] || null;
+  await client.query(
+    `UPDATE tenants
+        SET line_user_id=$1,
+            line_oa_id=$2,
+            updated_at=NOW()
+      WHERE id=$3`,
+    [row ? row.line_user_id : null, row ? row.oa_id || null : null, tenantId]
+  );
+  return row;
+}
+
 /**
- * Issue a new binding code for a tenant. If a pending code already exists
- * it is revoked (status='revoked') and a new one created — admin always
- * has at most one active code per tenant.
+ * Issue a new binding code for a tenant. By default it revokes old pending
+ * tenant codes first; pass replacePending=false when issuing an additional
+ * code for another LINE account in the same room.
  *
  * @param {object} opts
  * @param {number} opts.tenantId
  * @param {number} [opts.ttlDays=7]
  * @param {string} [opts.createdBy]
+ * @param {boolean} [opts.replacePending=true]
  * @param {number} [opts.targetOaId] - Hint: tenant should send to THIS OA.
  *        If set, only that OA's webhook will accept the code (binding
  *        enforces the match). If null/undefined, code accepts any OA.
  * @returns {Promise<{ code, expiresAt, tenantId, targetOaId? }>}
  */
-async function issue(pool, { tenantId, ttlDays, createdBy, targetOaId } = {}) {
+async function issue(pool, { tenantId, ttlDays, createdBy, targetOaId, replacePending = true } = {}) {
+  const tid = Number(tenantId);
+  if (!Number.isInteger(tid) || tid < 1) {
+    throw lineBindingError('invalid tenant id', 'INVALID_TENANT_ID');
+  }
   const ttl = Number(ttlDays || DEFAULT_TTL_DAYS);
   if (!Number.isFinite(ttl) || ttl < 1 || ttl > 30) {
-    throw new Error('ttlDays must be 1-30');
+    throw lineBindingError('ttlDays must be 1-30', 'INVALID_TTL_DAYS');
   }
-  const target = (targetOaId == null || targetOaId === '' || Number(targetOaId) === 0)
-    ? null
-    : Number(targetOaId);
+  let target = null;
+  if (targetOaId != null && targetOaId !== '' && Number(targetOaId) !== 0) {
+    target = Number(targetOaId);
+    if (!Number.isInteger(target) || target < 1) {
+      throw lineBindingError('invalid target LINE OA', 'INVALID_TARGET_OA');
+    }
+  }
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -63,19 +102,19 @@ async function issue(pool, { tenantId, ttlDays, createdBy, targetOaId } = {}) {
          FROM tenants
          WHERE id=$1 AND deleted_at IS NULL
          FOR UPDATE`,
-      [tenantId]
+      [tid]
     );
     if (!t.rows.length) {
       await client.query('ROLLBACK');
-      throw new Error('tenant not found');
+      throw lineBindingError('tenant not found', 'TENANT_NOT_FOUND', 404);
     }
     if (t.rows[0].line_binding_blocked) {
       await client.query('ROLLBACK');
-      throw new Error('tenant is blocked from LINE binding');
+      throw lineBindingError('tenant is blocked from LINE binding', 'TENANT_LINE_BINDING_BLOCKED');
     }
     if (t.rows[0].status !== 'active' || !t.rows[0].current_room_id) {
       await client.query('ROLLBACK');
-      throw new Error('tenant is not active for LINE binding');
+      throw lineBindingError('tenant is not active for LINE binding', 'TENANT_NOT_ACTIVE_FOR_LINE');
     }
     // If a target OA was specified, verify it exists and is enabled.
     if (target != null) {
@@ -85,15 +124,16 @@ async function issue(pool, { tenantId, ttlDays, createdBy, targetOaId } = {}) {
       );
       if (!oa.rows.length || !oa.rows[0].enabled) {
         await client.query('ROLLBACK');
-        throw new Error('OA ที่เลือกไม่มีอยู่หรือถูกปิดอยู่');
+        throw lineBindingError('OA ที่เลือกไม่มีอยู่หรือถูกปิดอยู่', 'TARGET_OA_NOT_AVAILABLE');
       }
     }
-    // Revoke any existing pending code
-    await client.query(
-      `UPDATE line_bindings SET status='revoked', updated_at=NOW()
-         WHERE tenant_id=$1 AND status='pending'`,
-      [tenantId]
-    );
+    if (replacePending) {
+      await client.query(
+        `UPDATE line_bindings SET status='revoked', updated_at=NOW()
+           WHERE tenant_id=$1 AND status='pending'`,
+        [tid]
+      );
+    }
     // Create new code (loop in the rare case of hex collision)
     let code, attempt = 0;
     while (attempt < 5) {
@@ -103,15 +143,25 @@ async function issue(pool, { tenantId, ttlDays, createdBy, targetOaId } = {}) {
           `INSERT INTO line_bindings (tenant_id, code, status, expires_at, created_by, target_oa_id)
            VALUES ($1, $2, 'pending', NOW() + ($3::int || ' days')::interval, $4, $5)
            RETURNING id, code, expires_at, target_oa_id`,
-          [tenantId, code, ttl, createdBy || null, target]
+          [tid, code, ttl, createdBy || null, target]
         );
         await client.query('COMMIT');
         return {
           id: ins.rows[0].id, code, expiresAt: ins.rows[0].expires_at,
-          tenantId, targetOaId: ins.rows[0].target_oa_id,
+          tenantId: tid, targetOaId: ins.rows[0].target_oa_id,
         };
       } catch (err) {
-        if (err.code === '23505') { attempt++; continue; }   // unique violation → retry
+        if (err.code === '23505' && (!err.constraint || err.constraint === 'uq_line_bindings_code')) {
+          attempt++;
+          continue;
+        }
+        if (err.code === '23505' && err.constraint === 'uq_line_bindings_pending_per_tenant') {
+          throw lineBindingError(
+            'database migration required: multiple pending LINE codes per room are still blocked',
+            'LINE_BINDING_PENDING_UNIQUE_MIGRATION_REQUIRED',
+            409
+          );
+        }
         throw err;
       }
     }
@@ -171,6 +221,75 @@ async function revoke(pool, { tenantId }) {
     client.release();
   }
   await refreshOaBoundCounts(pool, prevOaIds);
+}
+
+/**
+ * Revoke one bound LINE account without removing the other LINE accounts on
+ * the same room. tenants.line_user_id is only a cache; after the revoke it is
+ * pointed at the newest remaining bound account, or cleared if none remain.
+ */
+async function revokeAccount(pool, { tenantId, bindingId } = {}) {
+  const tid = Number(tenantId);
+  const bid = Number(bindingId);
+  if (!Number.isInteger(tid) || tid < 1 || !Number.isInteger(bid) || bid < 1) {
+    throw new Error('tenantId and bindingId required');
+  }
+  const client = await pool.connect();
+  let affectedOaIds = [];
+  let result = null;
+  try {
+    await client.query('BEGIN');
+    const before = await client.query(
+      `SELECT id, tenant_id, line_user_id, oa_id, status
+         FROM line_bindings
+        WHERE id=$1
+          AND tenant_id=$2
+          AND status='bound'
+        FOR UPDATE`,
+      [bid, tid]
+    );
+    if (!before.rows.length) {
+      await client.query('ROLLBACK');
+      return { ok: false, reason: 'not_found' };
+    }
+    const revoked = before.rows[0];
+    affectedOaIds.push(revoked.oa_id);
+    await client.query(
+      `UPDATE line_bindings
+          SET status='revoked', updated_at=NOW()
+        WHERE id=$1
+          AND tenant_id=$2
+          AND status='bound'`,
+      [bid, tid]
+    );
+    const latest = await syncTenantLineCacheFromLatest(client, tid);
+    affectedOaIds.push(latest && latest.oa_id);
+    const countRes = await client.query(
+      `SELECT COUNT(*)::int AS bound_count
+         FROM line_bindings
+        WHERE tenant_id=$1
+          AND status='bound'
+          AND line_user_id IS NOT NULL`,
+      [tid]
+    );
+    result = {
+      ok: true,
+      tenantId: tid,
+      bindingId: bid,
+      revokedLineUserId: revoked.line_user_id || null,
+      remainingBoundCount: Number(countRes.rows[0]?.bound_count) || 0,
+      activeLineUserId: latest ? latest.line_user_id : null,
+      activeOaId: latest ? latest.oa_id || null : null,
+    };
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+  await refreshOaBoundCounts(pool, affectedOaIds);
+  return result;
 }
 
 /**
@@ -337,7 +456,7 @@ async function getStatus(pool, tenantId) {
        LEFT JOIN line_oas tg ON tg.id = b.target_oa_id AND tg.deleted_at IS NULL
        WHERE b.tenant_id=$1
        ORDER BY (CASE b.status WHEN 'pending' THEN 0 WHEN 'bound' THEN 1 ELSE 2 END), b.created_at DESC
-       LIMIT 10`,
+       LIMIT 200`,
     [tenantId]
   );
   const countRes = await pool.query(
@@ -348,12 +467,26 @@ async function getStatus(pool, tenantId) {
         AND line_user_id IS NOT NULL`,
     [tenantId]
   );
+  const boundAccounts = await pool.query(
+    `SELECT b.id, b.line_user_id, b.oa_id, b.bound_at, b.created_at,
+            o.name AS oa_name, o.slug AS oa_slug
+       FROM line_bindings b
+       LEFT JOIN line_oas o ON o.id = b.oa_id AND o.deleted_at IS NULL
+      WHERE b.tenant_id=$1
+        AND b.status='bound'
+        AND b.line_user_id IS NOT NULL
+      ORDER BY b.bound_at DESC NULLS LAST, b.updated_at DESC NULLS LAST, b.id DESC
+      LIMIT 200`,
+    [tenantId]
+  );
   const boundCount = Number(countRes.rows[0]?.bound_count) || 0;
   return {
     tenant,
     pending: b.rows.find((r) => r.status === 'pending') || null,
+    pendingCodes: b.rows.filter((r) => r.status === 'pending'),
     bound: b.rows.find((r) => r.status === 'bound') || null,
     boundCount,
+    boundAccounts: boundAccounts.rows,
     history: b.rows,
   };
 }
@@ -518,6 +651,77 @@ async function tryBind(pool, { code, lineUserId, oaId } = {}) {
   }
 }
 
+/**
+ * Revoke every LINE binding that belongs to a public booking when that
+ * booking has been cancelled/rejected. Layered defence:
+ *
+ *   - tryBind() already refuses to bind a code whose booking is in a
+ *     terminal status (services/lineBinding.js, the JOIN on bookings +
+ *     booking_status check). So this revoke is NOT a security fix — the
+ *     binding can't actually be used.
+ *
+ *   - What it IS for: cleaning up stale rows that would otherwise count
+ *     toward the partial unique index `uq_line_bindings_active_user_per_oa`
+ *     (status='bound' bindings whose booking was cancelled AFTER bind but
+ *     BEFORE quick-invite transferred them). Without revoke, a follow-up
+ *     booking on the same OA could collide on the same line_user_id and
+ *     fail to issue a fresh code. Also keeps the admin /admin#line-bindings
+ *     queue tidy (no orphan "bound but booking_id points at cancelled").
+ *
+ * Scope:
+ *   - `booking_id = $1 AND tenant_id IS NULL` — only bindings still anchored
+ *     at the booking. transferBookingBindings (during quick-invite) clears
+ *     booking_id and sets tenant_id, so a transferred binding represents a
+ *     live tenant relationship that must NOT be touched here.
+ *   - `status IN ('pending', 'bound')` — the only states where revoke is
+ *     meaningful. 'blocked' and 'revoked' are already terminal-equivalent
+ *     and don't count toward the per-OA active-user uniqueness; touching
+ *     them would just re-stamp updated_at for no reason.
+ *
+ * Idempotent: calling twice on the same bookingId returns `revoked: 0` on
+ * the second call (WHERE filter no longer matches).
+ *
+ * @param {object} pool       - pg pool
+ * @param {object} opts
+ * @param {string} opts.bookingId - the external_id of the cancelled/rejected
+ *                                  booking (e.g. "BK-PUB-abc123")
+ * @returns {Promise<{ revoked: number, oaIds: number[] }>} — count + the
+ *                                  OA ids whose bound_count was refreshed
+ */
+async function revokeBookingBindings(pool, { bookingId } = {}) {
+  const bid = String(bookingId || '').slice(0, 64);
+  if (!bid) throw new Error('bookingId required');
+  const client = await pool.connect();
+  let affectedOaIds = [];
+  try {
+    await client.query('BEGIN');
+    const result = await client.query(
+      `UPDATE line_bindings
+          SET status='revoked', updated_at=NOW()
+        WHERE booking_id=$1
+          AND tenant_id IS NULL
+          AND status IN ('pending', 'bound')
+        RETURNING oa_id`,
+      [bid]
+    );
+    affectedOaIds = result.rows.map((r) => r.oa_id).filter(Boolean);
+    await client.query('COMMIT');
+    // Refresh per-OA bound_count after commit so admin /admin#line-oas
+    // sees the right total. Best-effort: a refresh failure doesn't undo
+    // the revoke (the count is a denormalised cache the next refresh will
+    // self-correct anyway).
+    if (affectedOaIds.length) {
+      await refreshOaBoundCounts(pool, affectedOaIds).catch(() => {});
+    }
+    return { revoked: result.rowCount, oaIds: affectedOaIds };
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 async function transferBookingBindings(pool, { bookingId, tenantId } = {}) {
   const bid = String(bookingId || '').slice(0, 64);
   const tid = Number(tenantId);
@@ -649,7 +853,8 @@ async function listAll(pool) {
 }
 
 module.exports = {
-  issue, issueBooking, revoke, block, unblock, getStatus, tryBind,
+  issue, issueBooking, revoke, revokeAccount, revokeBookingBindings,
+  block, unblock, getStatus, tryBind,
   transferBookingBindings, listTenantRecipients, listBookingRecipients, listAll,
   CODE_PREFIX, generateCode,
 };

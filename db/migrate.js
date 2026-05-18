@@ -473,8 +473,10 @@ async function migrate(pool, opts = {}) {
     CREATE UNIQUE INDEX IF NOT EXISTS uq_line_bindings_code ON line_bindings(code);
     CREATE INDEX IF NOT EXISTS idx_line_bindings_tenant ON line_bindings(tenant_id);
     CREATE INDEX IF NOT EXISTS idx_line_bindings_status ON line_bindings(status);
-    -- One pending code per tenant; admin must revoke first to issue another.
-    CREATE UNIQUE INDEX IF NOT EXISTS uq_line_bindings_pending_per_tenant
+    -- A room can have multiple pending LINE invite codes so several people
+    -- can bind their own LINE accounts without invalidating each other.
+    DROP INDEX IF EXISTS uq_line_bindings_pending_per_tenant;
+    CREATE INDEX IF NOT EXISTS idx_line_bindings_pending_per_tenant
       ON line_bindings(tenant_id) WHERE status = 'pending';
     -- A given LINE userId can only be bound to one tenant at a time.
     CREATE UNIQUE INDEX IF NOT EXISTS uq_line_bindings_active_user

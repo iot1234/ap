@@ -7960,9 +7960,39 @@ app.put('/api/bookings/:id', sameOrigin, csrfGuard, requireAuth, requireRole('ow
     }
     await client.query('COMMIT');
     txCommitted = true;
+    // R-followup booking audit: revoke any LINE binding codes that were
+    // issued for this booking when it transitions to a terminal status.
+    // tryBind() already refuses to bind on a cancelled/rejected booking
+    // (the JOIN on bookings.status), so this is NOT a security fix — it's
+    // a cleanup so stale 'bound' rows (bound BEFORE cancel but never
+    // transferred via quick-invite) don't keep occupying the per-OA
+    // active-user slot.
+    //
+    // Scope (in revokeBookingBindings): only bindings still anchored at
+    // booking_id with tenant_id IS NULL — bindings already transferred to
+    // a tenant (via transferBookingBindings during quick-invite) represent
+    // a live tenant relationship that must NOT be touched.
+    //
+    // Runs AFTER commit in its own short transaction so a slow LINE/OA
+    // refresh can't block the status-change durability. Errors are caught
+    // + surfaced in the audit log so admin can inspect at /admin#audit.
+    let bookingBindingRevoke = null;
+    if (['cancelled', 'rejected'].includes(updated.status) && before.status !== updated.status) {
+      try {
+        const lineBinding = require('./services/lineBinding');
+        bookingBindingRevoke = await lineBinding.revokeBookingBindings(pool, { bookingId: id });
+      } catch (err) {
+        console.warn('[booking.update] revokeBookingBindings failed:', err.message);
+        bookingBindingRevoke = { error: err.message };
+      }
+    }
     audit(req, 'booking.update', 'booking', id, {
       from: before.status, to: updated.status, fields: Object.keys(b), releasedRoomId,
       releasedTenantId: releasedTenant ? releasedTenant.id : null,
+      lineBindingRevoke: bookingBindingRevoke ? {
+        revoked: bookingBindingRevoke.revoked || 0,
+        error: bookingBindingRevoke.error || null,
+      } : null,
     });
 
     // Notify on status change so the applicant knows if the booking moved to

@@ -3405,6 +3405,10 @@ test('booking-stage LINE binding is issued, guarded, and carried into contract h
     'quick-invite must block a same-phone active tenant from silently claiming another room');
   assert.match(quickInvite, /lineBinding\.transferBookingBindings\(pool,[\s\S]{0,180}bookingId: bookingIdForRoom,[\s\S]{0,80}tenantId/,
     'approved booking LINE bindings must transfer to the tenant created during contract handoff');
+  assert.match(server, /revokeBookingBindings\(pool, \{ bookingId: id \}\)/,
+    'terminal booking updates must revoke booking-scoped LINE bindings that were never transferred to a tenant');
+  assert.match(server, /lineBindingRevoke/,
+    'booking audit must record whether terminal-status LINE binding cleanup ran');
 });
 
 test('booking LINE pre-bind protects friend/second-room scenarios', () => {
@@ -3492,12 +3496,52 @@ test('tenant LINE notifications fan out to every bound LINE account', () => {
     'LINE bindings overview must show the total number of bound LINE accounts');
   assert.match(bindingsPage, /label: `[\s\S]{0,80}\$\{boundCount\}[\s\S]{0,40}`/,
     'LINE bindings table rows must show the bound LINE account count per tenant');
+  assert.match(bindingsPage, /boundAccounts/,
+    'LINE bindings detail must list the individual LINE accounts bound to the room');
+  assert.match(bindingsPage, /pendingCodes/,
+    'LINE bindings detail must list every pending LINE key for the room');
+  assert.match(bindingsPage, /replacePending: false/,
+    'LINE bindings UI must be able to issue an additional key without invalidating existing pending keys');
+  assert.match(bindingsPage, /\/accounts\/\$\{bindingId\}/,
+    'LINE bindings detail must allow deleting one bound LINE account without revoking the whole room');
+  assert.match(bindingsPage, /ลบบัญชีนี้/,
+    'LINE bindings UI must label the per-account delete action clearly');
 
   const adminLineBindings = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-line-bindings.js'), 'utf8');
+  const bindingService = fs.readFileSync(path.join(__dirname, '..', 'services', 'lineBinding.js'), 'utf8');
   assert.match(adminLineBindings, /boundAccounts/,
     'admin LINE bindings API must return the total bound account counter');
   assert.match(adminLineBindings, /boundCount > 0/,
     'admin LINE bindings API must treat rows with bound_count as bound even if the tenant cache is stale');
+  assert.match(adminLineBindings, /\/tenants\/:id\/accounts\/:bindingId/,
+    'admin LINE bindings API must expose a per-account revoke endpoint');
+  assert.match(adminLineBindings, /lineBinding\.revokeAccount/,
+    'per-account revoke endpoint must call the scoped service method');
+  assert.match(adminLineBindings, /replacePending/,
+    'admin LINE bindings API must accept replacePending=false for additional room recipients');
+  assert.match(adminLineBindings, /lineBindingIssueErrorPayload/,
+    'admin LINE bindings API must map service errors into clear admin-facing messages');
+  assert.match(adminLineBindings, /LINE_BINDING_PENDING_UNIQUE_MIGRATION_REQUIRED/,
+    'admin LINE bindings API must expose a clear code when the old unique pending index still blocks multi-key issue');
+  assert.match(adminLineBindings, /คีย์เดิมยังไม่ถูกยกเลิก/,
+    'migration-required warning must reassure admin that existing pending keys were not silently revoked');
+
+  assert.match(bindingService, /async function revokeAccount/,
+    'LINE binding service must support revoking one bound LINE account');
+  assert.match(bindingService, /syncTenantLineCacheFromLatest/,
+    'single-account revoke must repoint the tenant LINE cache to the newest remaining account');
+  assert.match(bindingService, /replacePending = true/,
+    'LINE binding service must preserve reissue-by-replacing as the default mode');
+  assert.match(bindingService, /if \(replacePending\)/,
+    'LINE binding service must skip revoking pending keys when issuing an additional recipient key');
+
+  const migration = fs.readFileSync(path.join(__dirname, '..', 'db', 'migrate.js'), 'utf8');
+  assert.match(migration, /DROP INDEX IF EXISTS uq_line_bindings_pending_per_tenant/,
+    'migration must remove the old one-pending-code-per-room constraint');
+  assert.match(migration, /CREATE INDEX IF NOT EXISTS idx_line_bindings_pending_per_tenant/,
+    'migration must keep pending tenant-code lookup indexed without making it unique');
+  assert.doesNotMatch(migration, /CREATE UNIQUE INDEX IF NOT EXISTS uq_line_bindings_pending_per_tenant/,
+    'migration must not recreate the old unique pending-per-room index');
 
   const lineOasPage = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-line-oas.jsx'), 'utf8');
   const settingsPage = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-settings.jsx'), 'utf8');
@@ -5943,6 +5987,10 @@ test('POST /api/tenants accepts bookingId to carry over the citizen-ID photo', (
     'must link the booking photo to the new tenant + retarget ref_id');
   assert.match(src, /linkedFromBooking/,
     'audit log must capture which booking the photo came from');
+  assert.match(src, /lineBinding\.transferBookingBindings\(pool,[\s\S]{0,120}bookingId,[\s\S]{0,120}tenantId: rows\[0\]\.id/,
+    'tenant create from a booking must carry over booking-stage LINE bindings to the new tenant/room');
+  assert.match(src, /lineBindingCarryover/,
+    'tenant create response/audit must expose LINE binding carry-over status for admin follow-up');
 });
 
 test('storage.saveBase64 accepts side=front|back + falls back on missing column', () => {
@@ -6189,6 +6237,33 @@ test('notificationQueue: disabled OA throws fatal (no retry loop)', () => {
     'dispatch must check oa.enabled before pushing');
   assert.match(src, /fatalErr\.fatal = true/,
     'disabled-OA error must be marked fatal so processOne parks immediately');
+});
+
+test('booking cancel/reject: revokes LINE binding codes anchored at the booking', () => {
+  // BIND-XXXX codes issued for a public booking must stop working when
+  // the booking goes to a terminal status. Without revoke-on-cancel a
+  // BIND code from a cancelled booking could still bind a phantom
+  // line_bindings row pointing at the dead booking_id, blocking the
+  // per-OA active-user uniqueness for a follow-up booking that wants
+  // to issue a fresh code on the same OA.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const svc = fs.readFileSync(path.join(__dirname, '..', 'services', 'lineBinding.js'), 'utf8');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  // Helper exists, scoped to bindings still anchored at the booking, and exported.
+  assert.match(svc, /async function revokeBookingBindings/,
+    'revokeBookingBindings helper must exist');
+  assert.match(svc,
+    /WHERE booking_id=\$1\s+AND tenant_id IS NULL\s+AND status IN \('pending', 'bound'\)/,
+    'helper must scope to bindings still anchored at the booking');
+  assert.match(svc, /revokeBookingBindings,/,
+    'helper must be exported from the module');
+  // PUT /api/bookings/:id calls the helper on cancel/reject + records to audit.
+  assert.match(server,
+    /\['cancelled', 'rejected'\]\.includes\(updated\.status\)[\s\S]{0,400}revokeBookingBindings\(pool, \{ bookingId: id \}\)/,
+    'PUT /api/bookings/:id must revoke booking-anchored LINE codes on terminal status');
+  assert.match(server, /lineBindingRevoke:/,
+    'audit log must capture revoke outcome');
 });
 
 test('contracts: at most one active contract per room (DB-level guard)', () => {

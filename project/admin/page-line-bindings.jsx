@@ -51,19 +51,21 @@ function PageLineBindings({ setToast }) {
 
   // Issue a code, optionally targeting a specific OA. If admin has ≥2 OAs we
   // open a small modal to let them pick; with ≤1 OA we issue directly.
-  function startIssue(tenantId) {
+  function startIssue(tenantId, options = {}) {
+    const replacePending = options.replacePending !== false;
     if (oas.length <= 1) {
-      issue(tenantId, oas[0]?.id || null);
+      issue(tenantId, oas[0]?.id || null, { replacePending });
       return;
     }
     setIssueOaId('');  // any-OA by default
-    setShowIssueModal({ tenantId });
+    setShowIssueModal({ tenantId, replacePending });
   }
 
-  async function issue(id, targetOaId) {
+  async function issue(id, targetOaId, options = {}) {
     setBusy(true);
     try {
-      const body = { ttlDays: 7 };
+      const replacePending = options.replacePending !== false;
+      const body = { ttlDays: 7, replacePending };
       if (targetOaId != null && targetOaId !== '' && Number(targetOaId) > 0) {
         body.targetOaId = Number(targetOaId);
       }
@@ -72,7 +74,12 @@ function PageLineBindings({ setToast }) {
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || 'failed');
-      setToast && setToast({ kind: 'success', message: `ออกรหัสแล้ว: ${d.code}` });
+      setToast && setToast({
+        kind: 'success',
+        message: replacePending
+          ? `ออกคีย์ LINE แล้ว: ${d.code}`
+          : `ออกคีย์เพิ่มแล้ว: ${d.code} (คีย์เดิมยังใช้ได้)`,
+      });
       setShowIssueModal(null);
       await load();
       if (openId === id || id === showIssueModal?.tenantId) await loadDetail(id);
@@ -90,6 +97,20 @@ function PageLineBindings({ setToast }) {
       setToast && setToast({ kind: 'success', message: 'ปลดผูกแล้ว' });
       await load();
       if (openId === id) await loadDetail(id);
+    } catch (e) { setToast && setToast({ kind: 'error', message: e.message }); }
+    finally { setBusy(false); }
+  }
+
+  async function revokeAccount(tenantId, bindingId) {
+    if (!window.confirm('ลบบัญชี LINE นี้ออกจากห้องนี้? บัญชี LINE อื่นที่ผูกกับห้องนี้จะยังรับแจ้งเตือนต่อไป')) return;
+    setBusy(true);
+    try {
+      const r = await apiFetch(`/api/admin/line-bindings/tenants/${tenantId}/accounts/${bindingId}`, { method: 'DELETE' });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'failed');
+      setToast && setToast({ kind: 'success', message: `ลบบัญชี LINE แล้ว เหลือ ${d.remainingBoundCount || 0} บัญชี` });
+      await load();
+      if (openId === tenantId) await loadDetail(tenantId);
     } catch (e) { setToast && setToast({ kind: 'error', message: e.message }); }
     finally { setBusy(false); }
   }
@@ -236,8 +257,10 @@ function PageLineBindings({ setToast }) {
           oas={oas}
           busy={busy}
           onClose={() => { setOpenId(null); setOpenDetail(null); }}
-          onIssue={() => startIssue(openId)}
+          onIssue={() => startIssue(openId, { replacePending: true })}
+          onIssueAdditional={() => startIssue(openId, { replacePending: false })}
           onRevoke={() => revoke(openId)}
+          onRevokeAccount={(bindingId) => revokeAccount(openId, bindingId)}
           onBlock={() => block(openId)}
           onUnblock={() => unblock(openId)} />
       )}
@@ -251,7 +274,9 @@ function PageLineBindings({ setToast }) {
           <>
             <Btn variant="ghost" onClick={() => setShowIssueModal(null)}>ยกเลิก</Btn>
             <Btn variant="primary" disabled={busy}
-                 onClick={() => issue(showIssueModal.tenantId, issueOaId)}>
+                 onClick={() => issue(showIssueModal.tenantId, issueOaId, {
+                   replacePending: showIssueModal.replacePending !== false,
+                 })}>
               {busy ? '…' : 'ออกรหัส'}
             </Btn>
           </>
@@ -298,25 +323,31 @@ function StatCard({ label, value, color }) {
   );
 }
 
-function DetailModal({ C, Modal, Btn, Pill, detail, tenantId, oas, busy, onClose, onIssue, onRevoke, onBlock, onUnblock }) {
+function DetailModal({ C, Modal, Btn, Pill, detail, tenantId, oas, busy, onClose, onIssue, onIssueAdditional, onRevoke, onRevokeAccount, onBlock, onUnblock }) {
   const t = detail.tenant;
   const pending = detail.pending;
   const bound = detail.bound;
   const blocked = !!t.line_binding_blocked;
   const boundCount = Number(detail.boundCount || detail.bound_count || 0);
+  const boundAccounts = Array.isArray(detail.boundAccounts || detail.bound_accounts)
+    ? (detail.boundAccounts || detail.bound_accounts)
+    : [];
+  const pendingCodes = Array.isArray(detail.pendingCodes || detail.pending_codes)
+    ? (detail.pendingCodes || detail.pending_codes)
+    : (pending ? [pending] : []);
   const hasMultiOas = oas && oas.length > 0;
 
-  function copyCode(code) {
+  function copyCode(code, elementId) {
     if (!navigator.clipboard) return;
     navigator.clipboard.writeText(code).then(() => {
       // simple visual feedback
-      const el = document.getElementById(`copy-${code}`);
+      const el = document.getElementById(elementId || `copy-${code}`);
       if (el) { el.innerText = '✓ คัดลอกแล้ว'; setTimeout(() => { el.innerText = 'คัดลอก'; }, 1500); }
     });
   }
-  function resolveLineAddUrl() {
+  function resolveLineAddUrl(row = pending) {
     const list = Array.isArray(oas) ? oas : [];
-    const targetId = pending && (pending.target_oa_id || pending.targetOaId);
+    const targetId = row && (row.target_oa_id || row.targetOaId);
     if (targetId) {
       const target = list.find((o) => String(o.id) === String(targetId));
       return target && target.addFriendUrl ? target.addFriendUrl : '';
@@ -326,9 +357,9 @@ function DetailModal({ C, Modal, Btn, Pill, detail, tenantId, oas, busy, onClose
     const first = list.find((o) => o.addFriendUrl);
     return first ? first.addFriendUrl : '';
   }
-  function resolveLineMessageUrl() {
+  function resolveLineMessageUrl(row = pending) {
     const list = Array.isArray(oas) ? oas : [];
-    const targetId = pending && (pending.target_oa_id || pending.targetOaId);
+    const targetId = row && (row.target_oa_id || row.targetOaId);
     if (targetId) {
       const target = list.find((o) => String(o.id) === String(targetId));
       return target && target.oaMessageUrl ? target.oaMessageUrl : '';
@@ -350,8 +381,12 @@ function DetailModal({ C, Modal, Btn, Pill, detail, tenantId, oas, busy, onClose
       return '';
     }
   }
-  const lineAddUrl = resolveLineAddUrl();
-  const lineMessageUrl = buildLineTenantBindingMessageLink(resolveLineMessageUrl(), pending && pending.code);
+  function buildLineOpenUrlFor(row) {
+    const messageUrl = buildLineTenantBindingMessageLink(resolveLineMessageUrl(row), row && row.code);
+    return messageUrl || resolveLineAddUrl(row);
+  }
+  const lineAddUrl = resolveLineAddUrl(pending);
+  const lineMessageUrl = buildLineTenantBindingMessageLink(resolveLineMessageUrl(pending), pending && pending.code);
   const lineOpenUrl = lineMessageUrl || lineAddUrl;
 
   return (
@@ -418,6 +453,50 @@ function DetailModal({ C, Modal, Btn, Pill, detail, tenantId, oas, busy, onClose
               )}
               3) ระบบจะตอบกลับ "ผูกบัญชีสำเร็จ" และเริ่มส่งบิล/แจ้งเตือน
             </div>
+            {pendingCodes.length > 1 && (
+              <div style={{ marginTop: 10, borderTop: '1px solid ' + C.border, paddingTop: 10 }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: C.ink, marginBottom: 6 }}>
+                  คีย์รอผูกทั้งหมด ({pendingCodes.length}) - ส่งคนละคีย์ให้แต่ละบัญชี LINE ได้
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  {pendingCodes.map((row) => {
+                    const openUrl = buildLineOpenUrlFor(row);
+                    return (
+                      <div key={row.id} style={{
+                        display: 'grid',
+                        gridTemplateColumns: '1fr auto auto',
+                        gap: 8,
+                        alignItems: 'center',
+                        background: '#fff',
+                        border: '1px solid ' + C.border,
+                        borderRadius: 6,
+                        padding: '7px 8px',
+                      }}>
+                        <div style={{ minWidth: 0 }}>
+                          <code style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 12.5 }}>{row.code}</code>
+                          <div style={{ color: C.muted, fontSize: 11, marginTop: 2 }}>
+                            หมดอายุ {row.expires_at ? new Date(row.expires_at).toLocaleString('th-TH') : '-'}
+                            {row.target_oa_name ? ` · ส่งที่ ${row.target_oa_name}` : ''}
+                          </div>
+                        </div>
+                        <button id={`copy-pending-${row.id}`} onClick={() => copyCode(row.code, `copy-pending-${row.id}`)} style={btnLink(C)}>คัดลอก</button>
+                        {openUrl ? (
+                          <a href={openUrl} target="_blank" rel="noreferrer"
+                            style={{ ...btnLink(C), textDecoration: 'none' }}>
+                            เปิด LINE
+                          </a>
+                        ) : (
+                          <button onClick={() => { window.location.hash = '#line-oas'; }}
+                            style={btnLink(C)}>
+                            ตั้งลิงก์
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -438,10 +517,54 @@ function DetailModal({ C, Modal, Btn, Pill, detail, tenantId, oas, busy, onClose
           </div>
         )}
 
+        {boundAccounts.length > 0 && !blocked && (
+          <div style={{ marginTop: 4, border: '1px solid ' + C.border, borderRadius: 8, overflow: 'hidden' }}>
+            <div style={{ padding: '8px 10px', background: C.surfaceAlt || '#f7faf8', fontSize: 12.5, fontWeight: 700, color: C.ink }}>
+              บัญชี LINE ที่ผูกกับห้องนี้ ({boundAccounts.length})
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 1, background: C.border }}>
+              {boundAccounts.map((account) => {
+                const userId = String(account.line_user_id || '');
+                const tail = userId ? `…${userId.slice(-8)}` : '-';
+                return (
+                  <div key={account.id} style={{
+                    background: C.bg,
+                    padding: '8px 10px',
+                    display: 'grid',
+                    gridTemplateColumns: '1fr auto',
+                    gap: 10,
+                    alignItems: 'center',
+                  }}>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontSize: 12.5, color: C.ink }}>
+                        LINE userId <code style={{ fontFamily: 'JetBrains Mono, monospace' }}>{tail}</code>
+                      </div>
+                      <div style={{ fontSize: 11.5, color: C.muted, marginTop: 2 }}>
+                        {account.oa_name ? `ผ่าน ${account.oa_name}` : 'ผ่าน OA เดิม/ไม่ระบุ'} · ผูกเมื่อ {account.bound_at ? new Date(account.bound_at).toLocaleString('th-TH') : '-'}
+                      </div>
+                    </div>
+                    <Btn variant="danger" disabled={busy} onClick={() => onRevokeAccount && onRevokeAccount(account.id)}>
+                      ลบบัญชีนี้
+                    </Btn>
+                  </div>
+                );
+              })}
+            </div>
+            <div style={{ padding: '8px 10px', fontSize: 11.5, color: C.muted, background: C.bg }}>
+              การแก้ไขบัญชีที่ผูกให้ลบบัญชีที่ไม่ต้องการออก แล้วออกคีย์ใหม่ให้บัญชี LINE ที่ถูกต้องส่งเข้ามา ระบบจะยังส่งแจ้งเตือนให้บัญชีที่เหลืออยู่
+            </div>
+          </div>
+        )}
+
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 4 }}>
           {!blocked && (
-            <Btn variant="primary" disabled={busy} onClick={onIssue}>
-              {pending ? 'ออกรหัสใหม่ (ยกเลิกอันเก่า)' : bound ? 'ออกรหัสเพิ่ม LINE อีกบัญชี' : 'ออกรหัสยืนยัน'}
+            <Btn variant="primary" disabled={busy} onClick={bound ? (onIssueAdditional || onIssue) : onIssue}>
+              {pending ? (bound ? 'ออกคีย์เพิ่ม LINE อีกบัญชี' : 'ออกรหัสใหม่ (ยกเลิกอันเก่า)') : bound ? 'ออกคีย์เพิ่ม LINE อีกบัญชี' : 'ออกรหัสยืนยัน'}
+            </Btn>
+          )}
+          {pending && !bound && !blocked && (
+            <Btn disabled={busy} onClick={onIssueAdditional || onIssue}>
+              ออกคีย์เพิ่มอีกใบ (ไม่ยกเลิกคีย์เดิม)
             </Btn>
           )}
           {(pending || bound) && !blocked && (

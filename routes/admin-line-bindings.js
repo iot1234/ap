@@ -3,7 +3,7 @@
 //
 //   GET    /api/admin/line-bindings                   — overview (all tenants)
 //   GET    /api/admin/line-bindings/tenants/:id       — single tenant detail
-//   POST   /api/admin/line-bindings/tenants/:id       — issue new code (revokes previous pending)
+//   POST   /api/admin/line-bindings/tenants/:id       — issue new code
 //   DELETE /api/admin/line-bindings/tenants/:id       — revoke + unbind
 //   POST   /api/admin/line-bindings/tenants/:id/block — block (no future bindings)
 //   POST   /api/admin/line-bindings/tenants/:id/unblock
@@ -12,6 +12,28 @@
 const express = require('express');
 const QRCode = require('qrcode');
 const lineBinding = require('../services/lineBinding');
+
+function lineBindingIssueErrorPayload(err) {
+  const code = err && err.code ? String(err.code) : 'LINE_BINDING_ISSUE_FAILED';
+  const messages = {
+    INVALID_TENANT_ID: 'รหัสผู้เช่าไม่ถูกต้อง กรุณารีเฟรชหน้าแล้วลองใหม่',
+    INVALID_TTL_DAYS: 'อายุคีย์ LINE ต้องอยู่ระหว่าง 1-30 วัน',
+    INVALID_TARGET_OA: 'LINE OA ที่เลือกไม่ถูกต้อง กรุณาเลือก LINE OA ใหม่',
+    TARGET_OA_NOT_AVAILABLE: 'LINE OA ที่เลือกไม่มีอยู่หรือถูกปิดอยู่ กรุณาเปิดใช้งานหรือเลือก OA อื่น',
+    TENANT_NOT_FOUND: 'ไม่พบผู้เช่ารายนี้ กรุณารีเฟรชหน้าแล้วตรวจสอบอีกครั้ง',
+    TENANT_LINE_BINDING_BLOCKED: 'ห้องนี้ถูกบล็อกการผูก LINE อยู่ ต้องยกเลิกการบล็อกก่อนออกคีย์',
+    TENANT_NOT_ACTIVE_FOR_LINE: 'ออกคีย์ไม่ได้ เพราะผู้เช่ายังไม่เป็นสถานะใช้งานอยู่หรือยังไม่มีห้องปัจจุบัน',
+    LINE_BINDING_PENDING_UNIQUE_MIGRATION_REQUIRED:
+      'ยังออกคีย์เพิ่มหลายใบไม่ได้ เพราะฐานข้อมูลยังมีข้อจำกัดแบบเก่าอยู่ ให้รัน migration แล้วลองใหม่ คีย์เดิมยังไม่ถูกยกเลิก',
+  };
+  return {
+    status: Number(err && err.status) || (code === 'LINE_BINDING_PENDING_UNIQUE_MIGRATION_REQUIRED' ? 409 : 400),
+    body: {
+      error: messages[code] || err.message || 'ออกคีย์ LINE ไม่สำเร็จ',
+      code,
+    },
+  };
+}
 
 module.exports = function buildAdminLineBindingsRouter(ctx) {
   const { pool, requireAuth, requireRole, sameOrigin, csrfGuard, audit } = ctx;
@@ -60,16 +82,22 @@ module.exports = function buildAdminLineBindingsRouter(ctx) {
       // accept it. Without this passthrough the constraint silently
       // dropped and any OA could accept any code.
       const targetOaId = req.body?.targetOaId;
+      const replacePending = req.body?.replacePending !== false;
       try {
         const result = await lineBinding.issue(pool, {
-          tenantId: id, ttlDays, targetOaId,
+          tenantId: id, ttlDays, targetOaId, replacePending,
           createdBy: req.session.user.username,
         });
-        audit(req, 'line_binding.issue', 'tenant', String(id), { ttlDays, targetOaId: result.targetOaId || null });
+        audit(req, 'line_binding.issue', 'tenant', String(id), {
+          ttlDays,
+          targetOaId: result.targetOaId || null,
+          replacePending,
+        });
         res.json({ ok: true, ...result });
       } catch (err) {
         console.error('admin line-binding issue error:', err.message);
-        res.status(400).json({ error: err.message || 'failed' });
+        const payload = lineBindingIssueErrorPayload(err);
+        res.status(payload.status).json(payload.body);
       }
     }
   );
@@ -84,6 +112,32 @@ module.exports = function buildAdminLineBindingsRouter(ctx) {
         res.json({ ok: true });
       } catch (err) {
         console.error('admin line-binding revoke error:', err);
+        res.status(500).json({ error: 'internal error' });
+      }
+    }
+  );
+
+  r.delete('/tenants/:id/accounts/:bindingId', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'),
+    async (req, res) => {
+      const id = Number(req.params.id);
+      const bindingId = Number(req.params.bindingId);
+      if (!Number.isInteger(id) || id < 1 || !Number.isInteger(bindingId) || bindingId < 1) {
+        return res.status(400).json({ error: 'invalid id' });
+      }
+      try {
+        const result = await lineBinding.revokeAccount(pool, {
+          tenantId: id,
+          bindingId,
+          by: req.session.user.username,
+        });
+        if (!result.ok) return res.status(404).json({ error: 'binding not found', code: 'NOT_FOUND' });
+        audit(req, 'line_binding.revoke_account', 'tenant', String(id), {
+          bindingId,
+          remainingBoundCount: result.remainingBoundCount,
+        });
+        res.json(result);
+      } catch (err) {
+        console.error('admin line-binding account revoke error:', err);
         res.status(500).json({ error: 'internal error' });
       }
     }

@@ -62,6 +62,22 @@ test('issue: ttl validation rejects out-of-range', async () => {
   await assert.rejects(() => lb.issue(pool, { tenantId: 1, ttlDays: 'abc' }));
 });
 
+test('issue: validates tenant and OA inputs before opening a transaction', async () => {
+  const pool = {
+    connect() {
+      throw new Error('should not connect');
+    },
+  };
+  await assert.rejects(
+    () => lb.issue(pool, { tenantId: 0, ttlDays: 7 }),
+    { code: 'INVALID_TENANT_ID' }
+  );
+  await assert.rejects(
+    () => lb.issue(pool, { tenantId: 1, ttlDays: 7, targetOaId: 'abc' }),
+    { code: 'INVALID_TARGET_OA' }
+  );
+});
+
 test('issue: revokes prior pending then creates new', async () => {
   const pool = buildFakePool({
     'SELECT id, full_name': () => ({
@@ -79,6 +95,47 @@ test('issue: revokes prior pending then creates new', async () => {
   assert.ok(revokeIdx >= 0 && insertIdx > revokeIdx, 'revoke should come before insert');
   const tenantSelect = sequence.find((s) => s.includes('FROM tenants'));
   assert.match(tenantSelect, /FOR UPDATE/, 'issuing tenant codes must lock the tenant row');
+});
+
+test('issue: can create an additional pending code for another LINE account', async () => {
+  const pool = buildFakePool({
+    'SELECT id, full_name': () => ({
+      rows: [{ id: 1, full_name: 'X', line_binding_blocked: false, status: 'active', current_room_id: '101' }],
+    }),
+    'INSERT INTO line_bindings': () => ({ rows: [{ id: 43, code: 'BIND-BBBBBBBB', expires_at: new Date() }] }),
+  });
+  const out = await lb.issue(pool, {
+    tenantId: 1,
+    ttlDays: 7,
+    createdBy: 'admin',
+    replacePending: false,
+  });
+  assert.equal(out.id, 43);
+  const calls = pool._calls.map((c) => c.sql.replace(/\s+/g, ' '));
+  assert.equal(
+    calls.some((s) => s.includes("UPDATE line_bindings SET status='revoked'") && s.includes("status='pending'")),
+    false,
+    'additional LINE account codes must not revoke other pending room codes'
+  );
+  assert.ok(calls.some((s) => s.startsWith('INSERT INTO line_bindings')));
+});
+
+test('issue: reports old pending-per-tenant unique index as migration-required', async () => {
+  const pool = buildFakePool({
+    'SELECT id, full_name': () => ({
+      rows: [{ id: 1, full_name: 'X', line_binding_blocked: false, status: 'active', current_room_id: '101' }],
+    }),
+    'INSERT INTO line_bindings': () => {
+      const err = new Error('duplicate key');
+      err.code = '23505';
+      err.constraint = 'uq_line_bindings_pending_per_tenant';
+      throw err;
+    },
+  });
+  await assert.rejects(
+    () => lb.issue(pool, { tenantId: 1, ttlDays: 7, createdBy: 'admin', replacePending: false }),
+    { code: 'LINE_BINDING_PENDING_UNIQUE_MIGRATION_REQUIRED', status: 409 }
+  );
 });
 
 test('tryBind: invalid format returns ok=false', async () => {
@@ -318,13 +375,33 @@ test('transferBookingBindings: moves booking-bound LINE rows onto the created te
   assert.equal(tenantUpdate.params[2], 8);
 });
 
+test('revokeBookingBindings revokes only booking-scoped LINE rows', async () => {
+  const pool = buildFakePool({
+    'UPDATE line_bindings': () => ({
+      rowCount: 2,
+      rows: [{ oa_id: 2 }, { oa_id: null }],
+    }),
+  });
+  const out = await lb.revokeBookingBindings(pool, { bookingId: 'BK-9' });
+  assert.equal(out.revoked, 2);
+  const update = pool._calls.find((c) => c.sql.includes('UPDATE line_bindings'));
+  const sql = update.sql.replace(/\s+/g, ' ');
+  assert.match(sql, /WHERE booking_id=\$1/);
+  assert.match(sql, /tenant_id IS NULL/);
+  assert.match(sql, /status IN \('pending', 'bound'\)/);
+});
+
 test('getStatus/listAll expose bound LINE account counts per tenant room', async () => {
   const statusPool = buildFakePool({
     'FROM tenants WHERE id=$1': () => ({
       rows: [{ id: 1, full_name: 'Counter', phone: '0811111111', current_room_id: 'A1' }],
     }),
     'FROM line_bindings b': () => ({
-      rows: [{ id: 9, status: 'bound', line_user_id: 'U1', code: 'BIND-AAAA1111' }],
+      rows: [
+        { id: 10, status: 'pending', line_user_id: null, code: 'BIND-BBBB1111' },
+        { id: 11, status: 'pending', line_user_id: null, code: 'BIND-CCCC1111' },
+        { id: 9, status: 'bound', line_user_id: 'U1', code: 'BIND-AAAA1111' },
+      ],
     }),
     'COUNT(*)::int AS bound_count': () => ({ rows: [{ bound_count: 2 }] }),
   });
@@ -336,9 +413,36 @@ test('getStatus/listAll expose bound LINE account counts per tenant room', async
 
   const status = await lb.getStatus(statusPool, 1);
   assert.equal(status.boundCount, 2);
+  assert.equal(status.pendingCodes.length, 2);
 
   const rows = await lb.listAll(listPool);
   assert.equal(rows[0].bound_count, 3);
+});
+
+test('revokeAccount removes one LINE account and keeps remaining account cached', async () => {
+  const pool = buildFakePool({
+    'SELECT id, tenant_id, line_user_id, oa_id, status': () => ({
+      rows: [{ id: 91, tenant_id: 7, line_user_id: 'Uold', oa_id: 2, status: 'bound' }],
+    }),
+    'UPDATE line_bindings': () => ({ rows: [], rowCount: 1 }),
+    'SELECT line_user_id, oa_id': () => ({
+      rows: [{ line_user_id: 'Uremain', oa_id: 4 }],
+    }),
+    'COUNT(*)::int AS bound_count': () => ({ rows: [{ bound_count: 1 }] }),
+  });
+  const out = await lb.revokeAccount(pool, { tenantId: 7, bindingId: 91 });
+  assert.equal(out.ok, true);
+  assert.equal(out.remainingBoundCount, 1);
+  assert.equal(out.activeLineUserId, 'Uremain');
+  const calls = pool._calls.map((c) => c.sql.replace(/\s+/g, ' '));
+  assert.ok(calls.some((s) => s.includes("WHERE id=$1 AND tenant_id=$2 AND status='bound'")),
+    'single-account revoke must be scoped to one tenant and one bound binding');
+  const tenantUpdate = pool._calls.find((c) =>
+    c.sql.replace(/\s+/g, ' ').includes('UPDATE tenants SET line_user_id=$1'));
+  assert.ok(tenantUpdate, 'tenant LINE cache must be repointed after a single-account revoke');
+  assert.equal(tenantUpdate.params[0], 'Uremain');
+  assert.equal(tenantUpdate.params[1], 4);
+  assert.equal(tenantUpdate.params[2], 7);
 });
 
 test('CODE_PREFIX is BIND-', () => {

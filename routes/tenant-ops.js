@@ -32,6 +32,7 @@ const pricing = require('../services/pricing');
 const notifier = require('../services/notifier');
 const cryptoSvc = require('../services/crypto');
 const lineNotify = require('../services/line');
+const lineBinding = require('../services/lineBinding');
 const storage = require('../services/storage');
 
 // === Internal helpers =====================================================
@@ -833,6 +834,7 @@ module.exports = function buildTenantOpsRouter(ctx) {
     }
     try {
       let rows;
+      let lineBindingCarryover = null;
       if (requestedRoomId) {
         const client = await pool.connect();
         try {
@@ -901,11 +903,25 @@ module.exports = function buildTenantOpsRouter(ctx) {
           console.warn('[tenant.create] booking photo link skipped:', err.message);
         }
       }
+      if (b.bookingId) {
+        try {
+          const bookingId = String(b.bookingId).slice(0, 64);
+          lineBindingCarryover = await lineBinding.transferBookingBindings(pool, {
+            bookingId,
+            tenantId: rows[0].id,
+          });
+        } catch (err) {
+          console.warn('[tenant.create] booking LINE binding carry-over skipped:', err.message);
+          lineBindingCarryover = { ok: false, error: err.message };
+        }
+      }
       audit(req, 'tenant.create', 'tenant', String(rows[0].id),
         { hasIdentity: !!(b.citizenIdImageFront || b.citizenIdImageBack),
-          linkedFromBooking: b.bookingId || null, force: b.force === true });
+          linkedFromBooking: b.bookingId || null, lineBindingCarryover,
+          force: b.force === true });
       res.json({
         ok: true, tenant: rows[0],
+        lineBindingCarryover,
         // Hint to UI: if citizen ID images were sent in the same payload,
         // POST them to /identity now using the returned id. Keeping the
         // upload separate avoids 3MB-per-tenant-create payloads.
