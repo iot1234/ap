@@ -13,6 +13,7 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
 
   const [tab, setTab] = useState('pending');
   const [activeId, setActiveId] = useState(null);
+  const [detailLoadingId, setDetailLoadingId] = useState(null);
   const [confirmAction, setConfirmAction] = useState(null);
   const [actionReason, setActionReason] = useState('');
 
@@ -32,6 +33,38 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
 
   const active = activeId ? bookings.find(b => b.id === activeId) : null;
 
+  const mergeBookingRow = (current, incoming) => {
+    if (!incoming) return current;
+    const currentLine = current && (current.lineBinding || current.line_binding);
+    const incomingLine = incoming.lineBinding || incoming.line_binding;
+    const merged = { ...(current || {}), ...incoming };
+    if (current && current.id) merged.id = current.id;
+    if (incomingLine || currentLine) merged.lineBinding = incomingLine || currentLine;
+    return merged;
+  };
+
+  const openBookingDetail = async (bookingOrId) => {
+    const id = typeof bookingOrId === 'object' && bookingOrId ? bookingOrId.id : bookingOrId;
+    if (!id) return;
+    setActiveId(id);
+    setDetailLoadingId(id);
+    try {
+      const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
+      if (!apiCall) throw new Error('Admin API helper is not loaded. Refresh the page.');
+      const out = await apiCall(`/api/bookings/${encodeURIComponent(id)}`);
+      if (out && out.booking) {
+        setBookings(prev => prev.map(b => b.id === id ? mergeBookingRow(b, out.booking) : b));
+      }
+    } catch (err) {
+      setToast && setToast({
+        kind: 'warning',
+        message: `โหลดสถานะล่าสุดของการจอง ${id} ไม่สำเร็จ: ${err.message || err}`,
+      });
+    } finally {
+      setDetailLoadingId(prev => prev === id ? null : prev);
+    }
+  };
+
   // updateStatus is the canonical state-change hook. The server enforces
   // transitions, audits, notifies owner/tenant, and releases reserved rooms
   // on cancellation. If the server rejects the change, the optimistic row is
@@ -47,12 +80,12 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
         body: JSON.stringify({ status, ...extra }),
       });
       if (out && out.booking) {
-        setBookings(prev => prev.map(b => b.id === id ? out.booking : b));
+        setBookings(prev => prev.map(b => b.id === id ? mergeBookingRow(b, out.booking) : b));
       }
       if (out && out.releasedRoomId && out.room && setRooms) {
         setRooms(prev => ({ ...prev, [out.releasedRoomId]: out.room }));
       }
-      return true;
+      return out || { ok: true };
     } catch (e) {
       if (before) {
         setBookings(prev => prev.map(b => b.id === id ? before : b));
@@ -64,6 +97,27 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
     }
   };
 
+  const bookingNotifyText = (out) => {
+    const n = out && out.tenantNotify;
+    if (!n) return '';
+    const channelLabel = ({
+      line: 'LINE',
+      email: 'อีเมล',
+      sms: 'SMS',
+      queue: 'คิวแจ้งเตือน',
+    })[n.channel] || n.channel || 'ระบบแจ้งเตือน';
+    const lineCount = Number(n.lineRecipientCount || 0);
+    const lineCountText = lineCount > 0 ? ` · ห้องนี้ผูก LINE ทั้งหมด ${lineCount} บัญชี` : '';
+    if (n.ok) return ` — แจ้งผู้จองแล้วทาง ${channelLabel}${n.recipients ? ` ${n.recipients} บัญชี` : ''}${lineCountText}`;
+    if (n.queued) return ` — เข้าคิวแจ้งผู้จองแล้ว (${channelLabel})${lineCountText}`;
+    if (n.requiresManualContact) {
+      return ` — ยังแจ้งอัตโนมัติไม่ได้ กรุณาโทรแจ้งผู้จอง${n.phone ? ` (${n.phone})` : ''}${lineCountText}`;
+    }
+    return '';
+  };
+
+  const bookingNotifyDescription = (out) => bookingNotifyText(out).replace(/^ — /, '');
+
   const handleApprove = async (id) => {
     const booking = bookings.find(b => b.id === id);
     if (!booking) return;
@@ -74,20 +128,21 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
     // SELECTs both blobs FOR UPDATE so the second caller sees the first's
     // reservation + falls through to the next vacant room cleanly.
     let assignedRoomId = null;
+    let approveOut = null;
     try {
       const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
       if (!apiCall) throw new Error('Admin API helper is not loaded. Refresh the page.');
-      const out = await apiCall(`/api/bookings/${encodeURIComponent(id)}/approve-and-assign`, {
+      approveOut = await apiCall(`/api/bookings/${encodeURIComponent(id)}/approve-and-assign`, {
         method: 'POST',
         body: JSON.stringify({}),
       });
-      assignedRoomId = out.assignedRoomId;
+      assignedRoomId = approveOut.assignedRoomId;
       // Mirror the server's mutation into local React state so the table
       // + drawer reflect "approved" + "reserved" without waiting for the
       // next /api/data poll.
-      setBookings((prev) => prev.map((b) => b.id === id ? out.booking : b));
-      if (out.room && out.assignedRoomId) {
-        setRooms((prev) => ({ ...prev, [out.assignedRoomId]: out.room }));
+      setBookings((prev) => prev.map((b) => b.id === id ? mergeBookingRow(b, approveOut.booking) : b));
+      if (approveOut.room && approveOut.assignedRoomId) {
+        setRooms((prev) => ({ ...prev, [approveOut.assignedRoomId]: approveOut.room }));
       }
     } catch (err) {
       // Server refused — propagate the error and DON'T touch local state.
@@ -124,8 +179,8 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
           ? `✅ อนุมัติแล้ว — จัดห้อง ${assignedRoomId}`
           : '✅ อนุมัติแล้ว',
         description: assignedRoomId
-          ? 'ขั้นต่อไป: เปิดหน้าสัญญาของผู้เช่าห้องนี้ แล้วสร้างสัญญา/ส่งลิงก์จาก booking เดิม'
-          : 'ยังไม่มีห้องว่างตรงเงื่อนไข — กำหนดห้องด้วยตนเองที่หน้า "ห้องพัก" ก่อนตั้งค่าผู้เช่า',
+          ? ['ขั้นต่อไป: เปิดหน้าสัญญาของผู้เช่าห้องนี้ แล้วสร้างสัญญา/ส่งลิงก์จาก booking เดิม', bookingNotifyDescription(approveOut)].filter(Boolean).join('\n')
+          : ['ยังไม่มีห้องว่างตรงเงื่อนไข — กำหนดห้องด้วยตนเองที่หน้า "ห้องพัก" ก่อนตั้งค่าผู้เช่า', bookingNotifyDescription(approveOut)].filter(Boolean).join('\n'),
         action: assignedRoomId ? {
           label: 'สร้างสัญญา →',
           // Jump to tenants page; admin can find the just-mirrored row
@@ -145,10 +200,21 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
     setActiveId(null); setConfirmAction(null);
   };
   const handleReject = async (id) => {
-    const ok = await updateStatus(id, 'rejected');
-    if (!ok) return;
-    addActivity && addActivity({ icon: '❌', text: `ปฏิเสธการจอง ${id}`, type: 'booking' });
-    setToast && setToast({ kind: 'info', message: 'ปฏิเสธการจองแล้ว' });
+    const rejectReason = actionReason.trim();
+    if (rejectReason.length < 5) {
+      setToast && setToast({ kind: 'danger', message: 'กรุณาระบุเหตุผลปฏิเสธอย่างน้อย 5 ตัวอักษร เพื่อใช้แจ้งผู้จอง' });
+      return;
+    }
+    const out = await updateStatus(id, 'rejected', { adminNotes: rejectReason });
+    if (!out) return;
+    addActivity && addActivity({ icon: '❌', text: `ปฏิเสธการจอง ${id}: ${rejectReason.slice(0, 60)}`, type: 'booking' });
+    setToast && setToast({
+      kind: 'info',
+      message: out.releasedRoomId
+        ? `ปฏิเสธการจองแล้ว — ปล่อยห้อง ${out.releasedRoomId}${out.releasedTenant ? ' และเคลียร์ผู้เช่าที่ผูกจาก booking แล้ว' : ''}${bookingNotifyText(out)}`
+        : `ปฏิเสธการจองแล้ว${bookingNotifyText(out)}`,
+    });
+    setActionReason('');
     setActiveId(null); setConfirmAction(null);
   };
 
@@ -158,10 +224,10 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
       setToast && setToast({ kind: 'danger', message: 'กรุณาระบุเหตุผลทบทวนใหม่อย่างน้อย 5 ตัวอักษร' });
       return;
     }
-    const ok = await updateStatus(id, 'reviewing', { reopenReason });
-    if (!ok) return;
+    const out = await updateStatus(id, 'reviewing', { reopenReason });
+    if (!out) return;
     addActivity && addActivity({ icon: '↺', text: `ทบทวนการจอง ${id}: ${reopenReason.slice(0, 60)}`, type: 'booking' });
-    setToast && setToast({ kind: 'info', message: 'ส่งกลับไปตรวจสอบใหม่แล้ว' });
+    setToast && setToast({ kind: 'info', message: `ส่งกลับไปตรวจสอบใหม่แล้ว${bookingNotifyText(out)}` });
     setActionReason('');
     setConfirmAction(null);
   };
@@ -196,6 +262,11 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
           <div style={{ minWidth: 0 }}>
             <div style={{ fontSize: 13, fontWeight: 600, color: C.ink }}>{b.name}</div>
             <div style={{ fontSize: 11.5, color: C.muted }}>{b.phone}</div>
+            {b.applicantRisk && (
+              <div style={{ fontSize: 11, color: C.warning || '#b45309', marginTop: 2 }}>
+                เบอร์นี้มีผู้เช่า active อยู่แล้ว
+              </div>
+            )}
           </div>
         </div>
       ),
@@ -284,14 +355,14 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
       <DataTable
         columns={columns}
         rows={filtered}
-        onRowClick={(b) => setActiveId(b.id)}
+        onRowClick={openBookingDetail}
         empty={<EmptyState icon="📋" title="ไม่มีการจอง" description="เมื่อมีการจองใหม่จะแสดงที่นี่" />}
       />
 
       <Drawer
         open={!!active}
-        onClose={() => setActiveId(null)}
-        title={active ? `การจอง ${active.id}` : ''}
+        onClose={() => { setActiveId(null); setDetailLoadingId(null); }}
+        title={active ? `การจอง ${active.id}${detailLoadingId === active.id ? ' · กำลังโหลดสถานะล่าสุด' : ''}` : ''}
         width={560}
         footer={active && (
           <>
@@ -300,15 +371,18 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
               <>
                 <Btn variant="secondary" icon="🔍" onClick={async () => {
                   if (active.status === 'pending') {
-                    const ok = await updateStatus(active.id, 'reviewing');
-                    if (!ok) return;
+                    const out = await updateStatus(active.id, 'reviewing');
+                    if (!out) return;
                     addActivity && addActivity({ icon: '🔍', text: `เริ่มตรวจสอบการจอง ${active.id}`, type: 'booking' });
-                    setToast && setToast({ kind: 'info', message: 'เปลี่ยนเป็นกำลังตรวจสอบ' });
+                    setToast && setToast({ kind: 'info', message: `เปลี่ยนเป็นกำลังตรวจสอบ${bookingNotifyText(out)}` });
                   }
                 }} disabled={active.status === 'reviewing'}>
                   {active.status === 'reviewing' ? 'กำลังตรวจสอบ' : 'เริ่มตรวจสอบ'}
                 </Btn>
-                <Btn variant="danger" icon="✗" onClick={() => setConfirmAction({ id: active.id, type: 'reject' })}>
+                <Btn variant="danger" icon="✗" onClick={() => {
+                  setActionReason('');
+                  setConfirmAction({ id: active.id, type: 'reject' });
+                }}>
                   ปฏิเสธ
                 </Btn>
                 <Btn variant="success" icon="✓" onClick={() => setConfirmAction({ id: active.id, type: 'approve' })}>
@@ -329,10 +403,15 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
                   </Btn>
                 )}
                 <Btn variant="ghost" onClick={async () => {
-                  const ok = await updateStatus(active.id, 'cancelled');
-                  if (!ok) return;
+                  const out = await updateStatus(active.id, 'cancelled');
+                  if (!out) return;
                   addActivity && addActivity({ icon: '↺', text: `ยกเลิกอนุมัติการจอง ${active.id}`, type: 'booking' });
-                  setToast && setToast({ kind: 'info', message: 'ยกเลิกการจองและปล่อยห้องแล้ว' });
+                  setToast && setToast({
+                    kind: 'info',
+                    message: out.releasedRoomId
+                      ? `ยกเลิกการจองและปล่อยห้อง ${out.releasedRoomId} แล้ว${out.releasedTenant ? ' — เคลียร์ผู้เช่าที่ผูกจาก booking แล้ว' : ''}${bookingNotifyText(out)}`
+                      : `ยกเลิกการจองแล้ว${bookingNotifyText(out)}`,
+                  });
                   setActiveId(null);
                 }}>ยกเลิก/ปล่อยห้อง</Btn>
               </>
@@ -365,7 +444,8 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
               : confirmAction?.type === 'reopen'
                 ? <Btn variant="secondary" onClick={() => handleReopen(confirmAction.id)}
                     disabled={actionReason.trim().length < 5}>ส่งกลับไปตรวจสอบ</Btn>
-                : <Btn variant="danger" onClick={() => handleReject(confirmAction.id)}>ปฏิเสธการจอง</Btn>}
+                : <Btn variant="danger" onClick={() => handleReject(confirmAction.id)}
+                    disabled={actionReason.trim().length < 5}>ปฏิเสธการจอง</Btn>}
           </>
         }
       >
@@ -377,6 +457,7 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
           const b = confirmAction ? bookings.find((x) => x.id === confirmAction.id) : null;
           const isApprove = confirmAction?.type === 'approve';
           const isReopen = confirmAction?.type === 'reopen';
+          const isReject = confirmAction?.type === 'reject';
           return (
             <div style={{ fontSize: 14, color: C.ink2, lineHeight: 1.7 }}>
               <div style={{ marginBottom: 12 }}>
@@ -396,22 +477,26 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
                 </div>
               </div>
 
-              {isReopen ? (
+              {(isReopen || isReject) ? (
                 <div style={{ marginBottom: 12 }}>
                   <label style={{ display: 'block', fontSize: 12, color: C.muted, marginBottom: 4 }}>
-                    เหตุผลที่นำกลับมาตรวจใหม่
+                    {isReject ? 'เหตุผลที่แจ้งผู้จอง' : 'เหตุผลที่นำกลับมาตรวจใหม่'}
                   </label>
                   <textarea rows={3} maxLength={500}
                     value={actionReason}
                     onChange={(e) => setActionReason(e.target.value)}
-                    placeholder="เช่น ผู้จองส่งเอกสารเพิ่มแล้ว, ตรวจข้อมูลซ้ำพบว่าถูกต้อง"
+                    placeholder={isReject
+                      ? 'เช่น ห้องที่เลือกไม่ว่างแล้ว, เอกสาร/สลิปไม่ครบ, ข้อมูลไม่ตรงเงื่อนไข'
+                      : 'เช่น ผู้จองส่งเอกสารเพิ่มแล้ว, ตรวจข้อมูลซ้ำพบว่าถูกต้อง'}
                     style={{
                       width: '100%', padding: '8px 10px', border: `1px solid ${C.border}`,
                       borderRadius: 6, fontSize: 13, fontFamily: 'inherit',
                       boxSizing: 'border-box', resize: 'vertical',
                     }} />
                   <div style={{ fontSize: 11, color: C.muted, marginTop: 4 }}>
-                    ระบบจะบันทึกเหตุผลนี้ในรายการจองและ audit log
+                    {isReject
+                      ? 'เหตุผลนี้จะถูกส่งให้ผู้จองถ้ามีช่องทางแจ้งอัตโนมัติ และใช้เป็นข้อความอ้างอิงตอนโทรแจ้ง'
+                      : 'ระบบจะบันทึกเหตุผลนี้ในรายการจองและ audit log'}
                   </div>
                 </div>
               ) : null}
@@ -426,7 +511,7 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
                 {isApprove ? (
                   <>
                     1) ระบบจะหาห้องว่างตรงเงื่อนไขแล้วตั้งเป็น "จองแล้ว" อัตโนมัติ<br/>
-                    2) ผู้จองจะได้รับแจ้งเตือนทาง LINE/อีเมล (ถ้ามีข้อมูล)<br/>
+                    2) ผู้จองจะได้รับแจ้งเตือนทาง LINE/อีเมล/SMS ถ้าส่งอัตโนมัติได้; ถ้าไม่ได้ ระบบจะแจ้งให้แอดมินโทรเอง<br/>
                     3) <b style={{ color: C.warning || C.warning }}>ขั้นต่อไป:</b> ตรวจเบอร์ผู้เช่า + ผูก LINE ที่หน้า "ผู้เช่า" — ผู้เช่า login portal ด้วยเบอร์ที่ผูกกับห้อง
                   </>
                 ) : isReopen ? (
@@ -437,7 +522,7 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
                 ) : (
                   <>
                     1) สถานะการจองจะเปลี่ยนเป็น "ปฏิเสธ" — กดดู/เปลี่ยนกลับได้ในแท็บ "ปฏิเสธ"<br/>
-                    2) ผู้จองจะได้รับ LINE/อีเมลแจ้ง "ขออภัย — ไม่ได้รับการอนุมัติ" (ใส่ adminNotes ใน drawer ก่อนถ้าต้องการระบุเหตุผล)
+                    2) ผู้จองจะได้รับ LINE/อีเมล/SMS แจ้ง "ขออภัย — ไม่ได้รับการอนุมัติ" พร้อมเหตุผลด้านบนถ้าส่งอัตโนมัติได้; ถ้าไม่ได้ toast จะแจ้งให้โทรเอง
                   </>
                 )}
               </div>
@@ -472,6 +557,11 @@ function BookingDetail({ b }) {
     manual_review: 'ตรวจด้วยมือ',
     not_required: 'ไม่ต้องมัดจำ',
   })[s] || s || '—';
+  const applicantRisk = b.applicantRisk || (
+    Array.isArray(b.riskFlags) && b.riskFlags.includes('APPLICANT_PHONE_ALREADY_ACTIVE_TENANT')
+      ? { message: 'เบอร์นี้มีผู้เช่า active อยู่แล้ว', nextAction: 'โทรยืนยันตัวตนก่อนอนุมัติ' }
+      : null
+  );
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
@@ -485,6 +575,29 @@ function BookingDetail({ b }) {
           <Pill color={meta.color}>{meta.label}</Pill>
         </div>
       </Card>
+
+      {applicantRisk && (
+        <div style={{
+          padding: '10px 12px',
+          border: `1px solid ${(C.warning || '#d97706')}55`,
+          borderLeft: `3px solid ${C.warning || '#d97706'}`,
+          borderRadius: 8,
+          background: C.warningSoft || '#fff7ed',
+          color: C.ink2,
+          fontSize: 12.5,
+          lineHeight: 1.6,
+        }}>
+          <div style={{ fontWeight: 700, color: C.warningInk || C.ink, marginBottom: 4 }}>
+            ต้องตรวจสอบผู้จองก่อนอนุมัติ
+          </div>
+          <div>{applicantRisk.message || 'เบอร์นี้มีผู้เช่า active อยู่แล้ว'}</div>
+          <div style={{ marginTop: 2, color: C.muted }}>
+            {applicantRisk.nextAction || 'ถ้าจองให้เพื่อน ให้เพื่อนใช้ LINE/เบอร์ของตัวเอง; ถ้าจองอีกห้อง ให้แอดมินตรวจสอบก่อนสร้างสัญญา'}
+          </div>
+        </div>
+      )}
+
+      <BookingFlowChecklist b={b} depositStatusLabel={depositStatusLabel} />
 
       <div>
         <SectionHeading title="รายละเอียดการจอง" level={3} />
@@ -526,6 +639,171 @@ function BookingDetail({ b }) {
           <li>เช็คประวัติเครดิต (ถ้ามี)</li>
           <li>กำหนดห้องที่ตรงกับความต้องการ</li>
         </ul>
+      </div>
+    </div>
+  );
+}
+
+function BookingFlowChecklist({ b, depositStatusLabel }) {
+  const C = window.ADMIN_C;
+  const status = String(b.status || 'pending');
+  const lineBinding = b.lineBinding || b.line_binding || null;
+  const depositStatus = String(b.depositStatus || (b.depositRequired ? 'awaiting_slip' : 'not_required'));
+  const depositRequired = !!b.depositRequired || Number(b.bookingFee ?? b.deposit ?? 0) > 0;
+  const depositDone = !depositRequired || ['verified', 'not_required'].includes(depositStatus);
+  const depositWarn = depositRequired && ['pending_review', 'manual_review'].includes(depositStatus);
+  const lineCount = Number(lineBinding && (lineBinding.boundCount || lineBinding.bound_count || lineBinding.lineRecipientCount || 0));
+  const lineStatus = String((lineBinding && lineBinding.status) || '').toLowerCase();
+  const lineExpiresAt = lineBinding && (lineBinding.expiresAt || lineBinding.expires_at);
+  const lineExpiresAtMs = lineExpiresAt ? Date.parse(lineExpiresAt) : NaN;
+  const lineExpired = !!(lineBinding && (
+    lineBinding.expired ||
+    lineStatus === 'expired' ||
+    (Number.isFinite(lineExpiresAtMs) && lineExpiresAtMs <= Date.now() && lineCount <= 0)
+  ));
+  const lineFailed = !!(lineBinding && (lineBinding.error || lineStatus === 'error'));
+  const lineLookupError = !!(lineBinding && lineBinding.lookupError);
+  const lineNeedsReissue = !!(lineBinding && lineBinding.needsReissue) || lineExpired || ['revoked', 'blocked'].includes(lineStatus);
+  const lineIssued = !!(lineBinding && lineBinding.code) && !lineNeedsReissue;
+  const linePending = lineStatus === 'pending' || lineIssued;
+  const lineStepState = lineCount > 0 ? 'done' : (lineFailed || lineLookupError || lineNeedsReissue || linePending ? 'warn' : 'wait');
+  const assignedRoom = b.assignedRoomId || b.roomId || null;
+
+  const tone = {
+    done: { bg: C.successSoft || '#e6f4ec', fg: C.success || '#2f8f5b', border: C.success || '#2f8f5b', label: 'เสร็จแล้ว' },
+    warn: { bg: C.warningSoft || '#fff7ed', fg: C.warning || '#b45309', border: C.warning || '#b45309', label: 'ต้องติดตาม' },
+    wait: { bg: C.surfaceAlt || '#f7faf8', fg: C.muted || '#6b7280', border: C.border || '#dfe9e2', label: 'รอดำเนินการ' },
+    stop: { bg: C.dangerSoft || '#fef2f2', fg: C.danger || '#b91c1c', border: C.danger || '#b91c1c', label: 'หยุด flow' },
+  };
+  const stepTone = (state) => tone[state] || tone.wait;
+  const terminal = ['rejected', 'cancelled'].includes(status);
+  const completed = status === 'completed';
+  const approved = status === 'approved';
+  const reviewing = status === 'reviewing';
+
+  const steps = [
+    {
+      title: 'รับคำขอจอง',
+      state: 'done',
+      detail: `รหัส ${b.id || '-'} · ผู้จอง ${b.name || '-'} · โทร ${b.phone || '-'}`,
+    },
+    {
+      title: 'ค่าจอง/เอกสาร',
+      state: depositDone ? 'done' : (depositWarn ? 'warn' : 'stop'),
+      detail: depositRequired
+        ? `${depositStatusLabel(depositStatus)}${b.depositVerifyReason ? ` · ${b.depositVerifyReason}` : ''}`
+        : 'ไม่ต้องเก็บค่าจองสำหรับคำขอนี้',
+    },
+    {
+      title: 'LINE ผู้รับแจ้งเตือน',
+      state: lineStepState,
+      detail: lineCount > 0
+        ? `ผูกแล้ว ${lineCount} บัญชี ทุกบัญชีจะได้รับผลจอง สัญญา และบิลของห้องนี้`
+        : lineLookupError
+          ? 'อ่านสถานะ LINE ล่าสุดไม่ได้ ให้ refresh หรือเปิดหน้า LINE Binding เพื่อตรวจสอบก่อนแจ้งผลจอง'
+          : lineFailed
+            ? `ออกคีย์ LINE ไม่สำเร็จ: ${lineBinding.error || '-'} · ต้องออกคีย์ใหม่หรือโทรแจ้งโดยตรง`
+            : lineNeedsReissue
+              ? 'คีย์ LINE หมดอายุ/ถูกยกเลิก หรือยังไม่มีคีย์ที่ใช้ได้ ต้องออกคีย์ใหม่ก่อนหวังผลแจ้งเตือนอัตโนมัติ'
+              : linePending
+                ? 'ออกคีย์ให้ผู้จองแล้ว แต่ยังไม่ถือว่าผูกสำเร็จจนกว่าผู้จองจะส่งคีย์ใน LINE OA; ถ้าจองให้เพื่อน ให้เพื่อนใช้ LINE ของตัวเอง'
+                : 'ยังไม่พบคีย์ LINE ในคำขอนี้ ถ้าต้องการแจ้งอัตโนมัติให้ออกคีย์จากหน้า LINE Binding',
+    },
+    {
+      title: 'ตัดสินใจการจอง',
+      state: terminal ? 'stop' : (approved || completed ? 'done' : (reviewing ? 'warn' : 'wait')),
+      detail: terminal
+        ? `จบ flow ที่สถานะ ${status === 'rejected' ? 'ปฏิเสธ' : 'ยกเลิก'}${b.adminNotes ? ` · ${b.adminNotes}` : ''}`
+        : approved || completed
+          ? `อนุมัติแล้ว${assignedRoom ? ` · ห้อง ${assignedRoom}` : ''}`
+          : reviewing
+            ? 'กำลังตรวจสอบ ต้องอนุมัติหรือปฏิเสธพร้อมเหตุผล'
+            : 'รอตรวจสอบ กดเริ่มตรวจสอบหรืออนุมัติเมื่อข้อมูลครบ',
+    },
+    {
+      title: 'สัญญาและบิล',
+      state: completed ? 'done' : (approved ? 'warn' : 'wait'),
+      detail: completed
+        ? 'ส่งต่อไปขั้นสัญญาแล้ว ตรวจสัญญา/เช็คอิน/บิลเดือนแรกต่อ'
+        : approved
+          ? 'ขั้นต่อไปคือสร้างสัญญาจาก booking เดิม แล้วส่งลิงก์ให้ผู้เช่า'
+          : 'จะเริ่มได้หลังอนุมัติและกำหนดห้องแล้ว',
+    },
+  ];
+
+  const nextAction = terminal
+    ? 'ไม่ต้องสร้างสัญญาจากรายการนี้ เว้นแต่เปิดกลับมาตรวจใหม่'
+    : completed
+      ? 'ตรวจว่าสัญญาถูกส่ง/อนุมัติ และบิลเดือนแรกถูกออกครบ'
+      : approved
+        ? 'เปิดหน้า ผู้เช่า/สัญญา แล้วสร้างสัญญาจาก booking เดิม'
+        : reviewing
+          ? 'ตรวจค่าจอง เอกสาร และความเสี่ยงก่อนอนุมัติหรือปฏิเสธ'
+          : 'เริ่มตรวจสอบคำขอ แล้วแจ้งผลให้ผู้จอง';
+
+  return (
+    <div style={{
+      padding: 14,
+      background: C.bg || '#fff',
+      border: `1px solid ${C.border}`,
+      borderRadius: 10,
+    }}>
+      <div style={{ fontSize: 13, fontWeight: 700, color: C.ink, marginBottom: 8 }}>
+        Flow การจองจนถึงสัญญา
+      </div>
+      <div style={{
+        display: 'grid',
+        gap: 8,
+      }}>
+        {steps.map((step, idx) => {
+          const s = stepTone(step.state);
+          return (
+            <div key={step.title} style={{
+              display: 'grid',
+              gridTemplateColumns: '28px 1fr auto',
+              gap: 10,
+              alignItems: 'start',
+              padding: '9px 10px',
+              border: `1px solid ${s.border}33`,
+              borderRadius: 8,
+              background: s.bg,
+            }}>
+              <div style={{
+                width: 28, height: 28, borderRadius: 999,
+                display: 'grid', placeItems: 'center',
+                background: '#fff', color: s.fg, fontWeight: 700,
+                border: `1px solid ${s.border}55`,
+                fontSize: 12,
+              }}>{idx + 1}</div>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 12.5, fontWeight: 700, color: C.ink }}>{step.title}</div>
+                <div style={{ fontSize: 11.5, color: C.ink2 || C.muted, lineHeight: 1.45, marginTop: 2 }}>
+                  {step.detail}
+                </div>
+              </div>
+              <span style={{
+                fontSize: 10.5,
+                color: s.fg,
+                border: `1px solid ${s.border}55`,
+                borderRadius: 999,
+                padding: '2px 7px',
+                background: '#fff',
+                whiteSpace: 'nowrap',
+              }}>{s.label}</span>
+            </div>
+          );
+        })}
+      </div>
+      <div style={{
+        marginTop: 10,
+        padding: '8px 10px',
+        borderRadius: 8,
+        background: C.surfaceAlt || '#f7faf8',
+        color: C.ink2,
+        fontSize: 12,
+        lineHeight: 1.5,
+      }}>
+        ขั้นต่อไป: {nextAction}
       </div>
     </div>
   );

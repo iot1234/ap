@@ -40,10 +40,6 @@ const lineNotify = require('../services/line');
 // dataUrl so admin can attach a receipt photo even for cash / external
 // transfers. Same storage path the tenant slip upload uses.
 const storage = require('../services/storage');
-// queryWithRetry retries serialization/deadlock errors (40001, 40P01, 57P03,
-// 53300). bulk-generate inserts ~30+ bills in a tight loop — most likely
-// path to hit a deadlock against the scheduler's auto-gen running parallel.
-const { queryWithRetry } = require('../db/pool');
 const { renderBillPdf } = require('../services/pdf');
 const { schemas } = require('../schemas');
 const { validateBody } = require('../middleware/validate');
@@ -335,6 +331,16 @@ module.exports = function buildBillsExtrasRouter(ctx) {
     // after a successful insert (so they don't appear on next month's bill).
     let usedOneOffIds = [];
     let otherForStorage = Array.isArray(b.other) ? b.other : [];
+    // R3 — Defensive recompute: when admin submits a fully-formed bill (no
+    // `compute:true`), the server previously trusted every field as-is.
+    // A buggy client / curl typo / replayed payload could land bills in the
+    // DB with totals that don't match the resolver. We mark this drift
+    // below and reject unless admin explicitly opts into manual override.
+    //
+    // The drift report is attached to the audit log so a tenant dispute
+    // "why is my bill X฿?" months later can be traced to who clicked
+    // "force submit" with what override reason.
+    let driftReport = null;
     if (b.compute && b.roomId) {
       const [roomsRow, configRow] = await Promise.all([
         pool.query(`SELECT value FROM app_data WHERE key='baankarn_rooms_v1'`),
@@ -344,16 +350,11 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       const config = configRow.rows.length ? configRow.rows[0].value : {};
       const room = roomsObj[b.roomId] || (Object.values(roomsObj || {}).find((r) => r.id === b.roomId));
       if (!room) return res.status(404).json({ error: 'room not found' });
-      let previous = null;
-      try {
-        const prev = await pool.query(
-          `SELECT total, due_date, paid_at, status FROM bills
-             WHERE room_id=$1 AND status IN ('pending','overdue') AND deleted_at IS NULL
-             ORDER BY created_at DESC LIMIT 1`,
-          [b.roomId]
-        );
-        previous = prev.rows[0] ? { total: Number(prev.rows[0].total), dueDate: prev.rows[0].due_date, status: prev.rows[0].status } : null;
-      } catch {}
+      // R2 — previous overdue bill lookup is GONE. Late fees are owned by
+      // scheduler.tickLateFee and live on the old bill (updated in-place).
+      // Every new bill starts with late_fee=0; carrying penalties forward
+      // confused tenants who saw a stale total on the OLD bill that
+      // didn't match what was actually owed.
       // B1 — auto-load recurring charges if recurringCharges flag on and the
       // caller didn't explicitly pass `recurring`. Resolve the active tenant
       // first so per-tenant charges (parking, cleaning) match the right person.
@@ -407,11 +408,119 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       const roomForBilling = await meter.attachBillingReadingsForPeriod(pool, room, b.period);
       computed = billing.buildBill({
         room: roomForBilling, contract: activeContract, config, features: flags,
-        previous,
         recurring: recurringList,
         period: b.period, dueDate: b.dueDate,
         discountPct,
       });
+    } else if (b.roomId && b.period && !b.compute) {
+      // R3 — Recompute path for fully-formed submissions. Pull the same
+      // inputs the compute path would, run buildBill, compare to admin's
+      // submitted totals. If they drift beyond PAYMENT_TOLERANCE_THB on
+      // any leg (rent / subtotal / vat / late_fee / total), refuse unless
+      // admin explicitly sets `manualOverride: true` AND provides a reason.
+      // This catches: stale client form, client-side calc bugs, replayed
+      // payloads against a room whose contract changed since admin opened
+      // the form. False positives are surfaced with the full breakdown so
+      // admin can decide intentionally to override (with audit trail).
+      try {
+        const [roomsRowCheck, configRowCheck] = await Promise.all([
+          pool.query(`SELECT value FROM app_data WHERE key='baankarn_rooms_v1'`),
+          pool.query(`SELECT value FROM app_data WHERE key='baankarn_config_v1'`),
+        ]);
+        const roomsObjCheck = roomsRowCheck.rows.length ? roomsRowCheck.rows[0].value : {};
+        const configCheck = configRowCheck.rows.length ? configRowCheck.rows[0].value : {};
+        const roomCheck = roomsObjCheck[b.roomId]
+          || (Object.values(roomsObjCheck || {}).find((r) => r.id === b.roomId));
+        if (roomCheck) {
+          let activeContractCheck = null;
+          let discountPctCheck = 0;
+          try {
+            const cq = await pool.query(
+              `SELECT id, monthly_rent, discount_pct, status
+                 FROM contracts
+                 WHERE room_id=$1 AND status='active' AND deleted_at IS NULL
+                 ORDER BY start_date DESC LIMIT 1`,
+              [b.roomId]
+            );
+            if (cq.rows[0]) {
+              activeContractCheck = cq.rows[0];
+              discountPctCheck = Number(cq.rows[0].discount_pct) || 0;
+            }
+          } catch { /* legacy: no contracts table */ }
+          let recurringForRecompute = Array.isArray(b.recurring) ? b.recurring : [];
+          // Load DB recurring if caller didn't pass any AND flag is on — match
+          // the compute:true path's behaviour so the comparison is apples-to-apples.
+          if (flags.recurringCharges?.enabled
+              && flags.recurringCharges?.autoIncludeOnBillGen !== false
+              && !b.recurring) {
+            try {
+              const dbRec = await loadRecurringFor(pool, { tenantId: b.tenantId || null, roomId: b.roomId });
+              const applicable = dbRec.filter((r) => billing.isChargeApplicableForPeriod(r, b.period));
+              recurringForRecompute = applicable.map((r) => ({ label: r.label, amount: Number(r.amount) }));
+            } catch { /* fall back to no recurring */ }
+          }
+          const roomForBillingCheck = await meter.attachBillingReadingsForPeriod(pool, roomCheck, b.period);
+          const recomputed = billing.buildBill({
+            room: roomForBillingCheck,
+            contract: activeContractCheck,
+            config: configCheck,
+            features: flags,
+            recurring: recurringForRecompute,
+            period: b.period,
+            dueDate: b.dueDate,
+            discountPct: discountPctCheck,
+          });
+          const tol = billing.PAYMENT_TOLERANCE_THB;
+          const drifts = [];
+          const fields = ['rent', 'subtotal', 'vat', 'lateFee', 'total',
+                          'waterAmount', 'elecAmount', 'wifi'];
+          for (const f of fields) {
+            const submitted = Number(b[f] || 0);
+            const expected = Number(recomputed[f] || 0);
+            if (Math.abs(submitted - expected) > tol) {
+              drifts.push({ field: f, submitted, expected, diff: billing.round2(submitted - expected) });
+            }
+          }
+          if (drifts.length > 0) {
+            // Block unless admin opted in. The override flag MUST be paired
+            // with a non-trivial reason so the audit log explains WHY the
+            // operator chose to bypass — useful for tenant disputes later.
+            if (b.manualOverride !== true) {
+              return res.status(412).json({
+                error: 'ตัวเลขในบิลที่ส่งไม่ตรงกับที่ระบบคำนวณได้ — ตรวจสอบยอดอีกครั้งก่อนยืนยัน',
+                code: 'BILL_TOTAL_DRIFT',
+                drifts,
+                hint: 'หากตั้งใจส่งค่าที่ต่างจากระบบ (เช่น มี discount พิเศษนอกระบบ) ส่ง { manualOverride: true, overrideReason: "..." } พร้อมคำอธิบาย — ระบบจะ audit log ไว้',
+                expected: {
+                  rent: recomputed.rent,
+                  subtotal: recomputed.subtotal,
+                  vat: recomputed.vat,
+                  lateFee: recomputed.lateFee,
+                  total: recomputed.total,
+                },
+              });
+            }
+            const reason = String(b.overrideReason || '').trim();
+            if (reason.length < 5) {
+              return res.status(400).json({
+                error: 'ต้องระบุ overrideReason อย่างน้อย 5 ตัวอักษรเมื่อใช้ manualOverride',
+                code: 'OVERRIDE_REASON_REQUIRED',
+              });
+            }
+            // Override accepted — record the drift for the audit log below.
+            driftReport = { drifts, reason: reason.slice(0, 500) };
+          }
+        }
+      } catch (err) {
+        // Defensive — if recompute itself errored, refuse to silently
+        // accept the submitted numbers. Operator gets a clear hint to
+        // retry with `compute: true`.
+        console.warn('[bill.create] recompute check failed:', err.message);
+        return res.status(500).json({
+          error: 'ไม่สามารถตรวจสอบยอดบิลกับระบบได้ — ลองส่งใหม่ด้วย { compute: true } หรือติดต่อผู้ดูแล',
+          code: 'BILL_RECOMPUTE_FAILED',
+        });
+      }
     }
     const totalAmount = Number(computed.total);
     const subtotalAmount = computed.subtotal == null ? totalAmount : Number(computed.subtotal);
@@ -528,7 +637,15 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           hasVerifiedPayment: !!current.has_verified_payment,
         });
       }
-      audit(req, 'bill.create', 'bill', String(rows[0].id), { tenantId, autoLinked: !b.tenantId && tenantId });
+      audit(req, 'bill.create', 'bill', String(rows[0].id), {
+        tenantId,
+        autoLinked: !b.tenantId && tenantId,
+        // R3 — when manualOverride was used, surface the drift in the
+        // audit log so a future dispute can trace WHO accepted WHAT
+        // discrepancy and WHY. Without this, the bill row alone wouldn't
+        // explain why its total disagrees with the resolver.
+        manualOverride: driftReport ? { reason: driftReport.reason, drifts: driftReport.drifts } : null,
+      });
       // B1 — mark consumed one_off recurring charges inactive so they don't
       // appear on next month's bill. Best-effort; failure here doesn't unwind
       // the bill insert (the charges line items are already in `other`).
@@ -853,13 +970,48 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         const now = new Date();
         const dueDate = row.due_date ? new Date(row.due_date) : null;
         const restoredStatus = dueDate && dueDate < now ? 'overdue' : 'pending';
+
+        // R2-followup — when the bill is being restored to 'overdue' AND
+        // the previous verify used the principal-tier waiver (bill.late_fee
+        // was zeroed in good faith), recompute the late_fee NOW so the
+        // restored bill immediately shows the right amount due. Without
+        // this, the bill sits at total=principal for up to 24h until
+        // tickLateFee Phase B re-applies the fee — admin who unmark-paid
+        // expects "overdue" to mean overdue right away, not tomorrow.
+        //
+        // Re-reads the current feature flag because lateFee config may
+        // have changed between verify and unmark. computeLateFee is pure +
+        // idempotent so re-running won't compound.
+        let restoredLateFee = Number(row.late_fee) || 0;
+        let restoredTotal = Number(row.total) || 0;
+        if (restoredStatus === 'overdue') {
+          try {
+            const flags = await features.load(pool).catch(() => ({}));
+            if (flags.lateFee?.enabled && Number(flags.lateFee.ratePctPerMonth) > 0) {
+              const base = restoredTotal - restoredLateFee;
+              const calc = billing.computeLateFee({
+                base,
+                dueDate: row.due_date,
+                ratePctPerMonth: Number(flags.lateFee.ratePctPerMonth),
+                gracePeriodDays: Number(flags.lateFee.gracePeriodDays || 0),
+                now,
+              });
+              if (calc.lateFee > 0 && calc.lateFee !== restoredLateFee) {
+                restoredLateFee = calc.lateFee;
+                restoredTotal = billing.round2(base + calc.lateFee);
+              }
+            }
+          } catch { /* feature load failure → keep existing late_fee */ }
+        }
         const restored = await client.query(
           `UPDATE bills
               SET status=$2,
-                  paid_at=NULL
+                  paid_at=NULL,
+                  late_fee=$3::numeric,
+                  total=$4::numeric
             WHERE id=$1
           RETURNING *`,
-          [id, restoredStatus]
+          [id, restoredStatus, restoredLateFee, restoredTotal]
         );
         await client.query('COMMIT');
         audit(req, 'bill.unmark_paid', 'bill', String(id), {
@@ -909,7 +1061,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
   // Counts as ONE push toward LINE's rate limit (Messaging API bundles
   // up to 5 messages per push).
   function buildBillLineMessages(b, opts = {}) {
-    const { publicUrl, billLink, dueDateStr, billNo, qrToken, bankInfo } = opts;
+    const { publicUrl, billLink, dueDateStr, billNo, qrToken, bankInfo, lineCount } = opts;
     const total = Number(b.total) || 0;
     const totalStr = total.toLocaleString('th-TH', { minimumFractionDigits: 2 });
     const hasBankInfo = !!(bankInfo && bankInfo.account);
@@ -933,6 +1085,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         rowKV('รอบ', String(b.period || '-')),
         rowKV('กำหนดชำระ', String(dueDateStr || '-')),
         rowKV('ยอดชำระ', `฿${totalStr}`, true),
+        rowKV('LINE ที่ผูก', `${Number(lineCount) || 0} บัญชี`),
       ]},
     ];
     if (qrUrl) {
@@ -985,6 +1138,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         `ห้อง: ${b.room_id || '-'}`,
         `ยอดชำระ: ฿${totalStr}`,
         `กำหนดชำระ: ${dueDateStr || '-'}`,
+        `LINE ที่ผูกกับห้องนี้: ${Number(lineCount) || 0} บัญชี`,
         ``,
         `วิธีชำระเงิน:`,
         qrUrl ? `1) สแกน QR PromptPay ในข้อความนี้` : null,
@@ -1130,19 +1284,10 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         for (const room of rooms) {
           if (!room || !room.tenant) { skipped++; continue; }
           if (room.status !== 'occupied' && room.status !== 'overdue') { skipped++; continue; }
-          // pull previous overdue bill for late-fee. Filter soft-deleted
-          // so a void+restored bill can't pile up phantom late fees.
-          const prevQ = await pool.query(
-            `SELECT total, due_date, paid_at, status FROM bills
-              WHERE room_id=$1 AND status IN ('pending','overdue') AND deleted_at IS NULL
-              ORDER BY created_at DESC LIMIT 1`,
-            [room.id]
-          );
-          const previous = prevQ.rows[0] ? {
-            total: Number(prevQ.rows[0].total),
-            dueDate: prevQ.rows[0].due_date,
-            status: prevQ.rows[0].status,
-          } : null;
+          // R2 — previous overdue bill lookup is GONE. Late fees are owned by
+          // scheduler.tickLateFee and live on the old bill (updated in-place
+          // when it flips pending → overdue). New bills always start with
+          // late_fee=0 — no carry-over.
           // Pull active recurring charges for this room AND its current
           // tenant — without the tenant_id branch, parking/cleaning charges
           // billed to the person (not the unit) would be silently dropped.
@@ -1225,7 +1370,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
               }
             }
             const roomForBilling = await meter.attachBillingReadingsForPeriod(billClient, room, period);
-            const bill = billing.buildBill({ room: roomForBilling, contract: activeContract, config, features: flags, previous, recurring, period, dueDate, discountPct });
+            const bill = billing.buildBill({ room: roomForBilling, contract: activeContract, config, features: flags, recurring, period, dueDate, discountPct });
             // Capture which utilities silently fell back from flat → metered
             // for this room. waterFlatFellBack/elecFlatFellBack are set by
             // services/billing.js#resolveFlatMode when mode='flat' but the
@@ -1240,7 +1385,11 @@ module.exports = function buildBillsExtrasRouter(ctx) {
               });
             }
             const otherJson = JSON.stringify(recurring || []);
-            const ins = await billClient.query(
+            // R4 — try the default bill_no first; on collision retry once
+            // with the `-T${tenantId}` suffix (only when there's actually
+            // a different tenant taking up the room+period slot). Keeps the
+            // single-tenant case's bill_no shape stable for backward compat.
+            const buildInsert = (billNoForInsert) => billClient.query(
               `INSERT INTO bills
                  (bill_no, tenant_id, room_id, period, rent,
                   water_prev_reading, water_current_reading, water_units, water_rate, water_amount,
@@ -1249,9 +1398,10 @@ module.exports = function buildBillsExtrasRouter(ctx) {
                   subtotal, vat, late_fee, total, due_date, status)
                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::jsonb,
                        $18,$19,$20,$21,$22,'pending')
-               ON CONFLICT (bill_no) DO NOTHING`,
+               ON CONFLICT (bill_no) DO NOTHING
+               RETURNING id, bill_no`,
               [
-                bill.billNo, tenantIdForRoom, bill.roomId, bill.period,
+                billNoForInsert, tenantIdForRoom, bill.roomId, bill.period,
                 bill.rent,
                 bill.waterPrevReading, bill.waterCurrentReading,
                 bill.waterUnits, bill.waterRate, bill.waterAmount,
@@ -1262,6 +1412,19 @@ module.exports = function buildBillsExtrasRouter(ctx) {
                 bill.dueDate,
               ]
             );
+            let ins = await buildInsert(bill.billNo);
+            if (ins.rowCount === 0 && tenantIdForRoom) {
+              const probe = await billClient.query(
+                `SELECT tenant_id FROM bills
+                  WHERE bill_no = $1 AND deleted_at IS NULL LIMIT 1`,
+                [bill.billNo]
+              );
+              const existingTenantId = probe.rows[0]?.tenant_id;
+              if (existingTenantId != null && Number(existingTenantId) !== Number(tenantIdForRoom)) {
+                const suffixed = billing.makeBillNo(bill.roomId, period, { tenantId: tenantIdForRoom });
+                ins = await buildInsert(suffixed);
+              }
+            }
             if (ins.rowCount) {
               if (usedOneOffIds.length) {
                 await billClient.query(
@@ -1308,6 +1471,14 @@ module.exports = function buildBillsExtrasRouter(ctx) {
   // shown ahead of time. The function still STAMPS last_reminded_at +
   // bumps reminder_count so the UI can display "ส่งไปแล้ว N ครั้ง · ล่า
   // สุดเมื่อ X" the next time admin opens the confirm modal.
+  //
+  // R7-followup — hard 1-minute cooldown to protect against tenant spam
+  // when scheduler.tickPaymentReminder and admin /send race within seconds
+  // of each other. The scheduler check (`last_reminded_at < CURRENT_DATE`)
+  // protects the daily cron; this guard protects the manual path. Pass
+  // `opts.force = true` to override (e.g. admin explicitly said "I know,
+  // send again" in a confirm modal) — exposed via the existing /send
+  // endpoint's `force` field.
   async function enqueueBillNotifications(billId, _opts = {}) {
     // Filter the tenant join on deleted_at AND status — without these we
     // happily pushed bill reminders to soft-deleted tenants (whose
@@ -1344,7 +1515,30 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         hint: 'ตรวจสอบที่ /admin#payments ว่าใครเป็นคนยืนยัน',
       };
     }
-    // No hard debounce — admin can resend immediately. The send-readiness
+    // R7-followup — 1-minute cooldown to bullet-proof against the scheduler
+    // racing the admin. tickPaymentReminder fires daily; if admin clicks
+    // /send within the same minute the scheduler did, both would enqueue
+    // and the tenant receives 2 LINE pushes for the same bill. The cooldown
+    // blocks the second send unless the caller explicitly opts in with
+    // `force: true`. The send-readiness endpoint surfaces last_reminded_at
+    // + reminder_count so the admin UI can show "ส่งไปแล้ว N ครั้ง · ล่าสุด
+    // X นาทีก่อน" and a "บังคับส่งซ้ำ" checkbox to set force=true.
+    const REMINDER_COOLDOWN_MS = 60_000;   // 1 minute
+    if (!_opts.force && billQ.rows[0].last_reminded_at) {
+      const since = Date.now() - new Date(billQ.rows[0].last_reminded_at).getTime();
+      if (Number.isFinite(since) && since >= 0 && since < REMINDER_COOLDOWN_MS) {
+        return {
+          ok: false,
+          error: `เพิ่งส่งเตือนไปเมื่อ ${Math.max(1, Math.ceil(since / 1000))} วินาทีก่อน — รออย่างน้อย ${Math.ceil(REMINDER_COOLDOWN_MS / 1000)} วินาทีก่อนส่งซ้ำ หรือส่ง force:true เพื่อข้าม`,
+          code: 'REMINDER_COOLDOWN',
+          cooldownMs: REMINDER_COOLDOWN_MS - since,
+          lastRemindedAt: billQ.rows[0].last_reminded_at,
+          hint: 'ใช้ตอน admin คลิก "บังคับส่งซ้ำ" ในกล่องยืนยัน',
+        };
+      }
+    }
+    // No daily-level debounce — admin can still resend manually within the
+    // hour (just not within the same minute). The send-readiness
     // endpoint surfaces last_reminded_at + reminder_count so the confirm
     // modal can show "ส่งไปแล้ว N ครั้ง · ล่าสุด X นาทีก่อน" BEFORE the
     // admin clicks. Removing the block here means an intentional resend
@@ -1437,6 +1631,12 @@ module.exports = function buildBillsExtrasRouter(ctx) {
     const dueDateStr = b.due_date
       ? new Date(b.due_date).toLocaleDateString('th-TH', { year: 'numeric', month: 'long', day: 'numeric' })
       : '-';
+    const lineRecipients = await notifier.getTenantLineRecipients(pool, {
+      id: b.tenant_row_id,
+      line_user_id: b.line_user_id,
+      line_oa_id: b.line_oa_id,
+    });
+    const lineBindingCount = lineRecipients.length;
     if (canShowPromptPayQr) {
       paymentChoices.push(canEmbedPromptPayQr
         ? `1) สแกน QR PromptPay ใน LINE/หน้าบิล`
@@ -1456,6 +1656,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       `ห้อง: ${b.room_id}`,
       `ยอดชำระ: ฿${Number(b.total).toLocaleString('th-TH', { minimumFractionDigits: 2 })}`,
       `กำหนดชำระ: ${dueDateStr}`,
+      `LINE ที่ผูกกับห้องนี้: ${lineBindingCount} บัญชี`,
       ``,
       `วิธีชำระเงิน:`,
       paymentChoices.length ? paymentChoices.join('\n') : `เปิดหน้าบิลเพื่อตรวจสอบช่องทางชำระเงิน`,
@@ -1466,7 +1667,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       `(หากกดลิงก์ไม่ได้ ให้เข้า ${publicUrl || 'พอร์ทัล'}/tenant แล้วเลือกบิล ${b.bill_no || `#${billId}`})`,
     ].join('\n');
     const enqueued = [];
-    const hasLine = lineNotify.isLikelyUserId(b.line_user_id);
+    const hasLine = lineRecipients.length > 0;
     if (!hasLine && !b.email) {
       const flags = await features.load(pool);
       const owner = await notifier.notifyOwner({ pool, features: flags }, {
@@ -1484,6 +1685,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         error: 'tenant has no reachable channel',
         code: 'NO_TENANT_CHANNEL',
         enqueued,
+        lineCount: lineBindingCount,
         ownerNotified: !!(owner.ok || owner.queued),
       };
     }
@@ -1501,21 +1703,24 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             billNo: b.bill_no,
             qrToken: canEmbedPromptPayQr ? qrToken : null,
             bankInfo,
+            lineCount: lineBindingCount,
           })
         : null;
-      const qid = await notifQueue.enqueue(pool, {
-        channel: 'line', recipient: b.line_user_id, subject, body,
-        // payload.messages carries the raw LINE message array; the queue
-        // dispatcher uses pushMessages when this is present, falling back
-        // to plain pushText when absent. Keep `body` populated either way
-        // as a safety net + for the email channel duplicated below.
-        payload: {
-          oaId: b.line_oa_id || null,
-          billId,
-          messages: lineMessages,
-        },
-      });
-      enqueued.push({ channel: 'line', id: qid });
+      for (const recipient of lineRecipients) {
+        const qid = await notifQueue.enqueue(pool, {
+          channel: 'line', recipient: recipient.line_user_id, subject, body,
+          // payload.messages carries the raw LINE message array; the queue
+          // dispatcher uses pushMessages when this is present, falling back
+          // to plain pushText when absent. Keep `body` populated either way
+          // as a safety net + for the email channel duplicated below.
+          payload: {
+            oaId: recipient.line_oa_id || null,
+            billId,
+            messages: lineMessages,
+          },
+        });
+        enqueued.push({ channel: 'line', id: qid, recipient: recipient.line_user_id });
+      }
     } else if (!b.email) {
       const lineOwner = require('../services/secrets').get('LINE_OWNER_USER_ID');
       if (lineNotify.isLikelyUserId(lineOwner)) {
@@ -1547,7 +1752,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         [billId]
       ).catch((err) => console.warn('[enqueueBillNotifications] stamp last_reminded_at failed:', err.message));
     }
-    return { ok: true, enqueued };
+    return { ok: true, enqueued, lineCount: lineBindingCount };
   }
 
   // POST /api/bills/:id/send — enqueue LINE/email
@@ -1628,7 +1833,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           `SELECT b.id, b.bill_no, b.room_id, b.status AS bill_status,
                   b.tenant_id, b.last_reminded_at, b.reminder_count,
                   t.id AS tenant_row_id, t.full_name AS tenant_name,
-                  t.line_user_id, t.email,
+                  t.line_user_id, t.line_oa_id, t.email,
                   t.status AS tenant_status, t.current_room_id AS tenant_current_room
              FROM bills b
              LEFT JOIN tenants t
@@ -1662,14 +1867,22 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             blockCode = 'TENANT_MOVED_ROOM';
             blockMsg = `ย้ายไปห้อง ${b.tenant_current_room}`;
           } else {
-            const hasLine = lineNotify.isLikelyUserId(b.line_user_id);
+            const lineRecipients = await notifier.getTenantLineRecipients(pool, {
+              id: b.tenant_row_id,
+              line_user_id: b.line_user_id,
+              line_oa_id: b.line_oa_id,
+            });
+            b._lineRecipients = lineRecipients;
+            const hasLine = lineRecipients.length > 0;
             if (!hasLine && !b.email) {
               blockCode = 'NO_TENANT_CHANNEL';
               blockMsg = 'ไม่ผูก LINE + ไม่มีอีเมล';
             }
           }
+          const lineRecipients = Array.isArray(b._lineRecipients) ? b._lineRecipients : [];
           const channels = {
-            line: lineNotify.isLikelyUserId(b.line_user_id),
+            line: lineRecipients.length > 0,
+            lineCount: lineRecipients.length,
             email: !!b.email,
           };
           const reminderCount = Number(b.reminder_count) || 0;
@@ -1738,7 +1951,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         if (!billQ.rows.length) return res.status(404).json({ error: 'bill not found' });
         const b = billQ.rows[0];
         const issues = [];
-        const channels = { line: false, email: false, lineOa: null };
+        const channels = { line: false, lineCount: 0, email: false, lineOa: null };
 
         // Bill state
         if (b.status === 'void') {
@@ -1773,10 +1986,16 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         // Channel availability — only when tenant is otherwise valid
         if (b.tenant_row_id && b.tenant_status === 'active'
             && (!b.tenant_current_room || String(b.tenant_current_room) === String(b.room_id))) {
-          const hasLine = lineNotify.isLikelyUserId(b.line_user_id);
+          const lineRecipients = await notifier.getTenantLineRecipients(pool, {
+            id: b.tenant_row_id,
+            line_user_id: b.line_user_id,
+            line_oa_id: b.line_oa_id,
+          });
+          const hasLine = lineRecipients.length > 0;
           channels.line = !!hasLine;
+          channels.lineCount = lineRecipients.length;
           channels.email = !!b.email;
-          channels.lineOa = b.line_oa_id || null;
+          channels.lineOa = lineRecipients[0]?.line_oa_id || b.line_oa_id || null;
           if (!hasLine && !b.email) {
             issues.push({ sev: 'high', code: 'NO_TENANT_CHANNEL',
               msg: `ผู้เช่า "${b.tenant_name}" ยังไม่ผูก LINE และไม่ใส่อีเมล`,
@@ -1920,7 +2139,8 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           },
           tenant: b.tenant_row_id ? {
             id: b.tenant_row_id, name: b.tenant_name, phone: b.tenant_phone,
-            email: b.email, hasLine: !!b.line_user_id, status: b.tenant_status,
+            email: b.email, hasLine: channels.line, lineCount: channels.lineCount,
+            status: b.tenant_status,
             currentRoom: b.tenant_current_room,
           } : null,
           issues,
@@ -1935,18 +2155,29 @@ module.exports = function buildBillsExtrasRouter(ctx) {
     async (req, res) => {
       const id = Number(req.params.id);
       if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+      // R7-followup — admin's "บังคับส่งซ้ำ" checkbox sets force=true to
+      // bypass the 1-min cooldown that protects against tickPaymentReminder
+      // races. Without force, two sends within the same minute return 429.
+      const force = req.body?.force === true;
       try {
-        const out = await enqueueBillNotifications(id);
+        const out = await enqueueBillNotifications(id, { force });
         if (!out.ok) {
-          const status = out.code === 'NO_TENANT_CHANNEL' ? 409 : 404;
+          // Map cooldown to 429 (rate-limit-like) so the admin UI can show
+          // a "ส่งซ้ำตอนนี้?" prompt instead of a generic error.
+          const status = out.code === 'REMINDER_COOLDOWN' ? 429
+            : out.code === 'NO_TENANT_CHANNEL' ? 409
+            : 404;
           return res.status(status).json({
             error: out.error,
             code: out.code,
             ownerNotified: out.ownerNotified,
             enqueued: out.enqueued || [],
+            cooldownMs: out.cooldownMs,
+            lastRemindedAt: out.lastRemindedAt,
+            hint: out.hint,
           });
         }
-        audit(req, 'bill.send', 'bill', String(id), { enqueued: out.enqueued });
+        audit(req, 'bill.send', 'bill', String(id), { enqueued: out.enqueued, force });
         res.json({ ok: true, enqueued: out.enqueued });
       } catch (err) {
         console.error('bill send error:', err);
@@ -2045,22 +2276,33 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         }
       }
       const client = await pool.connect();
+      const cleanupUploadedSlip = () => {
+        if (!slipUploadId) return;
+        const orphanId = slipUploadId;
+        slipUploadId = null;
+        storage.remove(pool, orphanId)
+          .catch((e) => console.warn('[bill.pay] orphan slip cleanup failed:', e.message));
+      };
+      const rollbackManualPay = async () => {
+        await client.query('ROLLBACK').catch(() => {});
+        cleanupUploadedSlip();
+      };
       try {
         await client.query('BEGIN');
         const bill = await client.query(
-          `SELECT id, bill_no, period, total, status, tenant_id
+          `SELECT id, bill_no, period, total, late_fee, subtotal, vat, status, tenant_id
              FROM bills
             WHERE id=$1 AND deleted_at IS NULL
             FOR UPDATE`,
           [id]
         );
         if (!bill.rows.length) {
-          await client.query('ROLLBACK');
+          await rollbackManualPay();
           return res.status(404).json({ error: 'bill not found' });
         }
         const row = bill.rows[0];
         if (row.status !== 'pending' && row.status !== 'overdue') {
-          await client.query('ROLLBACK');
+          await rollbackManualPay();
           return res.status(409).json({
             error: 'bill is not payable',
             code: 'BILL_NOT_PAYABLE',
@@ -2073,17 +2315,74 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         // float dust that breaks downstream reconciliation against
         // bills.total (and against tenant-displayed amounts).
         const billTotal = billing.round2(Number(row.total));
+        const billLateFee = billing.round2(Number(row.late_fee || 0));
         if (!Number.isFinite(billTotal) || billTotal <= 0) {
-          await client.query('ROLLBACK');
+          await rollbackManualPay();
           return res.status(409).json({ error: 'bill total is invalid', code: 'INVALID_BILL_TOTAL' });
         }
-        if (Math.abs(requestedAmount - billTotal) > billing.PAYMENT_TOLERANCE_THB) {
-          await client.query('ROLLBACK');
+        // R2-followup — accept the offline payment in two tiers:
+        // tier='exact' = matches current total; tier='principal' = matches
+        // (subtotal+vat), i.e. the amount the tenant committed to BEFORE
+        // scheduler.tickLateFee added the penalty. Manual /pay is used
+        // when admin receives cash / bank transfer directly, often AFTER
+        // the late_fee already accrued — accepting principal lets admin
+        // record the actual collected amount + waive the late_fee in
+        // good faith. Audit-logged either way.
+        const amountCheck = billing.validatePaymentAmount({
+          amount: requestedAmount,
+          total: billTotal,
+          lateFee: billLateFee,
+        });
+        if (!amountCheck.ok) {
+          await rollbackManualPay();
           return res.status(409).json({
             error: 'payment amount does not match bill total',
             code: 'PAYMENT_AMOUNT_MISMATCH',
             billTotal,
+            billPrincipal: amountCheck.principal,
+            billLateFee,
             paymentAmount: requestedAmount,
+          });
+        }
+        let waivedLateFee = 0;
+        let effectiveTotal = billTotal;
+        if (amountCheck.tier === 'principal' && billLateFee > 0) {
+          waivedLateFee = billLateFee;
+          effectiveTotal = amountCheck.principal;
+          await client.query(
+            `UPDATE bills
+                SET late_fee = 0,
+                    total    = $2::numeric
+              WHERE id = $1 AND deleted_at IS NULL`,
+            [id, amountCheck.principal]
+          );
+          await client.query(
+            `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, detail)
+             VALUES ($1, $2, $3, $4, $5::jsonb)`,
+            [verifier, 'bill.late_fee_waived_on_principal_payment', 'bill', String(id),
+             JSON.stringify({
+               waivedLateFee,
+               paymentAmount: requestedAmount,
+               principalAtVerify: amountCheck.principal,
+               billTotalBeforeWaive: billTotal,
+               method,
+               reason: 'admin recorded manual payment matching principal — late_fee waived in good faith',
+             })]
+          ).catch(() => { /* audit best-effort */ });
+        }
+        const paidLedgerCheck = billing.validatePaidLedger({
+          paymentAmount: requestedAmount,
+          billTotal: effectiveTotal,
+        });
+        if (!paidLedgerCheck.ok) {
+          await rollbackManualPay();
+          return res.status(409).json({
+            error: 'payment ledger does not reconcile with bill total',
+            code: 'PAID_LEDGER_INCONSISTENT',
+            paymentAmount: paidLedgerCheck.paymentAmount,
+            billTotal: paidLedgerCheck.billTotal,
+            diff: paidLedgerCheck.diff,
+            tolerance: paidLedgerCheck.tolerance,
           });
         }
         const existing = await client.query(
@@ -2091,7 +2390,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           [id]
         );
         if (existing.rows.length) {
-          await client.query('ROLLBACK');
+          await rollbackManualPay();
           return res.status(409).json({
             error: 'bill already has a verified payment',
             code: 'BILL_ALREADY_PAID',
@@ -2107,12 +2406,23 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           [
             id,
             row.tenant_id || null,
-            billTotal,
+            // Record the actual collected amount, not bill total — bank
+            // reconciliation needs the cents tenant transferred. When
+            // tier='principal' bills.total was already updated above.
+            requestedAmount,
             method,
             ref,
             slipUrl,
             verifier,
-            JSON.stringify({ source: 'admin-billing', requestedAmount }),
+            JSON.stringify({
+              source: 'admin-billing',
+              requestedAmount,
+              amountTier: amountCheck.tier,
+              billTotalAtVerify: billTotal,
+              billLateFeeAtVerify: billLateFee,
+              principalAtVerify: amountCheck.principal,
+              waivedLateFee,
+            }),
           ]
         );
         // Reject sibling pending slips that the tenant uploaded before
@@ -2142,7 +2452,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           [id]
         );
         if (paid.rowCount !== 1) {
-          await client.query('ROLLBACK');
+          await rollbackManualPay();
           return res.status(409).json({
             error: 'bill was not marked paid',
             code: 'BILL_MARK_PAID_FAILED',
@@ -2157,7 +2467,10 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         ).catch(() => {});
         audit(req, 'bill.manual_pay', 'bill', String(id), {
           paymentId: payment.rows[0].id,
-          amount: billTotal,
+          amount: Number(payment.rows[0].amount),
+          requestedAmount,
+          amountTier: amountCheck.tier,
+          waivedLateFee,
           method,
           supersededPaymentIds: supersededPending.rows.map((r) => r.id),
         });
@@ -2176,10 +2489,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         console.error('bill manual pay error:', err);
         // If we uploaded a slip before the transaction failed, scrub the
         // orphan file so R2 doesn't accumulate unattached evidence.
-        if (slipUploadId) {
-          storage.remove(pool, slipUploadId)
-            .catch((e) => console.warn('[bill.pay] orphan slip cleanup failed:', e.message));
-        }
+        cleanupUploadedSlip();
         res.status(500).json({ error: 'internal error', code: 'DB_ERROR' });
       } finally {
         client.release();
@@ -2223,7 +2533,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       try {
         await client.query('BEGIN');
         const bill = await client.query(
-          `SELECT id, status, total, deleted_at FROM bills WHERE id=$1 FOR UPDATE`,
+          `SELECT id, status, total, late_fee, subtotal, vat, deleted_at FROM bills WHERE id=$1 FOR UPDATE`,
           [id]
         );
         if (!bill.rows.length || bill.rows[0].deleted_at) {
@@ -2241,6 +2551,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           return res.status(404).json({ error: 'no pending slip for this bill' });
         }
         const pid = pres.rows[0].id;
+        let waivedLateFee = 0;   // surfaced in audit when principal tier matches
         if (accept) {
           if (bill.rows[0].status !== 'pending' && bill.rows[0].status !== 'overdue') {
             await client.query('ROLLBACK');
@@ -2250,16 +2561,70 @@ module.exports = function buildBillsExtrasRouter(ctx) {
               billStatus: bill.rows[0].status,
             });
           }
+          // R2-followup — two-tier acceptance (see services/billing.js#validatePaymentAmount).
+          // tier='exact' matches bill.total at verify time; tier='principal'
+          // matches (subtotal+vat), i.e. the amount the tenant committed to
+          // BEFORE scheduler.tickLateFee added the penalty. Waive late_fee
+          // on principal-tier matches so the tenant isn't punished for the
+          // scheduler's timing.
           const billTotal = Number(bill.rows[0].total);
+          const billLateFee = Number(bill.rows[0].late_fee || 0);
           const paymentAmount = Number(pres.rows[0].amount);
-          if (!Number.isFinite(billTotal) || !Number.isFinite(paymentAmount)
-              || Math.abs(paymentAmount - billTotal) > billing.PAYMENT_TOLERANCE_THB) {
+          const amountCheck = billing.validatePaymentAmount({
+            amount: paymentAmount,
+            total: billTotal,
+            lateFee: billLateFee,
+          });
+          if (!Number.isFinite(billTotal) || !Number.isFinite(paymentAmount) || !amountCheck.ok) {
             await client.query('ROLLBACK');
             return res.status(409).json({
               error: 'payment amount does not match bill total',
               code: 'PAYMENT_AMOUNT_MISMATCH',
               billTotal,
+              billPrincipal: amountCheck.principal,
+              billLateFee,
               paymentAmount,
+            });
+          }
+          if (amountCheck.tier === 'principal' && billLateFee > 0) {
+            waivedLateFee = billLateFee;
+            await client.query(
+              `UPDATE bills
+                  SET late_fee = 0,
+                      total    = $2::numeric
+                WHERE id = $1 AND deleted_at IS NULL`,
+              [id, amountCheck.principal]
+            );
+            await client.query(
+              `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, detail)
+               VALUES ($1, $2, $3, $4, $5::jsonb)`,
+              [verifier, 'bill.late_fee_waived_on_principal_payment', 'bill', String(id),
+               JSON.stringify({
+                 waivedLateFee,
+                 paymentId: pid,
+                 paymentAmount,
+                 principalAtVerify: amountCheck.principal,
+                 billTotalBeforeWaive: billTotal,
+                 reason: 'tenant slip matched principal — late_fee waived in good faith',
+              })]
+            ).catch(() => { /* audit best-effort */ });
+          }
+          const settledBillTotal = amountCheck.tier === 'principal' && billLateFee > 0
+            ? amountCheck.principal
+            : billTotal;
+          const paidLedgerCheck = billing.validatePaidLedger({
+            paymentAmount,
+            billTotal: settledBillTotal,
+          });
+          if (!paidLedgerCheck.ok) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({
+              error: 'payment ledger does not reconcile with bill total',
+              code: 'PAID_LEDGER_INCONSISTENT',
+              paymentAmount: paidLedgerCheck.paymentAmount,
+              billTotal: paidLedgerCheck.billTotal,
+              diff: paidLedgerCheck.diff,
+              tolerance: paidLedgerCheck.tolerance,
             });
           }
           const upd = await client.query(

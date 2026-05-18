@@ -85,34 +85,41 @@ test('billing.buildBill: VAT applies AFTER discount (correct ledger order)', () 
   assert.equal(b.total, 9630, 'total = subtotal + vat');
 });
 
-test('billing.buildBill: late fee from previous overdue bill', () => {
+test('billing.computeLateFee: late fee from previous overdue bill', () => {
   const sevenDaysAgo = new Date(Date.now() - 60 * 86_400_000).toISOString().slice(0, 10);
-  const b = billing.buildBill({
-    room: { id: '1', rent: 5000, waterUnits: 0, elecUnits: 0, tenant: { name: 'T' } },
-    config: { utilities: { waterRate: 0, elecRate: 0, wifi: 0 } },
-    features: {
-      vat: { enabled: false },
-      lateFee: { enabled: true, ratePctPerMonth: 1.5, gracePeriodDays: 7 },
-    },
-    previous: { total: 5000, dueDate: sevenDaysAgo, status: 'overdue' },
+  const fee = billing.computeLateFee({
+    base: 5000,
+    dueDate: sevenDaysAgo,
+    ratePctPerMonth: 1.5,
+    gracePeriodDays: 7,
+    now: new Date(),
   });
   // 60 days overdue - 7 grace = 53 days = 1.766... months
   // Fee = 5000 * 0.015 * 1.766 ≈ 132.5
-  assert.ok(b.lateFee > 100 && b.lateFee < 200, `lateFee=${b.lateFee} should be ~132-133`);
+  assert.ok(fee.lateFee > 100 && fee.lateFee < 200, `lateFee=${fee.lateFee} should be ~132-133`);
 });
 
-test('billing.buildBill: late fee skipped when previous status is not overdue', () => {
+test('billing.buildBill: never carries forward previous bill late fee (R2)', () => {
+  // R2 — buildBill is now a pure rent/utility/recurring calculator. Late
+  // fees are owned by services/scheduler.js#tickLateFee which updates the
+  // OLD bill's late_fee + total in-place when it flips pending → overdue.
+  // Whether `previous` is overdue, paid, or pending no longer matters here
+  // — the new bill always starts with late_fee=0. Tenants viewing the
+  // overdue bill always see the up-to-date total.
   const oldDate = new Date(Date.now() - 60 * 86_400_000).toISOString().slice(0, 10);
-  const b = billing.buildBill({
-    room: { id: '1', rent: 5000, waterUnits: 0, elecUnits: 0, tenant: { name: 'T' } },
-    config: { utilities: { waterRate: 0, elecRate: 0, wifi: 0 } },
-    features: {
-      vat: { enabled: false },
-      lateFee: { enabled: true, ratePctPerMonth: 1.5, gracePeriodDays: 7 },
-    },
-    previous: { total: 5000, dueDate: oldDate, status: 'paid' },
-  });
-  assert.equal(b.lateFee, 0, 'paid bills do not generate late fees');
+  for (const prevStatus of ['paid', 'overdue', 'pending', 'void']) {
+    const b = billing.buildBill({
+      room: { id: '1', rent: 5000, waterUnits: 0, elecUnits: 0, tenant: { name: 'T' } },
+      config: { utilities: { waterRate: 0, elecRate: 0, wifi: 0 } },
+      features: {
+        vat: { enabled: false },
+        lateFee: { enabled: true, ratePctPerMonth: 1.5, gracePeriodDays: 7 },
+      },
+      previous: { total: 5000, dueDate: oldDate, status: prevStatus },
+    });
+    assert.equal(b.lateFee, 0,
+      `buildBill must ignore previous status (got prev.status=${prevStatus})`);
+  }
 });
 
 test('billing.buildBill: recurring items only included when feature on', () => {
@@ -436,6 +443,10 @@ test('/api/tenant/payments handler: rejects amount mismatch BEFORE saving slip',
     'both AMOUNT_NOT_BILL_TOTAL and a downstream storage.saveBase64 must exist');
   assert.ok(idxAmountGuard < idxSlipSave,
     'AMOUNT_NOT_BILL_TOTAL guard must run BEFORE saveBase64 (else slip leaks on reject)');
+  assert.match(server, /SELECT id, total, late_fee, status, tenant_id FROM bills WHERE id=\$1 AND deleted_at IS NULL/,
+    'tenant slip upload must read late_fee so principal-tier payments can be validated');
+  assert.match(server, /AMOUNT_NOT_BILL_TOTAL_AT_COMMIT/,
+    'tenant slip upload must re-check the amount after locking the bill row');
 });
 
 // =====================================================================

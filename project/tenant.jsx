@@ -11,6 +11,17 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 
 const PAYMENT_TOLERANCE_THB = 1;
 
+// R4 — format bill_no for tenant display. Backend's services/billing.js#makeBillNo
+// can emit `INV-2026-05-201-T42` when a room hosts two tenants in the same
+// calendar month (move-out + move-in within the period). The "-T42" suffix
+// is meaningful to admin (it disambiguates which tenant the bill belongs to)
+// but confusing to tenants ("what is T42?"), so we strip it for the tenant
+// UI. Admin pages keep the raw shape for unambiguous lookup.
+function fmtBillNoForTenant(billNo) {
+  if (!billNo) return '';
+  return String(billNo).replace(/-T\d+(?:-\d+)?$/, '');
+}
+
 // --------------------------------------------------------------------- i18n
 const TR = {
   th: {
@@ -1356,7 +1367,7 @@ function HomeView({ tenant, locale, bills, tickets, contract, goto }) {
                 </Pill>
               </div>
               <div style={{ color: '#e0d2b6', fontSize: 13.5, marginTop: 4 }}>
-                {unpaid.bill_no} · {t('billPeriod')} {fmtPeriod(unpaid.period, locale)} · {t('dueDate')} {fmtDate(unpaid.due_date, locale)}
+                {fmtBillNoForTenant(unpaid.bill_no)} · {t('billPeriod')} {fmtPeriod(unpaid.period, locale)} · {t('dueDate')} {fmtDate(unpaid.due_date, locale)}
               </div>
               <div className="home-bill-actions" style={{ display: 'flex', gap: 10, marginTop: 22, flexWrap: 'wrap' }}>
                 <Button variant="primary" size="md" icon="qr" onClick={() => goto('bills', unpaid.id)}>{t('payPromptpay')}</Button>
@@ -1462,7 +1473,7 @@ function BillRow({ bill, onClick, divider, locale, t }) {
     onMouseEnter={(e) => e.currentTarget.style.background = 'var(--surface-2)'}
     onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}>
       <div style={{ minWidth: 0 }}>
-        <div style={{ fontWeight: 600, fontSize: 14.5 }}>{bill.bill_no}</div>
+        <div style={{ fontWeight: 600, fontSize: 14.5 }}>{fmtBillNoForTenant(bill.bill_no)}</div>
         <div style={{ color: 'var(--muted)', fontSize: 12.5, marginTop: 2 }}>
           {t('billPeriod')} {fmtPeriod(bill.period, locale)} · {t('dueDate')} {fmtDate(bill.due_date, locale)}
         </div>
@@ -1542,7 +1553,7 @@ function BillsView({ locale, bills, refresh, slipFeature, openId, setOpenId }) {
               <div className="bill-card-main" style={{ padding: 'var(--sp-4) var(--sp-5)', display: 'grid', gridTemplateColumns: '1fr auto', gap: 'var(--sp-4)', alignItems: 'center' }}>
                 <div style={{ minWidth: 0 }}>
                   <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-                    <div style={{ fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 16 }}>{b.bill_no}</div>
+                    <div style={{ fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 16 }}>{fmtBillNoForTenant(b.bill_no)}</div>
                     <Pill tone={STATUS_TONE[b.status]}>{t(b.status)}</Pill>
                   </div>
                   <div style={{ color: 'var(--muted)', fontSize: 13, marginTop: 4 }}>
@@ -1586,7 +1597,7 @@ function BillDetailModal({ open, bill, onClose, locale, refresh, slipFeature }) 
   const t = (k) => tr(locale, k);
   if (!bill) return null;
   return (
-    <Modal open={open} onClose={onClose} title={bill.bill_no} size="lg">
+    <Modal open={open} onClose={onClose} title={fmtBillNoForTenant(bill.bill_no)} size="lg">
       <BillDetailBody bill={bill} locale={locale} refresh={refresh} slipFeature={slipFeature} />
     </Modal>
   );
@@ -1810,6 +1821,23 @@ function BillDetailBody({ bill, locale, refresh, slipFeature }) {
           <div style={{ height: 12 }} />
           <KV label={t('dueDate')} value={fmtDate(bill.due_date, locale)} />
           <KV label={t('billTotal')} value={`฿${fmtMoney(bill.total)}`} bold hi last />
+          {/* R2-followup — surface the "principal vs total" tiering so the
+              tenant understands they can pay either amount in good faith.
+              tickLateFee's daily refresh can grow late_fee silently; without
+              this hint a tenant who already transferred the principal might
+              think they were undercharged. The fmtBillNoForTenant strip in
+              the title keeps the suffix out of view. */}
+          {Number(bill.late_fee) > 0 && bill.status !== 'paid' ? (
+            <div style={{
+              marginTop: 10, padding: '10px 12px', borderRadius: 10,
+              background: 'rgba(255, 200, 120, 0.10)',
+              border: '1px solid rgba(255, 200, 120, 0.35)',
+              color: '#5a4a2a', fontSize: 13, lineHeight: 1.55,
+            }}>
+              💡 ค่าปรับล่าช้า ฿{fmtMoney(bill.late_fee)} ถูกบวกเพิ่มอัตโนมัติเพราะบิลเลยกำหนด<br/>
+              หากคุณโอนตามยอดเดิม ฿{fmtMoney(Number(bill.total) - Number(bill.late_fee || 0))} แล้ว ระบบจะถือว่าจ่ายโดยสุจริต — แอดมินสามารถยกเว้นค่าปรับให้ได้
+            </div>
+          ) : null}
           <div style={{ display: 'flex', gap: 8, marginTop: 18, flexWrap: 'wrap' }}>
             <a href={`/api/tenant/bills/${bill.id}/pdf`} target="_blank" rel="noopener" style={{ textDecoration: 'none' }}>
               <Button variant="outline" icon="download">{bill.status === 'paid' ? t('receipt') : t('downloadPdf')}</Button>
@@ -2141,7 +2169,7 @@ function PaymentsView({ locale, payments, syncErrors, goto }) {
               <div className="payment-card-main" style={{ padding: 'var(--sp-4) var(--sp-5)', display: 'grid', gridTemplateColumns: '1fr auto', gap: 'var(--sp-4)', alignItems: 'center' }}>
                 <div style={{ minWidth: 0 }}>
                   <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-                    <div style={{ fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 16 }}>{p.bill_no || `#${p.bill_id || '—'}`}</div>
+                    <div style={{ fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 16 }}>{p.bill_no ? fmtBillNoForTenant(p.bill_no) : `#${p.bill_id || '—'}`}</div>
                     <Pill tone={STATUS_TONE[p.status]}>{statusLabel(p.status)}</Pill>
                     {p.method ? <span style={{ fontSize: 'var(--fs-xs)', color: 'var(--muted)' }}>{p.method}</span> : null}
                   </div>
@@ -2181,7 +2209,7 @@ function SlipPreviewModal({ payment, locale, onClose }) {
   useEffect(() => { if (payment) setState('loading'); }, [payment && payment.id]);
   const src = payment ? `/api/tenant/payments/${encodeURIComponent(payment.id)}/slip` : '';
   const title = payment
-    ? `${t('slipPreviewTitle')} · ${payment.bill_no || `#${payment.bill_id || payment.id}`}`
+    ? `${t('slipPreviewTitle')} · ${payment.bill_no ? fmtBillNoForTenant(payment.bill_no) : `#${payment.bill_id || payment.id}`}`
     : t('slipPreviewTitle');
   return (
     <Modal open={!!payment} onClose={onClose} title={title} size="xl">
@@ -2245,7 +2273,7 @@ function SlipPreviewModal({ payment, locale, onClose }) {
           color: 'var(--muted)',
           fontSize: 'var(--fs-xs)',
         }}>
-          <span>{payment.bill_no || `#${payment.bill_id || payment.id}`}</span>
+          <span>{payment.bill_no ? fmtBillNoForTenant(payment.bill_no) : `#${payment.bill_id || payment.id}`}</span>
           <span>{fmtDateTime(payment.created_at, locale)}</span>
         </div>
       ) : null}

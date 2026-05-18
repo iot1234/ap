@@ -883,8 +883,9 @@ function TabPortal({ t, setToast, addActivity, apiFetch }) {
     return <div style={{ padding: 16, color: C.muted }}>กำลังโหลดข้อมูล portal…</div>;
   }
 
+  const bindingBoundCount = Number(binding && (binding.boundCount || binding.bound_count || 0));
   const bindingStatus = binding && binding.bound
-    ? { label: `ผูก LINE แล้ว (ผ่าน ${binding.bound.oa_name || 'OA'})`, color: C.success }
+    ? { label: `ผูก LINE แล้ว ${bindingBoundCount || 1} บัญชี (ผ่าน ${binding.bound.oa_name || 'OA'})`, color: C.success }
     : binding && binding.pending
       ? { label: `รอผูก — รหัส ${binding.pending.code}`, color: C.warning }
       : { label: 'ยังไม่ผูก LINE', color: C.muted };
@@ -926,7 +927,7 @@ function TabPortal({ t, setToast, addActivity, apiFetch }) {
         </div>
         <div style={{ fontSize: 12.5, color: C.muted, lineHeight: 1.6, marginBottom: 12 }}>
           {binding && binding.bound
-            ? 'ผูกแล้ว — ระบบส่งบิล/แจ้งเตือนผ่าน LINE OA นี้'
+            ? `ผูกแล้ว ${bindingBoundCount || 1} บัญชี — ต้องการให้คนในห้องรับแจ้งเตือนเพิ่ม ให้ออกรหัสใหม่และให้ LINE อีกบัญชีส่งรหัสนี้ ระบบจะไม่ลบบัญชีเดิม และจะแจ้งเตือนทุกบัญชีที่ผูกกับห้องนี้`
             : binding && binding.pending
               ? `รหัสค้างอยู่: ${binding.pending.code} (หมดอายุ ${new Date(binding.pending.expires_at).toLocaleDateString('th-TH')})`
               : 'ออกรหัส 8 หลัก ให้ผู้เช่า — add OA + ส่งรหัสในแชต = ผูกอัตโนมัติ'}
@@ -935,7 +936,7 @@ function TabPortal({ t, setToast, addActivity, apiFetch }) {
           <Btn variant={binding && binding.bound ? 'secondary' : 'primary'}
                disabled={bindBusy} onClick={issueBinding}>
             {bindBusy ? 'กำลังออกรหัส…'
-              : binding && binding.bound ? 'ออกรหัสใหม่ (เปลี่ยน OA)'
+              : binding && binding.bound ? 'ออกรหัสเพิ่ม LINE อีกบัญชี'
               : binding && binding.pending ? 'ออกรหัสใหม่ (ยกเลิกอันเก่า)'
               : 'ออกรหัสผูก LINE'}
           </Btn>

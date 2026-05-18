@@ -56,7 +56,7 @@ function PageReportsV2({ setToast, embedded = false }) {
       setToast && setToast({ kind: 'info', message: 'หน้านี้ไม่รองรับการส่งออก' });
       return;
     }
-    window.open(url, '_blank');
+    window.open(url, '_blank', 'noopener');
   }
 
   return (

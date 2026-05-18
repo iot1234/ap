@@ -266,6 +266,117 @@
   }
   .success-card p { color: #506156; font-size: 14px; margin: 0 0 8px; }
   .ref { font-family: 'JetBrains Mono', monospace; color: #2f8a70; }
+  .line-bind-box {
+    margin: 18px auto 0;
+    padding: 14px;
+    border: 1px solid #c7d8cf;
+    border-radius: 10px;
+    background: #f6fbf7;
+    text-align: left;
+    max-width: 420px;
+  }
+  .line-bind-box.line-bind-error {
+    border-color: #e6c8c2;
+    background: #fff7f4;
+  }
+  .line-bind-box h3 {
+    margin: 0 0 8px;
+    font: 600 15px 'Sora', sans-serif;
+    color: #163f32;
+  }
+  .line-bind-box.line-bind-error h3 {
+    color: #7f1d1d;
+  }
+  .line-bind-code {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin: 10px 0;
+  }
+  .line-bind-code code {
+    flex: 1;
+    min-width: 0;
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: #ffffff;
+    border: 1px solid #dfe9e2;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 16px;
+    color: #102019;
+    overflow-wrap: anywhere;
+  }
+  .line-copy-btn {
+    border: 0;
+    border-radius: 8px;
+    background: #102019;
+    color: #ffffff;
+    padding: 10px 12px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .line-bind-box p {
+    margin: 6px 0 0;
+    font-size: 12.5px;
+    line-height: 1.55;
+  }
+  .success-flow {
+    margin: 18px auto 0;
+    max-width: 420px;
+    text-align: left;
+    border: 1px solid #dfe9e2;
+    border-radius: 10px;
+    background: #ffffff;
+    padding: 14px;
+  }
+  .success-flow-title {
+    font-weight: 700;
+    color: #1e2a24;
+    font-size: 14px;
+    margin-bottom: 10px;
+  }
+  .success-flow ol {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: grid;
+    gap: 10px;
+  }
+  .success-flow li {
+    display: grid;
+    grid-template-columns: 26px 1fr;
+    gap: 10px;
+    align-items: start;
+  }
+  .success-flow .step-no {
+    width: 26px;
+    height: 26px;
+    border-radius: 999px;
+    display: grid;
+    place-items: center;
+    background: #e6f4ec;
+    color: #0e3a25;
+    font: 700 12px 'Sora', sans-serif;
+  }
+  .success-flow b {
+    display: block;
+    color: #1e2a24;
+    font-size: 13px;
+  }
+  .success-flow small {
+    display: block;
+    color: #506156;
+    font-size: 12px;
+    line-height: 1.45;
+    margin-top: 2px;
+  }
+  .success-flow li.warn .step-no {
+    background: #fff2d8;
+    color: #8a5a22;
+  }
+  .success-flow li.error .step-no {
+    background: #f9e7e3;
+    color: #7f1d1d;
+  }
 </style>
 </head>
 <body class="tenant-public-page tenant-booking-page">
@@ -407,6 +518,48 @@
       <p>หมายเลขอ้างอิง: <span class="ref" id="refNo"></span></p>
       <p class="success-note" id="successDepositNotice" style="display:none"></p>
       <p id="successNextAction" style="display:none"></p>
+      <div class="success-flow" aria-label="ขั้นตอนหลังส่งคำขอจอง">
+        <div class="success-flow-title">ขั้นตอนต่อไป</div>
+        <ol>
+          <li>
+            <span class="step-no">1</span>
+            <div>
+              <b>เก็บหมายเลขอ้างอิง</b>
+              <small>ใช้แจ้งเจ้าหน้าที่เมื่อติดต่อเรื่องการจองนี้</small>
+            </div>
+          </li>
+          <li id="lineFlowStep">
+            <span class="step-no">2</span>
+            <div>
+              <b>ผูก LINE ของผู้ที่จะรับแจ้งเตือน</b>
+              <small id="lineFlowText">คัดลอกรหัสด้านล่าง แล้วส่งในแชต LINE OA ของหอพัก</small>
+            </div>
+          </li>
+          <li>
+            <span class="step-no">3</span>
+            <div>
+              <b>รอแอดมินตรวจสอบ</b>
+              <small>เมื่ออนุมัติหรือปฏิเสธ ระบบจะแจ้งผ่าน LINE/อีเมล/SMS ที่ติดต่อได้</small>
+            </div>
+          </li>
+          <li>
+            <span class="step-no">4</span>
+            <div>
+              <b>เซ็นสัญญาและรับบิล</b>
+              <small>หลังอนุมัติ แอดมินจะส่งขั้นตอนสัญญา และบิลของห้องจะส่งถึงทุก LINE ที่ผูกไว้</small>
+            </div>
+          </li>
+        </ol>
+      </div>
+      <div class="line-bind-box" id="lineBindBox" style="display:none">
+        <h3>ผูก LINE เพื่อรับสถานะการจอง</h3>
+        <p>คัดลอกรหัสนี้แล้วส่งในแชต LINE OA ของหอพัก</p>
+        <div class="line-bind-code">
+          <code id="lineBindCode"></code>
+          <button type="button" class="line-copy-btn" id="lineBindCopyBtn">คัดลอก</button>
+        </div>
+        <p id="lineBindHint">หลังผูกแล้ว ระบบจะใช้ LINE นี้แจ้งผลจอง สัญญา และบิลของห้องนี้</p>
+      </div>
       <p style="margin-top:24px"><a href="/" style="color:#2f8a70;text-decoration:none;font-weight:500">← กลับหน้าแรก</a></p>
     </div>
   </template>
@@ -1194,6 +1347,58 @@
       if (next && verification && verification.nextAction) {
         next.style.display = 'block';
         next.textContent = verification.nextAction;
+      }
+      const lineBinding = result.booking && result.booking.lineBinding;
+      const lineBox = document.getElementById('lineBindBox');
+      const lineCode = document.getElementById('lineBindCode');
+      const lineCopy = document.getElementById('lineBindCopyBtn');
+      const lineHint = document.getElementById('lineBindHint');
+      const lineFlowStep = document.getElementById('lineFlowStep');
+      const lineFlowText = document.getElementById('lineFlowText');
+      if (lineBox && lineBinding && lineBinding.code) {
+        lineBox.style.display = 'block';
+        lineBox.classList.remove('line-bind-error');
+        lineCode.textContent = lineBinding.code;
+        if (lineCopy) lineCopy.style.display = '';
+        if (lineFlowStep) lineFlowStep.className = '';
+        if (lineFlowText) {
+          lineFlowText.textContent = 'คัดลอกรหัสด้านล่างแล้วส่งใน LINE OA ของหอพัก ถ้าจองให้เพื่อน ให้เพื่อนส่งรหัสด้วย LINE ของเพื่อนเอง';
+        }
+        if (lineBinding.expiresAt && lineHint) {
+          const exp = new Date(lineBinding.expiresAt);
+          lineHint.textContent = Number.isFinite(exp.getTime())
+            ? `รหัสหมดอายุ ${exp.toLocaleString('th-TH')} หลังผูกแล้ว ระบบจะใช้ LINE นี้แจ้งผลจอง สัญญา และบิลของห้องนี้ ถ้าจองอีกห้องให้ตัวเองหรือจองแทนเพื่อน ให้แอดมินตรวจสอบก่อนสร้างสัญญา`
+            : 'หลังผูกแล้ว ระบบจะใช้ LINE นี้แจ้งผลจอง สัญญา และบิลของห้องนี้ ถ้าจองอีกห้องให้ตัวเองหรือจองแทนเพื่อน ให้แอดมินตรวจสอบก่อนสร้างสัญญา';
+        }
+        if (lineCopy) {
+          lineCopy.addEventListener('click', async () => {
+            try {
+              await navigator.clipboard.writeText(lineBinding.code);
+              lineCopy.textContent = 'คัดลอกแล้ว';
+              setTimeout(() => { lineCopy.textContent = 'คัดลอก'; }, 1800);
+            } catch {
+              lineCopy.textContent = 'เลือกคัดลอก';
+              lineCode.focus && lineCode.focus();
+            }
+          });
+        }
+      } else if (lineBox && lineBinding && lineBinding.error) {
+        lineBox.style.display = 'block';
+        lineBox.classList.add('line-bind-error');
+        lineCode.textContent = lineBinding.error;
+        if (lineCopy) lineCopy.style.display = 'none';
+        if (lineFlowStep) lineFlowStep.className = 'warn';
+        if (lineFlowText) {
+          lineFlowText.textContent = 'ระบบออกคีย์ LINE ไม่สำเร็จ เจ้าหน้าที่จะออกคีย์ใหม่หรือโทรแจ้งสถานะโดยตรง';
+        }
+        if (lineHint) {
+          lineHint.textContent = lineBinding.nextAction || lineBinding.message || 'เจ้าหน้าที่จะออก LINE code ให้ใหม่หรือโทรแจ้งสถานะการจองโดยตรง';
+        }
+      } else {
+        if (lineFlowStep) lineFlowStep.className = 'warn';
+        if (lineFlowText) {
+          lineFlowText.textContent = 'ยังไม่มีคีย์ LINE ในคำขอนี้ ให้รอเจ้าหน้าที่ติดต่อกลับหรือออกคีย์จากหน้าแอดมิน';
+        }
       }
       window.scrollTo({ top: 0, behavior: 'smooth' });
     } catch (err) {

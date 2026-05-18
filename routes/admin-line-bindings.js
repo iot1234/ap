@@ -21,11 +21,13 @@ module.exports = function buildAdminLineBindingsRouter(ctx) {
     try {
       const rows = await lineBinding.listAll(pool);
       // Aggregate counters for the page header
-      const counts = { total: rows.length, pending: 0, bound: 0, unbound: 0, blocked: 0 };
+      const counts = { total: rows.length, pending: 0, bound: 0, unbound: 0, blocked: 0, boundAccounts: 0 };
       for (const row of rows) {
+        const boundCount = Number(row.bound_count || 0);
+        counts.boundAccounts += boundCount;
         if (row.line_binding_blocked) counts.blocked++;
         else if (row.binding_status === 'pending') counts.pending++;
-        else if (row.line_user_id) counts.bound++;
+        else if (row.line_user_id || boundCount > 0) counts.bound++;
         else counts.unbound++;
       }
       res.json({ ok: true, items: rows, counts });

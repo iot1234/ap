@@ -702,8 +702,8 @@ test('/api/payments/:id/verify refuses to verify against non-payable bills', () 
   const body = nextIdx > 0 ? tail.slice(0, 50 + nextIdx) : tail.slice(0, 5000);
   assert.match(body, /SELECT \* FROM payments WHERE id=\$1 AND status='pending' FOR UPDATE/,
     'admin verify must lock the pending payment row');
-  assert.match(body, /SELECT id, status, total, deleted_at FROM bills WHERE id=\$1 FOR UPDATE/,
-    'admin verify must lock and inspect the target bill total');
+  assert.match(body, /SELECT id, status, total, late_fee, subtotal, vat, deleted_at FROM bills WHERE id=\$1 FOR UPDATE/,
+    'admin verify must lock and inspect the target bill total and late fee');
   assert.match(body, /BILL_NOT_PAYABLE/,
     'admin verify must refuse paid, void, deleted, or missing bills');
   assert.match(body, /BILL_MARK_PAID_FAILED/,
@@ -725,8 +725,10 @@ test('/api/payments/:id/verify rejects amount mismatches before marking paid', (
   // enforcement points (tenant upload, payment verify, bill verify-slip,
   // manual pay) stay in sync. The check must reference the shared constant
   // rather than a hard-coded literal — pin that here.
-  assert.match(body, /Math\.abs\(paymentAmount - billTotal\) > billing\.PAYMENT_TOLERANCE_THB/,
-    'verify path must compare payment amount to bill total via shared constant');
+  assert.match(body, /billing\.validatePaymentAmount\(\{[\s\S]{0,140}amount: paymentAmount,[\s\S]{0,140}lateFee: billLateFee/,
+    'verify path must use the shared two-tier payment amount validator');
+  assert.match(body, /bill\.late_fee_waived_on_principal_payment/,
+    'verify path must waive late_fee when the payment matches principal');
   assert.match(body, /PAYMENT_AMOUNT_MISMATCH/,
     'verify path must fail closed on amount mismatch');
 });
@@ -751,10 +753,10 @@ test('/api/bills/:id/verify-slip matches owner-manager payment verification poli
   const idx = route.indexOf("r.post('/:id/verify-slip'");
   assert.ok(idx > 0, 'should find bill verify-slip handler');
   // 7000 char window — handler grew when REJECT_REASON_TOO_LONG validation
-  // + verifier session-fallback guard were added. The handler boundary is
-  // the next `r.post(` or end-of-file, but slicing a generous fixed window
-  // keeps the test simple while still bounded.
-  const body = route.slice(idx, idx + 7000);
+  // Slice to the next route so adding validation/guards does not break this
+  // policy test by pushing later assertions outside a fixed-length window.
+  const nextIdx = route.indexOf('  // POST /api/bills/:id/send', idx);
+  const body = route.slice(idx, nextIdx > idx ? nextIdx : idx + 12000);
   assert.match(body, /requireRole\('owner', 'manager'\)/,
     'bill-id verify path must use the same owner/manager policy as payment-id verify');
   assert.doesNotMatch(body, /requireRole\('owner', 'manager', 'staff'\)/,
@@ -763,6 +765,10 @@ test('/api/bills/:id/verify-slip matches owner-manager payment verification poli
     'bill-id verify path must fail closed when the bill is not payable');
   assert.match(body, /PAYMENT_AMOUNT_MISMATCH/,
     'bill-id verify path must reject amount mismatches');
+  assert.match(body, /billing\.validatePaymentAmount\(\{[\s\S]{0,160}lateFee: billLateFee/,
+    'bill-id verify path must use the shared two-tier amount validator');
+  assert.match(body, /bill\.late_fee_waived_on_principal_payment/,
+    'bill-id verify path must waive late_fee when the slip matches principal');
   assert.match(body, /SELECT id, amount, tenant_id FROM payments/,
     'bill-id verify path must retain tenant_id for post-payment access-card restore');
   assert.match(body, /RETURNING id, room_id/,
@@ -779,13 +785,15 @@ test('/api/bills/:id/pay records offline payments in the payment ledger', () => 
   assert.ok(idx > 0, 'should find bill manual-pay handler');
   // 8000 char window — the handler grew when we added optional slip upload
   // (storage.saveBase64 call + rollback cleanup) ahead of the INSERT.
-  const body = route.slice(idx, idx + 11000);
+  const body = route.slice(idx, idx + 16000);
   assert.match(body, /requireRole\('owner', 'manager'\)/,
     'manual pay must be owner/manager only');
-  assert.match(body, /SELECT id, bill_no, period, total, status, tenant_id[\s\S]*FOR UPDATE/,
-    'manual pay must lock the bill and read total');
+  assert.match(body, /SELECT id, bill_no, period, total, late_fee, subtotal, vat, status, tenant_id[\s\S]*FOR UPDATE/,
+    'manual pay must lock the bill and read total plus late fee');
   assert.match(body, /INSERT INTO payments[\s\S]*'verified'/,
     'manual pay must create a verified payment row');
+  assert.match(body, /requestedAmount,[\s\S]{0,220}amountTier: amountCheck\.tier/,
+    'manual pay must preserve the operator-entered amount and validation tier in the ledger payload');
   assert.match(body, /UPDATE bills SET status='paid', paid_at=NOW\(\)/,
     'manual pay must mark the bill paid in the same handler');
   assert.match(body, /PAYMENT_AMOUNT_MISMATCH|BILL_ALREADY_PAID/,
@@ -805,7 +813,8 @@ test('/api/bills create validates input and refuses to mutate paid/verified ledg
   const route = fs.readFileSync(path.join(__dirname, '..', 'routes', 'bills-extras.js'), 'utf8');
   const idx = route.indexOf("r.post('/', sameOrigin");
   assert.ok(idx > 0, 'should find bill create handler');
-  const body = route.slice(idx, idx + 12000);
+  const nextRoute = route.indexOf("  r.get('/send-readiness-batch'", idx);
+  const body = route.slice(idx, nextRoute > idx ? nextRoute : idx + 24000);
   assert.match(body, /validateBody\(schemas\.generateBill\)/,
     'bill create must use request schema validation');
   assert.match(body, /WHERE bills\.status IN \('pending','overdue'\)/,
@@ -895,7 +904,7 @@ test('/api/bills/:id/send fails closed when tenant has no reachable channel', ()
   const postIdx = route.indexOf("r.post('/:id/send'", helperEnd > idx ? helperEnd : idx);
   assert.ok(postIdx > 0, 'should find single bill send route');
   const postBody = route.slice(postIdx, postIdx + 2000);
-  assert.match(postBody, /out\.code === 'NO_TENANT_CHANNEL' \? 409 : 404/,
+  assert.match(postBody, /out\.code === 'NO_TENANT_CHANNEL' \? 409[\s\S]{0,40}: 404/,
     'single-send route must surface no-channel as a conflict, not success');
 });
 
@@ -1780,12 +1789,12 @@ test('payment verification uses canonical bill-before-payment lock order', () =>
   const body = server.slice(idx, server.indexOf('// Helper for both verify endpoints', idx));
   assert.match(body, /SELECT bill_id FROM payments WHERE id=\$1 AND status='pending'/,
     'verify flow must peek payment bill_id before taking locks');
-  assert.match(body, /SELECT id, status, total, deleted_at FROM bills WHERE id=\$1 FOR UPDATE/,
+  assert.match(body, /SELECT id, status, total, late_fee, subtotal, vat, deleted_at FROM bills WHERE id=\$1 FOR UPDATE/,
     'verify flow must lock the bill before locking the payment row');
   assert.match(body, /SELECT \* FROM payments WHERE id=\$1 AND status='pending' FOR UPDATE/,
     'verify flow must re-lock/re-check the payment after locking bill');
   assert.ok(
-    body.indexOf('SELECT id, status, total, deleted_at FROM bills WHERE id=$1 FOR UPDATE')
+    body.indexOf('SELECT id, status, total, late_fee, subtotal, vat, deleted_at FROM bills WHERE id=$1 FOR UPDATE')
       < body.indexOf("SELECT * FROM payments WHERE id=$1 AND status='pending' FOR UPDATE"),
     'bill lock must appear before payment row lock to avoid deadlocks with bill verify-slip');
   assert.match(body, /code: 'PAYMENT_BILL_CHANGED'/,
@@ -1798,7 +1807,7 @@ test('bill payment helpers keep non-null verifier audit values', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'bills-extras.js'), 'utf8');
   assert.match(src, /const verifier = req\.session\?\.user\?\.username \|\| 'admin:unknown'/,
     'bill helpers must fall back to a non-null verifier sentinel');
-  assert.match(src, /verified_by, verified_at[\s\S]{0,600}ref,\s*slipUrl,\s*verifier,\s*JSON\.stringify/,
+  assert.match(src, /verified_by, verified_at[\s\S]*ref,\s*slipUrl,\s*verifier,\s*JSON\.stringify/,
     'manual pay insert must include optional slipUrl column + verifier variable');
   assert.match(src, /UPDATE payments SET status='verified', verified_by=\$1[\s\S]{0,160}\[verifier, pid\]/,
     'verify-slip accept path must use the verifier variable');
@@ -2747,7 +2756,7 @@ test('slip upload re-validates bill.tenant_id under FOR UPDATE lock (BILL_REASSI
   // The locked SELECT must include tenant_id so the reassignment guard has
   // data to compare against.
   assert.match(server,
-    /SELECT id, status, total, tenant_id FROM bills WHERE id=\$1 AND deleted_at IS NULL FOR UPDATE/,
+    /SELECT id, status, total, late_fee, tenant_id FROM bills WHERE id=\$1 AND deleted_at IS NULL FOR UPDATE/,
     'inside-tx lock must fetch tenant_id');
   // The reassignment guard must run + ROLLBACK on mismatch.
   assert.match(server,
@@ -2806,6 +2815,41 @@ test('reports v2 maintenance tab exports CSV and Excel', () => {
     'maintenance tab must not hide CSV/Excel buttons');
   assert.match(reportsRoute, /if \(format === 'csv' \|\| format === 'xlsx'\)[\s\S]{0,900}send\(req, res, exportRows, 'maintenance-stats'\)/,
     'maintenance stats route must return export rows via the shared report sender');
+});
+
+test('admin report exports open new tabs with noopener', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const reportsUi = fs.readFileSync(
+    path.join(__dirname, '..', 'project', 'admin', 'page-reports.jsx'), 'utf8'
+  );
+  const reportsV2Ui = fs.readFileSync(
+    path.join(__dirname, '..', 'project', 'admin', 'page-reports-v2.jsx'), 'utf8'
+  );
+
+  assert.match(reportsUi, /window\.open\(`\/api\/reports\/bills\.xlsx\?period=\$\{encodeURIComponent\(currentPeriod\)\}`, '_blank', 'noopener'\)/,
+    'legacy reports Excel export must not expose window.opener');
+  assert.match(reportsV2Ui, /window\.open\(url, '_blank', 'noopener'\)/,
+    'v2 report exports must not expose window.opener');
+});
+
+test('route modules can be imported without a live DATABASE_URL', () => {
+  const path = require('node:path');
+  const { spawnSync } = require('node:child_process');
+  const root = path.join(__dirname, '..');
+  const env = { ...process.env };
+  delete env.DATABASE_URL;
+  const script = [
+    "delete process.env.DATABASE_URL",
+    "const makeRouter = require('./routes/bills-extras')",
+    "if (typeof makeRouter !== 'function') process.exit(2)",
+  ].join(';');
+  const res = spawnSync(process.execPath, ['-e', script], {
+    cwd: root,
+    env,
+    encoding: 'utf8',
+  });
+  assert.equal(res.status, 0, res.stderr || res.stdout);
 });
 
 test('static assets do not intercept /admin auth route with directory redirect', () => {
@@ -3222,6 +3266,12 @@ test('lineBinding tryBind catches 23505 → clean reason', () => {
     'tryBind must catch the unique-violation code');
   assert.match(src, /reason: 'line_user_already_bound', raceLost: true/,
     'and return the same reason as the dedup branch');
+  assert.match(src, /FOR UPDATE OF b/,
+    'tryBind must lock the binding row so one code cannot be consumed by two concurrent users');
+  assert.match(src, /WHERE id=\$3 AND status='pending'/,
+    'tryBind must only flip a code from pending to bound');
+  assert.match(src, /bound\.rowCount !== 1[\s\S]{0,120}reason: 'already_bound'/,
+    'tryBind must return a clean already_bound result if another transaction consumed the code first');
 });
 
 test('LINE binding only works for active current tenants', () => {
@@ -3230,12 +3280,156 @@ test('LINE binding only works for active current tenants', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'lineBinding.js'), 'utf8');
   assert.match(src, /SELECT id, full_name, line_binding_blocked, status, current_room_id/,
     'issue() must load tenant status and room before issuing a bind code');
+  assert.match(src, /FROM tenants[\s\S]{0,120}FOR UPDATE/,
+    'issue() must lock the tenant row while revoking/creating pending codes');
   assert.match(src, /status !== 'active' \|\| !t\.rows\[0\]\.current_room_id/,
     'issue() must refuse moved-out or roomless tenants');
   assert.match(src, /t\.status AS tenant_status/,
     'tryBind() must load tenant status at bind time too');
   assert.match(src, /reason: 'tenant_not_active'/,
     'tryBind() must fail cleanly if the tenant moved out after code issue');
+});
+
+test('booking-stage LINE binding is issued, guarded, and carried into contract handoff', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const bookingRoute = server.slice(
+    server.indexOf("app.post('/api/bookings/public'"),
+    server.indexOf("// POST /api/notify/bill")
+  );
+  assert.match(bookingRoute, /normaliseBookingPhone\(cleaned\.phone\)/,
+    'public booking must normalise applicant phone before risk checks');
+  assert.match(bookingRoute, /APPLICANT_PHONE_ALREADY_ACTIVE_TENANT/,
+    'public booking must flag a booking from a phone that already has an active tenant');
+  assert.match(bookingRoute, /lineBinding\.issueBooking\(pool,[\s\S]{0,220}createdBy: 'public-booking'/,
+    'public booking must issue a booking-scoped LINE key after the booking is saved');
+  assert.match(bookingRoute, /LINE_BINDING_CODE_FAILED/,
+    'booking submit must fail soft if LINE key issuance is unavailable');
+  assert.match(bookingRoute, /lineBindingError: newBooking\.lineBinding && newBooking\.lineBinding\.error/,
+    'booking audit must record LINE code issuance failures');
+  assert.match(bookingRoute, /LINE: สร้างรหัสผูก LINE ไม่สำเร็จ/,
+    'owner notification must surface when booking LINE code issuance failed');
+  assert.match(server, /function summariseBookingApplicantNotify[\s\S]{0,700}lineRecipientCount/,
+    'booking applicant notification summaries must carry the bound LINE account count');
+  assert.match(server, /function bookingNotifyOwnerLine[\s\S]{0,500}lineRecipientCount/,
+    'owner booking status copy must include the bound LINE account count for admin visibility');
+  assert.match(server, /async function enrichBookingLineBindingStatus/,
+    'booking detail API must enrich LINE status from the canonical line_bindings table');
+  assert.match(server, /lineBinding\.listBookingRecipients\(pool, bookingId\)/,
+    'booking detail API must count booking-scoped LINE recipients instead of trusting stale JSONB only');
+  assert.match(server, /composeBookingDetail\(row, blobBooking\)/,
+    'booking detail API must merge relational and JSONB rows before returning detail');
+  const bindingService = fs.readFileSync(path.join(__dirname, '..', 'services', 'lineBinding.js'), 'utf8');
+  assert.match(bindingService, /FROM bookings[\s\S]{0,120}FOR UPDATE/,
+    'booking-stage LINE code issuance must lock the booking row under concurrent submits');
+
+  const bookingHtml = fs.readFileSync(path.join(__dirname, '..', 'project', 'booking.html'), 'utf8');
+  assert.match(bookingHtml, /line-bind-error/,
+    'public booking success page must visibly warn when LINE code issuance failed');
+  assert.match(bookingHtml, /lineBinding\.nextAction \|\| lineBinding\.message/,
+    'public booking success page must show an actionable fallback when LINE code issuance failed');
+  assert.match(bookingHtml, /success-flow/,
+    'public booking success page must show a clear next-step flow after submit');
+  assert.match(bookingHtml, /lineFlowText/,
+    'public booking success flow must update the LINE step based on key issuance success/failure');
+  assert.match(bookingHtml, /จองให้เพื่อน/,
+    'public booking LINE flow must warn that friend bookings should use the friend LINE account');
+
+  const quickInvite = server.match(/app\.post\('\/api\/contracts\/quick-invite'[\s\S]+?app\.post\('\/api\/contracts\/:id\/invite-tenant'/)[0];
+  assert.match(quickInvite, /TENANT_ALREADY_ACTIVE/,
+    'quick-invite must block a same-phone active tenant from silently claiming another room');
+  assert.match(quickInvite, /lineBinding\.transferBookingBindings\(pool,[\s\S]{0,180}bookingId: bookingIdForRoom,[\s\S]{0,80}tenantId/,
+    'approved booking LINE bindings must transfer to the tenant created during contract handoff');
+});
+
+test('booking LINE pre-bind protects friend/second-room scenarios', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const binding = fs.readFileSync(path.join(__dirname, '..', 'services', 'lineBinding.js'), 'utf8');
+  assert.match(binding, /const isBookingBinding = !row\.tenant_id && !!row\.booking_id/,
+    'booking binding must be an explicit boolean so webhook copy can distinguish pre-tenant binds');
+  assert.match(binding, /reason: sameTenant \|\| sameBooking \? 'already_bound' : 'line_user_already_bound'/,
+    'a LINE already bound to a different tenant/booking must not attach to a new booking');
+
+  const webhook = fs.readFileSync(path.join(__dirname, '..', 'routes', 'webhooks.js'), 'utf8');
+  assert.match(webhook, /\['line_user_already_bound', 'tenant_blocked', 'booking_not_active', 'wrong_oa'\]/,
+    'risky binding failures must be escalated to the owner, not only replied to the LINE user');
+  assert.match(webhook, /subject: 'LINE binding ต้องตรวจสอบ'/,
+    'owner alert must clearly identify LINE binding failures that need admin review');
+  assert.match(webhook, /ถ้าจองให้เพื่อน ให้เพื่อนส่งรหัสนี้ด้วย LINE ของเพื่อนเอง/,
+    'LINE reply must tell an existing tenant not to bind a friend booking with their own LINE');
+  assert.match(webhook, /ถ้าจองอีกห้องให้ตัวเอง ให้แอดมินตรวจสอบ\/รวมข้อมูลก่อนผูก/,
+    'LINE reply must tell second-room cases to go through admin verification');
+});
+
+test('tenant LINE notifications fan out to every bound LINE account', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const notifierSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'notifier.js'), 'utf8');
+  assert.match(notifierSrc, /async function getTenantLineRecipients/,
+    'notifier must expose a recipient resolver');
+  assert.match(notifierSrc, /lineBinding\.listTenantRecipients\(pool, tenantId\)/,
+    'recipient resolver must read all bound line_bindings for the tenant');
+  assert.match(notifierSrc, /for \(const recipient of lineRecipients\)[\s\S]{0,260}pushLineToTenant/,
+    'notifyTenant must push to every bound LINE recipient');
+  assert.match(notifierSrc, /failedRecipients/,
+    'notifyTenant result must show partial fan-out failures');
+  assert.match(notifierSrc, /function appendLineRecipientCount/,
+    'tenant notifications must have one central footer for the LINE binding count');
+  assert.match(notifierSrc, /const text = appendLineRecipientCount\(rawText, lineRecipientCount\)/,
+    'notifyTenant must include how many LINE accounts are bound to this room');
+
+  const bills = fs.readFileSync(path.join(__dirname, '..', 'routes', 'bills-extras.js'), 'utf8');
+  const sendHelper = bills.slice(
+    bills.indexOf('async function enqueueBillNotifications'),
+    bills.indexOf('  // POST /api/bills/:id/send')
+  );
+  assert.match(sendHelper, /notifier\.getTenantLineRecipients\(pool,[\s\S]{0,180}tenant_row_id/,
+    'bill send helper must resolve all LINE recipients instead of using tenants.line_user_id only');
+  assert.match(sendHelper, /const lineBindingCount = lineRecipients\.length/,
+    'bill send helper must compute the room LINE binding count before composing the message');
+  assert.match(sendHelper, /for \(const recipient of lineRecipients\)[\s\S]{0,260}notifQueue\.enqueue/,
+    'bill send helper must enqueue one LINE job per bound LINE account');
+  assert.match(sendHelper, /lineCount: lineBindingCount/,
+    'bill send helper must return/pass the same LINE binding count for admin visibility');
+  assert.match(bills, /lineCount: lineRecipients\.length/,
+    'bill readiness endpoints must expose how many LINE accounts will receive the bill');
+  assert.match(bills, /rowKV\('LINE[\s\S]{0,80}Number\(lineCount\)/,
+    'LINE Flex bill messages must show the bound-account count');
+
+  const scheduler = fs.readFileSync(path.join(__dirname, '..', 'services', 'scheduler.js'), 'utf8');
+  assert.match(scheduler, /notifier\.getTenantLineRecipients\(pool,[\s\S]{0,160}line_oa_id: t\.line_oa_id/,
+    'auto-generated bill notifications must also fan out to every bound LINE account');
+  assert.match(scheduler, /const lineBindingCount = lineRecipients\.length/,
+    'auto-generated bill notifications must include the room LINE binding count');
+  assert.match(scheduler, /const lineBindingCount = recipients\.length/,
+    'payment reminders must include the room LINE binding count');
+
+  const tenantsPage = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-tenants.jsx'), 'utf8');
+  assert.match(tenantsPage, /ออกรหัสเพิ่ม LINE อีกบัญชี/,
+    'tenant UI must make it clear that issuing a new code adds another LINE instead of replacing the old one');
+  assert.match(tenantsPage, /bindingBoundCount/,
+    'tenant UI must render the number of LINE accounts currently bound to the room');
+  const bindingsPage = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-line-bindings.jsx'), 'utf8');
+  assert.match(bindingsPage, /ส่งแจ้งเตือนถึงทุกบัญชีที่ผูกไว้/,
+    'LINE bindings UI must explain multi-recipient bill notification behaviour');
+  assert.match(bindingsPage, /counts\.boundAccounts/,
+    'LINE bindings overview must show the total number of bound LINE accounts');
+  assert.match(bindingsPage, /label: `[\s\S]{0,80}\$\{boundCount\}[\s\S]{0,40}`/,
+    'LINE bindings table rows must show the bound LINE account count per tenant');
+
+  const adminLineBindings = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-line-bindings.js'), 'utf8');
+  assert.match(adminLineBindings, /boundAccounts/,
+    'admin LINE bindings API must return the total bound account counter');
+  assert.match(adminLineBindings, /boundCount > 0/,
+    'admin LINE bindings API must treat rows with bound_count as bound even if the tenant cache is stale');
+
+  const webhooks = fs.readFileSync(path.join(__dirname, '..', 'routes', 'webhooks.js'), 'utf8');
+  assert.match(webhooks, /bindingCountLine/,
+    'successful LINE binding replies must tell the user how many accounts are now bound');
+  assert.match(webhooks, /listTenantRecipients\(pool, result\.tenantId\)/,
+    'webhook success copy must count tenant-bound LINE recipients from the canonical binding rows');
 });
 
 test('CSV escapes CR + neutralises formula leaders', () => {
@@ -3501,7 +3695,10 @@ test('booking approval keeps JSONB and rooms_v2 room locks consistent', () => {
 test('booking cancellation releases only its own reserved room', () => {
   // Approved bookings reserve a room. If admin cancels before contract
   // handoff, the room must become vacant again, but only when reservedBy
-  // matches this booking id so we never free someone else's room.
+  // matches this booking id so we never free someone else's room. Approval
+  // also mirrors the applicant into tenants.current_room_id; cancellation
+  // must clear that pre-contract tenant link or the portal/health checks
+  // keep seeing a resident who never moved in.
   const fs = require('node:fs');
   const path = require('node:path');
   const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
@@ -3516,6 +3713,20 @@ test('booking cancellation releases only its own reserved room', () => {
     'completed booking cancellation must refuse release while a linked contract is active');
   assert.match(block, /const \{ tenant, reservedBy, reservedAt,[\s\S]{0,80}\} = room/,
     'release must drop stale tenant/reservation metadata from the room blob');
+  assert.match(block,
+    /const tenantClauses = \[[\s\S]{0,180}`current_room_id=\$1`[\s\S]{0,80}`status='active'`[\s\S]{0,80}`deleted_at IS NULL`/,
+    'release must scope tenant cleanup to the released room and active tenant');
+  assert.match(block,
+    /SELECT id, full_name, phone[\s\S]{0,220}FROM tenants[\s\S]{0,180}WHERE \$\{tenantClauses\.join\(' AND '\)\}[\s\S]{0,160}FOR UPDATE/,
+    'release must lock and find the mirrored tenant before cleanup');
+  assert.match(block,
+    /SELECT id FROM contracts[\s\S]{0,160}tenant_id=\$1 AND room_id=\$2[\s\S]{0,160}status='active'/,
+    'release must not move out a tenant that already has an active contract');
+  assert.match(block,
+    /UPDATE tenants[\s\S]{0,180}SET status='moved_out',[\s\S]{0,120}current_room_id=NULL/,
+    'release must clear the pre-contract tenant link created by booking approval');
+  assert.match(block, /releasedTenant/,
+    'response must tell the admin UI when tenant cleanup happened');
   assert.match(block,
     /UPDATE rooms_v2 SET status='vacant', updated_at=NOW\(\)[\s\S]{0,120}WHERE room_code=\$1 AND status='reserved'/,
     'rooms_v2 must be released only from reserved status');
@@ -3606,8 +3817,22 @@ test('booking-approve notify uses tenant matched to assigned room when possible'
   const path = require('node:path');
   const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   assert.match(src,
-    /WHERE phone=\$1 AND current_room_id=\$2 AND deleted_at IS NULL/,
+    /WHERE phone=\$1 AND current_room_id=\$2[\s\S]{0,120}deleted_at IS NULL AND status='active'/,
     'must prefer phone+room match before falling back to phone-only');
+  assert.match(src, /async function notifyBookingApplicantStatus/,
+    'booking status notifications must use the shared applicant notify helper');
+  assert.match(src, /if \(!tenantInfo\.line_user_id && !tenantInfo\.lineRecipients\.length && !tenantInfo\.email && !tenantInfo\.phone\)/,
+    'applicants with no reachable channel must be reported as manual follow-up');
+  assert.match(src, /const hasBookingLineRecipients = tenantInfo\.lineRecipients\.length > 0/,
+    'booking-scoped LINE recipients must be detected before same-phone tenant enrichment');
+  assert.match(src, /if \(phone && !hasBookingLineRecipients\)/,
+    'friend or second-room booking notices must not be sent to an old same-phone tenant LINE after booking pre-bind');
+  assert.match(src, /notifier\.notifyTenant\([\s\S]{0,160}tenantInfo/,
+    'booking notifications must still pass phone-only applicants into notifyTenant so SMS can be used');
+  assert.doesNotMatch(src, /if \(tenantInfo\.line_user_id \|\| tenantInfo\.email\) \{[\s\S]{0,260}notifyTenant/,
+    'booking notifications must not skip phone-only applicants before the SMS fallback');
+  assert.match(src, /tenantNotify[\s\S]{0,120}requiresManualContact/,
+    'API response must tell the admin UI when staff must call the applicant');
 });
 
 test('anomaly detector partial-recovery does not say "ระบบกลับมาทำงานปกติ"', () => {
@@ -4035,6 +4260,36 @@ test('bookings admin UI handles terminal statuses and uses valid reopen/cancel t
     'unknown/legacy booking statuses must not crash the table or drawer');
   assert.match(src, /active\.status === 'approved'[\s\S]{0,900}updateStatus\(active\.id, 'cancelled'\)/,
     'approved booking button must cancel/release, not return to pending');
+  assert.match(src, /releasedTenant[\s\S]{0,180}เคลียร์ผู้เช่าที่ผูกจาก booking แล้ว/,
+    'cancel/reject toast must make tenant cleanup visible to admins');
+  assert.match(src, /const bookingNotifyText[\s\S]{0,900}ยังแจ้งอัตโนมัติไม่ได้ กรุณาโทรแจ้งผู้จอง/,
+    'booking status toasts must tell admins when applicant notification needs a phone call');
+  assert.match(src, /lineRecipientCount/,
+    'booking status toasts must include how many LINE accounts are bound to the booking/room');
+  assert.match(src, /lineCountText/,
+    'booking status toast copy must append the bound LINE account count when available');
+  assert.match(src, /const openBookingDetail = async \(bookingOrId\)/,
+    'booking drawer must refresh the selected booking detail before trusting cached list data');
+  assert.match(src, /apiCall\(`\/api\/bookings\/\$\{encodeURIComponent\(id\)\}`\)/,
+    'booking drawer refresh must use the CSRF-aware JSON API helper');
+  assert.match(src, /onRowClick=\{openBookingDetail\}/,
+    'booking rows must open through the latest-detail loader');
+  assert.match(src, /function BookingFlowChecklist/,
+    'booking detail drawer must show a single flow checklist from request to contract/bill');
+  assert.match(src, /Flow การจองจนถึงสัญญา/,
+    'booking flow checklist title must be visible to admins');
+  assert.match(src, /lineStepState = lineCount > 0 \? 'done' : \(lineFailed \|\| lineLookupError \|\| lineNeedsReissue \|\| linePending \? 'warn' : 'wait'\)/,
+    'issued-but-unbound LINE keys must stay in follow-up state, not done');
+  assert.match(src, /\u0e22\u0e31\u0e07\u0e44\u0e21\u0e48\u0e16\u0e37\u0e2d\u0e27\u0e48\u0e32\u0e1c\u0e39\u0e01\u0e2a\u0e33\u0e40\u0e23\u0e47\u0e08/,
+    'booking flow checklist must explicitly say pending LINE code is not bound yet');
+  assert.match(src, /ออกคีย์ให้ผู้จองแล้ว[\s\S]{0,160}ถ้าจองให้เพื่อน/,
+    'booking flow checklist must explain the friend-booking LINE guard');
+  assert.match(src, /updateStatus\(id, 'rejected', \{ adminNotes: rejectReason \}\)/,
+    'rejection must send the visible reason to the backend notification text');
+  assert.match(src, /เหตุผลที่แจ้งผู้จอง/,
+    'reject modal must collect the reason shown to the applicant');
+  assert.match(src, /disabled=\{actionReason\.trim\(\)\.length < 5\}>ปฏิเสธการจอง/,
+    'reject action must block empty reasons so applicant notices are clear');
   assert.doesNotMatch(src, /active\.status === 'approved'[\s\S]{0,900}updateStatus\(active\.id, 'pending'\)/,
     'approved → pending is forbidden by the backend state machine');
   assert.match(src, /active\.status === 'rejected'[\s\S]{0,260}type: 'reopen'/,
@@ -5593,5 +5848,197 @@ test('LINE notifications validate userId shape before push or queue retry', () =
   assert.match(notifier, /invalid LINE userId shape/);
   assert.match(queue, /invalid LINE recipient/);
   assert.match(tenantOps, /INVALID_LINE_USER_ID/);
-  assert.match(scheduler, /lineNotify\.isLikelyUserId\(t\.line_user_id\)/);
+  assert.match(scheduler, /notifier\.getTenantLineRecipients\(pool,/,
+    'scheduler must resolve validated LINE recipients through notifier before queueing');
+});
+
+// === R2-followup integration guards ======================================
+// Defensive guards added after the cross-feature audit. Pin them via source
+// regex so a future refactor that drops a guard surfaces immediately.
+
+test('tickLateFee: holds late_fee on bills with a pending slip (fairness guard)', () => {
+  // R2-followup — when tenant uploaded a slip BEFORE tickLateFee, applying
+  // late_fee retroactively would penalise the tenant for the scheduler's
+  // timing. Both Phase A (flip) and Phase B (refresh) must skip such bills.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'scheduler.js'), 'utf8');
+  assert.match(src, /pending_slip_count/,
+    'Phase A flipped-bill query must surface pending_slip_count');
+  assert.match(src, /bill\.late_fee_skipped_pending_slip/,
+    'Phase A must audit-log the skip so admin can see why fees didn\'t apply');
+  assert.match(src, /NOT EXISTS \(\s*SELECT 1 FROM payments p\s*WHERE p\.bill_id = b\.id AND p\.status = 'pending'\s*\)/,
+    'Phase B sweep must filter out bills with pending slips via SQL');
+});
+
+test('validatePaymentAmount: exported + used by all 4 verify entry points', () => {
+  // R2-followup — payment.amount can match either current bill.total OR
+  // (subtotal+vat) principal. All four enforcement points must call
+  // validatePaymentAmount instead of the legacy strict equality, then call
+  // validatePaidLedger before flipping a bill to paid.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const billing = fs.readFileSync(path.join(__dirname, '..', 'services', 'billing.js'), 'utf8');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const billsExtras = fs.readFileSync(path.join(__dirname, '..', 'routes', 'bills-extras.js'), 'utf8');
+  assert.match(billing, /function validatePaymentAmount/, 'helper must exist');
+  assert.match(billing, /validatePaymentAmount,/, 'helper must be exported');
+  assert.match(billing, /function validatePaidLedger/, 'paid-ledger helper must exist');
+  assert.match(billing, /validatePaidLedger,/, 'paid-ledger helper must be exported');
+  // Tenant slip upload (server.js#tenantPaymentUploadHandler).
+  assert.match(server, /billing\.validatePaymentAmount/,
+    'tenant slip upload + admin verify must use the shared helper');
+  // Admin /api/bills/:id/pay (manual offline payment).
+  assert.match(billsExtras, /billing\.validatePaymentAmount/,
+    'admin manual pay + verify-slip must use the shared helper');
+  assert.ok((server.match(/billing\.validatePaidLedger/g) || []).length >= 2,
+    'tenant slip upload + admin verify must guard the paid ledger');
+  assert.ok((billsExtras.match(/billing\.validatePaidLedger/g) || []).length >= 2,
+    'admin manual pay + verify-slip must guard the paid ledger');
+  assert.match(server, /PAID_LEDGER_INCONSISTENT/);
+  assert.match(billsExtras, /PAID_LEDGER_INCONSISTENT/);
+  // The principal-tier waiver pattern is the same string in both paths.
+  assert.match(server, /bill\.late_fee_waived_on_principal_payment/);
+  assert.match(billsExtras, /bill\.late_fee_waived_on_principal_payment/,
+    'both /pay and /verify-slip must emit the same audit action when waiving');
+});
+
+test('manual bill pay rollback cleans uploaded slip evidence', () => {
+  // Admin manual-pay uploads slip evidence before the DB transaction starts.
+  // Any later validation failure must rollback AND remove that unattached file.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'bills-extras.js'), 'utf8');
+  assert.match(src, /const cleanupUploadedSlip = \(\) => \{/,
+    'manual pay must define one cleanup path for pre-uploaded evidence');
+  assert.match(src, /const rollbackManualPay = async \(\) => \{[\s\S]{0,120}cleanupUploadedSlip\(\);/,
+    'manual pay rollback helper must remove uploaded evidence');
+  assert.match(src, /if \(!amountCheck\.ok\) \{[\s\S]{0,80}await rollbackManualPay\(\);/,
+    'amount mismatch must use rollback+cleanup');
+  assert.match(src, /if \(!paidLedgerCheck\.ok\) \{[\s\S]{0,80}await rollbackManualPay\(\);/,
+    'paid-ledger mismatch must use rollback+cleanup');
+});
+
+test('enqueueBillNotifications: 1-min cooldown to bullet-proof admin/scheduler race', () => {
+  // R7-followup — admin clicking /send within 60s of tickPaymentReminder
+  // would push the tenant a duplicate. Helper enforces the cooldown unless
+  // caller passes force:true (admin "บังคับส่งซ้ำ" checkbox).
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'bills-extras.js'), 'utf8');
+  assert.match(src, /REMINDER_COOLDOWN_MS\s*=\s*60_000/,
+    'helper must define a 1-minute cooldown constant');
+  assert.match(src, /REMINDER_COOLDOWN/,
+    'cooldown rejection must surface a distinct error code');
+  assert.match(src, /if \(!_opts\.force && billQ\.rows\[0\]\.last_reminded_at\)/,
+    'cooldown must respect force-flag to allow explicit admin override');
+  // POST /:id/send must thread the force flag through.
+  assert.match(src, /const force = req\.body\?\.force === true/,
+    '/send endpoint must accept force in body for the override path');
+});
+
+test('healthCheck: bills.total = subtotal + vat + late_fee invariant', () => {
+  // R2-followup — manual SQL fixes or future refactors could leave the
+  // trio inconsistent. Surface in /admin#health so ops catches drift early.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'healthCheck.js'), 'utf8');
+  assert.match(src, /bills_with_total_breakdown_mismatch/,
+    'healthCheck must define the breakdown invariant counter');
+  assert.match(src, /ABS\(total - \(COALESCE\(subtotal,0\) \+ COALESCE\(vat,0\) \+ COALESCE\(late_fee,0\)\)\) > 0\.02/,
+    'invariant SQL must tolerate sub-cent drift but flag real mismatches');
+  assert.match(src, /bills have total inconsistent with subtotal \+ vat \+ late_fee breakdown/,
+    'invariant must surface as a user-facing error message');
+});
+
+test('unmark-paid: recomputes late_fee when restoring to overdue (R2-followup)', () => {
+  // After tier='principal' waiver + admin unmark-paid, the bill must
+  // re-acquire the late_fee that was waived in good faith. Without this
+  // eager recompute the bill would sit at principal until the next daily
+  // tickLateFee — confusing for admin who expects unmark-paid to mean
+  // "restore the state as if pay never happened".
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'bills-extras.js'), 'utf8');
+  assert.match(src, /restoredLateFee/, 'unmark-paid must compute restoredLateFee');
+  assert.match(src, /billing\.computeLateFee\(\{[\s\S]{0,400}\}\)/,
+    'unmark-paid must call computeLateFee with the principal base');
+  assert.match(src, /SET status=\$2,\s*paid_at=NULL,\s*late_fee=\$3::numeric,\s*total=\$4::numeric/,
+    'unmark-paid must write late_fee + total back atomically with status');
+});
+
+test('revenue report: breaks down rent / utilities / vat / late_fee (R2-followup)', () => {
+  // CFOs need separation between rental revenue, pass-through utilities,
+  // VAT collected for the tax authority, and penalty income.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'reports.js'), 'utf8');
+  assert.match(src, /rent_amount/, 'must surface SUM(rent)');
+  assert.match(src, /utilities_amount/, 'must surface utilities sum');
+  assert.match(src, /late_fee_amount/, 'must surface late_fee sum');
+  assert.match(src, /vat_amount/, 'must surface VAT sum');
+  assert.match(src, /paid_vat_amount/,
+    'must separate collected (paid) VAT from invoiced VAT for tax filing');
+  assert.match(src, /jsonb_array_elements\(COALESCE\(other,'\[\]'::jsonb\)\)/,
+    'recurring other amounts must be summed from the JSONB array');
+});
+
+test('aged-receivable report: queries bills table, not rooms blob (R2-followup)', () => {
+  // The old rooms-blob path missed late_fee accrual + relied on a counter
+  // that drifted when daily ticks were skipped. Switching to bills.due_date
+  // makes the buckets reflect what tenants actually owe.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'reports.js'), 'utf8');
+  assert.match(src, /CURRENT_DATE - due_date/, 'must bucket by actual days past due_date');
+  assert.match(src, /AND paid_at IS NULL\s*AND status IN \('pending','overdue'\)/,
+    'must exclude paid bills from receivable buckets');
+  assert.match(src, /late_fee_amount/,
+    'must surface late_fee sum per bucket so admin can see penalty accumulation');
+  assert.match(src, /source: 'bills'/, 'response must declare the data source for client display');
+});
+
+test('tenant.jsx: strips -T${id} suffix from bill_no for display (R4-followup)', () => {
+  // The admin-side bill_no (INV-2026-05-201-T42) is unambiguous but
+  // confusing to tenants — strip the suffix in the tenant portal.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'tenant.jsx'), 'utf8');
+  assert.match(src, /function fmtBillNoForTenant/, 'helper must exist');
+  // Confirm the helper is actually CALLED in at least one BillRow / BillModal site.
+  assert.match(src, /fmtBillNoForTenant\(bill\.bill_no\)/,
+    'helper must be applied to the bill row + modal title');
+});
+
+test('page-payments.jsx: surfaces tier-aware mismatch alert (R2-followup)', () => {
+  // Admin scanning the slip queue needs visual cues for which tier the
+  // amount falls into — exact (green), principal-good-faith (amber),
+  // or hard mismatch (red).
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-payments.jsx'), 'utf8');
+  assert.match(src, /amountTier/,
+    'admin payments UI must read amountTier from verify_payload');
+  assert.match(src, /ผู้เช่าจ่ายค่าเช่าสุจริต/,
+    'principal-tier alert must explain the good-faith waiver behaviour');
+});
+
+test('hooks.jsx: ERROR_CODE_MAP handles new R2/R3/R7 error codes', () => {
+  // Frontend must show Thai-friendly explanations for the new error
+  // codes the backend emits. Generic "ขัดข้อง" without context leaves
+  // admin stuck guessing what went wrong.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'hooks.jsx'), 'utf8');
+  for (const code of [
+    'BILL_TOTAL_DRIFT',         // R3
+    'BILL_RECOMPUTE_FAILED',    // R3
+    'OVERRIDE_REASON_REQUIRED', // R3
+    'PAYMENT_AMOUNT_MISMATCH',  // R2-followup
+    'AMOUNT_NOT_BILL_TOTAL',    // R2-followup
+    'REMINDER_COOLDOWN',        // R7-followup
+  ]) {
+    assert.match(src, new RegExp(code + ':\\s*\\{'),
+      `ERROR_CODE_MAP must define ${code} with title + description`);
+  }
 });

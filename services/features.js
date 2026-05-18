@@ -149,6 +149,24 @@ const DEFAULTS = Object.freeze({
     dayOfMonth: 1,               // run on the 1st of each month
     // dueDay lives in config.notify.dueOnDay so manual + auto share it.
   },
+  // R7 — daily pre-due payment reminder. Default OFF so existing deploys
+  // don't suddenly start sending extra LINE pushes to tenants without an
+  // explicit opt-in. Once enabled, the scheduler.tickPaymentReminder pings
+  // tenants whose bill's due_date matches CURRENT_DATE + offset for each
+  // offset in `daysBeforeDue`. Idempotent per day via bills.last_reminded_at.
+  paymentReminder: {
+    enabled: false,
+    // [3, 0] = remind 3 days before due, then on the due date itself.
+    // Operators wanting an earlier nudge can pass [7, 3, 0]; safety-clamped
+    // to integers in [0, 30] (negatives are "overdue" territory handled by
+    // tickLateFee; >30 days is almost always a typo on a ~15-day bill window).
+    daysBeforeDue: [3, 0],
+    // When true, also remind tenants daily for bills already in 'overdue'
+    // status until paid. Default false because tickLateFee already handles
+    // the flip-day notification + access-sync covers card-suspension warnings
+    // — a third daily channel often crosses into "harassment" territory.
+    includeOverdue: false,
+  },
   // Tenancy contract / identity capture defaults. These describe the
   // safety guards admin can tune from the Features page — none of them
   // require new code paths to function, they just adjust how strict the

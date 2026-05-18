@@ -195,6 +195,25 @@ function fmtMonthTH(d) {
   const months = ['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.','ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'];
   return `${months[dt.getMonth()]} ${dt.getFullYear() + 543}`;
 }
+// R4 — format bill_no for display. Backend's services/billing.js#makeBillNo
+// can emit:
+//   INV-2026-05-201            (single-tenant, single-bill case — the default)
+//   INV-2026-05-201-T42        (two-tenant-in-same-room-period collision case)
+//   INV-2026-05-201-T42-2      (rare double collision attempt)
+// Showing the raw bill_no with -T42 suffix confuses tenants (they don't
+// know what "T42" means). For TENANT-FACING UI, strip the suffix and add
+// a friendlier "(ผู้เช่า: คุณ X)" hint when the surrounding context has
+// the tenant name. ADMIN UI keeps the raw value for unambiguous lookup
+// — admin needs to be able to copy/search the full bill_no.
+function fmtBillNoDisplay(billNo, opts = {}) {
+  const raw = String(billNo || '');
+  if (!raw) return '';
+  if (opts.context === 'admin') return raw;     // admin sees the full id
+  // Strip "-T${id}" and any trailing attempt suffix. The roomId may legally
+  // contain digits + hyphens (e.g. "B-101") so we anchor on the literal
+  // "-T" + digits sentinel, which the room id never carries.
+  return raw.replace(/-T\d+(?:-\d+)?$/, '');
+}
 function contractTodayYmd() {
   const dt = new Date();
   dt.setMinutes(dt.getMinutes() - dt.getTimezoneOffset());

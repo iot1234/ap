@@ -119,35 +119,106 @@ module.exports = function buildReportsRouter(ctx) {
     }
   });
 
-  // GET /api/reports/aged-receivable — buckets overdue rooms by days late
-  // using the overdueDays field already maintained in the rooms blob.
+  // GET /api/reports/aged-receivable — buckets overdue receivables by days late.
+  //
+  // R2-followup — switched from the rooms blob (static room.rent +
+  // overdueDays counter, which never saw late_fee accrual) to the bills
+  // table. The bills table is the legal ledger and includes the late_fee
+  // that scheduler.tickLateFee applies in-place; using it means the
+  // aged-receivable totals match what the tenant actually owes today.
+  //
+  // Buckets calculated from `due_date` (DATE), not from a precomputed
+  // counter, so a missed daily tick can't make a 65-day-overdue bill
+  // appear in the "31-60" bucket. The room blob path is kept for legacy
+  // dashboards that still depend on it — we route through bills primarily
+  // but fall back if the bills table is empty or unavailable.
   r.get('/aged-receivable', requireAuth, managerOrOwner, async (_req, res) => {
     try {
-      const { rows } = await pool.query(
-        `SELECT value FROM app_data WHERE key='baankarn_rooms_v1'`
+      // Bucket by ACTUAL days past due_date — CURRENT_DATE - due_date.
+      // Aggregate the live bills.total (which already includes any
+      // late_fee scheduler.tickLateFee has applied).
+      const { rows: billBuckets } = await pool.query(
+        `SELECT
+           CASE
+             WHEN CURRENT_DATE - due_date <= 30 THEN 'current'
+             WHEN CURRENT_DATE - due_date <= 60 THEN 'late_30'
+             WHEN CURRENT_DATE - due_date <= 90 THEN 'late_60'
+             ELSE                                   'late_90'
+           END AS bucket,
+           COUNT(*)::int AS bills,
+           COUNT(DISTINCT room_id)::int AS rooms,
+           COALESCE(SUM(total), 0)::numeric(12,2) AS amount,
+           COALESCE(SUM(COALESCE(late_fee,0)), 0)::numeric(12,2) AS late_fee_amount
+          FROM bills
+         WHERE deleted_at IS NULL
+           AND paid_at IS NULL
+           AND status IN ('pending','overdue')
+           AND due_date < CURRENT_DATE
+         GROUP BY bucket`
       );
-      const roomsObj = rows.length ? rows[0].value : {};
-      const buckets = {
-        'current': { range: '0-30', rooms: 0, amount: 0 },
-        'late_30': { range: '31-60', rooms: 0, amount: 0 },
-        'late_60': { range: '61-90', rooms: 0, amount: 0 },
-        'late_90': { range: '90+',   rooms: 0, amount: 0 },
+      const labels = {
+        current: '0-30',
+        late_30: '31-60',
+        late_60: '61-90',
+        late_90: '90+',
       };
-      Object.values(roomsObj || {}).forEach((rm) => {
-        if (rm.status !== 'overdue') return;
-        const days = Number(rm.overdueDays) || 0;
-        const amt = Number(rm.rent) || 0;
-        let key = 'current';
-        if (days > 90)      key = 'late_90';
-        else if (days > 60) key = 'late_60';
-        else if (days > 30) key = 'late_30';
-        buckets[key].rooms += 1;
-        buckets[key].amount += amt;
+      const empty = (key) => ({
+        bucket: key, range: labels[key],
+        bills: 0, rooms: 0, amount: 0, late_fee_amount: 0,
       });
-      res.json({ ok: true, buckets: Object.values(buckets) });
+      const buckets = {
+        current: empty('current'),
+        late_30: empty('late_30'),
+        late_60: empty('late_60'),
+        late_90: empty('late_90'),
+      };
+      for (const r of billBuckets) {
+        if (!buckets[r.bucket]) continue;
+        buckets[r.bucket] = {
+          bucket: r.bucket,
+          range: labels[r.bucket],
+          bills: Number(r.bills) || 0,
+          rooms: Number(r.rooms) || 0,
+          amount: Number(r.amount) || 0,
+          late_fee_amount: Number(r.late_fee_amount) || 0,
+        };
+      }
+      res.json({
+        ok: true,
+        source: 'bills',           // identifies which data path produced the result
+        buckets: Object.values(buckets),
+      });
     } catch (err) {
       console.error('reports aged-receivable error:', err);
-      res.status(500).json({ error: 'internal error' });
+      // Fallback to the old rooms-blob path if the bills table can't be
+      // queried (very old deploys without the relational layer).
+      try {
+        const { rows } = await pool.query(
+          `SELECT value FROM app_data WHERE key='baankarn_rooms_v1'`
+        );
+        const roomsObj = rows.length ? rows[0].value : {};
+        const labels = { current: '0-30', late_30: '31-60', late_60: '61-90', late_90: '90+' };
+        const buckets = {
+          current: { bucket: 'current', range: labels.current, rooms: 0, amount: 0, late_fee_amount: 0, bills: 0 },
+          late_30: { bucket: 'late_30', range: labels.late_30, rooms: 0, amount: 0, late_fee_amount: 0, bills: 0 },
+          late_60: { bucket: 'late_60', range: labels.late_60, rooms: 0, amount: 0, late_fee_amount: 0, bills: 0 },
+          late_90: { bucket: 'late_90', range: labels.late_90, rooms: 0, amount: 0, late_fee_amount: 0, bills: 0 },
+        };
+        Object.values(roomsObj || {}).forEach((rm) => {
+          if (rm.status !== 'overdue') return;
+          const days = Number(rm.overdueDays) || 0;
+          let key = 'current';
+          if (days > 90)      key = 'late_90';
+          else if (days > 60) key = 'late_60';
+          else if (days > 30) key = 'late_30';
+          buckets[key].rooms += 1;
+          buckets[key].amount += Number(rm.rent) || 0;
+        });
+        res.json({ ok: true, source: 'rooms-fallback', buckets: Object.values(buckets) });
+      } catch (err2) {
+        console.error('reports aged-receivable fallback error:', err2);
+        res.status(500).json({ error: 'internal error' });
+      }
     }
   });
 
@@ -312,19 +383,45 @@ module.exports = function buildReportsRouter(ctx) {
   });
 
   // GET /api/reports/revenue?year=2026&month=5
-  // Sum of paid bills per period. If month omitted → 12-month series for the year.
+  // Sum of paid bills per period. If month omitted → 12-month series.
+  //
+  // R2-followup — also breaks the total down per revenue stream:
+  //   - rent_amount       (locked-in rent — for top-line revenue tracking)
+  //   - utilities_amount  (water + elec + wifi — pass-through cost)
+  //   - other_amount      (recurring extras: parking, cleaning, etc.)
+  //   - vat_amount        (collected for the tax authority — NOT revenue)
+  //   - late_fee_amount   (penalty income, separate from operating revenue)
+  // Helps the operator answer accountant-style questions like "how much
+  // VAT did we collect last month?" and "what's our real rent revenue
+  // excluding late fees and pass-through utilities?" — those used to live
+  // inside the single `total` column and had to be teased apart manually.
   r.get('/revenue', requireAuth, managerOrOwner, async (req, res) => {
     const year = Number(req.query.year) || new Date().getFullYear();
     const month = req.query.month ? Number(req.query.month) : null;
+    // The "other" column carries an array of {label, amount} for recurring
+    // charges. Reduce to a single numeric per row via a CTE expression so
+    // SQL handles the math instead of round-tripping JSONB to Node.
+    const breakdownExpr = `
+      COUNT(*)::int AS bills,
+      COALESCE(SUM(total), 0)::numeric(12,2) AS total_amount,
+      COALESCE(SUM(CASE WHEN status='paid' THEN total ELSE 0 END), 0)::numeric(12,2) AS paid_amount,
+      COALESCE(SUM(CASE WHEN status='overdue' THEN total ELSE 0 END), 0)::numeric(12,2) AS overdue_amount,
+      COALESCE(SUM(rent), 0)::numeric(12,2) AS rent_amount,
+      COALESCE(SUM(COALESCE(water_amount,0) + COALESCE(elec_amount,0) + COALESCE(wifi,0)), 0)::numeric(12,2) AS utilities_amount,
+      COALESCE(SUM(COALESCE((
+        SELECT SUM((elem->>'amount')::numeric)
+          FROM jsonb_array_elements(COALESCE(other,'[]'::jsonb)) AS elem
+      ), 0)), 0)::numeric(12,2) AS other_amount,
+      COALESCE(SUM(COALESCE(vat,0)), 0)::numeric(12,2) AS vat_amount,
+      COALESCE(SUM(COALESCE(late_fee,0)), 0)::numeric(12,2) AS late_fee_amount,
+      COALESCE(SUM(CASE WHEN status='paid' THEN COALESCE(vat,0) ELSE 0 END), 0)::numeric(12,2) AS paid_vat_amount,
+      COALESCE(SUM(CASE WHEN status='paid' THEN COALESCE(late_fee,0) ELSE 0 END), 0)::numeric(12,2) AS paid_late_fee_amount`;
     try {
       let rows;
       if (month) {
         const period = `${year}-${String(month).padStart(2, '0')}`;
         const q = await pool.query(
-          `SELECT period, COUNT(*)::int AS bills,
-                  COALESCE(SUM(total)::numeric, 0)::numeric(12,2) AS total_amount,
-                  COALESCE(SUM(CASE WHEN status='paid' THEN total ELSE 0 END), 0)::numeric(12,2) AS paid_amount,
-                  COALESCE(SUM(CASE WHEN status='overdue' THEN total ELSE 0 END), 0)::numeric(12,2) AS overdue_amount
+          `SELECT period, ${breakdownExpr}
              FROM bills WHERE deleted_at IS NULL AND period=$1 GROUP BY period`,
           [period]
         );
@@ -333,19 +430,20 @@ module.exports = function buildReportsRouter(ctx) {
         const periods = [];
         for (let m = 1; m <= 12; m++) periods.push(`${year}-${String(m).padStart(2, '0')}`);
         const q = await pool.query(
-          `SELECT period, COUNT(*)::int AS bills,
-                  COALESCE(SUM(total), 0)::numeric(12,2) AS total_amount,
-                  COALESCE(SUM(CASE WHEN status='paid' THEN total ELSE 0 END), 0)::numeric(12,2) AS paid_amount,
-                  COALESCE(SUM(CASE WHEN status='overdue' THEN total ELSE 0 END), 0)::numeric(12,2) AS overdue_amount
+          `SELECT period, ${breakdownExpr}
              FROM bills WHERE deleted_at IS NULL AND period = ANY($1)
              GROUP BY period ORDER BY period ASC`,
           [periods]
         );
         // Fill missing months with zeros so charts have a full series.
+        const empty = {
+          bills: 0, total_amount: 0, paid_amount: 0, overdue_amount: 0,
+          rent_amount: 0, utilities_amount: 0, other_amount: 0,
+          vat_amount: 0, late_fee_amount: 0,
+          paid_vat_amount: 0, paid_late_fee_amount: 0,
+        };
         const byPeriod = Object.fromEntries(q.rows.map((r) => [r.period, r]));
-        rows = periods.map((p) => byPeriod[p] || {
-          period: p, bills: 0, total_amount: 0, paid_amount: 0, overdue_amount: 0,
-        });
+        rows = periods.map((p) => byPeriod[p] || { period: p, ...empty });
       }
       send(req, res, rows, `revenue-${year}${month ? '-' + month : ''}`);
     } catch (err) {

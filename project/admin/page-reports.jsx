@@ -239,7 +239,7 @@ function PageReports({ rooms, config, addActivity, setToast }) {
               setTimeout(() => window.printPage(), 300);
             }}>ส่งออก PDF</Btn>
             <Btn variant="secondary" icon="📊" onClick={() => {
-              window.open(`/api/reports/bills.xlsx?period=${encodeURIComponent(currentPeriod)}`, '_blank');
+              window.open(`/api/reports/bills.xlsx?period=${encodeURIComponent(currentPeriod)}`, '_blank', 'noopener');
               addActivity && addActivity({ icon: '📊', text: 'ดาวน์โหลดบิลทั้งหอเป็น Excel', type: 'system' });
             }}>Excel บิลทั้งหอ</Btn>
           </>

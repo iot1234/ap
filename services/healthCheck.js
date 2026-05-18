@@ -604,6 +604,16 @@ async function checkDataIntegrity(pool) {
           WHERE deleted_at IS NULL
             AND (status NOT IN ('pending','paid','overdue','void')
                  OR total <= 0 OR subtotal < 0)) AS invalid_bill_rows,
+        -- R2-followup — invariant: total = subtotal + vat + late_fee.
+        -- scheduler.tickLateFee updates late_fee + total atomically; this
+        -- check catches any path that drifts the trio (manual SQL fix,
+        -- partial migration, future refactor that forgets to keep them in
+        -- sync). Tolerance 0.02 absorbs the worst case of two-direction
+        -- round2() drift on the three components.
+        (SELECT COUNT(*)::int FROM bills
+          WHERE deleted_at IS NULL
+            AND ABS(total - (COALESCE(subtotal,0) + COALESCE(vat,0) + COALESCE(late_fee,0))) > 0.02
+        ) AS bills_with_total_breakdown_mismatch,
         (SELECT COUNT(*)::int FROM payments
           WHERE status NOT IN ('pending','verified','rejected')
              OR amount <= 0) AS invalid_payment_rows,
@@ -929,6 +939,8 @@ async function checkDataIntegrity(pool) {
         payment_amount_mismatch: Number(counts.payment_amount_mismatch) || 0,
         duplicate_verified_payments_per_bill: Number(counts.duplicate_verified_payments_per_bill) || 0,
         invalid_bill_rows: Number(counts.invalid_bill_rows) || 0,
+        // R2-followup — invariant total = subtotal + vat + late_fee.
+        bills_with_total_breakdown_mismatch: Number(counts.bills_with_total_breakdown_mismatch) || 0,
         invalid_payment_rows: Number(counts.invalid_payment_rows) || 0,
         active_tenant_room_status_mismatch: Number(counts.active_tenant_room_status_mismatch) || 0,
         active_tenants_without_room: Number(counts.active_tenants_without_room) || 0,
@@ -1022,6 +1034,14 @@ async function checkDataIntegrity(pool) {
     }
     if (detail.counts.invalid_bill_rows > 0) {
       errors.push('bill rows contain invalid statuses or non-positive/nonnegative amount fields');
+    }
+    if (detail.counts.bills_with_total_breakdown_mismatch > 0) {
+      // R2-followup — total != subtotal + vat + late_fee indicates a row
+      // touched outside the supported paths (manual SQL fix, broken
+      // migration, future refactor forgetting to keep the trio in sync).
+      // Surfaces in /admin#health so ops can locate + fix before the
+      // discrepancy reaches a tenant's PDF.
+      errors.push('bills have total inconsistent with subtotal + vat + late_fee breakdown');
     }
     if (detail.counts.invalid_payment_rows > 0) {
       errors.push('payment rows contain invalid statuses or non-positive amounts');

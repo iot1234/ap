@@ -447,6 +447,51 @@ function SlipModal({ payment, busy, onClose, onDecide }) {
           <div>วันที่: {new Date(payment.created_at).toLocaleString('th-TH')}</div>
           <div>สถานะสลิป: {paymentStatusLabel(payment.status)}</div>
         </div>
+        {/* R2-followup — visual mismatch alert. Admin scanning the slip
+            queue needs to see at a glance when amount ≠ bill_total so they
+            can decide which tier (exact / principal / reject) is right.
+            Shows three colors: green = exact match, amber = principal tier
+            (likely good-faith pre-late_fee payment, late_fee will be waived),
+            red = doesn't match either reference. The verify_payload.amountTier
+            on the row tells us which tier the server already classified. */}
+        {(() => {
+          const billTotal = Number(payment.bill_total);
+          const amt = Number(payment.amount);
+          if (!Number.isFinite(billTotal) || billTotal <= 0 || !Number.isFinite(amt)) return null;
+          const lateFee = Number(payment.verify_payload?.amountTier?.billLateFeeAtUpload || 0);
+          const principal = Number(payment.verify_payload?.amountTier?.principalAtUpload) || (billTotal - lateFee);
+          const TOL = 1;   // matches PAYMENT_TOLERANCE_THB on the backend
+          const diffTotal = Math.abs(amt - billTotal);
+          const diffPrincipal = Math.abs(amt - principal);
+          let alert = null;
+          if (diffTotal <= TOL) {
+            alert = { tone: 'success', icon: '✅', title: 'ยอดตรงกับบิลพอดี',
+              desc: lateFee > 0
+                ? `ผู้เช่าจ่ายยอดเต็ม (รวมค่าปรับ ฿${fmtMoney(lateFee)})`
+                : 'ยอดที่ผู้เช่าระบุตรงกับยอดบิลปัจจุบัน' };
+          } else if (lateFee > 0 && diffPrincipal <= TOL) {
+            alert = { tone: 'warning', icon: '💡', title: 'ผู้เช่าจ่ายค่าเช่าสุจริต (ยังไม่รวมค่าปรับ)',
+              desc: `ผู้เช่าโอน ฿${fmtMoney(amt)} = ค่าเช่า+ค่าน้ำไฟ — ค่าปรับ ฿${fmtMoney(lateFee)} เพิ่งขึ้นภายหลัง. เมื่อยืนยัน ระบบจะยกเว้นค่าปรับให้อัตโนมัติ` };
+          } else {
+            alert = { tone: 'danger', icon: '⚠️', title: 'ยอดไม่ตรงกับทั้งสองเกณฑ์',
+              desc: `ผู้เช่าโอน ฿${fmtMoney(amt)}; ยอดบิล ฿${fmtMoney(billTotal)}${lateFee > 0 ? ` (ค่าเช่า ฿${fmtMoney(principal)} + ค่าปรับ ฿${fmtMoney(lateFee)})` : ''} — ปฏิเสธหรือสอบถามผู้เช่า` };
+          }
+          const palette = {
+            success: { bg: '#dff7e6', border: '#7bc798', fg: '#1d6a3e' },
+            warning: { bg: '#fff3cd', border: '#dba43a', fg: '#664400' },
+            danger:  { bg: '#fde2e2', border: '#d97070', fg: '#7a1b1b' },
+          }[alert.tone];
+          return (
+            <div style={{
+              marginTop: 12, padding: '10px 12px', borderRadius: 8,
+              background: palette.bg, border: `1px solid ${palette.border}`, color: palette.fg,
+              fontSize: 13, lineHeight: 1.55,
+            }}>
+              <div style={{ fontWeight: 600, marginBottom: 4 }}>{alert.icon} {alert.title}</div>
+              <div>{alert.desc}</div>
+            </div>
+          );
+        })()}
         <div style={{ marginTop: 10, padding: 10, borderRadius: 8, background: C.bgSoft || '#fbf6ec', color: C.ink2, fontSize: 12.5, lineHeight: 1.6 }}>
           <div>ห้อง: {payment.room_id || '-'} · สถานะบิล: {billStatusLabel(payment.bill_status)}</div>
           {payment.bill_total != null ? <div>ยอดตามบิล: ฿{fmtMoney(payment.bill_total)}</div> : null}

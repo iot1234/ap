@@ -124,11 +124,16 @@ function PageLineBindings({ setToast }) {
 
   const filtered = useMemo(() => {
     if (filter === 'all') return items;
-    if (filter === 'bound') return items.filter((x) => x.line_user_id && !x.line_binding_blocked);
+    if (filter === 'bound') return items.filter((x) =>
+      !x.line_binding_blocked && (x.line_user_id || Number(x.bound_count || 0) > 0)
+    );
     if (filter === 'blocked') return items.filter((x) => x.line_binding_blocked);
     // actionable = pending or unbound (not blocked)
     return items.filter((x) =>
-      !x.line_binding_blocked && (x.binding_status === 'pending' || !x.line_user_id)
+      !x.line_binding_blocked && (
+        x.binding_status === 'pending' ||
+        (!x.line_user_id && Number(x.bound_count || 0) === 0)
+      )
     );
   }, [items, filter]);
 
@@ -140,7 +145,10 @@ function PageLineBindings({ setToast }) {
         : 0;
       return { label: `รอผูก (${remaining}d)`, color: '#c08a2a' };
     }
-    if (row.line_user_id) return { label: 'ผูกแล้ว', color: '#2f8f5b' };
+    if (row.line_user_id || Number(row.bound_count || 0) > 0) {
+      const boundCount = Number(row.bound_count || 0) || 1;
+      return { label: `ผูกแล้ว ${boundCount} บัญชี`, color: '#2f8f5b' };
+    }
     return { label: 'ยังไม่ผูก', color: C.muted };
   }
 
@@ -161,6 +169,7 @@ function PageLineBindings({ setToast }) {
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 10, marginBottom: 16 }}>
         <StatCard label="ผู้เช่าทั้งหมด" value={counts.total || 0} color={C.ink} />
         <StatCard label="ผูกแล้ว" value={counts.bound || 0} color="#2f8f5b" />
+        <StatCard label="บัญชี LINE ที่ผูก" value={counts.boundAccounts || 0} color="#2f8f5b" />
         <StatCard label="รอผูก (รหัสค้าง)" value={counts.pending || 0} color="#c08a2a" />
         <StatCard label="ยังไม่ผูก" value={counts.unbound || 0} color={C.muted} />
         <StatCard label="บล็อก" value={counts.blocked || 0} color="#b94a48" />
@@ -294,6 +303,7 @@ function DetailModal({ C, Modal, Btn, Pill, detail, tenantId, oas, busy, onClose
   const pending = detail.pending;
   const bound = detail.bound;
   const blocked = !!t.line_binding_blocked;
+  const boundCount = Number(detail.boundCount || detail.bound_count || 0);
   const hasMultiOas = oas && oas.length > 0;
 
   function copyCode(code) {
@@ -360,18 +370,24 @@ function DetailModal({ C, Modal, Btn, Pill, detail, tenantId, oas, busy, onClose
         {bound && !pending && !blocked && (
           <div style={{ padding: 12, background: '#f1faf3', border: '1px solid #c8e6cd', borderRadius: 8, color: '#1f6b3a', fontSize: 13 }}>
             ✅ ผูกบัญชีแล้วเมื่อ {new Date(bound.bound_at).toLocaleString('th-TH')}
+            <div style={{ marginTop: 4, fontSize: 12, color: '#1f6b3a' }}>
+              ห้องนี้ผูก LINE แล้วทั้งหมด <b>{boundCount || 1}</b> บัญชี — ทุกบัญชีจะได้รับบิลและแจ้งเตือนของห้องนี้
+            </div>
             {bound.oa_name && (
               <div style={{ marginTop: 4, fontSize: 12, color: '#1f6b3a' }}>
                 ผ่าน LINE OA: <b>{bound.oa_name}</b> — บิล/แจ้งเตือนจะส่งกลับผ่าน OA นี้
               </div>
             )}
+            <div style={{ marginTop: 6, fontSize: 12, color: '#1f6b3a' }}>
+              ต้องการเพิ่ม LINE ของคนในห้องนี้ ให้ออกรหัสใหม่แล้วให้บัญชี LINE อีกบัญชีส่งรหัส ระบบจะส่งแจ้งเตือนถึงทุกบัญชีที่ผูกไว้
+            </div>
           </div>
         )}
 
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 4 }}>
           {!blocked && (
             <Btn variant="primary" disabled={busy} onClick={onIssue}>
-              {pending ? 'ออกรหัสใหม่ (ยกเลิกอันเก่า)' : 'ออกรหัสยืนยัน'}
+              {pending ? 'ออกรหัสใหม่ (ยกเลิกอันเก่า)' : bound ? 'ออกรหัสเพิ่ม LINE อีกบัญชี' : 'ออกรหัสยืนยัน'}
             </Btn>
           )}
           {(pending || bound) && !blocked && (

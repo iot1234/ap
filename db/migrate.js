@@ -156,8 +156,24 @@ async function migrate(pool, opts = {}) {
     -- auto-gen and admin's manual generate can't both insert. ON CONFLICT
     -- (bill_no) handles bill_no collisions; this catches the case where the
     -- two paths compute different bill_nos for the same logical period.
-    CREATE UNIQUE INDEX IF NOT EXISTS uq_bills_room_period_active
-      ON bills(room_id, period) WHERE deleted_at IS NULL AND status <> 'void';
+    --
+    -- R4 — narrowed to include tenant_id so the same room+period CAN hold
+    -- two bills when the tenant actually changes mid-period (one moves out,
+    -- another moves in within the same calendar month). COALESCE(tenant_id, 0)
+    -- collapses orphan/legacy bills (tenant_id IS NULL) into a single
+    -- "anonymous" slot per room+period — they still can't multiply against
+    -- each other, preserving the original constraint's intent.
+    --
+    -- The DROP-then-CREATE handles three deploy states without failing:
+    --   1. Fresh deploy: DROP IF EXISTS is a no-op, CREATE makes the new one.
+    --   2. Upgrade from old schema: drops the legacy index, creates the new
+    --      tenant-aware one.
+    --   3. Half-migrated deploy where both already exist: DROP removes the
+    --      old, CREATE IF NOT EXISTS leaves the new alone.
+    DROP INDEX IF EXISTS uq_bills_room_period_active;
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_bills_room_period_tenant_active
+      ON bills(room_id, period, COALESCE(tenant_id, 0))
+      WHERE deleted_at IS NULL AND status <> 'void';
 
     CREATE TABLE IF NOT EXISTS payments (
       id             BIGSERIAL PRIMARY KEY,
@@ -517,6 +533,18 @@ async function migrate(pool, opts = {}) {
       ON line_bindings(COALESCE(oa_id, 0), line_user_id)
       WHERE status = 'bound' AND line_user_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_line_bindings_oa ON line_bindings(oa_id);
+
+    -- Public booking pre-bind support. A booking applicant can bind LINE
+    -- before a tenant row exists; quick-invite later moves these bindings
+    -- onto the real tenant. tenant_id must therefore be nullable, while
+    -- admin-issued tenant bindings still use tenant_id exactly as before.
+    ALTER TABLE line_bindings ALTER COLUMN tenant_id DROP NOT NULL;
+    ALTER TABLE line_bindings ADD COLUMN IF NOT EXISTS booking_id TEXT;
+    CREATE INDEX IF NOT EXISTS idx_line_bindings_booking
+      ON line_bindings(booking_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_line_bindings_pending_per_booking
+      ON line_bindings(booking_id)
+      WHERE status = 'pending' AND booking_id IS NOT NULL;
 
     -- Cache the binding's OA on the tenant row too, so notifier doesn't have
     -- to JOIN every push. Updated by lineBinding.tryBind / revoke / block.

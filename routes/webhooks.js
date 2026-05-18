@@ -220,28 +220,64 @@ module.exports = function buildWebhooksRouter(ctx) {
       }
       if (result.ok) {
         const room = result.roomId ? ` (ห้อง ${result.roomId})` : '';
+        let bindingCount = null;
+        try {
+          const boundRows = result.tenantId
+            ? await lineBinding.listTenantRecipients(pool, result.tenantId)
+            : (result.bookingId ? await lineBinding.listBookingRecipients(pool, result.bookingId) : []);
+          bindingCount = boundRows.length;
+        } catch { bindingCount = null; }
+        const bindingCountLine = bindingCount == null
+          ? ''
+          : `\nห้อง/การจองนี้ผูก LINE แล้วทั้งหมด ${bindingCount} บัญชี`;
+        const scope = result.pendingTenantLink
+          ? 'ระบบจะผูกบัญชีนี้กับห้องอัตโนมัติหลังแอดมินอนุมัติและสร้างสัญญา'
+          : 'คุณจะได้รับแจ้งเตือนบิล / แจ้งซ่อม / ประกาศต่าง ๆ ผ่านช่องนี้';
         await lineSvc.replyText(oa, ev.replyToken,
           `✅ ผูกบัญชี LINE สำเร็จ\n` +
           `${result.fullName}${room}\n` +
           `ผ่าน OA: ${oa.name}\n\n` +
-          `คุณจะได้รับแจ้งเตือนบิล / แจ้งซ่อม / ประกาศต่าง ๆ ผ่านช่องนี้`
+          scope +
+          bindingCountLine
         );
         // Tell the operator owner so they have visibility
         try {
           const flags = await features.load(pool);
           notifier.notifyOwner({ pool, features: flags }, {
             subject: 'มีผู้เช่าผูก LINE OA',
-            text: `${result.fullName}${room} ผูก LINE OA สำเร็จ ผ่าน ${oa.name}`,
+            text: `${result.fullName}${room} ผูก LINE OA สำเร็จ ผ่าน ${oa.name}${bindingCount == null ? '' : `\nห้อง/การจองนี้ผูก LINE แล้วทั้งหมด ${bindingCount} บัญชี`}`,
           }).catch(() => {});
         } catch { /* ignore */ }
         return;
+      }
+      if (['line_user_already_bound', 'tenant_blocked', 'booking_not_active', 'wrong_oa'].includes(result.reason)) {
+        try {
+          const flags = await features.load(pool);
+          notifier.notifyOwner({ pool, features: flags }, {
+            subject: 'LINE binding ต้องตรวจสอบ',
+            text: [
+              `เหตุผล: ${result.reason}`,
+              `OA: ${oa.name || oa.slug || oa.id || '-'}`,
+              `LINE userId: ${userId || '-'}`,
+              result.otherTenantId ? `ผูกอยู่กับ tenantId อื่น: ${result.otherTenantId}` : null,
+              result.otherBookingId ? `ผูกอยู่กับ bookingId อื่น: ${result.otherBookingId}` : null,
+              result.expectedOaId ? `ควรส่งรหัสไปที่ OA id: ${result.expectedOaId}` : null,
+              'ขั้นต่อไป: ตรวจสอบว่าเป็นการจองแทนเพื่อน/จองอีกห้อง/ส่งผิด OA ก่อนออก code ใหม่หรือรวมข้อมูล',
+            ].filter(Boolean).join('\n'),
+          }).catch(() => {});
+        } catch { /* owner alert must not break LINE reply */ }
       }
       const messages = {
         invalid:                 '❌ รหัสไม่ถูกต้อง — โปรดติดต่อแอดมินเพื่อขอรหัสใหม่',
         expired:                 '❌ รหัสหมดอายุ — โปรดติดต่อแอดมินเพื่อขอรหัสใหม่',
         already_bound:           '❌ รหัสนี้ถูกใช้ไปแล้ว',
         tenant_blocked:          '❌ บัญชีถูกระงับจาก LINE binding — ติดต่อแอดมิน',
-        line_user_already_bound: '❌ LINE บัญชีนี้ผูกกับห้องอื่นอยู่แล้ว — ติดต่อแอดมินเพื่อยกเลิกก่อน',
+        booking_not_active:      '❌ การจองนี้ไม่อยู่ในสถานะที่ผูก LINE ได้แล้ว — ติดต่อแอดมิน',
+        line_user_already_bound: [
+          '❌ LINE บัญชีนี้ผูกกับผู้เช่า/ห้องอื่นอยู่แล้ว',
+          'ถ้าจองให้เพื่อน ให้เพื่อนส่งรหัสนี้ด้วย LINE ของเพื่อนเอง',
+          'ถ้าจองอีกห้องให้ตัวเอง ให้แอดมินตรวจสอบ/รวมข้อมูลก่อนผูก เพื่อป้องกันบิลหรือสัญญาส่งผิดห้อง',
+        ].join('\n'),
         wrong_oa:                '❌ รหัสนี้ออกให้ใช้กับ LINE OA อื่น — โปรดส่งไปที่ OA ที่แอดมินระบุ',
       };
       await lineSvc.replyText(oa, ev.replyToken, messages[result.reason] || '❌ ไม่สามารถผูกบัญชีได้');

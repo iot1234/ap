@@ -15,6 +15,9 @@ function buildFakePool(scenarios = {}) {
     for (const [pattern, fn] of Object.entries(scenarios)) {
       if (sql.includes(pattern)) return fn(sql, params);
     }
+    if (/UPDATE line_bindings[\s\S]+SET status='bound'/.test(sql)) {
+      return { rows: [{ id: params?.[2] || 1 }], rowCount: 1 };
+    }
     return { rows: [], rowCount: 0 };
   }
   // Connect returns a transaction-capable client.
@@ -74,6 +77,8 @@ test('issue: revokes prior pending then creates new', async () => {
   const revokeIdx = sequence.findIndex((s) => s.startsWith('UPDATE line_bindings SET status='));
   const insertIdx = sequence.findIndex((s) => s.startsWith('INSERT INTO line_bindings'));
   assert.ok(revokeIdx >= 0 && insertIdx > revokeIdx, 'revoke should come before insert');
+  const tenantSelect = sequence.find((s) => s.includes('FROM tenants'));
+  assert.match(tenantSelect, /FOR UPDATE/, 'issuing tenant codes must lock the tenant row');
 });
 
 test('tryBind: invalid format returns ok=false', async () => {
@@ -85,7 +90,7 @@ test('tryBind: invalid format returns ok=false', async () => {
 
 test('tryBind: unknown code returns invalid', async () => {
   const pool = buildFakePool({
-    'FROM line_bindings b JOIN tenants': () => ({ rows: [] }),
+    'FROM line_bindings b': () => ({ rows: [] }),
   });
   const r = await lb.tryBind(pool, { code: 'BIND-DEADBEEF', lineUserId: 'U1' });
   assert.equal(r.ok, false);
@@ -94,7 +99,7 @@ test('tryBind: unknown code returns invalid', async () => {
 
 test('tryBind: blocked tenant returns tenant_blocked', async () => {
   const pool = buildFakePool({
-    'FROM line_bindings b JOIN tenants': () => ({
+    'FROM line_bindings b': () => ({
       rows: [{
         id: 1, tenant_id: 5, status: 'pending',
         expires_at: new Date(Date.now() + 86400000),
@@ -110,7 +115,7 @@ test('tryBind: blocked tenant returns tenant_blocked', async () => {
 
 test('tryBind: expired code returns expired', async () => {
   const pool = buildFakePool({
-    'FROM line_bindings b JOIN tenants': () => ({
+    'FROM line_bindings b': () => ({
       rows: [{
         id: 1, tenant_id: 5, status: 'pending',
         expires_at: new Date(Date.now() - 86400000), // yesterday
@@ -126,7 +131,7 @@ test('tryBind: expired code returns expired', async () => {
 
 test('tryBind: already-bound code returns already_bound', async () => {
   const pool = buildFakePool({
-    'FROM line_bindings b JOIN tenants': () => ({
+    'FROM line_bindings b': () => ({
       rows: [{
         id: 1, tenant_id: 5, status: 'bound',
         expires_at: new Date(Date.now() + 86400000),
@@ -142,7 +147,7 @@ test('tryBind: already-bound code returns already_bound', async () => {
 
 test('tryBind: detects LINE userId already bound to other tenant', async () => {
   const pool = buildFakePool({
-    'FROM line_bindings b JOIN tenants': () => ({
+    'FROM line_bindings b': () => ({
       rows: [{
         id: 1, tenant_id: 5, status: 'pending',
         expires_at: new Date(Date.now() + 86400000),
@@ -162,7 +167,7 @@ test('tryBind: detects LINE userId already bound to other tenant', async () => {
 
 test('tryBind: success — updates binding + tenant', async () => {
   const pool = buildFakePool({
-    'FROM line_bindings b JOIN tenants': () => ({
+    'FROM line_bindings b': () => ({
       rows: [{
         id: 1, tenant_id: 5, status: 'pending',
         expires_at: new Date(Date.now() + 86400000),
@@ -184,6 +189,156 @@ test('tryBind: success — updates binding + tenant', async () => {
   // — normalize whitespace before substring-match so the test stays robust
   // against multi-OA refactors that reformat the query.
   assert.ok(calls.some((s) => s.replace(/\s+/g, ' ').includes('UPDATE tenants SET line_user_id')));
+  const lookup = pool._calls.find((c) => c.sql.includes('FROM line_bindings b'));
+  assert.match(lookup.sql, /FOR UPDATE OF b/, 'tryBind must lock the binding row before consuming a code');
+  const update = pool._calls.find((c) => c.sql.includes('UPDATE line_bindings'));
+  assert.match(update.sql, /WHERE id=\$3 AND status='pending'/,
+    'tryBind must only consume codes that are still pending after any concurrent bind');
+});
+
+test('issueBooking: creates a booking-scoped code without a tenant row', async () => {
+  const pool = buildFakePool({
+    'SELECT external_id, status': () => ({
+      rows: [{ external_id: 'BK-1', status: 'pending', phone: '0811111111', name: 'Booker' }],
+    }),
+    'INSERT INTO line_bindings': () => ({
+      rows: [{ id: 77, code: 'BIND-AAAA1111', expires_at: new Date(), target_oa_id: null }],
+    }),
+  });
+  const out = await lb.issueBooking(pool, { bookingId: 'BK-1', ttlDays: 7, createdBy: 'public-booking' });
+  assert.equal(out.id, 77);
+  assert.equal(out.bookingId, 'BK-1');
+  assert.equal(out.tenantId, undefined);
+  const calls = pool._calls.map((c) => c.sql.replace(/\s+/g, ' '));
+  assert.ok(calls.some((s) =>
+    s.includes("UPDATE line_bindings SET status='revoked'") &&
+    s.includes('WHERE booking_id=$1 AND tenant_id IS NULL AND status=')));
+  assert.ok(calls.some((s) =>
+    s.includes('INSERT INTO line_bindings (tenant_id, booking_id, code') &&
+    s.includes('VALUES (NULL, $1, $2')));
+  const bookingSelect = pool._calls.find((c) => c.sql.includes('FROM bookings'));
+  assert.match(bookingSelect.sql, /FOR UPDATE/,
+    'issuing booking-stage codes must lock the booking row under concurrent submits');
+});
+
+test('tryBind: concurrent code consumption returns already_bound cleanly', async () => {
+  const pool = buildFakePool({
+    'FROM line_bindings b': () => ({
+      rows: [{
+        id: 31, tenant_id: 5, status: 'pending',
+        expires_at: new Date(Date.now() + 86400000),
+        full_name: 'Race Guard', current_room_id: '701', tenant_status: 'active',
+        line_binding_blocked: false,
+      }],
+    }),
+    'WHERE line_user_id=$1': () => ({ rows: [] }),
+    "UPDATE line_bindings\n          SET status='bound'": () => ({ rows: [], rowCount: 0 }),
+  });
+  const r = await lb.tryBind(pool, { code: 'BIND-DEADBEEF', lineUserId: 'Urace', oaId: 3 });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'already_bound');
+  const tenantUpdate = pool._calls.some((c) =>
+    c.sql.replace(/\s+/g, ' ').includes('UPDATE tenants SET line_user_id'));
+  assert.equal(tenantUpdate, false, 'tenant cache must not be overwritten if the code was consumed concurrently');
+});
+
+test('tryBind: booking-stage code binds before tenant creation', async () => {
+  const pool = buildFakePool({
+    'FROM line_bindings b': () => ({
+      rows: [{
+        id: 11,
+        tenant_id: null,
+        booking_id: 'BK-2',
+        status: 'pending',
+        target_oa_id: null,
+        expires_at: new Date(Date.now() + 86400000),
+        booking_name: 'Booker',
+        booking_room_id: '402',
+        booking_status: 'pending',
+      }],
+    }),
+    'WHERE line_user_id=$1': () => ({ rows: [] }),
+  });
+  const r = await lb.tryBind(pool, { code: 'BIND-DEADBEEF', lineUserId: 'Ubooking', oaId: 9 });
+  assert.equal(r.ok, true);
+  assert.equal(r.tenantId, null);
+  assert.equal(r.bookingId, 'BK-2');
+  assert.equal(r.fullName, 'Booker');
+  assert.equal(r.roomId, '402');
+  assert.equal(r.pendingTenantLink, true);
+  const tenantUpdate = pool._calls.some((c) =>
+    c.sql.replace(/\s+/g, ' ').includes('UPDATE tenants SET line_user_id'));
+  assert.equal(tenantUpdate, false, 'booking pre-bind must not update tenants before a tenant exists');
+});
+
+test('tryBind: keeps existing same-tenant bindings for unlimited LINE recipients', async () => {
+  const pool = buildFakePool({
+    'FROM line_bindings b': () => ({
+      rows: [{
+        id: 21, tenant_id: 5, status: 'pending',
+        expires_at: new Date(Date.now() + 86400000),
+        full_name: 'Multi Line', current_room_id: '501', tenant_status: 'active',
+        line_binding_blocked: false,
+      }],
+    }),
+    'WHERE line_user_id=$1': () => ({ rows: [] }),
+  });
+  const r = await lb.tryBind(pool, { code: 'BIND-DEADBEEF', lineUserId: 'Unew', oaId: 3 });
+  assert.equal(r.ok, true);
+  const revokedOtherBoundRows = pool._calls.some((c) => {
+    const sql = c.sql.replace(/\s+/g, ' ');
+    return sql.includes('UPDATE line_bindings') &&
+      sql.includes("status='revoked'") &&
+      sql.includes("status='bound'") &&
+      sql.includes('id <>');
+  });
+  assert.equal(revokedOtherBoundRows, false, 'binding a new LINE must not revoke older bound rows');
+});
+
+test('transferBookingBindings: moves booking-bound LINE rows onto the created tenant', async () => {
+  const pool = buildFakePool({
+    'UPDATE line_bindings': () => ({
+      rowCount: 3,
+      rows: [
+        { line_user_id: 'Uold', oa_id: 2, status: 'bound', bound_at: new Date('2026-01-01T00:00:00Z') },
+        { line_user_id: null, oa_id: null, status: 'pending', bound_at: null },
+        { line_user_id: 'Unew', oa_id: 4, status: 'bound', bound_at: new Date('2026-01-02T00:00:00Z') },
+      ],
+    }),
+  });
+  const out = await lb.transferBookingBindings(pool, { bookingId: 'BK-3', tenantId: 8 });
+  assert.deepEqual({ moved: out.moved, bound: out.bound, pending: out.pending }, {
+    moved: 3, bound: 2, pending: 1,
+  });
+  const tenantUpdate = pool._calls.find((c) =>
+    c.sql.replace(/\s+/g, ' ').includes('UPDATE tenants SET line_user_id'));
+  assert.ok(tenantUpdate, 'latest bound LINE should be cached on tenants.* for backward compatibility');
+  assert.equal(tenantUpdate.params[0], 'Unew');
+  assert.equal(tenantUpdate.params[1], 4);
+  assert.equal(tenantUpdate.params[2], 8);
+});
+
+test('getStatus/listAll expose bound LINE account counts per tenant room', async () => {
+  const statusPool = buildFakePool({
+    'FROM tenants WHERE id=$1': () => ({
+      rows: [{ id: 1, full_name: 'Counter', phone: '0811111111', current_room_id: 'A1' }],
+    }),
+    'FROM line_bindings b': () => ({
+      rows: [{ id: 9, status: 'bound', line_user_id: 'U1', code: 'BIND-AAAA1111' }],
+    }),
+    'COUNT(*)::int AS bound_count': () => ({ rows: [{ bound_count: 2 }] }),
+  });
+  const listPool = buildFakePool({
+    'COALESCE(bc.bound_count': () => ({
+      rows: [{ tenant_id: 1, full_name: 'Counter', line_user_id: null, bound_count: 3 }],
+    }),
+  });
+
+  const status = await lb.getStatus(statusPool, 1);
+  assert.equal(status.boundCount, 2);
+
+  const rows = await lb.listAll(listPool);
+  assert.equal(rows[0].bound_count, 3);
 });
 
 test('CODE_PREFIX is BIND-', () => {
@@ -221,7 +376,7 @@ test('issue: targetOaId=0 is treated as "any OA" (legacy env)', async () => {
 
 test('tryBind: enforces target_oa_id when set on the binding', async () => {
   const pool = buildFakePool({
-    'FROM line_bindings b JOIN tenants': () => ({
+    'FROM line_bindings b': () => ({
       rows: [{
         id: 1, tenant_id: 5, status: 'pending',
         target_oa_id: 7,    // code was issued for OA #7
@@ -243,7 +398,7 @@ test('tryBind: dedup is per-OA (same userId on different OAs is OK)', async () =
   // tenant 99 — but that bind is on a different OA (oa_id=2 vs current oa=5).
   // Should NOT collide because LINE userIds are scoped per-OA.
   const pool = buildFakePool({
-    'FROM line_bindings b JOIN tenants': () => ({
+    'FROM line_bindings b': () => ({
       rows: [{
         id: 1, tenant_id: 5, status: 'pending',
         target_oa_id: null,
@@ -262,7 +417,7 @@ test('tryBind: dedup is per-OA (same userId on different OAs is OK)', async () =
 
 test('tryBind: records oa_id on success', async () => {
   const pool = buildFakePool({
-    'FROM line_bindings b JOIN tenants': () => ({
+    'FROM line_bindings b': () => ({
       rows: [{
         id: 1, tenant_id: 5, status: 'pending', target_oa_id: null,
         expires_at: new Date(Date.now() + 86400000),

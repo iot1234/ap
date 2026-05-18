@@ -19,7 +19,6 @@ const features = require('./features');
 const billing = require('./billing');
 const promptpay = require('./promptpay');
 const notifier = require('./notifier');
-const lineNotify = require('./line');
 const meter = require('./meter');
 
 const TICK_MS = 60 * 60 * 1000;          // hourly
@@ -38,6 +37,7 @@ const SCHEDULER_JOB_IMPACT = Object.freeze({
   'room-status-sync': 'สถานะห้องจากสัญญา/บิลอาจยังไม่ถูก sync รายวัน',
   'notif-prune': 'คิวแจ้งเตือนเก่าที่ failed อาจยังไม่ถูกล้าง',
   'orphan-slip-prune': 'ไฟล์สลิปกำพร้าอาจยังไม่ถูกลบออกจาก storage',
+  'payment-reminder': 'ผู้เช่าอาจไม่ได้รับ reminder ก่อนวันครบกำหนดชำระ',
   'anomaly': 'health/anomaly alert รอบนี้อาจไม่ทำงาน',
 });
 
@@ -113,8 +113,37 @@ function _pickStateFile() {
   return null;
 }
 let STATE_FILE = _pickStateFile();
+
+// R6 — explicit persistence warning. The /tmp fallback works at the file-
+// system level but every container restart wipes /tmp, which means the
+// daily-fired latches (lastBillPeriod, lastLateFeeMark, etc.) reset and
+// the same bills can re-fire on the next boot — once-per-period
+// notifications turn into per-boot notifications. The DB-level idempotency
+// guards (uq_bills_room_period_tenant_active, ON CONFLICT, advisory locks)
+// still prevent duplicate INSERTs, but the OWNER alerts ("ออกบิลอัตโนมัติ
+// X ใบ") are NOT idempotent — without a persistent state file they'd land
+// in the owner's inbox every restart of the day. Surface this loudly at
+// boot so operators set SCHEDULER_STATE_FILE / UPLOAD_DIR to a real volume.
+const _isTmpFallback = !!(STATE_FILE
+  && STATE_FILE === path.join(require('os').tmpdir(), 'baankarn-scheduler-state.json'));
 if (STATE_FILE && STATE_FILE !== _candidateStatePaths[0]) {
   console.log('[scheduler] state file:', STATE_FILE);
+}
+if (_isTmpFallback) {
+  console.warn(
+    '[scheduler] ⚠️ state file is on /tmp (ephemeral). '
+    + 'Daily latches reset every container restart — owner can receive '
+    + 'duplicate "auto-bill" / "late fee" notifications until midnight UTC. '
+    + 'Set SCHEDULER_STATE_FILE or UPLOAD_DIR to a persistent volume to fix.'
+  );
+}
+function isStateFilePersistent() {
+  // The first candidate is operator-supplied via env (SCHEDULER_STATE_FILE
+  // or UPLOAD_DIR), the second is the app dir (works for self-hosted +
+  // VM deploys where the working directory persists). Both are treated as
+  // "persistent". The /tmp fallback is not. Used by /admin#health to surface
+  // an actionable warning when the deploy is missing a volume mount.
+  return !!STATE_FILE && !_isTmpFallback;
 }
 
 function readState() {
@@ -190,6 +219,32 @@ async function tickLateFee(pool, flags, now, state) {
   const todayKey = now.toISOString().slice(0, 10);
   if (state.lastLateFeeMark === todayKey) return;
   try {
+    // R2 — Two-phase late fee handling, in order:
+    //
+    //   Phase A: status='pending' AND due_date < TODAY → flip to 'overdue'.
+    //     For freshly-overdue bills, compute late_fee from the principal
+    //     (rent + util + recurring + vat — i.e. total minus any pre-existing
+    //     late_fee) and write back to bills.late_fee + bills.total in ONE
+    //     atomic UPDATE so the audit invariant
+    //         total = subtotal + vat + late_fee
+    //     never breaks halfway.
+    //
+    //   Phase B: status='overdue' (incl. older bills from prior days)
+    //     → re-compute late_fee from `total - late_fee` (principal) ×
+    //       monthsOver. Idempotent: running twice on the same day yields
+    //       the same value, not a doubled one. This is what keeps a bill
+    //       that's been overdue for 53 days correctly priced — the
+    //       scheduler may have ticked it on day 1, 8, 15, 22, ... and each
+    //       tick recomputes from principal × monthsOver(today).
+    //
+    // The buildBill engine NEVER computes a late fee on the NEW month's
+    // bill any more — every penalty lives on the bill it belongs to, not
+    // carried forward into next month's invoice (R2). Tenants viewing the
+    // old bill always see the up-to-date amount due.
+    const lateFeeEnabled = !!(flags && flags.lateFee && flags.lateFee.enabled);
+    const ratePctMonth = lateFeeEnabled ? Number(flags.lateFee.ratePctPerMonth || 0) : 0;
+    const gracePeriodDays = lateFeeEnabled ? Number(flags.lateFee.gracePeriodDays || 0) : 0;
+
     // PostgreSQL doesn't allow DISTINCT inside RETURNING — the old query
     // raised "syntax error at or near DISTINCT" every tick, so bills past
     // due_date were NEVER auto-marked overdue (and the room status cascade
@@ -200,13 +255,149 @@ async function tickLateFee(pool, flags, now, state) {
       `WITH bumped AS (
          UPDATE bills SET status='overdue'
            WHERE status='pending' AND due_date < CURRENT_DATE
-           RETURNING id, room_id, tenant_id, total, due_date, bill_no, period
+                 AND deleted_at IS NULL
+           RETURNING id, room_id, tenant_id, total, late_fee, subtotal, vat,
+                     due_date, bill_no, period
        )
-       SELECT b.id, b.room_id, b.tenant_id, b.total, b.due_date, b.bill_no, b.period,
-              t.full_name, t.phone, t.email, t.line_user_id, t.line_oa_id, t.status AS tenant_status, t.deleted_at
+       SELECT b.id, b.room_id, b.tenant_id, b.total, b.late_fee, b.subtotal, b.vat,
+              b.due_date, b.bill_no, b.period,
+              t.full_name, t.phone, t.email, t.line_user_id, t.line_oa_id,
+              t.status AS tenant_status, t.deleted_at,
+              (SELECT COUNT(*)::int FROM payments p
+                 WHERE p.bill_id = b.id AND p.status = 'pending') AS pending_slip_count
          FROM bumped b
          LEFT JOIN tenants t ON t.id = b.tenant_id`
     );
+
+    // Phase A: apply late_fee to each just-flipped bill. Skip when the
+    // feature is off — the bill still flips to overdue so the tenant gets
+    // notified, just without an added penalty.
+    //
+    // R2-followup — FAIRNESS GUARD: skip adding a late_fee when the tenant
+    // already has a pending slip on this bill. The slip was uploaded BEFORE
+    // tickLateFee fired, so the tenant committed to pay the original total
+    // and shouldn't be retroactively charged a penalty while waiting for
+    // admin review. The validatePaymentAmount two-tier check would catch
+    // this on verify, but skipping the fee here keeps bill.total stable
+    // during the review window (better UX in the admin queue).
+    if (lateFeeEnabled && ratePctMonth > 0 && flipped.length) {
+      for (const b of flipped) {
+        if (Number(b.pending_slip_count) > 0) {
+          // Audit the skip so admin can see WHY a bill flipped overdue
+          // without a fee — useful for reconciliation.
+          await pool.query(
+            `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, detail)
+             VALUES ($1, $2, $3, $4, $5::jsonb)`,
+            ['system:scheduler', 'bill.late_fee_skipped_pending_slip', 'bill', String(b.id),
+             JSON.stringify({
+               pendingSlipCount: Number(b.pending_slip_count),
+               due_date: b.due_date,
+               reason: 'tenant has a pending slip — late_fee held until verify decision',
+             })]
+          ).catch(() => { /* best-effort */ });
+          continue;
+        }
+        const base = (Number(b.total) || 0) - (Number(b.late_fee) || 0);
+        const calc = billing.computeLateFee({
+          base,
+          dueDate: b.due_date,
+          ratePctPerMonth: ratePctMonth,
+          gracePeriodDays,
+          now,
+        });
+        if (calc.lateFee > 0 && calc.lateFee !== Number(b.late_fee)) {
+          try {
+            await pool.query(
+              `UPDATE bills
+                  SET late_fee = $2::numeric,
+                      total    = ($3::numeric + $2::numeric)
+                WHERE id = $1
+                  AND status = 'overdue'
+                  AND deleted_at IS NULL`,
+              [b.id, calc.lateFee, base]
+            );
+            b.late_fee = calc.lateFee;
+            b.total = billing.round2(base + calc.lateFee);
+            await pool.query(
+              `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, detail)
+               VALUES ($1, $2, $3, $4, $5::jsonb)`,
+              ['system:scheduler', 'bill.late_fee_applied', 'bill', String(b.id),
+               JSON.stringify({
+                 lateFee: calc.lateFee, base, daysOver: calc.daysOver,
+                 monthsOver: calc.monthsOver, ratePctPerMonth: ratePctMonth,
+                 gracePeriodDays, due_date: b.due_date, phase: 'A-flip',
+               })]
+            ).catch(() => { /* audit best-effort */ });
+          } catch (err) {
+            console.warn(`[scheduler] late-fee apply Phase A bill ${b.id} failed:`, err.message);
+          }
+        }
+      }
+    }
+
+    // Phase B: refresh late_fee on bills that were ALREADY overdue from a
+    // prior day. Each tick recomputes from principal × monthsOver(today)
+    // — idempotent and self-correcting (re-runs converge to the right
+    // amount).
+    if (lateFeeEnabled && ratePctMonth > 0) {
+      try {
+        const flippedIds = new Set(flipped.map((f) => Number(f.id)));
+        // R2-followup — same FAIRNESS GUARD as Phase A: don't grow late_fee
+        // on bills with a pending slip. The SQL filter `NOT EXISTS` is
+        // cheaper than per-row checks, and the index on
+        // payments(status, created_at DESC) makes the subquery fast.
+        const { rows: stillOverdue } = await pool.query(
+          `SELECT id, total, late_fee, due_date
+             FROM bills b
+            WHERE b.status = 'overdue'
+              AND b.deleted_at IS NULL
+              AND b.paid_at IS NULL
+              AND NOT EXISTS (
+                SELECT 1 FROM payments p
+                 WHERE p.bill_id = b.id AND p.status = 'pending'
+              )`
+        );
+        for (const b of stillOverdue) {
+          if (flippedIds.has(Number(b.id))) continue;   // already done in Phase A
+          const base = (Number(b.total) || 0) - (Number(b.late_fee) || 0);
+          const calc = billing.computeLateFee({
+            base,
+            dueDate: b.due_date,
+            ratePctPerMonth: ratePctMonth,
+            gracePeriodDays,
+            now,
+          });
+          if (calc.lateFee > 0 && calc.lateFee !== Number(b.late_fee)) {
+            try {
+              await pool.query(
+                `UPDATE bills
+                    SET late_fee = $2::numeric,
+                        total    = ($3::numeric + $2::numeric)
+                  WHERE id = $1
+                    AND status = 'overdue'
+                    AND deleted_at IS NULL`,
+                [b.id, calc.lateFee, base]
+              );
+              await pool.query(
+                `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, detail)
+                 VALUES ($1, $2, $3, $4, $5::jsonb)`,
+                ['system:scheduler', 'bill.late_fee_applied', 'bill', String(b.id),
+                 JSON.stringify({
+                   lateFee: calc.lateFee, base, daysOver: calc.daysOver,
+                   monthsOver: calc.monthsOver, ratePctPerMonth: ratePctMonth,
+                   gracePeriodDays, due_date: b.due_date,
+                   prevLateFee: Number(b.late_fee) || 0, phase: 'B-refresh',
+                 })]
+              ).catch(() => { /* best-effort */ });
+            } catch (err) {
+              console.warn(`[scheduler] late-fee apply Phase B bill ${b.id} failed:`, err.message);
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('[scheduler] late-fee Phase B sweep failed:', err.message);
+      }
+    }
     if (flipped.length) {
       const rooms = new Set(flipped.map((r) => r.room_id).filter(Boolean));
       console.log(`[scheduler] marked ${flipped.length} bill(s) overdue across ${rooms.size} room(s)`);
@@ -444,6 +635,11 @@ async function tickBillGen(pool, flags, now, state) {
     // notifications AFTER the loop completes (one queue enqueue per bill,
     // not per attempt — failed inserts shouldn't notify anyone).
     const billsCreated = [];
+    // R5 — capture per-room flat-mode silent fallbacks so we can alert
+    // the owner once at the end of the run. Without this, an admin who
+    // ticked "เหมา" but forgot to set the amount would silently get
+    // metered bills generated by the scheduler with no warning.
+    const flatFellBack = [];
     for (const room of rooms) {
       if (!room.tenant || (room.status !== 'occupied' && room.status !== 'overdue')) continue;
       // Resolve the active tenant for this room so generated bills appear
@@ -460,33 +656,13 @@ async function tickBillGen(pool, flags, now, state) {
         if (tq.rows.length) tenantId = tq.rows[0].id;
       } catch { /* fail-soft */ }
 
-      // Pull active recurring charges (parking/internet/etc.) so the
-      // scheduler-generated bill matches what the manual /api/bills POST
-      // would produce. Without this, scheduler bills silently miss line
-      // items that the admin UI shows when generating manually.
-      //
-      // Track one_off ids so we can deactivate them after a successful insert
-      // — manual bill gen at server.js:2287 already does this; scheduler
-      // previously didn't, so a one_off charge would re-bill every month
-      // forever (real data bug found in May 2026 cross-feature audit).
-      // Pull previous overdue bill for late-fee carry-over (matches the
-      // manual generate path so totals are identical between both routes).
-      let previous = null;
-      try {
-        const prev = await pool.query(
-          `SELECT total, due_date, paid_at, status FROM bills
-             WHERE room_id=$1 AND status IN ('pending','overdue') AND deleted_at IS NULL
-             ORDER BY created_at DESC LIMIT 1`,
-          [room.id]
-        );
-        if (prev.rows[0]) {
-          previous = {
-            total: Number(prev.rows[0].total),
-            dueDate: prev.rows[0].due_date,
-            status: prev.rows[0].status,
-          };
-        }
-      } catch { /* ignore */ }
+      // R2 — previous overdue bill lookup is GONE. Late fees now live on
+      // the bill they belong to (services/scheduler.js#tickLateFee updates
+      // the old bill's late_fee + total in-place when it flips overdue).
+      // The new month's bill always starts with late_fee=0; carrying the
+      // previous month's penalty forward used to confuse tenants who
+      // viewed the old bill and saw a total that didn't match what they
+      // actually owed.
 
       // Pull contract-length discount so scheduler bills match what the
       // manual /api/bills POST + bulk-generate produce. Without this lookup
@@ -551,18 +727,37 @@ async function tickBillGen(pool, flags, now, state) {
           }
         }
         const roomForBilling = await meter.attachBillingReadingsForPeriod(billClient, room, period);
-        const bill = billing.buildBill({ room: roomForBilling, contract: activeContract, config, features: flags, previous, recurring, period, dueDate, discountPct });
+        const bill = billing.buildBill({ room: roomForBilling, contract: activeContract, config, features: flags, recurring, period, dueDate, discountPct });
+
+        // R5 — surface flat-mode silent fallbacks. Recorded per room; the
+        // owner alert below fires once at the end of the run with the full
+        // list so admins notice when "เหมา" rooms reverted to metered.
+        if (bill.waterFlatFellBack || bill.elecFlatFellBack) {
+          flatFellBack.push({
+            roomId: room.id,
+            water: !!bill.waterFlatFellBack,
+            elec: !!bill.elecFlatFellBack,
+          });
+        }
+
+        // R4 — bill_no collision retry: when the same room+period already
+        // has a bill for a DIFFERENT tenant (move-out + move-in within the
+        // month), the default `INV-period-roomId` clashes. Try the default
+        // first to keep historic bill_no shape stable for the common single-
+        // tenant case; on collision, retry once with the `-T${tenantId}`
+        // suffix which the partial unique `uq_bills_room_period_tenant_active`
+        // accommodates.
         const otherJson = JSON.stringify(recurring || []);
-        const ins = await billClient.query(
+        const buildInsert = (billNoForInsert) => billClient.query(
           `INSERT INTO bills (bill_no, tenant_id, room_id, period, rent,
               water_prev_reading, water_current_reading, water_units, water_rate, water_amount,
               elec_prev_reading, elec_current_reading, elec_units, elec_rate, elec_amount,
               wifi, other, subtotal, vat, late_fee, total, due_date, status)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::jsonb,$18,$19,$20,$21,$22,'pending')
            ON CONFLICT (bill_no) DO NOTHING
-           RETURNING id`,
+           RETURNING id, bill_no`,
           [
-            bill.billNo, tenantId, bill.roomId, bill.period,
+            billNoForInsert, tenantId, bill.roomId, bill.period,
             bill.rent,
             bill.waterPrevReading, bill.waterCurrentReading,
             bill.waterUnits, bill.waterRate, bill.waterAmount,
@@ -572,6 +767,30 @@ async function tickBillGen(pool, flags, now, state) {
             bill.dueDate,
           ]
         );
+
+        let ins = await buildInsert(bill.billNo);
+        let finalBillNo = bill.billNo;
+        // ON CONFLICT (bill_no) DO NOTHING returns rowCount=0 on collision.
+        // If we have a tenantId AND the conflict is on bill_no, we can try
+        // again with a tenant suffix. Verify the existing bill is actually
+        // for a different tenant before retrying — otherwise we'd
+        // unnecessarily proliferate suffixed bill_nos for the same logical bill.
+        if (ins.rowCount === 0 && tenantId) {
+          const probe = await billClient.query(
+            `SELECT tenant_id FROM bills
+              WHERE bill_no = $1 AND deleted_at IS NULL LIMIT 1`,
+            [bill.billNo]
+          );
+          const existingTenantId = probe.rows[0]?.tenant_id;
+          if (existingTenantId != null && Number(existingTenantId) !== Number(tenantId)) {
+            const suffixed = billing.makeBillNo(bill.roomId, period, { tenantId });
+            ins = await buildInsert(suffixed);
+            if (ins.rowCount > 0) {
+              finalBillNo = ins.rows[0].bill_no;
+            }
+          }
+        }
+
         if (ins.rowCount > 0) {
           if (usedOneOffIds.length) {
             await billClient.query(
@@ -582,16 +801,17 @@ async function tickBillGen(pool, flags, now, state) {
           }
           await billClient.query('COMMIT');
           made++;
-          billsCreated.push({ id: ins.rows[0].id, tenantId, roomId: bill.roomId, billNo: bill.billNo, period, total: bill.total, dueDate: bill.dueDate });
+          billsCreated.push({ id: ins.rows[0].id, tenantId, roomId: bill.roomId, billNo: finalBillNo, period, total: bill.total, dueDate: bill.dueDate });
         } else {
-          // ON CONFLICT DO NOTHING → bill_no collided. one_offs stay
-          // active because they weren't billed this run.
+          // Real duplicate (same room+period+tenant already has a bill, or
+          // bill_no collision with same tenant). one_offs stay active because
+          // they weren't billed this run — they'll fire again next cycle.
           await billClient.query('COMMIT');
         }
       } catch (e) {
         await billClient.query('ROLLBACK').catch(() => {});
-        // Partial-unique on (room_id, period) blocks duplicates even when
-        // bill_no differs across paths; treat as silent skip.
+        // Partial-unique on (room_id, period, COALESCE(tenant_id,0)) blocks
+        // duplicates even when bill_no differs across paths; treat as silent skip.
         if (e.code !== '23505') console.error('[scheduler] bill insert failed:', e.message);
       } finally {
         billClient.release();
@@ -600,6 +820,39 @@ async function tickBillGen(pool, flags, now, state) {
     state.lastBillPeriod = period;
     writeState(state);
     console.log(`[scheduler] auto-generated ${made} bills for ${period}`);
+
+    // R5 — owner alert for flat-mode silent fallbacks. We do this BEFORE
+    // the success notification so the operator's inbox shows the WARNING
+    // first (more urgent than "X bills sent"). Once-per-period via state
+    // latch so admin who hasn't fixed the missing flat amount doesn't get
+    // hourly spam from re-runs (the scheduler's own state.lastBillPeriod
+    // guard prevents re-running anyway, but the alert latch is independent
+    // so a manual trigger can still surface the warning).
+    if (flatFellBack.length > 0) {
+      const alertKey = `billGenFlatFellBack_${period}`;
+      if (!state[alertKey]) {
+        const lines = flatFellBack.map((r) => {
+          const parts = [];
+          if (r.water) parts.push('น้ำ');
+          if (r.elec) parts.push('ไฟ');
+          return `  • ห้อง ${r.roomId}: ${parts.join(' + ')} — กลับไปคิดตามมิเตอร์`;
+        });
+        notifier.notifyOwner({ pool, features: flags }, {
+          subject: `⚠️ ${flatFellBack.length} ห้อง: โหมดเหมา (flat) ตั้งไม่ครบ`,
+          text: [
+            `รอบบิล ${period} — ${flatFellBack.length} ห้องเปิดโหมดเหมาไว้ แต่ไม่ได้ใส่จำนวนเหมา ระบบจึงคิดเงินตามมิเตอร์แทน`,
+            ``,
+            ...lines,
+            ``,
+            `วิธีแก้: เปิด /admin#rooms → ห้องที่ระบุข้างต้น → ตั้ง waterFlatAmount / elecFlatAmount ให้ครบก่อนรอบถัดไป`,
+            `(หรือเปลี่ยน mode กลับเป็น 'metered' ถ้าตั้งใจคิดตามมิเตอร์อยู่แล้ว)`,
+          ].join('\n'),
+        }).catch(() => {});
+        state[alertKey] = true;
+        writeState(state);
+      }
+    }
+
     if (made > 0) {
       notifier.notifyOwner({ pool, features: flags },
         { subject: 'ออกบิลอัตโนมัติ', text: `ออกบิลรอบ ${period} จำนวน ${made} ใบ` }
@@ -615,12 +868,18 @@ async function tickBillGen(pool, flags, now, state) {
         for (const b of billsCreated) {
           if (!b.tenantId) continue;  // orphan bills: nobody to notify
           const tQ = await pool.query(
-            `SELECT line_user_id, line_oa_id, email FROM tenants
+            `SELECT id, line_user_id, line_oa_id, email FROM tenants
                WHERE id=$1 AND deleted_at IS NULL AND status='active'`,
             [b.tenantId]
           );
           if (!tQ.rows.length) continue;
           const t = tQ.rows[0];
+          const lineRecipients = await notifier.getTenantLineRecipients(pool, {
+            id: t.id,
+            line_user_id: t.line_user_id,
+            line_oa_id: t.line_oa_id,
+          });
+          const lineBindingCount = lineRecipients.length;
           const subject = `💰 บิลใหม่รอบ ${b.period} — ห้อง ${b.roomId}`;
           const body = [
             `บิลใหม่ออกแล้ว`,
@@ -629,13 +888,14 @@ async function tickBillGen(pool, flags, now, state) {
             `รอบบิล: ${b.period}`,
             `ยอดรวม: ฿${Number(b.total).toLocaleString('th-TH', { minimumFractionDigits: 2 })}`,
             `ครบกำหนด: ${b.dueDate}`,
+            `LINE ที่ผูกกับห้องนี้: ${lineBindingCount} บัญชี`,
             ``,
             `ดูรายละเอียด + ชำระผ่าน QR ที่พอร์ทัล /tenant`,
           ].join('\n');
-          if (lineNotify.isLikelyUserId(t.line_user_id)) {
+          for (const recipient of lineRecipients) {
             await notifQueue.enqueue(pool, {
-              channel: 'line', recipient: t.line_user_id, subject, body,
-              payload: { oaId: t.line_oa_id || null, billId: b.id },
+              channel: 'line', recipient: recipient.line_user_id, subject, body,
+              payload: { oaId: recipient.line_oa_id || null, billId: b.id },
             }).catch(() => {});
           }
           if (t.email) {
@@ -1481,6 +1741,207 @@ async function _withAdvisoryLock(pool, name, fn) {
   }
 }
 
+// === R7 — Pre-due payment reminder ========================================
+// Tenants forget. The original system only notified them when a bill was
+// FIRST issued (via tickBillGen or admin click "ส่ง") and AFTER it had
+// already gone overdue (via tickLateFee). Between those two signals there
+// was no nudge — most "I forgot, that's why I paid late" complaints lived
+// in that gap. This tick fires on TWO trigger days:
+//   - 3 days before due_date (T-3) → soft heads-up
+//   - the due_date itself (T-0)    → final reminder
+//
+// Idempotency: `last_reminded_at` (already in the bills table for the admin
+// "ส่งเตือน" history) — we skip any bill reminded today, so a daily tick
+// can never fire twice. Without this check a Railway 2-replica deploy
+// would still each send their own reminder on the same day; the advisory
+// lock wrapping the tick prevents that, but the `last_reminded_at` guard
+// is the second line of defence.
+//
+// FEATURE FLAG: features.paymentReminder.enabled (default OFF — preserves
+// historical behaviour for deploys that don't want extra LINE pushes).
+// Config keys:
+//   - daysBeforeDue:  array of integers, e.g. [3, 0]. 0 means due day.
+//                     Defaults to [3, 0] when flag enabled but list missing.
+//   - includeOverdue: when true, also remind on overdue bills daily until
+//                     paid. Default false because tickLateFee already
+//                     handles the flip-day notification and access-sync
+//                     handles the suspension warning — most operators
+//                     don't want a third channel pinging tenants daily.
+async function tickPaymentReminder(pool, flags, now, state) {
+  if (!flags.paymentReminder || !flags.paymentReminder.enabled) return;
+  const todayKey = now.toISOString().slice(0, 10);
+  if (state.lastPaymentReminderAt === todayKey) return;
+
+  // Sanitize the configured reminder days: keep integers in [0, 30] only.
+  // 30 is more than the usual ~15-day bill window — anything beyond is
+  // almost certainly a typo. Negative days don't make sense (those are
+  // "after due date" which is overdue territory, handled separately).
+  const rawDays = Array.isArray(flags.paymentReminder.daysBeforeDue)
+    ? flags.paymentReminder.daysBeforeDue
+    : [3, 0];
+  const dueOffsets = [...new Set(rawDays
+    .map((d) => Number(d))
+    .filter((d) => Number.isInteger(d) && d >= 0 && d <= 30)
+  )].sort((a, b) => b - a);   // most-future first so T-3 fires before T-0
+  if (dueOffsets.length === 0) return;
+
+  const includeOverdue = flags.paymentReminder.includeOverdue === true;
+
+  try {
+    // Query bills that hit any of the configured offsets today.
+    // CURRENT_DATE + offset works because PostgreSQL evaluates the DATE
+    // arithmetic before comparing to due_date (which is also DATE).
+    //
+    // We filter `last_reminded_at < CURRENT_DATE` (not <= CURRENT_DATE)
+    // so a bill reminded EARLIER today (e.g. by an admin clicking "ส่งเตือน"
+    // at 9am, then the cron firing at 6pm) is NOT re-pinged. The admin's
+    // manual send takes priority.
+    //
+    // Tenant join filter (status='active', deleted_at IS NULL) matches
+    // the rest of the codebase — we never push to moved-out / soft-deleted
+    // tenants. tenant_status and current_room are pulled so we can also
+    // skip bills whose tenant has since moved out (their problem to pay
+    // is being handled via collections workflow, not portal reminders).
+    const conditions = dueOffsets.map((_, i) => `b.due_date = CURRENT_DATE + $${i + 1}::int`);
+    if (includeOverdue) conditions.push(`(b.status = 'overdue' AND b.due_date < CURRENT_DATE)`);
+    const params = dueOffsets.slice();
+    const { rows: due } = await pool.query(
+      `SELECT b.id, b.bill_no, b.room_id, b.tenant_id, b.period,
+              b.total, b.due_date, b.late_fee, b.status,
+              t.full_name, t.phone, t.email,
+              t.line_user_id, t.line_oa_id
+         FROM bills b
+         INNER JOIN tenants t ON t.id = b.tenant_id
+        WHERE b.deleted_at IS NULL
+          AND b.paid_at IS NULL
+          AND b.status IN ('pending', 'overdue')
+          AND (${conditions.join(' OR ')})
+          AND (b.last_reminded_at IS NULL
+               OR b.last_reminded_at < CURRENT_DATE)
+          AND t.deleted_at IS NULL
+          AND t.status = 'active'
+          AND t.current_room_id = b.room_id
+        ORDER BY b.due_date ASC, b.id ASC
+        LIMIT 200`,
+      params
+    );
+
+    if (due.length === 0) {
+      state.lastPaymentReminderAt = todayKey;
+      writeState(state);
+      return;
+    }
+
+    const notifQueue = require('./notificationQueue');
+    let reminded = 0;
+    for (const b of due) {
+      // Skip rooms with no reachable channel; owner gets a separate
+      // alert via the queue/notifier failure path if needed.
+      let recipients = [];
+      try {
+        recipients = await notifier.getTenantLineRecipients(pool, {
+          id: b.tenant_id,
+          line_user_id: b.line_user_id,
+          line_oa_id: b.line_oa_id,
+        });
+      } catch {
+        recipients = b.line_user_id ? [{ line_user_id: b.line_user_id, line_oa_id: b.line_oa_id }] : [];
+      }
+      const lineBindingCount = recipients.length;
+      const hasLine = lineBindingCount > 0;
+      const hasEmail = !!(b.email);
+      if (!hasLine && !hasEmail) continue;
+
+      const dueDt = b.due_date ? new Date(b.due_date) : null;
+      const dueDayStr = dueDt
+        ? dueDt.toLocaleDateString('th-TH', { year: 'numeric', month: 'long', day: 'numeric' })
+        : '-';
+      const daysUntilDue = dueDt
+        ? Math.round((dueDt.getTime() - now.getTime()) / 86_400_000)
+        : null;
+      const isToday = daysUntilDue === 0;
+      const isOverdueRow = b.status === 'overdue';
+      const amtStr = Number(b.total).toLocaleString('th-TH', { minimumFractionDigits: 2 });
+
+      // Tailor the subject to the urgency tier — gives tenants a quick
+      // skim signal in their LINE chat list / email subject line.
+      let subject;
+      if (isOverdueRow) {
+        subject = `⏰ บิลค้างชำระ — ห้อง ${b.room_id}`;
+      } else if (isToday) {
+        subject = `📌 วันนี้ครบกำหนดชำระ — ห้อง ${b.room_id}`;
+      } else {
+        subject = `🔔 อีก ${daysUntilDue} วันครบกำหนดชำระ — ห้อง ${b.room_id}`;
+      }
+
+      const lateFeeLine = Number(b.late_fee) > 0
+        ? `ค่าปรับล่าช้า: ฿${Number(b.late_fee).toLocaleString('th-TH', { minimumFractionDigits: 2 })}`
+        : null;
+
+      const body = [
+        `เรียน คุณ${b.full_name || ''}`,
+        ``,
+        isOverdueRow
+          ? `บิลด้านล่างเลยกำหนดชำระแล้ว กรุณาชำระโดยเร็ว`
+          : isToday
+            ? `วันนี้เป็นวันสุดท้ายในการชำระบิลด้านล่าง`
+            : `บิลด้านล่างจะครบกำหนดชำระในอีก ${daysUntilDue} วัน — ส่งล่วงหน้าเพื่อให้คุณไม่ลืม`,
+        ``,
+        `📄 บิล: ${b.bill_no || `#${b.id}`}${b.period ? ` (รอบ ${b.period})` : ''}`,
+        `🏠 ห้อง: ${b.room_id}`,
+        `💰 ยอดที่ต้องชำระ: ฿${amtStr}`,
+        lateFeeLine,
+        `📅 ครบกำหนด: ${dueDayStr}`,
+        `LINE ที่ผูกกับห้องนี้: ${lineBindingCount} บัญชี`,
+        ``,
+        `📋 ชำระผ่าน QR PromptPay หรือโอนเงินตามที่ระบุในบิล แล้วอัปโหลดสลิปที่พอร์ทัล /tenant`,
+      ].filter(Boolean).join('\n');
+
+      try {
+        if (hasLine) {
+          // Fan out to every LINE binding the tenant has (single-OA
+          // tenants get 1 push, multi-OA tenants get 1 per OA so the
+          // message lands wherever they actually check). Falls back
+          // gracefully when getTenantLineRecipients isn't yet wired
+          // for a legacy deploy (we still have b.line_user_id).
+          for (const r of recipients) {
+            await notifQueue.enqueue(pool, {
+              channel: 'line', recipient: r.line_user_id, subject, body,
+              payload: { oaId: r.line_oa_id || null, billId: b.id, reminderTier: isOverdueRow ? 'overdue' : (isToday ? 'today' : 'pre-due') },
+            }).catch(() => {});
+          }
+        }
+        if (hasEmail) {
+          await notifQueue.enqueue(pool, {
+            channel: 'email', recipient: b.email, subject, body,
+            payload: { billId: b.id, reminderTier: isOverdueRow ? 'overdue' : (isToday ? 'today' : 'pre-due') },
+          }).catch(() => {});
+        }
+        // Stamp last_reminded_at on success so admin's send-history UI
+        // and the next tick's filter both see this bill as handled.
+        await pool.query(
+          `UPDATE bills
+              SET last_reminded_at = NOW(),
+                  reminder_count   = COALESCE(reminder_count, 0) + 1
+            WHERE id = $1 AND deleted_at IS NULL`,
+          [b.id]
+        ).catch((err) => console.warn('[scheduler] reminder stamp failed:', err.message));
+        reminded++;
+      } catch (err) {
+        console.warn(`[scheduler] reminder for bill ${b.id} failed:`, err.message);
+      }
+    }
+    if (reminded > 0) {
+      console.log(`[scheduler] payment reminders sent for ${reminded}/${due.length} bill(s)`);
+    }
+    state.lastPaymentReminderAt = todayKey;
+    writeState(state);
+  } catch (err) {
+    console.error('[scheduler] payment reminder failed:', err.message);
+    return { error: err.message };
+  }
+}
+
 // === Janitor: prune old failed notifications ============================
 // notifications_queue rows with status='failed' linger forever — there
 // was no TTL or cleanup before this. Over months the table accumulates
@@ -1578,10 +2039,13 @@ async function tick(pool) {
   }
   const now = new Date();
 
-  // Late-fee MUST run before bill-gen so today's auto-bills can include the
-  // late fee on the previous overdue bill. Running them in parallel races —
-  // bill-gen reads bills.status, and a previous bill stuck in 'pending' past
-  // its due_date doesn't pay a late fee that cycle.
+  // Late-fee MUST run before bill-gen so any bills going overdue today get
+  // their late_fee applied IN-PLACE before bill-gen reads the same table.
+  // R2 — buildBill never carries the previous bill's penalty forward; the
+  // fee lives on the original overdue bill (updated by tickLateFee). Order
+  // still matters because access-control sync + room-status cascade read
+  // bills.status, so the overdue flip must complete before downstream
+  // jobs see the table.
   try {
     const lateFeeResult = await tickLateFee(pool, flags, now, state);
     if (lateFeeResult && lateFeeResult.error) {
@@ -1625,6 +2089,11 @@ async function tick(pool) {
     { job: 'room-status-sync', promise: _withAdvisoryLock(pool, `roomStatusSync-${todayKey}`, () => tickRoomStatusSync(pool, flags, now, state)) },
     { job: 'notif-prune', promise: _withAdvisoryLock(pool, `notifQueuePrune-${todayKey}`, () => tickPruneFailedNotifications(pool, flags, now, state)) },
     { job: 'orphan-slip-prune', promise: _withAdvisoryLock(pool, `orphanSlipPrune-${todayKey}`, () => tickPruneOrphanSlips(pool, flags, now, state)) },
+    // R7 — pre-due payment reminder. Runs after bill-gen so newly-issued
+    // bills with a same-day due date (rare but possible when admin sets
+    // dueOnDay = bill-gen day) get the "ครบกำหนดวันนี้" alert immediately.
+    // Daily idempotent via state.lastPaymentReminderAt + bills.last_reminded_at.
+    { job: 'payment-reminder', promise: _withAdvisoryLock(pool, `paymentReminder-${todayKey}`, () => tickPaymentReminder(pool, flags, now, state)) },
   ];
   const results = await Promise.allSettled(jobs.map((j) => j.promise));
   for (const [i, r] of results.entries()) {
@@ -1673,4 +2142,8 @@ module.exports = {
   // balance — instead of forcing them to wait for the next daily tick.
   restoreAccessCardsForTenantIfClear,
   ACCESS_CARD_AUTO_REVOKE_REASON,
+  // R6 — exposed for /admin#health so the UI can surface an actionable
+  // "deploy is missing a persistent volume" warning when the scheduler
+  // state file is on ephemeral storage.
+  isStateFilePersistent,
 };

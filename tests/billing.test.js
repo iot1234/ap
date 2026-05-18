@@ -67,14 +67,21 @@ test('buildBill: VAT applied when enabled', () => {
   assert.equal(bill.total, 6569.8);
 });
 
-test('buildBill: late fee from previous overdue', () => {
+test('computeLateFee: late fee from previous overdue', () => {
   const flags = { lateFee: { enabled: true, ratePctPerMonth: 1.5, gracePeriodDays: 0 }, vat: { enabled: false } };
   const past = new Date(); past.setDate(past.getDate() - 30);
-  const previous = { total: 6000, dueDate: past.toISOString().slice(0, 10), status: 'overdue' };
-  const bill = billing.buildBill({ room: baseRoom, config: baseConfig, features: flags, previous });
-  assert.ok(bill.lateFee > 0, 'late fee should be > 0');
+  const fee = billing.computeLateFee({
+    base: 6000,
+    dueDate: past.toISOString().slice(0, 10),
+    ratePctPerMonth: flags.lateFee.ratePctPerMonth,
+    gracePeriodDays: flags.lateFee.gracePeriodDays,
+    now: new Date(),
+  });
+  assert.ok(fee.lateFee > 0, 'late fee should be > 0');
   // Roughly 6000 × 1.5% × (30/30) = 90 (give or take grace handling)
-  assert.ok(bill.lateFee >= 80 && bill.lateFee <= 100);
+  assert.ok(fee.lateFee >= 80 && fee.lateFee <= 100);
+  const bill = billing.buildBill({ room: baseRoom, config: baseConfig, features: flags, previous: { total: 6000 } });
+  assert.equal(bill.lateFee, 0, 'buildBill keeps late fees on the overdue bill, not the new bill');
 });
 
 test('buildBill: recurring charges only when enabled', () => {
@@ -96,6 +103,179 @@ test('statusOf: paid > overdue > pending', () => {
 
 test('makeBillNo is deterministic for room+period', () => {
   assert.equal(billing.makeBillNo('201', '2026-05'), 'INV-2026-05-201');
+});
+
+// --- R4 — makeBillNo with tenant suffix ------------------------------------
+// When a room changes tenants mid-period (one moves out, another moves in
+// within the same calendar month), the default INV-${period}-${roomId}
+// collides — both tenants need a separate bill for the same room+period.
+// makeBillNo's opts.tenantId appends -T${id} so the partial unique
+// uq_bills_room_period_tenant_active accommodates both.
+
+test('makeBillNo: with tenantId appends -T${id}', () => {
+  assert.equal(billing.makeBillNo('201', '2026-05', { tenantId: 42 }), 'INV-2026-05-201-T42');
+});
+
+test('makeBillNo: invalid/empty tenantId falls back to default shape', () => {
+  assert.equal(billing.makeBillNo('201', '2026-05', { tenantId: null }), 'INV-2026-05-201');
+  assert.equal(billing.makeBillNo('201', '2026-05', { tenantId: '' }), 'INV-2026-05-201');
+  assert.equal(billing.makeBillNo('201', '2026-05', { tenantId: -1 }), 'INV-2026-05-201');
+  assert.equal(billing.makeBillNo('201', '2026-05', { tenantId: 'oops' }), 'INV-2026-05-201');
+});
+
+test('makeBillNo: attempt suffix for rare double-collision', () => {
+  assert.equal(billing.makeBillNo('201', '2026-05', { tenantId: 42, attempt: 1 }), 'INV-2026-05-201-T42');
+  assert.equal(billing.makeBillNo('201', '2026-05', { tenantId: 42, attempt: 2 }), 'INV-2026-05-201-T42-2');
+});
+
+// --- R2 — computeLateFee edge cases ----------------------------------------
+// services/scheduler.js#tickLateFee calls billing.computeLateFee to keep
+// the math centralised. These pin the contract so a future refactor can't
+// silently drift (off-by-one on grace, base coercion, NaN propagation).
+
+test('computeLateFee: zero/invalid inputs → 0 (defensive)', () => {
+  assert.equal(billing.computeLateFee({}).lateFee, 0);
+  assert.equal(billing.computeLateFee({ base: 0, dueDate: '2026-01-01', ratePctPerMonth: 1.5 }).lateFee, 0);
+  assert.equal(billing.computeLateFee({ base: 5000, dueDate: '2026-01-01' }).lateFee, 0, 'no rate → 0');
+  assert.equal(billing.computeLateFee({ base: 'oops', dueDate: '2026-01-01', ratePctPerMonth: 1.5 }).lateFee, 0);
+  assert.equal(billing.computeLateFee({ base: 5000, dueDate: 'not-a-date', ratePctPerMonth: 1.5 }).lateFee, 0);
+});
+
+test('computeLateFee: due in future → 0 (not yet overdue)', () => {
+  const future = new Date(Date.now() + 7 * 86_400_000);
+  const r = billing.computeLateFee({ base: 5000, dueDate: future, ratePctPerMonth: 1.5 });
+  assert.equal(r.lateFee, 0);
+  assert.equal(r.daysOver, 0);
+});
+
+test('computeLateFee: grace period absorbs short delay', () => {
+  const fiveDaysAgo = new Date(Date.now() - 5 * 86_400_000);
+  const r = billing.computeLateFee({ base: 5000, dueDate: fiveDaysAgo, ratePctPerMonth: 1.5, gracePeriodDays: 7 });
+  assert.equal(r.lateFee, 0);
+});
+
+test('computeLateFee: idempotent — same inputs → same output', () => {
+  // tickLateFee re-runs daily; must converge, not compound.
+  const due = new Date(Date.now() - 53 * 86_400_000);
+  const fixedNow = new Date();
+  const a = billing.computeLateFee({ base: 5000, dueDate: due, ratePctPerMonth: 1.5, gracePeriodDays: 7, now: fixedNow });
+  const b = billing.computeLateFee({ base: 5000, dueDate: due, ratePctPerMonth: 1.5, gracePeriodDays: 7, now: fixedNow });
+  assert.equal(a.lateFee, b.lateFee);
+  assert.equal(a.daysOver, b.daysOver);
+});
+
+// --- R2-followup — validatePaymentAmount two-tier acceptance --------------
+// Slip payment uploaded BEFORE scheduler.tickLateFee fires must still be
+// accepted when admin verifies AFTER tickLateFee has added a penalty.
+// Tier matrix:
+//   - 'exact'     → amount ≈ current bills.total (post late_fee)
+//   - 'principal' → amount ≈ subtotal+vat (paid in good faith before fee)
+//   - 'none'      → neither tier matched → reject
+
+test('validatePaymentAmount: exact match → tier="exact" (no late_fee)', () => {
+  const r = billing.validatePaymentAmount({ amount: 5000, total: 5000, lateFee: 0 });
+  assert.equal(r.ok, true);
+  assert.equal(r.tier, 'exact');
+  assert.equal(r.lateFeeOutstanding, 0);
+});
+
+test('validatePaymentAmount: exact match with late_fee already paid → tier="exact"', () => {
+  // Tenant pays full total (5000 + 90 late_fee = 5090).
+  const r = billing.validatePaymentAmount({ amount: 5090, total: 5090, lateFee: 90 });
+  assert.equal(r.ok, true);
+  assert.equal(r.tier, 'exact');
+  assert.equal(r.lateFeeOutstanding, 0);
+});
+
+test('validatePaymentAmount: principal-tier match → tier="principal", outstanding=late_fee', () => {
+  // Bill total grew from 5000 to 5090 after late_fee. Tenant paid 5000
+  // (the original total they saw before tickLateFee fired).
+  const r = billing.validatePaymentAmount({ amount: 5000, total: 5090, lateFee: 90 });
+  assert.equal(r.ok, true);
+  assert.equal(r.tier, 'principal');
+  assert.equal(r.principal, 5000);
+  assert.equal(r.lateFeeOutstanding, 90);
+});
+
+test('validatePaymentAmount: amount in middle → reject, report closer reference', () => {
+  // 5045 is between principal (5000) and total (5090) — not close enough
+  // to either within 1฿ tolerance → reject.
+  const r = billing.validatePaymentAmount({ amount: 5045, total: 5090, lateFee: 90 });
+  assert.equal(r.ok, false);
+  assert.equal(r.tier, 'none');
+  // Closest reference (whichever is nearer) reported back for clearer error.
+  assert.ok(r.closest === 5000 || r.closest === 5090);
+});
+
+test('validatePaymentAmount: bank-rounding tolerance ±1฿', () => {
+  // PromptPay rounds 0.50, some processors ±1.00. We allow 1฿ either way.
+  assert.equal(billing.validatePaymentAmount({ amount: 5000.5, total: 5000, lateFee: 0 }).ok, true);
+  assert.equal(billing.validatePaymentAmount({ amount: 4999.5, total: 5000, lateFee: 0 }).ok, true);
+  assert.equal(billing.validatePaymentAmount({ amount: 5001.5, total: 5000, lateFee: 0 }).ok, false);
+});
+
+test('validatePaymentAmount: when late_fee=0, principal tier collapses to exact', () => {
+  // No late_fee → principal == total → only one path to match.
+  const r = billing.validatePaymentAmount({ amount: 5000, total: 5000, lateFee: 0 });
+  assert.equal(r.tier, 'exact');
+  // The reverse case (amount far from total, no late_fee) is unambiguous reject.
+  const bad = billing.validatePaymentAmount({ amount: 100, total: 5000, lateFee: 0 });
+  assert.equal(bad.ok, false);
+  assert.equal(bad.tier, 'none');
+});
+
+test('validatePaymentAmount: invalid inputs → safe reject (no NaN propagation)', () => {
+  assert.equal(billing.validatePaymentAmount({}).ok, false);
+  assert.equal(billing.validatePaymentAmount({ amount: NaN, total: 5000 }).ok, false);
+  assert.equal(billing.validatePaymentAmount({ amount: 5000, total: 0 }).ok, false);
+  assert.equal(billing.validatePaymentAmount({ amount: -100, total: 5000 }).ok, false);
+});
+
+test('validatePaymentAmount: custom tolerance honoured', () => {
+  // Caller can tighten/loosen the tolerance for special cases. Tightening
+  // to 0 means strict equality (no float drift allowed).
+  assert.equal(billing.validatePaymentAmount({ amount: 5000.5, total: 5000, lateFee: 0, tolerance: 0 }).ok, false);
+  // Loosening to 50 (e.g. legacy migration tolerating bigger drift).
+  assert.equal(billing.validatePaymentAmount({ amount: 5040, total: 5000, lateFee: 0, tolerance: 50 }).ok, true);
+});
+
+test('validatePaymentAmount: accepts exact total and principal before late fee', () => {
+  const exact = billing.validatePaymentAmount({ amount: 5090, total: 5090, lateFee: 90 });
+  assert.equal(exact.ok, true);
+  assert.equal(exact.tier, 'exact');
+  assert.equal(exact.lateFeeOutstanding, 0);
+
+  const principal = billing.validatePaymentAmount({ amount: 5000, total: 5090, lateFee: 90 });
+  assert.equal(principal.ok, true);
+  assert.equal(principal.tier, 'principal');
+  assert.equal(principal.principal, 5000);
+  assert.equal(principal.lateFeeOutstanding, 90);
+
+  const mismatch = billing.validatePaymentAmount({ amount: 100, total: 5090, lateFee: 90 });
+  assert.equal(mismatch.ok, false);
+  assert.equal(mismatch.tier, 'none');
+});
+
+test('validatePaidLedger: accepts settled ledger within payment tolerance', () => {
+  const r = billing.validatePaidLedger({ paymentAmount: 5000.5, billTotal: 5000 });
+  assert.equal(r.ok, true);
+  assert.equal(r.code, 'OK');
+  assert.equal(r.diff, 0.5);
+});
+
+test('validatePaidLedger: rejects paid bill/payment drift', () => {
+  const r = billing.validatePaidLedger({ paymentAmount: 5000, billTotal: 5090 });
+  assert.equal(r.ok, false);
+  assert.equal(r.code, 'PAID_LEDGER_INCONSISTENT');
+  assert.equal(r.paymentAmount, 5000);
+  assert.equal(r.billTotal, 5090);
+});
+
+test('validatePaidLedger: invalid inputs fail closed', () => {
+  assert.equal(billing.validatePaidLedger({}).ok, false);
+  assert.equal(billing.validatePaidLedger({ paymentAmount: NaN, billTotal: 5000 }).code, 'INVALID_PAID_LEDGER');
+  assert.equal(billing.validatePaidLedger({ paymentAmount: 5000, billTotal: 0 }).code, 'INVALID_PAID_LEDGER');
+  assert.equal(billing.validatePaidLedger({ paymentAmount: -100, billTotal: 5000 }).code, 'INVALID_PAID_LEDGER');
 });
 
 // --- Defensive readings handling -------------------------------------------

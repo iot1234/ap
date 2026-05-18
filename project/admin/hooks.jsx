@@ -588,6 +588,61 @@
       title: 'มีบิลของรอบนี้อยู่แล้ว',
       description: 'ทำการ void บิลเดิมก่อน หากต้องการสร้างใหม่',
     },
+    // R3 — server recomputes the bill and refuses to insert if admin's
+    // submitted totals drift > tolerance vs the resolver. Admin can opt-in
+    // via manualOverride+reason for legitimate cases (special promo, legacy
+    // migration, contract change mid-flight).
+    BILL_TOTAL_DRIFT: {
+      title: 'ตัวเลขบิลไม่ตรงกับที่ระบบคำนวณ',
+      description: (e) => {
+        const lines = ['ตรวจสอบยอดอีกครั้งก่อนยืนยัน — หรือส่ง manualOverride:true พร้อม overrideReason เพื่อบันทึก audit'];
+        if (Array.isArray(e.drifts)) {
+          for (const d of e.drifts.slice(0, 5)) {
+            lines.push(`• ${d.field}: ส่งมา ${d.submitted} ระบบคำนวณ ${d.expected} (ต่าง ${d.diff})`);
+          }
+        }
+        return lines.join('\n');
+      },
+    },
+    // R3 — recompute itself failed (DB hiccup mid-handler). Distinct from
+    // DRIFT because the issue is server-side, not the submitted numbers.
+    BILL_RECOMPUTE_FAILED: {
+      title: 'ระบบตรวจสอบบิลไม่สำเร็จ',
+      description: 'ลองส่งใหม่ด้วยตัวเลือก "ให้ระบบคำนวณให้" (compute:true) หรือรอสักครู่แล้วลองใหม่',
+    },
+    // R3 — admin must include a reason when bypassing the drift check.
+    OVERRIDE_REASON_REQUIRED: {
+      title: 'ต้องระบุเหตุผลในการ override',
+      description: 'พิมพ์อธิบายในกล่อง overrideReason อย่างน้อย 5 ตัวอักษร ก่อนกดยืนยัน',
+    },
+    // R2-followup — payment amount didn't match current total OR principal.
+    // The response shape includes billPrincipal so the UI can show both
+    // reference numbers, letting admin/tenant pick the right amount.
+    PAYMENT_AMOUNT_MISMATCH: {
+      title: 'จำนวนเงินไม่ตรงกับยอดบิล',
+      description: (e) => {
+        const lines = [];
+        if (e.billTotal != null) lines.push(`ยอดบิลปัจจุบัน: ฿${Number(e.billTotal).toLocaleString('th-TH', { minimumFractionDigits: 2 })}`);
+        if (e.billPrincipal != null && e.billLateFee > 0) {
+          lines.push(`  • ค่าเช่า+ค่าน้ำไฟ: ฿${Number(e.billPrincipal).toLocaleString('th-TH', { minimumFractionDigits: 2 })}`);
+          lines.push(`  • ค่าปรับล่าช้า: ฿${Number(e.billLateFee).toLocaleString('th-TH', { minimumFractionDigits: 2 })}`);
+        }
+        if (e.paymentAmount != null) lines.push(`ยอดที่ระบุ: ฿${Number(e.paymentAmount).toLocaleString('th-TH', { minimumFractionDigits: 2 })}`);
+        return lines.join('\n');
+      },
+    },
+    // R2-followup — tenant uploaded amount didn't match (same shape).
+    AMOUNT_NOT_BILL_TOTAL: {
+      title: 'ยอดสลิปไม่ตรงกับยอดบิล',
+      description: (e) => e.error || 'โอนเงินตามยอดบิล แล้วลองอัปโหลดสลิปใหม่',
+    },
+    // R7-followup — admin clicked "ส่งเตือน" too soon after the previous
+    // send (manual or scheduler). UI should show "ส่งซ้ำตอนนี้?" prompt
+    // and re-call with force:true.
+    REMINDER_COOLDOWN: {
+      title: 'เพิ่งส่งเตือนไป',
+      description: (e) => e.error || 'รอสักครู่ก่อนส่งซ้ำ หรือคลิก "บังคับส่งซ้ำ" ถ้าจำเป็น',
+    },
     TENANT_HAS_REFS: {
       title: 'ลบผู้เช่าไม่ได้',
       description: 'ผู้เช่ายังมีบิล/สัญญา/บัตรเข้า-ออกเชื่อมโยง — เปิด softDelete หรือลบข้อมูลที่อ้างถึงก่อน',

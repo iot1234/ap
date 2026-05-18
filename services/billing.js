@@ -18,20 +18,33 @@ const pricing = require('./pricing');
  * it, the resolver falls back to formula → legacy room.rent. Existing
  * code paths that don't pass `contract` keep working unchanged.
  *
+ * LATE FEE POLICY (R2): buildBill itself NEVER computes a late fee from a
+ * previous overdue bill. Late fees are owned by services/scheduler.js#tickLateFee,
+ * which updates the *previous* bill's `late_fee` + `total` in-place when it
+ * flips pending → overdue. This keeps each bill self-contained: a tenant
+ * viewing the old bill sees the current amount due (with late fee folded in),
+ * not a stale total that's contradicted by the new month's bill. Callers may
+ * still pass `previous` for forward compat, but the value is ignored.
+ *
+ * VAT POLICY (R1): VAT applies to vatBase = rent + utilities + wifi + recurring
+ * - discount. It does NOT apply to late_fee — Thai tax rules treat penalty
+ * charges as outside the VAT-able rental/utility revenue stream.
+ *
  * @param {object} opts
  * @param {object} opts.room       - { id, rent, tenant?, waterUnits?, elecUnits?, type?, floor?, view?, rent_override? }
  * @param {object} opts.config     - { utilities: { waterRate, elecRate, wifi }, building, rates, floorPremium, viewPremium, featurePremium }
- * @param {object} opts.features   - feature flag map (lateFee, vat, recurringCharges)
+ * @param {object} opts.features   - feature flag map (vat, recurringCharges) — note: lateFee.* is read by scheduler.tickLateFee, not here
  * @param {object} [opts.contract] - active contract row (id, status, monthly_rent, discount_pct)
- * @param {object} [opts.previous] - previous bill for late-fee calc { paidAt, dueDate, total, status }
  * @param {Array}  [opts.recurring] - extra line items [{ label, amount }]
  * @param {string} [opts.period]   - "2026-05" or human-readable
  * @param {string} [opts.dueDate]  - ISO date "YYYY-MM-DD"
  * @returns {object} bill ready for PDF rendering or DB insert. Adds
  *                   rentSource ('contract'|'override'|'formula'|'legacy')
  *                   so admin can audit-log why a bill came out at a given price.
+ *                   Always returns lateFee: 0 — the previous overdue's fee
+ *                   lives on the previous bill, not on this new one.
  */
-function buildBill({ room, contract = null, config, features, previous = null, recurring = [], period, dueDate, discountPct = 0, isFirstBill = false }) {
+function buildBill({ room, contract = null, config, features, recurring = [], period, dueDate, discountPct = 0, isFirstBill = false }) {
   const u = (config && config.utilities) || {};
   // Rate resolution: each utility prefers a per-room override (room blob
   // accepts both camelCase + snake_case to match rooms_v2 columns) then
@@ -175,40 +188,43 @@ function buildBill({ room, contract = null, config, features, previous = null, r
     }
   }
 
-  // Round at each accumulation step so VAT/total math runs on stable 2-decimal
-  // values. Items are individually rounded but raw reduce of floats can drift
-  // sub-cent; rounding here keeps the bill total exactly equal to the displayed
-  // line-item sum (also matches what the bill renderer prints).
-  let subtotal = round2(items.reduce((s, it) => s + (Number(it.amount) || 0), 0));
+  // vatBase = rent + utilities + wifi + recurring - discount.
+  // This is BEFORE late_fee and BEFORE vat — it's the taxable amount.
+  // Round at each accumulation step so VAT/total math runs on stable
+  // 2-decimal values. Items are individually rounded but a raw reduce of
+  // floats can drift sub-cent; rounding here keeps the bill total exactly
+  // equal to the displayed line-item sum (also matches the bill renderer).
+  //
+  // R1 — VAT applies to the rental/utility/recurring revenue stream only.
+  // Late fees are penalty charges (ค่าปรับ) which are out-of-scope for
+  // Thai VAT, so they sit AFTER vat on the bill and don't inflate the
+  // tax base. Stacking them inside subtotal would silently overcharge VAT
+  // on penalties — a real tenant-dispute risk.
+  const vatBase = round2(items.reduce((s, it) => s + (Number(it.amount) || 0), 0));
 
-  // Late fee from previous bill
-  let lateFee = 0;
-  if (features?.lateFee?.enabled && previous && previous.status === 'overdue') {
-    const grace = Number(features.lateFee.gracePeriodDays || 0);
-    const ratePctMonth = Number(features.lateFee.ratePctPerMonth || 0);
-    const due = previous.dueDate ? new Date(previous.dueDate) : null;
-    if (due && Number.isFinite(due.getTime())) {
-      const daysOver = Math.max(0, Math.floor((Date.now() - due.getTime()) / 86_400_000) - grace);
-      if (daysOver > 0) {
-        const monthsOver = daysOver / 30;
-        lateFee = round2((Number(previous.total) || 0) * (ratePctMonth / 100) * monthsOver);
-        if (lateFee > 0) {
-          items.push({ label: `ค่าปรับชำระล่าช้า (${daysOver} วัน)`, qty: '', amount: lateFee });
-          subtotal = round2(subtotal + lateFee);
-        }
-      }
-    }
-  }
-
-  // VAT — added on top of subtotal (excludes from base by default)
+  // VAT — computed on vatBase, NOT on (vatBase + lateFee).
   let vat = 0;
   if (features?.vat?.enabled) {
     const ratePct = Number(features.vat.ratePct || 0);
-    vat = round2(subtotal * (ratePct / 100));
+    vat = round2(vatBase * (ratePct / 100));
     if (vat > 0) items.push({ label: `ภาษีมูลค่าเพิ่ม ${ratePct}%`, qty: '', amount: vat });
   }
 
-  const total = round2(subtotal + vat);
+  // R2 — late_fee is owned by services/scheduler.js#tickLateFee and lives
+  // on the *previous* overdue bill (updated in-place when the bill flips
+  // pending → overdue). A freshly-generated bill always starts with
+  // late_fee=0 — there is no carry-over of last month's penalty into this
+  // month's invoice.
+  const lateFee = 0;
+
+  // subtotal = vatBase (everything before VAT, before late_fee). Stored
+  // separately from total so the bill PDF can show the breakdown clearly:
+  //   subtotal (vatable) + vat + late_fee = total
+  // chk_bills_amounts_nonnegative requires subtotal >= 0 — vatBase already
+  // round2'd so this can't go negative even when discount > base (the
+  // discount cap at 50% prevents that anyway).
+  const subtotal = vatBase;
+  const total = round2(subtotal + vat + lateFee);
   const billNo = makeBillNo(room.id, period);
 
   return {
@@ -462,10 +478,48 @@ function buildPaymentBlock(config) {
 
 function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
 
-function makeBillNo(roomId, period) {
+/**
+ * Build a unique bill_no.
+ *
+ * Default shape: `INV-${period}-${roomId}` — keeps backward compat with every
+ * bill issued before R4. Stable + human-readable + sortable.
+ *
+ * R4 — when a room changes tenants mid-period (one moves out, another moves
+ * in within the same calendar month), the simple shape collides: both
+ * tenants need a bill for the same (room, period) pair but ON CONFLICT
+ * (bill_no) DO NOTHING silently dropped the second one. The opt-in
+ * `tenantId` argument appends `-T${id}` so two coexisting bills for the
+ * same room+period can be stored without collision.
+ *
+ * Callers SHOULD pass tenantId when they know the bill is for a *new*
+ * tenant who just moved in — services/billing.js can't tell on its own
+ * because rooms_v2 only carries the current tenant pointer. Bill-gen
+ * paths (manual POST, bulk-generate, scheduler) detect collision via the
+ * partial-unique index `uq_bills_room_period_active` and retry with the
+ * tenant suffix attached — see the conflict-recovery block in those routes.
+ *
+ * The `attempt` integer is for the rare belt-and-braces case where two
+ * tenants happen to share the same DB id — practically impossible but
+ * keeps the API future-proof and lets the recovery path keep climbing
+ * the suffix space without colliding on the suffix itself.
+ */
+function makeBillNo(roomId, period, opts = {}) {
   const safe = String(roomId || '000').replace(/[^A-Za-z0-9_-]/g, '');
   const p = (period || formatPeriodNow()).replace(/\s+/g, '-');
-  return `INV-${p}-${safe}`;
+  let base = `INV-${p}-${safe}`;
+  if (opts && opts.tenantId != null && opts.tenantId !== '') {
+    const tid = Number(opts.tenantId);
+    if (Number.isInteger(tid) && tid > 0) {
+      base += `-T${tid}`;
+    }
+  }
+  if (opts && opts.attempt != null) {
+    const att = Number(opts.attempt);
+    if (Number.isInteger(att) && att > 1) {
+      base += `-${att}`;
+    }
+  }
+  return base;
 }
 
 function formatPeriodNow() {
@@ -564,6 +618,148 @@ function isChargeApplicableForPeriod(charge, period) {
   return true;
 }
 
+/**
+ * R2 — Compute the late fee for a bill that has gone past its due date.
+ *
+ * Centralised so services/scheduler.js#tickLateFee (which writes the fee
+ * BACK to bills.late_fee + bills.total) and any future caller (admin
+ * preview, tenant-portal "what would my fee be?" calculator) all agree on
+ * the math. Pure function — no DB, no I/O.
+ *
+ * Math:
+ *   daysOver  = max(0, floor((now - dueDate)/86400000) - gracePeriodDays)
+ *   monthsOver = daysOver / 30          (continuous, not stepped)
+ *   lateFee   = base × (ratePctPerMonth/100) × monthsOver
+ *
+ * `base` is the bill total BEFORE late fee — passing the wrong value here
+ * is the classic compounding bug (late fee charges late fee charges late
+ * fee). tickLateFee derives base via `total - COALESCE(late_fee, 0)` so
+ * each daily tick recomputes from the original principal, making the
+ * operation idempotent: running tickLateFee twice on the same day
+ * produces the same late_fee, not a doubled one.
+ *
+ * @param {object} opts
+ * @param {number} opts.base                - bill total excluding late_fee (rent + util + recurring + vat)
+ * @param {string|Date} opts.dueDate        - YYYY-MM-DD or Date
+ * @param {number} [opts.ratePctPerMonth]   - features.lateFee.ratePctPerMonth (default 0 → no fee)
+ * @param {number} [opts.gracePeriodDays]   - features.lateFee.gracePeriodDays (default 0)
+ * @param {Date}   [opts.now]               - injectable for tests; defaults to new Date()
+ * @returns {{ lateFee:number, daysOver:number, monthsOver:number, base:number }}
+ *          lateFee already round2'd. daysOver/monthsOver returned for
+ *          the audit-log entry ("billed X฿ because 53 days overdue").
+ */
+function computeLateFee({ base, dueDate, ratePctPerMonth = 0, gracePeriodDays = 0, now } = {}) {
+  const safeBase = Number(base);
+  const ratePct = Number(ratePctPerMonth);
+  const grace = Number(gracePeriodDays);
+  // Guard every input — a NaN slipping through here propagates into the
+  // bills.late_fee column and breaks downstream chk_bills_amounts_nonnegative.
+  if (!Number.isFinite(safeBase) || safeBase <= 0
+      || !Number.isFinite(ratePct) || ratePct <= 0) {
+    return { lateFee: 0, daysOver: 0, monthsOver: 0, base: Number.isFinite(safeBase) ? safeBase : 0 };
+  }
+  const due = dueDate instanceof Date ? dueDate : (dueDate ? new Date(dueDate) : null);
+  if (!due || !Number.isFinite(due.getTime())) {
+    return { lateFee: 0, daysOver: 0, monthsOver: 0, base: safeBase };
+  }
+  const reference = now instanceof Date && Number.isFinite(now.getTime()) ? now : new Date();
+  const safeGrace = Number.isFinite(grace) ? Math.max(0, grace) : 0;
+  const rawDays = Math.floor((reference.getTime() - due.getTime()) / 86_400_000);
+  const daysOver = Math.max(0, rawDays - safeGrace);
+  if (daysOver <= 0) {
+    return { lateFee: 0, daysOver: 0, monthsOver: 0, base: safeBase };
+  }
+  const monthsOver = daysOver / 30;
+  const lateFee = round2(safeBase * (ratePct / 100) * monthsOver);
+  return { lateFee, daysOver, monthsOver, base: safeBase };
+}
+
+/**
+ * R2-followup — Validate a payment amount against a bill that may have had
+ * late_fee applied AFTER the tenant initiated payment.
+ *
+ * Background:
+ *   - tickLateFee updates `bills.total` and `bills.late_fee` in-place when
+ *     a bill flips pending → overdue (and refreshes daily while overdue).
+ *   - A tenant who downloaded the PDF / scanned the QR yesterday saw
+ *     `total = 5000`. Today's tick added a 90฿ late fee → `total = 5090`.
+ *   - The tenant transfers 5000 in good faith and uploads the slip.
+ *   - Strict `Math.abs(amount - total) <= 1` rejects this legitimate
+ *     payment as AMOUNT_NOT_BILL_TOTAL.
+ *
+ * Resolution: accept payment.amount within a TIER. Either:
+ *   a) amount ≈ current total (rented + utilities + vat + late_fee) → "fully paid"
+ *   b) amount ≈ principal (rented + utilities + vat only)            → "good-faith principal,
+ *                                                                       late_fee accrued after
+ *                                                                       upload — admin decides
+ *                                                                       whether to waive"
+ *
+ * The match is reported back so caller can record WHICH tier matched in
+ * the audit log + drive admin UI:
+ *   - tier='exact'     → full match (no late_fee or amount equals total)
+ *   - tier='principal' → matched principal but late_fee remains outstanding
+ *   - tier='none'      → reject with the closer of (total, principal)
+ *
+ * @param {object} opts
+ * @param {number} opts.amount       - submitted payment amount (THB)
+ * @param {number} opts.total        - bills.total at verify time
+ * @param {number} opts.lateFee      - bills.late_fee (default 0)
+ * @param {number} [opts.tolerance]  - override; defaults to PAYMENT_TOLERANCE_THB
+ * @returns {{ ok:boolean, tier:'exact'|'principal'|'none', total:number,
+ *             principal:number, lateFee:number, lateFeeOutstanding:number,
+ *             closest:number, diff:number }}
+ */
+function validatePaymentAmount({ amount, total, lateFee = 0, tolerance } = {}) {
+  const tol = Number.isFinite(Number(tolerance)) && Number(tolerance) >= 0
+    ? Number(tolerance)
+    : PAYMENT_TOLERANCE_THB;
+  const safeAmount = Number(amount);
+  const safeTotal = Number(total);
+  const safeLateFee = Number(lateFee) || 0;
+  const principal = round2(safeTotal - safeLateFee);
+  if (!Number.isFinite(safeAmount) || safeAmount <= 0
+      || !Number.isFinite(safeTotal) || safeTotal <= 0) {
+    return {
+      ok: false, tier: 'none',
+      total: safeTotal, principal, lateFee: safeLateFee,
+      lateFeeOutstanding: safeLateFee,
+      closest: safeTotal, diff: Math.abs(safeAmount - safeTotal),
+    };
+  }
+  const exactDiff = Math.abs(safeAmount - safeTotal);
+  if (exactDiff <= tol) {
+    return {
+      ok: true, tier: 'exact',
+      total: safeTotal, principal, lateFee: safeLateFee,
+      lateFeeOutstanding: 0,
+      closest: safeTotal, diff: exactDiff,
+    };
+  }
+  // Only consider the principal tier when there's an active late_fee. If
+  // late_fee=0, total==principal and the exact check above already covered it.
+  if (safeLateFee > 0) {
+    const principalDiff = Math.abs(safeAmount - principal);
+    if (principalDiff <= tol) {
+      return {
+        ok: true, tier: 'principal',
+        total: safeTotal, principal, lateFee: safeLateFee,
+        lateFeeOutstanding: safeLateFee,
+        closest: principal, diff: principalDiff,
+      };
+    }
+  }
+  // Neither tier matched — return the closer reference for a clearer error.
+  const closer = Math.abs(safeAmount - safeTotal) <= Math.abs(safeAmount - principal)
+    ? { closest: safeTotal, diff: Math.abs(safeAmount - safeTotal) }
+    : { closest: principal, diff: Math.abs(safeAmount - principal) };
+  return {
+    ok: false, tier: 'none',
+    total: safeTotal, principal, lateFee: safeLateFee,
+    lateFeeOutstanding: safeLateFee,
+    closest: closer.closest, diff: closer.diff,
+  };
+}
+
 // Tolerance (Thai baht) for accepting a payment whose amount differs from
 // the bill total. Banks round in different directions for fees/discounts
 // (e.g. PromptPay ±0.50, some processors ±1.00), so a strict equality
@@ -578,10 +774,59 @@ function isChargeApplicableForPeriod(charge, period) {
 // Tightening this value affects all six paths together — that's the point.
 const PAYMENT_TOLERANCE_THB = 1.0;
 
+/**
+ * Final paid-ledger guard. This runs after any late_fee waiver has been
+ * applied and immediately before a bill is marked paid. At that point the
+ * durable payment amount must match the settled bill total; otherwise a paid
+ * bill would no longer reconcile with the payment ledger.
+ *
+ * @param {object} opts
+ * @param {number} opts.paymentAmount - amount stored/being stored in payments.amount
+ * @param {number} opts.billTotal     - final bills.total after any waiver
+ * @param {number} [opts.tolerance]   - override; defaults to PAYMENT_TOLERANCE_THB
+ * @returns {{ ok:boolean, code:'OK'|'INVALID_PAID_LEDGER'|'PAID_LEDGER_INCONSISTENT',
+ *             paymentAmount:number, billTotal:number, diff:number, tolerance:number }}
+ */
+function validatePaidLedger({ paymentAmount, billTotal, tolerance } = {}) {
+  const tol = Number.isFinite(Number(tolerance)) && Number(tolerance) >= 0
+    ? Number(tolerance)
+    : PAYMENT_TOLERANCE_THB;
+  const rawAmount = Number(paymentAmount);
+  const rawTotal = Number(billTotal);
+  const safeAmount = Number.isFinite(rawAmount) ? round2(rawAmount) : rawAmount;
+  const safeTotal = Number.isFinite(rawTotal) ? round2(rawTotal) : rawTotal;
+  const diff = Number.isFinite(safeAmount) && Number.isFinite(safeTotal)
+    ? round2(Math.abs(safeAmount - safeTotal))
+    : NaN;
+  if (!Number.isFinite(rawAmount) || rawAmount <= 0
+      || !Number.isFinite(rawTotal) || rawTotal <= 0) {
+    return {
+      ok: false,
+      code: 'INVALID_PAID_LEDGER',
+      paymentAmount: safeAmount,
+      billTotal: safeTotal,
+      diff,
+      tolerance: tol,
+    };
+  }
+  const ok = diff <= tol;
+  return {
+    ok,
+    code: ok ? 'OK' : 'PAID_LEDGER_INCONSISTENT',
+    paymentAmount: safeAmount,
+    billTotal: safeTotal,
+    diff,
+    tolerance: tol,
+  };
+}
+
 module.exports = {
   buildBill, buildPaymentBlock, statusOf, makeBillNo,
   formatPeriodNow, formatDueDate, formatYMD, round2,
   resolveUtilityUsage, resolveUtilityUsageFromBillRow, buildUtilityItem,
   isChargeApplicableForPeriod,
+  computeLateFee,
+  validatePaymentAmount,
+  validatePaidLedger,
   PAYMENT_TOLERANCE_THB,
 };

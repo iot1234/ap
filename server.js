@@ -28,6 +28,7 @@ const sentry = require('./services/sentry');
 const scheduler = require('./services/scheduler');
 const roomSync = require('./services/roomSync');
 const billPayments = require('./services/billPayments');
+const lineBinding = require('./services/lineBinding');
 const { schemas } = require('./schemas');
 const { validateBody } = require('./middleware/validate');
 
@@ -1947,6 +1948,42 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBookingSubmit, validateBod
   const wantFloor = Number(cleaned.floor) || null;
   const bookingId = 'BK-PUB-' + require('crypto').randomBytes(6).toString('hex');
   const holdTokenHash = bookingHoldHash(cleaned.holdToken);
+  let applicantRisk = null;
+  const normalisedApplicantPhone = normaliseBookingPhone(cleaned.phone);
+  if (normalisedApplicantPhone) {
+    try {
+      const existingTenant = await pool.query(
+        `SELECT id, full_name, current_room_id
+           FROM tenants
+          WHERE deleted_at IS NULL
+            AND status='active'
+            AND (
+              phone=$1
+              OR REPLACE(REPLACE(COALESCE(phone, ''), ' ', ''), '-', '')=$2
+            )
+          ORDER BY updated_at DESC
+          LIMIT 1`,
+        [cleaned.phone, normalisedApplicantPhone]
+      );
+      if (existingTenant.rows.length) {
+        const t = existingTenant.rows[0];
+        applicantRisk = {
+          code: 'APPLICANT_PHONE_ALREADY_ACTIVE_TENANT',
+          tenantId: t.id,
+          tenantName: t.full_name || null,
+          currentRoomId: t.current_room_id || null,
+          message: t.current_room_id
+            ? `เบอร์นี้มีผู้เช่า active อยู่ห้อง ${t.current_room_id} แล้ว`
+            : 'เบอร์นี้มีผู้เช่า active อยู่แล้ว',
+          nextAction: 'โทรยืนยันว่าเป็นผู้เช่าเดิมจองอีกห้อง หรือจองแทนเพื่อน ก่อนอนุมัติและสร้างสัญญา',
+        };
+      }
+    } catch (err) {
+      if (err.code !== '42P01' && err.code !== '42703') {
+        console.warn('[public-booking] active-tenant risk check skipped:', err.message);
+      }
+    }
+  }
   let depositSlipFile = null;
   let depositSlipHash = null;
   let depositVerifyResult = null;
@@ -2143,6 +2180,8 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBookingSubmit, validateBod
     createdAt: new Date().toISOString(),
     email: cleaned.email,
     message: cleaned.message,
+    riskFlags: applicantRisk ? [applicantRisk.code] : [],
+    applicantRisk,
     source: 'public-form',
     roomId: cleaned.roomId,
     citizenIdTail: cleaned.citizenIdTail || null,
@@ -2381,6 +2420,25 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBookingSubmit, validateBod
       }
     }
     await client.query('COMMIT');
+    try {
+      const binding = await lineBinding.issueBooking(pool, {
+        bookingId: newBooking.id,
+        ttlDays: 7,
+        createdBy: 'public-booking',
+      });
+      newBooking.lineBinding = {
+        code: binding.code,
+        expiresAt: binding.expiresAt,
+        bookingId: binding.bookingId,
+      };
+    } catch (err) {
+      console.warn('[booking] LINE binding code issue skipped:', err.message);
+      newBooking.lineBinding = {
+        error: 'LINE_BINDING_CODE_FAILED',
+        message: 'สร้างรหัสผูก LINE ไม่สำเร็จ เจ้าหน้าที่สามารถออกให้ใหม่ได้ภายหลัง',
+        nextAction: 'แอดมินควรออก LINE binding code ให้ผู้จองใหม่จากหน้าแอดมิน หรือโทรแจ้งสถานะการจองโดยตรง',
+      };
+    }
     audit(req, 'booking.public_create', 'booking', newBooking.id,
       {
         phone: cleaned.phone, roomId: cleaned.roomId, wantType, wantFloor,
@@ -2390,6 +2448,8 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBookingSubmit, validateBod
         depositVerifyCode: newBooking.depositVerifyCode,
         depositVerifyProvider: newBooking.depositVerifyProvider,
         depositTransactionRef: newBooking.depositTransactionRef,
+        applicantRisk: applicantRisk ? applicantRisk.code : null,
+        lineBindingError: newBooking.lineBinding && newBooking.lineBinding.error ? newBooking.lineBinding.error : null,
       },
       `public:${cleaned.phone || 'anon'}`).catch(() => {});
 
@@ -2399,7 +2459,7 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBookingSubmit, validateBod
       const flags = await features.load(pool);
       notifier.notifyOwner({ pool, features: flags }, {
         subject: '📋 ผู้เช่าใหม่ขอจอง',
-        text: `ชื่อ: ${cleaned.tenantName}\nโทร: ${cleaned.phone || '-'}\nห้อง: ${cleaned.roomId || '-'}\nวันเข้าพัก: ${cleaned.checkInDate || '-'}\nค่าจอง: ${newBooking.bookingFee ? `฿${Number(newBooking.bookingFee).toLocaleString('th-TH')}` : '-'} (${newBooking.depositStatus || 'not_required'})\nผลตรวจสลิป: ${newBooking.depositVerification?.title || newBooking.depositVerifyCode || '-'}\nนโยบาย: ${newBooking.bookingFeeAppliesToDeposit ? 'นำค่าจองไปหัก/นับรวมกับเงินมัดจำ' : 'ค่าจองแยกจากเงินมัดจำ'}\nมัดจำคงเหลือโดยประมาณ: ${newBooking.depositBalanceDue != null ? `฿${Number(newBooking.depositBalanceDue).toLocaleString('th-TH')}` : '-'}\nรหัสการจอง: ${newBooking.id}`,
+        text: `ชื่อ: ${cleaned.tenantName}\nโทร: ${cleaned.phone || '-'}\nห้อง: ${cleaned.roomId || '-'}\nวันเข้าพัก: ${cleaned.checkInDate || '-'}\nค่าจอง: ${newBooking.bookingFee ? `฿${Number(newBooking.bookingFee).toLocaleString('th-TH')}` : '-'} (${newBooking.depositStatus || 'not_required'})\nผลตรวจสลิป: ${newBooking.depositVerification?.title || newBooking.depositVerifyCode || '-'}\nนโยบาย: ${newBooking.bookingFeeAppliesToDeposit ? 'นำค่าจองไปหัก/นับรวมกับเงินมัดจำ' : 'ค่าจองแยกจากเงินมัดจำ'}\nมัดจำคงเหลือโดยประมาณ: ${newBooking.depositBalanceDue != null ? `฿${Number(newBooking.depositBalanceDue).toLocaleString('th-TH')}` : '-'}${newBooking.lineBinding?.error ? `\n⚠️ LINE: สร้างรหัสผูก LINE ไม่สำเร็จ (${newBooking.lineBinding.error})\nขั้นต่อไป: ${newBooking.lineBinding.nextAction}` : ''}${newBooking.applicantRisk ? `\n⚠️ ข้อควรตรวจ: ${newBooking.applicantRisk.message}\nขั้นต่อไป: ${newBooking.applicantRisk.nextAction}` : ''}\nรหัสการจอง: ${newBooking.id}`,
       }).catch(() => {});
     } catch { /* ignore */ }
 
@@ -5481,7 +5541,7 @@ async function tenantPaymentUploadHandler(req, res) {
   if (!b.slip) return res.status(400).json({ error: 'slip image required' });
   try {
     const billRes = await pool.query(
-      `SELECT id, total, status, tenant_id FROM bills WHERE id=$1 AND deleted_at IS NULL`,
+      `SELECT id, total, late_fee, status, tenant_id FROM bills WHERE id=$1 AND deleted_at IS NULL`,
       [billId]
     );
     if (!billRes.rows.length) return res.status(404).json({ error: 'bill not found' });
@@ -5502,18 +5562,42 @@ async function tenantPaymentUploadHandler(req, res) {
     // Without this guard, a tenant could pay 100฿ on a 5,000฿ bill, upload
     // the matching slip, and the auto-verify path would happily accept (slip
     // amount matches `expected.amount` since that came from the same client
-    // input) — bill flips to 'paid' for a fraction of what's due. We tolerate
-    // ±1฿ to match the slipVerifier's own bank-rounding tolerance, but reject
-    // anything beyond that here BEFORE saving the slip / hitting the provider.
+    // input) — bill flips to 'paid' for a fraction of what's due.
+    //
+    // R2-followup — accept the payment in two tiers:
+    //   - tier='exact'     → amount ≈ current total (incl. late_fee)
+    //   - tier='principal' → amount ≈ subtotal+vat (tenant paid before
+    //                        scheduler.tickLateFee added late_fee)
+    // Both are legitimate. validatePaymentAmount also reports the
+    // outstanding late_fee so the admin queue can decide whether to waive
+    // (good-faith principal) or hold for the full amount.
     const billTotal = Number(billRes.rows[0].total) || 0;
-    if (Math.abs(amount - billTotal) > billing.PAYMENT_TOLERANCE_THB) {
+    const billLateFee = Number(billRes.rows[0].late_fee) || 0;
+    const amountCheck = billing.validatePaymentAmount({
+      amount,
+      total: billTotal,
+      lateFee: billLateFee,
+    });
+    if (!amountCheck.ok) {
       return res.status(400).json({
-        error: `จำนวนเงินไม่ตรงกับยอดบิล — บิลนี้ ฿${billTotal.toLocaleString('th-TH', { minimumFractionDigits: 2 })} แต่ผู้เช่าระบุ ฿${amount.toLocaleString('th-TH', { minimumFractionDigits: 2 })}`,
+        error: `จำนวนเงินไม่ตรงกับยอดบิล — ยอดบิลปัจจุบัน ฿${billTotal.toLocaleString('th-TH', { minimumFractionDigits: 2 })}${
+          billLateFee > 0
+            ? ` (ค่าเช่า+ค่าน้ำไฟ ฿${amountCheck.principal.toLocaleString('th-TH', { minimumFractionDigits: 2 })} + ค่าปรับล่าช้า ฿${billLateFee.toLocaleString('th-TH', { minimumFractionDigits: 2 })})`
+            : ''
+        } แต่ผู้เช่าระบุ ฿${amount.toLocaleString('th-TH', { minimumFractionDigits: 2 })}`,
         code: 'AMOUNT_NOT_BILL_TOTAL',
         billTotal,
+        billPrincipal: amountCheck.principal,
+        billLateFee,
         submittedAmount: amount,
       });
     }
+    // Stash tier + outstanding late_fee for the verify path + audit log.
+    // When tier==='principal' and outstanding > 0, the verified payment
+    // leaves a residual debt that admin can decide to waive or pursue.
+    const amountTier = amountCheck.tier;
+    const lateFeeOutstandingAtUpload = amountCheck.lateFeeOutstanding;
+    let finalAmountCheck = amountCheck;
     // Don't allow re-paying a bill that's already paid or void. Without this
     // a tenant could re-upload after admin has already verified, creating a
     // second 'verified' payment row pointing at the same bill (orphaned
@@ -5643,10 +5727,18 @@ async function tenantPaymentUploadHandler(req, res) {
           // bank transfer, TrueMoney Wallet). Tenants may pay any visible
           // channel, so every configured receiver tail must be accepted by
           // auto-verify to avoid false RECEIVER_MISMATCH rejections.
+          //
+          // R2-followup — `expected.amount` is the tenant-submitted amount
+          // (already cross-checked against bill total OR principal by
+          // validatePaymentAmount above). Using billTotal here would fail
+          // the slip provider's amount-match when the tenant legitimately
+          // paid the principal before late_fee accrued. The submitted
+          // `amount` is the value actually on the slip's QR, so it's what
+          // the provider's amount field will match against.
           verifyResult = await slipVerifier.verifyWithFallback(
             rawBuf,
             {
-              amount: billTotal,
+              amount,
               billId,
               promptpayTarget: ppTarget || null,
               additionalReceiverTargets: extraTargets,
@@ -5763,7 +5855,7 @@ async function tenantPaymentUploadHandler(req, res) {
       // wrong tenant's ledger (bill might have been re-pointed at tenant B
       // while tenant A's upload was in flight).
       const lock = await client.query(
-        `SELECT id, status, total, tenant_id FROM bills WHERE id=$1 AND deleted_at IS NULL FOR UPDATE`,
+        `SELECT id, status, total, late_fee, tenant_id FROM bills WHERE id=$1 AND deleted_at IS NULL FOR UPDATE`,
         [billId]
       );
       if (!lock.rows.length) {
@@ -5820,6 +5912,32 @@ async function tenantPaymentUploadHandler(req, res) {
           existingPaymentId: existingVerified.rows[0].id,
         });
       }
+      // Re-check the amount under the bill row lock. The first check happens
+      // before a slow storage/verifier path; in that window an admin edit or
+      // the late-fee scheduler can change bills.total. The locked check keeps
+      // the durable payment row consistent with the ledger amount we are about
+      // to mark paid.
+      const lockedBillTotal = billing.round2(Number(lock.rows[0].total));
+      const lockedLateFee = billing.round2(Number(lock.rows[0].late_fee || 0));
+      finalAmountCheck = billing.validatePaymentAmount({
+        amount,
+        total: lockedBillTotal,
+        lateFee: lockedLateFee,
+      });
+      if (!finalAmountCheck.ok) {
+        await client.query('ROLLBACK');
+        if (slip && slip.id) {
+          require('./services/storage').remove(pool, slip.id).catch(() => {});
+        }
+        return res.status(409).json({
+          error: 'ยอดชำระไม่ตรงกับยอดบิลล่าสุด กรุณารีเฟรชบิลแล้วส่งใหม่',
+          code: 'AMOUNT_NOT_BILL_TOTAL_AT_COMMIT',
+          billTotal: lockedBillTotal,
+          billPrincipal: finalAmountCheck.principal,
+          billLateFee: lockedLateFee,
+          submittedAmount: amount,
+        });
+      }
 
       try {
         // INSERT now carries transaction_ref + verify_provider + raw payload
@@ -5831,6 +5949,23 @@ async function tenantPaymentUploadHandler(req, res) {
           attemptNo: req.publicPayment.attemptNo || null,
           maxAttempts: req.publicPayment.maxAttempts || PUBLIC_SLIP_UPLOAD_MAX_ATTEMPTS,
         } : null;
+        // R2-followup — record which amount-tier the tenant satisfied so
+        // admin verify-slip can show "good-faith principal payment, late
+        // fee 90฿ still outstanding" instead of a confusing mismatch alert.
+        // tier='exact' = amount matched current total. tier='principal' =
+        // amount matched subtotal+vat (late_fee accrued after the tenant
+        // already committed to pay).
+        const amountTierMeta = {
+          tier: finalAmountCheck.tier || amountTier,
+          billTotalAtUpload: billTotal,
+          billLateFeeAtUpload: billLateFee,
+          principalAtUpload: billing.round2(billTotal - billLateFee),
+          lateFeeOutstandingAtUpload,
+          billTotalAtCommit: finalAmountCheck.total,
+          billLateFeeAtCommit: finalAmountCheck.lateFee,
+          principalAtCommit: finalAmountCheck.principal,
+          lateFeeOutstandingAtCommit: finalAmountCheck.lateFeeOutstanding,
+        };
         const verifyPayload = (verifyResult || uploadMeta) ? JSON.stringify({
           ...(verifyResult ? {
             ok: verifyResult.ok,
@@ -5844,7 +5979,8 @@ async function tenantPaymentUploadHandler(req, res) {
             attempts: verifyResult.attempts || [],
           } : {}),
           ...(uploadMeta ? { upload: uploadMeta } : {}),
-        }) : null;
+          amountTier: amountTierMeta,
+        }) : JSON.stringify({ amountTier: amountTierMeta });
         const ins = await client.query(
           `INSERT INTO payments (bill_id, tenant_id, amount, method, slip_url, slip_hash,
                                  status, rejected_reason, transaction_ref, verify_provider, verify_payload, verified_by, verified_at)
@@ -5909,6 +6045,53 @@ async function tenantPaymentUploadHandler(req, res) {
         throw err;
       }
       if (initialStatus === 'verified') {
+        if (finalAmountCheck.tier === 'principal' && finalAmountCheck.lateFee > 0) {
+          await client.query(
+            `UPDATE bills
+                SET late_fee = 0,
+                    total    = $2::numeric
+              WHERE id = $1 AND deleted_at IS NULL`,
+            [billId, finalAmountCheck.principal]
+          );
+          await client.query(
+            `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, detail)
+             VALUES ($1, $2, $3, $4, $5::jsonb)`,
+            [
+              verifyResult?.ok ? `auto:${verifyResult.provider || 'slip'}` : `tenant:${req.tenant.tenant_id}`,
+              'bill.late_fee_waived_on_principal_payment',
+              'bill',
+              String(billId),
+              JSON.stringify({
+                waivedLateFee: finalAmountCheck.lateFee,
+                paymentAmount: amount,
+                principalAtVerify: finalAmountCheck.principal,
+                billTotalBeforeWaive: finalAmountCheck.total,
+                reason: 'tenant slip matched principal before late_fee was collected',
+              }),
+            ]
+          ).catch(() => { /* audit best-effort */ });
+        }
+        const settledBillTotal = finalAmountCheck.tier === 'principal' && finalAmountCheck.lateFee > 0
+          ? finalAmountCheck.principal
+          : finalAmountCheck.total;
+        const paidLedgerCheck = billing.validatePaidLedger({
+          paymentAmount: amount,
+          billTotal: settledBillTotal,
+        });
+        if (!paidLedgerCheck.ok) {
+          await client.query('ROLLBACK');
+          if (slip && slip.id) {
+            require('./services/storage').remove(pool, slip.id).catch(() => {});
+          }
+          return res.status(409).json({
+            error: 'ยอดชำระไม่สอดคล้องกับยอดบิลหลังปรับสถานะ กรุณารีเฟรชบิลแล้วส่งใหม่',
+            code: 'PAID_LEDGER_INCONSISTENT',
+            paymentAmount: paidLedgerCheck.paymentAmount,
+            billTotal: paidLedgerCheck.billTotal,
+            diff: paidLedgerCheck.diff,
+            tolerance: paidLedgerCheck.tolerance,
+          });
+        }
         const paid = await client.query(
           `UPDATE bills SET status='paid', paid_at=NOW()
              WHERE id=$1 AND status IN ('pending','overdue')
@@ -6486,7 +6669,7 @@ app.put('/api/payments/:id/verify', sameOrigin, csrfGuard, requireAuth, requireR
         });
       }
       const bill = await client.query(
-        `SELECT id, status, total, deleted_at FROM bills WHERE id=$1 FOR UPDATE`,
+        `SELECT id, status, total, late_fee, subtotal, vat, deleted_at FROM bills WHERE id=$1 FOR UPDATE`,
         [billId]
       );
       // Now lock the payment row in the canonical order. Re-check status
@@ -6526,16 +6709,80 @@ app.put('/api/payments/:id/verify', sameOrigin, csrfGuard, requireAuth, requireR
           billStatus: bill.rows[0].status,
         });
       }
+      // R2-followup — accept the payment in two tiers:
+      //   - tier='exact'     → paymentAmount ≈ current bill.total (incl. late_fee)
+      //   - tier='principal' → paymentAmount ≈ subtotal+vat (tenant paid before
+      //                         scheduler.tickLateFee added late_fee)
+      // Both are legitimate. When tier==='principal', late_fee stays on the
+      // bill as an outstanding residual the admin can choose to waive or
+      // pursue — the response surfaces that outstanding amount so the
+      // admin UI can flag it.
       const billTotal = Number(bill.rows[0].total);
+      const billLateFee = Number(bill.rows[0].late_fee || 0);
       const paymentAmount = Number(row.amount);
-      if (!Number.isFinite(billTotal) || !Number.isFinite(paymentAmount)
-          || Math.abs(paymentAmount - billTotal) > billing.PAYMENT_TOLERANCE_THB) {
+      const amountCheck = billing.validatePaymentAmount({
+        amount: paymentAmount,
+        total: billTotal,
+        lateFee: billLateFee,
+      });
+      if (!Number.isFinite(billTotal) || !Number.isFinite(paymentAmount) || !amountCheck.ok) {
         await client.query('ROLLBACK');
         return res.status(409).json({
           error: 'payment amount does not match bill total',
           code: 'PAYMENT_AMOUNT_MISMATCH',
           billTotal,
+          billPrincipal: amountCheck.principal,
+          billLateFee,
           paymentAmount,
+        });
+      }
+      // R2-followup — when the tenant matched the principal tier (paid
+      // before scheduler.tickLateFee added a penalty), waive the late_fee
+      // in good faith. The system added the charge AFTER the tenant had
+      // already committed to pay; punishing them for the scheduler's
+      // timing is unfair. Audit-logged so admin can review/reverse.
+      let waivedLateFee = 0;
+      if (amountCheck.tier === 'principal' && billLateFee > 0) {
+        waivedLateFee = billLateFee;
+        await client.query(
+          `UPDATE bills
+              SET late_fee = 0,
+                  total    = $2::numeric
+            WHERE id = $1 AND deleted_at IS NULL`,
+          [row.bill_id, amountCheck.principal]
+        );
+        await client.query(
+          `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, detail)
+           VALUES ($1, $2, $3, $4, $5::jsonb)`,
+          [req.session?.user?.username || 'admin:unknown',
+           'bill.late_fee_waived_on_principal_payment',
+           'bill', String(row.bill_id),
+           JSON.stringify({
+             waivedLateFee,
+             paymentId: id,
+             paymentAmount,
+             principalAtVerify: amountCheck.principal,
+             billTotalBeforeWaive: billTotal,
+             reason: 'tenant paid principal before scheduler.tickLateFee added penalty',
+           })]
+        ).catch(() => { /* audit best-effort */ });
+      }
+      const settledBillTotal = amountCheck.tier === 'principal' && billLateFee > 0
+        ? amountCheck.principal
+        : billTotal;
+      const paidLedgerCheck = billing.validatePaidLedger({
+        paymentAmount,
+        billTotal: settledBillTotal,
+      });
+      if (!paidLedgerCheck.ok) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'payment ledger does not reconcile with bill total',
+          code: 'PAID_LEDGER_INCONSISTENT',
+          paymentAmount: paidLedgerCheck.paymentAmount,
+          billTotal: paidLedgerCheck.billTotal,
+          diff: paidLedgerCheck.diff,
+          tolerance: paidLedgerCheck.tolerance,
         });
       }
       const upd = await client.query(
@@ -6655,13 +6902,150 @@ app.put('/api/payments/:id/verify', sameOrigin, csrfGuard, requireAuth, requireR
 // Bookings are stored in app_data['baankarn_bookings_v1'] (legacy JSONB).
 // Admin advances state via PUT /api/bookings/:id (status / notes / roomId).
 // Valid transitions: pending → reviewing → approved | rejected | cancelled.
-// Each transition fires a notify (owner sees the change; tenant via SMS/LINE
-// if we have a phone — currently only LINE since SMS is provider-dependent).
+// Each transition fires a notify (owner sees the change; applicant via
+// LINE/email/SMS when a reachable channel exists). If no automatic channel
+// works, the API returns that fact so the admin UI can tell staff to call.
 
 // GET /api/bookings/:id — single booking with the citizen ID photo URL
 // resolved (when the public booking form attached one). Surfaces enough
 // detail for admin to verify ID at approve-time without bouncing between
 // the JSONB blob view and file_uploads.
+function composeBookingDetail(row, blobBooking) {
+  if (!row && !blobBooking) return null;
+  const externalId = (row && row.external_id) || (blobBooking && blobBooking.id);
+  const out = { ...(blobBooking || {}), ...(row || {}) };
+  if (externalId) out.id = String(externalId);
+  if (row && row.id != null) out.rowId = row.id;
+  if (row && row.citizen_id_image_front_url && !out.citizenIdImageFrontUrl) {
+    out.citizenIdImageFrontUrl = row.citizen_id_image_front_url;
+  }
+  if (row && row.citizen_id_image_uploaded_at && !out.citizenIdImageUploadedAt) {
+    out.citizenIdImageUploadedAt = row.citizen_id_image_uploaded_at;
+  }
+  return out;
+}
+
+function isBookingLineExpiryPast(value) {
+  if (!value) return false;
+  const ts = new Date(value).getTime();
+  return Number.isFinite(ts) && ts <= Date.now();
+}
+
+async function enrichBookingLineBindingStatus(pool, booking) {
+  if (!booking) return booking;
+  const out = { ...booking };
+  const existing = out.lineBinding || out.line_binding || {};
+  const bookingId = String(out.id || out.external_id || '').slice(0, 64);
+  if (!bookingId) return out;
+
+  try {
+    const [bookingRecipients, statusRes] = await Promise.all([
+      lineBinding.listBookingRecipients(pool, bookingId),
+      pool.query(
+        `SELECT id, code, status, expires_at, bound_at, created_at, updated_at,
+                oa_id, target_oa_id
+           FROM line_bindings
+          WHERE booking_id=$1
+            AND tenant_id IS NULL
+          ORDER BY
+            CASE status
+              WHEN 'bound' THEN 0
+              WHEN 'pending' THEN 1
+              WHEN 'expired' THEN 2
+              WHEN 'revoked' THEN 3
+              ELSE 4
+            END,
+            bound_at DESC NULLS LAST,
+            updated_at DESC NULLS LAST,
+            created_at DESC
+          LIMIT 10`,
+        [bookingId]
+      ),
+    ]);
+
+    const bookingStatus = String(out.status || 'pending').toLowerCase();
+    const activeBookingStatus = ['pending', 'reviewing', 'approved'].includes(bookingStatus);
+    const rows = Array.isArray(statusRes.rows) ? statusRes.rows : [];
+    const pending = rows.find((r) => r.status === 'pending') || null;
+    const bound = rows.find((r) => r.status === 'bound') || null;
+    const latest = rows[0] || null;
+
+    let tenantRecipients = [];
+    let transferredTenantId = null;
+    const roomId = out.assignedRoomId || out.roomId || out.room_id || null;
+    const phone = normaliseBookingPhone(out.phone);
+    if (!bookingRecipients.length && roomId && phone && ['approved', 'completed'].includes(bookingStatus)) {
+      const tq = await pool.query(
+        `SELECT id
+           FROM tenants
+          WHERE phone=$1
+            AND current_room_id=$2
+            AND deleted_at IS NULL
+            AND status='active'
+          ORDER BY updated_at DESC LIMIT 1`,
+        [phone, String(roomId)]
+      );
+      if (tq.rows.length) {
+        transferredTenantId = tq.rows[0].id;
+        tenantRecipients = await lineBinding.listTenantRecipients(pool, transferredTenantId);
+      }
+    }
+
+    const lineRecipients = bookingRecipients.length ? bookingRecipients : tenantRecipients;
+    const boundCount = lineRecipients.length;
+    const existingExpiry = existing.expiresAt || existing.expires_at || null;
+    const expiresAt = pending?.expires_at || existingExpiry || latest?.expires_at || null;
+    const pendingExpired = !boundCount && (
+      (pending && isBookingLineExpiryPast(pending.expires_at))
+      || (!pending && activeBookingStatus && isBookingLineExpiryPast(existingExpiry))
+    );
+
+    let effectiveStatus = String(existing.status || latest?.status || '').toLowerCase();
+    if (boundCount > 0) effectiveStatus = 'bound';
+    else if (existing.error) effectiveStatus = 'error';
+    else if (pendingExpired) effectiveStatus = 'expired';
+    else if (pending) effectiveStatus = 'pending';
+    else if (!effectiveStatus && activeBookingStatus && existing.code) {
+      effectiveStatus = isBookingLineExpiryPast(existingExpiry) ? 'expired' : 'pending';
+    } else if (!effectiveStatus) {
+      effectiveStatus = activeBookingStatus ? 'none' : 'not_required';
+    }
+
+    const needsReissue = activeBookingStatus && boundCount === 0 && [
+      'none', 'error', 'expired', 'revoked', 'blocked',
+    ].includes(effectiveStatus);
+
+    out.lineBinding = {
+      ...existing,
+      status: effectiveStatus,
+      lastStatus: latest?.status || existing.status || null,
+      code: pending?.code || (activeBookingStatus ? existing.code : null) || null,
+      expiresAt,
+      boundAt: bound?.bound_at || existing.boundAt || existing.bound_at || null,
+      boundCount,
+      lineRecipientCount: boundCount,
+      pendingCount: pending ? 1 : 0,
+      expired: effectiveStatus === 'expired',
+      needsReissue,
+      transferredTenantId,
+      source: bookingRecipients.length ? 'booking-line-bindings' : (tenantRecipients.length ? 'tenant-line-bindings' : 'line-bindings'),
+    };
+  } catch (err) {
+    if (!['42P01', '42703'].includes(err.code)) {
+      console.warn('booking line binding enrich error:', err.message);
+    }
+    const fallbackCount = Number(existing.boundCount || existing.bound_count || existing.lineRecipientCount || 0) || 0;
+    out.lineBinding = {
+      ...existing,
+      status: existing.status || (existing.error ? 'error' : 'unknown'),
+      boundCount: fallbackCount,
+      lineRecipientCount: fallbackCount,
+      lookupError: true,
+    };
+  }
+  return out;
+}
+
 app.get('/api/bookings/:id', requireAuth, async (req, res) => {
   const id = String(req.params.id).slice(0, 64);
   try {
@@ -6693,11 +7077,15 @@ app.get('/api/bookings/:id', requireAuth, async (req, res) => {
     if (!row && !blobBooking) {
       return res.status(404).json({ error: 'booking not found' });
     }
+    const booking = await enrichBookingLineBindingStatus(
+      pool,
+      composeBookingDetail(row, blobBooking)
+    );
     res.json({
       ok: true,
-      booking: row || blobBooking,
+      booking,
       blob: blobBooking,
-      hasPhoto: !!(row && row.citizen_id_image_front_url),
+      hasPhoto: !!(booking && (booking.citizen_id_image_front_url || booking.citizenIdImageFrontUrl)),
     });
   } catch (err) {
     console.error('booking get error:', err);
@@ -6721,6 +7109,149 @@ const BOOKING_TRANSITIONS = {
   cancelled: [],                     // terminal
 };
 
+function normaliseBookingPhone(phone) {
+  return String(phone || '').replace(/[\s-]/g, '').slice(0, 32);
+}
+
+function summariseBookingApplicantNotify(result, tenantInfo) {
+  const out = result || {};
+  const fallbackLineCount = (tenantInfo.lineRecipients && tenantInfo.lineRecipients.length)
+    || (tenantInfo.line_user_id ? 1 : 0);
+  const lineRecipientCount = Number.isFinite(Number(out.lineRecipientCount))
+    ? Number(out.lineRecipientCount)
+    : fallbackLineCount;
+  return {
+    attempted: true,
+    ok: out.ok === true,
+    queued: out.queued === true,
+    channel: out.channel || 'none',
+    oa: out.oa || null,
+    recipients: out.recipients || null,
+    failedRecipients: out.failedRecipients || null,
+    lineRecipientCount,
+    skipped: out.skipped === true,
+    reason: out.reason || null,
+    requiresManualContact: !(out.ok === true || out.queued === true),
+    hasLine: lineRecipientCount > 0,
+    hasEmail: !!tenantInfo.email,
+    hasPhone: !!tenantInfo.phone,
+    phone: tenantInfo.phone || null,
+    email: tenantInfo.email || null,
+  };
+}
+
+function bookingNotifyOwnerLine(result) {
+  if (!result) return null;
+  const countText = Number(result.lineRecipientCount) > 0
+    ? ` — ห้องนี้ผูก LINE ทั้งหมด ${Number(result.lineRecipientCount)} บัญชี`
+    : '';
+  if (result.ok) {
+    return `แจ้งผู้จองแล้วทาง ${result.channel || '-'}${countText}`;
+  }
+  if (result.queued) {
+    return `เข้าคิวแจ้งผู้จองแล้ว (${result.channel || '-'})${countText}`;
+  }
+  if (result.requiresManualContact) {
+    return `ยังแจ้งผู้จองอัตโนมัติไม่ได้ — กรุณาโทรแจ้ง${result.phone ? ` ${result.phone}` : ''}${countText}`;
+  }
+  return null;
+}
+
+async function notifyBookingApplicantStatus({ pool, flags, booking, subject, text, roomId }) {
+  const phone = normaliseBookingPhone(booking && booking.phone);
+  const tenantInfo = {
+    full_name: booking?.name || booking?.tenantName || null,
+    email: booking?.email || null,
+    phone: phone || null,
+    line_user_id: null,
+    line_oa_id: null,
+    lineRecipients: [],
+  };
+  if (booking?.id) {
+    try {
+      tenantInfo.lineRecipients = await lineBinding.listBookingRecipients(pool, booking.id);
+    } catch { /* ignore booking-recipient lookup failure */ }
+  }
+  const hasBookingLineRecipients = tenantInfo.lineRecipients.length > 0;
+
+  // LINE enrichment is intentionally limited to active tenants only. A public
+  // booking applicant may share a phone with an old tenant record, and we do
+  // not want to push booking decisions to a stale LINE binding. If the
+  // booking already has its own pre-bound LINE recipients, keep the decision
+  // notice scoped to those recipients and do not add a same-phone tenant LINE.
+  if (phone && !hasBookingLineRecipients) {
+    try {
+      let tq = null;
+      if (roomId) {
+        tq = await pool.query(
+          `SELECT id, line_user_id, line_oa_id, email
+             FROM tenants
+            WHERE phone=$1 AND current_room_id=$2
+              AND deleted_at IS NULL AND status='active'
+            ORDER BY updated_at DESC LIMIT 1`,
+          [phone, roomId]
+        );
+      }
+      if (!tq || !tq.rows.length) {
+        tq = await pool.query(
+          `SELECT id, line_user_id, line_oa_id, email
+             FROM tenants
+            WHERE phone=$1 AND deleted_at IS NULL AND status='active'
+            ORDER BY updated_at DESC LIMIT 1`,
+          [phone]
+        );
+      }
+      if (tq.rows.length) {
+        tenantInfo.id = tq.rows[0].id;
+        tenantInfo.line_user_id = tq.rows[0].line_user_id;
+        tenantInfo.line_oa_id = tq.rows[0].line_oa_id;
+        if (!tenantInfo.email && tq.rows[0].email) tenantInfo.email = tq.rows[0].email;
+      }
+    } catch { /* ignore enrichment failure; email/SMS can still work */ }
+  }
+
+  if (!tenantInfo.line_user_id && !tenantInfo.lineRecipients.length && !tenantInfo.email && !tenantInfo.phone) {
+    return {
+      attempted: false,
+      ok: false,
+      queued: false,
+      channel: 'none',
+      requiresManualContact: true,
+      reason: 'no_contact',
+      hasLine: false,
+      hasEmail: false,
+      hasPhone: false,
+      lineRecipientCount: 0,
+      phone: null,
+      email: null,
+    };
+  }
+
+  try {
+    const result = await notifier.notifyTenant(
+      { pool, features: flags },
+      tenantInfo,
+      { subject, text }
+    );
+    return summariseBookingApplicantNotify(result, tenantInfo);
+  } catch (err) {
+    return {
+      attempted: true,
+      ok: false,
+      queued: false,
+      channel: 'none',
+      requiresManualContact: true,
+      reason: err.message || 'notify_failed',
+      hasLine: !!tenantInfo.line_user_id || !!(tenantInfo.lineRecipients && tenantInfo.lineRecipients.length),
+      hasEmail: !!tenantInfo.email,
+      hasPhone: !!tenantInfo.phone,
+      lineRecipientCount: (tenantInfo.lineRecipients && tenantInfo.lineRecipients.length) || (tenantInfo.line_user_id ? 1 : 0),
+      phone: tenantInfo.phone || null,
+      email: tenantInfo.email || null,
+    };
+  }
+}
+
 // POST /api/bookings/:id/approve-and-assign
 //
 // Atomically (1) flip the booking to 'approved', (2) find a vacant room
@@ -6737,6 +7268,7 @@ app.post('/api/bookings/:id/approve-and-assign', sameOrigin, csrfGuard, requireA
   const id = String(req.params.id).slice(0, 64);
   const adminNotes = req.body?.adminNotes !== undefined ? String(req.body.adminNotes).slice(0, 1000) : undefined;
   const client = await pool.connect();
+  let tenantNotify = null;
   try {
     await client.query('BEGIN');
 
@@ -7022,59 +7554,41 @@ app.post('/api/bookings/:id/approve-and-assign', sameOrigin, csrfGuard, requireA
         }
       });
     }
-    // Notify owner + tenant fire-and-forget.
+    // Notify owner + applicant after the status commit. The state change is
+    // already durable; notification failure is returned to the admin UI as a
+    // manual follow-up, not allowed to roll back approval.
     try {
       const flags = await features.load(pool);
+      tenantNotify = await notifyBookingApplicantStatus({
+        pool,
+        flags,
+        booking,
+        roomId: assignedRoomId || booking.assignedRoomId || booking.roomId || null,
+        subject: 'การจองห้องได้รับการอนุมัติแล้ว',
+        text: `✅ การจองห้องของคุณได้รับการอนุมัติ\n` +
+              (assignedRoomId ? `ห้อง: ${assignedRoomId}\n` : '') +
+              `กรุณาติดต่อสำนักงานเพื่อเซ็นสัญญา`,
+      });
       notifier.notifyOwner({ pool, features: flags }, {
         subject: `✅ อนุมัติการจอง ${id}${assignedRoomId ? ` → ห้อง ${assignedRoomId}` : ''}`,
-        text: `${booking.name || '-'} (${booking.phone || '-'})\n` +
-              (assignedRoomId ? `จัดให้ห้อง ${assignedRoomId}` : 'ยังไม่ได้กำหนดห้อง — ไม่มีห้องว่างตรงเงื่อนไข'),
+        text: [
+          `${booking.name || '-'} (${booking.phone || '-'})`,
+          assignedRoomId ? `จัดให้ห้อง ${assignedRoomId}` : 'ยังไม่ได้กำหนดห้อง — ไม่มีห้องว่างตรงเงื่อนไข',
+          bookingNotifyOwnerLine(tenantNotify),
+        ].filter(Boolean).join('\n'),
       }).catch(() => {});
-      // Tenant gets the same approval message that the legacy PUT path sends.
-      // Resolve the tenant whose phone matches AND who is currently assigned
-      // to the just-approved room (if any). This avoids the race where two
-      // tenants share a phone number — picking the most-recently-updated one
-      // by phone alone could send the approval message to the OTHER tenant.
-      // Fall back to the most-recent phone match only if the room match
-      // returns nothing (legacy bookings predating room assignment).
-      if (booking.phone) {
-        const phoneNorm = String(booking.phone).replace(/[\s-]/g, '');
-        const tenantInfo = { full_name: booking.name, email: booking.email, phone: phoneNorm };
-        try {
-          let tq = null;
-          if (assignedRoomId) {
-            tq = await pool.query(
-              `SELECT id, line_user_id, line_oa_id, status FROM tenants
-                 WHERE phone=$1 AND current_room_id=$2 AND deleted_at IS NULL
-                 ORDER BY updated_at DESC LIMIT 1`,
-              [phoneNorm, assignedRoomId]
-            );
-          }
-          if (!tq || !tq.rows.length) {
-            tq = await pool.query(
-              `SELECT id, line_user_id, line_oa_id, status FROM tenants
-                 WHERE phone=$1 AND deleted_at IS NULL AND status='active'
-                 ORDER BY updated_at DESC LIMIT 1`,
-              [phoneNorm]
-            );
-          }
-          if (tq.rows.length) {
-            tenantInfo.id = tq.rows[0].id;
-            tenantInfo.line_user_id = tq.rows[0].line_user_id;
-            tenantInfo.line_oa_id = tq.rows[0].line_oa_id;
-            tenantInfo.status = tq.rows[0].status;
-          }
-        } catch { /* ignore */ }
-        if (tenantInfo.line_user_id || tenantInfo.email) {
-          notifier.notifyTenant({ pool, features: flags }, tenantInfo, {
-            subject: 'การจองห้องได้รับการอนุมัติแล้ว',
-            text: `✅ การจองห้องของคุณได้รับการอนุมัติ\n` +
-                  (assignedRoomId ? `ห้อง: ${assignedRoomId}\n` : '') +
-                  `กรุณาติดต่อสำนักงานเพื่อเซ็นสัญญา`,
-          }).catch(() => {});
-        }
-      }
-    } catch { /* ignore notify failures */ }
+    } catch (err) {
+      tenantNotify = {
+        attempted: true,
+        ok: false,
+        queued: false,
+        channel: 'none',
+        requiresManualContact: true,
+        reason: err.message || 'notify_failed',
+        phone: normaliseBookingPhone(booking.phone) || null,
+        email: booking.email || null,
+      };
+    }
 
     res.json({
       ok: true,
@@ -7082,6 +7596,7 @@ app.post('/api/bookings/:id/approve-and-assign', sameOrigin, csrfGuard, requireA
       assignedRoomId,
       room: assignedRoomId ? rooms[assignedRoomId] : null,
       noVacantRoomMatch: !assignedRoomId,
+      tenantNotify,
     });
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
@@ -7160,6 +7675,8 @@ app.put('/api/bookings/:id', sameOrigin, csrfGuard, requireAuth, requireRole('ow
     };
     let releasedRoomId = null;
     let roomsAfterRelease = null;
+    let releasedTenant = null;
+    let tenantNotify = null;
     const shouldReleaseTerminalBookingRoom = ['cancelled', 'rejected'].includes(updated.status)
       && before.status !== updated.status;
     if (shouldReleaseTerminalBookingRoom) {
@@ -7237,6 +7754,71 @@ app.put('/api/bookings/:id', sameOrigin, csrfGuard, requireAuth, requireRole('ow
           }
         }
         if (shouldFree) {
+          // Approval mirrors a booking applicant into tenants.current_room_id
+          // before a contract exists. If the applicant backs out, clear that
+          // pre-contract tenant link together with the room reservation.
+          const bookingPhone = String(before.phone || '').replace(/[\s-]/g, '').slice(0, 32);
+          const bookingName = String(before.name || '').trim().slice(0, 200);
+          const tenantClauses = [
+            `current_room_id=$1`,
+            `status='active'`,
+            `deleted_at IS NULL`,
+          ];
+          const tenantParams = [roomToRelease];
+          if (bookingPhone) {
+            tenantParams.push(bookingPhone);
+            tenantClauses.push(`phone=$${tenantParams.length}`);
+          }
+          if (bookingName) {
+            tenantParams.push(bookingName);
+            tenantClauses.push(`lower(full_name)=lower($${tenantParams.length})`);
+          }
+          if (bookingPhone || bookingName) {
+            const tFind = await client.query(
+              `SELECT id, full_name, phone
+                 FROM tenants
+                WHERE ${tenantClauses.join(' AND ')}
+                ORDER BY updated_at DESC
+                LIMIT 1
+                FOR UPDATE`,
+              tenantParams
+            );
+            const tenantRow = tFind.rows[0] || null;
+            if (tenantRow) {
+              const activeContract = await client.query(
+                `SELECT id FROM contracts
+                  WHERE tenant_id=$1 AND room_id=$2
+                    AND status='active' AND deleted_at IS NULL
+                  LIMIT 1`,
+                [tenantRow.id, roomToRelease]
+              ).catch((err) => {
+                if (err.code === '42P01') return { rows: [] };
+                throw err;
+              });
+              if (!activeContract.rows.length) {
+                const tUpd = await client.query(
+                  `UPDATE tenants
+                      SET status='moved_out',
+                          current_room_id=NULL,
+                          updated_at=NOW(),
+                          notes=trim(BOTH E'\n' FROM COALESCE(notes || E'\n', '') || $2)
+                    WHERE id=$1 AND status='active'
+                    RETURNING id, full_name, phone`,
+                  [
+                    tenantRow.id,
+                    `[auto] booking ${id} ${updated.status}: released pre-contract reservation ${roomToRelease}`,
+                  ]
+                );
+                if (tUpd.rows.length) {
+                  releasedTenant = {
+                    id: tUpd.rows[0].id,
+                    fullName: tUpd.rows[0].full_name,
+                    phone: tUpd.rows[0].phone,
+                  };
+                }
+              }
+            }
+          }
           const { tenant, reservedBy, reservedAt, ...rest } = room;
           rooms[roomToRelease] = { ...rest, status: 'vacant' };
           roomsAfterRelease = rooms;
@@ -7285,26 +7867,16 @@ app.put('/api/bookings/:id', sameOrigin, csrfGuard, requireAuth, requireRole('ow
     txCommitted = true;
     audit(req, 'booking.update', 'booking', id, {
       from: before.status, to: updated.status, fields: Object.keys(b), releasedRoomId,
+      releasedTenantId: releasedTenant ? releasedTenant.id : null,
     });
 
-    // Fire-and-forget notify on status change (so the tenant + owner know
-    // their booking was acted on).
+    // Notify on status change so the applicant knows if the booking moved to
+    // reviewing/rejected/cancelled. Notification failures do not roll back the
+    // already-committed status change; they are returned to the admin UI as
+    // manual follow-up work.
     if (b.status && b.status !== before.status) {
       try {
         const flags = await features.load(pool);
-        // Owner notification — concise audit-style line.
-        const subj = `📋 Booking ${id}: ${before.status} → ${updated.status}`;
-        notifier.notifyOwner({ pool, features: flags }, {
-          subject: subj,
-          text: `${updated.name || '-'} (${updated.phone || '-'})\n` +
-                `ห้องที่ต้องการ: ${updated.roomId || updated.wantType || '-'}\n` +
-                (updated.adminNotes ? `หมายเหตุ: ${updated.adminNotes}` : ''),
-        }).catch(() => {});
-
-        // Tenant notification — try to enrich the booking blob with the
-        // applicant's bound LINE info so multi-OA tenants get the message
-        // via the right OA. If the applicant is also a registered tenant
-        // (matched by phone) we pull line_user_id + line_oa_id from there.
         const tenantText = ({
           approved: `✅ การจองห้องได้รับการอนุมัติแล้ว\nกรุณาติดต่อสำนักงานเพื่อเซ็นสัญญา`,
           rejected: `❌ ขออภัย — การจองห้องไม่ได้รับการอนุมัติ\n${updated.adminNotes ? 'หมายเหตุ: ' + updated.adminNotes : ''}`,
@@ -7312,44 +7884,37 @@ app.put('/api/bookings/:id', sameOrigin, csrfGuard, requireAuth, requireRole('ow
           cancelled: `🚫 การจองถูกยกเลิก`,
         })[updated.status];
         if (tenantText) {
-          let tenantInfo = {
-            full_name: updated.name,
-            email: updated.email || null,
-            phone: updated.phone || null,
-            line_user_id: null,
-            line_oa_id: null,
-          };
-          if (updated.phone) {
-            try {
-              const tq = await pool.query(
-                `SELECT line_user_id, line_oa_id, email
-                   FROM tenants WHERE phone=$1 AND deleted_at IS NULL
-                   ORDER BY updated_at DESC LIMIT 1`,
-                [updated.phone]
-              );
-              if (tq.rows.length) {
-                tenantInfo.line_user_id = tq.rows[0].line_user_id;
-                tenantInfo.line_oa_id = tq.rows[0].line_oa_id;
-                if (!tenantInfo.email && tq.rows[0].email) tenantInfo.email = tq.rows[0].email;
-              }
-            } catch { /* ignore enrichment failure */ }
-          }
-          // Only fire notify if we have at least one channel — LINE binding
-          // OR an email. Without either, the queued message would just log
-          // "no channel" and waste a row.
-          if (tenantInfo.line_user_id || tenantInfo.email) {
-            notifier.notifyTenant({ pool, features: flags },
-              tenantInfo,
-              { subject: `อัปเดตสถานะการจองห้อง — ${updated.status}`, text: tenantText }
-            ).catch(() => {});
-          }
+          tenantNotify = await notifyBookingApplicantStatus({
+            pool,
+            flags,
+            booking: updated,
+            roomId: updated.assignedRoomId || updated.roomId || releasedRoomId || null,
+            subject: `อัปเดตสถานะการจองห้อง — ${updated.status}`,
+            text: tenantText,
+          });
         }
+
+        // Owner notification — concise audit-style line.
+        const subj = `📋 Booking ${id}: ${before.status} → ${updated.status}`;
+        notifier.notifyOwner({ pool, features: flags }, {
+          subject: subj,
+          text: [
+            `${updated.name || '-'} (${updated.phone || '-'})`,
+            `ห้องที่ต้องการ: ${updated.roomId || updated.wantType || '-'}`,
+            releasedRoomId ? `ปล่อยห้องแล้ว: ${releasedRoomId}` : null,
+            releasedTenant ? `เคลียร์ผู้เช่าที่ mirror จาก booking แล้ว: ${releasedTenant.fullName || releasedTenant.id}` : null,
+            bookingNotifyOwnerLine(tenantNotify),
+            updated.adminNotes ? `หมายเหตุ: ${updated.adminNotes}` : null,
+          ].filter(Boolean).join('\n'),
+        }).catch(() => {});
       } catch { /* ignore */ }
     }
     res.json({
       ok: true,
       booking: updated,
       releasedRoomId,
+      releasedTenant,
+      tenantNotify,
       room: releasedRoomId && roomsAfterRelease ? roomsAfterRelease[releasedRoomId] : null,
     });
   } catch (err) {
@@ -10192,6 +10757,19 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
       };
       await client.query('COMMIT');
 
+      let lineBindingCarryover = null;
+      if (bookingIdForRoom) {
+        try {
+          lineBindingCarryover = await lineBinding.transferBookingBindings(pool, {
+            bookingId: bookingIdForRoom,
+            tenantId,
+          });
+        } catch (err) {
+          console.warn('[quick-invite] booking LINE binding carry-over skipped:', err.message);
+          lineBindingCarryover = { ok: false, error: err.message };
+        }
+      }
+
       const proto = req.headers['x-forwarded-proto'] || req.protocol || 'https';
       const host = req.headers['x-forwarded-host'] || req.headers.host || 'localhost';
       const url = `${proto}://${host}/contract/fill/${invitation.token}`;
@@ -10203,13 +10781,14 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
       );
 
       audit(req, 'contract.quick_invite', 'contract', String(contract.id),
-        { contractNo: contract.contract_no, tenantId, invitationId: invitation.id, delivery });
+        { contractNo: contract.contract_no, tenantId, invitationId: invitation.id, delivery, lineBindingCarryover });
 
       res.json({
         ok: true,
         tenant: { id: tenantId, fullName: tenantName, phone: tenantPhone },
         contract,
         delivery,
+        lineBindingCarryover,
         invitation: {
           id: invitation.id,
           token: invitation.token,

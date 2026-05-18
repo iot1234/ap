@@ -11,6 +11,7 @@ const lineOa = require('./lineOa');
 const email = require('./email');
 const sms = require('./sms');
 const secrets = require('./secrets');
+const lineBinding = require('./lineBinding');
 // Lazy-required to avoid a circular module-load cycle (notificationQueue
 // dispatches via line/email/sms — which never reach back into notifier,
 // but Node still evaluates the require eagerly at top-of-file).
@@ -44,6 +45,44 @@ async function pushLineToTenant(pool, tenant, text) {
   }
   const ok = await lineNotify.pushText(oa, lineId, text);
   return { ok, oaId: oa.id, oaSlug: oa.slug, lineId };
+}
+
+async function getTenantLineRecipients(pool, tenant) {
+  const tenantId = tenant && (tenant.id || tenant.tenant_id || tenant.tenantId);
+  const rows = tenantId ? await lineBinding.listTenantRecipients(pool, tenantId).catch(() => []) : [];
+  const recipients = [];
+  const seen = new Set();
+  const add = (lineUserId, lineOaId) => {
+    const lineId = lineNotify.isLikelyUserId(lineUserId) ? String(lineUserId).trim() : null;
+    if (!lineId) return;
+    const oaId = lineOaId != null ? lineOaId : null;
+    const key = `${oaId == null ? 0 : oaId}:${lineId}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    recipients.push({ line_user_id: lineId, line_oa_id: oaId });
+  };
+  for (const row of rows) add(row.line_user_id, row.oa_id);
+  if (Array.isArray(tenant?.lineRecipients)) {
+    for (const row of tenant.lineRecipients) {
+      add(row.line_user_id || row.lineUserId, row.oa_id ?? row.line_oa_id);
+    }
+  }
+  add(tenant?.line_user_id || tenant?.lineUserId, tenant?.line_oa_id);
+  return recipients;
+}
+
+function appendLineRecipientCount(text, count) {
+  const base = String(text || '');
+  const n = Number(count);
+  if (!Number.isFinite(n) || n < 0) return base;
+  if (
+    base.includes('LINE ที่ผูก') ||
+    base.includes('ห้องนี้ผูก LINE') ||
+    base.includes('ห้อง/การจองนี้ผูก LINE')
+  ) {
+    return base;
+  }
+  return `${base}\n\nLINE ที่ผูกกับห้องนี้: ${Math.trunc(n)} บัญชี`;
 }
 
 async function logResult(pool, row) {
@@ -175,14 +214,14 @@ async function notifyOwner(ctx, msg) {
 }
 
 /**
- * Notify a specific tenant. Tries email first if enabled and address known,
- * otherwise LINE userId if known.
+ * Notify a specific tenant. Sends LINE to every active binding for this
+ * tenant/room, then falls back to email/SMS only if no LINE delivery works.
  */
 async function notifyTenant(ctx, tenant, msg) {
   const { pool, features } = ctx;
   if (!tenant) return { channel: 'none', ok: false };
   const subject = msg.subject || 'แจ้งเตือน';
-  const text = msg.text || subject;
+  const rawText = msg.text || subject;
   // Accept both DB shape (snake_case from `tenants` table) and the legacy
   // rooms.tenant blob shape (camelCase). Earlier versions only matched
   // snake_case, so callers reading from rooms.tenant got nothing dispatched.
@@ -190,6 +229,9 @@ async function notifyTenant(ctx, tenant, msg) {
   const lineId = lineNotify.isLikelyUserId(rawLineId) ? String(rawLineId).trim() : null;
   const phone = tenant.phone || null;
   const mail = tenant.email || null;
+  const lineRecipients = await getTenantLineRecipients(pool, tenant);
+  const lineRecipientCount = lineRecipients.length;
+  const text = appendLineRecipientCount(rawText, lineRecipientCount);
   if (rawLineId && !lineId) {
     await logResult(pool, {
       channel: 'line', recipient: String(rawLineId).slice(0, 200),
@@ -210,19 +252,43 @@ async function notifyTenant(ctx, tenant, msg) {
       subject, body: text, status: 'skipped',
       error: `tenant inactive (status=${status})`,
     });
-    return { channel: 'none', ok: false, skipped: true, reason: 'inactive' };
+    return { channel: 'none', ok: false, skipped: true, reason: 'inactive', lineRecipientCount };
   }
 
-  if (lineId) {
-    const result = await pushLineToTenant(pool, tenant, text);
-    await logResult(pool, {
-      channel: 'line', recipient: lineId,
-      subject,
-      body: result.oaSlug ? `[oa:${result.oaSlug}] ${text}` : text,
-      status: result.ok ? 'sent' : 'failed',
-      error: result.ok ? null : (result.reason || result.error || 'failed'),
-    });
-    if (result.ok) return { channel: 'line', ok: true, oa: result.oaSlug };
+  if (lineRecipients.length) {
+    let sent = 0;
+    let failed = 0;
+    let firstOa = null;
+    for (const recipient of lineRecipients) {
+      const result = await pushLineToTenant(pool, {
+        ...tenant,
+        line_user_id: recipient.line_user_id,
+        line_oa_id: recipient.line_oa_id,
+      }, text);
+      if (result.ok) {
+        sent++;
+        if (!firstOa) firstOa = result.oaSlug || result.oaId || null;
+      } else {
+        failed++;
+      }
+      await logResult(pool, {
+        channel: 'line', recipient: recipient.line_user_id,
+        subject,
+        body: result.oaSlug ? `[oa:${result.oaSlug}] ${text}` : text,
+        status: result.ok ? 'sent' : 'failed',
+        error: result.ok ? null : (result.reason || result.error || 'failed'),
+      });
+    }
+    if (sent > 0) {
+      return {
+        channel: 'line',
+        ok: true,
+        oa: firstOa,
+        recipients: sent,
+        failedRecipients: failed,
+        lineRecipientCount,
+      };
+    }
   }
 
   if (mail && email.isConfigured(features)) {
@@ -233,7 +299,7 @@ async function notifyTenant(ctx, tenant, msg) {
       channel: 'email', recipient: mail,
       subject, body: text, status: ok ? 'sent' : 'failed',
     });
-    if (ok) return { channel: 'email', ok: true };
+    if (ok) return { channel: 'email', ok: true, lineRecipientCount };
   }
 
   // SMS — final fallback. Skipped (with a clear log row) when no SMS
@@ -246,7 +312,7 @@ async function notifyTenant(ctx, tenant, msg) {
         channel: 'sms', recipient: phone,
         subject, body: text, status: ok ? 'sent' : 'failed',
       });
-      if (ok) return { channel: 'sms', ok: true };
+      if (ok) return { channel: 'sms', ok: true, lineRecipientCount };
     } catch (err) {
       await logResult(pool, {
         channel: 'sms', recipient: phone, subject, body: text,
@@ -268,14 +334,18 @@ async function notifyTenant(ctx, tenant, msg) {
   const queue = getQueue();
   if (queue) {
     let enqueued = false;
-    if (lineId) {
-      try {
-        await queue.enqueue(pool, {
-          channel: 'line', recipient: lineId, subject, body: text,
-          payload: { oaId: tenant.line_oa_id || null, source: 'notifier-fallback' },
-        });
-        enqueued = true;
-      } catch { /* ignore — try next channel */ }
+    let queuedRecipient = '';
+    if (lineRecipients.length) {
+      for (const recipient of lineRecipients) {
+        try {
+          await queue.enqueue(pool, {
+            channel: 'line', recipient: recipient.line_user_id, subject, body: text,
+            payload: { oaId: recipient.line_oa_id || null, source: 'notifier-fallback' },
+          });
+          enqueued = true;
+          queuedRecipient = queuedRecipient || recipient.line_user_id;
+        } catch { /* ignore — try next channel */ }
+      }
     }
     if (!enqueued && mail && email.isConfigured(features)) {
       try {
@@ -297,11 +367,11 @@ async function notifyTenant(ctx, tenant, msg) {
     }
     if (enqueued) {
       await logResult(pool, {
-        channel: 'queue', recipient: lineId || mail || phone || '',
+        channel: 'queue', recipient: queuedRecipient || mail || phone || '',
         subject, body: text, status: 'queued',
         error: 'all immediate channels failed — enqueued for retry',
       });
-      return { channel: 'queue', ok: false, queued: true };
+      return { channel: 'queue', ok: false, queued: true, recipients: lineRecipientCount || undefined, lineRecipientCount };
     }
   }
 
@@ -309,7 +379,7 @@ async function notifyTenant(ctx, tenant, msg) {
     channel: 'none', recipient: phone || '', subject, body: text,
     status: 'failed', error: 'tenant has no reachable channel',
   });
-  return { channel: 'none', ok: false };
+  return { channel: 'none', ok: false, lineRecipientCount };
 }
 
-module.exports = { notifyOwner, notifyTenant };
+module.exports = { notifyOwner, notifyTenant, getTenantLineRecipients };
