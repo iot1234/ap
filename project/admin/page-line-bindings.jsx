@@ -101,7 +101,65 @@ function PageLineBindings({ setToast }) {
       return;
     }
     setIssueOaId('');  // any-OA by default
-    setShowIssueModal({ tenantId, replacePending });
+    setShowIssueModal({ tenantId, replacePending, issued: null });
+  }
+
+  function resolveIssueLineAddUrl(targetOaId) {
+    const list = Array.isArray(oas) ? oas : [];
+    if (targetOaId) {
+      const target = list.find((o) => String(o.id) === String(targetOaId));
+      return target && target.addFriendUrl ? target.addFriendUrl : '';
+    }
+    const defaultOa = list.find((o) => o.isDefault && o.addFriendUrl);
+    if (defaultOa) return defaultOa.addFriendUrl;
+    const first = list.find((o) => o.addFriendUrl);
+    return first ? first.addFriendUrl : '';
+  }
+
+  function resolveIssueLineMessageUrl(targetOaId) {
+    const list = Array.isArray(oas) ? oas : [];
+    if (targetOaId) {
+      const target = list.find((o) => String(o.id) === String(targetOaId));
+      return target && target.oaMessageUrl ? target.oaMessageUrl : '';
+    }
+    const defaultOa = list.find((o) => o.isDefault && o.oaMessageUrl);
+    if (defaultOa) return defaultOa.oaMessageUrl;
+    const first = list.find((o) => o.oaMessageUrl);
+    return first ? first.oaMessageUrl : '';
+  }
+
+  function buildIssueLineMessageLink(baseUrl, code) {
+    const bindCode = String(code || '').trim().slice(0, 80);
+    if (!baseUrl || !/^BIND-[A-F0-9]{4,16}$/i.test(bindCode)) return '';
+    try {
+      const u = new URL(String(baseUrl).trim(), window.location.origin);
+      if (u.protocol !== 'https:' || u.hostname !== 'line.me' || !u.pathname.startsWith('/R/oaMessage/')) return '';
+      const path = u.pathname.endsWith('/') ? u.pathname : `${u.pathname}/`;
+      return `${u.origin}${path}?${encodeURIComponent(bindCode)}`;
+    } catch {
+      return '';
+    }
+  }
+
+  function buildIssuedLineOpenUrl(issued) {
+    if (!issued) return '';
+    const messageUrl = buildIssueLineMessageLink(resolveIssueLineMessageUrl(issued.targetOaId), issued.code);
+    return messageUrl || resolveIssueLineAddUrl(issued.targetOaId);
+  }
+
+  function copyIssuedCode(code) {
+    if (!navigator.clipboard) return;
+    navigator.clipboard.writeText(code).then(() => {
+      const el = document.getElementById(`copy-issued-modal-${code}`);
+      if (el) { el.innerText = '✓ คัดลอกแล้ว'; setTimeout(() => { el.innerText = 'คัดลอก'; }, 1500); }
+    });
+  }
+
+  function formatIssueDateTime(value) {
+    if (!value) return '-';
+    const d = new Date(value);
+    if (Number.isNaN(d.getTime())) return '-';
+    return d.toLocaleString('th-TH');
   }
 
   async function issue(id, targetOaId, options = {}) {
@@ -124,7 +182,7 @@ function PageLineBindings({ setToast }) {
         expiresAt: d.expiresAt || d.expires_at,
         targetOaId: d.targetOaId || d.target_oa_id || (body.targetOaId || null),
         replacePending,
-        createdAt: new Date().toISOString(),
+        createdAt: d.createdAt || d.created_at || new Date().toISOString(),
       };
       setIssuedCodeNotice(issued);
       setOpenId(id);
@@ -134,13 +192,13 @@ function PageLineBindings({ setToast }) {
           ? d.detail
           : mergeIssuedCodeIntoDetail(d.detail, issued));
       }
+      setShowIssueModal({ tenantId: id, replacePending, issued });
       setToast && setToast({
         kind: 'success',
         message: replacePending
           ? `ออกคีย์ LINE แล้ว: ${d.code}`
           : `ออกคีย์เพิ่มแล้ว: ${d.code} (คีย์เดิมยังใช้ได้)`,
       });
-      setShowIssueModal(null);
       await load();
       if (!d.detail || !detailHasCode(d.detail, d.code)) {
         const detail = await loadDetail(id);
@@ -174,6 +232,40 @@ function PageLineBindings({ setToast }) {
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || 'failed');
       setToast && setToast({ kind: 'success', message: `ลบบัญชี LINE แล้ว เหลือ ${d.remainingBoundCount || 0} บัญชี` });
+      await load();
+      if (openId === tenantId) await loadDetail(tenantId);
+    } catch (e) { setToast && setToast({ kind: 'error', message: e.message }); }
+    finally { setBusy(false); }
+  }
+
+  async function revokePendingCode(tenantId, bindingId, code) {
+    const bid = Number(bindingId);
+    if (!Number.isInteger(bid) || bid < 1) {
+      setToast && setToast({
+        kind: 'error',
+        message: 'ยังลบคีย์นี้ไม่ได้ เพราะระบบยังไม่ได้ยืนยันเลขรายการคีย์ กรุณารีเฟรชรายละเอียดห้องแล้วลองใหม่',
+      });
+      return;
+    }
+    const label = code ? ` ${code}` : '';
+    if (!window.confirm(`ลบคีย์ LINE${label} ใช่ไหม? ระบบจะยกเลิกเฉพาะคีย์ที่ยังรอผูกเท่านั้น และจะไม่ลบบัญชี LINE ที่ผูกแล้ว`)) return;
+    setBusy(true);
+    try {
+      const r = await apiFetch(`/api/admin/line-bindings/tenants/${tenantId}/codes/${bid}`, { method: 'DELETE' });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'failed');
+      setIssuedCodeNotice((prev) => {
+        if (!prev) return prev;
+        if (String(prev.id || '') === String(bid) || String(prev.code || '') === String(code || d.code || '')) return null;
+        return prev;
+      });
+      setShowIssueModal((prev) => {
+        const issued = prev && prev.issued;
+        if (!issued) return prev;
+        if (String(issued.id || '') === String(bid) || String(issued.code || '') === String(code || d.code || '')) return null;
+        return prev;
+      });
+      setToast && setToast({ kind: 'success', message: `ยกเลิกคีย์ LINE${label} แล้ว` });
       await load();
       if (openId === tenantId) await loadDetail(tenantId);
     } catch (e) { setToast && setToast({ kind: 'error', message: e.message }); }
@@ -289,6 +381,16 @@ function PageLineBindings({ setToast }) {
                               : `→ ${row.target_oa_name}`}
                         </span>
                       )}
+                      {row.binding_status === 'pending' && (
+                        <span style={{ marginLeft: 8 }}>
+                          · ออกเมื่อ {formatIssueDateTime(row.created_at)} · หมดอายุ {formatIssueDateTime(row.expires_at)}
+                        </span>
+                      )}
+                      {row.binding_status === 'bound' && (
+                        <span style={{ marginLeft: 8 }}>
+                          · ผูกแล้วเมื่อ {formatIssueDateTime(row.bound_at)}
+                        </span>
+                      )}
                     </div>
                   </div>
                   <div>
@@ -328,6 +430,7 @@ function PageLineBindings({ setToast }) {
           onIssueAdditional={() => startIssue(openId, { replacePending: false })}
           onRevoke={() => revoke(openId)}
           onRevokeAccount={(bindingId) => revokeAccount(openId, bindingId)}
+          onRevokePendingCode={(bindingId, code) => revokePendingCode(openId, bindingId, code)}
           onBlock={() => block(openId)}
           onUnblock={() => unblock(openId)} />
       )}
@@ -336,20 +439,71 @@ function PageLineBindings({ setToast }) {
       <Modal
         open={!!showIssueModal}
         onClose={() => setShowIssueModal(null)}
-        title="เลือก LINE OA สำหรับรหัสนี้"
+        title={showIssueModal?.issued ? 'คีย์ LINE ที่สร้างสำเร็จ' : 'เลือก LINE OA สำหรับรหัสนี้'}
         footer={
-          <>
-            <Btn variant="ghost" onClick={() => setShowIssueModal(null)}>ยกเลิก</Btn>
-            <Btn variant="primary" disabled={busy}
-                 onClick={() => issue(showIssueModal.tenantId, issueOaId, {
-                   replacePending: showIssueModal.replacePending !== false,
-                 })}>
-              {busy ? '…' : 'ออกรหัส'}
-            </Btn>
-          </>
+          showIssueModal?.issued ? (
+            <>
+              <Btn variant="ghost" onClick={() => setShowIssueModal(null)}>ปิด</Btn>
+              <Btn variant="primary" onClick={() => copyIssuedCode(showIssueModal.issued.code)}>
+                คัดลอกคีย์
+              </Btn>
+            </>
+          ) : (
+            <>
+              <Btn variant="ghost" onClick={() => setShowIssueModal(null)}>ยกเลิก</Btn>
+              <Btn variant="primary" disabled={busy}
+                   onClick={() => issue(showIssueModal.tenantId, issueOaId, {
+                     replacePending: showIssueModal.replacePending !== false,
+                   })}>
+                {busy ? '…' : 'ออกรหัส'}
+              </Btn>
+            </>
+          )
         }
       >
-        {showIssueModal && (
+        {showIssueModal?.issued ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12, fontSize: 14 }}>
+            <div style={{ padding: 12, borderRadius: 8, border: '1px solid ' + (C.infoSoft || '#b8d9ef'), background: C.infoSoft || '#eef8ff', color: C.infoInk || '#1E3A8A', lineHeight: 1.55 }}>
+              ระบบสร้างคีย์แล้วและจะแสดงค้างในกล่องนี้ ไม่หายไปตาม toast ให้คัดลอกหรือเปิด LINE ก่อนปิดหน้าต่างนี้
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+              <code style={{
+                fontFamily: 'JetBrains Mono, monospace',
+                fontSize: 20,
+                fontWeight: 700,
+                padding: '10px 14px',
+                background: '#fff',
+                borderRadius: 6,
+                border: '1px solid ' + C.border,
+              }}>{showIssueModal.issued.code}</code>
+              <button id={`copy-issued-modal-${showIssueModal.issued.code}`}
+                onClick={() => copyIssuedCode(showIssueModal.issued.code)}
+                style={btnLink(C)}>
+                คัดลอก
+              </button>
+              {buildIssuedLineOpenUrl(showIssueModal.issued) ? (
+                <a href={buildIssuedLineOpenUrl(showIssueModal.issued)} target="_blank" rel="noreferrer"
+                  style={{ ...btnLink(C), background: C.accent || '#2f8a70', color: '#fff', textDecoration: 'none' }}>
+                  เปิด LINE พร้อมคีย์
+                </a>
+              ) : (
+                <button onClick={() => { window.location.hash = '#line-oas'; }}
+                  style={{ ...btnLink(C), border: '1px solid ' + C.border }}>
+                  ตั้งลิงก์ LINE
+                </button>
+              )}
+            </div>
+            <div style={{ color: C.muted, fontSize: 12, lineHeight: 1.6 }}>
+              {showIssueModal.issued.replacePending
+                ? 'คีย์นี้แทนคีย์รอผูกเดิมของห้องนี้'
+                : 'คีย์นี้เป็นคีย์เพิ่ม คีย์รอผูกเดิมของห้องนี้ยังใช้ได้'}
+              <br />
+              ออกเมื่อ {formatIssueDateTime(showIssueModal.issued.createdAt || showIssueModal.issued.created_at)} · หมดอายุ {formatIssueDateTime(showIssueModal.issued.expiresAt || showIssueModal.issued.expires_at)}
+              <br />
+              หลังปิดหน้าต่างนี้ คีย์เดียวกันยังแสดงในรายละเอียดห้องและรายการคีย์รอผูก
+            </div>
+          </div>
+        ) : showIssueModal && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10, fontSize: 14 }}>
             <div style={{ color: C.muted, fontSize: 13, lineHeight: 1.6 }}>
               ผู้เช่าต้องส่งรหัสไปที่ LINE OA ที่เลือกนี้เท่านั้น (ระบบจะปฏิเสธถ้าส่งผิดที่)
@@ -390,7 +544,7 @@ function StatCard({ label, value, color }) {
   );
 }
 
-function DetailModal({ C, Modal, Btn, Pill, detail, tenantId, oas, busy, issuedCodeNotice, onClearIssuedCode, onClose, onIssue, onIssueAdditional, onRevoke, onRevokeAccount, onBlock, onUnblock }) {
+function DetailModal({ C, Modal, Btn, Pill, detail, tenantId, oas, busy, issuedCodeNotice, onClearIssuedCode, onClose, onIssue, onIssueAdditional, onRevoke, onRevokeAccount, onRevokePendingCode, onBlock, onUnblock }) {
   const t = detail.tenant;
   const pending = detail.pending;
   const bound = detail.bound;
@@ -406,6 +560,61 @@ function DetailModal({ C, Modal, Btn, Pill, detail, tenantId, oas, busy, issuedC
     ? issuedCodeNotice
     : null;
   const hasMultiOas = oas && oas.length > 0;
+
+  function formatDateTime(value) {
+    if (!value) return '-';
+    const d = new Date(value);
+    if (Number.isNaN(d.getTime())) return '-';
+    return d.toLocaleString('th-TH');
+  }
+
+  function statusLabel(row) {
+    const status = String(row?.status || '');
+    if (status === 'pending') return 'รอผูก';
+    if (status === 'bound') return 'ผูกแล้ว';
+    if (status === 'revoked') return 'ยกเลิกแล้ว';
+    if (status === 'expired') return 'หมดอายุ';
+    if (status === 'blocked') return 'ถูกบล็อก';
+    return status || '-';
+  }
+
+  function statusColor(row) {
+    const status = String(row?.status || row || '');
+    if (status === 'bound') return '#2f8f5b';
+    if (status === 'pending') return '#c08a2a';
+    if (status === 'blocked') return '#b94a48';
+    if (status === 'expired') return '#7a5a00';
+    return C.muted;
+  }
+
+  function maskedLineUserId(value) {
+    const raw = String(value || '');
+    return raw ? `...${raw.slice(-8)}` : '-';
+  }
+
+  function targetOaText(row) {
+    if (!row) return '';
+    if (row.target_oa_name) return `ส่งไปที่ ${row.target_oa_name} เท่านั้น`;
+    if (row.oa_name) return `ผูกผ่าน ${row.oa_name}`;
+    return hasMultiOas ? 'รับได้ทุก OA' : '';
+  }
+
+  function keyMetaText(row) {
+    const parts = [`ออกเมื่อ ${formatDateTime(row?.created_at || row?.createdAt)}`];
+    if (row?.expires_at || row?.expiresAt) parts.push(`หมดอายุ ${formatDateTime(row.expires_at || row.expiresAt)}`);
+    if (row?.status === 'bound') {
+      parts.push(`ผูกแล้วเมื่อ ${formatDateTime(row.bound_at || row.boundAt)}`);
+      if (row.line_user_id) parts.push(`LINE ${maskedLineUserId(row.line_user_id)}`);
+    }
+    const oa = targetOaText(row);
+    if (oa) parts.push(oa);
+    return parts.join(' · ');
+  }
+
+  function canRevokePendingCode(row) {
+    const bid = Number(row?.id);
+    return row && row.status === 'pending' && Number.isInteger(bid) && bid > 0;
+  }
 
   function copyCode(code, elementId) {
     if (!navigator.clipboard) return;
@@ -468,6 +677,10 @@ function DetailModal({ C, Modal, Btn, Pill, detail, tenantId, oas, busy, issuedC
           <code style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 12 }}>
             {t.line_user_id ? `…${t.line_user_id.slice(-8)}` : '—'}
           </code>
+          <span style={{ color: C.muted }}>บัญชี LINE ที่ผูก:</span>
+          <span><b>{boundAccounts.length || boundCount || 0}</b> บัญชี</span>
+          <span style={{ color: C.muted }}>คีย์รอผูก:</span>
+          <span><b>{pendingCodes.length}</b> คีย์</span>
         </div>
 
         {blocked && (
@@ -522,6 +735,8 @@ function DetailModal({ C, Modal, Btn, Pill, detail, tenantId, oas, busy, issuedC
               {issuedForThisTenant.replacePending
                 ? 'คีย์นี้แทนคีย์รอผูกเดิมของห้องนี้'
                 : 'คีย์นี้เป็นคีย์เพิ่ม คีย์รอผูกเดิมของห้องนี้ยังใช้ได้'}
+              <br />
+              ออกเมื่อ {formatDateTime(issuedForThisTenant.createdAt || issuedForThisTenant.created_at)} · หมดอายุ {formatDateTime(issuedForThisTenant.expiresAt || issuedForThisTenant.expires_at)}
             </div>
           </div>
         )}
@@ -529,7 +744,7 @@ function DetailModal({ C, Modal, Btn, Pill, detail, tenantId, oas, busy, issuedC
         {pending && !blocked && (
           <div style={{ padding: 14, background: C.bgSoft || '#fff7e0', border: '1px solid ' + C.border, borderRadius: 8 }}>
             <div style={{ fontSize: 12, color: C.muted }}>
-              รหัสที่ออกล่าสุด · หมดอายุ {new Date(pending.expires_at).toLocaleString('th-TH')}
+              รหัสที่ออกล่าสุด · สถานะ {statusLabel(pending)} · ออกเมื่อ {formatDateTime(pending.created_at)} · หมดอายุ {formatDateTime(pending.expires_at)}
               {pending.target_oa_name && (
                 <span style={{ marginLeft: 8, color: C.accent }}>
                   · ส่งไปที่ <b>{pending.target_oa_name}</b> เท่านั้น
@@ -545,6 +760,12 @@ function DetailModal({ C, Modal, Btn, Pill, detail, tenantId, oas, busy, issuedC
                 padding: '8px 14px', background: '#fff', borderRadius: 6, border: '1px solid ' + C.border,
               }}>{pending.code}</code>
               <button id={`copy-${pending.code}`} onClick={() => copyCode(pending.code)} style={btnLink(C)}>คัดลอก</button>
+              {canRevokePendingCode(pending) && (
+                <button onClick={() => onRevokePendingCode && onRevokePendingCode(pending.id, pending.code)}
+                  style={{ ...btnLink(C), color: '#b94a48' }}>
+                  ลบคีย์นี้
+                </button>
+              )}
               {lineOpenUrl ? (
                 <a href={lineOpenUrl} target="_blank" rel="noreferrer"
                   style={{ ...btnLink(C), background: C.accent || '#2f8a70', color: '#fff', textDecoration: 'none' }}>
@@ -583,7 +804,7 @@ function DetailModal({ C, Modal, Btn, Pill, detail, tenantId, oas, busy, issuedC
                     return (
                       <div key={row.id} style={{
                         display: 'grid',
-                        gridTemplateColumns: '1fr auto auto',
+                        gridTemplateColumns: '1fr auto auto auto',
                         gap: 8,
                         alignItems: 'center',
                         background: '#fff',
@@ -594,11 +815,18 @@ function DetailModal({ C, Modal, Btn, Pill, detail, tenantId, oas, busy, issuedC
                         <div style={{ minWidth: 0 }}>
                           <code style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 12.5 }}>{row.code}</code>
                           <div style={{ color: C.muted, fontSize: 11, marginTop: 2 }}>
-                            หมดอายุ {row.expires_at ? new Date(row.expires_at).toLocaleString('th-TH') : '-'}
-                            {row.target_oa_name ? ` · ส่งที่ ${row.target_oa_name}` : ''}
+                            {keyMetaText(row)}
                           </div>
                         </div>
                         <button id={`copy-pending-${row.id}`} onClick={() => copyCode(row.code, `copy-pending-${row.id}`)} style={btnLink(C)}>คัดลอก</button>
+                        {canRevokePendingCode(row) ? (
+                          <button onClick={() => onRevokePendingCode && onRevokePendingCode(row.id, row.code)}
+                            style={{ ...btnLink(C), color: '#b94a48' }}>
+                            ลบ
+                          </button>
+                        ) : (
+                          <span style={{ color: C.muted, fontSize: 11 }}>{statusLabel(row)}</span>
+                        )}
                         {openUrl ? (
                           <a href={openUrl} target="_blank" rel="noreferrer"
                             style={{ ...btnLink(C), textDecoration: 'none' }}>
@@ -661,6 +889,9 @@ function DetailModal({ C, Modal, Btn, Pill, detail, tenantId, oas, busy, issuedC
                       <div style={{ fontSize: 11.5, color: C.muted, marginTop: 2 }}>
                         {account.oa_name ? `ผ่าน ${account.oa_name}` : 'ผ่าน OA เดิม/ไม่ระบุ'} · ผูกเมื่อ {account.bound_at ? new Date(account.bound_at).toLocaleString('th-TH') : '-'}
                       </div>
+                      <div style={{ fontSize: 11.5, color: C.muted, marginTop: 2 }}>
+                        คีย์ที่ใช้ผูก <code style={{ fontFamily: 'JetBrains Mono, monospace' }}>{account.code || '-'}</code> · ออกเมื่อ {formatDateTime(account.created_at)} · หมดอายุ {formatDateTime(account.expires_at)}
+                      </div>
                     </div>
                     <Btn variant="danger" disabled={busy} onClick={() => onRevokeAccount && onRevokeAccount(account.id)}>
                       ลบบัญชีนี้
@@ -700,15 +931,32 @@ function DetailModal({ C, Modal, Btn, Pill, detail, tenantId, oas, busy, issuedC
 
         {detail.history && detail.history.length > 0 && (
           <div style={{ marginTop: 12 }}>
-            <div style={{ fontSize: 12, color: C.muted, marginBottom: 6 }}>ประวัติ {detail.history.length} รายการ</div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 1, background: C.border, borderRadius: 6, fontSize: 12, maxHeight: 200, overflow: 'auto' }}>
-              {detail.history.map((h) => (
-                <div key={h.id} style={{ background: C.bg, padding: '6px 10px', display: 'grid', gridTemplateColumns: '1fr auto auto', gap: 8 }}>
-                  <code>{h.code}</code>
-                  <Pill color={h.status === 'bound' ? '#2f8f5b' : (h.status === 'pending' ? '#c08a2a' : C.muted)}>{h.status}</Pill>
-                  <span style={{ color: C.muted }}>{new Date(h.created_at).toLocaleDateString('th-TH')}</span>
-                </div>
-              ))}
+            <div style={{ fontSize: 12, color: C.muted, marginBottom: 6 }}>
+              ประวัติคีย์ {detail.history.length} รายการ - คีย์ที่ผูกแล้วจะแสดงสถานะผูกแล้วและลบจากส่วนนี้ไม่ได้
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 1, background: C.border, borderRadius: 6, fontSize: 12, maxHeight: 260, overflow: 'auto' }}>
+              {detail.history.map((h) => {
+                const canRevoke = canRevokePendingCode(h);
+                return (
+                  <div key={h.id} style={{ background: C.bg, padding: '8px 10px', display: 'grid', gridTemplateColumns: '1fr auto auto', gap: 8, alignItems: 'center' }}>
+                    <div style={{ minWidth: 0 }}>
+                      <code style={{ fontFamily: 'JetBrains Mono, monospace' }}>{h.code || '-'}</code>
+                      <div style={{ marginTop: 2, color: C.muted, lineHeight: 1.45 }}>{keyMetaText(h)}</div>
+                    </div>
+                    <Pill color={statusColor(h)}>{statusLabel(h)}</Pill>
+                    {canRevoke ? (
+                      <button onClick={() => onRevokePendingCode && onRevokePendingCode(h.id, h.code)}
+                        style={{ ...btnLink(C), color: '#b94a48' }}>
+                        ลบคีย์
+                      </button>
+                    ) : (
+                      <span style={{ color: C.muted, fontSize: 11 }}>
+                        {h.status === 'bound' ? 'ผูกแล้ว' : 'อ่านอย่างเดียว'}
+                      </span>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           </div>
         )}

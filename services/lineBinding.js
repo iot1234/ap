@@ -142,12 +142,13 @@ async function issue(pool, { tenantId, ttlDays, createdBy, targetOaId, replacePe
         const ins = await client.query(
           `INSERT INTO line_bindings (tenant_id, code, status, expires_at, created_by, target_oa_id)
            VALUES ($1, $2, 'pending', NOW() + ($3::int || ' days')::interval, $4, $5)
-           RETURNING id, code, expires_at, target_oa_id`,
+           RETURNING id, code, expires_at, target_oa_id, created_at`,
           [tid, code, ttl, createdBy || null, target]
         );
         await client.query('COMMIT');
         return {
           id: ins.rows[0].id, code, expiresAt: ins.rows[0].expires_at,
+          createdAt: ins.rows[0].created_at,
           tenantId: tid, targetOaId: ins.rows[0].target_oa_id,
         };
       } catch (err) {
@@ -293,6 +294,77 @@ async function revokeAccount(pool, { tenantId, bindingId } = {}) {
 }
 
 /**
+ * Revoke one unused pending key. This intentionally does not touch bound LINE
+ * accounts or tenants.line_user_id. If the key was already consumed/revoked/
+ * expired by another request, callers get a clean not_pending result.
+ */
+async function revokePendingCode(pool, { tenantId, bindingId } = {}) {
+  const tid = Number(tenantId);
+  const bid = Number(bindingId);
+  if (!Number.isInteger(tid) || tid < 1 || !Number.isInteger(bid) || bid < 1) {
+    throw lineBindingError('tenantId and bindingId required', 'INVALID_BINDING_ID');
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const existing = await client.query(
+      `SELECT id, tenant_id, code, status, expires_at, created_at, target_oa_id
+         FROM line_bindings
+        WHERE id=$1
+          AND tenant_id=$2
+        FOR UPDATE`,
+      [bid, tid]
+    );
+    if (!existing.rows.length) {
+      await client.query('ROLLBACK');
+      return { ok: false, reason: 'not_found', tenantId: tid, bindingId: bid };
+    }
+    const row = existing.rows[0];
+    if (row.status !== 'pending') {
+      await client.query('ROLLBACK');
+      return {
+        ok: false,
+        reason: 'not_pending',
+        status: row.status,
+        tenantId: tid,
+        bindingId: bid,
+        code: row.code,
+      };
+    }
+    const revoked = await client.query(
+      `UPDATE line_bindings
+          SET status='revoked',
+              updated_at=NOW()
+        WHERE id=$1
+          AND tenant_id=$2
+          AND status='pending'
+        RETURNING id, code, status, expires_at, created_at, target_oa_id`,
+      [bid, tid]
+    );
+    if (revoked.rowCount !== 1) {
+      await client.query('ROLLBACK');
+      return { ok: false, reason: 'not_pending', tenantId: tid, bindingId: bid, code: row.code };
+    }
+    await client.query('COMMIT');
+    return {
+      ok: true,
+      tenantId: tid,
+      bindingId: bid,
+      code: revoked.rows[0].code,
+      status: revoked.rows[0].status,
+      expiresAt: revoked.rows[0].expires_at,
+      createdAt: revoked.rows[0].created_at,
+      targetOaId: revoked.rows[0].target_oa_id,
+    };
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
  * Issue a booking-stage binding code before a tenant row exists. The code is
  * tied to bookings.external_id and later transferred to the tenant created by
  * quick-invite. This avoids creating fake active tenants just to receive LINE.
@@ -346,7 +418,7 @@ async function issueBooking(pool, { bookingId, ttlDays, createdBy, targetOaId } 
         const ins = await client.query(
           `INSERT INTO line_bindings (tenant_id, booking_id, code, status, expires_at, created_by, target_oa_id)
            VALUES (NULL, $1, $2, 'pending', NOW() + ($3::int || ' days')::interval, $4, $5)
-           RETURNING id, code, expires_at, target_oa_id`,
+           RETURNING id, code, expires_at, target_oa_id, created_at`,
           [id, code, ttl, createdBy || 'public-booking', target]
         );
         await client.query('COMMIT');
@@ -354,6 +426,7 @@ async function issueBooking(pool, { bookingId, ttlDays, createdBy, targetOaId } 
           id: ins.rows[0].id,
           code,
           expiresAt: ins.rows[0].expires_at,
+          createdAt: ins.rows[0].created_at,
           bookingId: id,
           targetOaId: ins.rows[0].target_oa_id,
         };
@@ -468,7 +541,7 @@ async function getStatus(pool, tenantId) {
     [tenantId]
   );
   const boundAccounts = await pool.query(
-    `SELECT b.id, b.line_user_id, b.oa_id, b.bound_at, b.created_at,
+    `SELECT b.id, b.code, b.line_user_id, b.oa_id, b.bound_at, b.created_at, b.expires_at,
             o.name AS oa_name, o.slug AS oa_slug
        FROM line_bindings b
        LEFT JOIN line_oas o ON o.id = b.oa_id AND o.deleted_at IS NULL
@@ -817,13 +890,13 @@ async function listAll(pool) {
       t.line_user_id, t.line_oa_id, t.line_binding_blocked,
       t.status AS tenant_status,
       b.id AS binding_id, b.code, b.status AS binding_status,
-      b.expires_at, b.bound_at, b.oa_id, b.target_oa_id,
+      b.created_at, b.expires_at, b.bound_at, b.oa_id, b.target_oa_id,
       COALESCE(bc.bound_count, 0)::int AS bound_count,
       o.name  AS oa_name,        o.slug  AS oa_slug,
       tg.name AS target_oa_name, tg.slug AS target_oa_slug
     FROM tenants t
     LEFT JOIN LATERAL (
-      SELECT id, code, status, expires_at, bound_at, oa_id, target_oa_id
+      SELECT id, code, status, created_at, expires_at, bound_at, oa_id, target_oa_id
         FROM line_bindings
         WHERE tenant_id = t.id
           AND status IN ('pending', 'bound')
@@ -853,7 +926,7 @@ async function listAll(pool) {
 }
 
 module.exports = {
-  issue, issueBooking, revoke, revokeAccount, revokeBookingBindings,
+  issue, issueBooking, revoke, revokeAccount, revokePendingCode, revokeBookingBindings,
   block, unblock, getStatus, tryBind,
   transferBookingBindings, listTenantRecipients, listBookingRecipients, listAll,
   CODE_PREFIX, generateCode,

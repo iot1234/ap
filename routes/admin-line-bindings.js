@@ -4,6 +4,7 @@
 //   GET    /api/admin/line-bindings                   — overview (all tenants)
 //   GET    /api/admin/line-bindings/tenants/:id       — single tenant detail
 //   POST   /api/admin/line-bindings/tenants/:id       — issue new code
+//   DELETE /api/admin/line-bindings/tenants/:id/codes/:bindingId — revoke unused pending code
 //   DELETE /api/admin/line-bindings/tenants/:id       — revoke + unbind
 //   POST   /api/admin/line-bindings/tenants/:id/block — block (no future bindings)
 //   POST   /api/admin/line-bindings/tenants/:id/unblock
@@ -117,6 +118,48 @@ module.exports = function buildAdminLineBindingsRouter(ctx) {
       } catch (err) {
         console.error('admin line-binding revoke error:', err);
         res.status(500).json({ error: 'internal error' });
+      }
+    }
+  );
+
+  r.delete('/tenants/:id/codes/:bindingId', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'),
+    async (req, res) => {
+      const id = Number(req.params.id);
+      const bindingId = Number(req.params.bindingId);
+      if (!Number.isInteger(id) || id < 1 || !Number.isInteger(bindingId) || bindingId < 1) {
+        return res.status(400).json({
+          error: 'รหัสผู้เช่าหรือคีย์ LINE ไม่ถูกต้อง กรุณารีเฟรชหน้ารายละเอียดแล้วลองใหม่',
+          code: 'INVALID_BINDING_ID',
+        });
+      }
+      try {
+        const result = await lineBinding.revokePendingCode(pool, {
+          tenantId: id,
+          bindingId,
+          by: req.session.user.username,
+        });
+        if (!result.ok) {
+          const statusCode = result.reason === 'not_found' ? 404 : 409;
+          const message = result.reason === 'not_found'
+            ? 'ไม่พบคีย์รอผูกของห้องนี้ อาจถูกลบไปแล้ว กรุณารีเฟรชหน้ารายละเอียด'
+            : 'ลบคีย์นี้ไม่ได้ เพราะสถานะล่าสุดไม่ใช่รอผูก อาจผูกแล้ว/หมดอายุ/ถูกยกเลิกแล้ว กรุณารีเฟรชหน้ารายละเอียด';
+          return res.status(statusCode).json({
+            error: message,
+            code: result.reason === 'not_found' ? 'LINE_BINDING_CODE_NOT_FOUND' : 'LINE_BINDING_CODE_NOT_PENDING',
+            status: result.status || null,
+          });
+        }
+        audit(req, 'line_binding.revoke_pending_code', 'tenant', String(id), {
+          bindingId,
+          code: result.code,
+        });
+        res.json(result);
+      } catch (err) {
+        console.error('admin line-binding pending code revoke error:', err);
+        res.status(500).json({
+          error: 'ยกเลิกคีย์ LINE ไม่สำเร็จ กรุณาลองใหม่ หากยังไม่สำเร็จให้ตรวจสอบสถานะคีย์ก่อน',
+          code: 'LINE_BINDING_CODE_REVOKE_FAILED',
+        });
       }
     }
   );

@@ -79,14 +79,16 @@ test('issue: validates tenant and OA inputs before opening a transaction', async
 });
 
 test('issue: revokes prior pending then creates new', async () => {
+  const createdAt = new Date('2026-05-18T09:00:00Z');
   const pool = buildFakePool({
     'SELECT id, full_name': () => ({
       rows: [{ id: 1, full_name: 'X', line_binding_blocked: false, status: 'active', current_room_id: '101' }],
     }),
-    'INSERT INTO line_bindings': () => ({ rows: [{ id: 42, code: 'BIND-AAAAAAAA', expires_at: new Date() }] }),
+    'INSERT INTO line_bindings': () => ({ rows: [{ id: 42, code: 'BIND-AAAAAAAA', expires_at: new Date(), created_at: createdAt }] }),
   });
   const out = await lb.issue(pool, { tenantId: 1, ttlDays: 7, createdBy: 'admin' });
   assert.equal(out.id, 42);
+  assert.equal(out.createdAt, createdAt);
   assert.match(out.code, /^BIND-/);
   // Verify the revoke step happened before insert
   const sequence = pool._calls.map((c) => c.sql);
@@ -443,6 +445,69 @@ test('revokeAccount removes one LINE account and keeps remaining account cached'
   assert.equal(tenantUpdate.params[0], 'Uremain');
   assert.equal(tenantUpdate.params[1], 4);
   assert.equal(tenantUpdate.params[2], 7);
+});
+
+test('revokePendingCode revokes only one unused tenant key', async () => {
+  const createdAt = new Date('2026-05-18T09:00:00Z');
+  const expiresAt = new Date('2026-05-25T09:00:00Z');
+  const pool = buildFakePool({
+    'SELECT id, tenant_id, code, status': () => ({
+      rows: [{
+        id: 55,
+        tenant_id: 7,
+        code: 'BIND-PENDING1',
+        status: 'pending',
+        expires_at: expiresAt,
+        created_at: createdAt,
+        target_oa_id: 2,
+      }],
+    }),
+    'UPDATE line_bindings': () => ({
+      rowCount: 1,
+      rows: [{
+        id: 55,
+        code: 'BIND-PENDING1',
+        status: 'revoked',
+        expires_at: expiresAt,
+        created_at: createdAt,
+        target_oa_id: 2,
+      }],
+    }),
+  });
+  const out = await lb.revokePendingCode(pool, { tenantId: 7, bindingId: 55 });
+  assert.equal(out.ok, true);
+  assert.equal(out.bindingId, 55);
+  assert.equal(out.code, 'BIND-PENDING1');
+  assert.equal(out.createdAt, createdAt);
+  assert.equal(out.expiresAt, expiresAt);
+  const select = pool._calls.find((c) => c.sql.includes('FROM line_bindings') && c.sql.includes('FOR UPDATE'));
+  assert.match(select.sql, /WHERE id=\$1/);
+  assert.match(select.sql, /tenant_id=\$2/);
+  const update = pool._calls.find((c) => c.sql.includes('UPDATE line_bindings'));
+  const sql = update.sql.replace(/\s+/g, ' ');
+  assert.match(sql, /WHERE id=\$1/);
+  assert.match(sql, /tenant_id=\$2/);
+  assert.match(sql, /status='pending'/);
+});
+
+test('revokePendingCode refuses keys that are already bound or gone', async () => {
+  const boundPool = buildFakePool({
+    'SELECT id, tenant_id, code, status': () => ({
+      rows: [{ id: 56, tenant_id: 7, code: 'BIND-BOUND001', status: 'bound' }],
+    }),
+  });
+  const bound = await lb.revokePendingCode(boundPool, { tenantId: 7, bindingId: 56 });
+  assert.equal(bound.ok, false);
+  assert.equal(bound.reason, 'not_pending');
+  assert.equal(bound.status, 'bound');
+  assert.equal(boundPool._calls.some((c) => c.sql.includes('UPDATE line_bindings')), false);
+
+  const missingPool = buildFakePool({
+    'SELECT id, tenant_id, code, status': () => ({ rows: [] }),
+  });
+  const missing = await lb.revokePendingCode(missingPool, { tenantId: 7, bindingId: 999 });
+  assert.equal(missing.ok, false);
+  assert.equal(missing.reason, 'not_found');
 });
 
 test('CODE_PREFIX is BIND-', () => {
