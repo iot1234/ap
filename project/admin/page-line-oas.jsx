@@ -312,6 +312,18 @@ function PageLineOas({ setToast }) {
                         {' · '}
                       </span>
                     )}
+                    {o.oaMessageUrl ? (
+                      <span>
+                        <a href={o.oaMessageUrl} target="_blank" rel="noreferrer" style={{ color: C.accent, fontWeight: 600 }}>
+                          ทดสอบเปิดแชต OA
+                        </a>
+                        {' · ลิงก์พร้อมคีย์: พร้อม · '}
+                      </span>
+                    ) : (
+                      <span style={{ color: C.warning || '#b45309' }}>
+                        ลิงก์พร้อมคีย์: ต้องใส่ Bot Basic ID ·
+                      </span>
+                    )}
                     {o.lastSeenAt && <span>เห็นล่าสุด: {new Date(o.lastSeenAt).toLocaleString('th-TH')}</span>}
                     {o.lastError && (
                       <span style={{ color: C.danger, marginLeft: 8 }}>⚠ {o.lastError}</span>
@@ -413,12 +425,12 @@ function PageLineOas({ setToast }) {
                    value={editing.botBasicId}
                    onChange={(v) => setEditing({ ...editing, botBasicId: v })}
                    placeholder="@baankarn"
-                   hint="ใช้สร้างลิงก์ add friend (อยากให้ผู้เช่ากด add ได้ทันที)" />
+                   hint="ใช้สร้างทั้งลิงก์ add friend และปุ่มเปิด LINE พร้อมคีย์ให้ผู้จองส่งเองใน LINE" />
             <Input label="ลิงก์เปิด LINE OA / Add friend (ไม่บังคับ)"
                    value={editing.addFriendUrl}
                    onChange={(v) => setEditing({ ...editing, addFriendUrl: v })}
                    placeholder="https://lin.ee/xxxx หรือ https://line.me/R/ti/p/@your_oa"
-                   hint="ถ้าใส่ค่านี้ ระบบจะใช้เป็นปุ่มเปิด LINE ในหน้าผูก LINE; ถ้าเว้นว่างจะสร้างจาก Bot Basic ID อัตโนมัติ" />
+                   hint="ถ้าใส่แค่ lin.ee ระบบเปิด OA ได้ แต่เติมคีย์ให้ผู้จองไม่ได้; ต้องมี Bot Basic ID เพื่อสร้างลิงก์เปิดแชตพร้อมคีย์" />
             <Input label="LINE userId ของเจ้าของ OA นี้ (ไม่บังคับ)"
                    value={editing.ownerUserId}
                    onChange={(v) => setEditing({ ...editing, ownerUserId: v })}

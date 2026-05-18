@@ -326,7 +326,33 @@ function DetailModal({ C, Modal, Btn, Pill, detail, tenantId, oas, busy, onClose
     const first = list.find((o) => o.addFriendUrl);
     return first ? first.addFriendUrl : '';
   }
+  function resolveLineMessageUrl() {
+    const list = Array.isArray(oas) ? oas : [];
+    const targetId = pending && (pending.target_oa_id || pending.targetOaId);
+    if (targetId) {
+      const target = list.find((o) => String(o.id) === String(targetId));
+      return target && target.oaMessageUrl ? target.oaMessageUrl : '';
+    }
+    const defaultOa = list.find((o) => o.isDefault && o.oaMessageUrl);
+    if (defaultOa) return defaultOa.oaMessageUrl;
+    const first = list.find((o) => o.oaMessageUrl);
+    return first ? first.oaMessageUrl : '';
+  }
+  function buildLineTenantBindingMessageLink(baseUrl, code) {
+    const bindCode = String(code || '').trim().slice(0, 80);
+    if (!baseUrl || !/^BIND-[A-F0-9]{4,16}$/i.test(bindCode)) return '';
+    try {
+      const u = new URL(String(baseUrl).trim(), window.location.origin);
+      if (u.protocol !== 'https:' || u.hostname !== 'line.me' || !u.pathname.startsWith('/R/oaMessage/')) return '';
+      const path = u.pathname.endsWith('/') ? u.pathname : `${u.pathname}/`;
+      return `${u.origin}${path}?${encodeURIComponent(bindCode)}`;
+    } catch {
+      return '';
+    }
+  }
   const lineAddUrl = resolveLineAddUrl();
+  const lineMessageUrl = buildLineTenantBindingMessageLink(resolveLineMessageUrl(), pending && pending.code);
+  const lineOpenUrl = lineMessageUrl || lineAddUrl;
 
   return (
     <Modal open={true} onClose={onClose} title={`${t.full_name}${t.current_room_id ? ' · ห้อง ' + t.current_room_id : ''}`}>
@@ -365,10 +391,10 @@ function DetailModal({ C, Modal, Btn, Pill, detail, tenantId, oas, busy, onClose
                 padding: '8px 14px', background: '#fff', borderRadius: 6, border: '1px solid ' + C.border,
               }}>{pending.code}</code>
               <button id={`copy-${pending.code}`} onClick={() => copyCode(pending.code)} style={btnLink(C)}>คัดลอก</button>
-              {lineAddUrl ? (
-                <a href={lineAddUrl} target="_blank" rel="noreferrer"
+              {lineOpenUrl ? (
+                <a href={lineOpenUrl} target="_blank" rel="noreferrer"
                   style={{ ...btnLink(C), background: C.accent || '#2f8a70', color: '#fff', textDecoration: 'none' }}>
-                  เปิด LINE OA
+                  {lineMessageUrl ? 'เปิด LINE พร้อมคีย์' : 'เปิด LINE OA'}
                 </a>
               ) : (
                 <button onClick={() => { window.location.hash = '#line-oas'; }}
@@ -384,8 +410,12 @@ function DetailModal({ C, Modal, Btn, Pill, detail, tenantId, oas, busy, onClose
             </div>
             <div style={{ marginTop: 8, fontSize: 12, color: C.muted, lineHeight: 1.6 }}>
               📋 ขั้นตอนสำหรับผู้เช่า:<br/>
-              1) กด “เปิด LINE OA” หรือ Add LINE OA เป็นเพื่อน<br/>
-              2) ส่งข้อความ <code>{pending.code}</code> ในแชต<br/>
+              1) กด “{lineMessageUrl ? 'เปิด LINE พร้อมคีย์' : 'เปิด LINE OA'}” หรือ Add LINE OA เป็นเพื่อน<br/>
+              {lineMessageUrl ? (
+                <>2) ตรวจว่าช่องพิมพ์มี <code>{pending.code}</code> แล้วกดส่งใน LINE<br/></>
+              ) : (
+                <>2) ส่งข้อความ <code>{pending.code}</code> ในแชต<br/></>
+              )}
               3) ระบบจะตอบกลับ "ผูกบัญชีสำเร็จ" และเริ่มส่งบิล/แจ้งเตือน
             </div>
           </div>

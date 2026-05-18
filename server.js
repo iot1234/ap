@@ -2433,6 +2433,7 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBookingSubmit, validateBod
         expiresAt: binding.expiresAt,
         bookingId: binding.bookingId,
         addFriendUrl: defaultOa?.addFriendUrl || null,
+        oaMessageUrl: defaultOa?.oaMessageUrl || null,
       };
     } catch (err) {
       console.warn('[booking] LINE binding code issue skipped:', err.message);
@@ -2799,6 +2800,32 @@ app.put('/api/maintenance/:id', sameOrigin, csrfGuard, requireAuth, requireRole(
   if (b.status !== undefined) {
     if (!VALID_TICKET_STATUS.has(String(b.status))) {
       return res.status(400).json({ error: 'invalid status' });
+    }
+    // Refuse to walk a ticket back from a terminal status. Once a ticket
+    // is rated/completed and the tenant has been notified, flipping it
+    // back to 'open' or 'in_progress' would orphan the completed_at
+    // timestamp + send confusing duplicate notifications. Admins who
+    // genuinely need to revive a closed ticket should create a new one.
+    // 'cancelled' is also treated as terminal so accidental click can't
+    // resurrect a cancelled ticket without explicit DB intervention.
+    const TERMINAL_TICKET_STATUSES = new Set(['completed', 'cancelled']);
+    const newStatus = String(b.status);
+    if (TERMINAL_TICKET_STATUSES.has(newStatus) || newStatus !== b.status) {
+      // Look up current status to decide whether the requested transition
+      // is allowed. Tiny extra round-trip but avoids racing 2 admins on
+      // the same ticket — the actual UPDATE is row-locked below.
+      const current = await pool.query(
+        `SELECT status FROM maintenance_tickets WHERE id=$1`,
+        [id]
+      );
+      if (current.rows.length && TERMINAL_TICKET_STATUSES.has(current.rows[0].status)
+          && current.rows[0].status !== newStatus) {
+        return res.status(409).json({
+          error: `ticket ปิดไปแล้ว (สถานะ ${current.rows[0].status}) — ออก ticket ใหม่แทนการเปลี่ยนสถานะ`,
+          code: 'TICKET_TERMINAL',
+          currentStatus: current.rows[0].status,
+        });
+      }
     }
     fields.push(`status = $${idx++}`); params.push(b.status);
     if (b.status === 'completed') {
@@ -5472,11 +5499,23 @@ app.post('/api/tenant/maintenance/:id/rate', sameOrigin, csrfGuard, requireTenan
   }
   const comment = req.body?.comment ? String(req.body.comment).slice(0, 500) : null;
   try {
+    // Authorization — only the tenant whose ticket this is may rate it.
+    //
+    // IDOR fix: previously the OR clause allowed match-by-phone as a
+    // fallback. Couples or family members sharing a phone could rate
+    // each other's tickets that way — tenant A's phone matches a ticket
+    // submitted by tenant B (same phone, different tenant_id), and the
+    // OR clause passed. Phone-only match is now scoped to tickets that
+    // never got tenant_id stamped (legacy/orphan rows), so identified
+    // tenants can only rate their OWN tickets.
     const { rows } = await pool.query(
       `UPDATE maintenance_tickets
          SET rating=$1, rating_comment=$2, updated_at=NOW()
          WHERE id=$3
-           AND (tenant_id = $4 OR (tenant_phone = $5 AND $5 <> ''))
+           AND (
+             tenant_id = $4
+             OR (tenant_id IS NULL AND tenant_phone = $5 AND $5 <> '')
+           )
            AND status='completed'
            AND rating IS NULL
          RETURNING ticket_no, rating, rating_comment, completed_at`,
@@ -7019,13 +7058,15 @@ async function enrichBookingLineBindingStatus(pool, booking) {
     ].includes(effectiveStatus);
 
     let addFriendUrl = existing.addFriendUrl || existing.add_friend_url || null;
-    if (!addFriendUrl) {
+    let oaMessageUrl = existing.oaMessageUrl || existing.oa_message_url || null;
+    if (!addFriendUrl || !oaMessageUrl) {
       const addFriendOaId = pending?.target_oa_id || pending?.oa_id || bound?.oa_id
         || latest?.target_oa_id || latest?.oa_id || null;
       const oa = addFriendOaId
         ? await lineOa.getById(pool, addFriendOaId).catch(() => null)
         : await lineOa.getDefault(pool).catch(() => null);
-      addFriendUrl = oa?.addFriendUrl || null;
+      addFriendUrl = addFriendUrl || oa?.addFriendUrl || null;
+      oaMessageUrl = oaMessageUrl || oa?.oaMessageUrl || null;
     }
 
     out.lineBinding = {
@@ -7035,6 +7076,7 @@ async function enrichBookingLineBindingStatus(pool, booking) {
       code: pending?.code || (activeBookingStatus ? existing.code : null) || null,
       expiresAt,
       addFriendUrl,
+      oaMessageUrl,
       boundAt: bound?.bound_at || existing.boundAt || existing.bound_at || null,
       boundCount,
       lineRecipientCount: boundCount,
@@ -11007,6 +11049,29 @@ app.post('/api/admin/contract-invitations/:id/approve',
             rejectInvitation: true,
             hint: 'กด "ขอให้แก้" พร้อมระบุรายการที่ขาด แล้วให้ผู้เช่าส่งกลับมาใหม่',
           },
+        });
+      }
+
+      // Re-lock the tenant row to verify it still exists + isn't deleted
+      // BEFORE applying drafts or binding to a room. Without this guard,
+      // a tenant deleted between submit and approve would silently take
+      // the contract lock + room reservation + welcome bill, leaving an
+      // orphan: locked contract with no real tenant, room flipped to
+      // 'occupied' for a row that scheduler.tickBillGen can't reach.
+      // The room-binding block below also re-locks the tenant; promoting
+      // the check here makes EVERY downstream write (drafts, tenant
+      // fields, room bind, welcome bill) refuse to fire on a phantom row.
+      const tenantGuard = await client.query(
+        `SELECT id FROM tenants WHERE id=$1 AND deleted_at IS NULL FOR UPDATE`,
+        [inv.tenant_id]
+      );
+      if (!tenantGuard.rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'ผู้เช่าที่ผูกกับ invitation นี้ถูกลบไปแล้ว ไม่สามารถ approve ได้',
+          code: 'TENANT_DELETED',
+          tenantId: inv.tenant_id,
+          hint: 'ลบ invitation เก่า + ผูก contract กับผู้เช่าคนปัจจุบัน แล้วออก invitation ใหม่',
         });
       }
 

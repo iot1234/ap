@@ -706,11 +706,11 @@
       </div>
       <div class="line-bind-box" id="lineBindBox" style="display:none">
         <h3>ผูก LINE เพื่อรับสถานะการจอง</h3>
-        <p>คัดลอกรหัสนี้แล้วส่งในแชต LINE OA ของหอพัก</p>
+        <p>กดปุ่มเพื่อเปิด LINE พร้อมคีย์ในช่องพิมพ์ หรือคัดลอกรหัสนี้แล้วส่งในแชต LINE OA ของหอพัก</p>
         <div class="line-bind-code">
           <code id="lineBindCode"></code>
           <button type="button" class="line-copy-btn" id="lineBindCopyBtn">คัดลอก</button>
-          <a class="line-open-btn" id="lineOpenBtn" target="_blank" rel="noreferrer">เปิด LINE OA</a>
+          <a class="line-open-btn" id="lineOpenBtn" target="_blank" rel="noreferrer">เปิด LINE พร้อมคีย์</a>
         </div>
         <p id="lineBindHint">หลังผูกแล้ว ระบบจะใช้ LINE นี้แจ้งผลจอง สัญญา และบิลของห้องนี้</p>
       </div>
@@ -910,6 +910,51 @@
     }
   }
 
+  function safeLineOaMessageUrl(value) {
+    try {
+      const u = new URL(String(value || '').trim(), window.location.origin);
+      if (u.protocol !== 'https:') return '';
+      if (u.hostname !== 'line.me') return '';
+      if (!u.pathname.startsWith('/R/oaMessage/')) return '';
+      u.hash = '';
+      return u.href;
+    } catch {
+      return '';
+    }
+  }
+
+  function lineMessageUrlWithCode(baseUrl, code) {
+    const safeBase = safeLineOaMessageUrl(baseUrl);
+    const bindCode = String(code || '').trim().slice(0, 80);
+    if (!safeBase || !/^BIND-[A-F0-9]{4,16}$/i.test(bindCode)) return '';
+    try {
+      const u = new URL(safeBase);
+      const path = u.pathname.endsWith('/') ? u.pathname : `${u.pathname}/`;
+      return `${u.origin}${path}?${encodeURIComponent(bindCode)}`;
+    } catch {
+      return '';
+    }
+  }
+
+  function applyLineOpenButton(button, lineBinding) {
+    if (!button) return '';
+    const messageUrl = lineMessageUrlWithCode(lineBinding && lineBinding.oaMessageUrl, lineBinding && lineBinding.code);
+    const addFriendUrl = safeLineAddFriendUrl(lineBinding && lineBinding.addFriendUrl);
+    const openUrl = messageUrl || addFriendUrl;
+    if (!openUrl) {
+      button.removeAttribute('href');
+      button.style.display = 'none';
+      return '';
+    }
+    button.href = openUrl;
+    button.style.display = 'inline-flex';
+    button.textContent = messageUrl ? 'เปิด LINE พร้อมคีย์' : 'เปิด LINE OA';
+    button.title = messageUrl
+      ? 'เปิดแชต LINE OA พร้อมคีย์ในช่องพิมพ์ แล้วกดส่งใน LINE'
+      : 'เปิด LINE OA แล้วส่งคีย์ด้วยตัวเอง';
+    return messageUrl ? 'message' : 'add';
+  }
+
   function clearLastBookingLineBinding() {
     try {
       window.localStorage && window.localStorage.removeItem(LINE_BINDING_CACHE_KEY);
@@ -935,6 +980,7 @@
         code: String(data.code || '').trim().slice(0, 80),
         expiresAt: data.expiresAt || null,
         addFriendUrl: safeLineAddFriendUrl(data.addFriendUrl),
+        oaMessageUrl: safeLineOaMessageUrl(data.oaMessageUrl),
         savedAt: data.savedAt || null,
       };
     } catch {
@@ -960,6 +1006,7 @@
         code: String(lineBinding.code).trim().slice(0, 80),
         expiresAt,
         addFriendUrl: safeLineAddFriendUrl(lineBinding.addFriendUrl),
+        oaMessageUrl: safeLineOaMessageUrl(lineBinding.oaMessageUrl),
         savedAt: new Date().toISOString(),
       }));
     } catch { /* localStorage may be full or disabled */ }
@@ -979,18 +1026,13 @@
     }
     if (lineRecoverHint) {
       const exp = cached.expiresAt ? new Date(cached.expiresAt) : null;
+      const canOpenWithKey = !!lineMessageUrlWithCode(cached.oaMessageUrl, cached.code);
       lineRecoverHint.textContent = exp && Number.isFinite(exp.getTime())
-        ? `คีย์หมดอายุ ${exp.toLocaleString('th-TH')} ถ้าผู้จองหาไม่เจอ แอดมินสามารถดูคีย์เดียวกันได้ที่รายละเอียดการจอง`
-        : 'ถ้าผู้จองหาไม่เจอ แอดมินสามารถดูคีย์เดียวกันได้ที่รายละเอียดการจอง';
+        ? `คีย์หมดอายุ ${exp.toLocaleString('th-TH')} ${canOpenWithKey ? 'ปุ่ม LINE จะเติมคีย์ให้ แต่ต้องกดส่งเองใน LINE' : 'ถ้าปุ่ม LINE ไม่ขึ้น ให้คัดลอกคีย์แล้วส่งใน OA'} แอดมินดูคีย์เดียวกันได้ที่รายละเอียดการจอง`
+        : `${canOpenWithKey ? 'ปุ่ม LINE จะเติมคีย์ให้ แต่ต้องกดส่งเองใน LINE' : 'ถ้าปุ่ม LINE ไม่ขึ้น ให้คัดลอกคีย์แล้วส่งใน OA'} แอดมินดูคีย์เดียวกันได้ที่รายละเอียดการจอง`;
     }
     if (lineRecoverOpen) {
-      if (cached.addFriendUrl) {
-        lineRecoverOpen.href = cached.addFriendUrl;
-        lineRecoverOpen.style.display = 'inline-flex';
-      } else {
-        lineRecoverOpen.removeAttribute('href');
-        lineRecoverOpen.style.display = 'none';
-      }
+      applyLineOpenButton(lineRecoverOpen, cached);
     }
     if (lineRecoverCopy) {
       lineRecoverCopy.onclick = async () => {
@@ -1755,25 +1797,18 @@
         lineBox.classList.remove('line-bind-error');
         lineCode.textContent = lineBinding.code;
         if (lineCopy) lineCopy.style.display = '';
-        if (lineOpen) {
-          const addFriendUrl = safeLineAddFriendUrl(lineBinding.addFriendUrl);
-          if (addFriendUrl) {
-            lineOpen.href = addFriendUrl;
-            lineOpen.style.display = 'inline-flex';
-          } else {
-            lineOpen.removeAttribute('href');
-            lineOpen.style.display = 'none';
-          }
-        }
+        const lineOpenMode = applyLineOpenButton(lineOpen, lineBinding);
         if (lineFlowStep) lineFlowStep.className = '';
         if (lineFlowText) {
-          lineFlowText.textContent = 'คัดลอกรหัสด้านล่างแล้วส่งใน LINE OA ของหอพัก ถ้าจองให้เพื่อน ให้เพื่อนส่งรหัสด้วย LINE ของเพื่อนเอง';
+          lineFlowText.textContent = lineOpenMode === 'message'
+            ? 'กด “เปิด LINE พร้อมคีย์” แล้วกดส่งใน LINE ถ้าจองให้เพื่อน ให้เพื่อนส่งรหัสด้วย LINE ของเพื่อนเอง'
+            : 'คัดลอกรหัสด้านล่างแล้วส่งใน LINE OA ของหอพัก ถ้าจองให้เพื่อน ให้เพื่อนส่งรหัสด้วย LINE ของเพื่อนเอง';
         }
         if (lineBinding.expiresAt && lineHint) {
           const exp = new Date(lineBinding.expiresAt);
           lineHint.textContent = Number.isFinite(exp.getTime())
-            ? `รหัสหมดอายุ ${exp.toLocaleString('th-TH')} หลังผูกแล้ว ระบบจะใช้ LINE นี้แจ้งผลจอง สัญญา และบิลของห้องนี้ ถ้าจองอีกห้องให้ตัวเองหรือจองแทนเพื่อน ให้แอดมินตรวจสอบก่อนสร้างสัญญา`
-            : 'หลังผูกแล้ว ระบบจะใช้ LINE นี้แจ้งผลจอง สัญญา และบิลของห้องนี้ ถ้าจองอีกห้องให้ตัวเองหรือจองแทนเพื่อน ให้แอดมินตรวจสอบก่อนสร้างสัญญา';
+            ? `รหัสหมดอายุ ${exp.toLocaleString('th-TH')} ${lineOpenMode === 'message' ? 'ปุ่ม LINE จะเติมคีย์ให้ แต่ต้องกดส่งเองใน LINE' : 'ถ้าปุ่ม LINE ไม่ขึ้น ให้คัดลอกคีย์แล้วส่งใน OA'} หลังผูกแล้ว ระบบจะใช้ LINE นี้แจ้งผลจอง สัญญา และบิลของห้องนี้ ถ้าจองอีกห้องให้ตัวเองหรือจองแทนเพื่อน ให้แอดมินตรวจสอบก่อนสร้างสัญญา`
+            : `${lineOpenMode === 'message' ? 'ปุ่ม LINE จะเติมคีย์ให้ แต่ต้องกดส่งเองใน LINE' : 'ถ้าปุ่ม LINE ไม่ขึ้น ให้คัดลอกคีย์แล้วส่งใน OA'} หลังผูกแล้ว ระบบจะใช้ LINE นี้แจ้งผลจอง สัญญา และบิลของห้องนี้ ถ้าจองอีกห้องให้ตัวเองหรือจองแทนเพื่อน ให้แอดมินตรวจสอบก่อนสร้างสัญญา`;
         }
         if (lineCopy) {
           lineCopy.addEventListener('click', async () => {

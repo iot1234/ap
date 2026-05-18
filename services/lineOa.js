@@ -69,11 +69,24 @@ function normaliseLineAddUrl(value) {
   }
 }
 
-function buildLineAddUrl(botBasicId) {
+function normaliseLineOfficialAccountId(botBasicId) {
   const id = String(botBasicId || '').trim();
   if (!/^@?[a-zA-Z0-9._-]{2,60}$/.test(id)) return null;
-  const withAt = id.startsWith('@') ? id : `@${id}`;
+  return id.startsWith('@') ? id : `@${id}`;
+}
+
+function buildLineAddUrl(botBasicId) {
+  const withAt = normaliseLineOfficialAccountId(botBasicId);
+  if (!withAt) return null;
   return `https://line.me/R/ti/p/${encodeURIComponent(withAt).replace(/^%40/, '@')}`;
+}
+
+function buildLineOaMessageUrl(botBasicId, textMessage = '') {
+  const withAt = normaliseLineOfficialAccountId(botBasicId);
+  if (!withAt) return null;
+  const base = `https://line.me/R/oaMessage/${encodeURIComponent(withAt)}/`;
+  const text = String(textMessage || '').trim().slice(0, 500);
+  return text ? `${base}?${encodeURIComponent(text)}` : base;
 }
 
 function resolveLineAddUrl(row) {
@@ -104,6 +117,7 @@ function rowToPublic(row, includeSecrets = false) {
     description: row.description || '',
     botBasicId: row.bot_basic_id || '',
     addFriendUrl: resolveLineAddUrl(row) || '',
+    oaMessageUrl: buildLineOaMessageUrl(row.bot_basic_id) || '',
     channelId: row.channel_id || '',
     enabled: !!row.enabled,
     isDefault: !!row.is_default,
@@ -151,14 +165,16 @@ function _envOa() {
   const token = secrets.get('LINE_CHANNEL_ACCESS_TOKEN');
   const channelSecret = secrets.get('LINE_CHANNEL_SECRET');
   const owner = secrets.get('LINE_OWNER_USER_ID');
+  const botBasicId = secrets.get('LINE_BOT_BASIC_ID') || secrets.get('LINE_BASIC_ID') || '';
   if (!token && !channelSecret) return null;
   return {
     id: 0,
     slug: 'env',
     name: 'LINE OA (env vars)',
     description: 'Legacy single-OA configured via environment variables',
-    botBasicId: '',
-    addFriendUrl: '',
+    botBasicId,
+    addFriendUrl: buildLineAddUrl(botBasicId) || '',
+    oaMessageUrl: buildLineOaMessageUrl(botBasicId) || '',
     enabled: true,
     isDefault: true,
     ownerUserId: owner || '',
@@ -598,6 +614,7 @@ module.exports = {
   list, getById, getBySlug, getDefault, resolveForTenant,
   create, update, remove, refreshBoundCount, getBindingStats, testConnection,
   verifyWebhookSignature, invalidateCache,
-  normalizeSlug, isValidSlug, normaliseLineAddUrl, buildLineAddUrl, resolveLineAddUrl,
+  normalizeSlug, isValidSlug, normaliseLineAddUrl, buildLineAddUrl,
+  buildLineOaMessageUrl, resolveLineAddUrl,
   _envOa,
 };

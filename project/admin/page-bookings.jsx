@@ -651,6 +651,19 @@ function BookingDetail({ b }) {
   );
 }
 
+function buildLineOaMessageLink(baseUrl, code) {
+  const bindCode = String(code || '').trim().slice(0, 80);
+  if (!baseUrl || !/^BIND-[A-F0-9]{4,16}$/i.test(bindCode)) return '';
+  try {
+    const u = new URL(String(baseUrl).trim(), window.location.origin);
+    if (u.protocol !== 'https:' || u.hostname !== 'line.me' || !u.pathname.startsWith('/R/oaMessage/')) return '';
+    const path = u.pathname.endsWith('/') ? u.pathname : `${u.pathname}/`;
+    return `${u.origin}${path}?${encodeURIComponent(bindCode)}`;
+  } catch {
+    return '';
+  }
+}
+
 function BookingLineKeyPanel({ b }) {
   const C = window.ADMIN_C;
   const [copied, setCopied] = useState(false);
@@ -666,6 +679,9 @@ function BookingLineKeyPanel({ b }) {
   const blocked = ['revoked', 'blocked', 'error'].includes(status) || !!lineBinding.error;
   const needsReissue = !!lineBinding.needsReissue || expired || blocked;
   const addFriendUrl = lineBinding.addFriendUrl || lineBinding.add_friend_url || '';
+  const oaMessageUrl = lineBinding.oaMessageUrl || lineBinding.oa_message_url || '';
+  const lineMessageUrl = buildLineOaMessageLink(oaMessageUrl, code);
+  const lineOpenUrl = lineMessageUrl || addFriendUrl;
   const canRecoverKey = !!code && lineCount <= 0 && !needsReissue;
 
   const copyCode = async () => {
@@ -696,7 +712,7 @@ function BookingLineKeyPanel({ b }) {
   const detail = lineCount > 0
     ? 'ทุกบัญชีที่ผูกไว้จะรับแจ้งผลจอง สัญญา และบิลของห้องนี้ ไม่ต้องส่งคีย์ซ้ำ'
     : canRecoverKey
-      ? 'ถ้าผู้จอง refresh หรือปิดหน้าจอไปก่อนคัดลอก ให้แอดมินคัดลอกคีย์นี้ส่งให้ผู้จอง แล้วให้ผู้จองส่งคีย์ใน LINE OA'
+      ? 'ถ้าผู้จอง refresh หรือปิดหน้าจอไปก่อนคัดลอก ให้แอดมินส่งคีย์นี้ให้ผู้จอง หรือกดเปิด LINE พร้อมคีย์เมื่อมี Bot Basic ID แล้วให้ผู้จองกดส่งใน LINE OA'
       : (lineBinding.lookupError
         ? 'อ่านสถานะ LINE ล่าสุดไม่สำเร็จ ให้ refresh รายละเอียดการจองหรือเปิดหน้า LINE Binding ก่อนแจ้งผล'
         : 'คีย์หมดอายุ ถูกยกเลิก หรือออกคีย์ไม่สำเร็จ ต้องออกคีย์ใหม่จากหน้า LINE Binding หรือโทรแจ้งผู้จองโดยตรง');
@@ -747,8 +763,8 @@ function BookingLineKeyPanel({ b }) {
             fontSize: 12,
             cursor: 'pointer',
           }}>{copied ? 'คัดลอกแล้ว' : 'คัดลอกคีย์'}</button>
-          {addFriendUrl && (
-            <a href={addFriendUrl} target="_blank" rel="noopener noreferrer" style={{
+          {lineOpenUrl && (
+            <a href={lineOpenUrl} target="_blank" rel="noopener noreferrer" style={{
               borderRadius: 8,
               background: C.accent || '#2f8a70',
               color: '#fff',
@@ -756,7 +772,7 @@ function BookingLineKeyPanel({ b }) {
               fontSize: 12,
               fontWeight: 700,
               textDecoration: 'none',
-            }}>เปิด LINE OA</a>
+            }}>{lineMessageUrl ? 'เปิด LINE พร้อมคีย์' : 'เปิด LINE OA'}</a>
           )}
         </div>
       )}

@@ -3312,10 +3312,14 @@ test('booking-stage LINE binding is issued, guarded, and carried into contract h
     'public booking must resolve the configured LINE OA link for the applicant button');
   assert.match(bookingRoute, /addFriendUrl: defaultOa\?\.addFriendUrl \|\| null/,
     'public booking response must include the configured LINE add-friend URL when available');
+  assert.match(bookingRoute, /oaMessageUrl: defaultOa\?\.oaMessageUrl \|\| null/,
+    'public booking response must include the LINE OA message URL for opening chat with the binding key prefilled');
   assert.match(server, /addFriendOaId = pending\?\.target_oa_id \|\| pending\?\.oa_id/,
     'booking detail enrichment must recover the correct LINE OA link for pending keys');
   assert.match(server, /out\.lineBinding = \{[\s\S]{0,260}addFriendUrl,/,
     'booking detail API must return the LINE add-friend URL so admins can resend lost keys');
+  assert.match(server, /out\.lineBinding = \{[\s\S]{0,320}oaMessageUrl,/,
+    'booking detail API must return the LINE OA message URL so admins can resend keys through a prefilled LINE chat');
   assert.match(bookingRoute, /LINE: สร้างรหัสผูก LINE ไม่สำเร็จ/,
     'owner notification must surface when booking LINE code issuance failed');
   assert.match(server, /function summariseBookingApplicantNotify[\s\S]{0,700}lineRecipientCount/,
@@ -3355,14 +3359,22 @@ test('booking-stage LINE binding is issued, guarded, and carried into contract h
     'public booking success page must include a button that opens the configured LINE OA');
   assert.match(bookingHtml, /lineBinding\.addFriendUrl/,
     'public booking success page must show the LINE button only when backend returned a safe link');
+  assert.match(bookingHtml, /function safeLineOaMessageUrl/,
+    'public booking page must validate LINE oaMessage links separately from add-friend links');
+  assert.match(bookingHtml, /lineMessageUrlWithCode\(lineBinding && lineBinding\.oaMessageUrl, lineBinding && lineBinding\.code\)/,
+    'public booking page must build a LINE button that opens the OA chat with the binding key prefilled');
+  assert.match(bookingHtml, /เปิด LINE พร้อมคีย์/,
+    'public booking page must label the prefilled LINE button clearly');
   assert.match(bookingHtml, /id="lineRecoverBox"/,
     'public booking page must show a same-browser recovery panel when a user refreshed after receiving a LINE key');
   assert.match(bookingHtml, /LINE_BINDING_CACHE_KEY/,
     'public booking page must persist the latest LINE key locally so refresh does not lose it');
   assert.match(bookingHtml, /localStorage\.setItem\(LINE_BINDING_CACHE_KEY/,
     'successful booking must save the LINE key to localStorage before the user leaves the page');
-  assert.match(bookingHtml, /safeLineAddFriendUrl\(lineBinding\.addFriendUrl\)/,
+  assert.match(bookingHtml, /safeLineAddFriendUrl\(lineBinding && lineBinding\.addFriendUrl\)/,
     'public booking page must validate cached/backend LINE OA links before opening them');
+  assert.match(bookingHtml, /oaMessageUrl: safeLineOaMessageUrl\(lineBinding\.oaMessageUrl\)/,
+    'cached booking LINE keys must keep the OA message URL so refresh does not lose the open-with-key button');
   assert.match(bookingHtml, /จองให้เพื่อน/,
     'public booking LINE flow must warn that friend bookings should use the friend LINE account');
 
@@ -3448,6 +3460,10 @@ test('tenant LINE notifications fan out to every bound LINE account', () => {
     'LINE bindings detail must resolve the configured LINE add-friend link');
   assert.match(bindingsPage, /เปิด LINE OA/,
     'LINE bindings detail must provide a button that opens LINE directly');
+  assert.match(bindingsPage, /buildLineTenantBindingMessageLink/,
+    'LINE bindings detail must prefer an official oaMessage link when the OA has Bot Basic ID');
+  assert.match(bindingsPage, /เปิด LINE พร้อมคีย์/,
+    'LINE bindings detail must label the prefilled LINE button clearly');
   assert.match(bindingsPage, /#line-oas/,
     'LINE bindings detail must guide admins to configure the LINE link when missing');
   assert.match(bindingsPage, /counts\.boundAccounts/,
@@ -3466,6 +3482,10 @@ test('tenant LINE notifications fan out to every bound LINE account', () => {
     'LINE OA admin UI must let owners configure the add-friend link');
   assert.match(lineOasPage, /https:\/\/lin\.ee/,
     'LINE OA admin UI must show a lin.ee example for the add-friend link');
+  assert.match(lineOasPage, /oaMessageUrl/,
+    'LINE OA admin UI must show whether the OA can open chat with a prefilled binding key');
+  assert.match(lineOasPage, /ต้องมี Bot Basic ID เพื่อสร้างลิงก์เปิดแชตพร้อมคีย์/,
+    'LINE OA settings must explain that lin.ee alone cannot prefill the booking key');
 
   const lineOaService = fs.readFileSync(path.join(__dirname, '..', 'services', 'lineOa.js'), 'utf8');
   assert.match(lineOaService, /function normaliseLineAddUrl/,
@@ -3474,6 +3494,8 @@ test('tenant LINE notifications fan out to every bound LINE account', () => {
     'LINE OA service must only accept LINE-owned add-friend hosts');
   assert.match(lineOaService, /buildLineAddUrl/,
     'LINE OA service must be able to derive the add-friend link from Bot Basic ID');
+  assert.match(lineOaService, /buildLineOaMessageUrl/,
+    'LINE OA service must derive the official oaMessage URL from Bot Basic ID');
 
   const migrate = fs.readFileSync(path.join(__dirname, '..', 'db', 'migrate.js'), 'utf8');
   assert.match(migrate, /ADD COLUMN IF NOT EXISTS add_friend_url TEXT/,
@@ -4345,8 +4367,10 @@ test('bookings admin UI handles terminal statuses and uses valid reopen/cancel t
     'booking detail drawer must have a dedicated LINE key recovery panel');
   assert.match(src, /navigator\.clipboard\.writeText\(code\)/,
     'admin LINE key recovery panel must let admins copy the unbound key');
-  assert.match(src, /href=\{addFriendUrl\}[\s\S]{0,420}เปิด LINE OA/,
-    'admin LINE key recovery panel must open the configured LINE OA link when available');
+  assert.match(src, /buildLineOaMessageLink\(oaMessageUrl, code\)/,
+    'admin LINE key recovery panel must build a prefilled LINE chat link when Bot Basic ID is configured');
+  assert.match(src, /href=\{lineOpenUrl\}[\s\S]{0,420}เปิด LINE พร้อมคีย์/,
+    'admin LINE key recovery panel must open the configured LINE OA link with the key when available');
   assert.match(src, /Flow การจองจนถึงสัญญา/,
     'booking flow checklist title must be visible to admins');
   assert.match(src, /lineStepState = lineCount > 0 \? 'done' : \(lineFailed \|\| lineLookupError \|\| lineNeedsReissue \|\| linePending \? 'warn' : 'wait'\)/,
@@ -6092,6 +6116,48 @@ test('page-payments.jsx: surfaces tier-aware mismatch alert (R2-followup)', () =
     'admin payments UI must read amountTier from verify_payload');
   assert.match(src, /ผู้เช่าจ่ายค่าเช่าสุจริต/,
     'principal-tier alert must explain the good-faith waiver behaviour');
+});
+
+test('maintenance.rate: phone-only match scoped to tenant_id IS NULL (IDOR fix)', () => {
+  // Couples/family sharing a phone could rate each other's tickets via
+  // the OR clause's phone fallback. Phone match now requires the ticket
+  // to have NULL tenant_id (legacy/orphan rows only); identified tenants
+  // can only rate tickets where tenant_id matches their own.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(src, /AND \(\s*tenant_id = \$4\s*OR \(tenant_id IS NULL AND tenant_phone = \$5 AND \$5 <> ''\)\s*\)/,
+    'rate endpoint must scope phone-only match to NULL-tenant_id tickets');
+  assert.doesNotMatch(src,
+    /AND \(tenant_id = \$4 OR \(tenant_phone = \$5 AND \$5 <> ''\)\)/,
+    'old IDOR-prone OR clause must be replaced');
+});
+
+test('notificationQueue: disabled OA throws fatal (no retry loop)', () => {
+  // Admin disabling an OA must immediately stop queue dispatch through
+  // that OA. The fatal flag tells processOne to park the row at 'failed'
+  // instead of burning 3 retries (which would all fail the same way).
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'notificationQueue.js'), 'utf8');
+  assert.match(src, /if \(oa\.enabled === false\)/,
+    'dispatch must check oa.enabled before pushing');
+  assert.match(src, /fatalErr\.fatal = true/,
+    'disabled-OA error must be marked fatal so processOne parks immediately');
+});
+
+test('maintenance.update: refuses to back-transition from terminal status', () => {
+  // Once completed or cancelled, the ticket is the legal record of work
+  // done. Flipping it back to open/in_progress orphans completed_at +
+  // can trigger duplicate notifications. Admin must create a fresh
+  // ticket instead.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(src, /TERMINAL_TICKET_STATUSES = new Set\(\['completed', 'cancelled'\]\)/,
+    'admin update must define terminal statuses');
+  assert.match(src, /code: 'TICKET_TERMINAL'/,
+    'back-transition must surface a distinct error code for the UI');
 });
 
 test('hooks.jsx: ERROR_CODE_MAP handles new R2/R3/R7 error codes', () => {

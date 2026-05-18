@@ -134,6 +134,17 @@ async function dispatch(pool, features, row) {
       throw new Error(`LINE OA resolve failed: ${err.message}`);
     }
     if (!oa || !oa.channelAccessToken) throw new Error('LINE not configured');
+    // Refuse dispatch through a disabled OA. Admin may have disabled the
+    // OA mid-flight (e.g. migrating tenants off it, suspected compromise),
+    // but enqueued rows from before still point at it. Pushing anyway
+    // would defeat the disable. Mark as fatal so the row parks at 'failed'
+    // immediately instead of burning retry attempts — admin needs to
+    // re-route the tenant's binding before the message can go through.
+    if (oa.enabled === false) {
+      const fatalErr = new Error(`LINE OA disabled (id=${oa.id || 'env'})`);
+      fatalErr.fatal = true;
+      throw fatalErr;
+    }
     // Idempotency: send a stable retry key derived from the queue row id
     // so LINE dedupes duplicate retries. Without this, a successful push
     // whose response was truncated mid-read would be retried and the

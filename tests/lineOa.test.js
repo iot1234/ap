@@ -61,6 +61,18 @@ test('LINE add-friend URL helpers accept only LINE HTTPS links', () => {
   assert.equal(lineOa.buildLineAddUrl('baankarn'), 'https://line.me/R/ti/p/@baankarn');
 });
 
+test('LINE OA message URL helper opens chat with optional prefilled key', () => {
+  assert.equal(
+    lineOa.buildLineOaMessageUrl('@baankarn'),
+    'https://line.me/R/oaMessage/%40baankarn/'
+  );
+  assert.equal(
+    lineOa.buildLineOaMessageUrl('baankarn', 'BIND-ABCD1234'),
+    'https://line.me/R/oaMessage/%40baankarn/?BIND-ABCD1234'
+  );
+  assert.equal(lineOa.buildLineOaMessageUrl('bad/id', 'BIND-ABCD1234'), null);
+});
+
 // ---- list / getById / getDefault: env fallback --------------------------
 
 test('list: returns env OA when DB empty + env vars set', async () => {
