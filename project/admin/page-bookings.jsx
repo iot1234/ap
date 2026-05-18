@@ -279,6 +279,7 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
       key: 'wantType', label: 'ห้องที่จอง', minWidth: 160,
       render: b => {
         const typeMeta = ADMIN_ROOM_TYPES[b.wantType] || ADMIN_ROOM_TYPES.standard;
+        const bookedRoomId = b.assignedRoomId || b.roomId || b.room_id || null;
         const floorTxt = b.wantFloor ? `ชั้น ${b.wantFloor}` : 'ไม่ระบุชั้น';
         const monthsTxt = b.months ? `${b.months} เดือน` : '—';
         const sourceTag = b.source === 'public-form' ? (
@@ -291,10 +292,10 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
         ) : null;
         return (
           <div>
-            <div style={{ fontSize: 12.5, color: C.ink }}>
-              {typeMeta.th}{sourceTag}
+            <div style={{ fontSize: 12.5, fontWeight: 700, color: C.ink }}>
+              {bookedRoomId ? `ห้อง ${bookedRoomId}` : 'ยังไม่ระบุห้อง'}{sourceTag}
             </div>
-            <div style={{ fontSize: 11.5, color: C.muted }}>{floorTxt} · {monthsTxt}</div>
+            <div style={{ fontSize: 11.5, color: C.muted }}>{typeMeta.th} · {floorTxt} · {monthsTxt}</div>
           </div>
         );
       },
@@ -610,6 +611,7 @@ function BookingDetail({ b }) {
           columns={2}
           items={[
             { label: 'รหัสการจอง',    value: b.id, bold: true },
+            { label: 'ห้องที่จอง/ล็อกไว้', value: (b.assignedRoomId || b.roomId || b.room_id) ? `ห้อง ${b.assignedRoomId || b.roomId || b.room_id}` : 'ยังไม่ระบุห้องเฉพาะ', bold: true },
             { label: 'ประเภทห้อง',    value: (ADMIN_ROOM_TYPES[b.wantType] || ADMIN_ROOM_TYPES.standard).th },
             { label: 'ชั้นที่ต้องการ', value: b.wantFloor ? `ชั้น ${b.wantFloor}` : 'ไม่ระบุ' },
             { label: 'ระยะเวลาเช่า',  value: b.months ? `${b.months} เดือน` : '—' },

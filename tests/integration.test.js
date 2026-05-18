@@ -3339,6 +3339,16 @@ test('booking-stage LINE binding is issued, guarded, and carried into contract h
     'public booking success page must show an actionable fallback when LINE code issuance failed');
   assert.match(bookingHtml, /success-flow/,
     'public booking success page must show a clear next-step flow after submit');
+  assert.match(bookingHtml, /id="bookingPaymentNotice"/,
+    'public booking form must explain the configured payment/counter/admin payment flow before submit');
+  assert.match(bookingHtml, /function renderBookingPaymentNotice/,
+    'public booking form must render payment instructions from roomBooking settings');
+  assert.match(bookingHtml, /paymentChannelSummary/,
+    'public booking form must tell applicants whether payment is online, counter, or admin-handled');
+  assert.match(bookingHtml, /id="summaryRoom"/,
+    'public booking success page must show the booked room number clearly');
+  assert.match(bookingHtml, /function populateBookingSummary/,
+    'public booking success page must fill a complete booking summary from the backend response');
   assert.match(bookingHtml, /lineFlowText/,
     'public booking success flow must update the LINE step based on key issuance success/failure');
   assert.match(bookingHtml, /id="lineOpenBtn"/,
@@ -4315,6 +4325,10 @@ test('bookings admin UI handles terminal statuses and uses valid reopen/cancel t
     'booking status toasts must include how many LINE accounts are bound to the booking/room');
   assert.match(src, /lineCountText/,
     'booking status toast copy must append the bound LINE account count when available');
+  assert.match(src, /bookedRoomId \? `ห้อง \$\{bookedRoomId\}` : 'ยังไม่ระบุห้อง'/,
+    'booking table must show the actual room number, not only room type/floor');
+  assert.match(src, /ห้องที่จอง\/ล็อกไว้/,
+    'booking detail drawer must show the room number reserved by the booking');
   assert.match(src, /const openBookingDetail = async \(bookingOrId\)/,
     'booking drawer must refresh the selected booking detail before trusting cached list data');
   assert.match(src, /apiCall\(`\/api\/bookings\/\$\{encodeURIComponent\(id\)\}`\)/,

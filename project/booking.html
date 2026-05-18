@@ -266,6 +266,87 @@
   }
   .success-card p { color: #506156; font-size: 14px; margin: 0 0 8px; }
   .ref { font-family: 'JetBrains Mono', monospace; color: #2f8a70; }
+  .booking-payment-notice,
+  .booking-summary {
+    text-align: left;
+    border: 1px solid #dfe9e2;
+    border-radius: 10px;
+    background: #ffffff;
+    padding: 14px;
+  }
+  .booking-payment-notice {
+    margin: 0 0 14px;
+    background: #f7faf8;
+  }
+  .booking-payment-notice strong,
+  .booking-summary-title {
+    display: block;
+    color: #1e2a24;
+    font-size: 14px;
+    font-weight: 700;
+    margin-bottom: 8px;
+  }
+  .booking-payment-notice ul {
+    margin: 8px 0 0;
+    padding-left: 20px;
+    color: #506156;
+    font-size: 12.5px;
+    line-height: 1.55;
+  }
+  .booking-summary {
+    margin: 16px auto 0;
+    max-width: 520px;
+  }
+  .booking-summary-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+  .booking-summary-item {
+    border: 1px solid #edf3ef;
+    border-radius: 8px;
+    padding: 9px 10px;
+    background: #f9fbfa;
+    min-width: 0;
+  }
+  .booking-summary-item.primary {
+    grid-column: 1 / -1;
+    background: #eef6f1;
+    border-color: #c7d8cf;
+  }
+  .booking-summary-item span {
+    display: block;
+    color: #6b7a70;
+    font-size: 11.5px;
+    margin-bottom: 2px;
+  }
+  .booking-summary-item strong {
+    display: block;
+    color: #102019;
+    font-size: 14px;
+    overflow-wrap: anywhere;
+  }
+  .booking-summary-item small {
+    display: block;
+    color: #506156;
+    font-size: 11.5px;
+    line-height: 1.45;
+    margin-top: 2px;
+  }
+  .booking-summary-warning {
+    display: none;
+    margin: 10px 0 0;
+    color: #8a5a22;
+    background: #fff7ed;
+    border: 1px solid #ead7b7;
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-size: 12.5px;
+    line-height: 1.5;
+  }
+  @media (max-width: 560px) {
+    .booking-summary-grid { grid-template-columns: 1fr; }
+  }
   .line-bind-box {
     margin: 18px auto 0;
     padding: 14px;
@@ -445,6 +526,7 @@
       <p id="lineRecoverHint"></p>
     </div>
     <form id="bookingForm" class="card" novalidate>
+      <div class="booking-payment-notice" id="bookingPaymentNotice" style="display:none"></div>
       <div class="row cols-2">
         <div>
           <label for="name" class="req">ชื่อ-นามสกุล</label>
@@ -556,6 +638,37 @@
       <h2>ได้รับคำขอจองแล้ว</h2>
       <p>ขอบคุณสำหรับการจอง — เจ้าหน้าที่จะติดต่อกลับภายใน 24 ชั่วโมง</p>
       <p>หมายเลขอ้างอิง: <span class="ref" id="refNo"></span></p>
+      <div class="booking-summary" id="bookingSummary">
+        <div class="booking-summary-title">สรุปรายละเอียดคำขอจอง</div>
+        <div class="booking-summary-grid">
+          <div class="booking-summary-item primary">
+            <span>ห้องที่จอง/ล็อกไว้</span>
+            <strong id="summaryRoom">-</strong>
+            <small id="summaryRoomMeta"></small>
+          </div>
+          <div class="booking-summary-item">
+            <span>ผู้จอง</span>
+            <strong id="summaryName">-</strong>
+            <small id="summaryPhone"></small>
+          </div>
+          <div class="booking-summary-item">
+            <span>วันเข้าพัก</span>
+            <strong id="summaryMoveIn">-</strong>
+            <small id="summaryStay"></small>
+          </div>
+          <div class="booking-summary-item">
+            <span>ค่าจอง</span>
+            <strong id="summaryBookingFee">-</strong>
+            <small id="summaryDepositPolicy"></small>
+          </div>
+          <div class="booking-summary-item">
+            <span>สถานะชำระ/สลิป</span>
+            <strong id="summaryDepositStatus">-</strong>
+            <small id="summaryPaymentMethod"></small>
+          </div>
+        </div>
+        <div class="booking-summary-warning" id="summaryRoomWarning"></div>
+      </div>
       <p class="success-note" id="successDepositNotice" style="display:none"></p>
       <p id="successNextAction" style="display:none"></p>
       <div class="success-flow" aria-label="ขั้นตอนหลังส่งคำขอจอง">
@@ -618,6 +731,7 @@
   const lineRecoverOpen = document.getElementById('lineRecoverOpenBtn');
   const lineRecoverMeta = document.getElementById('lineRecoverMeta');
   const lineRecoverHint = document.getElementById('lineRecoverHint');
+  const bookingPaymentNotice = document.getElementById('bookingPaymentNotice');
   const depositPanel = document.getElementById('depositPanel');
   const depositSlipInput = document.getElementById('depositSlip');
   const depositSlipHint = document.getElementById('depositSlipHint');
@@ -667,6 +781,122 @@
 
   function money(n) {
     return Number(n || 0).toLocaleString('th-TH', { minimumFractionDigits: 2 });
+  }
+
+  function escapeHtml(value) {
+    return String(value == null ? '' : value)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  function dateLabel(value) {
+    if (!value) return '-';
+    const raw = String(value).slice(0, 10);
+    const d = /^\d{4}-\d{2}-\d{2}$/.test(raw)
+      ? new Date(`${raw}T00:00:00+07:00`)
+      : new Date(value);
+    return Number.isFinite(d.getTime()) ? d.toLocaleDateString('th-TH') : raw;
+  }
+
+  function depositStatusLabel(status) {
+    return ({
+      pending_review: 'รอแอดมินตรวจสลิป',
+      verified: 'ยืนยันการชำระแล้ว',
+      rejected: 'สลิปไม่ผ่าน',
+      awaiting_slip: 'รอสลิปค่าจอง',
+      manual_review: 'รอตรวจด้วยมือ',
+      not_required: 'ไม่ต้องชำระผ่านหน้านี้',
+    })[status] || status || '-';
+  }
+
+  function paymentChannelSummary(cfg) {
+    const payment = cfg && cfg.payment;
+    if (!cfg || !cfg.requireDeposit) {
+      return 'ยังไม่ต้องชำระค่าจองผ่านหน้านี้';
+    }
+    if (!payment || payment.ready === false) {
+      return cfg.requireSlip
+        ? 'ยังไม่ได้ตั้งค่าบัญชีรับเงินออนไลน์ กรุณาชำระกับแอดมินหรือหน้าเคาน์เตอร์ตามที่เจ้าหน้าที่แจ้ง'
+        : 'ชำระกับแอดมินหรือหน้าเคาน์เตอร์ได้ตามที่เจ้าหน้าที่แจ้ง';
+    }
+    const parts = [];
+    if (payment.qrDataUrl || payment.targetLast4) parts.push(`พร้อมเพย์${payment.targetLast4 ? ` ท้าย ${payment.targetLast4}` : ''}`);
+    if (payment.bankInfo && payment.bankInfo.account) parts.push(`${payment.bankInfo.bank || 'ธนาคาร'} ${payment.bankInfo.account}`);
+    if (payment.walletInfo && payment.walletInfo.phone) parts.push(`TrueMoney Wallet ${payment.walletInfo.phone}`);
+    return parts.length ? parts.join(' · ') : 'ชำระตามช่องทางที่แสดงในหน้านี้';
+  }
+
+  function renderBookingPaymentNotice(cfg) {
+    if (!bookingPaymentNotice) return;
+    if (!cfg) {
+      bookingPaymentNotice.style.display = 'none';
+      return;
+    }
+    const lines = [];
+    if (cfg.enabled === false) {
+      lines.push('ระบบจองห้องถูกปิดใช้งานอยู่ในขณะนี้');
+    } else if (cfg.requireDeposit) {
+      lines.push(`ต้องเลือกห้องและล็อกห้องก่อนส่งคำขอ ระบบจะล็อกไว้ ${cfg.holdMinutes || 15} นาทีระหว่างชำระค่าจอง`);
+      lines.push(`ค่าจองที่ต้องชำระ: ฿${money(cfg.depositAmount)}${Number(cfg.minimumAmount) > 0 ? ` (ขั้นต่ำ ฿${money(cfg.minimumAmount)})` : ''}`);
+      lines.push(cfg.requireSlip
+        ? 'ต้องชำระค่าจองและแนบสลิปก่อนกดส่งคำขอ'
+        : 'ส่งคำขอได้โดยไม่บังคับแนบสลิป ถ้าชำระที่หน้าเคาน์เตอร์หรือกับแอดมิน ให้รอเจ้าหน้าที่ตรวจและบันทึกการชำระ');
+      lines.push(`ช่องทางชำระ: ${paymentChannelSummary(cfg)}`);
+      lines.push(cfg.applyBookingFeeToDeposit
+        ? 'ค่าจองนี้จะนำไปหัก/นับรวมกับเงินมัดจำสัญญา'
+        : 'ค่าจองนี้แยกจากเงินมัดจำสัญญา');
+    } else {
+      lines.push('ส่งคำขอจองได้โดยยังไม่ต้องชำระเงินผ่านหน้านี้');
+      lines.push('ถ้าต้องชำระที่หน้าเคาน์เตอร์หรือกับแอดมิน เจ้าหน้าที่จะแจ้งยอด ช่องทาง และกำหนดเวลาชำระหลังตรวจสอบคำขอ');
+      lines.push('เมื่อแอดมินอนุมัติหรือปฏิเสธ ระบบจะแจ้งผลผ่าน LINE/อีเมล/SMS ที่ติดต่อได้');
+    }
+    bookingPaymentNotice.innerHTML = '<strong>เงื่อนไขการจองและการชำระเงิน</strong>'
+      + `<ul>${lines.map((line) => `<li>${escapeHtml(line)}</li>`).join('')}</ul>`;
+    bookingPaymentNotice.style.display = 'block';
+  }
+
+  function setSummaryText(id, value) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = value == null || value === '' ? '-' : String(value);
+  }
+
+  function populateBookingSummary(booking, cfg) {
+    if (!booking) return;
+    const roomId = booking.assignedRoomId || booking.roomId || '';
+    const roomMeta = [];
+    const type = booking.wantType || booking.roomType || '';
+    const floor = booking.wantFloor || booking.floor || '';
+    if (type) roomMeta.push(roomTypeLabel(type));
+    if (floor) roomMeta.push(`ชั้น ${floor}`);
+
+    setSummaryText('summaryRoom', roomId ? `ห้อง ${roomId}` : 'ยังไม่ได้เลือกห้องเฉพาะ');
+    setSummaryText('summaryRoomMeta', roomMeta.length ? roomMeta.join(' · ') : 'แอดมินจะตรวจห้องว่างที่ตรงกับคำขอ');
+    setSummaryText('summaryName', booking.name || booking.tenantName || '-');
+    setSummaryText('summaryPhone', booking.phone || '-');
+    setSummaryText('summaryMoveIn', dateLabel(booking.moveIn || booking.checkInDate));
+    setSummaryText('summaryStay', booking.months ? `${booking.months} เดือน` : 'ระยะเช่าจะยืนยันตอนทำสัญญา');
+
+    const fee = Number(booking.bookingFee ?? booking.deposit ?? (cfg && cfg.depositAmount) ?? 0);
+    setSummaryText('summaryBookingFee', fee > 0 ? `฿${money(fee)}` : 'ยังไม่ต้องชำระผ่านหน้านี้');
+    setSummaryText('summaryDepositPolicy', booking.bookingFeeAppliesToDeposit || (cfg && cfg.applyBookingFeeToDeposit)
+      ? 'นำไปหัก/นับรวมกับเงินมัดจำสัญญา'
+      : (fee > 0 ? 'แยกจากเงินมัดจำสัญญา' : 'แอดมินจะแจ้งยอดถ้ามีค่าใช้จ่าย'));
+    setSummaryText('summaryDepositStatus', depositStatusLabel(booking.depositStatus));
+    setSummaryText('summaryPaymentMethod', paymentChannelSummary(cfg));
+
+    const warning = document.getElementById('summaryRoomWarning');
+    if (warning) {
+      if (roomId) {
+        warning.style.display = 'block';
+        warning.textContent = `คำขอนี้อ้างอิงห้อง ${roomId} หากชำระค่าจองแล้วระบบจะล็อกห้องนี้ไว้ให้ตามเงื่อนไขการตรวจสอบของแอดมิน`;
+      } else {
+        warning.style.display = 'block';
+        warning.textContent = 'คำขอนี้ยังไม่ได้ระบุห้องเฉพาะ แอดมินจะตรวจสอบห้องว่างตามประเภท/ชั้นที่เลือก แล้วแจ้งผลกลับไป';
+      }
+    }
   }
 
   function safeLineAddFriendUrl(value) {
@@ -1149,6 +1379,7 @@
 
   function renderBookingConfig(cfg) {
     bookingConfig = cfg || null;
+    renderBookingPaymentNotice(bookingConfig);
     if (!bookingConfig || !bookingConfig.requireDeposit) {
       depositPanel.style.display = 'none';
       syncPaymentStepUi();
@@ -1494,6 +1725,7 @@
       container.innerHTML = '';
       container.appendChild(tpl.content.cloneNode(true));
       document.getElementById('refNo').textContent = result.booking.id;
+      populateBookingSummary(result.booking, bookingConfig);
       const verification = result.booking && result.booking.depositVerification;
       const notice = document.getElementById('successDepositNotice');
       const next = document.getElementById('successNextAction');
