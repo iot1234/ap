@@ -2649,43 +2649,55 @@ function ProfileView({ tenant, locale, setLocale, theme, setTheme, onLogout, fea
   const buildingAddress = building?.address || null;
   // Tenant tenure derived from the active contract's start date.
   const since = contract?.start_date || null;
+  const hasPrefs = i18nOn || darkOn;
   return (
     <div className="anim-in">
       <SectionHeader title={t('accountSettings')} subtitle={t('accountSub')} />
       <PageGuide type="welcome" title={t('guideProfileTitle')} text={t('guideProfileText')} />
-      <Card pad={0}>
-        <div style={{
-          padding: 24, display: 'flex', alignItems: 'center', gap: 18,
-          borderBottom: '1px solid var(--line)', flexWrap: 'wrap',
-        }}>
-          <Avatar tenant={tenant} size={64} />
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{
-              fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 'var(--fs-lg)',
-              whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-            }}>
-              {tenant.fullName || '—'}
+      {/* Profile + Preferences sit in a 2-col grid on desktop so each card
+          is ~560-620px wide and the controls inside (logout button, dark
+          toggle, language select) stay visually anchored to their labels.
+          Before, both cards spanned the full 1180px main width, which on
+          a wide desktop made every right-aligned control look stranded
+          ~700px away from its label. Stacks to 1 col at ≤768 (tablet
+          portrait + phone). */}
+      <div className="profile-grid" style={{
+        display: 'grid', gap: 'var(--sp-4)',
+        gridTemplateColumns: hasPrefs ? 'minmax(0, 1.2fr) minmax(0, 1fr)' : 'minmax(0, 1fr)',
+        alignItems: 'start',
+      }}>
+        <Card pad={0}>
+          <div style={{
+            padding: 'var(--sp-5)', display: 'flex', alignItems: 'center', gap: 'var(--sp-4)',
+            borderBottom: '1px solid var(--line)', flexWrap: 'wrap',
+          }}>
+            <Avatar tenant={tenant} size={64} />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{
+                fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 'var(--fs-lg)',
+                whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+              }}>
+                {tenant.fullName || '—'}
+              </div>
+              <div style={{ color: 'var(--muted)', fontSize: 'var(--fs-sm)' }}>
+                {tenant.roomId ? `${tr(locale, 'contractRoom')} ${tenant.roomId}` : '—'}
+              </div>
+              <div style={{ display: 'flex', gap: 10, marginTop: 6, flexWrap: 'wrap' }}>
+                <Pill tone="green"><Icon name="check" size={12} /> {t('verifiedTenant')}</Pill>
+              </div>
             </div>
-            <div style={{ color: 'var(--muted)', fontSize: 'var(--fs-sm)' }}>
-              {tenant.roomId ? `${tr(locale, 'contractRoom')} ${tenant.roomId}` : '—'}
-            </div>
-            <div style={{ display: 'flex', gap: 10, marginTop: 6, flexWrap: 'wrap' }}>
-              <Pill tone="green"><Icon name="check" size={12} /> {t('verifiedTenant')}</Pill>
-            </div>
+            <Button variant="outline" size="sm" icon="logout" onClick={onLogout}>{t('logOut')}</Button>
           </div>
-          <Button variant="outline" size="sm" icon="logout" onClick={onLogout}>{t('logOut')}</Button>
-        </div>
-        <div style={{ padding: 24 }}>
-          <KV label={t('phone')} value={tenant.phone || '—'} />
-          <KV label={t('email')} value={tenant.email || '—'} last={!since} />
-          {since ? <KV label={t('sinceDate')} value={fmtDate(since, locale)} last /> : null}
-        </div>
-      </Card>
+          <div style={{ padding: 'var(--sp-5)' }}>
+            <KV label={t('phone')} value={tenant.phone || '—'} />
+            <KV label={t('email')} value={tenant.email || '—'} last={!since} />
+            {since ? <KV label={t('sinceDate')} value={fmtDate(since, locale)} last /> : null}
+          </div>
+        </Card>
 
-      {(i18nOn || darkOn) ? (
-        <>
-          <SectionHeader style={{ marginTop: 'var(--sp-7)' }} title={t('prefs')} subtitle={t('prefsSub')} />
+        {hasPrefs ? (
           <Card>
+            <SectionHeader style={{ marginBottom: 'var(--sp-3)' }} title={t('prefs')} subtitle={t('prefsSub')} />
             {darkOn ? (
               <PrefRow icon="moon" label={t('darkMode')} hint={t('darkModeSub')} last={!i18nOn}>
                 <Toggle on={theme === 'dark'} onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} />
@@ -2702,8 +2714,8 @@ function ProfileView({ tenant, locale, setLocale, theme, setTheme, onLogout, fea
               </PrefRow>
             ) : null}
           </Card>
-        </>
-      ) : null}
+        ) : null}
+      </div>
 
       <SectionHeader style={{ marginTop: 'var(--sp-7)' }} title={t('contactDorm')} subtitle={buildingName} />
       <div className="contact-grid" style={{ display: 'grid', gap: 'var(--sp-3)', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))' }}>
@@ -3296,6 +3308,9 @@ function App() {
         /* Tablet portrait — cards stack to 1 col, breakdown stays 3-up. */
         @media (max-width: 768px) {
           .home-breakdown { grid-template-columns: repeat(3, minmax(0, 1fr)) !important; }
+          /* Profile + Preferences stack on tablet portrait so each card
+             still gets the full readable width below 768px. */
+          .profile-grid { grid-template-columns: 1fr !important; }
         }
 
         /* Phone — bottom-tab nav appears and modal turns into a bottom-sheet. */
