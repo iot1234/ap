@@ -3502,6 +3502,14 @@ test('tenant LINE notifications fan out to every bound LINE account', () => {
     'LINE bindings detail must list every pending LINE key for the room');
   assert.match(bindingsPage, /replacePending: false/,
     'LINE bindings UI must be able to issue an additional key without invalidating existing pending keys');
+  assert.match(bindingsPage, /issuedCodeNotice/,
+    'LINE bindings UI must keep the latest issued key visible after the toast disappears');
+  assert.match(bindingsPage, /mergeIssuedCodeIntoDetail/,
+    'LINE bindings UI must optimistically merge a newly issued key into the open detail modal');
+  assert.match(bindingsPage, /detailHasCode/,
+    'LINE bindings UI must verify the reloaded detail contains the newly issued key before replacing optimistic state');
+  assert.match(bindingsPage, /รหัสล่าสุดที่เพิ่งออก/,
+    'LINE bindings UI must label the sticky latest-key box clearly for admins');
   assert.match(bindingsPage, /\/accounts\/\$\{bindingId\}/,
     'LINE bindings detail must allow deleting one bound LINE account without revoking the whole room');
   assert.match(bindingsPage, /ลบบัญชีนี้/,
@@ -3519,6 +3527,10 @@ test('tenant LINE notifications fan out to every bound LINE account', () => {
     'per-account revoke endpoint must call the scoped service method');
   assert.match(adminLineBindings, /replacePending/,
     'admin LINE bindings API must accept replacePending=false for additional room recipients');
+  assert.match(adminLineBindings, /const detail = await lineBinding\.getStatus\(pool, id\)/,
+    'admin LINE bindings issue API must return fresh detail with the newly issued pending code');
+  assert.match(adminLineBindings, /res\.json\(\{ ok: true, \.\.\.result, detail \}\)/,
+    'admin LINE bindings issue response must include detail so the UI can persist the code beyond toast lifetime');
   assert.match(adminLineBindings, /lineBindingIssueErrorPayload/,
     'admin LINE bindings API must map service errors into clear admin-facing messages');
   assert.match(adminLineBindings, /LINE_BINDING_PENDING_UNIQUE_MIGRATION_REQUIRED/,

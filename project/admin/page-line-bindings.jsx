@@ -19,6 +19,7 @@ function PageLineBindings({ setToast }) {
   const [oas, setOas] = useState([]);                 // list of registered OAs
   const [issueOaId, setIssueOaId] = useState('');     // selected target OA for issue
   const [showIssueModal, setShowIssueModal] = useState(null); // { tenantId } when picking OA
+  const [issuedCodeNotice, setIssuedCodeNotice] = useState(null); // sticky latest code; survives toast timeout
 
   async function load() {
     try {
@@ -46,7 +47,49 @@ function PageLineBindings({ setToast }) {
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || 'load failed');
       setOpenDetail(d);
+      return d;
     } catch (e) { setToast && setToast({ kind: 'error', message: e.message }); }
+    return null;
+  }
+
+  function detailHasCode(detail, code) {
+    const rows = [
+      ...(Array.isArray(detail?.pendingCodes || detail?.pending_codes) ? (detail.pendingCodes || detail.pending_codes) : []),
+      ...(Array.isArray(detail?.history) ? detail.history : []),
+      detail?.pending,
+    ].filter(Boolean);
+    return rows.some((row) => String(row.code || '') === String(code || ''));
+  }
+
+  function mergeIssuedCodeIntoDetail(detail, issued) {
+    if (!detail || !issued || String(detail.tenant?.id) !== String(issued.tenantId)) return detail;
+    const targetOa = issued.targetOaId
+      ? (oas || []).find((o) => String(o.id) === String(issued.targetOaId))
+      : null;
+    const pendingRow = {
+      id: issued.id || `issued-${issued.code}`,
+      code: issued.code,
+      status: 'pending',
+      expires_at: issued.expiresAt || issued.expires_at,
+      created_at: issued.createdAt || new Date().toISOString(),
+      target_oa_id: issued.targetOaId || null,
+      target_oa_name: targetOa ? targetOa.name : null,
+      target_oa_slug: targetOa ? targetOa.slug : null,
+    };
+    const currentPendingCodes = Array.isArray(detail.pendingCodes || detail.pending_codes)
+      ? (detail.pendingCodes || detail.pending_codes)
+      : (detail.pending ? [detail.pending] : []);
+    const keptPendingCodes = issued.replacePending
+      ? []
+      : currentPendingCodes.filter((row) => String(row.code || '') !== String(issued.code));
+    const history = Array.isArray(detail.history) ? detail.history : [];
+    const keptHistory = history.filter((row) => String(row.code || '') !== String(issued.code));
+    return {
+      ...detail,
+      pending: pendingRow,
+      pendingCodes: [pendingRow, ...keptPendingCodes],
+      history: [pendingRow, ...keptHistory].slice(0, 200),
+    };
   }
 
   // Issue a code, optionally targeting a specific OA. If admin has ≥2 OAs we
@@ -74,6 +117,23 @@ function PageLineBindings({ setToast }) {
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || 'failed');
+      const issued = {
+        tenantId: id,
+        id: d.id,
+        code: d.code,
+        expiresAt: d.expiresAt || d.expires_at,
+        targetOaId: d.targetOaId || d.target_oa_id || (body.targetOaId || null),
+        replacePending,
+        createdAt: new Date().toISOString(),
+      };
+      setIssuedCodeNotice(issued);
+      setOpenId(id);
+      setOpenDetail((prev) => mergeIssuedCodeIntoDetail(prev, issued));
+      if (d.detail) {
+        setOpenDetail(detailHasCode(d.detail, d.code)
+          ? d.detail
+          : mergeIssuedCodeIntoDetail(d.detail, issued));
+      }
       setToast && setToast({
         kind: 'success',
         message: replacePending
@@ -82,7 +142,12 @@ function PageLineBindings({ setToast }) {
       });
       setShowIssueModal(null);
       await load();
-      if (openId === id || id === showIssueModal?.tenantId) await loadDetail(id);
+      if (!d.detail || !detailHasCode(d.detail, d.code)) {
+        const detail = await loadDetail(id);
+        if (!detail || !detailHasCode(detail, d.code)) {
+          setOpenDetail((prev) => mergeIssuedCodeIntoDetail(prev, issued));
+        }
+      }
     } catch (e) { setToast && setToast({ kind: 'error', message: e.message }); }
     finally { setBusy(false); }
   }
@@ -256,6 +321,8 @@ function PageLineBindings({ setToast }) {
           tenantId={openId}
           oas={oas}
           busy={busy}
+          issuedCodeNotice={issuedCodeNotice}
+          onClearIssuedCode={() => setIssuedCodeNotice(null)}
           onClose={() => { setOpenId(null); setOpenDetail(null); }}
           onIssue={() => startIssue(openId, { replacePending: true })}
           onIssueAdditional={() => startIssue(openId, { replacePending: false })}
@@ -323,7 +390,7 @@ function StatCard({ label, value, color }) {
   );
 }
 
-function DetailModal({ C, Modal, Btn, Pill, detail, tenantId, oas, busy, onClose, onIssue, onIssueAdditional, onRevoke, onRevokeAccount, onBlock, onUnblock }) {
+function DetailModal({ C, Modal, Btn, Pill, detail, tenantId, oas, busy, issuedCodeNotice, onClearIssuedCode, onClose, onIssue, onIssueAdditional, onRevoke, onRevokeAccount, onBlock, onUnblock }) {
   const t = detail.tenant;
   const pending = detail.pending;
   const bound = detail.bound;
@@ -335,6 +402,9 @@ function DetailModal({ C, Modal, Btn, Pill, detail, tenantId, oas, busy, onClose
   const pendingCodes = Array.isArray(detail.pendingCodes || detail.pending_codes)
     ? (detail.pendingCodes || detail.pending_codes)
     : (pending ? [pending] : []);
+  const issuedForThisTenant = issuedCodeNotice && String(issuedCodeNotice.tenantId) === String(tenantId)
+    ? issuedCodeNotice
+    : null;
   const hasMultiOas = oas && oas.length > 0;
 
   function copyCode(code, elementId) {
@@ -404,6 +474,55 @@ function DetailModal({ C, Modal, Btn, Pill, detail, tenantId, oas, busy, onClose
           <div style={{ padding: 12, background: '#fff5f4', border: '1px solid #f3c2bf', borderRadius: 8, color: '#5a1a13', fontSize: 13 }}>
             🚫 ถูกบล็อกจาก LINE binding
             {t.line_binding_blocked_reason && <div style={{ marginTop: 4, fontSize: 12 }}>เหตุผล: {t.line_binding_blocked_reason}</div>}
+          </div>
+        )}
+
+        {issuedForThisTenant && !blocked && (
+          <div style={{ padding: 14, background: '#eef8ff', border: '1px solid #b8d9ef', borderRadius: 8 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'flex-start' }}>
+              <div>
+                <div style={{ fontSize: 12, color: '#2a6285', fontWeight: 700 }}>
+                  รหัสล่าสุดที่เพิ่งออก - กล่องนี้จะไม่หายตาม toast
+                </div>
+                <div style={{ marginTop: 4, fontSize: 12, color: '#2a6285', lineHeight: 1.55 }}>
+                  คัดลอกหรือเปิด LINE จากตรงนี้ได้ทันที หากรายการด้านล่าง reload ช้า ระบบยังเก็บรหัสนี้ไว้ให้แอดมินเห็นก่อนส่งให้ผู้เช่า
+                </div>
+              </div>
+              <button onClick={onClearIssuedCode} style={{ ...btnLink(C), color: '#2a6285' }}>ซ่อน</button>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginTop: 10 }}>
+              <code style={{
+                fontFamily: 'JetBrains Mono, monospace', fontSize: 18, fontWeight: 700,
+                padding: '8px 14px', background: '#fff', borderRadius: 6, border: '1px solid #b8d9ef',
+              }}>{issuedForThisTenant.code}</code>
+              <button id={`copy-issued-${issuedForThisTenant.code}`}
+                onClick={() => copyCode(issuedForThisTenant.code, `copy-issued-${issuedForThisTenant.code}`)}
+                style={btnLink(C)}>
+                คัดลอก
+              </button>
+              {buildLineOpenUrlFor({
+                code: issuedForThisTenant.code,
+                target_oa_id: issuedForThisTenant.targetOaId,
+              }) ? (
+                <a href={buildLineOpenUrlFor({
+                  code: issuedForThisTenant.code,
+                  target_oa_id: issuedForThisTenant.targetOaId,
+                })} target="_blank" rel="noreferrer"
+                  style={{ ...btnLink(C), background: C.accent || '#2f8a70', color: '#fff', textDecoration: 'none' }}>
+                  เปิด LINE พร้อมคีย์
+                </a>
+              ) : (
+                <button onClick={() => { window.location.hash = '#line-oas'; }}
+                  style={{ ...btnLink(C), border: '1px solid #b8d9ef' }}>
+                  ตั้งลิงก์ LINE
+                </button>
+              )}
+            </div>
+            <div style={{ marginTop: 8, fontSize: 11.5, color: '#2a6285' }}>
+              {issuedForThisTenant.replacePending
+                ? 'คีย์นี้แทนคีย์รอผูกเดิมของห้องนี้'
+                : 'คีย์นี้เป็นคีย์เพิ่ม คีย์รอผูกเดิมของห้องนี้ยังใช้ได้'}
+            </div>
           </div>
         )}
 

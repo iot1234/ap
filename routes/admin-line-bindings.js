@@ -88,12 +88,16 @@ module.exports = function buildAdminLineBindingsRouter(ctx) {
           tenantId: id, ttlDays, targetOaId, replacePending,
           createdBy: req.session.user.username,
         });
+        const detail = await lineBinding.getStatus(pool, id).catch((detailErr) => {
+          console.warn('[admin line-binding issue] detail reload failed:', detailErr.message);
+          return null;
+        });
         audit(req, 'line_binding.issue', 'tenant', String(id), {
           ttlDays,
           targetOaId: result.targetOaId || null,
           replacePending,
         });
-        res.json({ ok: true, ...result });
+        res.json({ ok: true, ...result, detail });
       } catch (err) {
         console.error('admin line-binding issue error:', err.message);
         const payload = lineBindingIssueErrorPayload(err);
