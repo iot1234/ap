@@ -53,6 +53,10 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
       if (!apiCall) throw new Error('Admin API helper is not loaded. Refresh the page.');
       const out = await apiCall(`/api/bookings/${encodeURIComponent(id)}`);
       if (out && out.booking) {
+        const returnedId = String(out.booking.id || out.booking.external_id || '');
+        if (returnedId && returnedId !== String(id)) {
+          throw new Error(`ข้อมูลการจองที่โหลดกลับมาไม่ตรงกัน (${returnedId})`);
+        }
         setBookings(prev => prev.map(b => b.id === id ? mergeBookingRow(b, out.booking) : b));
       }
     } catch (err) {

@@ -7174,33 +7174,23 @@ async function notifyBookingApplicantStatus({ pool, flags, booking, subject, tex
   }
   const hasBookingLineRecipients = tenantInfo.lineRecipients.length > 0;
 
-  // LINE enrichment is intentionally limited to active tenants only. A public
-  // booking applicant may share a phone with an old tenant record, and we do
-  // not want to push booking decisions to a stale LINE binding. If the
-  // booking already has its own pre-bound LINE recipients, keep the decision
-  // notice scoped to those recipients and do not add a same-phone tenant LINE.
-  if (phone && !hasBookingLineRecipients) {
+  // LINE enrichment is intentionally limited to the active tenant for the
+  // exact room involved in this booking. A public booking applicant may share
+  // a phone with an old/current tenant record, especially when booking for a
+  // friend or requesting another room. If the booking already has its own
+  // pre-bound LINE recipients, keep the decision notice scoped there. If it
+  // does not, never fall back to a phone-only tenant LINE because that can
+  // notify the wrong person; phone/SMS remains available via tenantInfo.phone.
+  if (phone && !hasBookingLineRecipients && roomId) {
     try {
-      let tq = null;
-      if (roomId) {
-        tq = await pool.query(
-          `SELECT id, line_user_id, line_oa_id, email
-             FROM tenants
-            WHERE phone=$1 AND current_room_id=$2
-              AND deleted_at IS NULL AND status='active'
-            ORDER BY updated_at DESC LIMIT 1`,
-          [phone, roomId]
-        );
-      }
-      if (!tq || !tq.rows.length) {
-        tq = await pool.query(
-          `SELECT id, line_user_id, line_oa_id, email
-             FROM tenants
-            WHERE phone=$1 AND deleted_at IS NULL AND status='active'
-            ORDER BY updated_at DESC LIMIT 1`,
-          [phone]
-        );
-      }
+      const tq = await pool.query(
+        `SELECT id, line_user_id, line_oa_id, email
+           FROM tenants
+          WHERE phone=$1 AND current_room_id=$2
+            AND deleted_at IS NULL AND status='active'
+          ORDER BY updated_at DESC LIMIT 1`,
+        [phone, roomId]
+      );
       if (tq.rows.length) {
         tenantInfo.id = tq.rows[0].id;
         tenantInfo.line_user_id = tq.rows[0].line_user_id;

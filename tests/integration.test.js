@@ -3810,9 +3810,10 @@ test('tenant portal access is limited to active tenants with a current room', ()
     'tenant PIN management endpoints must not remain mounted');
 });
 
-test('booking-approve notify uses tenant matched to assigned room when possible', () => {
-  // Old flow took ORDER BY updated_at LIMIT 1 by phone alone — couples
-  // sharing a phone got each other's approval messages.
+test('booking-approve notify only borrows tenant LINE for the exact assigned room', () => {
+  // Old flow took ORDER BY updated_at LIMIT 1 by phone alone — couples,
+  // friend bookings, or second-room bookings could get each other's
+  // approval/rejection messages.
   const fs = require('node:fs');
   const path = require('node:path');
   const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
@@ -3825,8 +3826,10 @@ test('booking-approve notify uses tenant matched to assigned room when possible'
     'applicants with no reachable channel must be reported as manual follow-up');
   assert.match(src, /const hasBookingLineRecipients = tenantInfo\.lineRecipients\.length > 0/,
     'booking-scoped LINE recipients must be detected before same-phone tenant enrichment');
-  assert.match(src, /if \(phone && !hasBookingLineRecipients\)/,
-    'friend or second-room booking notices must not be sent to an old same-phone tenant LINE after booking pre-bind');
+  assert.match(src, /if \(phone && !hasBookingLineRecipients && roomId\)/,
+    'same-phone tenant LINE may only be borrowed when the booking has an exact room context');
+  assert.doesNotMatch(src, /WHERE phone=\$1 AND deleted_at IS NULL AND status='active'/,
+    'friend or second-room booking notices must never fall back to phone-only tenant LINE');
   assert.match(src, /notifier\.notifyTenant\([\s\S]{0,160}tenantInfo/,
     'booking notifications must still pass phone-only applicants into notifyTenant so SMS can be used');
   assert.doesNotMatch(src, /if \(tenantInfo\.line_user_id \|\| tenantInfo\.email\) \{[\s\S]{0,260}notifyTenant/,
@@ -4272,6 +4275,8 @@ test('bookings admin UI handles terminal statuses and uses valid reopen/cancel t
     'booking drawer must refresh the selected booking detail before trusting cached list data');
   assert.match(src, /apiCall\(`\/api\/bookings\/\$\{encodeURIComponent\(id\)\}`\)/,
     'booking drawer refresh must use the CSRF-aware JSON API helper');
+  assert.match(src, /returnedId && returnedId !== String\(id\)/,
+    'booking drawer refresh must reject mismatched detail payloads before merging state');
   assert.match(src, /onRowClick=\{openBookingDetail\}/,
     'booking rows must open through the latest-detail loader');
   assert.match(src, /function BookingFlowChecklist/,
