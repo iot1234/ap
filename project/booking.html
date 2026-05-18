@@ -714,6 +714,13 @@
         </div>
         <p id="lineBindHint">หลังผูกแล้ว ระบบจะใช้ LINE นี้แจ้งผลจอง สัญญา และบิลของห้องนี้</p>
       </div>
+      <div class="line-bind-box" id="lineContactBox" style="display:none">
+        <h3>LINE ติดต่อ</h3>
+        <p id="lineContactHint">กดเพื่อเพิ่มเพื่อนหรือติดต่อหอพักทาง LINE</p>
+        <div class="line-bind-code">
+          <a class="line-open-btn" id="lineContactBtn" target="_blank" rel="noreferrer">LINE ติดต่อ</a>
+        </div>
+      </div>
       <p style="margin-top:24px"><a href="/" style="color:#2f8a70;text-decoration:none;font-weight:500">← กลับหน้าแรก</a></p>
     </div>
   </template>
@@ -953,6 +960,31 @@
       ? 'เปิดแชต LINE OA พร้อมคีย์ในช่องพิมพ์ แล้วกดส่งใน LINE'
       : 'เปิด LINE OA แล้วส่งคีย์ด้วยตัวเอง';
     return messageUrl ? 'message' : 'add';
+  }
+
+  function renderLineContactButton(lineContact) {
+    const box = document.getElementById('lineContactBox');
+    const btn = document.getElementById('lineContactBtn');
+    const hint = document.getElementById('lineContactHint');
+    if (!box || !btn) return;
+    const href = safeLineAddFriendUrl(lineContact && (lineContact.addFriendUrl || lineContact.url));
+    box.style.display = 'block';
+    if (!href) {
+      btn.removeAttribute('href');
+      btn.style.display = 'none';
+      if (hint) {
+        hint.textContent = (lineContact && lineContact.message)
+          || 'ยังไม่ได้ตั้งค่าลิงก์ LINE ติดต่อ โปรดติดต่อแอดมินเพื่อรับช่องทาง LINE';
+      }
+      return;
+    }
+    btn.href = href;
+    btn.style.display = 'inline-flex';
+    btn.textContent = 'LINE ติดต่อ';
+    btn.title = 'เพิ่มเพื่อนหรือติดต่อหอพักทาง LINE';
+    if (hint) {
+      hint.textContent = 'กดเพื่อเพิ่มเพื่อนหรือติดต่อหอพักทาง LINE ปุ่มนี้เป็นช่องทางติดต่อทั่วไป แยกจากการผูก LINE เพื่อรับแจ้งเตือน';
+    }
   }
 
   function clearLastBookingLineBinding() {
@@ -1779,6 +1811,7 @@
         next.style.display = 'block';
         next.textContent = verification.nextAction;
       }
+      renderLineContactButton((result.booking && result.booking.lineContact) || (bookingConfig && bookingConfig.lineContact));
       const lineBinding = result.booking && result.booking.lineBinding;
       if (lineBinding && lineBinding.code) {
         saveLastBookingLineBinding(result.booking, lineBinding);
@@ -1827,7 +1860,7 @@
         lineBox.classList.add('line-bind-error');
         lineCode.textContent = lineBinding.error;
         if (lineCopy) lineCopy.style.display = 'none';
-        if (lineOpen) lineOpen.style.display = 'none';
+        applyLineOpenButton(lineOpen, lineBinding);
         if (lineFlowStep) lineFlowStep.className = 'warn';
         if (lineFlowText) {
           lineFlowText.textContent = 'ระบบออกคีย์ LINE ไม่สำเร็จ เจ้าหน้าที่จะออกคีย์ใหม่หรือโทรแจ้งสถานะโดยตรง';

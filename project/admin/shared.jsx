@@ -141,6 +141,7 @@ const DEFAULT_CONFIG = {
     phone:   '',
     email:   '',
     line:    '',
+    lineAddFriendUrl: '',
     floors:  5,
     roomsPerFloor: 8,
     open:    '24 ชั่วโมง',
@@ -324,6 +325,7 @@ function buildActivities() { return []; }
 //   Domain                     UI route                Storage
 //   ----------------------     ------------------      ------------------
 //   ข้อมูลตึก                  /admin#settings (tab)   app_data.baankarn_config_v1.building
+//   ลิงก์แอด LINE ผู้จอง       /admin#settings (tab)   app_data.baankarn_config_v1.building.lineAddFriendUrl
 //   วิธีรับเงิน (PromptPay/bank) /admin#settings (tab) app_data.baankarn_config_v1.payment
 //   อัตราค่าเช่า + ส่วนเพิ่ม   /admin#settings (tab)   app_data.baankarn_config_v1.rates+premium+...
 //   เทมเพลตแจ้งเตือน          /admin#settings (tab)   app_data.baankarn_config_v1.notify
@@ -339,7 +341,7 @@ function buildActivities() { return []; }
 // Per-record settings (NOT in Settings hub — context-specific):
 //   ราคาห้องเฉพาะ (override)   /admin#rooms (per room) rooms_v2.rent_override
 //   ผู้เช่าเฉพาะ (PIN/locale)  /admin#tenants (row)    tenants.*
-//   LINE OA channel secret    /admin#line-oas         line_oas.channel_secret_encrypted
+//   LINE OA webhook/token     /admin#line-oas         line_oas.channel_secret_encrypted
 //
 // Legacy hash routes (/admin#pricing, #features, #secrets) still resolve
 // to the standalone page components for bookmarks / external links.

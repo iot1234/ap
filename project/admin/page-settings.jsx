@@ -109,6 +109,33 @@ function PageSettings({ rooms, setRooms, config, setConfig, bookings, setBooking
       if (typeof payment.truemoneyName === 'string') payment.truemoneyName = payment.truemoneyName.trim();
       if (typeof payment.truemoneyNote === 'string') payment.truemoneyNote = payment.truemoneyNote.trim();
     }
+    const building = next.building && typeof next.building === 'object' ? next.building : null;
+    if (building) {
+      if (typeof building.line === 'string') building.line = building.line.trim().replace(/^@+/, '');
+      const rawLineAddFriendUrl = String(building.lineAddFriendUrl || '').trim();
+      if (rawLineAddFriendUrl) {
+        try {
+          const u = new URL(rawLineAddFriendUrl);
+          const host = u.hostname.toLowerCase();
+          const allowed = u.protocol === 'https:' && (
+            host === 'line.me' || host.endsWith('.line.me') ||
+            host === 'lin.ee' || host.endsWith('.lin.ee')
+          );
+          if (!allowed) throw new Error('bad host');
+          u.hash = '';
+          building.lineAddFriendUrl = u.toString().slice(0, 300);
+        } catch {
+          setTab('building');
+          setToast && setToast({
+            kind: 'error',
+            message: 'ลิงก์เพิ่มเพื่อน LINE ต้องเป็น https://line.me หรือ https://lin.ee เท่านั้น',
+          });
+          return;
+        }
+      } else {
+        building.lineAddFriendUrl = '';
+      }
+    }
 
     const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
     if (!apiCall) {
@@ -259,7 +286,9 @@ function PageSettings({ rooms, setRooms, config, setConfig, bookings, setBooking
 
 // ============================================================
 function TabBuilding({ draft, updatePath }) {
+  const C = window.ADMIN_C;
   const { Card, Input, Textarea, SectionHeading } = window;
+  const hasLineContact = !!String((draft.building && draft.building.lineAddFriendUrl) || '').trim();
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 800 }}>
       <Card>
@@ -268,7 +297,26 @@ function TabBuilding({ draft, updatePath }) {
           <Input label="ชื่อตึก"         value={draft.building.name}    onChange={(v) => updatePath('building.name', v)} />
           <Input label="เบอร์โทรศัพท์" value={draft.building.phone}  onChange={(v) => updatePath('building.phone', v)} />
           <Input label="อีเมล"             value={draft.building.email}  onChange={(v) => updatePath('building.email', v)} />
-          <Input label="LINE ID"           value={draft.building.line}    onChange={(v) => updatePath('building.line', v)} prefix="@" />
+          <Input label="LINE ID" value={draft.building.line} onChange={(v) => updatePath('building.line', v)} prefix="@" />
+          <Input label="ลิงก์ LINE ติดต่อ"
+                 value={draft.building.lineAddFriendUrl || ''}
+                 onChange={(v) => updatePath('building.lineAddFriendUrl', v)}
+                 placeholder="https://lin.ee/xxxx หรือ https://line.me/R/ti/p/@your_oa"
+                 hint="คนละส่วนกับ LINE OA Webhook: ใช้ทำปุ่ม LINE ติดต่อหลังจองสำเร็จ"
+                 style={{ gridColumn: 'span 2' }} />
+        </div>
+        <div style={{
+          marginTop: 12,
+          padding: 10,
+          borderRadius: 8,
+          fontSize: 12.5,
+          lineHeight: 1.6,
+          background: hasLineContact ? (C.successSoft || '#eaf7ef') : (C.warningSoft || '#fff7e0'),
+          color: hasLineContact ? (C.successInk || '#17633a') : (C.warningInk || '#7a5a00'),
+        }}>
+          {hasLineContact
+            ? 'ปุ่ม LINE ติดต่อหลังจองพร้อมใช้งาน ผู้จองจะกดไปยังลิงก์นี้ได้ทันที และยังแยกจาก LINE OA Webhook/Token เหมือนเดิม'
+            : 'ยังไม่ได้ตั้งค่าลิงก์ LINE ติดต่อ ผู้จองจะเห็นข้อความ "โปรดติดต่อแอดมินเพื่อรับช่องทาง LINE" แทนปุ่ม จนกว่าแอดมินจะใส่ลิงก์ https://line.me หรือ https://lin.ee'}
         </div>
         <div style={{ marginTop: 12 }}>
           <Textarea

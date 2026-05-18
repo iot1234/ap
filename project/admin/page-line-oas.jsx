@@ -22,9 +22,34 @@ function PageLineOas({ setToast }) {
   const [editing, setEditing] = useState(null);
   const [confirmDel, setConfirmDel] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [lineContact, setLineContact] = useState({ loaded: false, addFriendUrl: '' });
   // diagnostics modal: holds the loaded payload from webhook-status endpoint.
   // null = closed, { loading: true } = fetching, full payload = ready.
   const [diag, setDiag] = useState(null);
+
+  function safePublicLineContactUrl(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    try {
+      const u = new URL(raw);
+      const host = u.hostname.toLowerCase();
+      const isLineHost = host === 'line.me' || host.endsWith('.line.me')
+        || host === 'lin.ee' || host.endsWith('.lin.ee');
+      return u.protocol === 'https:' && isLineHost ? u.toString() : '';
+    } catch {
+      return '';
+    }
+  }
+
+  function readPublicLineContactUrl(payload) {
+    const cfg = payload && typeof payload === 'object' && payload.value && typeof payload.value === 'object'
+      ? payload.value
+      : payload;
+    const building = cfg && typeof cfg === 'object' && cfg.building && typeof cfg.building === 'object'
+      ? cfg.building
+      : {};
+    return safePublicLineContactUrl(building.lineAddFriendUrl || building.lineUrl || building.lineLink);
+  }
 
   async function openDiagnostics(oa) {
     setDiag({ oa, loading: true });
@@ -42,13 +67,23 @@ function PageLineOas({ setToast }) {
   async function load() {
     setLoading(true); setError(null);
     try {
-      const r = await fetch('/api/admin/line-oas', { credentials: 'same-origin' });
-      const d = await r.json();
-      if (!r.ok) throw new Error(d.error || 'load failed');
+      const [d, configPayload] = await Promise.all([
+        fetch('/api/admin/line-oas', { credentials: 'same-origin' })
+          .then(async (r) => {
+            const out = await r.json();
+            if (!r.ok) throw new Error(out.error || 'load failed');
+            return out;
+          }),
+        fetch('/api/data/baankarn_config_v1', { credentials: 'same-origin' })
+          .then((r) => r.ok ? r.json().catch(() => null) : null)
+          .catch(() => null),
+      ]);
       setItems(d.items || []);
       setSummary(d.summary || summarizeLineOas(d.items || []));
+      setLineContact({ loaded: true, addFriendUrl: readPublicLineContactUrl(configPayload) });
     } catch (e) {
       setError(e.message);
+      setLineContact((current) => current.loaded ? current : { loaded: true, addFriendUrl: '' });
     } finally {
       setLoading(false);
     }
@@ -216,13 +251,56 @@ function PageLineOas({ setToast }) {
       <PageHeader
         title="LINE Official Accounts"
         subtitle="ลงทะเบียน LINE OA ได้ไม่จำกัด — ผู้เช่าผูกเข้า OA ใดได้ก็ตาม ระบบจะส่งบิลกลับผ่าน OA นั้น"
-        actions={<Btn variant="primary" icon="+" onClick={openAdd}>เพิ่ม OA</Btn>}
+        actions={(
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <Btn variant="secondary" onClick={() => { window.location.hash = '#settings'; }}>
+              ตั้งลิงก์ LINE ติดต่อ
+            </Btn>
+            <Btn variant="primary" icon="+" onClick={openAdd}>เพิ่ม OA</Btn>
+          </div>
+        )}
       />
 
       {error && (
         <div style={{ padding: 12, background: C.dangerSoft, color: C.dangerInk,
                        borderRadius: 8, fontSize: 13, marginBottom: 12 }}>
           ⚠️ {error}
+        </div>
+      )}
+
+      {lineContact.loaded && (
+        <div style={{
+          padding: 12,
+          background: lineContact.addFriendUrl ? (C.successSoft || '#eaf7ef') : (C.warningSoft || '#fff7e0'),
+          color: lineContact.addFriendUrl ? (C.successInk || '#17633a') : (C.warningInk || '#7a5a00'),
+          borderRadius: 8,
+          fontSize: 13,
+          lineHeight: 1.6,
+          marginBottom: 12,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 12,
+          flexWrap: 'wrap',
+        }}>
+          <div>
+            <b>{lineContact.addFriendUrl ? 'LINE ติดต่อพร้อมใช้งาน' : 'ยังไม่ได้ตั้งลิงก์ LINE ติดต่อ'}</b>
+            <div>
+              {lineContact.addFriendUrl
+                ? 'ผู้จองจะเห็นปุ่ม LINE ติดต่อหลังจองสำเร็จ ส่วน LINE OA Webhook/Token ด้านล่างยังทำงานแยกกันตามเดิม'
+                : 'ผู้จองจะเห็นข้อความ "โปรดติดต่อแอดมินเพื่อรับช่องทาง LINE" แทนปุ่ม จนกว่าจะตั้งลิงก์ใน Settings'}
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            {lineContact.addFriendUrl && (
+              <Btn variant="secondary" onClick={() => window.open(lineContact.addFriendUrl, '_blank', 'noopener,noreferrer')}>
+                เปิด LINE ติดต่อ
+              </Btn>
+            )}
+            <Btn variant="secondary" onClick={() => { window.location.hash = '#settings'; }}>
+              ตั้งลิงก์ LINE ติดต่อ
+            </Btn>
+          </div>
         </div>
       )}
 

@@ -3309,17 +3309,29 @@ test('booking-stage LINE binding is issued, guarded, and carried into contract h
   assert.match(bookingRoute, /lineBindingError: newBooking\.lineBinding && newBooking\.lineBinding\.error/,
     'booking audit must record LINE code issuance failures');
   assert.match(bookingRoute, /lineOa\.getDefault\(pool\)/,
-    'public booking must resolve the configured LINE OA link for the applicant button');
+    'public booking must resolve the configured LINE OA link for the binding-key button');
   assert.match(bookingRoute, /addFriendUrl: defaultOa\?\.addFriendUrl \|\| null/,
-    'public booking response must include the configured LINE add-friend URL when available');
+    'public booking response must keep LINE OA add-friend URL on the binding flow only');
   assert.match(bookingRoute, /oaMessageUrl: defaultOa\?\.oaMessageUrl \|\| null/,
-    'public booking response must include the LINE OA message URL for opening chat with the binding key prefilled');
+    'public booking response must keep LINE OA message URL on the binding flow only');
+  assert.match(bookingRoute, /newBooking\.lineContact = await loadPublicLineContactLinks\(\)/,
+    'public booking response must include the separate contact LINE link without mixing it into the binding key');
   assert.match(server, /addFriendOaId = pending\?\.target_oa_id \|\| pending\?\.oa_id/,
     'booking detail enrichment must recover the correct LINE OA link for pending keys');
   assert.match(server, /out\.lineBinding = \{[\s\S]{0,260}addFriendUrl,/,
     'booking detail API must return the LINE add-friend URL so admins can resend lost keys');
   assert.match(server, /out\.lineBinding = \{[\s\S]{0,320}oaMessageUrl,/,
     'booking detail API must return the LINE OA message URL so admins can resend keys through a prefilled LINE chat');
+  assert.match(server, /function resolvePublicLineContactLinks\(config\)/,
+    'LINE add-friend link must be resolved from building settings separately from LINE OA webhook records');
+  assert.match(server, /lineOa\.normaliseLineAddUrl\(building\.lineAddFriendUrl\)/,
+    'public LINE link resolver must sanitize the building LINE add-friend URL');
+  assert.match(server, /configured,\s*source: configured \? 'building-line-contact' : 'none'/,
+    'public LINE contact payload must explicitly tell the frontend whether the contact link is configured');
+  assert.match(server, /ยังไม่ได้ตั้งค่าลิงก์ LINE ติดต่อ โปรดติดต่อแอดมินเพื่อรับช่องทาง LINE/,
+    'public LINE contact payload must include a clear fallback message when the contact link is missing');
+  assert.match(server, /building\.lineAddFriendUrl = ต้องเป็น https:\/\/line\.me หรือ https:\/\/lin\.ee เท่านั้น/,
+    'config save must reject non-LINE add-friend links before they reach the public booking page');
   assert.match(bookingRoute, /LINE: สร้างรหัสผูก LINE ไม่สำเร็จ/,
     'owner notification must surface when booking LINE code issuance failed');
   assert.match(server, /function summariseBookingApplicantNotify[\s\S]{0,700}lineRecipientCount/,
@@ -3365,6 +3377,16 @@ test('booking-stage LINE binding is issued, guarded, and carried into contract h
     'public booking page must build a LINE button that opens the OA chat with the binding key prefilled');
   assert.match(bookingHtml, /เปิด LINE พร้อมคีย์/,
     'public booking page must label the prefilled LINE button clearly');
+  assert.match(bookingHtml, /id="lineContactBtn"/,
+    'public booking success page must include a separate contact LINE button');
+  assert.match(bookingHtml, /id="lineContactHint"/,
+    'public booking success page must have a dedicated hint area for contact LINE status');
+  assert.match(bookingHtml, /btn\.style\.display = 'none'/,
+    'public booking success page must hide the contact LINE button when no safe link is configured');
+  assert.match(bookingHtml, /โปรดติดต่อแอดมินเพื่อรับช่องทาง LINE/,
+    'public booking success page must clearly tell applicants what to do when the contact LINE link is missing');
+  assert.match(bookingHtml, /renderLineContactButton\(\(result\.booking && result\.booking\.lineContact\) \|\| \(bookingConfig && bookingConfig\.lineContact\)\)/,
+    'public booking page must render contact LINE separately from LINE binding');
   assert.match(bookingHtml, /id="lineRecoverBox"/,
     'public booking page must show a same-browser recovery panel when a user refreshed after receiving a LINE key');
   assert.match(bookingHtml, /LINE_BINDING_CACHE_KEY/,
@@ -3478,8 +3500,31 @@ test('tenant LINE notifications fan out to every bound LINE account', () => {
     'admin LINE bindings API must treat rows with bound_count as bound even if the tenant cache is stale');
 
   const lineOasPage = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-line-oas.jsx'), 'utf8');
+  const settingsPage = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-settings.jsx'), 'utf8');
+  const sharedPage = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'shared.jsx'), 'utf8');
+  const shellPage = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'shell.jsx'), 'utf8');
+  assert.match(settingsPage, /building\.lineAddFriendUrl/,
+    'public LINE add-friend link must be configured in Settings > building, separate from LINE OA webhook setup');
+  assert.match(settingsPage, /คนละส่วนกับ LINE OA Webhook/,
+    'settings copy must explicitly separate the add-friend link from LINE OA webhook');
+  assert.match(settingsPage, /ผู้จองจะเห็นข้อความ "โปรดติดต่อแอดมินเพื่อรับช่องทาง LINE" แทนปุ่ม/,
+    'settings page must warn admins exactly what applicants see when the contact LINE link is missing');
+  assert.match(settingsPage, /ปุ่ม LINE ติดต่อหลังจองพร้อมใช้งาน/,
+    'settings page must show a ready state when the contact LINE link is configured');
+  assert.match(sharedPage, /lineAddFriendUrl: ''/,
+    'default config must include a stable public LINE add-friend link field');
+  assert.match(shellPage, /จัดการ LINE OA/,
+    'LINE OA page label must stay simple for webhook/token setup');
   assert.match(lineOasPage, /addFriendUrl/,
     'LINE OA admin UI must let owners configure the add-friend link');
+  assert.match(lineOasPage, /ตั้งลิงก์ LINE ติดต่อ/,
+    'LINE OA page must provide a simple button to set the separate public contact LINE link');
+  assert.match(lineOasPage, /\/api\/data\/baankarn_config_v1/,
+    'LINE OA page must read building settings so it can warn when the public contact link is missing');
+  assert.match(lineOasPage, /readPublicLineContactUrl/,
+    'LINE OA page must sanitize/read the contact link separately from OA webhook records');
+  assert.match(lineOasPage, /โปรดติดต่อแอดมินเพื่อรับช่องทาง LINE/,
+    'LINE OA page must show the same missing-contact-link fallback seen by applicants');
   assert.match(lineOasPage, /https:\/\/lin\.ee/,
     'LINE OA admin UI must show a lin.ee example for the add-friend link');
   assert.match(lineOasPage, /oaMessageUrl/,
@@ -6144,6 +6189,60 @@ test('notificationQueue: disabled OA throws fatal (no retry loop)', () => {
     'dispatch must check oa.enabled before pushing');
   assert.match(src, /fatalErr\.fatal = true/,
     'disabled-OA error must be marked fatal so processOne parks immediately');
+});
+
+test('contracts: at most one active contract per room (DB-level guard)', () => {
+  // The booking approve + invitation approve paths already refuse a second
+  // contract on a room, but quick-invite and manual SQL edits can bypass
+  // those code-level checks. The partial unique index is the final defence
+  // at the DB level. The DO $$ block warns instead of crashing migrate so
+  // a deploy with legacy duplicates still boots.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'db', 'migrate.js'), 'utf8');
+  assert.match(src,
+    /CREATE UNIQUE INDEX uq_contracts_active_room\s+ON contracts\(room_id\)\s+WHERE status='active' AND deleted_at IS NULL/,
+    'partial unique must scope to active + non-deleted contracts');
+  assert.match(src,
+    /Skipping uq_contracts_active_room because duplicate active contracts already exist/,
+    'migration must warn instead of crashing when legacy duplicates exist');
+});
+
+test('contract-invitation approve: audit log captures lock state + snapshot', () => {
+  // Contract lock is the moment terms become legally binding — the audit
+  // entry must record locked_by, the template snapshot's identity, and
+  // whether the move-in bill was actually written.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(src,
+    /audit\(req, 'contract\.invitation_approve'[\s\S]{0,1500}lockedAt:[\s\S]{0,200}lockedBy:[\s\S]{0,200}templateId:[\s\S]{0,120}snapshotVersion:[\s\S]{0,120}hasSignature:[\s\S]{0,120}welcomeBill:[\s\S]{0,120}welcomeBillError:/,
+    'audit must capture lock + template + signature + welcome-bill state');
+});
+
+test('contract-invitation approve: refuses to operate on deleted tenant', () => {
+  // A tenant deleted between submit and approve would otherwise silently
+  // take the contract lock + room reservation + welcome bill, leaving an
+  // orphan locked contract for a deleted tenant. The early guard +
+  // defensive WHERE deleted_at IS NULL on every tenant UPDATE refuses to
+  // fire on phantom rows.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  // Early lock-and-check guard at the top of the approve transaction
+  assert.match(src,
+    /tenantGuard[\s\S]{0,300}TENANT_DELETED/,
+    'approve must lock + verify tenant.deleted_at IS NULL before any write');
+  // Both downstream UPDATEs are scoped to non-deleted tenants
+  assert.match(src,
+    /UPDATE tenants SET \$\{sets\.join\(', '\)\}\s*WHERE id=\$\$\{i\} AND deleted_at IS NULL/,
+    'draft UPDATE must scope to non-deleted tenants');
+  assert.match(src,
+    /UPDATE tenants\s+SET current_room_id=\$1[\s\S]{0,120}WHERE id=\$2 AND deleted_at IS NULL/,
+    'room-bind UPDATE must scope to non-deleted tenants');
+  // Race fallback code
+  assert.match(src, /TENANT_DISAPPEARED/,
+    'must surface TENANT_DISAPPEARED if the row vanishes mid-transaction');
 });
 
 test('maintenance.update: refuses to back-transition from terminal status', () => {

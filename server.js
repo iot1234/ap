@@ -892,6 +892,23 @@ app.put('/api/data/:key', sameOrigin, csrfGuard, requireAuth, requireRole('owner
         payment[field] = trimmed;
       }
     }
+    const building = value.building && typeof value.building === 'object' ? value.building : null;
+    if (building) {
+      if (typeof building.line === 'string') {
+        building.line = building.line.trim().replace(/^@+/, '');
+      }
+      const rawLineAddFriendUrl = String(building.lineAddFriendUrl || '').trim();
+      if (rawLineAddFriendUrl) {
+        const safeLineAddFriendUrl = lineOa.normaliseLineAddUrl(rawLineAddFriendUrl);
+        if (!safeLineAddFriendUrl) {
+          hardIssues.push('building.lineAddFriendUrl = ต้องเป็น https://line.me หรือ https://lin.ee เท่านั้น');
+        } else {
+          building.lineAddFriendUrl = safeLineAddFriendUrl;
+        }
+      } else {
+        building.lineAddFriendUrl = '';
+      }
+    }
     // floorPremium / viewPremium / featurePremium are ADDITIVE deltas —
     // they can legitimately be 0, but negative values can't be intended
     // unless admin really wants a "discount per floor" which we don't
@@ -1585,6 +1602,35 @@ async function publicBookingDepositInfo() {
   return { settings, payment, flags, paymentBlock };
 }
 
+function resolvePublicLineContactLinks(config) {
+  const building = config && typeof config === 'object' && config.building && typeof config.building === 'object'
+    ? config.building
+    : {};
+  const configuredAddFriendUrl = lineOa.normaliseLineAddUrl(building.lineAddFriendUrl)
+    || lineOa.normaliseLineAddUrl(building.lineUrl)
+    || lineOa.normaliseLineAddUrl(building.lineLink);
+  const configured = !!configuredAddFriendUrl;
+  return {
+    addFriendUrl: configuredAddFriendUrl || null,
+    configured,
+    source: configured ? 'building-line-contact' : 'none',
+    message: configured
+      ? 'LINE ติดต่อพร้อมใช้งาน'
+      : 'ยังไม่ได้ตั้งค่าลิงก์ LINE ติดต่อ โปรดติดต่อแอดมินเพื่อรับช่องทาง LINE',
+  };
+}
+
+async function loadPublicLineContactLinks() {
+  try {
+    const { rows } = await pool.query(
+      `SELECT value FROM app_data WHERE key='baankarn_config_v1' LIMIT 1`
+    );
+    return resolvePublicLineContactLinks(rows[0]?.value || null);
+  } catch {
+    return resolvePublicLineContactLinks(null);
+  }
+}
+
 async function bookingDepositAdminPaymentReadiness(amount) {
   const { paymentBlock } = await loadEffectivePaymentBlock();
   const bankInfo = paymentBlock.bankInfo && paymentBlock.bankInfo.account
@@ -1616,6 +1662,7 @@ app.get('/api/bookings/public/config', async (_req, res) => {
   try {
     await releaseExpiredPublicBookingHolds(pool);
     const { settings, payment } = await publicBookingDepositInfo();
+    const lineContact = await loadPublicLineContactLinks();
     res.setHeader('Cache-Control', 'no-store');
     res.json({
       ok: true,
@@ -1631,6 +1678,7 @@ app.get('/api/bookings/public/config', async (_req, res) => {
         maxBytes: settings.maxBytes,
         allowedMimes: settings.allowedMimes,
         payment,
+        lineContact,
       },
     });
   } catch (err) {
@@ -2443,6 +2491,7 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBookingSubmit, validateBod
         nextAction: 'แอดมินควรออก LINE binding code ให้ผู้จองใหม่จากหน้าแอดมิน หรือโทรแจ้งสถานะการจองโดยตรง',
       };
     }
+    newBooking.lineContact = await loadPublicLineContactLinks().catch(() => ({ addFriendUrl: null, source: 'none' }));
     audit(req, 'booking.public_create', 'booking', newBooking.id,
       {
         phone: cleaned.phone, roomId: cleaned.roomId, wantType, wantFloor,
@@ -11440,10 +11489,32 @@ app.post('/api/admin/contract-invitations/:id/approve',
         }
       }
       await client.query('COMMIT');
+      // Audit log — captures the full state change so a tenant dispute
+      // months later ("ทำไม locked ตอนนั้น? termsSnapshot ใช้ template ไหน?")
+      // can be answered without grepping notifications_log.
+      //
+      // Includes:
+      //   - lockedAt/lockedBy: who flipped the contract from draft → locked
+      //   - templateId + snapshotVersion: which terms got frozen on the bill
+      //   - signature: whether a signature image was captured
+      //   - welcomeBill: bill_no if the move-in bill was created
+      //   - welcomeBillError: surface SAVEPOINT failure so admin reconciles
+      //     manually instead of finding out from the tenant
       audit(req, 'contract.invitation_approve', 'contract', String(inv.contract_id),
         { invitationId: id, draftKeys: Object.keys(draft),
           roomId: contract.room_id, tenantId: inv.tenant_id,
-          welcomeBill: welcomeBillCreated ? welcomeBillCreated.bill_no : null });
+          // The contract row was UPDATE'd with locked_at=NOW() + locked_by
+          // a few lines above; using `req.session.user.username` matches
+          // what the SQL stored, and `lockedAt` is approximated to the
+          // commit moment (millisecond precision is enough for audit).
+          lockedAt: new Date().toISOString(),
+          lockedBy: req.session.user.username,
+          templateId: termsSnapshot.templateId || null,
+          snapshotVersion: termsSnapshot.snapshot?.snapshotVersion || null,
+          hasSignature: !!draft.signatureFileId,
+          agreedTermsVersion: draft.agreedTermsVersion || null,
+          welcomeBill: welcomeBillCreated ? welcomeBillCreated.bill_no : null,
+          welcomeBillError: welcomeBillError || null });
 
       // Owner notify with full context — admin can act immediately rather
       // than going hunting through 3 pages to see what was approved.

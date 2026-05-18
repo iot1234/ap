@@ -901,6 +901,44 @@ async function migrate(pool, opts = {}) {
     -- ALTERed rows get sane initial values without a separate backfill.
     ALTER TABLE contracts ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 
+    -- At most one ACTIVE non-deleted contract per room. The booking
+    -- approve + contract approve paths already check for the existence
+    -- of an occupant, but admin can also POST /api/contracts/quick-invite
+    -- directly to create a contract without the same guard — that path
+    -- silently created a second active contract on a room, leaving bill
+    -- generation confused (pricing.resolveBillingRent picks the FIRST
+    -- matching row but two-active means ORDER BY chooses unpredictably).
+    -- This index is the final guard at the DB level, regardless of which
+    -- code path created the row.
+    --
+    -- DO $$ block + dup pre-check matches the pattern other partial unique
+    -- indexes use in this file (see uq_payments_one_verified_per_bill).
+    -- Refuses to create the index if existing data violates it — admin
+    -- must reconcile the duplicate active contracts manually before the
+    -- next deploy. A WARNING is emitted instead of crashing migrate so a
+    -- deploy with legacy duplicates doesn't fail to boot.
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_indexes
+         WHERE schemaname='public' AND indexname='uq_contracts_active_room'
+      ) THEN
+        IF NOT EXISTS (
+          SELECT 1
+            FROM contracts
+           WHERE status='active' AND deleted_at IS NULL
+           GROUP BY room_id
+          HAVING COUNT(*) > 1
+        ) THEN
+          CREATE UNIQUE INDEX uq_contracts_active_room
+            ON contracts(room_id)
+            WHERE status='active' AND deleted_at IS NULL;
+        ELSE
+          RAISE WARNING 'Skipping uq_contracts_active_room because duplicate active contracts already exist on at least one room';
+        END IF;
+      END IF;
+    END $$;
+
     -- === Tenant self-fill invitations =====================================
     -- Admin generates a tokenised URL → tenant opens (no login) → fills
     -- personal info + ID photos + signature → submits → admin reviews →
