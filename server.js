@@ -11107,8 +11107,12 @@ app.post('/api/admin/contract-invitations/:id/approve',
         if (sets.length) {
           sets.push('updated_at = NOW()');
           params.push(inv.tenant_id);
-          await client.query(
-            `UPDATE tenants SET ${sets.join(', ')} WHERE id=$${i}`,
+          // Scope to non-deleted tenants — the tenantGuard above pre-locks
+          // the row but a defensive WHERE clause keeps this UPDATE safe
+          // even if the guard is refactored away in the future.
+          const draftUpd = await client.query(
+            `UPDATE tenants SET ${sets.join(', ')}
+              WHERE id=$${i} AND deleted_at IS NULL`,
             params
           ).catch((err) => {
             // Dedup race: another tenant already has this hash. Treat as
@@ -11119,6 +11123,17 @@ app.post('/api/admin/contract-invitations/:id/approve',
             }
             throw err;
           });
+          // Belt-and-braces — if the row vanished between tenantGuard and
+          // this UPDATE (impossible inside the transaction, but defends
+          // against future refactor that drops the FOR UPDATE lock above)
+          // we treat it as the same "tenant deleted" condition.
+          if (draftUpd && draftUpd.rowCount === 0) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({
+              error: 'ผู้เช่าหายไประหว่าง approve — กรุณาลองใหม่',
+              code: 'TENANT_DISAPPEARED',
+            });
+          }
         }
       }
 
@@ -11229,12 +11244,22 @@ app.post('/api/admin/contract-invitations/:id/approve',
         } else {
           // Set tenant → room link. Active status is set here for
           // moved_out tenants who are reactivating via this contract.
-          await client.query(
+          // deleted_at IS NULL guard matches the tenantGuard at the top
+          // of the handler — refuses to bind a soft-deleted tenant even
+          // if some future refactor weakens the early check.
+          const bindUpd = await client.query(
             `UPDATE tenants
                 SET current_room_id=$1, status='active', updated_at=NOW()
-              WHERE id=$2`,
+              WHERE id=$2 AND deleted_at IS NULL`,
             [contract.room_id, inv.tenant_id]
           );
+          if (bindUpd.rowCount === 0) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({
+              error: 'ผู้เช่าหายไประหว่าง approve — กรุณาลองใหม่',
+              code: 'TENANT_DISAPPEARED',
+            });
+          }
 
           // Free the OLD room (if tenant was in a different room).
           // Status → 'vacant' AND tenant → removed so notifications can't
