@@ -2796,16 +2796,12 @@ function Sidebar({ page, setPage, locale, unpaidCount, tenant, onLogout }) {
     <aside className="portal-sidebar" style={{
       width: 264, background: 'var(--surface)', borderRight: '1px solid var(--line)',
       padding: '24px 16px 18px', display: 'flex', flexDirection: 'column',
-      // alignSelf: start + maxHeight (not height) keeps the sidebar from
-      // being stretched to the full grid-row height by the default
-      // align-self: stretch. When the home page's content is taller than
-      // the viewport, stretch made the sidebar match the row height
-      // (e.g. 2000px), so position:sticky never activated and the side
-      // menu scrolled away with the main content. alignSelf: 'start' +
-      // a viewport-cap on max-height pins it correctly. overflowY auto
-      // catches accounts with extra-long nav lists on a short laptop.
-      position: 'sticky', top: 0, alignSelf: 'start',
-      maxHeight: '100vh', overflowY: 'auto',
+      // Shell-scroll layout: the portal-shell grid is fixed at 100vh with
+      // overflow:hidden, so the sidebar already fills its grid row (default
+      // align-self: stretch) and never grows past the viewport. No
+      // position:sticky needed; overflow-y handles unusually tall nav
+      // configs on a short laptop.
+      height: '100%', overflowY: 'auto',
     }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '4px 8px 22px' }}>
         <LogoMark size={40} />
@@ -3112,9 +3108,16 @@ function App() {
   // 20 rows) and then clicks "โปรไฟล์" lands in the middle of the
   // profile page — every page feels like it starts somewhere different
   // because the browser preserves scroll across page state changes.
+  // Shell-scroll layout: target the .tenant-scroll container instead of
+  // window.scrollY — body itself never scrolls anymore.
   useEffect(() => {
-    if (typeof window === 'undefined') return;
-    try { window.scrollTo({ top: 0, behavior: 'auto' }); } catch { window.scrollTo(0, 0); }
+    if (typeof document === 'undefined') return;
+    const el = document.querySelector('.tenant-scroll');
+    if (el) {
+      try { el.scrollTo({ top: 0, behavior: 'auto' }); } catch { el.scrollTop = 0; }
+    } else if (typeof window !== 'undefined') {
+      try { window.scrollTo({ top: 0, behavior: 'auto' }); } catch { window.scrollTo(0, 0); }
+    }
   }, [page]);
 
   useEffect(() => onAuthExpired(() => {
@@ -3231,37 +3234,51 @@ function App() {
 
   return (
     <>
+      {/* Shell-scroll layout: the page itself never scrolls (height: 100vh
+          + overflow: hidden on the shell), and only the main column scrolls
+          via its own .tenant-scroll container. Without this the sidebar
+          rode along whenever the right column was taller than the viewport,
+          and the top bar got pushed off the top edge on long pages. Now
+          the sidebar + topbar stay anchored while content scrolls beneath. */}
       <div className="portal-shell" style={{
         display: 'grid', gridTemplateColumns: 'var(--sidebar-w) 1fr',
-        boxSizing: 'border-box', width: '100%', minWidth: 0, minHeight: '100vh', background: 'var(--bg)',
+        boxSizing: 'border-box', width: '100%', minWidth: 0,
+        height: '100vh', overflow: 'hidden', background: 'var(--bg)',
       }}>
         <Sidebar page={page} setPage={setPage} locale={locale} unpaidCount={unpaidCount}
           tenant={tenant} onLogout={onLogout} />
-        <div style={{ minWidth: 0, display: 'flex', flexDirection: 'column' }}>
+        <div style={{ minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
           <TopBar page={page} locale={locale} tenant={tenant} openMenu={() => setDrawer(true)}
             unpaidCount={unpaidCount} openTickets={openTickets}
             onBellClick={() => setPage(unpaidCount > 0 ? 'bills' : openTickets > 0 ? 'maintenance' : 'bills')} />
-          <main className="tenant-main" style={{
-            padding: 'var(--sp-6) var(--sp-7) calc(var(--bottomnav-h) + var(--sp-6))',
-            boxSizing: 'border-box', maxWidth: 'var(--max-content)', width: '100%', margin: '0 auto',
+          <div className="tenant-scroll" style={{
+            flex: 1, minHeight: 0,
+            overflowY: 'auto', overflowX: 'hidden',
+            scrollbarGutter: 'stable',
+            WebkitOverflowScrolling: 'touch',
           }}>
-            <SyncBanner errors={syncErrors} syncing={syncing}
-              onRetry={triggerRefresh} locale={locale} />
-            {page === 'home'        && <HomeView tenant={tenant} locale={locale} bills={bills}
-              tickets={tickets} contract={contract} goto={goto} />}
-            {page === 'bills'       && <BillsView locale={locale} bills={bills}
-              refresh={triggerRefresh} slipFeature={features?.slipUpload}
-              openId={openBillId} setOpenId={setOpenBillId} />}
-            {page === 'payments'    && <PaymentsView locale={locale} payments={payments}
-              syncErrors={syncErrors} goto={goto} />}
-            {page === 'contract'    && <ContractView locale={locale} tenant={tenant}
-              contract={contract} />}
-            {page === 'maintenance' && <MaintenanceView locale={locale} tenant={tenant}
-              tickets={tickets} refresh={triggerRefresh} />}
-            {page === 'profile'     && <ProfileView tenant={tenant} locale={locale} setLocale={setLocale}
-              theme={theme} setTheme={setTheme} onLogout={onLogout} features={features}
-              contract={contract} building={building} />}
-          </main>
+            <main className="tenant-main" style={{
+              padding: 'var(--sp-6) var(--sp-7) calc(var(--bottomnav-h) + var(--sp-6))',
+              boxSizing: 'border-box', maxWidth: 'var(--max-content)', width: '100%', margin: '0 auto',
+            }}>
+              <SyncBanner errors={syncErrors} syncing={syncing}
+                onRetry={triggerRefresh} locale={locale} />
+              {page === 'home'        && <HomeView tenant={tenant} locale={locale} bills={bills}
+                tickets={tickets} contract={contract} goto={goto} />}
+              {page === 'bills'       && <BillsView locale={locale} bills={bills}
+                refresh={triggerRefresh} slipFeature={features?.slipUpload}
+                openId={openBillId} setOpenId={setOpenBillId} />}
+              {page === 'payments'    && <PaymentsView locale={locale} payments={payments}
+                syncErrors={syncErrors} goto={goto} />}
+              {page === 'contract'    && <ContractView locale={locale} tenant={tenant}
+                contract={contract} />}
+              {page === 'maintenance' && <MaintenanceView locale={locale} tenant={tenant}
+                tickets={tickets} refresh={triggerRefresh} />}
+              {page === 'profile'     && <ProfileView tenant={tenant} locale={locale} setLocale={setLocale}
+                theme={theme} setTheme={setTheme} onLogout={onLogout} features={features}
+                contract={contract} building={building} />}
+            </main>
+          </div>
         </div>
       </div>
       <BottomNav page={page} setPage={setPage} locale={locale} unpaidCount={unpaidCount} />
