@@ -6381,15 +6381,37 @@ test('maintenance.rate: phone-only match scoped to tenant_id IS NULL (IDOR fix)'
   // Couples/family sharing a phone could rate each other's tickets via
   // the OR clause's phone fallback. Phone match now requires the ticket
   // to have NULL tenant_id (legacy/orphan rows only); identified tenants
-  // can only rate tickets where tenant_id matches their own.
+  // can only rate tickets where tenant_id matches their own. Legacy phone
+  // fallback is also room-scoped so a current tenant cannot rate an old
+  // phone-only ticket from another room.
   const fs = require('node:fs');
   const path = require('node:path');
   const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
-  assert.match(src, /AND \(\s*tenant_id = \$4\s*OR \(tenant_id IS NULL AND tenant_phone = \$5 AND \$5 <> ''\)\s*\)/,
-    'rate endpoint must scope phone-only match to NULL-tenant_id tickets');
+  assert.match(src, /AND \(\s*tenant_id = \$4\s*OR \(tenant_id IS NULL AND tenant_phone = \$5 AND \$5 <> '' AND room_id = \$6\)\s*\)/,
+    'rate endpoint must scope phone-only match to NULL-tenant_id tickets in the current room');
   assert.doesNotMatch(src,
     /AND \(tenant_id = \$4 OR \(tenant_phone = \$5 AND \$5 <> ''\)\)/,
     'old IDOR-prone OR clause must be replaced');
+});
+
+test('tenant maintenance list scopes legacy phone fallback to current room only', () => {
+  // Portal history used to list `tenant_id=$1 OR tenant_phone=$2`, which
+  // leaks another tenant's identified tickets when family members share a
+  // phone. The fallback is only for old rows with tenant_id NULL and must be
+  // tied to the logged-in tenant's current room.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const idx = src.indexOf("app.get('/api/tenant/maintenance'");
+  assert.ok(idx > 0, 'tenant maintenance list route must exist');
+  const body = src.slice(idx, src.indexOf("app.get('/api/tenant/payments'", idx));
+  assert.match(body,
+    /WHERE tenant_id = \$1\s+OR \(tenant_id IS NULL AND tenant_phone = \$2 AND \$2 <> '' AND room_id = \$3\)/,
+    'tenant maintenance list must not expose same-phone tickets from other tenants or rooms');
+  assert.match(body, /req\.tenant\.current_room_id \|\| ''/,
+    'legacy phone fallback must use the current room from the tenant session');
+  assert.doesNotMatch(body, /WHERE tenant_id = \$1 OR \(tenant_phone = \$2 AND \$2 <> ''\)/,
+    'old broad phone fallback must not remain');
 });
 
 test('notificationQueue: disabled OA throws fatal (no retry loop)', () => {

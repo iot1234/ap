@@ -5476,15 +5476,18 @@ app.get('/api/tenant/maintenance', requireTenant, async (req, res) => {
   const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 100);
   const offset = Math.max(Number(req.query.offset) || 0, 0);
   try {
-    // Match by tenant_id (durable across phone changes) OR phone (covers
-    // legacy tickets created before tenant_id was stamped at insert time).
+    // Match by tenant_id (durable across phone changes). Legacy rows created
+    // before tenant_id stamping may fall back to phone, but only when the row
+    // has no tenant_id and belongs to the tenant's current room; otherwise
+    // family/shared phones can leak another tenant's ticket history.
     const { rows } = await pool.query(
       `SELECT id, ticket_no, room_id, category, priority, status, title, description,
               created_at, completed_at, rating, rating_comment
          FROM maintenance_tickets
-         WHERE tenant_id = $1 OR (tenant_phone = $2 AND $2 <> '')
-         ORDER BY created_at DESC LIMIT $3 OFFSET $4`,
-      [req.tenant.tenant_id, req.tenant.phone || '', limit, offset]
+         WHERE tenant_id = $1
+            OR (tenant_id IS NULL AND tenant_phone = $2 AND $2 <> '' AND room_id = $3)
+         ORDER BY created_at DESC LIMIT $4 OFFSET $5`,
+      [req.tenant.tenant_id, req.tenant.phone || '', req.tenant.current_room_id || '', limit, offset]
     );
     res.json({ ok: true, tickets: rows, limit, offset });
   } catch (err) {
@@ -5604,12 +5607,12 @@ app.post('/api/tenant/maintenance/:id/rate', sameOrigin, csrfGuard, requireTenan
          WHERE id=$3
            AND (
              tenant_id = $4
-             OR (tenant_id IS NULL AND tenant_phone = $5 AND $5 <> '')
-           )
-           AND status='completed'
-           AND rating IS NULL
-         RETURNING ticket_no, rating, rating_comment, completed_at`,
-      [rating, comment, id, req.tenant.tenant_id, req.tenant.phone || '']
+            OR (tenant_id IS NULL AND tenant_phone = $5 AND $5 <> '' AND room_id = $6)
+            )
+            AND status='completed'
+            AND rating IS NULL
+          RETURNING ticket_no, rating, rating_comment, completed_at`,
+      [rating, comment, id, req.tenant.tenant_id, req.tenant.phone || '', req.tenant.current_room_id || '']
     );
     if (!rows.length) {
       return res.status(404).json({ error: 'ticket not found, not yours, not completed, or already rated' });
