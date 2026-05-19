@@ -179,6 +179,200 @@ async function checkR2() {
   }
 }
 
+async function checkUploadStorage(pool) {
+  const storage = require('./storage');
+  const status = storage.storageStatus();
+  const detail = {
+    mode: status.storageMode,
+    s3Configured: status.s3Configured,
+    uploadRoot: status.uploadRoot,
+    hasExplicitUploadDir: status.hasExplicitUploadDir,
+    productionLike: status.productionLike,
+    localUploadMayBeEphemeral: status.localUploadMayBeEphemeral,
+    counts: {},
+    missingLocalFileSamples: [],
+  };
+  const errors = [];
+  const warnings = [];
+
+  try {
+    if (status.storageMode === 'local') {
+      const rootExists = fs.existsSync(status.uploadRoot);
+      const accessPath = rootExists ? status.uploadRoot : path.dirname(status.uploadRoot);
+      detail.localAccess = { rootExists, checkedPath: accessPath, ok: false };
+      try {
+        fs.accessSync(accessPath, fs.constants.R_OK | fs.constants.W_OK);
+        detail.localAccess.ok = true;
+      } catch (err) {
+        detail.localAccess.error = err.message;
+        errors.push(`local upload path is not readable/writable: ${accessPath}`);
+      }
+      if (status.localUploadMayBeEphemeral) {
+        warnings.push(
+          'production-like runtime is storing uploads on app-local disk without R2/S3 or explicit UPLOAD_DIR; legal files may disappear after redeploy'
+        );
+      }
+    }
+
+    const countsQ = await pool.query(`
+      WITH invitation_files AS (
+        SELECT ci.id AS invitation_id, ci.draft->>'signatureFileId' AS file_id,
+               'contract_signature'::text AS expected_category, NULL::text AS expected_side
+          FROM contract_invitations ci
+         WHERE ci.status IN ('pending','submitted')
+        UNION ALL
+        SELECT ci.id, ci.draft->>'citizenIdFrontFileId',
+               'citizen_id_image'::text, 'front'::text
+          FROM contract_invitations ci
+         WHERE ci.status IN ('pending','submitted')
+        UNION ALL
+        SELECT ci.id, ci.draft->>'citizenIdBackFileId',
+               'citizen_id_image'::text, 'back'::text
+          FROM contract_invitations ci
+         WHERE ci.status IN ('pending','submitted')
+      )
+      SELECT
+        (SELECT COUNT(*)::int FROM file_uploads) AS file_rows,
+        (SELECT COUNT(*)::int FROM file_uploads WHERE storage='local') AS local_file_rows,
+        (SELECT COUNT(*)::int FROM file_uploads WHERE storage='s3') AS s3_file_rows,
+        (SELECT COUNT(*)::int FROM contracts c
+          WHERE c.deleted_at IS NULL
+            AND c.locked_at IS NOT NULL
+            AND c.signature_image_id IS NULL) AS locked_contracts_missing_signature,
+        (SELECT COUNT(*)::int FROM contracts c
+          WHERE c.deleted_at IS NULL
+            AND c.signature_image_id IS NOT NULL
+            AND NOT EXISTS (
+              SELECT 1 FROM file_uploads f WHERE f.id = c.signature_image_id
+            )) AS contract_signature_file_rows_missing,
+        (SELECT COUNT(*)::int FROM contracts c
+          JOIN file_uploads f ON f.id = c.signature_image_id
+         WHERE c.deleted_at IS NULL
+           AND (
+             f.category <> 'contract_signature'
+             OR COALESCE(f.ref_id, '') <> c.id::text
+           )) AS contract_signature_file_rows_mismatched,
+        (SELECT COUNT(*)::int FROM tenants t
+          WHERE t.deleted_at IS NULL
+            AND t.citizen_id_image_front_id IS NOT NULL
+            AND NOT EXISTS (
+              SELECT 1 FROM file_uploads f WHERE f.id = t.citizen_id_image_front_id
+            )) +
+        (SELECT COUNT(*)::int FROM tenants t
+          WHERE t.deleted_at IS NULL
+            AND t.citizen_id_image_back_id IS NOT NULL
+            AND NOT EXISTS (
+              SELECT 1 FROM file_uploads f WHERE f.id = t.citizen_id_image_back_id
+            )) AS tenant_identity_file_rows_missing,
+        (SELECT COUNT(*)::int FROM tenants t
+          JOIN file_uploads f ON f.id = t.citizen_id_image_front_id
+         WHERE t.deleted_at IS NULL
+           AND (
+             f.category <> 'citizen_id_image'
+             OR COALESCE(f.ref_id, '') <> t.id::text
+             OR (f.side IS NOT NULL AND f.side <> 'front')
+           )) +
+        (SELECT COUNT(*)::int FROM tenants t
+          JOIN file_uploads f ON f.id = t.citizen_id_image_back_id
+         WHERE t.deleted_at IS NULL
+           AND (
+             f.category <> 'citizen_id_image'
+             OR COALESCE(f.ref_id, '') <> t.id::text
+             OR (f.side IS NOT NULL AND f.side <> 'back')
+           )) AS tenant_identity_file_rows_mismatched,
+        (SELECT COUNT(*)::int
+           FROM invitation_files x
+          WHERE NULLIF(x.file_id, '') IS NOT NULL
+            AND (
+              x.file_id !~ '^[0-9]+$'
+              OR NOT EXISTS (
+                SELECT 1 FROM file_uploads f
+                 WHERE f.id = CASE
+                   WHEN x.file_id ~ '^[0-9]+$' THEN x.file_id::bigint
+                   ELSE NULL
+                 END
+                   AND f.category = x.expected_category
+                   AND f.ref_id = 'invitation-' || x.invitation_id::text
+                   AND (
+                     x.expected_side IS NULL
+                     OR f.side = x.expected_side
+                     OR f.side IS NULL
+                   )
+              )
+            )) AS invitation_draft_file_invalid`);
+    const counts = countsQ.rows[0] || {};
+    detail.counts = {
+      file_rows: Number(counts.file_rows) || 0,
+      local_file_rows: Number(counts.local_file_rows) || 0,
+      s3_file_rows: Number(counts.s3_file_rows) || 0,
+      locked_contracts_missing_signature: Number(counts.locked_contracts_missing_signature) || 0,
+      contract_signature_file_rows_missing: Number(counts.contract_signature_file_rows_missing) || 0,
+      contract_signature_file_rows_mismatched: Number(counts.contract_signature_file_rows_mismatched) || 0,
+      tenant_identity_file_rows_missing: Number(counts.tenant_identity_file_rows_missing) || 0,
+      tenant_identity_file_rows_mismatched: Number(counts.tenant_identity_file_rows_mismatched) || 0,
+      invitation_draft_file_invalid: Number(counts.invitation_draft_file_invalid) || 0,
+    };
+
+    if (!status.s3Configured && detail.counts.s3_file_rows > 0) {
+      errors.push(`${detail.counts.s3_file_rows} uploaded file row(s) are stored as s3 but R2/S3 secrets are not fully configured`);
+    }
+    if (detail.counts.locked_contracts_missing_signature > 0) {
+      errors.push(`${detail.counts.locked_contracts_missing_signature} locked contract(s) have no signature_image_id`);
+    }
+    if (detail.counts.contract_signature_file_rows_missing > 0) {
+      errors.push(`${detail.counts.contract_signature_file_rows_missing} contract signature reference(s) point to missing file_uploads rows`);
+    }
+    if (detail.counts.contract_signature_file_rows_mismatched > 0) {
+      errors.push(`${detail.counts.contract_signature_file_rows_mismatched} contract signature file row(s) have wrong category/ref_id`);
+    }
+    if (detail.counts.tenant_identity_file_rows_missing > 0) {
+      errors.push(`${detail.counts.tenant_identity_file_rows_missing} tenant citizen-ID file reference(s) point to missing file_uploads rows`);
+    }
+    if (detail.counts.tenant_identity_file_rows_mismatched > 0) {
+      errors.push(`${detail.counts.tenant_identity_file_rows_mismatched} tenant citizen-ID file row(s) have wrong category/ref_id/side`);
+    }
+    if (detail.counts.invitation_draft_file_invalid > 0) {
+      errors.push(`${detail.counts.invitation_draft_file_invalid} pending/submitted contract invitation draft file reference(s) are invalid`);
+    }
+
+    if (status.storageMode === 'local') {
+      const localFilesQ = await pool.query(`
+        SELECT id, category, ref_id, filename, storage, uploaded_at
+          FROM file_uploads
+         WHERE storage='local'
+           AND category IN ('contract_signature','citizen_id_image','slip')
+         ORDER BY id DESC
+         LIMIT 200`);
+      const missing = (localFilesQ.rows || []).filter((row) => !storage.localFileExists(row));
+      detail.sampledLocalFiles = localFilesQ.rows.length;
+      detail.missingLocalFileSamples = missing.slice(0, 10).map((row) => ({
+        id: row.id,
+        category: row.category,
+        refId: row.ref_id,
+        filename: row.filename,
+        uploadedAt: row.uploaded_at,
+      }));
+      if (missing.length > 0) {
+        errors.push(`${missing.length} sampled local legal/payment file(s) are missing from disk`);
+      }
+    }
+
+    if (errors.length) {
+      return { status: 'error', message: `${errors.length} upload storage error(s)`, detail: { ...detail, errors, warnings } };
+    }
+    if (warnings.length) {
+      return { status: 'warn', message: `${warnings.length} upload storage warning(s)`, detail: { ...detail, warnings } };
+    }
+    return {
+      status: 'ok',
+      message: `Upload storage OK (${detail.counts.file_rows} file row(s), mode=${status.storageMode})`,
+      detail,
+    };
+  } catch (err) {
+    return { status: 'error', message: `Upload storage check failed: ${err.message}`, detail };
+  }
+}
+
 async function checkNotificationQueue(pool) {
   try {
     const res = await pool.query(`
@@ -1388,6 +1582,7 @@ const CHECKS = [
   { id: 'line_oa',             label: 'LINE OA reachability',  fn: (p) => checkLineOa(p) },
   { id: 'smtp',                label: 'SMTP transport',        fn: (_p, f) => checkSmtp(f) },
   { id: 'r2',                  label: 'R2 / S3 storage',       fn: () => checkR2() },
+  { id: 'upload_storage',      label: 'Upload storage guard',  fn: (p) => checkUploadStorage(p) },
   { id: 'queue',               label: 'Notification queue',    fn: (p) => checkNotificationQueue(p) },
   { id: 'failed_logins',       label: 'Failed logins (15min)', fn: (p) => checkRecentFailedLogins(p) },
   { id: 'lockouts',            label: 'Active lockouts',       fn: (p) => checkActiveLockouts(p) },
@@ -1451,4 +1646,4 @@ async function runChecks(pool) {
   };
 }
 
-module.exports = { runChecks, CHECKS };
+module.exports = { runChecks, CHECKS, checkUploadStorage };

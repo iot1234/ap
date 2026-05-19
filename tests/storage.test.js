@@ -22,3 +22,14 @@ test('parseBase64 with raw base64', () => {
 test('parseBase64 throws on non-string', () => {
   assert.throws(() => storage.parseBase64(123));
 });
+
+test('storage status exposes durability and local-file guard helpers', () => {
+  const status = storage.storageStatus();
+  assert.ok(status.uploadRoot);
+  assert.ok(['local', 's3'].includes(status.storageMode));
+  assert.equal(typeof status.localUploadMayBeEphemeral, 'boolean');
+  assert.equal(
+    storage.localFileExists({ storage: 'local', category: '..', filename: 'x.png' }),
+    false
+  );
+});

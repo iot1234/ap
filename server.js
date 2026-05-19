@@ -11992,15 +11992,26 @@ app.put('/api/contract-fill/:token', rateLimitContractFill, sameOrigin, async (r
     // shouldn't have their link expire underneath them. We bump it to
     // 7 days from now if the current expires_at is closer than that.
     // Idle invitations still expire on the original schedule.
-    await pool.query(
+    const saved = await pool.query(
       `UPDATE contract_invitations
           SET draft=$1::jsonb,
               expires_at = GREATEST(expires_at, NOW() + INTERVAL '7 days'),
               updated_at=NOW()
-        WHERE id=$2`,
+        WHERE id=$2 AND status='pending'
+        RETURNING draft`,
       [JSON.stringify(merged), inv.id]
     );
-    res.json({ ok: true, draft: merged });
+    if (!saved.rows.length) {
+      const raw = await contractInvitation.inspectByToken(pool, token);
+      if (raw && raw.status === 'submitted') {
+        return res.status(409).json({
+          error: 'ส่งให้ตรวจสอบแล้ว — แก้ไขไม่ได้จนกว่า admin จะ reject',
+          code: 'NOT_EDITABLE',
+        });
+      }
+      return _contractFillFriendlyError(pool, contractInvitation, token, res);
+    }
+    res.json({ ok: true, draft: saved.rows[0].draft || merged });
   } catch (err) {
     console.error('contract-fill PUT error:', err);
     res.status(500).json({ error: 'internal error' });
@@ -12174,14 +12185,47 @@ app.post('/api/contract-fill/:token/submit', rateLimitContractFill, sameOrigin, 
     // submitted row lazy-expired before admin gets to review it (now
     // prevented by the resolveActiveByToken change too, but defense in
     // depth is cheap).
-    await pool.query(
+    const submitUpdate = await pool.query(
       `UPDATE contract_invitations
           SET status='submitted', draft=$1::jsonb, submitted_at=NOW(),
               expires_at = GREATEST(expires_at, NOW() + INTERVAL '60 days'),
               updated_at=NOW()
-        WHERE id=$2 AND status='pending'`,
+        WHERE id=$2 AND status='pending'
+        RETURNING id`,
       [JSON.stringify(draft), inv.id]
     );
+    if (!submitUpdate.rows.length) {
+      const raw = await contractInvitation.inspectByToken(pool, token);
+      if (raw && raw.status === 'submitted') {
+        return res.json({
+          ok: true, invitationId: inv.id, status: 'submitted',
+          alreadySubmitted: true,
+        });
+      }
+      if (raw && raw.status === 'approved') {
+        return res.status(409).json({
+          error: 'สัญญานี้ได้รับการอนุมัติแล้ว — ไม่ต้องส่งซ้ำ',
+          code: 'ALREADY_APPROVED',
+        });
+      }
+      if (raw && raw.status === 'revoked') {
+        return res.status(409).json({
+          error: 'ลิงก์นี้ถูกยกเลิกโดยเจ้าของหอพัก — ติดต่อขอลิงก์ใหม่',
+          code: 'REVOKED',
+        });
+      }
+      if (raw && raw.status === 'expired') {
+        return res.status(409).json({
+          error: 'ลิงก์หมดอายุแล้ว — ติดต่อเจ้าของหอพักเพื่อขอต่ออายุ',
+          code: 'EXPIRED',
+        });
+      }
+      return res.status(409).json({
+        error: 'ลิงก์นี้แก้ไขไม่ได้แล้ว',
+        code: 'NOT_EDITABLE',
+        status: raw ? raw.status : null,
+      });
+    }
     // Owner notify so admin sees a fresh submission immediately.
     try {
       const flags = await features.load(pool);
@@ -13095,6 +13139,23 @@ app.get('/api/admin/production-readiness', requireAuth, requireRole('owner'), as
       'เปิดที่หน้า Features (ข้อมูลใหม่จะถูกเข้ารหัส; ของเก่ายังเป็น plaintext)');
   } else {
     ok('citizen_enc', 'Citizen ID encryption', 'เปิดอยู่');
+  }
+  const uploadStorage = storage.storageStatus();
+  if (uploadStorage.s3Configured) {
+    ok('upload_storage', 'Upload storage',
+      `R2/S3 configured; uploads are not tied to the app container disk`);
+  } else if (NODE_ENV === 'production' && !uploadStorage.hasExplicitUploadDir) {
+    fail('upload_storage', 'Upload storage',
+      'ไฟล์สัญญา/ลายเซ็น/บัตรประชาชนจะเก็บบน local disk ของ container และอาจหายเมื่อ redeploy',
+      'ตั้งค่า R2_* ที่ Settings → Secrets หรือกำหนด UPLOAD_DIR ไปยัง persistent volume ก่อนใช้งานจริง');
+  } else if (uploadStorage.hasExplicitUploadDir) {
+    warn('upload_storage', 'Upload storage',
+      `ใช้ local UPLOAD_DIR=${uploadStorage.uploadRoot}`,
+      'ยืนยันว่า path นี้เป็น persistent volume และ backup โฟลเดอร์ uploads คู่กับ DB');
+  } else {
+    warn('upload_storage', 'Upload storage',
+      'ใช้ local ./uploads เหมาะกับ dev เท่านั้น',
+      'production ควรใช้ R2/S3 หรือ persistent UPLOAD_DIR');
   }
   if (flags.autoBackup && flags.autoBackup.enabled) {
     const r2 = !!(sec.get('R2_ACCESS_KEY_ID') && sec.get('R2_BUCKET'));

@@ -103,7 +103,9 @@ async function resolveActiveByToken(pool, token) {
     if (expRows.length && expRows[0].is_expired) {
       try {
         await pool.query(
-          `UPDATE contract_invitations SET status='expired', updated_at=NOW() WHERE id=$1`,
+          `UPDATE contract_invitations
+              SET status='expired', updated_at=NOW()
+            WHERE id=$1 AND status='pending'`,
           [row.id]
         );
       } catch { /* best-effort; don't block the read on the flip */ }

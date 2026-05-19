@@ -3697,6 +3697,37 @@ test('storage notifies owner when R2 upload fails', () => {
     'R2 fail must alert owner with explicit subject');
 });
 
+test('health checks guard upload storage and contract legal file references', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const health = fs.readFileSync(path.join(__dirname, '..', 'services', 'healthCheck.js'), 'utf8');
+  const storageSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'storage.js'), 'utf8');
+  const serverSrc = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+
+  assert.match(storageSrc, /function storageStatus\(\)/,
+    'storage service must expose deployment durability status');
+  assert.match(storageSrc, /function localFileExists\(rec\)/,
+    'health check must verify local files through the same path guard as reads');
+  assert.match(health, /async function checkUploadStorage\(pool\)/,
+    'admin health must have an upload storage guard');
+  assert.match(health, /localUploadMayBeEphemeral/,
+    'health must warn when production uploads can land on ephemeral local disk');
+  assert.match(health, /locked_contracts_missing_signature/,
+    'locked contracts without signatures must be surfaced');
+  assert.match(health, /contract_signature_file_rows_missing/,
+    'contract signature ids pointing at missing file_uploads rows must be surfaced');
+  assert.match(health, /tenant_identity_file_rows_missing/,
+    'tenant citizen-ID file ids pointing at missing file_uploads rows must be surfaced');
+  assert.match(health, /invitation_draft_file_invalid/,
+    'pending/submitted invitation drafts must not silently hold invalid file ids');
+  assert.match(health, /storage\.localFileExists\(row\)/,
+    'local legal/payment file rows must be sampled against disk');
+  assert.match(health, /id: 'upload_storage'/,
+    'upload storage guard must be registered in CHECKS so anomaly alerts fire');
+  assert.match(serverSrc, /fail\('upload_storage'/,
+    'production readiness must fail when production upload storage is unsafe');
+});
+
 test('checkout revokes access cards + records refund + pro-rates closing bill', () => {
   // Three things the old checkout missed: cards stayed active (security),
   // refund only landed in audit_logs (vanished from reports), no pro-rate
@@ -5214,6 +5245,30 @@ test('public fill: uploads are persisted into draft before submit can race', () 
     'upload handler must clean up the saved file if draft persistence fails');
   assert.match(block, /storage\.remove\(pool, previousFileId\)/,
     'upload handler must clean up replaced files after a successful replacement');
+});
+
+test('public fill: autosave/submit writes are guarded against status races', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const invites = fs.readFileSync(path.join(__dirname, '..', 'services', 'contractInvitation.js'), 'utf8');
+
+  const putBlock = server.match(/app\.put\('\/api\/contract-fill\/:token'[\s\S]+?app\.post\('\/api\/contract-fill\/:token\/upload'/);
+  assert.ok(putBlock, 'PUT contract-fill handler must be present');
+  assert.match(putBlock[0], /WHERE id=\$2 AND status='pending'[\s\S]{0,80}RETURNING draft/,
+    'autosave must guard the UPDATE itself, not only the pre-read status');
+  assert.match(putBlock[0], /if \(!saved\.rows\.length\)/,
+    'autosave must handle a concurrent submit/revoke/approve changing status');
+
+  const submitBlock = server.match(/app\.post\('\/api\/contract-fill\/:token\/submit'[\s\S]+?\/\/ === Legacy single-template alias/);
+  assert.ok(submitBlock, 'submit contract-fill handler must be present');
+  assert.match(submitBlock[0], /WHERE id=\$2 AND status='pending'[\s\S]{0,80}RETURNING id/,
+    'submit must only flip pending rows and observe whether it won the race');
+  assert.match(submitBlock[0], /if \(!submitUpdate\.rows\.length\)/,
+    'submit must not report success after a concurrent terminal transition');
+
+  assert.match(invites, /WHERE id=\$1 AND status='pending'/,
+    'lazy expiry must not turn a concurrently submitted invitation into expired');
 });
 
 test('admin UI: contract-invitations page registered + script-loaded', () => {

@@ -40,11 +40,33 @@ function s3Configured() {
     && secrets.get('R2_BUCKET'));
 }
 
+function isProductionLikeRuntime() {
+  const nodeEnv = process.env.NODE_ENV || 'production';
+  return nodeEnv === 'production'
+    || !!process.env.RAILWAY_ENVIRONMENT
+    || !!process.env.RAILWAY_PROJECT_ID
+    || !!process.env.RAILWAY_SERVICE_ID;
+}
+
 // Allow operators to point uploads at a Railway/Docker mounted volume so
 // files survive container restarts. Falls back to ./uploads in dev.
 const UPLOAD_ROOT = process.env.UPLOAD_DIR
   ? path.resolve(process.env.UPLOAD_DIR)
   : path.join(__dirname, '..', 'uploads');
+
+function storageStatus() {
+  const usingS3 = s3Configured();
+  const hasExplicitUploadDir = !!process.env.UPLOAD_DIR;
+  const productionLike = isProductionLikeRuntime();
+  return {
+    storageMode: usingS3 ? 's3' : 'local',
+    s3Configured: usingS3,
+    uploadRoot: UPLOAD_ROOT,
+    hasExplicitUploadDir,
+    productionLike,
+    localUploadMayBeEphemeral: !usingS3 && productionLike && !hasExplicitUploadDir,
+  };
+}
 
 // Whitelisted mime → extension. Anything else is rejected.
 const MIME_EXT = {
@@ -257,6 +279,15 @@ function _safeLocalPath(category, filename) {
   return resolved;
 }
 
+function localFileExists(rec) {
+  if (!rec || rec.storage === 's3') return null;
+  try {
+    return fs.existsSync(_safeLocalPath(rec.category, rec.filename));
+  } catch {
+    return false;
+  }
+}
+
 // Read a stored file's bytes back. Used by the auth-gated /files/:id
 // route so it can stream from either backend without leaking the URL
 // shape to clients.
@@ -316,4 +347,15 @@ async function remove(pool, id) {
  */
 function rootPath() { return UPLOAD_ROOT; }
 
-module.exports = { saveBase64, remove, readFile, rootPath, parseBase64, detectMime, ensureDir, s3Configured };
+module.exports = {
+  saveBase64,
+  remove,
+  readFile,
+  rootPath,
+  parseBase64,
+  detectMime,
+  ensureDir,
+  s3Configured,
+  storageStatus,
+  localFileExists,
+};
