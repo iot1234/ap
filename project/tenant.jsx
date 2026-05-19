@@ -2796,7 +2796,16 @@ function Sidebar({ page, setPage, locale, unpaidCount, tenant, onLogout }) {
     <aside className="portal-sidebar" style={{
       width: 264, background: 'var(--surface)', borderRight: '1px solid var(--line)',
       padding: '24px 16px 18px', display: 'flex', flexDirection: 'column',
-      position: 'sticky', top: 0, height: '100vh',
+      // alignSelf: start + maxHeight (not height) keeps the sidebar from
+      // being stretched to the full grid-row height by the default
+      // align-self: stretch. When the home page's content is taller than
+      // the viewport, stretch made the sidebar match the row height
+      // (e.g. 2000px), so position:sticky never activated and the side
+      // menu scrolled away with the main content. alignSelf: 'start' +
+      // a viewport-cap on max-height pins it correctly. overflowY auto
+      // catches accounts with extra-long nav lists on a short laptop.
+      position: 'sticky', top: 0, alignSelf: 'start',
+      maxHeight: '100vh', overflowY: 'auto',
     }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '4px 8px 22px' }}>
         <LogoMark size={40} />
