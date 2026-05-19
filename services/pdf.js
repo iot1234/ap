@@ -99,57 +99,103 @@ async function renderBillPdf(bill, stream) {
     console.warn('[pdf] QR skipped: bill total must be greater than 0');
   }
 
+  function measuredTextHeight(fontName, fontSize, text, width, options = {}) {
+    doc.font(fontName).fontSize(fontSize);
+    return doc.heightOfString(String(text || ' '), { width, ...options });
+  }
+
+  function cappedTextHeight(fontName, fontSize, text, width, maxHeight, options = {}) {
+    return Math.min(measuredTextHeight(fontName, fontSize, text, width, options), maxHeight);
+  }
+
+  function truncateText(value, maxChars) {
+    const text = String(value || '');
+    if (text.length <= maxChars) return text;
+    return `${text.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
+  }
+
   function drawHeader() {
+    const headerY = MARGIN;
+    const headerH = 108;
+    const leftW = 290;
+    const rightX = 360;
+    const rightW = 187;
+
     doc
       .fillColor(C.ink)
-      .font('th-bold').fontSize(20).text(buildingName, MARGIN, MARGIN, { width: 290 })
+      .font('th-bold').fontSize(20)
+      .text(truncateText(buildingName, 72), MARGIN, headerY, { width: leftW, height: 46, ellipsis: true })
       .font('th').fontSize(10).fillColor(C.muted)
-      .text(buildingAddr || '', MARGIN, doc.y + 2, { width: 290 })
-      .text(buildingPhone ? `โทร. ${buildingPhone}` : '', MARGIN, doc.y + 2, { width: 290 });
+      .text(truncateText(buildingAddr || '', 90), MARGIN, headerY + 52, { width: leftW, height: 28, ellipsis: true })
+      .text(buildingPhone ? truncateText(`โทร. ${buildingPhone}`, 54) : '', MARGIN, headerY + 84, { width: leftW, height: 16, ellipsis: true });
 
     doc
       .fillColor(C.ink).font('th-bold').fontSize(16)
-      .text(isPaid ? 'ใบเสร็จรับเงิน' : 'ใบแจ้งหนี้', 360, MARGIN, { width: 187, align: 'right' })
+      .text(isPaid ? 'ใบเสร็จรับเงิน' : 'ใบแจ้งหนี้', rightX, headerY, { width: rightW, height: 24, align: 'right', ellipsis: true })
       .font('th').fontSize(10).fillColor(C.ink2)
-      .text(`เลขที่: ${bill.billNo || '—'}`, 360, doc.y + 4, { width: 187, align: 'right' })
-      .text(`วันที่ออก: ${fmtThaiDate(new Date())}`, 360, doc.y + 2, { width: 187, align: 'right' });
+      .text(truncateText(`เลขที่: ${bill.billNo || '—'}`, 52), rightX, headerY + 32, { width: rightW, height: 28, align: 'right', ellipsis: true })
+      .text(`วันที่ออก: ${fmtThaiDate(new Date())}`, rightX, headerY + 64, { width: rightW, height: 16, align: 'right', ellipsis: true });
     if (isPaid && bill.paidAt) {
       doc.font('th').fontSize(10).fillColor('#2f8f5b')
-        .text(`ชำระเมื่อ: ${fmtThaiDate(new Date(bill.paidAt))}`, 360, doc.y + 2,
-          { width: 187, align: 'right' });
+        .text(`ชำระเมื่อ: ${fmtThaiDate(new Date(bill.paidAt))}`, rightX, headerY + 84,
+          { width: rightW, height: 18, align: 'right', ellipsis: true });
     }
 
+    const lineY = headerY + headerH;
     doc
-      .moveTo(MARGIN, 130).lineTo(PAGE_W - MARGIN, 130)
+      .moveTo(MARGIN, lineY).lineTo(PAGE_W - MARGIN, lineY)
       .lineWidth(1).strokeColor(C.border).stroke();
+    return lineY + 16;
   }
 
-  function drawTenantBlock() {
-    const y = 148;
+  function drawTenantBlock(startY) {
+    const pad = 10;
+    const leftW = 290;
+    const rightX = 360;
+    const rightW = 187;
+    const tenantNameText = truncateText(bill.tenantName || '—', 72);
+    const tenantNameH = cappedTextHeight('th-bold', 12, tenantNameText, leftW, 34);
+    const phoneText = bill.tenantPhone ? truncateText(`โทร. ${bill.tenantPhone}`, 70) : '';
+    const phoneH = phoneText ? cappedTextHeight('th', 10, phoneText, leftW, 28) : 0;
+    const roomText = truncateText(bill.roomId || '—', 58);
+    const roomH = cappedTextHeight('th-bold', 12, roomText, rightW, 34, { align: 'right' });
+    const periodText = bill.period ? truncateText(`รอบบิล ${bill.period}`, 66) : '';
+    const periodH = periodText ? cappedTextHeight('th', 10, periodText, rightW, 30, { align: 'right' }) : 0;
+    const leftH = 12 + 4 + tenantNameH + (phoneH ? 3 + phoneH : 0);
+    const rightH = 12 + 4 + roomH + (periodH ? 3 + periodH : 0);
+    const tenantBlockH = Math.max(66, leftH, rightH) + pad * 2;
+    const y = startY + pad;
+
+    doc.roundedRect(MARGIN, startY, CONTENT_W, tenantBlockH, 7).fill('#fffdf8');
+    doc.roundedRect(MARGIN, startY, CONTENT_W, tenantBlockH, 7)
+      .lineWidth(0.5).strokeColor(C.border).stroke();
     doc
       .fontSize(10).fillColor(C.muted).text('เรียกเก็บจาก', MARGIN, y)
-      .font('th-bold').fontSize(12).fillColor(C.ink).text(bill.tenantName || '—', MARGIN, y + 14, { width: 290 });
-    if (bill.tenantPhone) {
+      .font('th-bold').fontSize(12).fillColor(C.ink)
+      .text(tenantNameText, MARGIN, y + 16, { width: leftW, height: tenantNameH, ellipsis: true });
+    if (phoneText) {
       doc.font('th').fontSize(10).fillColor(C.ink2)
-        .text(`โทร. ${bill.tenantPhone}`, MARGIN, doc.y + 2, { width: 290 });
+        .text(phoneText, MARGIN, y + 16 + tenantNameH + 3, { width: leftW, height: phoneH, ellipsis: true });
     }
 
     doc
       .font('th').fontSize(10).fillColor(C.muted)
-      .text('ห้องเลขที่', 360, y, { width: 187, align: 'right' })
+      .text('ห้องเลขที่', rightX, y, { width: rightW, align: 'right' })
       .font('th-bold').fontSize(12).fillColor(C.ink)
-      .text(bill.roomId || '—', 360, y + 14, { width: 187, align: 'right' });
-    if (bill.period) {
+      .text(roomText, rightX, y + 16, { width: rightW, height: roomH, align: 'right', ellipsis: true });
+    if (periodText) {
       doc.font('th').fontSize(10).fillColor(C.ink2)
-        .text(`รอบบิล ${bill.period}`, 360, doc.y + 2, { width: 187, align: 'right' });
+        .text(periodText, rightX, y + 16 + roomH + 3, { width: rightW, height: periodH, align: 'right', ellipsis: true });
     }
+    return startY + tenantBlockH + 18;
   }
 
   function drawContinuationHeader() {
     doc.font('th-bold').fontSize(13).fillColor(C.ink)
       .text(isPaid ? 'ใบเสร็จรับเงิน' : 'ใบแจ้งหนี้', MARGIN, MARGIN, { width: 240 });
+    const continuationText = truncateText(`เลขที่ ${bill.billNo || '—'} · ห้อง ${bill.roomId || '—'}`, 80);
     doc.font('th').fontSize(9).fillColor(C.muted)
-      .text(`เลขที่ ${bill.billNo || '—'} · ห้อง ${bill.roomId || '—'}`, MARGIN, doc.y + 2, { width: 300 });
+      .text(continuationText, MARGIN, doc.y + 2, { width: 300, height: 24, ellipsis: true });
     doc.moveTo(MARGIN, 86).lineTo(PAGE_W - MARGIN, 86)
       .lineWidth(0.5).strokeColor(C.border).stroke();
     return 104;
@@ -164,9 +210,8 @@ async function renderBillPdf(bill, stream) {
     return y + 30;
   }
 
-  let y = 220;
-  drawHeader();
-  drawTenantBlock();
+  let y = drawHeader();
+  y = drawTenantBlock(y);
   y = drawTableHeader(y);
 
   function addPageWithTableHeader() {
@@ -184,28 +229,26 @@ async function renderBillPdf(bill, stream) {
 
   for (const it of items) {
     doc.font('th').fontSize(10);
-    const label = String(it.label || '');
-    const detail = String(it.detail || '');
-    const qty = String(it.qty || '');
+    const label = truncateText(it.label || '', 84);
+    const detail = truncateText(it.detail || '', 100);
+    const qty = truncateText(it.qty || '', 44);
     const amount = fmtCurrency(it.amount);
-    const labelH = doc.heightOfString(label || ' ', { width: colW.label });
-    doc.font('th').fontSize(8.5);
-    const detailH = detail ? doc.heightOfString(detail, { width: colW.label }) : 0;
-    doc.font('th').fontSize(10);
-    const qtyH = doc.heightOfString(qty || ' ', { width: colW.qty, align: 'center' });
-    const amountH = doc.heightOfString(amount, { width: colW.amount, align: 'right' });
+    const labelH = cappedTextHeight('th', 10, label || ' ', colW.label, 36);
+    const detailH = detail ? cappedTextHeight('th', 8.5, detail, colW.label, 30) : 0;
+    const qtyH = cappedTextHeight('th', 10, qty || ' ', colW.qty, 30, { align: 'center' });
+    const amountH = cappedTextHeight('th', 10, amount, colW.amount, 18, { align: 'right' });
     const labelBlockH = labelH + (detail ? detailH + 2 : 0);
     const rowH = Math.max(22, labelBlockH, qtyH, amountH) + 8;
     if (y + rowH > CONTENT_BOTTOM) addPageWithTableHeader();
     doc.font('th').fontSize(10).fillColor(C.ink)
-      .text(label, colX.label, y + 4, { width: colW.label });
+      .text(label, colX.label, y + 4, { width: colW.label, height: labelH, ellipsis: true });
     if (detail) {
       doc.font('th').fontSize(8.5).fillColor(C.muted)
-        .text(detail, colX.label, y + 4 + labelH + 2, { width: colW.label });
+        .text(detail, colX.label, y + 4 + labelH + 2, { width: colW.label, height: detailH, ellipsis: true });
     }
     doc.font('th').fontSize(10).fillColor(C.ink)
-      .text(qty, colX.qty, y + 4, { width: colW.qty, align: 'center' })
-      .text(amount, colX.amount, y + 4, { width: colW.amount, align: 'right' });
+      .text(qty, colX.qty, y + 4, { width: colW.qty, height: qtyH, align: 'center', ellipsis: true })
+      .text(amount, colX.amount, y + 4, { width: colW.amount, height: amountH, align: 'right', ellipsis: true });
     y += rowH;
   }
 
@@ -227,8 +270,29 @@ async function renderBillPdf(bill, stream) {
     .filter((m) => m && m.enabled && m.key !== 'promptpay' && m.key !== 'bank');
   const hasBank = !!(bill.bankInfo && bill.bankInfo.account);
   const qrCardH = qrPng ? 192 : 0;
-  const bankCardH = hasBank ? 76 : 0;
-  const extraCardH = extraMethods.length ? 22 + extraMethods.length * 13 : 0;
+  const paymentRightW = qrPng ? CONTENT_W - 238 - 16 : CONTENT_W;
+  const paymentTextW = paymentRightW - 24;
+  const bankTitleH = hasBank ? measuredTextHeight('th-bold', 10, 'โอนผ่านธนาคาร', paymentTextW) : 0;
+  const bankNameText = hasBank ? truncateText(bill.bankInfo.bank || '—', 92) : '';
+  const bankAccountText = hasBank ? truncateText(bill.bankInfo.account, 86) : '';
+  const bankOwnerText = hasBank && bill.bankInfo.name ? truncateText(bill.bankInfo.name, 96) : '';
+  const bankNameH = hasBank ? cappedTextHeight('th', 10, bankNameText, paymentTextW, 36) : 0;
+  const bankAccountH = hasBank ? cappedTextHeight('th-bold', 11, bankAccountText, paymentTextW, 38) : 0;
+  const bankOwnerH = bankOwnerText
+    ? cappedTextHeight('th', 9, bankOwnerText, paymentTextW, 30)
+    : 0;
+  const bankCardH = hasBank
+    ? Math.max(76, 18 + bankTitleH + 4 + bankNameH + 3 + bankAccountH + (bankOwnerH ? 3 + bankOwnerH : 0) + 10)
+    : 0;
+  const extraTitleH = extraMethods.length
+    ? measuredTextHeight('th-bold', 10, 'ช่องทางที่รับชำระอื่น', paymentTextW)
+    : 0;
+  const extraMethodHeights = extraMethods.map((m) => (
+    cappedTextHeight('th', 9, `• ${truncateText(m.label || '—', 96)}`, paymentTextW, 28, { lineGap: 1 })
+  ));
+  const extraCardH = extraMethods.length
+    ? Math.max(42, 12 + extraTitleH + 4 + extraMethodHeights.reduce((sum, h) => sum + h + 3, 0) + 8)
+    : 0;
   const rightH = [bankCardH, extraCardH].filter(Boolean).reduce((s, h) => s + h + (s ? 8 : 0), 0);
   const paymentH = Math.max(qrCardH, rightH);
   if (paymentH > 0) {
@@ -259,13 +323,16 @@ async function renderBillPdf(bill, stream) {
       doc.roundedRect(rightX, rightY, rightW, bankCardH, 10).fill(C.bg);
       doc.fillColor(C.ink2).font('th-bold').fontSize(10)
         .text('โอนผ่านธนาคาร', rightX + 12, rightY + 8, { width: rightW - 24 });
+      let bankLineY = doc.y + 4;
       doc.font('th').fontSize(10).fillColor(C.ink)
-        .text(bill.bankInfo.bank || '—', rightX + 12, rightY + 24, { width: rightW - 24 });
+        .text(bankNameText, rightX + 12, bankLineY, { width: rightW - 24, height: bankNameH, ellipsis: true });
+      bankLineY = doc.y + 3;
       doc.font('th-bold').fontSize(11).fillColor(C.ink)
-        .text(bill.bankInfo.account, rightX + 12, rightY + 40, { width: rightW - 24 });
-      if (bill.bankInfo.name) {
+        .text(bankAccountText, rightX + 12, bankLineY, { width: rightW - 24, height: bankAccountH, ellipsis: true });
+      if (bankOwnerText) {
+        bankLineY = doc.y + 3;
         doc.font('th').fontSize(9).fillColor(C.muted)
-          .text(bill.bankInfo.name, rightX + 12, rightY + 58, { width: rightW - 24 });
+          .text(bankOwnerText, rightX + 12, bankLineY, { width: rightW - 24, height: bankOwnerH, ellipsis: true });
       }
       rightY += bankCardH + 8;
     }
@@ -274,12 +341,13 @@ async function renderBillPdf(bill, stream) {
       doc.roundedRect(rightX, rightY, rightW, extraCardH, 10).fill(C.bg);
       doc.fillColor(C.ink2).font('th-bold').fontSize(10)
         .text('ช่องทางที่รับชำระอื่น', rightX + 12, rightY + 6, { width: rightW - 24 });
-      let lineY = rightY + 22;
+      let lineY = doc.y + 4;
       doc.font('th').fontSize(9).fillColor(C.ink2);
-      for (const m of extraMethods) {
-        doc.text(`• ${m.label}`, rightX + 12, lineY, { width: rightW - 24 });
-        lineY += 13;
-      }
+      extraMethods.forEach((m, idx) => {
+        doc.text(`• ${truncateText(m.label || '—', 96)}`, rightX + 12, lineY,
+          { width: rightW - 24, height: extraMethodHeights[idx], ellipsis: true, lineGap: 1 });
+        lineY = doc.y + 3;
+      });
     }
     y += paymentH + 8;
   }

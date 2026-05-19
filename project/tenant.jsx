@@ -2216,18 +2216,23 @@ function SlipPreviewModal({ payment, locale, onClose }) {
       <div className="slip-preview" style={{
         position: 'relative',
         minHeight: 240,
-        height: 'min(68vh, 720px)',
-        maxHeight: 'calc(100dvh - 220px)',
+        height: 'min(72vh, 760px)',
+        maxHeight: 'calc(100dvh - 200px)',
         padding: 12,
-        display: 'grid',
-        placeItems: 'center',
+        display: 'flex',
+        alignItems: state === 'ready' ? 'flex-start' : 'center',
+        justifyContent: 'center',
         background: 'linear-gradient(145deg, var(--surface-2) 0%, rgba(196,106,62,0.08) 100%)',
         border: '1px solid var(--line)',
         borderRadius: 16,
-        overflow: 'hidden',
+        overflow: state === 'ready' ? 'auto' : 'hidden',
+        boxSizing: 'border-box',
+        WebkitOverflowScrolling: 'touch',
+        overscrollBehavior: 'contain',
       }}>
         {payment && state !== 'error' ? (
           <img
+            className="slip-preview-image"
             key={payment.id}
             src={src}
             alt={title}
@@ -2235,10 +2240,10 @@ function SlipPreviewModal({ payment, locale, onClose }) {
             onError={() => setState('error')}
             style={{
               display: state === 'ready' ? 'block' : 'none',
-              width: 'auto',
+              width: 'min(100%, 680px)',
               height: 'auto',
               maxWidth: '100%',
-              maxHeight: '100%',
+              maxHeight: 'none',
               objectFit: 'contain',
               background: '#fff',
               borderRadius: 10,
@@ -3404,9 +3409,9 @@ function App() {
           .page-guide-stage { width: 96px !important; border-radius: 20px !important; }
           .page-guide-mascot { max-width: 104px !important; height: 96px !important; }
           .slip-preview {
-            min-height: 220px !important;
-            height: clamp(220px, 62dvh, 560px) !important;
-            max-height: calc(100dvh - 180px) !important;
+            min-height: 240px !important;
+            height: clamp(240px, 68dvh, 620px) !important;
+            max-height: calc(100dvh - 160px) !important;
             padding: var(--sp-2) !important;
             border-radius: 14px !important;
           }
@@ -3454,8 +3459,8 @@ function App() {
           .modal-panel { max-height: min(calc(100vh - 12px), calc(100dvh - 12px)) !important; }
           .slip-preview {
             min-height: 160px !important;
-            height: min(54dvh, 260px) !important;
-            max-height: calc(100dvh - 152px) !important;
+            height: min(58dvh, 300px) !important;
+            max-height: calc(100dvh - 132px) !important;
           }
         }
       `}</style>

@@ -144,6 +144,84 @@ test('renderContractPdf: structured layout helpers keep sections organized', () 
     'signature area should have a clear heading');
 });
 
+test('renderContractPdf: long fixed-position fields are capped or measured', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'contractPdf.js'), 'utf8');
+  assert.match(src, /const headerBandH = 94/,
+    'header band must have enough room for capped building details');
+  assert.match(src, /const headerLineOptions = \{ width: headerLeftW, height: 13, ellipsis: true \}/,
+    'header detail lines must be clipped inside the header band');
+  assert.match(src, /function truncateText\(value, maxChars\)/,
+    'summary-only contract fields must be truncated before rendering');
+  assert.match(src, /const metaLineH = Math\.min\(doc\.heightOfString\(metaLineText/,
+    'room and tenant meta line must reserve its rendered height');
+  assert.match(src, /const partyBoxH = Math\.max\(leftH, rightH\)/,
+    'party info boxes must be measured before drawing');
+  assert.match(src, /ensureRoom\(28 \+ partyBoxH \+ 14\)/,
+    'party info boxes must not be drawn across the footer');
+  assert.match(src, /height: 12, align: 'center', ellipsis: true/,
+    'long signature names must not overlap the role/date labels');
+  assert.doesNotMatch(src, /roundedRect\(MARGIN, headerY, CONTENT_W, 68/,
+    'old 68pt header clipped long building information');
+  assert.doesNotMatch(src, /doc\.y \+= 16;/,
+    'fixed meta-line spacing overlapped the lead paragraph when wrapped');
+});
+
+test('renderContractPdf: handles long header and party details without page explosion', async () => {
+  const long = 'Very long contract layout text '.repeat(18);
+  const stream = memStream();
+  await contractPdf.renderContractPdf(
+    {
+      ...SAMPLE_CONTRACT,
+      contractNo: `CONTRACT-${long}`,
+      termMonths: 12,
+    },
+    {
+      ...SAMPLE_TENANT,
+      fullName: `Tenant ${long}`,
+      phone: `0812345678 ${long}`,
+      email: `tenant-${long.replace(/\s+/g, '-')}@example.com`,
+      citizenIdMasked: `***-${long}`,
+      address: `Tenant address ${long}`,
+      emergencyContactName: `Emergency ${long}`,
+      emergencyContactPhone: `0898765432 ${long}`,
+      emergencyContactRelation: `Relation ${long}`,
+    },
+    {
+      ...SAMPLE_ROOM,
+      id: `ROOM-${long}`,
+      type: `Type ${long}`,
+      floor: `Floor ${long}`,
+      size: `Size ${long}`,
+      amenities: Array.from({ length: 8 }, (_, i) => `Amenity ${i + 1} ${long}`),
+      address: `Room address ${long}`,
+    },
+    {
+      ...SAMPLE_BUILDING,
+      name: `Building ${long}`,
+      address: `Building address ${long}`,
+      phone: `02-555-1234 ${long}`,
+      taxId: `TAX-${long}`,
+      ownerName: `Owner ${long}`,
+    },
+    {
+      termsTemplate: {
+        mode: 'override',
+        clauses: [{ title: 'Main terms', body: 'The tenant agrees to follow the house rules.' }],
+        sections: {
+          headerNote: `Header note ${long}`,
+          showWitnesses: false,
+        },
+      },
+    },
+    stream
+  );
+  const buf = stream.toBuffer();
+  assert.equal(buf.slice(0, 4).toString('ascii'), '%PDF');
+  assert.ok(pageCount(buf) <= 4, 'long metadata should wrap in measured sections, not create blank pages');
+});
+
 test('renderContractPdf: handles a long terms list across pages', async () => {
   // 30 clauses → forces multiple pages. Pre-bufferPages-fix this also
   // implicitly verified that the footer pass doesn't crash on any prior

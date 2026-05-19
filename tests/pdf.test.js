@@ -145,3 +145,63 @@ test('renderBillPdf paginates long item tables without blank-page explosion', as
   assert.ok(pageCount(buf) <= 3,
     '28 line items should paginate to a few dense pages, not many mostly blank pages');
 });
+
+test('renderBillPdf handles long header, tenant, and payment text without throwing', async () => {
+  const long = 'Long customer facing text for PDF layout wrapping '.repeat(10);
+  const sink = memSink();
+  await renderBillPdf({
+    ...minimalBill,
+    billNo: `INV-${long}`,
+    roomId: `ROOM-${long}`,
+    tenantName: `Tenant ${long}`,
+    tenantPhone: `080-123-4567 ${long}`,
+    period: `May 2026 ${long}`,
+    building: {
+      name: `Building ${long}`,
+      address: `Address ${long}`,
+      phone: `02-555-1234 ${long}`,
+    },
+    items: Array.from({ length: 8 }, (_, i) => ({
+      label: `Service ${i + 1} ${long}`,
+      qty: `quantity ${long}`,
+      detail: `detail ${long}`,
+      amount: 1000 + i,
+    })),
+    total: 12000,
+    bankInfo: {
+      bank: `Bank ${long}`,
+      account: `Account ${long}`,
+      name: `Account owner ${long}`,
+    },
+    paymentMethods: [
+      { key: 'linePay', label: `LINE Pay ${long}`, enabled: true },
+      { key: 'cash', label: `Cash at office ${long}`, enabled: true },
+      { key: 'wallet', label: `Wallet transfer ${long}`, enabled: true },
+    ],
+  }, sink);
+  const buf = sink.getBuffer();
+  assert.equal(buf.slice(0, 5).toString('ascii'), '%PDF-');
+  assert.ok(pageCount(buf) <= 4, 'long text should wrap inside blocks without page explosion');
+});
+
+test('renderBillPdf layout uses measured blocks instead of fixed overlapping positions', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'pdf.js'), 'utf8');
+  assert.match(src, /function drawTenantBlock\(startY\)/,
+    'tenant block must start from the measured header bottom');
+  assert.match(src, /const tenantBlockH = Math\.max/,
+    'tenant block height must be based on rendered text');
+  assert.match(src, /let y = drawHeader\(\);/,
+    'table flow must start after the dynamic header');
+  assert.match(src, /const continuationText = truncateText/,
+    'continuation-page header must cap long bill and room identifiers');
+  assert.match(src, /const extraMethodHeights = extraMethods\.map/,
+    'payment method rows must measure wrapped labels');
+  assert.match(src, /const bankCardH = hasBank\s*\?\s*Math\.max/,
+    'bank transfer card must expand beyond the old fixed height');
+  assert.doesNotMatch(src, /let y = 220;/,
+    'fixed table start overlapped long header and tenant details');
+  assert.doesNotMatch(src, /const bankCardH = hasBank \? 76 : 0;/,
+    'fixed bank-card height clips long bank account text');
+});

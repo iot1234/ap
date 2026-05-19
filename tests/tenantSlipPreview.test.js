@@ -80,6 +80,10 @@ test('tenant shell and modal layout are locked across desktop and mobile', () =>
     'modal scroll lock should compensate for the removed desktop scrollbar');
   assert.match(jsx, /\.modal-panel \{\s*width: 100vw !important;[\s\S]*?max-width: 100vw !important;/,
     'mobile bottom-sheet modal should use the full viewport width');
-  assert.match(jsx, /\.slip-preview \{[\s\S]*?height: clamp\(220px, 62dvh, 560px\) !important;/,
-    'slip preview should have a responsive bounded viewport height');
+  assert.match(jsx, /overflow: state === 'ready' \? 'auto' : 'hidden'/,
+    'slip preview should scroll after the image loads instead of clipping tall slips');
+  assert.match(jsx, /className="slip-preview-image"[\s\S]*?maxHeight: 'none'/,
+    'slip preview image should keep full height available inside the scrollable viewer');
+  assert.match(jsx, /\.slip-preview \{[\s\S]*?height: clamp\(240px, 68dvh, 620px\) !important;/,
+    'mobile slip preview should reserve a responsive viewer height');
 });

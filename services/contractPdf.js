@@ -359,6 +359,11 @@ async function renderContractPdf(contract, tenant, room, building, options, stre
       doc.y = CONTENT_TOP;
     }
   }
+  function truncateText(value, maxChars) {
+    const text = String(value || '');
+    if (text.length <= maxChars) return text;
+    return `${text.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
+  }
   function hr(yOpt) {
     const y = yOpt != null ? yOpt : doc.y;
     doc.moveTo(MARGIN, y).lineTo(PAGE_W - MARGIN, y)
@@ -375,10 +380,10 @@ async function renderContractPdf(contract, tenant, room, building, options, stre
   }
   function infoBoxHeight(title, lines, width) {
     doc.font(FONT_B).fontSize(10);
-    const titleH = doc.heightOfString(title || ' ', { width: width - 20 });
+    const titleH = Math.min(doc.heightOfString(title || ' ', { width: width - 20 }), 18);
     doc.font(FONT).fontSize(9);
     const bodyH = lines.reduce((sum, line) => (
-      sum + doc.heightOfString(line || ' ', { width: width - 20 }) + 3
+      sum + Math.min(doc.heightOfString(line || ' ', { width: width - 20, lineGap: 1 }), 36) + 3
     ), 0);
     return Math.max(62, 10 + titleH + 6 + bodyH + 6);
   }
@@ -386,13 +391,17 @@ async function renderContractPdf(contract, tenant, room, building, options, stre
     const height = infoBoxHeight(title, lines, width);
     doc.roundedRect(x, y, width, height, 7).fill('#fffdf8');
     doc.roundedRect(x, y, width, height, 7).lineWidth(0.5).strokeColor(C.border).stroke();
-    doc.font(FONT_B).fontSize(10).fillColor(C.ink)
-      .text(title, x + 10, y + 7, { width: width - 20 });
-    let lineY = doc.y + 4;
+    doc.font(FONT_B).fontSize(10);
+    const titleH = Math.min(doc.heightOfString(title || ' ', { width: width - 20 }), 18);
+    doc.fillColor(C.ink)
+      .text(title, x + 10, y + 7, { width: width - 20, height: titleH, ellipsis: true });
+    let lineY = y + 7 + titleH + 4;
     doc.font(FONT).fontSize(9).fillColor(C.ink2);
     for (const line of lines) {
-      doc.text(line || '—', x + 10, lineY, { width: width - 20, lineGap: 1 });
-      lineY = doc.y + 3;
+      const lineH = Math.min(doc.heightOfString(line || '—', { width: width - 20, lineGap: 1 }), 36);
+      doc.text(line || '—', x + 10, lineY,
+        { width: width - 20, height: lineH, ellipsis: true, lineGap: 1 });
+      lineY += lineH + 3;
     }
     return height;
   }
@@ -403,38 +412,53 @@ async function renderContractPdf(contract, tenant, room, building, options, stre
 
   // Header band
   const headerY = MARGIN;
-  doc.roundedRect(MARGIN, headerY, CONTENT_W, 68, 8).fill(C.bg);
-  doc.rect(MARGIN, headerY, 6, 68).fill(C.accent);
+  const headerBandH = 94;
+  const headerLeftX = MARGIN + 14;
+  const headerLeftW = 290;
+  doc.roundedRect(MARGIN, headerY, CONTENT_W, headerBandH, 8).fill(C.bg);
+  doc.rect(MARGIN, headerY, 6, headerBandH).fill(C.accent);
   doc.font(FONT_B).fontSize(15).fillColor(C.ink)
-    .text(building?.name || 'บ้านกาญจน์ เรสซิเดนซ์', MARGIN + 14, headerY + 12, { width: 290 });
+    .text(truncateText(building?.name || 'บ้านกาญจน์ เรสซิเดนซ์', 72), headerLeftX, headerY + 12,
+      { width: headerLeftW, height: 34, ellipsis: true });
   doc.font(FONT).fontSize(9.5).fillColor(C.ink2);
-  let headerLineY = doc.y + 2;
+  let headerLineY = headerY + 50;
+  const headerLineOptions = { width: headerLeftW, height: 13, ellipsis: true };
   if (building?.address) {
-    doc.text(building.address, MARGIN + 14, headerLineY, { width: 290 });
-    headerLineY = doc.y + 2;
+    doc.text(truncateText(building.address, 90), headerLeftX, headerLineY, headerLineOptions);
+    headerLineY += 14;
   }
   if (building?.phone) {
-    doc.text(`โทร. ${building.phone}`, MARGIN + 14, headerLineY, { width: 290 });
-    headerLineY = doc.y + 2;
+    doc.text(truncateText(`โทร. ${building.phone}`, 54), headerLeftX, headerLineY, headerLineOptions);
+    headerLineY += 14;
   }
   if (building?.taxId) {
-    doc.text(`เลขประจำตัวผู้เสียภาษี ${building.taxId}`, MARGIN + 14, headerLineY, { width: 290 });
-    headerLineY = doc.y + 2;
+    doc.text(truncateText(`เลขประจำตัวผู้เสียภาษี ${building.taxId}`, 74), headerLeftX, headerLineY, headerLineOptions);
+    headerLineY += 14;
   }
   if (sections.headerNote) {
-    doc.font(FONT).fontSize(9).fillColor(C.accent)
-      .text(sections.headerNote, MARGIN + 14, headerLineY, { width: 290 });
+    const noteH = Math.max(0, headerY + headerBandH - headerLineY - 8);
+    if (noteH > 8) {
+      doc.font(FONT).fontSize(9).fillColor(C.accent)
+        .text(truncateText(sections.headerNote, 70), headerLeftX, headerLineY,
+          { width: headerLeftW, height: noteH, ellipsis: true });
+    }
   }
-  const metaX = MARGIN + CONTENT_W - 176;
-  doc.roundedRect(metaX, headerY + 10, 162, 48, 6).fill('#ffffff');
-  doc.roundedRect(metaX, headerY + 10, 162, 48, 6).lineWidth(0.5).strokeColor(C.border).stroke();
+  const metaW = 166;
+  const metaH = 64;
+  const metaX = MARGIN + CONTENT_W - metaW - 14;
+  const metaY = headerY + 15;
+  const metaInnerW = metaW - 20;
+  doc.roundedRect(metaX, metaY, metaW, metaH, 6).fill('#ffffff');
+  doc.roundedRect(metaX, metaY, metaW, metaH, 6).lineWidth(0.5).strokeColor(C.border).stroke();
   doc.font(FONT).fontSize(8.5).fillColor(C.muted)
-    .text('เลขที่สัญญา', metaX + 10, headerY + 17, { width: 142 });
+    .text('เลขที่สัญญา', metaX + 10, metaY + 7, { width: metaInnerW });
   doc.font(FONT_B).fontSize(11).fillColor(C.ink)
-    .text(contract.contractNo || '—', metaX + 10, headerY + 29, { width: 142 });
+    .text(truncateText(contract.contractNo || '—', 54), metaX + 10, metaY + 20,
+      { width: metaInnerW, height: 26, ellipsis: true });
   doc.font(FONT).fontSize(8.5).fillColor(C.muted)
-    .text(fmtThaiDate(contract.signedAt || new Date()), metaX + 10, headerY + 44, { width: 142 });
-  doc.y = headerY + 80;
+    .text(fmtThaiDate(contract.signedAt || new Date()), metaX + 10, metaY + 50,
+      { width: metaInnerW, height: 12, ellipsis: true });
+  doc.y = headerY + headerBandH + 12;
 
   // Title
   doc.font(FONT_B).fontSize(18).fillColor(C.ink)
@@ -442,55 +466,63 @@ async function renderContractPdf(contract, tenant, room, building, options, stre
   doc.y += 8;
 
   // Contract meta line
-  doc.font(FONT).fontSize(10).fillColor(C.ink2)
-    .text(
-      `ห้อง ${room?.id || '—'}    ผู้เช่า ${tenantName}`,
-      MARGIN, doc.y, { width: CONTENT_W, align: 'center' }
-    );
-  doc.y += 16;
+  const metaLineText = truncateText(`ห้อง ${room?.id || '—'}    ผู้เช่า ${tenantName}`, 130);
+  doc.font(FONT).fontSize(10).fillColor(C.ink2);
+  const metaLineY = doc.y;
+  const metaLineH = Math.min(doc.heightOfString(metaLineText, { width: CONTENT_W, align: 'center', lineGap: 1 }), 46);
+  doc.text(metaLineText, MARGIN, metaLineY,
+    { width: CONTENT_W, height: metaLineH, align: 'center', ellipsis: true, lineGap: 1 });
+  doc.y = metaLineY + metaLineH + 10;
 
   // Lead paragraph: "วันที่ ... ระหว่าง ... กับ ..."
+  const leadLessorName = truncateText(lessorName, 72);
+  const leadTenantName = truncateText(tenantName, 72);
   const leadText =
     `สัญญาฉบับนี้ทำขึ้นเมื่อ ${fmtThaiDate(contract.signedAt || new Date())} `
-    + `ระหว่าง ${lessorName} (ซึ่งต่อไปในสัญญานี้เรียกว่า "ผู้ให้เช่า") `
-    + `กับ ${tenantName} (ซึ่งต่อไปในสัญญานี้เรียกว่า "ผู้เช่า") `
+    + `ระหว่าง ${leadLessorName} (ซึ่งต่อไปในสัญญานี้เรียกว่า "ผู้ให้เช่า") `
+    + `กับ ${leadTenantName} (ซึ่งต่อไปในสัญญานี้เรียกว่า "ผู้เช่า") `
     + `ทั้งสองฝ่ายตกลงทำสัญญาเช่าห้องพักดังนี้`;
   doc.font(FONT).fontSize(10.5);
-  const leadH = doc.heightOfString(leadText, { width: CONTENT_W - 20, align: 'justify', lineGap: 2 }) + 18;
+  const leadTextH = Math.min(doc.heightOfString(leadText, { width: CONTENT_W - 20, align: 'justify', lineGap: 2 }), 90);
+  const leadH = leadTextH + 18;
   ensureRoom(leadH + 12);
   const leadY = doc.y;
   doc.roundedRect(MARGIN, leadY, CONTENT_W, leadH, 7).fill('#fffdf8');
   doc.roundedRect(MARGIN, leadY, CONTENT_W, leadH, 7).lineWidth(0.5).strokeColor(C.border).stroke();
   doc.font(FONT).fontSize(11).fillColor(C.ink)
     .text(leadText, MARGIN + 10, leadY + 9,
-      { width: CONTENT_W - 20, align: 'justify', lineGap: 2 });
+      { width: CONTENT_W - 20, height: leadTextH, align: 'justify', ellipsis: true, lineGap: 2 });
   doc.y = leadY + leadH + 12;
 
   // === Parties block (two-column) ===
-  drawSectionTitle('คู่สัญญา');
   const partyColW = (CONTENT_W - 16) / 2;
-  const partyTopY = doc.y;
   const lessorLines = [
-    `ชื่อ: ${lessorName}`,
-    building?.address ? `ที่อยู่: ${building.address}` : null,
-    building?.phone ? `โทรศัพท์: ${building.phone}` : null,
-    building?.taxId ? `เลขประจำตัวผู้เสียภาษี: ${building.taxId}` : null,
+    truncateText(`ชื่อ: ${lessorName}`, 112),
+    building?.address ? truncateText(`ที่อยู่: ${building.address}`, 132) : null,
+    building?.phone ? truncateText(`โทรศัพท์: ${building.phone}`, 86) : null,
+    building?.taxId ? truncateText(`เลขประจำตัวผู้เสียภาษี: ${building.taxId}`, 96) : null,
   ].filter(Boolean);
   const tenantLines = [
-    `ชื่อ: ${tenantName}`,
-    tenant?.citizenIdMasked ? `เลขบัตร ปชช.: ${tenant.citizenIdMasked}` : null,
-    tenant?.phone ? `โทรศัพท์: ${tenant.phone}` : null,
-    tenant?.address ? `ที่อยู่: ${tenant.address}` : null,
+    truncateText(`ชื่อ: ${tenantName}`, 112),
+    tenant?.citizenIdMasked ? truncateText(`เลขบัตร ปชช.: ${tenant.citizenIdMasked}`, 86) : null,
+    tenant?.phone ? truncateText(`โทรศัพท์: ${tenant.phone}`, 86) : null,
+    tenant?.address ? truncateText(`ที่อยู่: ${tenant.address}`, 132) : null,
     sections.showEmergencyContact && tenant?.emergencyContactName
-      ? `ติดต่อฉุกเฉิน: ${tenant.emergencyContactName}`
+      ? truncateText(`ติดต่อฉุกเฉิน: ${tenant.emergencyContactName}`
           + (tenant.emergencyContactPhone ? ` · ${tenant.emergencyContactPhone}` : '')
-          + (tenant.emergencyContactRelation ? ` (${tenant.emergencyContactRelation})` : '')
+          + (tenant.emergencyContactRelation ? ` (${tenant.emergencyContactRelation})` : ''), 128)
       : null,
   ].filter(Boolean);
-  const leftH = drawInfoBox(MARGIN, partyTopY, partyColW, 'ผู้ให้เช่า', lessorLines);
-  const rightH = drawInfoBox(MARGIN + partyColW + 16, partyTopY, partyColW, 'ผู้เช่า', tenantLines);
+  const leftH = infoBoxHeight('ผู้ให้เช่า', lessorLines, partyColW);
+  const rightH = infoBoxHeight('ผู้เช่า', tenantLines, partyColW);
+  const partyBoxH = Math.max(leftH, rightH);
+  ensureRoom(28 + partyBoxH + 14);
+  drawSectionTitle('คู่สัญญา');
+  const partyTopY = doc.y;
+  drawInfoBox(MARGIN, partyTopY, partyColW, 'ผู้ให้เช่า', lessorLines);
+  drawInfoBox(MARGIN + partyColW + 16, partyTopY, partyColW, 'ผู้เช่า', tenantLines);
 
-  doc.y = partyTopY + Math.max(leftH, rightH) + 14;
+  doc.y = partyTopY + partyBoxH + 14;
   ensureRoom(120);
 
   // === Property + financial summary ===
@@ -547,17 +579,18 @@ async function renderContractPdf(contract, tenant, room, building, options, stre
 
     rows.forEach(([k, v], idx) => {
       doc.font(FONT).fontSize(10);
-      const labelH = doc.heightOfString(k, { width: labelW });
-      const valueH = doc.heightOfString(String(v || '—'), { width: valW });
+      const labelH = Math.min(doc.heightOfString(k, { width: labelW }), 22);
+      const valueText = truncateText(v || '—', 180);
+      const valueH = Math.min(doc.heightOfString(valueText, { width: valW }), 50);
       const actualRowH = Math.max(rowH, labelH, valueH) + 4;
       ensureRoom(actualRowH);
       const rowTop = doc.y;
       doc.roundedRect(MARGIN, rowTop, CONTENT_W, actualRowH - 1, 3)
         .fill(idx % 2 === 0 ? '#fffdf8' : C.bg);
       doc.font(FONT).fontSize(10).fillColor(C.muted)
-        .text(k, MARGIN, rowTop + 3, { width: labelW });
+        .text(k, MARGIN, rowTop + 3, { width: labelW, height: labelH, ellipsis: true });
       doc.font(FONT).fontSize(10).fillColor(C.ink)
-        .text(v, MARGIN + labelW, rowTop + 3, { width: valW });
+        .text(valueText, MARGIN + labelW, rowTop + 3, { width: valW, height: valueH, ellipsis: true });
       hr(rowTop + actualRowH - 1);
       doc.y = rowTop + actualRowH;
     });
@@ -693,8 +726,8 @@ async function renderContractPdf(contract, tenant, room, building, options, stre
       .text('ลงชื่อ ........................................................',
             x, lblY, { width: sigColW, align: 'center' });
     doc.font(FONT_B).fontSize(10).fillColor(C.ink)
-      .text(`(${name || '—'})`, x, lblY + 14,
-            { width: sigColW, align: 'center' });
+      .text(`(${truncateText(name || '—', 58)})`, x, lblY + 14,
+            { width: sigColW, height: 12, align: 'center', ellipsis: true });
     doc.font(FONT).fontSize(9).fillColor(C.muted)
       .text(label, x, lblY + 27, { width: sigColW, align: 'center' });
     doc.text(dateLabel, x, lblY + 39, { width: sigColW, align: 'center' });
