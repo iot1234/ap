@@ -483,7 +483,12 @@ async function renderContractPdf(contract, tenant, room, building, options, stre
     + `กับ ${leadTenantName} (ซึ่งต่อไปในสัญญานี้เรียกว่า "ผู้เช่า") `
     + `ทั้งสองฝ่ายตกลงทำสัญญาเช่าห้องพักดังนี้`;
   doc.font(FONT).fontSize(10.5);
-  const leadTextH = Math.min(doc.heightOfString(leadText, { width: CONTENT_W - 20, align: 'justify', lineGap: 2 }), 90);
+  // align: 'left' (not 'justify') — PDFKit's justify stretches the spaces
+  // between words to fill the line width, which on a short lead paragraph
+  // produced visible 30-50px gaps between every word ("กับ    คุณพิมพ์ชนก").
+  // Thai legal text reads cleanly left-aligned and the box still looks
+  // tidy because the paragraph fills most of the line naturally.
+  const leadTextH = Math.min(doc.heightOfString(leadText, { width: CONTENT_W - 20, align: 'left', lineGap: 2 }), 90);
   const leadH = leadTextH + 18;
   ensureRoom(leadH + 12);
   const leadY = doc.y;
@@ -491,7 +496,7 @@ async function renderContractPdf(contract, tenant, room, building, options, stre
   doc.roundedRect(MARGIN, leadY, CONTENT_W, leadH, 7).lineWidth(0.5).strokeColor(C.border).stroke();
   doc.font(FONT).fontSize(11).fillColor(C.ink)
     .text(leadText, MARGIN + 10, leadY + 9,
-      { width: CONTENT_W - 20, height: leadTextH, align: 'justify', ellipsis: true, lineGap: 2 });
+      { width: CONTENT_W - 20, height: leadTextH, align: 'left', ellipsis: true, lineGap: 2 });
   doc.y = leadY + leadH + 12;
 
   // === Parties block (two-column) ===
@@ -655,9 +660,13 @@ async function renderContractPdf(contract, tenant, room, building, options, stre
     doc.font(FONT_B).fontSize(11);
     const titleH = doc.heightOfString(titleText, { width: CONTENT_W });
     doc.font(FONT).fontSize(10);
+    // align: 'left' for clause bodies — same reason as the lead paragraph.
+    // PDFKit's justify on Thai text padded every short clause's last
+    // pre-final line with visible gaps, especially when a clause was only
+    // 2-3 lines long. Left-alignment keeps the reading rhythm consistent.
     const bodyH = doc.heightOfString(body || ' ', {
       width: CONTENT_W - 16,
-      align: 'justify',
+      align: 'left',
       lineGap: 2,
     });
     ensureRoom(titleH + bodyH + 16);
@@ -669,7 +678,7 @@ async function renderContractPdf(contract, tenant, room, building, options, stre
     doc.y += 2;
     doc.font(FONT).fontSize(10).fillColor(C.ink2)
       .text(body, MARGIN + 16, doc.y,
-            { width: CONTENT_W - 16, align: 'justify', lineGap: 2 });
+            { width: CONTENT_W - 16, align: 'left', lineGap: 2 });
     doc.y += 10;
   }
 
