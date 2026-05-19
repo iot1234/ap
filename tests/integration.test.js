@@ -2142,6 +2142,30 @@ test('tenant portal exposes payments tab + PDF download button', () => {
     'bill detail must link to PDF endpoint');
 });
 
+test('tenant contract PDF is ownership-gated, locked-only, and queued', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const idx = server.indexOf("app.get('/api/tenant/contract/:id/pdf'");
+  assert.ok(idx > 0, 'tenant contract PDF route must exist');
+  const next = server.indexOf("app.get('/api/tenant/bills'", idx);
+  const body = server.slice(idx, next > idx ? next : idx + 10000);
+  assert.match(body, /requireTenant/,
+    'tenant contract PDF route must require tenant auth');
+  assert.match(body, /not your contract/,
+    'tenant contract PDF must enforce tenant_id ownership');
+  assert.match(body, /NOT_LOCKED/,
+    'tenant contract PDF must refuse unapproved contract drafts');
+  assert.match(body, /await acquirePdfSlot\(\)/,
+    'tenant contract PDF must share the PDF render queue');
+  assert.match(body, /releasePdfSlot\(\)/,
+    'tenant contract PDF must release the PDF render queue slot');
+  assert.match(body, /renderContractPdf\(/,
+    'tenant contract PDF must stream through the shared contract renderer');
+  assert.match(body, /signatures: \{ tenantBuf: tenantSigBuf \}/,
+    'tenant contract PDF must embed stored online signatures when available');
+});
+
 test('public room dashboard is read-only, not an admin management surface', () => {
   const fs = require('node:fs');
   const path = require('node:path');
@@ -4282,6 +4306,11 @@ test('quick-invite refuses duplicate unsigned drafts for same tenant', () => {
   const path = require('node:path');
   const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   const block = src.match(/quick-invite'[\s\S]+?app\.post\('\/api\/contracts\/:id\/invite-tenant'/)[0];
+  assert.match(block, /pg_advisory_xact_lock\(\$1::int, \$2::int\)[\s\S]{0,160}advisoryInt32Key\(tenantPhone\)/,
+    'quick-invite must serialize same-phone draft creation before tenant lookup');
+  assert.match(block,
+    /FROM tenants[\s\S]{0,220}WHERE phone=\$1 AND deleted_at IS NULL[\s\S]{0,120}FOR UPDATE/,
+    'quick-invite must lock the reused tenant row while checking drafts');
   assert.match(block,
     /SELECT id, contract_no, room_id FROM contracts[\s\S]{0,300}WHERE tenant_id=\$1 AND status='active' AND locked_at IS NULL/,
     'duplicate-draft check must scope to unsigned active contracts');
@@ -5509,6 +5538,15 @@ test('PDF endpoint role tightened to owner+manager (no staff)', () => {
   assert.match(src,
     /app\.get\('\/api\/contracts\/:id\/pdf', requireAuth, requireRole\('owner', 'manager'\)/,
     'PDF endpoint must NOT include staff role');
+  const idx = src.indexOf("app.get('/api/contracts/:id/pdf'");
+  const next = src.indexOf('// === v2: Backup', idx);
+  const body = src.slice(idx, next > idx ? next : idx + 16000);
+  assert.match(body, /await acquirePdfSlot\(\)/,
+    'contract PDF route must share the PDF render queue');
+  assert.match(body, /releasePdfSlot\(\)/,
+    'contract PDF route must release the PDF render queue slot');
+  assert.match(body, /code === 503 \? 'BUSY' : 'PDF_ERROR'/,
+    'contract PDF route must report queue saturation distinctly');
 });
 
 test('citizen-ID dedup pre-flight checks tail when hash is NULL', () => {

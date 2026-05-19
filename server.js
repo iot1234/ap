@@ -1312,6 +1312,16 @@ const ROOM_BOOKING_EDITABLE_FIELDS = new Set([
   'allowedMimes',
 ]);
 const ROOM_BOOKING_ALLOWED_MIMES = new Set(['image/jpeg', 'image/png', 'image/webp']);
+const ROOM_BOOKING_DISABLED_NOTICE = {
+  code: 'ROOM_BOOKING_DISABLED',
+  error: 'ระบบจองห้องถูกปิดใช้งานอยู่',
+  message: 'ขณะนี้ยังไม่รับคำขอจองออนไลน์ กรุณาติดต่อแอดมินหรือกลับมาตรวจสอบอีกครั้ง',
+  nextAction: 'เปิดรับจองจากหน้าแอดมินเมื่อพร้อมให้ผู้สนใจส่งคำขอจอง',
+};
+
+function roomBookingDisabledPayload(extra = {}) {
+  return { ...ROOM_BOOKING_DISABLED_NOTICE, ...extra };
+}
 
 function normalizeRoomBookingEditableSettings(raw) {
   const base = {
@@ -1462,6 +1472,16 @@ function parseRoomBookingEditableSettings(input, currentRaw) {
 function bookingHoldHash(token) {
   if (!token || typeof token !== 'string') return null;
   return cryptoSvc.hmac(`booking-hold:${token}`);
+}
+
+function advisoryInt32Key(value) {
+  let h = 0x811c9dc5;
+  const s = String(value || '');
+  for (let i = 0; i < s.length; i += 1) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0) & 0x7fffffff;
 }
 
 function roomFromV2(row) {
@@ -1679,6 +1699,7 @@ app.get('/api/bookings/public/config', async (_req, res) => {
         allowedMimes: settings.allowedMimes,
         payment,
         lineContact,
+        disabledNotice: settings.enabled ? null : roomBookingDisabledPayload(),
       },
     });
   } catch (err) {
@@ -1690,6 +1711,18 @@ app.get('/api/bookings/public/config', async (_req, res) => {
 app.get('/api/bookings/public/rooms', async (_req, res) => {
   try {
     await releaseExpiredPublicBookingHolds(pool);
+    const flags = await features.load(pool);
+    const settings = roomBookingSettings(flags);
+    if (!settings.enabled) {
+      res.setHeader('Cache-Control', 'no-store');
+      return res.json({
+        ok: true,
+        enabled: false,
+        count: 0,
+        rooms: [],
+        ...roomBookingDisabledPayload(),
+      });
+    }
     const { rows } = await pool.query(
       `SELECT key, value FROM app_data WHERE key = ANY($1)`,
       [['baankarn_rooms_v1', 'baankarn_config_v1']]
@@ -1710,7 +1743,7 @@ app.get('/api/bookings/public/rooms', async (_req, res) => {
     }
     const rooms = publicBookableRooms(rawRooms, rawConfig, v2Rows);
     res.setHeader('Cache-Control', 'no-store');
-    res.json({ ok: true, count: rooms.length, rooms });
+    res.json({ ok: true, enabled: true, count: rooms.length, rooms });
   } catch (err) {
     console.error('public booking rooms error:', err);
     res.status(500).json({ error: 'internal error', code: 'ROOMS_LOAD_FAILED' });
@@ -1728,7 +1761,7 @@ app.post('/api/bookings/public/hold', sameOrigin, rateLimitBookingHold, async (r
     return res.status(500).json({ error: 'internal error', code: 'CONFIG_ERROR' });
   }
   if (!settings.enabled) {
-    return res.status(503).json({ error: 'room booking is disabled', code: 'ROOM_BOOKING_DISABLED' });
+    return res.status(503).json(roomBookingDisabledPayload());
   }
   if (!settings.requireDeposit) {
     return res.json({ ok: true, holdRequired: false, booking: { requireDeposit: false } });
@@ -1923,7 +1956,7 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBookingSubmit, validateBod
     return res.status(500).json({ error: 'internal error', code: 'CONFIG_ERROR' });
   }
   if (!bookingSettings.enabled) {
-    return res.status(503).json({ error: 'room booking is disabled', code: 'ROOM_BOOKING_DISABLED' });
+    return res.status(503).json(roomBookingDisabledPayload());
   }
   if (bookingSettings.requireDeposit) {
     if (!cleaned.roomId) {
@@ -3118,6 +3151,7 @@ app.put('/api/admin/booking-deposit-settings',
       );
       audit(req, 'booking_deposit_settings.update', 'config', 'roomBooking', {
         keys: Object.keys(input || {}),
+        enabled: parsed.settings.enabled,
         requireDeposit: parsed.settings.requireDeposit,
         depositAmount: parsed.settings.depositAmount,
         minimumAmount: parsed.settings.minimumAmount,
@@ -5087,6 +5121,7 @@ app.get('/api/tenant/contract', requireTenant, async (req, res) => {
 app.get('/api/tenant/contract/:id/pdf', requireTenant, async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+  let acquired = false;
   try {
     // Same SELECT shape the admin /api/contracts/:id/pdf uses so the
     // renderer below gets the fields it expects (tenant_address, emergency
@@ -5228,14 +5263,6 @@ app.get('/api/tenant/contract/:id/pdf', requireTenant, async (req, res) => {
       }
     } catch { /* keep defaults */ }
 
-    const filename = `contract-${contract.contract_no || id}.pdf`;
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Cache-Control', 'no-store');
-    res.setHeader(
-      'Content-Disposition',
-      `${req.query.download === '1' ? 'attachment' : 'inline'}; filename="${filename}"`
-    );
-
     const contractPdf = require('./services/contractPdf');
     const tenant = {
       fullName: contract.tenant_name,
@@ -5248,6 +5275,15 @@ app.get('/api/tenant/contract/:id/pdf', requireTenant, async (req, res) => {
       emergencyContactRelation: contract.emergency_contact_relation || null,
     };
 
+    await acquirePdfSlot();
+    acquired = true;
+    const filename = `contract-${contract.contract_no || id}.pdf`;
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader(
+      'Content-Disposition',
+      `${req.query.download === '1' ? 'attachment' : 'inline'}; filename="${filename}"`
+    );
     await contractPdf.renderContractPdf(
       {
         contractNo: contract.contract_no,
@@ -5271,8 +5307,13 @@ app.get('/api/tenant/contract/:id/pdf', requireTenant, async (req, res) => {
     );
   } catch (err) {
     console.error('tenant contract pdf error:', err);
-    if (!res.headersSent) res.status(500).json({ error: 'internal error', code: 'PDF_ERROR' });
+    if (!res.headersSent) {
+      const code = String(err.message || '').includes('PDF queue timeout') ? 503 : 500;
+      res.status(code).json({ error: 'internal error', code: code === 503 ? 'BUSY' : 'PDF_ERROR' });
+    }
     else res.end();
+  } finally {
+    if (acquired) releasePdfSlot();
   }
 });
 
@@ -10427,6 +10468,15 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
     try {
       await client.query('BEGIN');
 
+      // Serialize contract drafts for the same applicant phone. The
+      // duplicate-draft SELECT below is a read-before-insert guard; without
+      // this xact lock, two admins could start quick-invite for the same
+      // phone in different rooms, both see no draft, then both insert.
+      await client.query(
+        'SELECT pg_advisory_xact_lock($1::int, $2::int)',
+        [0x51494e56, advisoryInt32Key(tenantPhone)] // "QINV": quick invite applicant
+      );
+
       // 1. Find existing tenant by phone — most-recent active match wins.
       // Active tenants ranked first so we re-use rather than creating
       // another row for the same person across multiple contracts.
@@ -10438,7 +10488,8 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
                 status, current_room_id
            FROM tenants
            WHERE phone=$1 AND deleted_at IS NULL
-           ORDER BY (status='active') DESC, updated_at DESC LIMIT 1`,
+           ORDER BY (status='active') DESC, updated_at DESC LIMIT 1
+           FOR UPDATE`,
         [tenantPhone]
       );
       if (tQ.rows.length) {
@@ -12429,6 +12480,7 @@ app.get('/api/contracts/:id/pdf', requireAuth, requireRole('owner', 'manager'),
   async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+    let acquired = false;
     try {
       // ============== 1. Contract + tenant ==============
       // Single SELECT with all the joins admin needs at print time. Falls
@@ -12630,15 +12682,6 @@ app.get('/api/contracts/:id/pdf', requireAuth, requireRole('owner', 'manager'),
         }
       } catch { /* keep defaults */ }
 
-      // ============== 7. Response headers + render ==============
-      const filename = `contract-${contract.contract_no || id}.pdf`;
-      res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Cache-Control', 'no-store');
-      res.setHeader(
-        'Content-Disposition',
-        `${req.query.download === '1' ? 'attachment' : 'inline'}; filename="${filename}"`
-      );
-
       // Mask the citizen ID — the PDF can be shared / reprinted. Last 4 digits
       // + asterisks matches the masking convention used elsewhere.
       const contractPdf = require('./services/contractPdf');
@@ -12658,6 +12701,17 @@ app.get('/api/contracts/:id/pdf', requireAuth, requireRole('owner', 'manager'),
         download: req.query.download === '1',
         templateId: explicitId, roomSource: room.source || 'minimal',
       });
+
+      // ============== 7. Response headers + render ==============
+      await acquirePdfSlot();
+      acquired = true;
+      const filename = `contract-${contract.contract_no || id}.pdf`;
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader(
+        'Content-Disposition',
+        `${req.query.download === '1' ? 'attachment' : 'inline'}; filename="${filename}"`
+      );
 
       await contractPdf.renderContractPdf(
         {
@@ -12682,8 +12736,13 @@ app.get('/api/contracts/:id/pdf', requireAuth, requireRole('owner', 'manager'),
       );
     } catch (err) {
       console.error('contract pdf error:', err);
-      if (!res.headersSent) res.status(500).json({ error: 'internal error', code: 'PDF_ERROR' });
+      if (!res.headersSent) {
+        const code = String(err.message || '').includes('PDF queue timeout') ? 503 : 500;
+        res.status(code).json({ error: 'internal error', code: code === 503 ? 'BUSY' : 'PDF_ERROR' });
+      }
       else res.end();
+    } finally {
+      if (acquired) releasePdfSlot();
     }
   });
 

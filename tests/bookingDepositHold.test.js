@@ -88,6 +88,12 @@ test('public booking supports expiring room holds before deposit submission', ()
     'rate-limited booking responses must tell the UI how long to wait before retrying');
   assert.match(server, /app\.get\('\/api\/bookings\/public\/rooms'/,
     'public booking page must have a safe vacant-room feed');
+  assert.match(server, /disabledNotice: settings\.enabled \? null : roomBookingDisabledPayload\(\)/,
+    'public booking config must expose a clear disabled notice when online booking is closed');
+  assert.match(server, /app\.get\('\/api\/bookings\/public\/rooms'[\s\S]{0,750}enabled: false[\s\S]{0,120}rooms: \[\][\s\S]{0,120}\.\.\.roomBookingDisabledPayload\(\)/,
+    'public room feed must hide inventory and return a stable disabled code when booking is closed');
+  assert.match(server, /return res\.status\(503\)\.json\(roomBookingDisabledPayload\(\)\);/,
+    'public hold and submit endpoints must block writes with the same disabled-booking response');
   assert.match(server, /function publicBookableRooms/,
     'public vacant-room feed must be centralized and testable');
   assert.match(server, /relationalStatus && relationalStatus !== 'vacant'/,
@@ -232,6 +238,18 @@ test('public booking page and admin features expose deposit controls', () => {
     'public page must timeout room inventory loading instead of leaving the picker stuck forever');
   assert.match(booking, /roomPickerRetryBtn/,
     'public page must offer a manual retry when room inventory loading fails');
+  assert.match(booking, /BOOKING_DISABLED_FALLBACK/,
+    'public page must keep a fallback disabled-booking message');
+  assert.match(booking, /function bookingDisabledMessage/,
+    'public page must normalize disabled-booking notices from config, room feed, hold, and submit responses');
+  assert.match(booking, /function setBookingDisabled/,
+    'public page must centralize the disabled-booking UI lockout');
+  assert.match(booking, /out && \(out\.enabled === false \|\| out\.code === 'ROOM_BOOKING_DISABLED'\)/,
+    'public room feed loader must stop and render a closed-booking notice when inventory is disabled');
+  assert.match(booking, /bookingDisabledReason = d\.booking\.enabled === false \? bookingDisabledMessage\(d\.booking\) : ''/,
+    'public page must use the server disabled notice before loading rooms');
+  assert.match(booking, /setBookingDisabled\(bookingDisabledMessage\(result\)\)/,
+    'public submit flow must lock the UI if booking is disabled during submission');
   assert.match(booking, /rateLimitMessage/,
     'public page must turn 429 responses into actionable wait-and-retry guidance');
   assert.match(booking, /fetchJsonWithTimeout/,
@@ -288,6 +306,10 @@ test('public booking page and admin features expose deposit controls', () => {
     'dedicated admin page must register a booking deposit settings component');
   assert.match(depositSettings, /\/api\/admin\/booking-deposit-settings/,
     'dedicated admin page must persist through the guarded booking deposit settings API');
+  assert.match(depositSettings, /next\.enabled && bookingDepositNeedsPaymentSetup/,
+    'dedicated admin page must not warn about payment setup when online booking is deliberately closed');
+  assert.match(depositSettings, /ปิดรับจองออนไลน์แล้ว/,
+    'dedicated admin page must confirm that closing booking prevents public submissions');
   assert.match(depositSettings, /ไม่ต้องใช้ปุ่มบันทึกของตั้งค่าระบบ/,
     'embedded booking deposit settings must render its own save action instead of hiding it with the page header');
   assert.match(depositSettings, /bookingDepositCanEditRole/,

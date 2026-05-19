@@ -173,7 +173,7 @@ function PageBookingDepositSettings({ setToast, embedded = false, currentUser = 
       }
       const next = normalizeBookingDepositFeature(d.settings || clean);
       const returnedPayment = d.payment || null;
-      const savedNeedsPaymentSetup = bookingDepositNeedsPaymentSetup(
+      const savedNeedsPaymentSetup = next.enabled && bookingDepositNeedsPaymentSetup(
         next,
         returnedPayment && typeof returnedPayment.ready === 'boolean',
         returnedPayment?.ready
@@ -191,7 +191,9 @@ function PageBookingDepositSettings({ setToast, embedded = false, currentUser = 
             : 'บันทึกค่าจอง/มัดจำแล้ว',
           description: savedNeedsPaymentSetup
             ? 'ต้องตั้งค่า PromptPay/บัญชีธนาคาร หรือปิด "ต้องแนบสลิปค่าจอง" เพื่อให้หน้า booking จองต่อได้'
-            : (clean.requireDeposit
+            : (!clean.enabled
+                ? 'ปิดรับจองออนไลน์แล้ว ผู้สนใจจะเห็นข้อความแจ้งชัดเจนและส่งคำขอจองไม่ได้'
+                : clean.requireDeposit
                 ? `ผู้จองต้องชำระ ${bookingDepositMoney(bookingDepositEffectiveAmount(clean))} และห้องจะถูกล็อก ${clean.holdMinutes} นาที`
                 : 'ปิดการเก็บค่าจองก่อนส่งคำขอแล้ว'),
         },
