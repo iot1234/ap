@@ -324,6 +324,14 @@ app.use(compression({
   threshold: 1024,
 }));
 
+// API responses can include roles, tenant data, bills, slips metadata, and
+// CSRF tokens. Keep them out of shared/browser caches by default; explicit
+// PDF/file routes can still set their own stricter headers later.
+app.use('/api', (_req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store');
+  next();
+});
+
 // Rate-limit login attempts per IP — 5 per 15 minutes is plenty for humans
 // while frustrating brute-force scripts. Per-account lockout (middleware/
 // lockout.js) adds a second layer that survives IP rotation.
@@ -391,6 +399,211 @@ async function audit(req, action, entityType, entityId, detail, userIdOverride) 
     console.error('[audit] log failed:', err.message);
   }
 }
+
+function securityEvent(req, action, detail = {}, userIdOverride) {
+  const safeDetail = {
+    ...detail,
+    path: String(detail.path || req.originalUrl || req.url || '').slice(0, 500),
+    method: String(detail.method || req.method || '').slice(0, 16),
+    requestId: req.id || null,
+  };
+  const auditWrite = audit(
+    req,
+    action,
+    'security',
+    safeDetail.path || null,
+    safeDetail,
+    userIdOverride
+  );
+  maybeNotifySecurityEvent(req, action, safeDetail).catch(() => {});
+  return auditWrite;
+}
+
+function recordSecurityEvent(req, action, detail = {}, userIdOverride) {
+  securityEvent(req, action, detail, userIdOverride).catch(() => {});
+}
+
+app.set('securityEvent', securityEvent);
+
+const SECURITY_WARNING_TEXT = 'คำขอนี้ไม่ได้รับอนุญาตหรือไม่สามารถตรวจสอบสิทธิ์ได้ ระบบได้บันทึกเหตุการณ์ไว้เพื่อความปลอดภัย';
+function applySecurityWarning(res) {
+  res.setHeader('X-Security-Warning', 'unauthorized-access-logged');
+  res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+}
+
+function securityWarningBody(error, code) {
+  return {
+    error,
+    code,
+    warning: SECURITY_WARNING_TEXT,
+  };
+}
+
+function sendSecurityJson(res, status, error, code) {
+  applySecurityWarning(res);
+  return res.status(status).json(securityWarningBody(error, code));
+}
+
+function sendSecurityText(res, status) {
+  applySecurityWarning(res);
+  return res.status(status).type('text/plain').send(SECURITY_WARNING_TEXT);
+}
+
+const SECURITY_ALERT_WINDOW_MS = 10 * 60_000;
+const SECURITY_ALERT_COOLDOWN_MS = 30 * 60_000;
+const SECURITY_ALERT_RULES = Object.freeze({
+  'security.blocked_request':      { threshold: 2, severity: 'high', title: 'พบการ probe URL/ไฟล์ระบบ' },
+  'security.blocked_method':       { threshold: 1, severity: 'high', title: 'พบ HTTP method ที่ไม่อนุญาต' },
+  'security.file_guess_miss':      { threshold: 8, severity: 'high', title: 'พบการเดา URL ไฟล์' },
+  'security.file_access_denied':   { threshold: 3, severity: 'high', title: 'พบการพยายามเปิดไฟล์ที่ไม่มีสิทธิ์' },
+  'security.api_unknown_route':    { threshold: 12, severity: 'medium', title: 'พบการเดา API URL' },
+  'security.public_unknown_route': { threshold: 8, severity: 'medium', title: 'พบการ probe URL สาธารณะ' },
+  'security.device_token_rejected':{ threshold: 3, severity: 'high', title: 'พบ token อุปกรณ์ผิดซ้ำ' },
+  'security.admin_forbidden_role': { threshold: 3, severity: 'medium', title: 'พบสิทธิ์ผู้ใช้ไม่พอซ้ำ' },
+  'security.admin_unauthorized':   { threshold: 10, severity: 'medium', title: 'พบการเข้า admin endpoint โดยไม่มี session' },
+});
+const _securityAlertBuckets = new Map();
+
+function securityAlertFingerprint(req, action, detail) {
+  const ip = clientIp(req) || 'unknown';
+  const reason = detail && detail.reason ? String(detail.reason).slice(0, 80) : '';
+  return `${action}|${ip}|${reason}`;
+}
+
+async function maybeNotifySecurityEvent(req, action, detail = {}) {
+  const rule = SECURITY_ALERT_RULES[action];
+  if (!rule) return;
+  const now = Date.now();
+  const key = securityAlertFingerprint(req, action, detail);
+  let bucket = _securityAlertBuckets.get(key);
+  if (!bucket || now - bucket.firstAt > SECURITY_ALERT_WINDOW_MS) {
+    bucket = {
+      firstAt: now,
+      count: 0,
+      lastAlertAt: 0,
+      samples: [],
+      lastUa: '',
+    };
+    _securityAlertBuckets.set(key, bucket);
+  }
+  bucket.count += 1;
+  bucket.lastUa = String(req.headers['user-agent'] || '').slice(0, 180);
+  const pathSample = String(detail.path || req.originalUrl || req.url || '').slice(0, 180);
+  if (pathSample && !bucket.samples.includes(pathSample)) {
+    bucket.samples.push(pathSample);
+    if (bucket.samples.length > 5) bucket.samples.shift();
+  }
+
+  for (const [k, b] of _securityAlertBuckets) {
+    if (now - b.firstAt > SECURITY_ALERT_WINDOW_MS && now - b.lastAlertAt > SECURITY_ALERT_COOLDOWN_MS) {
+      _securityAlertBuckets.delete(k);
+    }
+  }
+
+  if (bucket.count < rule.threshold) return;
+  if (bucket.lastAlertAt && now - bucket.lastAlertAt < SECURITY_ALERT_COOLDOWN_MS) return;
+  bucket.lastAlertAt = now;
+
+  const ip = clientIp(req) || 'unknown';
+  const reason = detail.reason ? `\nเหตุผล: ${detail.reason}` : '';
+  const samples = bucket.samples.length
+    ? `\nURL ตัวอย่าง:\n${bucket.samples.map((x) => `- ${x}`).join('\n')}`
+    : '';
+  const ua = bucket.lastUa ? `\nUser-Agent: ${bucket.lastUa}` : '';
+  const flags = await features.load(pool).catch(() => ({}));
+  await notifier.notifyOwner({ pool, features: flags }, {
+    subject: `แจ้งเตือนความปลอดภัย: ${rule.title}`,
+    text: [
+      rule.title,
+      `ระดับ: ${rule.severity}`,
+      `เหตุการณ์: ${action}`,
+      `จำนวน: ${bucket.count} ครั้งใน ${Math.round(SECURITY_ALERT_WINDOW_MS / 60_000)} นาที`,
+      `IP: ${ip}`,
+      reason.trim(),
+      samples.trim(),
+      ua.trim(),
+      '',
+      'ระบบบล็อก/ปฏิเสธคำขอแล้ว และบันทึกไว้ที่ /admin#security-events',
+    ].filter(Boolean).join('\n'),
+  }).catch(() => {});
+}
+
+function safeDecodePath(rawPath) {
+  let out = String(rawPath || '');
+  for (let i = 0; i < 2; i++) {
+    try {
+      const decoded = decodeURIComponent(out);
+      if (decoded === out) break;
+      out = decoded;
+    } catch {
+      return { ok: false, value: out };
+    }
+  }
+  return { ok: true, value: out };
+}
+
+const BLOCKED_METHODS = new Set(['TRACE', 'TRACK', 'CONNECT']);
+const PROTECTED_SOURCE_PATH = /(?:^|\/)(?:\.env(?:\..*)?|\.git|\.svn|\.hg|node_modules|uploads|db|routes|services|middleware|tests|scripts|server-assets)(?:\/|$)|(?:^|\/)(?:server\.js|package(?:-lock)?\.json|\.npmrc|railway\.json)(?:$|[?#])/i;
+const SUSPICIOUS_UNKNOWN_PATH = /(?:wp-admin|wp-login|xmlrpc|phpmyadmin|adminer|composer\.(?:json|lock)|vendor\/|backup|dump|database|config|setup|install|\.php|\.asp|\.aspx|\.jsp|\.cgi|\.sql|\.bak|\.old|\.zip|\.tar|\.gz|\.rar)/i;
+
+function suspiciousUnknownPath(rawPath) {
+  const decoded = safeDecodePath(String(rawPath || '').split('?')[0] || '/');
+  const value = (decoded.ok ? decoded.value : String(rawPath || '')).replace(/\\/g, '/');
+  if (SUSPICIOUS_UNKNOWN_PATH.test(value)) return true;
+  if (value.length > 160) return true;
+  const slashCount = (value.match(/\//g) || []).length;
+  return slashCount >= 6;
+}
+
+app.use((req, res, next) => {
+  if (BLOCKED_METHODS.has(req.method)) {
+    recordSecurityEvent(req, 'security.blocked_method', {
+      reason: 'blocked_method',
+      method: req.method,
+    });
+    return sendSecurityJson(res, 405, 'method not allowed', 'METHOD_NOT_ALLOWED');
+  }
+
+  const rawPath = String((req.originalUrl || req.url || '').split('?')[0] || '/');
+  if (rawPath.length > 2048) {
+    recordSecurityEvent(req, 'security.blocked_request', {
+      reason: 'path_too_long',
+      pathLength: rawPath.length,
+    });
+    return sendSecurityJson(res, 414, 'uri too long', 'URI_TOO_LONG');
+  }
+
+  const decoded = safeDecodePath(rawPath);
+  if (!decoded.ok) {
+    recordSecurityEvent(req, 'security.blocked_request', {
+      reason: 'malformed_path_encoding',
+      path: rawPath.slice(0, 500),
+    });
+    return sendSecurityJson(res, 400, 'bad request', 'BAD_PATH');
+  }
+
+  const pathValue = decoded.value.replace(/\\/g, '/');
+  if (/%00/i.test(rawPath) || pathValue.includes('\0')) {
+    recordSecurityEvent(req, 'security.blocked_request', { reason: 'null_byte_path' });
+    return sendSecurityJson(res, 400, 'bad request', 'BAD_PATH');
+  }
+  if (/(^|\/)\.\.(\/|$)/.test(pathValue)) {
+    recordSecurityEvent(req, 'security.blocked_request', {
+      reason: 'path_traversal',
+      path: rawPath.slice(0, 500),
+    });
+    return sendSecurityJson(res, 404, 'not found', 'NOT_FOUND');
+  }
+  if (PROTECTED_SOURCE_PATH.test(pathValue)) {
+    recordSecurityEvent(req, 'security.blocked_request', {
+      reason: 'protected_source_path',
+      path: rawPath.slice(0, 500),
+    });
+    return sendSecurityJson(res, 404, 'not found', 'NOT_FOUND');
+  }
+
+  next();
+});
 
 // --- Lightweight CSRF defense ---------------------------------------------
 // Beyond cookie SameSite=lax, require state-changing requests to carry a
@@ -1169,6 +1382,11 @@ const rateLimitBookingSubmit = makeIpLimiter({
 const rateLimitTicket  = makeIpLimiter({ windowMs: 60_000, max: 3 });
 const rateLimitQr      = makeIpLimiter({ windowMs: 60_000, max: 30 });
 const rateLimitPublicPayment = makeIpLimiter({ windowMs: 60_000, max: 10 });
+const rateLimitFileAccess = makeIpLimiter({
+  windowMs: 60_000,
+  max: 120,
+  message: 'file access too frequent',
+});
 // A7 — lookup endpoint can leak phone↔room mapping by enumeration. Tight
 // per-IP cap + small random jitter on the response to neutralise timing.
 const rateLimitLookup  = makeIpLimiter({ windowMs: 60_000, max: 10 });
@@ -8626,6 +8844,7 @@ app.get('/api/admin/security-events', requireAuth, requireRole('owner', 'manager
         `SELECT id, user_id, action, ip, ua, detail, created_at
            FROM audit_logs
           WHERE action IN ('auth.login_failed','tenant.login_failed','auth.login_locked')
+             OR action LIKE 'security.%'
           ORDER BY created_at DESC LIMIT $1`,
         [limit]
       ),
@@ -13503,25 +13722,47 @@ app.use(express.static(path.join(__dirname, 'project'), { redirect: false }));
 // /files/:id with auth gating: admins see everything; tenants see only their
 // own uploads. URLs that leaked to logs/chats are still useless without auth.
 storage.ensureDir(storage.rootPath());
-app.get('/files/:id', async (req, res) => {
+app.get('/files/:id', rateLimitFileAccess, async (req, res) => {
   const id = Number(req.params.id);
-  if (!Number.isInteger(id) || id < 1) return res.status(400).end();
+  if (!Number.isInteger(id) || id < 1) {
+    recordSecurityEvent(req, 'security.file_guess_miss', {
+      reason: 'invalid_file_id',
+      fileId: String(req.params.id || '').slice(0, 80),
+    });
+    return sendSecurityText(res, 400);
+  }
   try {
     const { rows } = await pool.query(
       'SELECT category, filename, mime_type, uploaded_by, storage FROM file_uploads WHERE id=$1',
       [id]
     );
-    if (!rows.length) return res.status(404).end();
+    if (!rows.length) {
+      recordSecurityEvent(req, 'security.file_guess_miss', {
+        reason: 'missing_file_id',
+        fileId: id,
+      });
+      return sendSecurityText(res, 404);
+    }
     const f = rows[0];
     const isAdmin = !!(req.session && req.session.user);
     let allowed = isAdmin;
+    let tSession = null;
     if (!allowed) {
       // Tenant: allow only own uploads (uploaded_by === 'tenant:<id>')
-      const tSession = await tenantSessionLookup(req);
+      tSession = await tenantSessionLookup(req);
       if (tSession && f.uploaded_by === `tenant:${tSession.tenant_id}`) allowed = true;
     }
-    if (!allowed) return res.status(403).end();
+    if (!allowed) {
+      recordSecurityEvent(req, 'security.file_access_denied', {
+        fileId: id,
+        category: f.category,
+        uploadedBy: f.uploaded_by,
+        tenantId: tSession ? tSession.tenant_id : null,
+      });
+      return sendSecurityText(res, 403);
+    }
     res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Vary', 'Cookie');
     // Sensitive PII categories must not be cached on disk — Cache-Control:
     // no-store keeps slips and citizen-ID images out of the browser cache so
     // they're not recoverable after logout. room_photo is non-sensitive and
@@ -13612,13 +13853,28 @@ app.use((err, req, res, _next) => {
 // frontend then tries to JSON.parse and shows a confusing "Unexpected token <"
 // error. JSON 404 makes debugging instant.
 app.use('/api', (req, res) => {
+  recordSecurityEvent(req, 'security.api_unknown_route', {
+    reason: 'unknown_api_route',
+    path: req.originalUrl || req.url,
+  });
+  applySecurityWarning(res);
   res.status(404).json({
-    error: 'route not found',
-    code: 'NOT_FOUND',
+    ...securityWarningBody('route not found', 'NOT_FOUND'),
     requestId: req.id,
     path: req.path,
     method: req.method,
   });
+});
+
+app.use((req, res) => {
+  if (suspiciousUnknownPath(req.originalUrl || req.url)) {
+    recordSecurityEvent(req, 'security.public_unknown_route', {
+      reason: 'suspicious_unknown_route',
+      path: req.originalUrl || req.url,
+    });
+    return sendSecurityText(res, 404);
+  }
+  res.status(404).type('text/plain').send('not found');
 });
 
 // --- Boot -----------------------------------------------------------------

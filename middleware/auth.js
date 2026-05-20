@@ -12,9 +12,25 @@ const crypto = require('crypto');
 
 const ROLE_RANK = { owner: 4, manager: 3, staff: 2, readonly: 1 };
 
+function emitSecurityEvent(req, action, detail = {}) {
+  try {
+    const sink = req && req.app && typeof req.app.get === 'function'
+      ? req.app.get('securityEvent')
+      : null;
+    if (typeof sink === 'function') {
+      Promise.resolve(sink(req, action, detail)).catch(() => {});
+    }
+  } catch { /* security logging must never break auth */ }
+}
+
 function makeAuth(pool) {
   async function requireAuth(req, res, next) {
     if (!req.session || !req.session.user) {
+      emitSecurityEvent(req, 'security.admin_unauthorized', {
+        path: req.originalUrl || req.url,
+        method: req.method,
+        reason: 'missing_admin_session',
+      });
       return res.status(401).json({ error: 'unauthorized', code: 'UNAUTHORIZED' });
     }
     try {
@@ -22,6 +38,13 @@ function makeAuth(pool) {
         'SELECT role FROM auth_users WHERE id=$1', [req.session.user.id]
       );
       if (!rows.length) {
+        emitSecurityEvent(req, 'security.admin_stale_session', {
+          path: req.originalUrl || req.url,
+          method: req.method,
+          userId: req.session.user.id,
+          username: req.session.user.username,
+          reason: 'account_missing',
+        });
         req.session.destroy(() => {});
         return res.status(401).json({ error: 'account no longer exists', code: 'UNAUTHORIZED' });
       }
@@ -43,12 +66,25 @@ function makeAuth(pool) {
     const minRank = Math.min(...allowed.map((r) => ROLE_RANK[r] || 99));
     return async function (req, res, next) {
       if (!req.session || !req.session.user) {
+        emitSecurityEvent(req, 'security.admin_unauthorized', {
+          path: req.originalUrl || req.url,
+          method: req.method,
+          reason: 'missing_admin_session_for_role',
+          required: allowed,
+        });
         return res.status(401).json({ error: 'unauthorized', code: 'UNAUTHORIZED' });
       }
       const role = req.session.user.role;
       if (allowed.includes(role)) return next();
       const rank = ROLE_RANK[role] || 0;
       if (rank >= minRank) return next();
+      emitSecurityEvent(req, 'security.admin_forbidden_role', {
+        path: req.originalUrl || req.url,
+        method: req.method,
+        required: allowed,
+        actual: role,
+        username: req.session.user.username,
+      });
       return res.status(403).json({
         error: 'forbidden — insufficient role',
         code: 'FORBIDDEN',
@@ -69,6 +105,11 @@ function makeAuth(pool) {
     if (auth && auth.startsWith('Bearer ')) {
       const token = auth.slice(7).trim();
       if (!token || token.length > 200) {
+        emitSecurityEvent(req, 'security.device_token_rejected', {
+          path: req.originalUrl || req.url,
+          method: req.method,
+          reason: !token ? 'empty_token' : 'token_too_long',
+        });
         return res.status(401).json({ error: 'invalid token', code: 'UNAUTHORIZED' });
       }
       const hash = crypto.createHash('sha256').update(token).digest('hex');
@@ -85,6 +126,11 @@ function makeAuth(pool) {
             .catch(() => {});
           return next();
         }
+        emitSecurityEvent(req, 'security.device_token_rejected', {
+          path: req.originalUrl || req.url,
+          method: req.method,
+          reason: 'hash_not_found_or_disabled',
+        });
         return res.status(401).json({ error: 'invalid device token', code: 'UNAUTHORIZED' });
       } catch (err) {
         console.error('device auth error:', err.message);
