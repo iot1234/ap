@@ -851,6 +851,7 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
           onUpdate={updateEditDraft}
           onServerPatch={applyRoomServerPatch}
           config={config}
+          setToast={setToast}
         />}
       </Drawer>
 
@@ -941,6 +942,7 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
         onAdd={handleAddRoom}
         config={config}
         existingIds={Object.keys(rooms)}
+        setToast={setToast}
       />
 
       <BulkAddFloorModal
@@ -949,6 +951,7 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
         onAdd={(data) => { if (handleBulkAddFloor(data)) setBulkAddOpen(false); }}
         config={config}
         existingFloors={allFloors}
+        setToast={setToast}
       />
     </PageContainer>
   );
@@ -959,13 +962,14 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
 // per floor and admin would otherwise click "เพิ่มห้อง" per room. Generates
 // `count` rooms in floor `floor` starting at `startNo`, all with the same
 // type/rent/view. Idempotent — re-running skips IDs that already exist.
-function BulkAddFloorModal({ open, onClose, onAdd, existingFloors, config }) {
+function BulkAddFloorModal({ open, onClose, onAdd, existingFloors, config, setToast }) {
   const C = window.ADMIN_C;
   const ADMIN_ROOM_TYPES = window.ADMIN_ROOM_TYPES;
   const ADMIN_ROOM_TYPE_KEYS = window.ADMIN_ROOM_TYPE_KEYS;
   const ADMIN_VIEWS = window.ADMIN_VIEWS;
   const { Modal, Btn, Input, Select, Toggle } = window;
   const { fmtCurrency, computeRoomRent } = window;
+  const notify = setToast || window.toast;
 
   // Default the new floor to "next floor up from the highest existing one".
   // Same UX shortcut as AddRoomModal for the per-room flow — the operator
@@ -1044,7 +1048,7 @@ function BulkAddFloorModal({ open, onClose, onAdd, existingFloors, config }) {
   if (tooMany) bulkIssues.push(`เลขห้องสุดท้ายเกิน 99 (${lastNo})`);
   const submit = () => {
     if (bulkIssues.length) {
-      window.toast && window.toast({
+      notify && notify({
         kind: 'danger',
         message: { title: 'ยังเพิ่มชั้นไม่ได้', description: bulkIssues.join('\n') },
       });
@@ -1242,7 +1246,7 @@ function TenantSection({ room }) {
 }
 
 // --- Add room modal ------------------------------------------------------
-function AddRoomModal({ open, onClose, onAdd, existingIds, config }) {
+function AddRoomModal({ open, onClose, onAdd, existingIds, config, setToast }) {
   const C = window.ADMIN_C;
   const ADMIN_ROOM_TYPES = window.ADMIN_ROOM_TYPES;
   const ADMIN_ROOM_TYPE_KEYS = window.ADMIN_ROOM_TYPE_KEYS;
@@ -1250,6 +1254,7 @@ function AddRoomModal({ open, onClose, onAdd, existingIds, config }) {
   const { Modal, Btn, Input, Select, Toggle } = window;
   const { fmtCurrency, computeRoomRent } = window;
   const apiFetch = window.requireApiFetch ? window.requireApiFetch() : window.apiFetch;
+  const notify = setToast || window.toast;
   const defaultAddView = 'วิวสวน';
   const defaultAddFeatures = { ac: ADMIN_ROOM_TYPES.standard.ac, balcony: false, parking: false, kitchen: false };
   const defaultAddRent = computeRoomRent
@@ -1383,7 +1388,7 @@ function AddRoomModal({ open, onClose, onAdd, existingIds, config }) {
   const addPendingPhotos = (fileList) => {
     const { accepted, issues } = splitRoomPhotoFiles(fileList, ROOM_PHOTO_MAX_COUNT - photoFiles.length);
     if (issues.length) {
-      window.toast && window.toast({
+      notify && notify({
         kind: accepted.length ? 'warning' : 'danger',
         message: { title: 'ตรวจสอบรูปห้อง', description: issues.join('\n') },
       });
@@ -1398,7 +1403,7 @@ function AddRoomModal({ open, onClose, onAdd, existingIds, config }) {
   const submit = async () => {
     if (uploadingPhotos) return;
     if (addIssues.length) {
-      window.toast && window.toast({
+      notify && notify({
         kind: 'danger',
         message: { title: 'ยังเพิ่มห้องไม่ได้', description: addIssues.join('\n') },
       });
@@ -1423,7 +1428,7 @@ function AddRoomModal({ open, onClose, onAdd, existingIds, config }) {
       if (ok !== false) {
         setPhotoFiles([]);
         if (uploadResult.urls.length) {
-          window.toast && window.toast({
+          notify && notify({
             kind: 'success',
             message: `รูปห้อง ${form.id} อัปโหลดสำเร็จ ${uploadResult.urls.length} รูป (${describeRoomPhotoStorage(uploadResult.storageModes)})`,
           });
@@ -1435,12 +1440,12 @@ function AddRoomModal({ open, onClose, onAdd, existingIds, config }) {
         const ok = onAdd({ ...form, photos: partialPhotos });
         if (ok !== false) {
           setPhotoFiles([]);
-          window.toast && window.toast({
+          notify && notify({
             kind: 'warning',
             message: `เพิ่มห้องพร้อมรูปที่อัปโหลดสำเร็จ ${partialPhotos.length} รูปแล้ว (${describeRoomPhotoStorage(err.storageModes)}) แต่มีบางรูปไม่สำเร็จ: ${err.message || err}`,
           });
         } else {
-          window.toast && window.toast({
+          notify && notify({
             kind: 'danger',
             message: `เพิ่มห้องไม่สำเร็จหลังอัปโหลดรูปบางส่วน กรุณาตรวจเลขห้องแล้วลองเพิ่มรูปอีกครั้ง`,
           });
@@ -1450,12 +1455,12 @@ function AddRoomModal({ open, onClose, onAdd, existingIds, config }) {
       const ok = onAdd({ ...form, photos: [] });
       if (ok !== false) {
         setPhotoFiles([]);
-        window.toast && window.toast({
+        notify && notify({
           kind: 'warning',
           message: `เพิ่มห้อง ${form.id} แล้ว แต่รูปห้องยังไม่ถูกบันทึก: ${err.message || err}`,
         });
       } else {
-        window.toast && window.toast({
+        notify && notify({
           kind: 'danger',
           message: `เพิ่มห้องและอัปโหลดรูปไม่สำเร็จ: ${err.message || err}`,
         });
@@ -1466,7 +1471,7 @@ function AddRoomModal({ open, onClose, onAdd, existingIds, config }) {
   };
   const closeModal = () => {
     if (uploadingPhotos) {
-      window.toast && window.toast({ kind: 'warning', message: 'กำลังอัปโหลดรูปอยู่ กรุณารอให้เสร็จก่อนปิดหน้าต่าง' });
+      notify && notify({ kind: 'warning', message: 'กำลังอัปโหลดรูปอยู่ กรุณารอให้เสร็จก่อนปิดหน้าต่าง' });
       return;
     }
     onClose();
@@ -1630,7 +1635,7 @@ function AddRoomModal({ open, onClose, onAdd, existingIds, config }) {
 }
 
 // --- Edit form (sub-component) -------------------------------------------
-function RoomEditForm({ room, originalRoom, onUpdate, onServerPatch, config }) {
+function RoomEditForm({ room, originalRoom, onUpdate, onServerPatch, config, setToast }) {
   const C = window.ADMIN_C;
   const ADMIN_STATUS = window.ADMIN_STATUS;
   const ADMIN_ROOM_TYPES = window.ADMIN_ROOM_TYPES;
@@ -1639,6 +1644,7 @@ function RoomEditForm({ room, originalRoom, onUpdate, onServerPatch, config }) {
   const { fmt, fmtCurrency, computeRoomRent, resolveRoomRent } = window;
   const { Input, Select, Toggle, Textarea, SectionHeading, DefList, Pill, Btn } = window;
   const apiFetch = window.requireApiFetch ? window.requireApiFetch() : window.apiFetch;
+  const notify = setToast || window.toast;
   const roomPhotoInputRef = React.useRef(null);
   const [photoBusy, setPhotoBusy] = React.useState(false);
 
@@ -1688,7 +1694,7 @@ function RoomEditForm({ room, originalRoom, onUpdate, onServerPatch, config }) {
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || 'reconcile failed');
-      window.toast && window.toast({ kind: 'success', message: `Reconciled ห้อง ${room.id} — ${d.actions?.length || 0} actions` });
+      notify && notify({ kind: 'success', message: `Reconciled ห้อง ${room.id} — ${d.actions?.length || 0} actions` });
       setAuditLoadKey((k) => k + 1);
       // The parent rooms blob also needs a refresh — onUpdate is the
       // hook into the parent state, but it expects a patch object. Pass
@@ -1698,7 +1704,7 @@ function RoomEditForm({ room, originalRoom, onUpdate, onServerPatch, config }) {
       if (onServerPatch) onServerPatch(patch);
       else onUpdate(patch);
     } catch (e) {
-      window.toast && window.toast({ kind: 'danger', message: 'Reconcile ล้มเหลว: ' + (e.message || e) });
+      notify && notify({ kind: 'danger', message: 'Reconcile ล้มเหลว: ' + (e.message || e) });
     } finally { setReconciling(false); }
   };
 
@@ -1806,39 +1812,45 @@ function RoomEditForm({ room, originalRoom, onUpdate, onServerPatch, config }) {
   };
 
   const roomPhotos = normaliseRoomPhotos(room.photos);
+  const commitRoomPhotos = (photos) => {
+    const nextPhotos = normaliseRoomPhotos(photos);
+    const applied = onServerPatch ? onServerPatch({ photos: nextPhotos }) : false;
+    if (!applied) onUpdate({ photos: nextPhotos });
+    return nextPhotos;
+  };
   const addRoomPhotos = async (fileList) => {
     if (photoBusy) return;
     const { accepted, issues } = splitRoomPhotoFiles(fileList, ROOM_PHOTO_MAX_COUNT - roomPhotos.length);
     if (issues.length) {
-      window.toast && window.toast({
+      notify && notify({
         kind: accepted.length ? 'warning' : 'danger',
         message: { title: 'ตรวจสอบรูปห้อง', description: issues.join('\n') },
       });
     }
     if (!accepted.length) return;
     if (roomPhotos.length >= ROOM_PHOTO_MAX_COUNT) {
-      window.toast && window.toast({ kind: 'warning', message: `เก็บรูปได้สูงสุด ${ROOM_PHOTO_MAX_COUNT} รูปต่อห้อง` });
+      notify && notify({ kind: 'warning', message: `เก็บรูปได้สูงสุด ${ROOM_PHOTO_MAX_COUNT} รูปต่อห้อง` });
       return;
     }
     setPhotoBusy(true);
     try {
       const uploadResult = await uploadRoomPhotoFiles(apiFetch, room.id, accepted);
-      onUpdate({ photos: normaliseRoomPhotos([...roomPhotos, ...uploadResult.urls]) });
-      window.toast && window.toast({
+      commitRoomPhotos([...roomPhotos, ...uploadResult.urls]);
+      notify && notify({
         kind: 'success',
-        message: `เพิ่มรูปห้อง ${room.id} แล้ว ${uploadResult.urls.length} รูป (${describeRoomPhotoStorage(uploadResult.storageModes)})`,
+        message: `เพิ่มรูปห้อง ${room.id} แล้ว ${uploadResult.urls.length} รูป (${describeRoomPhotoStorage(uploadResult.storageModes)}) และบันทึกเข้าห้องแล้ว`,
       });
     } catch (err) {
       const partialPhotos = normaliseRoomPhotos(err.uploaded || []);
       if (partialPhotos.length) {
-        onUpdate({ photos: normaliseRoomPhotos([...roomPhotos, ...partialPhotos]) });
-        window.toast && window.toast({
+        commitRoomPhotos([...roomPhotos, ...partialPhotos]);
+        notify && notify({
           kind: 'warning',
-          message: `เพิ่มรูปที่อัปโหลดสำเร็จ ${partialPhotos.length} รูปแล้ว (${describeRoomPhotoStorage(err.storageModes)}) แต่มีบางรูปไม่สำเร็จ: ${err.message || err}`,
+          message: `เพิ่มรูปที่อัปโหลดสำเร็จ ${partialPhotos.length} รูปแล้ว (${describeRoomPhotoStorage(err.storageModes)}) และบันทึกเข้าห้องแล้ว แต่มีบางรูปไม่สำเร็จ: ${err.message || err}`,
         });
         return;
       }
-      window.toast && window.toast({
+      notify && notify({
         kind: 'danger',
         message: `อัปโหลดรูปห้องไม่สำเร็จ: ${err.message || err}`,
       });
@@ -1847,14 +1859,16 @@ function RoomEditForm({ room, originalRoom, onUpdate, onServerPatch, config }) {
     }
   };
   const removeRoomPhoto = (idx) => {
-    onUpdate({ photos: roomPhotos.filter((_, i) => i !== idx) });
+    commitRoomPhotos(roomPhotos.filter((_, i) => i !== idx));
+    notify && notify({ kind: 'warning', message: `ลบรูปห้อง ${room.id} แล้ว` });
   };
   const setRoomCoverPhoto = (idx) => {
     if (idx <= 0) return;
     const next = [...roomPhotos];
     const [picked] = next.splice(idx, 1);
     next.unshift(picked);
-    onUpdate({ photos: next });
+    commitRoomPhotos(next);
+    notify && notify({ kind: 'success', message: `ตั้งรูปหลักของห้อง ${room.id} แล้ว` });
   };
 
   return (

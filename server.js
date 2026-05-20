@@ -8419,7 +8419,8 @@ app.post('/api/uploads', sameOrigin, csrfGuard, requireAuth, requireRole('owner'
       side,
     });
     audit(req, 'upload.create', 'file', String(out.id), { category, side });
-    res.json({ ok: true, file: out });
+    const { buffer, ...file } = out;
+    res.json({ ok: true, file });
   } catch (err) {
     const classification = classifyUploadError(err);
     const refId = b.refId ? String(b.refId).slice(0, 64) : null;

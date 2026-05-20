@@ -205,7 +205,7 @@ test('rooms edit drawer stages type/feature changes and explains pricing impact'
 
   assert.match(roomsPage, /const \[editDraft, setEditDraft\]/,
     'room edit drawer must stage edits in a draft instead of mutating rooms immediately');
-  assert.match(roomsPage, /function RoomEditForm\(\{ room, originalRoom, onUpdate, onServerPatch, config \}\)/,
+  assert.match(roomsPage, /function RoomEditForm\(\{ room, originalRoom, onUpdate, onServerPatch, config, setToast \}\)/,
     'RoomEditForm must receive originalRoom for before/after pricing impact');
   assert.match(roomsPage, /disabled=\{!editDirty\}/,
     'save button must only commit when the draft changed');
@@ -2197,6 +2197,12 @@ test('admin room photos use storage URLs and public feeds expose only safe room-
     'admin rooms page must tell admins where uploaded room photos were stored');
   assert.match(roomsPage, /roomPhotoUploadErrorMessage\(res, body\)/,
     'admin rooms page must turn server-side upload rejection codes into clear alerts');
+  assert.match(roomsPage, /function AddRoomModal\(\{ open, onClose, onAdd, existingIds, config, setToast \}\)/,
+    'add-room photo alerts must use the page toast channel');
+  assert.match(roomsPage, /function RoomEditForm\(\{ room, originalRoom, onUpdate, onServerPatch, config, setToast \}\)/,
+    'edit-room photo alerts must use the page toast channel');
+  assert.match(roomsPage, /const notify = setToast \|\| window\.toast/,
+    'room photo UI must fall back safely but prefer shell toasts');
   assert.match(roomsPage, /if \(uploadingPhotos\) return/,
     'add-room submit must prevent double-submit while photos are uploading');
   assert.match(roomsPage, /if \(photoBusy\) return/,
@@ -2207,6 +2213,10 @@ test('admin room photos use storage URLs and public feeds expose only safe room-
     'add-room modal must block accidental close while uploading photos');
   assert.match(roomsPage, /normaliseRoomPhotos\(data\.photos\)/,
     'new rooms must persist storage URL refs, not embedded data URLs');
+  assert.match(roomsPage, /const commitRoomPhotos = \(photos\) =>/,
+    'edit-room photo changes must be committed through the parent room state');
+  assert.match(roomsPage, /onServerPatch \? onServerPatch\(\{ photos: nextPhotos \}\) : false/,
+    'edit-room uploaded photos must persist immediately instead of waiting on another draft save');
   assert.match(roomsPage, /onAdd\(\{ \.\.\.form, photos: \[\] \}\)/,
     'add-room must still create the room when every selected photo upload fails');
   assert.match(roomsPage, /เพิ่มห้อง \$\{form\.id\} แล้ว แต่รูปห้องยังไม่ถูกบันทึก/,
@@ -2231,6 +2241,10 @@ test('admin room photos use storage URLs and public feeds expose only safe room-
     'server must owner-notify when a room-photo upload is rejected as abnormal');
   assert.match(server, /audit\(req, 'upload\.rejected'/,
     'rejected uploads must be recorded in the audit log');
+  assert.match(server, /const \{ buffer, \.\.\.file \} = out/,
+    'upload response must strip raw image buffers so browser JSON parsing stays small');
+  assert.doesNotMatch(server, /res\.json\(\{ ok: true, file: out \}\)/,
+    'upload response must not send the raw buffer back to admin');
 });
 
 test('admin overview uses real contracts for upcoming expiry alerts', () => {
