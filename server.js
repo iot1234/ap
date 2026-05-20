@@ -4010,6 +4010,7 @@ app.get('/api/admin/billing-readiness',
           fix: hasManualPaymentChannel
             ? '/admin#settings → การชำระเงิน หากต้องการ QR ให้ตั้ง PromptPay เพิ่ม'
             : '/admin#settings → การชำระเงิน ตั้ง PromptPay หรือบัญชีธนาคาร/TrueMoney Wallet',
+          detail: { manualChannelConfigured: hasManualPaymentChannel },
         });
       } else {
         try {
@@ -4070,13 +4071,39 @@ app.get('/api/admin/billing-readiness',
         );
         const wRate = Number(cfg?.utilities?.waterRate);
         const eRate = Number(cfg?.utilities?.elecRate);
-        const anyMeteredWater = tenantsWithBills.some((r) => !billing.isFlatUtilityConfigured(r, 'water'));
-        const anyMeteredElec = tenantsWithBills.some((r) => !billing.isFlatUtilityConfigured(r, 'elec'));
+        const issueRoom = (r, fields = []) => ({
+          roomId: String(r?.id || '-'),
+          tenant: r?.tenant?.name || '',
+          ...(fields.length ? { fields } : {}),
+        });
+        const isFlatModeRequested = (r, prefix) =>
+          String(r?.[`${prefix}Mode`] ?? r?.[`${prefix}_mode`] ?? '').toLowerCase() === 'flat';
+        const meteredWaterRooms = tenantsWithBills.filter((r) => !billing.isFlatUtilityConfigured(r, 'water'));
+        const meteredElecRooms = tenantsWithBills.filter((r) => !billing.isFlatUtilityConfigured(r, 'elec'));
+        const flatMisconfigured = tenantsWithBills
+          .map((r) => {
+            const fields = [];
+            if (isFlatModeRequested(r, 'water') && !billing.isFlatUtilityConfigured(r, 'water')) fields.push('water');
+            if (isFlatModeRequested(r, 'elec') && !billing.isFlatUtilityConfigured(r, 'elec')) fields.push('elec');
+            return fields.length ? issueRoom(r, fields) : null;
+          })
+          .filter(Boolean);
+        const anyMeteredWater = meteredWaterRooms.length > 0;
+        const anyMeteredElec = meteredElecRooms.length > 0;
+        if (flatMisconfigured.length > 0) {
+          issues.push({
+            sev: 'med', code: 'FLAT_AMOUNT_MISSING', area: ['issue'],
+            msg: `${flatMisconfigured.length} ห้องตั้งค่าน้ำ/ไฟแบบเหมา แต่ยังไม่ได้ใส่จำนวนเหมา ระบบจะ fallback ไปคิดตามมิเตอร์`,
+            fix: '/admin#rooms → เปิดห้องที่แจ้งเตือน แล้วใส่จำนวนเหมาน้ำ/ไฟ หรือเปลี่ยนกลับเป็นคิดตามมิเตอร์',
+            detail: { period: readinessPeriod, count: flatMisconfigured.length, rooms: flatMisconfigured.slice(0, 20) },
+          });
+        }
         if (anyMeteredWater && (!Number.isFinite(wRate) || wRate <= 0)) {
           issues.push({
             sev: 'high', code: 'NO_WATER_RATE', area: ['issue'],
             msg: 'ค่าน้ำต่อหน่วยยังไม่ตั้ง — บิลจะออกค่าน้ำ ฿0 สำหรับห้องที่คิดตามมิเตอร์',
             fix: '/admin#pricing → ค่าน้ำ-ไฟ หรือ ตั้งค่าน้ำแบบเหมาในทุกห้องที่ไม่ใช้มิเตอร์',
+            detail: { period: readinessPeriod, count: meteredWaterRooms.length, rooms: meteredWaterRooms.map((r) => issueRoom(r, ['water'])).slice(0, 20) },
           });
         }
         if (anyMeteredElec && (!Number.isFinite(eRate) || eRate <= 0)) {
@@ -4084,6 +4111,7 @@ app.get('/api/admin/billing-readiness',
             sev: 'high', code: 'NO_ELEC_RATE', area: ['issue'],
             msg: 'ค่าไฟต่อหน่วยยังไม่ตั้ง — บิลจะออกค่าไฟ ฿0 สำหรับห้องที่คิดตามมิเตอร์',
             fix: '/admin#pricing → ค่าน้ำ-ไฟ หรือ ตั้งค่าไฟแบบเหมาในทุกห้องที่ไม่ใช้มิเตอร์',
+            detail: { period: readinessPeriod, count: meteredElecRooms.length, rooms: meteredElecRooms.map((r) => issueRoom(r, ['elec'])).slice(0, 20) },
           });
         }
         const periodMeters = await meter.buildPeriodSummary(pool, rooms, readinessPeriod);
@@ -4106,7 +4134,12 @@ app.get('/api/admin/billing-readiness',
             sev: 'med', code: 'NO_METER_READINGS', area: ['issue'],
             msg: `${noMeter.length} ห้องยังไม่มีเลขมิเตอร์ครบสำหรับรอบ ${readinessPeriod} — บิลส่วนน้ำ/ไฟอาจเป็น 0 หรือข้อมูลไม่ครบ`,
             fix: `/admin#meters → เลือกรอบ ${readinessPeriod} แล้วบันทึกเลขมิเตอร์ก่อนออกบิล`,
-            detail: { period: readinessPeriod, rooms: noMeter.map((r) => r.id).slice(0, 20) },
+            detail: { period: readinessPeriod, count: noMeter.length, rooms: noMeter.map((r) => {
+              const fields = [];
+              if (!billing.isFlatUtilityConfigured(r, 'water') && !hasPeriodReading(r, 'water')) fields.push('water');
+              if (!billing.isFlatUtilityConfigured(r, 'elec') && !hasPeriodReading(r, 'elec')) fields.push('elec');
+              return issueRoom(r, fields);
+            }).slice(0, 20) },
           });
         }
       } catch { /* tolerate empty rooms blob */ }

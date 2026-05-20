@@ -1229,28 +1229,63 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         );
         if (!ppTarget) {
           issues.push({ sev: hasManualPaymentChannel ? 'med' : 'high', code: 'NO_PROMPTPAY',
-            msg: 'PROMPTPAY_TARGET ไม่ตั้ง — บิล PDF จะไม่มี QR' });
+            msg: hasManualPaymentChannel
+              ? 'PROMPTPAY_TARGET ไม่ตั้ง — บิล PDF จะไม่มี QR แต่ยังมีบัญชีโอน/วอลเล็ต manual ให้ผู้เช่าใช้'
+              : 'PROMPTPAY_TARGET ไม่ตั้ง และยังไม่มีบัญชีโอน/วอลเล็ต manual — ผู้เช่าจะไม่มีปลายทางรับเงินที่ชัดเจน',
+            fix: hasManualPaymentChannel
+              ? '/admin#settings → การชำระเงิน หากต้องการ QR ให้ตั้ง PromptPay เพิ่ม'
+              : '/admin#settings → การชำระเงิน ตั้ง PromptPay หรือบัญชีธนาคาร/TrueMoney Wallet',
+            detail: { manualChannelConfigured: hasManualPaymentChannel } });
         } else if (promptpay.isDemoTarget(ppTarget)) {
           issues.push({ sev: 'high', code: 'DEMO_PROMPTPAY',
-            msg: 'PromptPay ยังเป็นค่า demo — เปลี่ยนเป็นบัญชีรับเงินจริงก่อนออกบิล' });
+            msg: 'PromptPay ยังเป็นค่า demo — เปลี่ยนเป็นบัญชีรับเงินจริงก่อนออกบิล',
+            fix: '/admin#settings → การชำระเงิน เป็นเบอร์/บัตรประชาชนจริง' });
         }
         const eligibleRooms = rooms.filter((r) => r && r.tenant
           && (r.status === 'occupied' || r.status === 'overdue'));
         const wRate = Number(config?.utilities?.waterRate);
         const eRate = Number(config?.utilities?.elecRate);
+        const issueRoom = (r, fields = []) => ({
+          roomId: String(r?.id || '-'),
+          tenant: r?.tenant?.name || '',
+          ...(fields.length ? { fields } : {}),
+        });
+        const isFlatModeRequested = (r, prefix) =>
+          String(r?.[`${prefix}Mode`] ?? r?.[`${prefix}_mode`] ?? '').toLowerCase() === 'flat';
+        const meteredWaterRooms = eligibleRooms.filter((r) => !billing.isFlatUtilityConfigured(r, 'water'));
+        const meteredElecRooms = eligibleRooms.filter((r) => !billing.isFlatUtilityConfigured(r, 'elec'));
+        const flatMisconfigured = eligibleRooms
+          .map((r) => {
+            const fields = [];
+            if (isFlatModeRequested(r, 'water') && !billing.isFlatUtilityConfigured(r, 'water')) fields.push('water');
+            if (isFlatModeRequested(r, 'elec') && !billing.isFlatUtilityConfigured(r, 'elec')) fields.push('elec');
+            return fields.length ? issueRoom(r, fields) : null;
+          })
+          .filter(Boolean);
         const anyMeteredWater = eligibleRooms.some((r) => !billing.isFlatUtilityConfigured(r, 'water'));
         const anyMeteredElec = eligibleRooms.some((r) => !billing.isFlatUtilityConfigured(r, 'elec'));
+        if (flatMisconfigured.length > 0) {
+          issues.push({ sev: 'med', code: 'FLAT_AMOUNT_MISSING',
+            msg: `${flatMisconfigured.length} ห้องตั้งค่าน้ำ/ไฟแบบเหมา แต่ยังไม่ได้ใส่จำนวนเหมา ระบบจะ fallback ไปคิดตามมิเตอร์`,
+            fix: '/admin#rooms → เปิดห้องที่แจ้งเตือน แล้วใส่จำนวนเหมาน้ำ/ไฟ หรือเปลี่ยนกลับเป็นคิดตามมิเตอร์',
+            detail: { period, count: flatMisconfigured.length, rooms: flatMisconfigured.slice(0, 20) } });
+        }
         if (anyMeteredWater && (!Number.isFinite(wRate) || wRate <= 0)) {
           issues.push({ sev: 'high', code: 'NO_WATER_RATE',
-            msg: 'อัตราค่าน้ำต่อหน่วยไม่ตั้ง — ยอดค่าน้ำในบิลจะ ฿0' });
+            msg: 'อัตราค่าน้ำต่อหน่วยไม่ตั้ง — ยอดค่าน้ำในบิลจะ ฿0 สำหรับห้องที่คิดตามมิเตอร์',
+            fix: '/admin#pricing → ค่าน้ำ-ไฟ หรือ ตั้งค่าน้ำแบบเหมาในทุกห้องที่ไม่ใช้มิเตอร์',
+            detail: { period, count: meteredWaterRooms.length, rooms: meteredWaterRooms.map((r) => issueRoom(r, ['water'])).slice(0, 20) } });
         }
         if (anyMeteredElec && (!Number.isFinite(eRate) || eRate <= 0)) {
           issues.push({ sev: 'high', code: 'NO_ELEC_RATE',
-            msg: 'อัตราค่าไฟต่อหน่วยไม่ตั้ง — ยอดค่าไฟในบิลจะ ฿0' });
+            msg: 'อัตราค่าไฟต่อหน่วยไม่ตั้ง — ยอดค่าไฟในบิลจะ ฿0 สำหรับห้องที่คิดตามมิเตอร์',
+            fix: '/admin#pricing → ค่าน้ำ-ไฟ หรือ ตั้งค่าไฟแบบเหมาในทุกห้องที่ไม่ใช้มิเตอร์',
+            detail: { period, count: meteredElecRooms.length, rooms: meteredElecRooms.map((r) => issueRoom(r, ['elec'])).slice(0, 20) } });
         }
         if (eligibleRooms.length === 0) {
           issues.push({ sev: 'high', code: 'NO_ELIGIBLE_ROOMS',
-            msg: 'ไม่มีห้องที่มีผู้เช่าแสดงสถานะ occupied/overdue — จะออกบิล 0 ใบ' });
+            msg: 'ไม่มีห้องที่มีผู้เช่าแสดงสถานะ occupied/overdue — จะออกบิล 0 ใบ',
+            fix: '/admin#rooms → กำหนดผู้เช่าให้ห้อง และตั้งสถานะเป็น occupied หรือ overdue' });
         }
         // High-severity issues block unless force=true; medium/low are
         // returned as warnings in the response (informational, doesn't block).
@@ -1459,7 +1494,8 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           }
         }
         audit(req, 'bill.bulk_generate', 'period', period, { made, skipped });
-        res.json({ ok: true, period, made, skipped, flatFellBack });
+        res.json({ ok: true, period, made, skipped, flatFellBack,
+          warnings: issues.filter((i) => i.sev !== 'high') });
       } catch (err) {
         console.error('bulk-generate error:', err);
         res.status(500).json({ error: 'internal error', code: 'DB_ERROR' });

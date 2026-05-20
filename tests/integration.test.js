@@ -403,10 +403,20 @@ test('bulk bill generation warns when flat utility mode falls back to metered', 
     'billing-readiness must use the same flat-mode rate guard as bill generation');
   assert.match(scheduler, /billing\.isFlatUtilityConfigured\(r, 'water'\)/,
     'scheduler must use the same flat-mode rate guard as manual generation');
-  assert.match(extras, /res\.json\(\{ ok: true, period, made, skipped, flatFellBack \}\)/,
+  assert.match(extras, /FLAT_AMOUNT_MISSING/,
+    'bulk-generate must warn before issuing when flat mode is selected without a flat amount');
+  assert.match(server, /FLAT_AMOUNT_MISSING/,
+    'billing-readiness must surface flat-mode misconfiguration before bill generation');
+  assert.match(extras, /detail: \{ period, count: flatMisconfigured\.length, rooms: flatMisconfigured\.slice\(0, 20\) \}/,
+    'bulk-generate flat fallback warning must include affected rooms');
+  assert.match(extras, /res\.json\(\{ ok: true, period, made, skipped, flatFellBack,\s*warnings: issues\.filter/,
     'bulk-generate response must expose flat fallback details to the UI');
   assert.match(billingPage, /Array\.isArray\(d\.flatFellBack\)/,
     'billing UI must read flat fallback details');
+  assert.match(billingPage, /formatIssueDetail\(i\)/,
+    'billing UI must include structured issue details in confirmation text');
+  assert.match(billingPage, /detail\.rooms\.map\(formatIssueRoom\)/,
+    'billing UI must show affected rooms from server readiness details');
   assert.match(billingPage, /ตั้งโหมดเหมาไว้แต่ยังไม่กรอกจำนวน/,
     'billing UI must warn the operator in plain language');
 });
@@ -1793,6 +1803,7 @@ test('admin billing readiness backs bill issue and payment preflights', () => {
     'NO_PROMPTPAY',
     'NO_WATER_RATE',
     'NO_ELEC_RATE',
+    'FLAT_AMOUNT_MISSING',
     'AUTOVERIFY_NO_PROVIDER',
     'TRUEMONEY_PHONE_MISSING',
     'NO_LINE_OA',
@@ -1806,6 +1817,12 @@ test('admin billing readiness backs bill issue and payment preflights', () => {
     'admin billing page must call readiness for the selected period');
   assert.match(billingPage, /formatReadinessIssues\(readiness, 'payment'\)/,
     'mark-paid flow must surface payment readiness issues');
+  assert.match(billingPage, /formatIssueDetail/,
+    'billing preflight text must include issue code/detail helpers');
+  assert.match(billingPage, /manualChannelConfigured/,
+    'billing preflight text must explain whether a manual payment channel exists');
+  assert.match(billingPage, /ห้องที่เกี่ยวข้อง:/,
+    'billing preflight text must show affected rooms when the server returns them');
   assert.match(billingPage, /i\.area\.includes\('issue'\)/,
     'bill issue flow must filter readiness issues by issue area');
   assert.match(billingPage, /force: issues\.length > 0/,

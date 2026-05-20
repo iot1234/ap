@@ -445,6 +445,34 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
     } catch { return null; }
   }, [currentPeriod]);
 
+  const formatIssueRoom = React.useCallback((room) => {
+    if (room == null) return '';
+    if (typeof room === 'string' || typeof room === 'number') return String(room);
+    const fields = Array.isArray(room.fields) && room.fields.length
+      ? ` [${room.fields.map((f) => ({ water: 'ค่าน้ำ', elec: 'ค่าไฟ' })[f] || f).join('+')}]`
+      : '';
+    const tenant = room.tenant ? ` (${room.tenant})` : '';
+    return `${room.roomId || room.id || '-'}${fields}${tenant}`;
+  }, []);
+
+  const formatIssueDetail = React.useCallback((issue) => {
+    const detail = issue?.detail || {};
+    const lines = [];
+    if (detail.period) lines.push(`รอบบิล: ${detail.period}`);
+    if (typeof detail.manualChannelConfigured === 'boolean') {
+      lines.push(`ช่องทางโอน manual: ${detail.manualChannelConfigured ? 'มี' : 'ไม่มี'}`);
+    }
+    if (Array.isArray(detail.rooms) && detail.rooms.length > 0) {
+      const rooms = detail.rooms.map(formatIssueRoom).filter(Boolean);
+      if (rooms.length > 0) {
+        const count = Number(detail.count);
+        const suffix = Number.isFinite(count) && count > rooms.length ? ` ... รวม ${count} ห้อง` : '';
+        lines.push(`ห้องที่เกี่ยวข้อง: ${rooms.join(', ')}${suffix}`);
+      }
+    }
+    return lines.length ? `\n   ${lines.join('\n   ')}` : '';
+  }, [formatIssueRoom]);
+
   // Render the preflight modal text. Filters by `area` so the same endpoint
   // serves both flows: "ออกบิล" wants area=issue, "บันทึกชำระ" wants payment.
   const formatReadinessIssues = React.useCallback((readiness, area) => {
@@ -459,10 +487,12 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         : i.sev === 'med' ? 'ควรตรวจ'
         : i.sev === 'info' ? 'ข้อมูล' : 'ทั่วไป';
       const fix = i.fix ? `\n   → ${i.fix}` : '';
-      return `${idx + 1}. [${severity}] ${i.msg}${fix}`;
+      const code = i.code ? ` (${i.code})` : '';
+      const detail = formatIssueDetail(i);
+      return `${idx + 1}. [${severity}]${code} ${i.msg}${detail}${fix}`;
     }).join('\n\n');
     return { lines, high, count: relevant.length };
-  }, []);
+  }, [formatIssueDetail]);
 
   const handleMarkPaid = async (id, opts = {}) => {
     const bill = bills.find(b => b.id === id);
@@ -691,8 +721,10 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         .filter((i) => Array.isArray(i.area) ? i.area.includes('issue') : true)
         .map((i) => ({
           sev: i.sev === 'info' ? 'low' : i.sev,
+          code: i.code || '',
           msg: i.msg,
           fix: i.fix || '',
+          detail: i.detail || null,
         }));
     } else {
       issues = [];
@@ -709,21 +741,60 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
       if (!ppTarget) {
         issues.push({
           sev: hasManualPaymentChannel ? 'med' : 'high',
+          code: 'NO_PROMPTPAY',
           msg: 'ยังไม่ได้ตั้ง PromptPay — บิล PDF จะไม่มี QR (ผู้เช่าจะ scan-to-pay ไม่ได้)',
           fix: 'ตั้งที่ /admin#secrets → กลุ่ม PromptPay หรือ Settings → การชำระเงิน',
+          detail: { manualChannelConfigured: hasManualPaymentChannel },
         });
       }
+      const issueRoom = (r, fields = []) => ({
+        roomId: String(r?.id || '-'),
+        tenant: r?.tenant?.name || '',
+        ...(fields.length ? { fields } : {}),
+      });
+      const isFlatModeRequested = (r, prefix) => String(r?.[`${prefix}Mode`] || '').toLowerCase() === 'flat';
       const isFlatOk = (r, prefix) => String(r?.[`${prefix}Mode`] || '').toLowerCase() === 'flat'
         && Number(r?.[`${prefix}FlatAmount`]) > 0;
-      const anyMeteredWater = tenantsWithBills.some((r) => !isFlatOk(r, 'water'));
-      const anyMeteredElec = tenantsWithBills.some((r) => !isFlatOk(r, 'elec'));
+      const meteredWaterRooms = tenantsWithBills.filter((r) => !isFlatOk(r, 'water'));
+      const meteredElecRooms = tenantsWithBills.filter((r) => !isFlatOk(r, 'elec'));
+      const flatMisconfigured = tenantsWithBills
+        .map((r) => {
+          const fields = [];
+          if (isFlatModeRequested(r, 'water') && !isFlatOk(r, 'water')) fields.push('water');
+          if (isFlatModeRequested(r, 'elec') && !isFlatOk(r, 'elec')) fields.push('elec');
+          return fields.length ? issueRoom(r, fields) : null;
+        })
+        .filter(Boolean);
+      const anyMeteredWater = meteredWaterRooms.length > 0;
+      const anyMeteredElec = meteredElecRooms.length > 0;
       const wRate = Number(config?.utilities?.waterRate);
       const eRate = Number(config?.utilities?.elecRate);
+      if (flatMisconfigured.length > 0) {
+        issues.push({
+          sev: 'med',
+          code: 'FLAT_AMOUNT_MISSING',
+          msg: `${flatMisconfigured.length} ห้องตั้งค่าน้ำ/ไฟแบบเหมา แต่ยังไม่ได้ใส่จำนวนเหมา ระบบจะ fallback ไปคิดตามมิเตอร์`,
+          fix: '/admin#rooms → เปิดห้องที่แจ้งเตือน แล้วใส่จำนวนเหมาน้ำ/ไฟ หรือเปลี่ยนกลับเป็นคิดตามมิเตอร์',
+          detail: { period: currentPeriod, count: flatMisconfigured.length, rooms: flatMisconfigured.slice(0, 20) },
+        });
+      }
       if (anyMeteredWater && (!Number.isFinite(wRate) || wRate <= 0)) {
-        issues.push({ sev: 'high', msg: 'ค่าน้ำต่อหน่วยไม่ได้ตั้ง — บิลจะ ฿0 ในส่วนค่าน้ำ', fix: '/admin#pricing → ค่าน้ำ-ไฟ' });
+        issues.push({
+          sev: 'high',
+          code: 'NO_WATER_RATE',
+          msg: 'ค่าน้ำต่อหน่วยไม่ได้ตั้ง — บิลจะ ฿0 ในส่วนค่าน้ำสำหรับห้องที่คิดตามมิเตอร์',
+          fix: '/admin#pricing → ค่าน้ำ-ไฟ หรือ ตั้งค่าน้ำแบบเหมาในทุกห้องที่ไม่ใช้มิเตอร์',
+          detail: { period: currentPeriod, count: meteredWaterRooms.length, rooms: meteredWaterRooms.map((r) => issueRoom(r, ['water'])).slice(0, 20) },
+        });
       }
       if (anyMeteredElec && (!Number.isFinite(eRate) || eRate <= 0)) {
-        issues.push({ sev: 'high', msg: 'ค่าไฟต่อหน่วยไม่ได้ตั้ง — บิลจะ ฿0 ในส่วนค่าไฟ', fix: '/admin#pricing → ค่าน้ำ-ไฟ' });
+        issues.push({
+          sev: 'high',
+          code: 'NO_ELEC_RATE',
+          msg: 'ค่าไฟต่อหน่วยไม่ได้ตั้ง — บิลจะ ฿0 ในส่วนค่าไฟสำหรับห้องที่คิดตามมิเตอร์',
+          fix: '/admin#pricing → ค่าน้ำ-ไฟ หรือ ตั้งค่าไฟแบบเหมาในทุกห้องที่ไม่ใช้มิเตอร์',
+          detail: { period: currentPeriod, count: meteredElecRooms.length, rooms: meteredElecRooms.map((r) => issueRoom(r, ['elec'])).slice(0, 20) },
+        });
       }
       const hasPeriodReading = (r, prefix) => {
         const m = periodMeters && periodMeters[String(r.id)] ? periodMeters[String(r.id)] : null;
@@ -732,17 +803,29 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
       const noMeter = tenantsWithBills.filter((r) =>
         (!isFlatOk(r, 'water') && !hasPeriodReading(r, 'water'))
         || (!isFlatOk(r, 'elec') && !hasPeriodReading(r, 'elec'))
-      ).length;
-      if (noMeter > 0) {
+      );
+      if (noMeter.length > 0) {
         issues.push({
           sev: 'med',
-          msg: `${noMeter} ห้องยังไม่มีเลขมิเตอร์ครบสำหรับรอบ ${currentPeriod} — บิลส่วนน้ำ/ไฟอาจเป็น 0 หรือข้อมูลไม่ครบ`,
+          code: 'NO_METER_READINGS',
+          msg: `${noMeter.length} ห้องยังไม่มีเลขมิเตอร์ครบสำหรับรอบ ${currentPeriod} — บิลส่วนน้ำ/ไฟอาจเป็น 0 หรือข้อมูลไม่ครบ`,
           fix: `/admin#meters → เลือกรอบ ${currentPeriod} แล้วบันทึกเลขมิเตอร์ก่อนออกบิล`,
+          detail: {
+            period: currentPeriod,
+            count: noMeter.length,
+            rooms: noMeter.map((r) => {
+              const fields = [];
+              if (!isFlatOk(r, 'water') && !hasPeriodReading(r, 'water')) fields.push('water');
+              if (!isFlatOk(r, 'elec') && !hasPeriodReading(r, 'elec')) fields.push('elec');
+              return issueRoom(r, fields);
+            }).slice(0, 20),
+          },
         });
       }
       if (tenantsWithBills.length === 0) {
         issues.push({
           sev: 'high',
+          code: 'NO_ELIGIBLE_ROOMS',
           msg: 'ยังไม่มีห้องที่มีผู้เช่าแสดงสถานะ "occupied" — จะออกบิล 0 ใบ',
           fix: '/admin#rooms → กำหนดผู้เช่าให้ห้องก่อน',
         });
@@ -750,6 +833,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
       if (!config?.building?.name || config.building.name === 'บ้านกาญจน์ เรสซิเดนซ์') {
         issues.push({
           sev: 'low',
+          code: 'DEFAULT_BUILDING_NAME',
           msg: 'ชื่อตึกยังเป็น default — บิล PDF จะแสดง "บ้านกาญจน์ เรสซิเดนซ์"',
           fix: '/admin#settings → ข้อมูลตึก',
         });
@@ -761,7 +845,9 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
       const lines = issues.map((i, idx) => {
         const severity = i.sev === 'high' ? 'สำคัญ' : i.sev === 'med' ? 'ควรตรวจ' : 'ทั่วไป';
         const fix = i.fix ? `\n   → ${i.fix}` : '';
-        return `${idx + 1}. [${severity}] ${i.msg}${fix}`;
+        const code = i.code ? ` (${i.code})` : '';
+        const detail = formatIssueDetail(i);
+        return `${idx + 1}. [${severity}]${code} ${i.msg}${detail}${fix}`;
       }).join('\n\n');
       const ok = window.confirm(
         `พบ ${issues.length} ปัญหา${high > 0 ? ` (${high} ข้อสำคัญ)` : ''} ก่อนออกบิล:\n\n` +
@@ -794,15 +880,20 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
       // billing UI just says "ออกบิล N ใบ" and the wrong-mode bills go
       // out unnoticed until a tenant disputes.
       const fellBack = Array.isArray(d.flatFellBack) ? d.flatFellBack : [];
+      const warnings = Array.isArray(d.warnings) ? d.warnings : [];
       const fellBackMsg = fellBack.length
         ? ` · เตือน: ${fellBack.length} ห้อง (${fellBack.slice(0, 3).map((x) => x.roomId).join(', ')}${fellBack.length > 3 ? '…' : ''}) ตั้งโหมดเหมาไว้แต่ยังไม่กรอกจำนวน — บิลถูกออกตามมิเตอร์แทน`
         : '';
+      const warningMsg = warnings.length
+        ? ` · warning ${warnings.length} รายการ (${warnings.slice(0, 3).map((w) => w.code || w.msg || 'WARN').join(', ')}${warnings.length > 3 ? '…' : ''})`
+        : '';
       setToast && setToast({
-        kind: fellBack.length ? 'warning' : (d.made > 0 ? 'success' : 'info'),
+        kind: (fellBack.length || warnings.length) ? 'warning' : (d.made > 0 ? 'success' : 'info'),
         message: (d.made > 0
           ? `ออกบิล ${d.made} ใบสำเร็จ${d.skipped ? ` (ข้าม ${d.skipped} ใบที่มีอยู่แล้ว)` : ''}`
           : `ทุกห้องมีบิลรอบ ${period} อยู่แล้ว — ไม่ได้สร้างเพิ่ม`)
-          + fellBackMsg,
+          + fellBackMsg
+          + warningMsg,
       });
       // Refresh the DB-bills overlay so the banner + per-row badge flip
       // from "ประมาณการ" to "ออกแล้ว" without needing a manual reload.
