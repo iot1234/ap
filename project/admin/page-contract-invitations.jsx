@@ -193,6 +193,34 @@ function approvalPrecheckWarnings(detail) {
   }).map(([field, label, consequence]) => ({ field, label, consequence }));
 }
 
+function formatApprovalErrorMessage(err) {
+  const raw = (err && (err.raw || err.body)) || {};
+  const issues = Array.isArray(raw.issueSummary)
+    ? raw.issueSummary
+    : (Array.isArray(raw.issues) ? raw.issues : []);
+  const issueText = issues.slice(0, 5).map((it) => {
+    const detail = it && it.detail && typeof it.detail === 'object' ? it.detail : {};
+    const values = [];
+    if (detail.monthlyRent !== undefined) values.push(`ค่าเช่า ${detail.monthlyRent}`);
+    if (detail.minimumRent !== undefined) values.push(`ขั้นต่ำ ${detail.minimumRent}`);
+    const valueText = values.length ? ` (${values.join(' / ')})` : '';
+    const action = it.action || it.consequence || '';
+    return `• ${it.label || it.field || it.code || 'ตรวจสอบข้อมูล'}${valueText}${action ? ` — ${action}` : ''}`;
+  }).join('\n');
+  const guidance = [
+    raw.hint,
+    raw.nextActions && raw.nextActions.hint,
+  ].filter(Boolean).join('\n');
+  return {
+    title: 'อนุมัติล้มเหลว',
+    description: [
+      err && err.message ? err.message : 'ระบบไม่สามารถอนุมัติสัญญานี้ได้',
+      issueText,
+      guidance,
+    ].filter(Boolean).join('\n'),
+  };
+}
+
 // === Review modal — admin sees tenant's submission and approves/rejects ===
 function ReviewModal({ invitation, onClose, onAction, onError }) {
   const C = window.ADMIN_C;
@@ -230,7 +258,7 @@ function ReviewModal({ invitation, onClose, onAction, onError }) {
     } catch (err) {
       // Server may return ROOM_OCCUPIED 409 — surface clearly so admin
       // knows to checkout the previous tenant first.
-      onError('อนุมัติล้มเหลว: ' + err.message);
+      onError(formatApprovalErrorMessage(err));
     } finally { setBusy(false); }
   };
 

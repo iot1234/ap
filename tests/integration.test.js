@@ -4588,6 +4588,12 @@ test('admin toastError explains booking-to-contract guard codes with next action
     'toastError must have a generic hint/nextActions formatter');
   assert.match(hooks, /raw\.nextActions/,
     'generic fallback must surface backend nextActions instead of hiding them');
+  assert.match(hooks, /this\.body = payload\.raw/,
+    'ApiError must keep the full backend body for page-level inline errors');
+  assert.match(hooks, /this\.issueSummary = payload\.issueSummary/,
+    'ApiError must expose backend issueSummary to UI components');
+  assert.match(hooks, /detail\.monthlyRent/,
+    'contract approval toast must include actual rent values from issue details');
   assert.match(hooks, /reconcileUrl/,
     'generic fallback must surface reconcile links from backend errors');
 });
@@ -5258,11 +5264,20 @@ test('approve preflight blocks invalid contract targets before tenant-room sync'
   assert.ok(approveBlock, 'approve handler must be present');
   const block = approveBlock[0];
   assert.match(src, /function validateContractApprovalTarget/);
+  assert.match(src, /function approvalIssueSummary/);
   assert.match(block, /validateContractApprovalTarget\(inv, cLock\.rows\[0\]\)/);
+  assert.match(block, /const summary = approvalIssueSummary/);
   assert.match(block, /CONTRACT_APPROVAL_TARGET_INVALID/);
+  assert.match(block, /error: summary\.error/);
+  assert.match(block, /issueSummary: summary\.issueSummary/);
+  assert.match(block, /hint: summary\.hint/);
   assert.match(src, /CONTRACT_TENANT_MISMATCH/);
   assert.match(src, /CONTRACT_RENT_INVALID/);
   assert.match(src, /CONTRACT_RENT_TOO_LOW/);
+  assert.match(src, /ค่าเช่า \$\{detail\.monthlyRent\}/,
+    'approval target errors must expose the actual low rent value');
+  assert.match(src, /ขั้นต่ำ \$\{detail\.minimumRent\}/,
+    'approval target errors must expose the guarded minimum rent');
 });
 
 test('contract admin lists expire stale pending invites and return warnings', () => {
@@ -5429,6 +5444,12 @@ test('admin UI: contract review shows approval consequences and disables incompl
     'admin review must treat short/non-13-digit citizen IDs as incomplete');
   assert.match(page, /approvalWarnings\.length/);
   assert.match(page, /disabled=\{busy \|\| approvalWarnings\.length > 0\}/);
+  assert.match(page, /function formatApprovalErrorMessage/,
+    'approval failures must be formatted with backend issue details');
+  assert.match(page, /issueSummary/,
+    'approval failure toast must show backend issueSummary details');
+  assert.match(page, /formatApprovalErrorMessage\(err\)/,
+    'approve catch block must not collapse structured server errors to err.message only');
   assert.match(page, /ถ้าฝืนอนุมัติ/);
   assert.match(page, /ผลที่จะเกิดขึ้น/);
 });
@@ -5519,6 +5540,20 @@ test('tenant contract cancel UI uses checkout cascade for early move-out', () =>
     'tenant-page cancellation must require a useful audit reason before submit');
   assert.match(block[0], /window\.toastError\(setToast, err, \{ action: 'ยกเลิกสัญญา' \}\)/,
     'tenant-page cancellation must render structured API errors instead of a generic message');
+});
+
+test('tenant contract review panel keeps approval issue details visible', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-tenants.jsx'), 'utf8');
+  assert.match(src, /const body = \(err && \(err\.raw \|\| err\.body\)\) \|\| \{\}/,
+    'tenant contract approve must read structured ApiError.raw details');
+  assert.match(src, /const issues = Array\.isArray\(body\.issueSummary\)/,
+    'tenant contract approve must prefer backend issueSummary');
+  assert.match(src, /approveError\.issues\.slice\(0, 5\)\.map/,
+    'inline approval error panel must list issue details');
+  assert.match(src, /it\.action \? ` — \$\{it\.action\}`/,
+    'inline approval error panel must show actionable fixes');
 });
 
 test('contracts page hides manual signing for locked contracts', () => {

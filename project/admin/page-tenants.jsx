@@ -1200,13 +1200,31 @@ function TabContract({ t, setToast, addActivity, setRooms, onTenantChanged, onCl
       // Server responses (CITIZEN_ID_DUPLICATE / ROOM_OCCUPIED / BAD_STATUS)
       // carry both error + hint; surface them inline in the review panel
       // so admin can act on the next-step guidance instead of guessing.
-      const body = (err && err.body) || {};
+      const body = (err && (err.raw || err.body)) || {};
+      const issues = Array.isArray(body.issueSummary)
+        ? body.issueSummary
+        : (Array.isArray(body.issues) ? body.issues : []);
       setApproveError({
         error: err.message || 'เกิดข้อผิดพลาด',
-        hint: body.hint || null,
+        hint: body.hint || (body.nextActions && body.nextActions.hint) || null,
+        issues,
         code: err.code || body.code || null,
       });
-      setToast && setToast({ kind: 'danger', message: 'อนุมัติล้มเหลว: ' + (err.message || '') });
+      const issueText = issues.slice(0, 4).map((it) => {
+        const detail = it && it.detail && typeof it.detail === 'object' ? it.detail : {};
+        const values = [];
+        if (detail.monthlyRent !== undefined) values.push(`ค่าเช่า ${detail.monthlyRent}`);
+        if (detail.minimumRent !== undefined) values.push(`ขั้นต่ำ ${detail.minimumRent}`);
+        const valueText = values.length ? ` (${values.join(' / ')})` : '';
+        return `• ${it.label || it.field || it.code || 'ตรวจสอบข้อมูล'}${valueText}${it.action ? ` — ${it.action}` : ''}`;
+      }).join('\n');
+      setToast && setToast({
+        kind: 'danger',
+        message: {
+          title: 'อนุมัติล้มเหลว',
+          description: [err.message || '', issueText, body.hint].filter(Boolean).join('\n'),
+        },
+      });
     } finally { setBusy(false); }
   };
 
@@ -1806,6 +1824,18 @@ function ContractReviewPanel({ detail, busy, approveError, onApprove, onReject, 
         }}>
           <div style={{ fontWeight: 600, marginBottom: 4 }}>❌ อนุมัติไม่สำเร็จ</div>
           <div>{approveError.error}</div>
+          {approveError.issues && approveError.issues.length ? (
+            <ul style={{ margin: '6px 0 0 18px', padding: 0 }}>
+              {approveError.issues.slice(0, 5).map((it, idx) => (
+                <li key={idx}>
+                  <b>{it.label || it.field || it.code || 'ตรวจสอบข้อมูล'}</b>
+                  {it.detail && it.detail.monthlyRent !== undefined ? ` (ค่าเช่า ${it.detail.monthlyRent}` : null}
+                  {it.detail && it.detail.minimumRent !== undefined ? ` / ขั้นต่ำ ${it.detail.minimumRent})` : (it.detail && it.detail.monthlyRent !== undefined ? ')' : null)}
+                  {it.action ? ` — ${it.action}` : null}
+                </li>
+              ))}
+            </ul>
+          ) : null}
           {approveError.hint ? (
             <div style={{ marginTop: 6, fontSize: 12, color: '#7a1d10', opacity: 0.85 }}>
               💡 {approveError.hint}

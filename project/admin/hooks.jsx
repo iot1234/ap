@@ -287,8 +287,12 @@
       this.code = payload.code;
       this.error = payload.error;
       this.issues = payload.issues;
+      this.issueSummary = payload.issueSummary;
+      this.hint = payload.hint;
+      this.nextActions = payload.nextActions;
       this.requestId = payload.requestId;
       this.raw = payload.raw;
+      this.body = payload.raw;
     }
   }
   async function apiCall(url, opts = {}) {
@@ -316,6 +320,9 @@
         code: (body && body.code) || null,
         error: (body && body.error) || `HTTP ${res.status}`,
         issues: body && body.issues,
+        issueSummary: body && body.issueSummary,
+        hint: body && body.hint,
+        nextActions: body && body.nextActions,
         requestId: body && body.requestId,
         raw: body,
       });
@@ -745,7 +752,14 @@
       title: 'สัญญาปลายทางยังไม่พร้อม',
       description: (e) => {
         const issues = Array.isArray(e.issues) ? e.issues : [];
-        const top = issues.slice(0, 4).map((it) => `• ${it.label || it.code}: ${it.action || ''}`.trim()).join('\n');
+        const top = issues.slice(0, 4).map((it) => {
+          const detail = it && it.detail && typeof it.detail === 'object' ? it.detail : {};
+          const values = [];
+          if (detail.monthlyRent !== undefined) values.push(`ค่าเช่า ${detail.monthlyRent}`);
+          if (detail.minimumRent !== undefined) values.push(`ขั้นต่ำ ${detail.minimumRent}`);
+          const valueText = values.length ? ` (${values.join(' / ')})` : '';
+          return `• ${it.label || it.code}${valueText}: ${it.action || it.consequence || ''}`.trim();
+        }).join('\n');
         return top || e.hint || 'แก้ข้อมูลสัญญา/ผู้เช่า/ห้องให้ตรงกันก่อนอนุมัติ';
       },
     },

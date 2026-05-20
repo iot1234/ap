@@ -9496,6 +9496,31 @@ function validateContractApprovalTarget(inv, contract) {
   return issues;
 }
 
+function approvalIssueSummary(issues, fallbackError, fallbackHint) {
+  const list = Array.isArray(issues) ? issues.filter(Boolean) : [];
+  const primary = list[0] || {};
+  const firstLabel = primary.label || primary.code || '';
+  const firstAction = primary.action || primary.consequence || fallbackHint || '';
+  const detail = primary.detail && typeof primary.detail === 'object' ? primary.detail : {};
+  const valueBits = [];
+  if (detail.monthlyRent !== undefined) valueBits.push(`ค่าเช่า ${detail.monthlyRent}`);
+  if (detail.minimumRent !== undefined) valueBits.push(`ขั้นต่ำ ${detail.minimumRent}`);
+  const valueText = valueBits.length ? ` (${valueBits.join(' / ')})` : '';
+  return {
+    error: firstLabel
+      ? `${fallbackError}: ${firstLabel}${valueText}`
+      : fallbackError,
+    hint: firstAction || fallbackHint || null,
+    issueSummary: list.slice(0, 6).map((issue) => ({
+      code: issue.code || null,
+      label: issue.label || issue.field || issue.code || 'ตรวจสอบข้อมูล',
+      action: issue.action || null,
+      consequence: issue.consequence || null,
+      detail: issue.detail || null,
+    })),
+  };
+}
+
 // finally accessible via UI in this round). These endpoints expose the
 // table for read + targeted edits — admin needs them to:
 //   - see who's coming up for renewal (paired with tickContractExpiry alerts)
@@ -11730,16 +11755,23 @@ app.post('/api/admin/contract-invitations/:id/approve',
       }
       const targetIssues = validateContractApprovalTarget(inv, cLock.rows[0]);
       if (targetIssues.length) {
+        const summary = approvalIssueSummary(
+          targetIssues,
+          'สัญญาปลายทางไม่พร้อมสำหรับการ approve',
+          'แก้ข้อมูลสัญญา/ผู้เช่า/ห้องให้ตรงกันก่อน แล้วค่อย approve ใหม่'
+        );
         await client.query('ROLLBACK');
         return res.status(409).json({
-          error: 'สัญญาปลายทางไม่พร้อมสำหรับการ approve',
+          error: summary.error,
           code: 'CONTRACT_APPROVAL_TARGET_INVALID',
           issues: targetIssues,
+          issueSummary: summary.issueSummary,
           consequences: targetIssues.map((x) => x.consequence),
+          hint: summary.hint,
           nextActions: {
             contractUrl: `/admin#contracts`,
             invitationUrl: `/admin#contract-invitations`,
-            hint: 'แก้ข้อมูลสัญญา/ผู้เช่า/ห้องให้ตรงกันก่อน แล้วค่อย approve ใหม่',
+            hint: summary.hint || 'แก้ข้อมูลสัญญา/ผู้เช่า/ห้องให้ตรงกันก่อน แล้วค่อย approve ใหม่',
           },
         });
       }
