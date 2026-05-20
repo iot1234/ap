@@ -973,11 +973,57 @@ function Toast({ open, kind = 'success', children, onClose, duration }) {
   const resolvedDuration = duration != null
     ? duration
     : (kind === 'danger' ? 7000 : kind === 'warning' ? 4500 : 2800);
+  const timerRef = useRef(null);
+  const startedAtRef = useRef(0);
+  const remainingRef = useRef(0);
+  const closeRef = useRef(onClose);
+
   useEffect(() => {
+    closeRef.current = onClose;
+  }, [onClose]);
+
+  const clearAutoDismissTimer = () => {
+    if (!timerRef.current) return;
+    clearTimeout(timerRef.current);
+    timerRef.current = null;
+  };
+
+  const startAutoDismissTimer = (waitMs) => {
+    clearAutoDismissTimer();
     if (!open || !resolvedDuration) return;
-    const t = setTimeout(() => onClose && onClose(), resolvedDuration);
-    return () => clearTimeout(t);
-  }, [open, resolvedDuration, onClose]);
+    const wait = Math.max(0, Number(waitMs) || 0);
+    if (!wait) {
+      closeRef.current && closeRef.current();
+      return;
+    }
+    startedAtRef.current = Date.now();
+    remainingRef.current = wait;
+    timerRef.current = setTimeout(() => {
+      timerRef.current = null;
+      remainingRef.current = 0;
+      closeRef.current && closeRef.current();
+    }, wait);
+  };
+
+  const pauseAutoDismiss = () => {
+    if (!open || !resolvedDuration || !timerRef.current) return;
+    const elapsed = Date.now() - startedAtRef.current;
+    remainingRef.current = Math.max(0, remainingRef.current - elapsed);
+    clearAutoDismissTimer();
+  };
+
+  const resumeAutoDismiss = () => {
+    if (!open || !resolvedDuration || timerRef.current) return;
+    startAutoDismissTimer(remainingRef.current > 0 ? remainingRef.current : 1);
+  };
+
+  useEffect(() => {
+    remainingRef.current = resolvedDuration || 0;
+    clearAutoDismissTimer();
+    if (!open || !resolvedDuration) return undefined;
+    startAutoDismissTimer(resolvedDuration);
+    return clearAutoDismissTimer;
+  }, [open, resolvedDuration, children, kind]);
   if (!open) return null;
   // Each kind gets a left-edge category color rail + matching icon,
   // mirroring the PageHeader pattern so the toast looks like it
@@ -1011,6 +1057,8 @@ function Toast({ open, kind = 'success', children, onClose, duration }) {
       aria-live={isUrgent ? 'assertive' : 'polite'}
       aria-atomic="true"
       className="toast-floating"
+      onMouseEnter={pauseAutoDismiss}
+      onMouseLeave={resumeAutoDismiss}
       style={{
         position: 'fixed', bottom: 24, left: '50%', transform: 'translateX(-50%)',
         background: cc.bg, color: '#fff',

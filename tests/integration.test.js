@@ -2253,6 +2253,35 @@ test('admin room photos use storage URLs and public feeds expose only safe room-
     '/api/uploads must be explicitly exempt from the direct /uploads path probe guard');
 });
 
+test('admin toast auto-dismiss pauses while the mouse is hovering', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const ui = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'ui.jsx'), 'utf8');
+  const shell = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'shell.jsx'), 'utf8');
+  const toastBlock = ui.match(/function Toast\([\s\S]*?\n}\n\n\/\/ --- Alert/);
+  assert.ok(toastBlock, 'Toast component must remain in the shared admin UI module');
+  const src = toastBlock[0];
+
+  assert.match(shell, /<Toast[\s\S]{0,260}open=\{!!toast\}/,
+    'admin shell must continue routing every page toast through the shared Toast component');
+  assert.match(src, /const timerRef = useRef\(null\)/,
+    'Toast must keep a cancellable auto-dismiss timer');
+  assert.match(src, /const startedAtRef = useRef\(0\)/,
+    'Toast must track when the current timer started');
+  assert.match(src, /const remainingRef = useRef\(0\)/,
+    'Toast must preserve the remaining auto-dismiss time while hovered');
+  assert.match(src, /const pauseAutoDismiss = \(\) => \{[\s\S]{0,260}Date\.now\(\) - startedAtRef\.current[\s\S]{0,260}clearAutoDismissTimer\(\)/,
+    'hovering a toast must pause the countdown instead of letting it close under the cursor');
+  assert.match(src, /const resumeAutoDismiss = \(\) => \{[\s\S]{0,220}startAutoDismissTimer\(remainingRef\.current > 0 \? remainingRef\.current : 1\)/,
+    'leaving the toast must resume auto-dismiss using the remaining time');
+  assert.match(src, /onMouseEnter=\{pauseAutoDismiss\}/,
+    'toast root must pause on mouse enter');
+  assert.match(src, /onMouseLeave=\{resumeAutoDismiss\}/,
+    'toast root must resume on mouse leave');
+  assert.doesNotMatch(src, /const t = setTimeout\(\(\) => onClose && onClose\(\), resolvedDuration\)/,
+    'Toast must not use the old unpausable timeout');
+});
+
 test('admin overview uses real contracts for upcoming expiry alerts', () => {
   const fs = require('node:fs');
   const path = require('node:path');
