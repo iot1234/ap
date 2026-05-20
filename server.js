@@ -544,6 +544,12 @@ function safeDecodePath(rawPath) {
 
 const BLOCKED_METHODS = new Set(['TRACE', 'TRACK', 'CONNECT']);
 const PROTECTED_SOURCE_PATH = /(?:^|\/)(?:\.env(?:\..*)?|\.git|\.svn|\.hg|node_modules|uploads|db|routes|services|middleware|tests|scripts|server-assets)(?:\/|$)|(?:^|\/)(?:server\.js|package(?:-lock)?\.json|\.npmrc|railway\.json)(?:$|[?#])/i;
+function isProtectedSourceProbePath(pathValue) {
+  // `/api/uploads` is the authenticated upload endpoint. The protected-path
+  // scanner still blocks direct `/uploads/...` probes for local files.
+  if (/^\/api\/uploads\/?$/i.test(String(pathValue || ''))) return false;
+  return PROTECTED_SOURCE_PATH.test(pathValue);
+}
 const SUSPICIOUS_UNKNOWN_PATH = /(?:wp-admin|wp-login|xmlrpc|phpmyadmin|adminer|composer\.(?:json|lock)|vendor\/|backup|dump|database|config|setup|install|\.php|\.asp|\.aspx|\.jsp|\.cgi|\.sql|\.bak|\.old|\.zip|\.tar|\.gz|\.rar)/i;
 
 function suspiciousUnknownPath(rawPath) {
@@ -594,7 +600,7 @@ app.use((req, res, next) => {
     });
     return sendSecurityJson(res, 404, 'not found', 'NOT_FOUND');
   }
-  if (PROTECTED_SOURCE_PATH.test(pathValue)) {
+  if (isProtectedSourceProbePath(pathValue)) {
     recordSecurityEvent(req, 'security.blocked_request', {
       reason: 'protected_source_path',
       path: rawPath.slice(0, 500),

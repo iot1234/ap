@@ -2197,6 +2197,8 @@ test('admin room photos use storage URLs and public feeds expose only safe room-
     'admin rooms page must tell admins where uploaded room photos were stored');
   assert.match(roomsPage, /roomPhotoUploadErrorMessage\(res, body\)/,
     'admin rooms page must turn server-side upload rejection codes into clear alerts');
+  assert.match(roomsPage, /ไม่พบ endpoint อัปโหลดรูป \/api\/uploads/,
+    'admin rooms page must explain upload endpoint 404s instead of showing raw not found');
   assert.match(roomsPage, /function AddRoomModal\(\{ open, onClose, onAdd, existingIds, config, setToast \}\)/,
     'add-room photo alerts must use the page toast channel');
   assert.match(roomsPage, /function RoomEditForm\(\{ room, originalRoom, onUpdate, onServerPatch, config, setToast \}\)/,
@@ -2245,6 +2247,10 @@ test('admin room photos use storage URLs and public feeds expose only safe room-
     'upload response must strip raw image buffers so browser JSON parsing stays small');
   assert.doesNotMatch(server, /res\.json\(\{ ok: true, file: out \}\)/,
     'upload response must not send the raw buffer back to admin');
+  assert.match(server, /function isProtectedSourceProbePath\(pathValue\)/,
+    'security source-path guard must leave the authenticated upload API reachable');
+  assert.match(server, /\^\\\/api\\\/uploads\\\/\?\$/,
+    '/api/uploads must be explicitly exempt from the direct /uploads path probe guard');
 });
 
 test('admin overview uses real contracts for upcoming expiry alerts', () => {

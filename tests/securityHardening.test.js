@@ -19,6 +19,12 @@ test('server blocks path traversal and source-file probing before routes', () =>
     'dangerous HTTP methods should be blocked before reaching routes');
   assert.match(src, /PROTECTED_SOURCE_PATH/,
     'server must define protected source-path scanner');
+  assert.match(src, /function isProtectedSourceProbePath\(pathValue\)/,
+    'protected source-path scanner must be centralized');
+  assert.match(src, /\^\\\/api\\\/uploads\\\/\?\$/,
+    'authenticated /api/uploads must not be confused with direct /uploads file probes');
+  assert.match(src, /if \(isProtectedSourceProbePath\(pathValue\)\)/,
+    'request guard must use the scanner helper so route exceptions stay active');
   assert.match(src, /path_traversal/,
     'server must explicitly reject traversal probes');
   assert.match(src, /protected_source_path/,

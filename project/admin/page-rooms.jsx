@@ -148,6 +148,9 @@ function roomPhotoUploadErrorMessage(res, body) {
   if (code === 'INVALID_UPLOAD_FILE' || /unrecognized file type|mime mismatch|mime not allowed/i.test(raw)) {
     return 'ไฟล์รูปไม่ถูกต้องหรือชนิดไฟล์ไม่รองรับ';
   }
+  if ((res && res.status === 404) || code === 'NOT_FOUND') {
+    return 'ไม่พบ endpoint อัปโหลดรูป /api/uploads กรุณารีเฟรชหน้าและตรวจว่า backend deploy เวอร์ชันล่าสุดแล้ว';
+  }
   return raw || `upload failed (${res ? res.status : 'unknown'})`;
 }
 
