@@ -2207,6 +2207,12 @@ test('admin room photos use storage URLs and public feeds expose only safe room-
     'add-room modal must block accidental close while uploading photos');
   assert.match(roomsPage, /normaliseRoomPhotos\(data\.photos\)/,
     'new rooms must persist storage URL refs, not embedded data URLs');
+  assert.match(roomsPage, /onAdd\(\{ \.\.\.form, photos: \[\] \}\)/,
+    'add-room must still create the room when every selected photo upload fails');
+  assert.match(roomsPage, /เพิ่มห้อง \$\{form\.id\} แล้ว แต่รูปห้องยังไม่ถูกบันทึก/,
+    'add-room must warn clearly when it creates the room without failed photos');
+  assert.doesNotMatch(roomsPage, /disabled=\{!!addIssues\.length \|\| uploadingPhotos\}/,
+    'add-room submit button must remain clickable so validation errors can be shown as a toast');
   assert.match(server, /function publicRoomPhotos\(photos\)/,
     'server must centrally sanitize public room-photo URLs');
   assert.match(server, /url\.startsWith\('data:'\)/,
@@ -2813,6 +2819,28 @@ test('admin shell live poll surfaces stale-data failures', () => {
     'network live poll failures must show an admin-facing warning');
   assert.match(block, /if \(bRes\.ok && tRes\.ok\)[\s\S]{0,140}warnedLiveError = false/,
     'live poll warnings should be allowed again after recovery');
+});
+
+test('admin shell surfaces background room-save failures from api-client', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const shell = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'shell.jsx'), 'utf8');
+  const apiClient = fs.readFileSync(path.join(__dirname, '..', 'project', 'api-client.js'), 'utf8');
+
+  assert.match(apiClient, /function emitSyncError\(key, detail = \{\}\)/,
+    'api-client must emit a visible event when background localStorage sync fails');
+  assert.match(apiClient, /new CustomEvent\('ap:sync-error'/,
+    'sync failure event name must be stable for the admin shell');
+  assert.match(apiClient, /emitSyncError\(key, \{[\s\S]{0,180}status: res\.status/,
+    'failed PUT responses must dispatch status details');
+  assert.match(apiClient, /BAD_LOCAL_SHAPE/,
+    'client-side shape drops must also notify the admin');
+  assert.match(shell, /window\.addEventListener\('ap:sync-error', onSyncError\)/,
+    'admin shell must listen for sync failures');
+  assert.match(shell, /key === 'baankarn_rooms_v1'[\s\S]{0,120}บันทึกข้อมูลห้องพัก/,
+    'room saves must get a room-specific toast title');
+  assert.match(shell, /kind: 'danger'[\s\S]{0,160}\$\{label\} ไม่สำเร็จ/,
+    'sync failure toast must be visible as an error');
 });
 
 test('slip upload re-validates bill.tenant_id under FOR UPDATE lock (BILL_REASSIGNED)', () => {

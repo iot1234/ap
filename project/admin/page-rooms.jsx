@@ -1447,10 +1447,19 @@ function AddRoomModal({ open, onClose, onAdd, existingIds, config }) {
         }
         return;
       }
-      window.toast && window.toast({
-        kind: 'danger',
-        message: `อัปโหลดรูปห้องไม่สำเร็จ: ${err.message || err}`,
-      });
+      const ok = onAdd({ ...form, photos: [] });
+      if (ok !== false) {
+        setPhotoFiles([]);
+        window.toast && window.toast({
+          kind: 'warning',
+          message: `เพิ่มห้อง ${form.id} แล้ว แต่รูปห้องยังไม่ถูกบันทึก: ${err.message || err}`,
+        });
+      } else {
+        window.toast && window.toast({
+          kind: 'danger',
+          message: `เพิ่มห้องและอัปโหลดรูปไม่สำเร็จ: ${err.message || err}`,
+        });
+      }
     } finally {
       setUploadingPhotos(false);
     }
@@ -1472,7 +1481,7 @@ function AddRoomModal({ open, onClose, onAdd, existingIds, config }) {
       footer={
         <>
           <Btn variant="ghost" onClick={closeModal} disabled={uploadingPhotos}>ยกเลิก</Btn>
-          <Btn variant="primary" disabled={!!addIssues.length || uploadingPhotos}
+          <Btn variant="primary" disabled={uploadingPhotos}
                onClick={submit}>{uploadingPhotos ? 'กำลังอัปโหลดรูป…' : 'เพิ่มห้อง'}</Btn>
         </>
       }

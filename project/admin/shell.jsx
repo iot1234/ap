@@ -915,6 +915,26 @@ function App() {
 
   // --- Toast ---
   const [toast, setToast] = useState(null);
+  useEffect(() => {
+    const onSyncError = (ev) => {
+      const d = ev && ev.detail ? ev.detail : {};
+      const key = String(d.key || '');
+      const label = key === 'baankarn_rooms_v1'
+        ? 'บันทึกข้อมูลห้องพัก'
+        : key === 'baankarn_config_v1'
+          ? 'บันทึกการตั้งค่า'
+          : 'บันทึกข้อมูล';
+      setToast({
+        kind: 'danger',
+        message: {
+          title: `${label} ไม่สำเร็จ`,
+          description: `${d.error || 'ระบบบันทึกข้อมูลไม่ได้'}${d.status ? ` (HTTP ${d.status})` : ''}`,
+        },
+      });
+    };
+    window.addEventListener('ap:sync-error', onSyncError);
+    return () => window.removeEventListener('ap:sync-error', onSyncError);
+  }, []);
 
   // --- Confirm refresh modal ---
   const [confirmRefresh, setConfirmRefresh] = useState(false);

@@ -146,6 +146,19 @@
   // (next AP.me() / AP.login() returns truthy), we flush this queue.
   const retryQueue = new Map();
 
+  function emitSyncError(key, detail = {}) {
+    try {
+      window.dispatchEvent(new CustomEvent('ap:sync-error', {
+        detail: {
+          key,
+          status: detail.status || 0,
+          code: detail.code || null,
+          error: detail.error || detail.message || 'sync failed',
+        },
+      }));
+    } catch {}
+  }
+
   async function flushRetryQueue() {
     if (!isAuthenticated) return;
     const entries = Array.from(retryQueue.entries());
@@ -159,9 +172,13 @@
           body: JSON.stringify({ value }),
         });
         if (r.status === 403) _csrfToken = null;     // token rotated → refetch
-        if (!r.ok) console.warn(`[api-client] retry PUT ${key} failed`, r.status);
+        if (!r.ok) {
+          console.warn(`[api-client] retry PUT ${key} failed`, r.status);
+          emitSyncError(key, { status: r.status, error: `retry PUT failed (${r.status})` });
+        }
       } catch (err) {
         console.warn(`[api-client] retry PUT ${key} error`, err);
+        emitSyncError(key, { error: err && err.message ? err.message : String(err) });
         retryQueue.set(key, value); // keep for next attempt
       }
     }
@@ -190,9 +207,17 @@
           isAuthenticated = false;
         } else if (!res.ok) {
           console.warn(`[api-client] PUT ${key} failed`, res.status);
+          let body = null;
+          try { body = await res.json(); } catch {}
+          emitSyncError(key, {
+            status: res.status,
+            code: body && body.code,
+            error: (body && body.error) || `PUT failed (${res.status})`,
+          });
         }
       } catch (err) {
         console.warn(`[api-client] PUT ${key} error`, err);
+        emitSyncError(key, { error: err && err.message ? err.message : String(err) });
       } finally {
         inflight.delete(key);
       }
@@ -245,6 +270,7 @@
     if (!isHydrating && isAuthenticated && SYNCED_KEYS.includes(key)) {
       if (!shapeIsValid(key, value)) {
         console.warn('[api-client] dropped invalid value for', key);
+        emitSyncError(key, { code: 'BAD_LOCAL_SHAPE', error: 'local value failed shape/size validation' });
         return;
       }
       pushToApi(key, value);
