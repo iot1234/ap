@@ -51,6 +51,32 @@ test('tenant slip preview route is ownership checked and inline image only', () 
     'preview route should render inline instead of attachment/download');
 });
 
+test('tenant contract PDF opens inline before explicit download', () => {
+  const server = serverSource();
+  const routeStart = server.indexOf("app.get('/api/tenant/contract/:id/pdf'");
+  const routeEnd = server.indexOf("app.get('/api/tenant/bills'", routeStart);
+  assert.ok(routeStart > -1 && routeEnd > routeStart, 'should locate tenant contract PDF route');
+  const route = server.slice(routeStart, routeEnd);
+  assert.match(route, /Content-Type'?, 'application\/pdf'/,
+    'tenant contract route must serve a PDF response');
+  assert.match(route, /req\.query\.download === '1' \? 'attachment' : 'inline'/,
+    'tenant contract route must render inline unless the UI explicitly requests download=1');
+
+  const src = tenantSource();
+  const start = src.indexOf('function ContractView');
+  const end = src.indexOf('// ======================================================== MaintenanceView', start);
+  assert.ok(start > -1 && end > start, 'should locate tenant ContractView block');
+  const block = src.slice(start, end);
+  assert.match(block, /const contractPdfUrl = `\/api\/tenant\/contract\/\$\{encodeURIComponent\(c\.id\)\}\/pdf`;/,
+    'tenant portal must build the base inline contract PDF URL without download=1');
+  assert.match(block, /href=\{contractPdfUrl\}[\s\S]{0,180}<Button icon="contract">\{t\('contractViewPdf'\)\}/,
+    'primary contract action must open the PDF inline in a browser tab');
+  assert.match(block, /href=\{`\$\{contractPdfUrl\}\?download=1`\}[\s\S]{0,220}<Button variant="outline" icon="download">\{t\('contractDownload'\)\}/,
+    'download must remain a separate explicit action');
+  assert.doesNotMatch(block, /href=\{`\/api\/tenant\/contract\/\$\{c\.id\}\/pdf\?download=1`\}/,
+    'the old primary contract button must not force an immediate download');
+});
+
 test('tenant payment history opens slip in modal, not window.open', () => {
   const src = tenantSource();
   const paymentsStart = src.indexOf('function PaymentsView');

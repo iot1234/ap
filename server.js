@@ -5357,9 +5357,10 @@ app.get('/api/tenant/contract', requireTenant, async (req, res) => {
   }
 });
 
-// GET /api/tenant/contract/:id/pdf — tenant downloads their OWN signed
+// GET /api/tenant/contract/:id/pdf — tenant views/downloads their OWN signed
 // contract PDF. Replaces the "ติดต่อสำนักงานเพื่อรับ PDF" friction:
-// tenant can now self-serve from the portal. Ownership is enforced via
+// tenant can now self-serve from the portal. Inline preview is the default;
+// ?download=1 is reserved for explicit downloads. Ownership is enforced via
 // tenant_id match (a guessed contract id can't fetch someone else's PDF),
 // and we require locked_at (signed) so unfinished drafts don't leak.
 app.get('/api/tenant/contract/:id/pdf', requireTenant, async (req, res) => {

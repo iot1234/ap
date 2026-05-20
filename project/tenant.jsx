@@ -101,7 +101,8 @@ const TR = {
     contractRoom: 'ห้อง', contractStart: 'วันเริ่มสัญญา', contractEnd: 'วันสิ้นสุด',
     contractTerm: 'ระยะเวลา', contractRent: 'ค่าเช่ารายเดือน',
     contractDeposit: 'เงินมัดจำ', contractDiscount: 'ส่วนลด',
-    contractSigned: 'ลงนามเมื่อ', contractDownload: 'ดาวน์โหลดสัญญา (PDF)',
+    contractSigned: 'ลงนามเมื่อ', contractViewPdf: 'ดูสัญญา (PDF)',
+    contractDownload: 'ดาวน์โหลดสัญญา (PDF)',
     contractDaysLeft: 'เหลืออีก', contractMonths: 'เดือน',
     contractOpenEnded: 'เปิด-ไม่จำกัด', contractActive: 'มีผลบังคับใช้',
     contractPending: 'สัญญายังไม่ได้รับอนุมัติ — รอเจ้าของหอพักตรวจสอบ',
@@ -142,7 +143,7 @@ const TR = {
     guidePaymentsTitle: 'ตรวจประวัติการชำระ',
     guidePaymentsText: 'ดูสถานะสลิป ใบเสร็จ และรายการที่ต้องอัปโหลดใหม่ได้จากหน้านี้',
     guideContractTitle: 'ข้อมูลสัญญาเช่า',
-    guideContractText: 'ตรวจระยะสัญญา ค่าเช่า เงินมัดจำ และดาวน์โหลด PDF เมื่อสัญญาพร้อมใช้งาน',
+    guideContractText: 'ตรวจระยะสัญญา ค่าเช่า เงินมัดจำ เปิดดู PDF ในเว็บ หรือดาวน์โหลดเมื่อสัญญาพร้อมใช้งาน',
     guideMaintenanceTitle: 'แจ้งซ่อมและติดตามงาน',
     guideMaintenanceText: 'แจ้งปัญหาพร้อมรายละเอียด แล้วติดตามสถานะงานซ่อมได้ในหน้าเดียว',
     guideProfileTitle: 'ข้อมูลผู้เช่าและการติดต่อ',
@@ -236,7 +237,8 @@ const TR = {
     contractRoom: 'Room', contractStart: 'Start date', contractEnd: 'End date',
     contractTerm: 'Term', contractRent: 'Monthly rent',
     contractDeposit: 'Deposit', contractDiscount: 'Discount',
-    contractSigned: 'Signed at', contractDownload: 'Download lease (PDF)',
+    contractSigned: 'Signed at', contractViewPdf: 'View lease (PDF)',
+    contractDownload: 'Download lease (PDF)',
     contractDaysLeft: 'Remaining', contractMonths: 'months',
     contractOpenEnded: 'Open-ended', contractActive: 'Active',
     contractPending: 'Lease not yet approved — awaiting building owner.',
@@ -275,7 +277,7 @@ const TR = {
     guidePaymentsTitle: 'Review payment history',
     guidePaymentsText: 'See slip status, receipts and any payments that need another upload.',
     guideContractTitle: 'Lease information',
-    guideContractText: 'Review term dates, rent, deposit and download the PDF when the lease is ready.',
+    guideContractText: 'Review term dates, rent, deposit, open the PDF in your browser, or download it when the lease is ready.',
     guideMaintenanceTitle: 'Report and track repairs',
     guideMaintenanceText: 'Send the issue details and follow repair status in one place.',
     guideProfileTitle: 'Profile and dorm contact',
@@ -2314,6 +2316,7 @@ function ContractView({ locale, tenant, contract }) {
     }
   }
   const floor = deriveFloor(tenant.roomId || c.room_id);
+  const contractPdfUrl = `/api/tenant/contract/${encodeURIComponent(c.id)}/pdf`;
   return (
     <div className="anim-in">
       <SectionHeader title={t('myContract')} subtitle={`${t('contractNo')} ${c.contract_no || '—'}`} />
@@ -2373,10 +2376,16 @@ function ContractView({ locale, tenant, contract }) {
               value={c.term_months ? `${c.term_months} ${t('contractMonths')}` : t('contractOpenEnded')} last />
             <div style={{ display: 'flex', gap: 10, marginTop: 18, flexWrap: 'wrap' }}>
               {isLocked ? (
-                <a href={`/api/tenant/contract/${c.id}/pdf?download=1`} target="_blank" rel="noopener noreferrer"
-                  style={{ textDecoration: 'none' }}>
-                  <Button icon="download">{t('contractDownload')}</Button>
-                </a>
+                <>
+                  <a href={contractPdfUrl} target="_blank" rel="noopener noreferrer"
+                    style={{ textDecoration: 'none' }}>
+                    <Button icon="contract">{t('contractViewPdf')}</Button>
+                  </a>
+                  <a href={`${contractPdfUrl}?download=1`} target="_blank" rel="noopener noreferrer"
+                    style={{ textDecoration: 'none' }}>
+                    <Button variant="outline" icon="download">{t('contractDownload')}</Button>
+                  </a>
+                </>
               ) : null}
             </div>
           </div>
