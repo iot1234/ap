@@ -760,9 +760,10 @@ const ALLOWED_KEYS = new Set([
 // `maskRoomsPublic` first.
 const PUBLIC_KEYS = new Set(['baankarn_rooms_v1', 'baankarn_config_v1']);
 
-// Strip every tenant-PII field from a rooms object. The home page only needs
-// status/floor/type/rent to render the building grid, so we drop name, phone,
-// email, citizen ID, occupation, photos, contract end, etc.
+// Strip every tenant-PII field from a rooms object. The home page needs
+// status/floor/type/rent plus non-sensitive room-photo URLs to render the
+// building grid, so we drop name, phone, email, citizen ID, occupation,
+// contract end, etc.
 //
 // The rent shown publicly is run through the formula resolver so admin
 // pricing edits in /admin#pricing reflect on the homepage immediately
@@ -770,6 +771,23 @@ const PUBLIC_KEYS = new Set(['baankarn_rooms_v1', 'baankarn_config_v1']);
 // the static room.rent snapshot when no config is supplied — that path is
 // only hit on the GET-all endpoint where the caller hasn't loaded config
 // yet; the per-key GET path always passes config.
+function publicRoomPhotos(photos) {
+  if (!Array.isArray(photos)) return [];
+  const out = [];
+  const seen = new Set();
+  for (const item of photos) {
+    const url = String(item || '').trim();
+    if (!url || url.startsWith('data:')) continue;
+    const isSafeRoomPhotoUrl = /^\/files\/\d+$/.test(url)
+      || /^\/assets\/rooms\/[A-Za-z0-9._/-]+$/.test(url);
+    if (!isSafeRoomPhotoUrl || seen.has(url)) continue;
+    seen.add(url);
+    out.push(url.slice(0, 2048));
+    if (out.length >= 12) break;
+  }
+  return out;
+}
+
 function maskRoomsPublic(roomsObj, config) {
   if (!roomsObj || typeof roomsObj !== 'object') return roomsObj;
   const out = {};
@@ -795,6 +813,7 @@ function maskRoomsPublic(roomsObj, config) {
       view: r.view,
       status: r.status,
       rent: resolvedRent,
+      photos: publicRoomPhotos(r.photos),
       // Keep tenant truthy so existing UI conditions still work, but every
       // PII field is replaced with a masked placeholder.
       tenant: r.tenant ? { name: 'มีผู้เช่า', occupation: '', masked: true } : null,
@@ -847,6 +866,7 @@ function publicBookableRooms(roomsObj, config, v2Rows = []) {
       view: masked.view || '',
       status: 'vacant',
       rent: Number.isFinite(Number(masked.rent)) ? Number(masked.rent) : 0,
+      photos: Array.isArray(masked.photos) ? masked.photos : [],
     });
   }
   return out.sort((a, b) => (
@@ -8322,6 +8342,52 @@ app.put('/api/bookings/:id', sameOrigin, csrfGuard, requireAuth, requireRole('ow
 // there now.
 
 // === v2: Photo upload (rooms / signatures / citizen-id images) ============
+const ROOM_PHOTO_UPLOAD_ALERT_COOLDOWN_MS = 15 * 60 * 1000;
+const roomPhotoUploadAlertBuckets = new Map();
+
+function classifyUploadError(err) {
+  const raw = String(err && err.message ? err.message : err || 'upload failed');
+  if (/file too large/i.test(raw)) {
+    return { status: 413, code: 'UPLOAD_TOO_LARGE', message: 'ไฟล์ใหญ่เกินกำหนด', raw };
+  }
+  if (/expected string|unrecognized file type|mime mismatch|mime not allowed|unknown mime/i.test(raw)) {
+    return { status: 400, code: 'INVALID_UPLOAD_FILE', message: 'ไฟล์รูปไม่ถูกต้องหรือชนิดไฟล์ไม่รองรับ', raw };
+  }
+  return { status: 400, code: 'UPLOAD_FAILED', message: raw, raw };
+}
+
+async function notifyRoomPhotoUploadRejected(req, refId, classification) {
+  const now = Date.now();
+  const ip = clientIp(req) || 'unknown';
+  const reason = String(classification.code || classification.raw || 'upload failed').slice(0, 120);
+  const key = `${ip}|${refId || '-'}|${reason}`;
+  const last = roomPhotoUploadAlertBuckets.get(key) || 0;
+  if (now - last < ROOM_PHOTO_UPLOAD_ALERT_COOLDOWN_MS) return;
+  roomPhotoUploadAlertBuckets.set(key, now);
+  for (const [k, t] of roomPhotoUploadAlertBuckets) {
+    if (now - t > ROOM_PHOTO_UPLOAD_ALERT_COOLDOWN_MS * 2) {
+      roomPhotoUploadAlertBuckets.delete(k);
+    }
+  }
+
+  const flags = req.features || (await features.load(pool).catch(() => ({})));
+  const status = storage.storageStatus();
+  const user = req.session && req.session.user ? req.session.user.username : 'unknown';
+  notifier.notifyOwner({ pool, features: flags }, {
+    subject: 'อัปโหลดรูปห้องถูกปฏิเสธ',
+    text: [
+      'ระบบปฏิเสธการอัปโหลดรูปห้อง เพราะไฟล์หรือข้อมูลไม่ถูกต้อง/ผิดปกติ',
+      `ห้อง: ${refId || '-'}`,
+      `ผู้ใช้: ${user}`,
+      `IP: ${ip}`,
+      `เหตุผล: ${classification.message}`,
+      `รายละเอียดระบบ: ${classification.raw}`,
+      `Storage ปัจจุบัน: ${status.storageMode === 's3' ? 'R2/S3' : `local (${status.uploadRoot})`}`,
+      'ไฟล์นี้ยังไม่ถูกบันทึก กรุณาตรวจชนิดไฟล์ ขนาดไฟล์ และการตั้งค่า R2/S3 ถ้าใช้งาน production',
+    ].join('\n'),
+  }).catch(() => {});
+}
+
 app.post('/api/uploads', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager', 'staff'), features.requireFeature('photoUpload'), async (req, res) => {
   const b = req.body || {};
   const category = String(b.category || 'misc');
@@ -8355,7 +8421,22 @@ app.post('/api/uploads', sameOrigin, csrfGuard, requireAuth, requireRole('owner'
     audit(req, 'upload.create', 'file', String(out.id), { category, side });
     res.json({ ok: true, file: out });
   } catch (err) {
-    res.status(400).json({ error: err.message || 'upload failed' });
+    const classification = classifyUploadError(err);
+    const refId = b.refId ? String(b.refId).slice(0, 64) : null;
+    audit(req, 'upload.rejected', 'file', refId, {
+      category,
+      side,
+      code: classification.code,
+      reason: classification.raw,
+      storageMode: storage.storageStatus().storageMode,
+    }).catch(() => {});
+    if (category === 'room_photo') {
+      notifyRoomPhotoUploadRejected(req, refId, classification).catch(() => {});
+    }
+    res.status(classification.status).json({
+      error: classification.message,
+      code: classification.code,
+    });
   }
 });
 
@@ -13717,10 +13798,11 @@ app.use((req, res, next) => {
 });
 app.use(express.static(path.join(__dirname, 'project'), { redirect: false }));
 
-// Files (slips, room photos, signatures, citizen-ID images) are sensitive
-// PII. Instead of mounting uploads/ as a public static path, we proxy through
-// /files/:id with auth gating: admins see everything; tenants see only their
-// own uploads. URLs that leaked to logs/chats are still useless without auth.
+// Files proxy. Sensitive uploads stay auth-gated; room_photo is deliberately
+// public because the public room board/booking page needs to render the room
+// gallery that admins upload. Keep every category behind this proxy instead
+// of mounting uploads/ directly so scanning, MIME headers, and caching remain
+// centralized.
 storage.ensureDir(storage.rootPath());
 app.get('/files/:id', rateLimitFileAccess, async (req, res) => {
   const id = Number(req.params.id);
@@ -13744,8 +13826,9 @@ app.get('/files/:id', rateLimitFileAccess, async (req, res) => {
       return sendSecurityText(res, 404);
     }
     const f = rows[0];
+    const isPublicRoomPhoto = f.category === 'room_photo';
     const isAdmin = !!(req.session && req.session.user);
-    let allowed = isAdmin;
+    let allowed = isPublicRoomPhoto || isAdmin;
     let tSession = null;
     if (!allowed) {
       // Tenant: allow only own uploads (uploaded_by === 'tenant:<id>')

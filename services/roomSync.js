@@ -287,7 +287,6 @@ function rowToBlobRoom(row) {
     tenant: null,
     since: null,
     contractEnd: null,
-    photos: [],
     notes: row.notes || '',
     view: row.view_type || '',
     balcony: !!row.has_balcony,

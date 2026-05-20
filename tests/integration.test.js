@@ -2181,6 +2181,52 @@ test('public room dashboard is read-only, not an admin management surface', () =
     'public dashboard must not ship the dev tweaks panel');
 });
 
+test('admin room photos use storage URLs and public feeds expose only safe room-photo URLs', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const roomsPage = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-rooms.jsx'), 'utf8');
+
+  assert.match(roomsPage, /category: 'room_photo'/,
+    'admin rooms page must upload room photos through the storage endpoint');
+  assert.match(roomsPage, /const ROOM_PHOTO_MAX_BYTES = 1_500_000/,
+    'admin rooms page must reject oversized photos before reading them into memory');
+  assert.match(roomsPage, /function splitRoomPhotoFiles\(fileList, availableSlots/,
+    'admin rooms page must validate selected files before upload');
+  assert.match(roomsPage, /function describeRoomPhotoStorage\(storageModes\)/,
+    'admin rooms page must tell admins where uploaded room photos were stored');
+  assert.match(roomsPage, /roomPhotoUploadErrorMessage\(res, body\)/,
+    'admin rooms page must turn server-side upload rejection codes into clear alerts');
+  assert.match(roomsPage, /if \(uploadingPhotos\) return/,
+    'add-room submit must prevent double-submit while photos are uploading');
+  assert.match(roomsPage, /if \(photoBusy\) return/,
+    'edit-room upload must prevent concurrent photo uploads');
+  assert.match(roomsPage, /err\.uploaded/,
+    'partial room-photo uploads must keep successfully uploaded URL refs');
+  assert.match(roomsPage, /const closeModal = \(\) =>/,
+    'add-room modal must block accidental close while uploading photos');
+  assert.match(roomsPage, /normaliseRoomPhotos\(data\.photos\)/,
+    'new rooms must persist storage URL refs, not embedded data URLs');
+  assert.match(server, /function publicRoomPhotos\(photos\)/,
+    'server must centrally sanitize public room-photo URLs');
+  assert.match(server, /url\.startsWith\('data:'\)/,
+    'public room photos must reject embedded base64 data URLs');
+  assert.match(server, /photos: publicRoomPhotos\(r\.photos\)/,
+    'public rooms blob must include sanitized room photos');
+  assert.match(server, /const isPublicRoomPhoto = f\.category === 'room_photo'/,
+    'file proxy must treat room photos differently from sensitive uploads');
+  assert.match(server, /let allowed = isPublicRoomPhoto \|\| isAdmin/,
+    'public room photos must be renderable without an admin session');
+  assert.match(server, /function classifyUploadError\(err\)/,
+    'server must classify upload failures into clear error codes');
+  assert.match(server, /UPLOAD_TOO_LARGE/,
+    'oversized uploads must return a specific code for admin alerts');
+  assert.match(server, /function notifyRoomPhotoUploadRejected\(req, refId, classification\)/,
+    'server must owner-notify when a room-photo upload is rejected as abnormal');
+  assert.match(server, /audit\(req, 'upload\.rejected'/,
+    'rejected uploads must be recorded in the audit log');
+});
+
 test('admin overview uses real contracts for upcoming expiry alerts', () => {
   const fs = require('node:fs');
   const path = require('node:path');

@@ -114,6 +114,16 @@ test('rowToBlobRoom carries rent_override back into the blob shape', () => {
   assert.equal(blob.rentOverrideBy, 'admin');
 });
 
+test('rowToBlobRoom does not wipe JSONB room photos during v2 mirror', () => {
+  const blob = roomSync.rowToBlobRoom({
+    room_code: '101', floor: 1, room_no: 1, room_type: 'standard',
+    status: 'vacant', rent_price: 4500, deposit_price: 9000,
+    wifi_fee: 250, view_type: '', has_balcony: false,
+    has_parking: false, has_kitchen: false, has_ac: false,
+  });
+  assert.equal(Object.prototype.hasOwnProperty.call(blob, 'photos'), false);
+});
+
 test('upsertRoomsV2FromJsonb dry-run reports inserts/updates without writes', async () => {
   const calls = [];
   const pool = {

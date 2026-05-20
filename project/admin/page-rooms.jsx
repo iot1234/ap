@@ -97,6 +97,139 @@ function sanitizeRoomPatch(patch) {
   return out;
 }
 
+const ROOM_PHOTO_ALLOWED_MIMES = new Set(['image/jpeg', 'image/png', 'image/webp']);
+const ROOM_PHOTO_MAX_COUNT = 12;
+const ROOM_PHOTO_MAX_BYTES = 1_500_000;
+
+function normaliseRoomPhotoUrl(value) {
+  const url = String(value || '').trim();
+  if (!url || url.startsWith('data:')) return null;
+  return url.slice(0, 2048);
+}
+
+function normaliseRoomPhotos(photos) {
+  if (!Array.isArray(photos)) return [];
+  const out = [];
+  const seen = new Set();
+  for (const item of photos) {
+    const url = normaliseRoomPhotoUrl(item);
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+    out.push(url);
+    if (out.length >= ROOM_PHOTO_MAX_COUNT) break;
+  }
+  return out;
+}
+
+function formatRoomPhotoFileSize(file) {
+  const bytes = Number(file && file.size) || 0;
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${bytes} B`;
+}
+
+function formatRoomPhotoMaxSize() {
+  return formatRoomPhotoFileSize({ size: ROOM_PHOTO_MAX_BYTES });
+}
+
+function describeRoomPhotoStorage(storageModes) {
+  const modes = new Set(Array.from(storageModes || []).filter(Boolean));
+  if (modes.has('s3') && modes.size === 1) return 'เก็บบน R2/S3 แล้ว';
+  if (modes.has('s3') && modes.has('local')) return 'เก็บบางรูปบน R2/S3 และบางรูปบน local uploads';
+  if (modes.has('local')) return 'เก็บบน local uploads แล้ว';
+  return 'เก็บใน storage กลางของระบบแล้ว';
+}
+
+function roomPhotoUploadErrorMessage(res, body) {
+  const code = body && body.code;
+  const raw = String((body && body.error) || '');
+  if (res && res.status === 413) return `ไฟล์ใหญ่เกินกำหนด (${formatRoomPhotoMaxSize()})`;
+  if (code === 'UPLOAD_TOO_LARGE') return `ไฟล์ใหญ่เกินกำหนด (${formatRoomPhotoMaxSize()})`;
+  if (code === 'INVALID_UPLOAD_FILE' || /unrecognized file type|mime mismatch|mime not allowed/i.test(raw)) {
+    return 'ไฟล์รูปไม่ถูกต้องหรือชนิดไฟล์ไม่รองรับ';
+  }
+  return raw || `upload failed (${res ? res.status : 'unknown'})`;
+}
+
+function splitRoomPhotoFiles(fileList, availableSlots = ROOM_PHOTO_MAX_COUNT) {
+  const picked = Array.from(fileList || []);
+  const accepted = [];
+  const issues = [];
+  let overflow = 0;
+  for (const file of picked) {
+    const name = file?.name || 'photo';
+    if (!file || !file.size) {
+      issues.push(`${name}: ไฟล์ว่างหรืออ่านไม่ได้`);
+      continue;
+    }
+    if (file.type && !ROOM_PHOTO_ALLOWED_MIMES.has(file.type)) {
+      issues.push(`${name}: รองรับเฉพาะ JPG, PNG หรือ WebP`);
+      continue;
+    }
+    if (file.size > ROOM_PHOTO_MAX_BYTES) {
+      issues.push(`${name}: ขนาด ${formatRoomPhotoFileSize(file)} เกิน ${formatRoomPhotoMaxSize()}`);
+      continue;
+    }
+    if (accepted.length >= availableSlots) {
+      overflow++;
+      continue;
+    }
+    accepted.push(file);
+  }
+  if (overflow > 0) issues.push(`เก็บรูปได้สูงสุด ${ROOM_PHOTO_MAX_COUNT} รูปต่อห้อง`);
+  return { accepted, issues };
+}
+
+function readRoomPhotoDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(reader.error || new Error('read failed'));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function uploadRoomPhotoFiles(apiFetch, roomId, files) {
+  if (!apiFetch) throw new Error('Admin API is not ready');
+  if (!roomId) throw new Error('room id required');
+  const selected = Array.from(files || []);
+  if (selected.length > ROOM_PHOTO_MAX_COUNT) throw new Error(`upload limit is ${ROOM_PHOTO_MAX_COUNT} photos`);
+  const uploaded = [];
+  const storageModes = [];
+  for (const file of selected) {
+    if (!file || !file.size) throw new Error(`${file?.name || 'photo'} is empty`);
+    if (file.type && !ROOM_PHOTO_ALLOWED_MIMES.has(file.type)) {
+      throw new Error(`${file.name || 'photo'} must be JPG, PNG or WebP`);
+    }
+    if (file.size > ROOM_PHOTO_MAX_BYTES) {
+      throw new Error(`${file.name || 'photo'} is too large (${formatRoomPhotoFileSize(file)} > ${formatRoomPhotoMaxSize()})`);
+    }
+    const dataUrl = await readRoomPhotoDataUrl(file);
+    if (!/^data:image\/(jpeg|jpg|png|webp);base64,/i.test(dataUrl)) {
+      throw new Error(`${file.name || 'photo'} could not be read as an image`);
+    }
+    const res = await apiFetch('/api/uploads', {
+      method: 'POST',
+      body: JSON.stringify({
+        category: 'room_photo',
+        refId: roomId,
+        dataUrl,
+      }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || !body.ok || !body.file || !body.file.url) {
+      const err = new Error(roomPhotoUploadErrorMessage(res, body));
+      err.code = body.code || null;
+      err.uploaded = uploaded;
+      err.storageModes = storageModes;
+      throw err;
+    }
+    uploaded.push(body.file.url);
+    storageModes.push(body.file.storage || 'unknown');
+  }
+  return { urls: uploaded, storageModes };
+}
+
 function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
   const C = window.ADMIN_C;
   const ADMIN_STATUS = window.ADMIN_STATUS;
@@ -444,7 +577,7 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
       rent, deposit: rent * 2,
       tenant: null, since: null, contractEnd: null,
       water: 0, elec: 0, waterUnits: 0, elecUnits: 0, wifi: config.utilities.wifi || 250,
-      photos: [], notes: '',
+      photos: normaliseRoomPhotos(data.photos), notes: '',
       view: data.view, ac: !!data.ac,
       balcony: !!data.balcony, parking: !!data.parking, kitchen: !!data.kitchen,
       rentOverride: rentIsOverride ? rent : null,
@@ -1116,6 +1249,7 @@ function AddRoomModal({ open, onClose, onAdd, existingIds, config }) {
   const ADMIN_VIEWS = window.ADMIN_VIEWS;
   const { Modal, Btn, Input, Select, Toggle } = window;
   const { fmtCurrency, computeRoomRent } = window;
+  const apiFetch = window.requireApiFetch ? window.requireApiFetch() : window.apiFetch;
   const defaultAddView = 'วิวสวน';
   const defaultAddFeatures = { ac: ADMIN_ROOM_TYPES.standard.ac, balcony: false, parking: false, kitchen: false };
   const defaultAddRent = computeRoomRent
@@ -1129,6 +1263,15 @@ function AddRoomModal({ open, onClose, onAdd, existingIds, config }) {
     balcony: false, parking: false, kitchen: false,
   });
   const [manualRent, setManualRent] = React.useState(false);
+  const [photoFiles, setPhotoFiles] = React.useState([]);
+  const [uploadingPhotos, setUploadingPhotos] = React.useState(false);
+  const addPhotoInputRef = React.useRef(null);
+
+  React.useEffect(() => {
+    if (!open) return;
+    setPhotoFiles([]);
+    setUploadingPhotos(false);
+  }, [open]);
 
   // Suggest the next-available room id based on what's ALREADY in the
   // rooms blob (not a hardcoded 5×8 grid). Strategy:
@@ -1237,7 +1380,23 @@ function AddRoomModal({ open, onClose, onAdd, existingIds, config }) {
   if (!Number.isFinite(Number(form.no)) || Number(form.no) < 1 || Number(form.no) > 99) addIssues.push('ลำดับห้องต้องอยู่ระหว่าง 1-99');
   if (!Number.isFinite(Number(form.rent))) addIssues.push('ค่าเช่าต้องเป็นตัวเลข');
   else if (Number(form.rent) > 0 && Number(form.rent) < 100) addIssues.push('ค่าเช่าต่ำกว่า 100 บาท ผิดปกติสำหรับการออกสัญญา/บิล');
-  const submit = () => {
+  const addPendingPhotos = (fileList) => {
+    const { accepted, issues } = splitRoomPhotoFiles(fileList, ROOM_PHOTO_MAX_COUNT - photoFiles.length);
+    if (issues.length) {
+      window.toast && window.toast({
+        kind: accepted.length ? 'warning' : 'danger',
+        message: { title: 'ตรวจสอบรูปห้อง', description: issues.join('\n') },
+      });
+    }
+    if (accepted.length) {
+      setPhotoFiles((prev) => [...prev, ...accepted].slice(0, ROOM_PHOTO_MAX_COUNT));
+    }
+  };
+  const removePendingPhoto = (idx) => {
+    setPhotoFiles((prev) => prev.filter((_, i) => i !== idx));
+  };
+  const submit = async () => {
+    if (uploadingPhotos) return;
     if (addIssues.length) {
       window.toast && window.toast({
         kind: 'danger',
@@ -1255,20 +1414,66 @@ function AddRoomModal({ open, onClose, onAdd, existingIds, config }) {
       );
       if (!ok) return;
     }
-    onAdd(form);
+    setUploadingPhotos(true);
+    try {
+      const uploadResult = photoFiles.length
+        ? await uploadRoomPhotoFiles(apiFetch, form.id, photoFiles)
+        : { urls: [], storageModes: [] };
+      const ok = onAdd({ ...form, photos: uploadResult.urls });
+      if (ok !== false) {
+        setPhotoFiles([]);
+        if (uploadResult.urls.length) {
+          window.toast && window.toast({
+            kind: 'success',
+            message: `รูปห้อง ${form.id} อัปโหลดสำเร็จ ${uploadResult.urls.length} รูป (${describeRoomPhotoStorage(uploadResult.storageModes)})`,
+          });
+        }
+      }
+    } catch (err) {
+      const partialPhotos = normaliseRoomPhotos(err.uploaded || []);
+      if (partialPhotos.length) {
+        const ok = onAdd({ ...form, photos: partialPhotos });
+        if (ok !== false) {
+          setPhotoFiles([]);
+          window.toast && window.toast({
+            kind: 'warning',
+            message: `เพิ่มห้องพร้อมรูปที่อัปโหลดสำเร็จ ${partialPhotos.length} รูปแล้ว (${describeRoomPhotoStorage(err.storageModes)}) แต่มีบางรูปไม่สำเร็จ: ${err.message || err}`,
+          });
+        } else {
+          window.toast && window.toast({
+            kind: 'danger',
+            message: `เพิ่มห้องไม่สำเร็จหลังอัปโหลดรูปบางส่วน กรุณาตรวจเลขห้องแล้วลองเพิ่มรูปอีกครั้ง`,
+          });
+        }
+        return;
+      }
+      window.toast && window.toast({
+        kind: 'danger',
+        message: `อัปโหลดรูปห้องไม่สำเร็จ: ${err.message || err}`,
+      });
+    } finally {
+      setUploadingPhotos(false);
+    }
+  };
+  const closeModal = () => {
+    if (uploadingPhotos) {
+      window.toast && window.toast({ kind: 'warning', message: 'กำลังอัปโหลดรูปอยู่ กรุณารอให้เสร็จก่อนปิดหน้าต่าง' });
+      return;
+    }
+    onClose();
   };
 
   return (
     <Modal
       open={open}
-      onClose={onClose}
+      onClose={closeModal}
       title="เพิ่มห้องใหม่"
       width={520}
       footer={
         <>
-          <Btn variant="ghost" onClick={onClose}>ยกเลิก</Btn>
-          <Btn variant="primary" disabled={!!addIssues.length}
-               onClick={submit}>เพิ่มห้อง</Btn>
+          <Btn variant="ghost" onClick={closeModal} disabled={uploadingPhotos}>ยกเลิก</Btn>
+          <Btn variant="primary" disabled={!!addIssues.length || uploadingPhotos}
+               onClick={submit}>{uploadingPhotos ? 'กำลังอัปโหลดรูป…' : 'เพิ่มห้อง'}</Btn>
         </>
       }
     >
@@ -1350,6 +1555,66 @@ function AddRoomModal({ open, onClose, onAdd, existingIds, config }) {
             })}
           </div>
         </div>
+        <div style={{ padding: 12, background: C.surfaceAlt, borderRadius: 8, border: `1px solid ${C.borderSoft}` }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 8 }}>
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 600, color: C.ink }}>รูปห้อง</div>
+              <div style={{ fontSize: 11.5, color: C.muted, marginTop: 2 }}>JPG, PNG, WebP · บันทึกเป็น URL ไม่ฝัง base64 ในข้อมูลห้อง</div>
+            </div>
+            <Btn
+              variant="secondary"
+              size="sm"
+              icon="+"
+              disabled={uploadingPhotos || photoFiles.length >= ROOM_PHOTO_MAX_COUNT}
+              onClick={() => addPhotoInputRef.current && addPhotoInputRef.current.click()}
+            >
+              เลือกรูป
+            </Btn>
+            <input
+              ref={addPhotoInputRef}
+              type="file"
+              accept="image/jpeg,image/png,image/webp"
+              multiple
+              style={{ display: 'none' }}
+              onChange={(e) => {
+                addPendingPhotos(e.target.files);
+                e.target.value = '';
+              }}
+            />
+          </div>
+          {photoFiles.length ? (
+            <div style={{ display: 'grid', gap: 6 }}>
+              {photoFiles.map((file, idx) => (
+                <div key={`${file.name}-${file.size}-${idx}`} style={{
+                  display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8,
+                  padding: '8px 10px', background: C.surface, border: `1px solid ${C.border}`, borderRadius: 7,
+                }}>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 12.5, fontWeight: 600, color: C.ink, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {file.name || `photo-${idx + 1}`}
+                    </div>
+                    <div style={{ fontSize: 11, color: C.muted }}>{formatRoomPhotoFileSize(file)}</div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => removePendingPhoto(idx)}
+                    disabled={uploadingPhotos}
+                    style={{
+                      border: 'none', background: 'transparent', color: C.danger,
+                      cursor: uploadingPhotos ? 'not-allowed' : 'pointer', fontSize: 12, fontWeight: 600,
+                    }}
+                  >
+                    ลบ
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div style={{ fontSize: 12, color: C.muted, padding: '8px 0 2px' }}>
+              เลือกรูปได้ตอนสร้างห้อง หรือเพิ่ม/ลบรูปภายหลังในหน้าแก้ไขห้อง
+            </div>
+          )}
+        </div>
       </div>
     </Modal>
   );
@@ -1365,6 +1630,8 @@ function RoomEditForm({ room, originalRoom, onUpdate, onServerPatch, config }) {
   const { fmt, fmtCurrency, computeRoomRent, resolveRoomRent } = window;
   const { Input, Select, Toggle, Textarea, SectionHeading, DefList, Pill, Btn } = window;
   const apiFetch = window.requireApiFetch ? window.requireApiFetch() : window.apiFetch;
+  const roomPhotoInputRef = React.useRef(null);
+  const [photoBusy, setPhotoBusy] = React.useState(false);
 
   // Server-side audit for this room: cross-checks blob, rooms_v2, contracts,
   // and outstanding bills to surface inconsistencies the rooms-blob UI alone
@@ -1529,6 +1796,58 @@ function RoomEditForm({ room, originalRoom, onUpdate, onServerPatch, config }) {
     }
   };
 
+  const roomPhotos = normaliseRoomPhotos(room.photos);
+  const addRoomPhotos = async (fileList) => {
+    if (photoBusy) return;
+    const { accepted, issues } = splitRoomPhotoFiles(fileList, ROOM_PHOTO_MAX_COUNT - roomPhotos.length);
+    if (issues.length) {
+      window.toast && window.toast({
+        kind: accepted.length ? 'warning' : 'danger',
+        message: { title: 'ตรวจสอบรูปห้อง', description: issues.join('\n') },
+      });
+    }
+    if (!accepted.length) return;
+    if (roomPhotos.length >= ROOM_PHOTO_MAX_COUNT) {
+      window.toast && window.toast({ kind: 'warning', message: `เก็บรูปได้สูงสุด ${ROOM_PHOTO_MAX_COUNT} รูปต่อห้อง` });
+      return;
+    }
+    setPhotoBusy(true);
+    try {
+      const uploadResult = await uploadRoomPhotoFiles(apiFetch, room.id, accepted);
+      onUpdate({ photos: normaliseRoomPhotos([...roomPhotos, ...uploadResult.urls]) });
+      window.toast && window.toast({
+        kind: 'success',
+        message: `เพิ่มรูปห้อง ${room.id} แล้ว ${uploadResult.urls.length} รูป (${describeRoomPhotoStorage(uploadResult.storageModes)})`,
+      });
+    } catch (err) {
+      const partialPhotos = normaliseRoomPhotos(err.uploaded || []);
+      if (partialPhotos.length) {
+        onUpdate({ photos: normaliseRoomPhotos([...roomPhotos, ...partialPhotos]) });
+        window.toast && window.toast({
+          kind: 'warning',
+          message: `เพิ่มรูปที่อัปโหลดสำเร็จ ${partialPhotos.length} รูปแล้ว (${describeRoomPhotoStorage(err.storageModes)}) แต่มีบางรูปไม่สำเร็จ: ${err.message || err}`,
+        });
+        return;
+      }
+      window.toast && window.toast({
+        kind: 'danger',
+        message: `อัปโหลดรูปห้องไม่สำเร็จ: ${err.message || err}`,
+      });
+    } finally {
+      setPhotoBusy(false);
+    }
+  };
+  const removeRoomPhoto = (idx) => {
+    onUpdate({ photos: roomPhotos.filter((_, i) => i !== idx) });
+  };
+  const setRoomCoverPhoto = (idx) => {
+    if (idx <= 0) return;
+    const next = [...roomPhotos];
+    const [picked] = next.splice(idx, 1);
+    next.unshift(picked);
+    onUpdate({ photos: next });
+  };
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 22 }}>
       {/* === Cross-source audit panel =================================
@@ -1631,6 +1950,92 @@ function RoomEditForm({ room, originalRoom, onUpdate, onServerPatch, config }) {
             { label: 'ที่มาราคา', value: rentInfo.source === 'override' ? 'ราคาพิเศษรายห้อง' : rentInfo.source === 'formula' ? 'สูตรจาก Pricing' : 'ค่าเดิม' },
           ]}
         />
+      </div>
+
+      {/* Room photos */}
+      <div>
+        <SectionHeading
+          title="รูปห้อง"
+          level={3}
+          style={{ marginBottom: 10 }}
+          action={
+            <Btn
+              variant="secondary"
+              size="sm"
+              icon="+"
+              disabled={photoBusy || roomPhotos.length >= ROOM_PHOTO_MAX_COUNT}
+              onClick={() => roomPhotoInputRef.current && roomPhotoInputRef.current.click()}
+            >
+              เพิ่มรูป
+            </Btn>
+          }
+        />
+        <input
+          ref={roomPhotoInputRef}
+          type="file"
+          accept="image/jpeg,image/png,image/webp"
+          multiple
+          style={{ display: 'none' }}
+          onChange={(e) => {
+            addRoomPhotos(e.target.files);
+            e.target.value = '';
+          }}
+        />
+        {roomPhotos.length ? (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 10 }}>
+            {roomPhotos.map((src, idx) => (
+              <div key={`${src}-${idx}`} style={{
+                border: `1px solid ${C.border}`, borderRadius: 8, overflow: 'hidden',
+                background: C.surface, minWidth: 0,
+              }}>
+                <div style={{ aspectRatio: '4/3', background: C.borderSoft, overflow: 'hidden' }}>
+                  <img
+                    src={src}
+                    alt={`Room ${room.id} photo ${idx + 1}`}
+                    loading="lazy"
+                    style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+                  />
+                </div>
+                <div style={{
+                  display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6,
+                  padding: 8, borderTop: `1px solid ${C.borderSoft}`,
+                }}>
+                  <div style={{ fontSize: 11.5, color: C.muted, fontWeight: 600 }}>
+                    {idx === 0 ? 'รูปหลัก' : `รูป ${idx + 1}`}
+                  </div>
+                  <div style={{ display: 'flex', gap: 4 }}>
+                    {idx > 0 ? (
+                      <button
+                        type="button"
+                        onClick={() => setRoomCoverPhoto(idx)}
+                        style={{ border: 'none', background: 'transparent', color: C.accent, cursor: 'pointer', fontSize: 11.5, fontWeight: 600 }}
+                      >
+                        ใช้หลัก
+                      </button>
+                    ) : null}
+                    <button
+                      type="button"
+                      onClick={() => removeRoomPhoto(idx)}
+                      style={{ border: 'none', background: 'transparent', color: C.danger, cursor: 'pointer', fontSize: 11.5, fontWeight: 600 }}
+                    >
+                      ลบ
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div style={{
+            padding: 14, borderRadius: 8, background: C.surfaceAlt, border: `1px dashed ${C.borderStrong}`,
+            color: C.muted, fontSize: 12.5, lineHeight: 1.5,
+          }}>
+            ยังไม่มีรูปห้อง · กด “เพิ่มรูป” เพื่ออัปโหลดผ่าน storage กลางของระบบ
+          </div>
+        )}
+        {photoBusy ? (
+          <div style={{ marginTop: 8, fontSize: 12, color: C.muted }}>กำลังอัปโหลดรูปห้อง...</div>
+        ) : null}
       </div>
 
       {/* Status */}
