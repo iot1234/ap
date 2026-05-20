@@ -700,23 +700,31 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         (r) => r && r.tenant && (r.status === 'occupied' || r.status === 'overdue')
       );
       const ppTarget = config?.payment?.promptpay || config?.payment?.promptpayTarget;
+      const hasManualPaymentChannel = !!(
+        config?.payment?.bankAcc
+        || config?.payment?.truemoneyPhone
+        || config?.payment?.trueMoneyPhone
+        || config?.payment?.walletPhone
+      );
       if (!ppTarget) {
         issues.push({
-          sev: 'high',
+          sev: hasManualPaymentChannel ? 'med' : 'high',
           msg: 'ยังไม่ได้ตั้ง PromptPay — บิล PDF จะไม่มี QR (ผู้เช่าจะ scan-to-pay ไม่ได้)',
           fix: 'ตั้งที่ /admin#secrets → กลุ่ม PromptPay หรือ Settings → การชำระเงิน',
         });
       }
-      const wRate = Number(config?.utilities?.waterRate);
-      const eRate = Number(config?.utilities?.elecRate);
-      if (!Number.isFinite(wRate) || wRate <= 0) {
-        issues.push({ sev: 'high', msg: 'ค่าน้ำต่อหน่วยไม่ได้ตั้ง — บิลจะ ฿0 ในส่วนค่าน้ำ', fix: '/admin#pricing → ค่าน้ำ-ไฟ' });
-      }
-      if (!Number.isFinite(eRate) || eRate <= 0) {
-        issues.push({ sev: 'high', msg: 'ค่าไฟต่อหน่วยไม่ได้ตั้ง — บิลจะ ฿0 ในส่วนค่าไฟ', fix: '/admin#pricing → ค่าน้ำ-ไฟ' });
-      }
       const isFlatOk = (r, prefix) => String(r?.[`${prefix}Mode`] || '').toLowerCase() === 'flat'
         && Number(r?.[`${prefix}FlatAmount`]) > 0;
+      const anyMeteredWater = tenantsWithBills.some((r) => !isFlatOk(r, 'water'));
+      const anyMeteredElec = tenantsWithBills.some((r) => !isFlatOk(r, 'elec'));
+      const wRate = Number(config?.utilities?.waterRate);
+      const eRate = Number(config?.utilities?.elecRate);
+      if (anyMeteredWater && (!Number.isFinite(wRate) || wRate <= 0)) {
+        issues.push({ sev: 'high', msg: 'ค่าน้ำต่อหน่วยไม่ได้ตั้ง — บิลจะ ฿0 ในส่วนค่าน้ำ', fix: '/admin#pricing → ค่าน้ำ-ไฟ' });
+      }
+      if (anyMeteredElec && (!Number.isFinite(eRate) || eRate <= 0)) {
+        issues.push({ sev: 'high', msg: 'ค่าไฟต่อหน่วยไม่ได้ตั้ง — บิลจะ ฿0 ในส่วนค่าไฟ', fix: '/admin#pricing → ค่าน้ำ-ไฟ' });
+      }
       const hasPeriodReading = (r, prefix) => {
         const m = periodMeters && periodMeters[String(r.id)] ? periodMeters[String(r.id)] : null;
         return m && m[`${prefix}CurrentReading`] != null;

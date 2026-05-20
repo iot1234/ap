@@ -388,11 +388,21 @@ test('bulk bill generation warns when flat utility mode falls back to metered', 
   const fs = require('node:fs');
   const path = require('node:path');
   const extras = fs.readFileSync(path.join(__dirname, '..', 'routes', 'bills-extras.js'), 'utf8');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const scheduler = fs.readFileSync(path.join(__dirname, '..', 'services', 'scheduler.js'), 'utf8');
   const billingPage = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-billing.jsx'), 'utf8');
   assert.match(extras, /const flatFellBack = \[\]/,
     'bulk-generate must collect rooms where flat utility mode fell back');
   assert.match(extras, /bill\.waterFlatFellBack \|\| bill\.elecFlatFellBack/,
     'bulk-generate must detect both water and electricity flat fallback flags');
+  assert.match(extras, /billing\.isFlatUtilityConfigured\(r, 'water'\)/,
+    'bulk-generate must not require a global water rate when every room has a valid flat amount');
+  assert.match(extras, /billing\.isFlatUtilityConfigured\(r, 'elec'\)/,
+    'bulk-generate must not require a global electricity rate when every room has a valid flat amount');
+  assert.match(server, /billing\.isFlatUtilityConfigured\(r, 'water'\)/,
+    'billing-readiness must use the same flat-mode rate guard as bill generation');
+  assert.match(scheduler, /billing\.isFlatUtilityConfigured\(r, 'water'\)/,
+    'scheduler must use the same flat-mode rate guard as manual generation');
   assert.match(extras, /res\.json\(\{ ok: true, period, made, skipped, flatFellBack \}\)/,
     'bulk-generate response must expose flat fallback details to the UI');
   assert.match(billingPage, /Array\.isArray\(d\.flatFellBack\)/,
@@ -3220,6 +3230,10 @@ test('formatDueDate / formatYMD are timezone-safe (Asia/Bangkok regression)', ()
   assert.equal(mod.formatYMD(2026, 1, 1), '2026-01-01');
   // Padding: single-digit month/day must zero-pad
   assert.equal(mod.formatYMD(2026, 9, 7), '2026-09-07');
+  // Invalid due-day values should never produce invalid SQL DATE strings.
+  assert.equal(mod.formatYMD(2026, 2, 31), '2026-02-28');
+  assert.equal(mod.formatYMD(2024, 2, 31), '2024-02-29');
+  assert.equal(mod.formatYMD(2026, 13, 15), '2026-12-15');
   // Defensive: dom outside reasonable range should clamp inside formatDueDate
   // (operator typo'd 31 on a Feb generation would otherwise surface as
   // "Feb 31" — billing.formatDueDate clamps to 1-28 for predictability).
@@ -3244,8 +3258,24 @@ test('scheduler + bulk-generate use formatYMD for dueDate', () => {
   // refactor that switches scheduler to period-derived too still passes.
   assert.match(sched, /billing\.formatYMD\(now\.getFullYear\(\), now\.getMonth\(\) \+ 1, dueDay\)/,
     'scheduler must use formatYMD for due date');
+  assert.match(sched, /Math\.max\(1, Math\.min\(28, rawDueDay\)\)/,
+    'scheduler due day must be clamped like manual bulk generation');
   assert.match(bulk, /billing\.formatYMD\((?:now\.getFullYear\(\), now\.getMonth\(\) \+ 1|periodYear, periodMonth), dueDay\)/,
     'bulk-generate must use formatYMD for due date');
+});
+
+test('bill generation can run without PromptPay when a manual receiver is configured', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const sched = fs.readFileSync(path.join(__dirname, '..', 'services', 'scheduler.js'), 'utf8');
+  const bulk = fs.readFileSync(path.join(__dirname, '..', 'routes', 'bills-extras.js'), 'utf8');
+  const billingPage = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-billing.jsx'), 'utf8');
+  assert.match(bulk, /hasManualPaymentChannel \? 'med' : 'high'/,
+    'bulk-generate should warn, not block, when bank/wallet is configured but PromptPay QR is absent');
+  assert.match(sched, /!ppTarget && !hasManualPaymentChannel/,
+    'scheduler should only skip for missing receiver when no manual channel exists either');
+  assert.match(billingPage, /hasManualPaymentChannel \? 'med' : 'high'/,
+    'billing UI fallback preflight must mirror the server severity');
 });
 
 test('auto billing guards against demo PromptPay target', () => {

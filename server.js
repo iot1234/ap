@@ -4045,23 +4045,6 @@ app.get('/api/admin/billing-readiness',
         });
       }
 
-      const wRate = Number(cfg?.utilities?.waterRate);
-      const eRate = Number(cfg?.utilities?.elecRate);
-      if (!Number.isFinite(wRate) || wRate <= 0) {
-        issues.push({
-          sev: 'high', code: 'NO_WATER_RATE', area: ['issue'],
-          msg: 'ค่าน้ำต่อหน่วยยังไม่ตั้ง — บิลจะออกค่าน้ำ ฿0 (ลูกบ้านอาจเข้าใจผิดว่าไม่ต้องจ่าย)',
-          fix: '/admin#pricing → ค่าน้ำ-ไฟ',
-        });
-      }
-      if (!Number.isFinite(eRate) || eRate <= 0) {
-        issues.push({
-          sev: 'high', code: 'NO_ELEC_RATE', area: ['issue'],
-          msg: 'ค่าไฟต่อหน่วยยังไม่ตั้ง — บิลจะออกค่าไฟ ฿0',
-          fix: '/admin#pricing → ค่าน้ำ-ไฟ',
-        });
-      }
-
       if (!cfg?.building?.name || cfg.building.name === 'บ้านกาญจน์ เรสซิเดนซ์') {
         issues.push({
           sev: 'low', code: 'DEFAULT_BUILDING_NAME', area: ['issue'],
@@ -4085,16 +4068,32 @@ app.get('/api/admin/billing-readiness',
         const tenantsWithBills = Object.values(rooms).filter(
           (r) => r && r.tenant && (r.status === 'occupied' || r.status === 'overdue')
         );
+        const wRate = Number(cfg?.utilities?.waterRate);
+        const eRate = Number(cfg?.utilities?.elecRate);
+        const anyMeteredWater = tenantsWithBills.some((r) => !billing.isFlatUtilityConfigured(r, 'water'));
+        const anyMeteredElec = tenantsWithBills.some((r) => !billing.isFlatUtilityConfigured(r, 'elec'));
+        if (anyMeteredWater && (!Number.isFinite(wRate) || wRate <= 0)) {
+          issues.push({
+            sev: 'high', code: 'NO_WATER_RATE', area: ['issue'],
+            msg: 'ค่าน้ำต่อหน่วยยังไม่ตั้ง — บิลจะออกค่าน้ำ ฿0 สำหรับห้องที่คิดตามมิเตอร์',
+            fix: '/admin#pricing → ค่าน้ำ-ไฟ หรือ ตั้งค่าน้ำแบบเหมาในทุกห้องที่ไม่ใช้มิเตอร์',
+          });
+        }
+        if (anyMeteredElec && (!Number.isFinite(eRate) || eRate <= 0)) {
+          issues.push({
+            sev: 'high', code: 'NO_ELEC_RATE', area: ['issue'],
+            msg: 'ค่าไฟต่อหน่วยยังไม่ตั้ง — บิลจะออกค่าไฟ ฿0 สำหรับห้องที่คิดตามมิเตอร์',
+            fix: '/admin#pricing → ค่าน้ำ-ไฟ หรือ ตั้งค่าไฟแบบเหมาในทุกห้องที่ไม่ใช้มิเตอร์',
+          });
+        }
         const periodMeters = await meter.buildPeriodSummary(pool, rooms, readinessPeriod);
-        const isFlatOk = (r, prefix) => String(r?.[`${prefix}Mode`] || '').toLowerCase() === 'flat'
-          && Number(r?.[`${prefix}FlatAmount`]) > 0;
         const hasPeriodReading = (r, prefix) => {
           const m = periodMeters[String(r.id)] || {};
           return m[`${prefix}CurrentReading`] != null;
         };
         const noMeter = tenantsWithBills.filter((r) =>
-          (!isFlatOk(r, 'water') && !hasPeriodReading(r, 'water'))
-          || (!isFlatOk(r, 'elec') && !hasPeriodReading(r, 'elec'))
+          (!billing.isFlatUtilityConfigured(r, 'water') && !hasPeriodReading(r, 'water'))
+          || (!billing.isFlatUtilityConfigured(r, 'elec') && !hasPeriodReading(r, 'elec'))
         );
         if (tenantsWithBills.length === 0) {
           issues.push({

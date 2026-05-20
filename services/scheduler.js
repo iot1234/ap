@@ -571,10 +571,14 @@ async function tickBillGen(pool, flags, now, state) {
     // about them. Once-per-period log + owner alert so operator can fix
     // the gap without finding out via tenant complaints next month.
     const issues = [];
-    const ppTarget = config?.payment?.promptpay
-      || config?.payment?.promptpayTarget
+    const paymentBlock = billing.buildPaymentBlock(config);
+    const ppTarget = paymentBlock.promptpayTarget
       || require('./secrets').get('PROMPTPAY_TARGET');
-    if (!ppTarget)                          issues.push('PROMPTPAY_TARGET ไม่ตั้ง');
+    const hasManualPaymentChannel = !!(
+      (paymentBlock.bankInfo && paymentBlock.bankInfo.account)
+      || (paymentBlock.walletInfo && paymentBlock.walletInfo.phone)
+    );
+    if (!ppTarget && !hasManualPaymentChannel) issues.push('ยังไม่ได้ตั้ง PromptPay/บัญชีธนาคาร/TrueMoney Wallet');
     else if (promptpay.isDemoTarget(ppTarget)) issues.push('PROMPTPAY_TARGET ยังเป็นค่า demo');
     const wRate = Number(config?.utilities?.waterRate);
     const eRate = Number(config?.utilities?.elecRate);
@@ -585,11 +589,8 @@ async function tickBillGen(pool, flags, now, state) {
     // because the operator legitimately left global rates at 0.
     const eligibleRooms = rooms.filter((r) => r && r.tenant
       && (r.status === 'occupied' || r.status === 'overdue'));
-    const isFlat = (r, prefix) => String(
-      r[`${prefix}Mode`] ?? r[`${prefix}_mode`] ?? ''
-    ).toLowerCase() === 'flat';
-    const anyMeteredWater = eligibleRooms.some((r) => !isFlat(r, 'water'));
-    const anyMeteredElec  = eligibleRooms.some((r) => !isFlat(r, 'elec'));
+    const anyMeteredWater = eligibleRooms.some((r) => !billing.isFlatUtilityConfigured(r, 'water'));
+    const anyMeteredElec  = eligibleRooms.some((r) => !billing.isFlatUtilityConfigured(r, 'elec'));
     if (anyMeteredWater && (!Number.isFinite(wRate) || wRate <= 0)) issues.push('waterRate ไม่ตั้ง / ≤ 0');
     if (anyMeteredElec  && (!Number.isFinite(eRate) || eRate <= 0)) issues.push('elecRate ไม่ตั้ง / ≤ 0');
     if (eligibleRooms.length === 0) issues.push('ไม่มีห้อง occupied/overdue ที่จะออกบิล');
@@ -624,7 +625,8 @@ async function tickBillGen(pool, flags, now, state) {
     // Single source of truth: config.notify.dueOnDay. The manual-bill flow
     // in page-billing.jsx reads the same key, so admin sees one value drive
     // both the "Generate bills" modal default and the scheduler's bill day.
-    const dueDay = Number(config?.notify?.dueOnDay || 15);
+    const rawDueDay = Number(config?.notify?.dueOnDay || 15);
+    const dueDay = Number.isFinite(rawDueDay) ? Math.max(1, Math.min(28, rawDueDay)) : 15;
     // Build YYYY-MM-DD from local year/month + dueDay directly — Date()→
     // toISOString() round-trip subtracts the timezone offset and on
     // Asia/Bangkok (UTC+7) returns the previous day, so bills issued on

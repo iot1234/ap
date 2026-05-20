@@ -550,6 +550,14 @@ test('buildBill: flat mode with snake_case keys (rooms_v2 column shape)', () => 
   assert.equal(bill.waterAmount, 250);
 });
 
+test('isFlatUtilityConfigured requires mode=flat and a positive amount', () => {
+  assert.equal(billing.isFlatUtilityConfigured({ waterMode: 'flat', waterFlatAmount: 300 }, 'water'), true);
+  assert.equal(billing.isFlatUtilityConfigured({ water_mode: 'flat', water_flat_amount: 300 }, 'water'), true);
+  assert.equal(billing.isFlatUtilityConfigured({ waterMode: 'flat', waterFlatAmount: 0 }, 'water'), false);
+  assert.equal(billing.isFlatUtilityConfigured({ waterMode: 'flat', waterFlatAmount: null }, 'water'), false);
+  assert.equal(billing.isFlatUtilityConfigured({ waterMode: 'metered', waterFlatAmount: 300 }, 'water'), false);
+});
+
 test('buildBill: default mode (no field) → metered (backward compat)', () => {
   const flags = { lateFee: { enabled: false }, vat: { enabled: false } };
   const bill = billing.buildBill({ room: baseRoom, config: baseConfig, features: flags });

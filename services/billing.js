@@ -542,15 +542,36 @@ function formatDueDate(dom = 15) {
   return `${y}-${m}-${day}`;
 }
 
+function daysInMonth(year, monthOneIndexed) {
+  const y = Math.trunc(Number(year) || new Date().getFullYear());
+  const m = Math.max(1, Math.min(12, Math.trunc(Number(monthOneIndexed) || 1)));
+  if (m === 2) {
+    const leap = (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
+    return leap ? 29 : 28;
+  }
+  return [4, 6, 9, 11].includes(m) ? 30 : 31;
+}
+
 // Build a YYYY-MM-DD string for a specific (year, month, day) without going
 // through Date → toISOString. Same timezone-safety reasoning as
 // formatDueDate. Caller passes the human values they mean (year, 1-indexed
 // month, day-of-month). Used by the scheduler + bulk-generate paths.
 function formatYMD(year, monthOneIndexed, day) {
-  const y = String(Number(year) || new Date().getFullYear()).padStart(4, '0');
-  const m = String(Number(monthOneIndexed) || 1).padStart(2, '0');
-  const d = String(Number(day) || 1).padStart(2, '0');
+  const yNum = Math.trunc(Number(year) || new Date().getFullYear());
+  const mNum = Math.max(1, Math.min(12, Math.trunc(Number(monthOneIndexed) || 1)));
+  const maxDay = daysInMonth(yNum, mNum);
+  const dNum = Math.max(1, Math.min(maxDay, Math.trunc(Number(day) || 1)));
+  const y = String(yNum).padStart(4, '0');
+  const m = String(mNum).padStart(2, '0');
+  const d = String(dNum).padStart(2, '0');
   return `${y}-${m}-${d}`;
+}
+
+function isFlatUtilityConfigured(room, prefix) {
+  const r = room || {};
+  const mode = String(r[`${prefix}Mode`] ?? r[`${prefix}_mode`] ?? '').toLowerCase();
+  const amount = Number(r[`${prefix}FlatAmount`] ?? r[`${prefix}_flat_amount`]);
+  return mode === 'flat' && Number.isFinite(amount) && amount > 0;
 }
 
 /**
@@ -824,6 +845,7 @@ module.exports = {
   buildBill, buildPaymentBlock, statusOf, makeBillNo,
   formatPeriodNow, formatDueDate, formatYMD, round2,
   resolveUtilityUsage, resolveUtilityUsageFromBillRow, buildUtilityItem,
+  isFlatUtilityConfigured,
   isChargeApplicableForPeriod,
   computeLateFee,
   validatePaymentAmount,

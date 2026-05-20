@@ -1220,28 +1220,34 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         // a 3rd-party caller (cron, script, future mobile app) can't blindly
         // generate empty bills either.
         const issues = [];
-        const ppTarget = config?.payment?.promptpay
-          || config?.payment?.promptpayTarget
+        const paymentBlock = billing.buildPaymentBlock(config);
+        const ppTarget = paymentBlock.promptpayTarget
           || require('../services/secrets').get('PROMPTPAY_TARGET');
+        const hasManualPaymentChannel = !!(
+          (paymentBlock.bankInfo && paymentBlock.bankInfo.account)
+          || (paymentBlock.walletInfo && paymentBlock.walletInfo.phone)
+        );
         if (!ppTarget) {
-          issues.push({ sev: 'high', code: 'NO_PROMPTPAY',
+          issues.push({ sev: hasManualPaymentChannel ? 'med' : 'high', code: 'NO_PROMPTPAY',
             msg: 'PROMPTPAY_TARGET ไม่ตั้ง — บิล PDF จะไม่มี QR' });
         } else if (promptpay.isDemoTarget(ppTarget)) {
           issues.push({ sev: 'high', code: 'DEMO_PROMPTPAY',
             msg: 'PromptPay ยังเป็นค่า demo — เปลี่ยนเป็นบัญชีรับเงินจริงก่อนออกบิล' });
         }
+        const eligibleRooms = rooms.filter((r) => r && r.tenant
+          && (r.status === 'occupied' || r.status === 'overdue'));
         const wRate = Number(config?.utilities?.waterRate);
         const eRate = Number(config?.utilities?.elecRate);
-        if (!Number.isFinite(wRate) || wRate <= 0) {
+        const anyMeteredWater = eligibleRooms.some((r) => !billing.isFlatUtilityConfigured(r, 'water'));
+        const anyMeteredElec = eligibleRooms.some((r) => !billing.isFlatUtilityConfigured(r, 'elec'));
+        if (anyMeteredWater && (!Number.isFinite(wRate) || wRate <= 0)) {
           issues.push({ sev: 'high', code: 'NO_WATER_RATE',
             msg: 'อัตราค่าน้ำต่อหน่วยไม่ตั้ง — ยอดค่าน้ำในบิลจะ ฿0' });
         }
-        if (!Number.isFinite(eRate) || eRate <= 0) {
+        if (anyMeteredElec && (!Number.isFinite(eRate) || eRate <= 0)) {
           issues.push({ sev: 'high', code: 'NO_ELEC_RATE',
             msg: 'อัตราค่าไฟต่อหน่วยไม่ตั้ง — ยอดค่าไฟในบิลจะ ฿0' });
         }
-        const eligibleRooms = rooms.filter((r) => r && r.tenant
-          && (r.status === 'occupied' || r.status === 'overdue'));
         if (eligibleRooms.length === 0) {
           issues.push({ sev: 'high', code: 'NO_ELIGIBLE_ROOMS',
             msg: 'ไม่มีห้องที่มีผู้เช่าแสดงสถานะ occupied/overdue — จะออกบิล 0 ใบ' });
