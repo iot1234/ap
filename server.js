@@ -4743,8 +4743,6 @@ function normalizeUploadedSlipMethod(value) {
 }
 
 function inferSlipPaymentMethod(paymentBlock, verifyResult, opts = {}) {
-  const requested = normalizeUploadedSlipMethod(opts.requestedMethod);
-  if (requested) return requested;
   if (verifyResult?.receiverMatch?.method) return verifyResult.receiverMatch.method;
   const actualDigits = String(verifyResult?.receiver?.account || '').replace(/[^0-9]/g, '');
   if (actualDigits.length >= 4) {
@@ -4756,6 +4754,8 @@ function inferSlipPaymentMethod(paymentBlock, verifyResult, opts = {}) {
       }
     }
   }
+  const requested = normalizeUploadedSlipMethod(opts.requestedMethod);
+  if (requested) return requested;
   return opts.defaultMethod || (opts.promptpayTarget || paymentBlock?.promptpayTarget ? 'promptpay' : 'transfer');
 }
 
@@ -6052,8 +6052,10 @@ async function tenantPaymentUploadHandler(req, res) {
     // touching the DB. The provider returns the bank's transaction
     // reference + actual amount + receiver account. We cross-check:
     //   1) amount ±1฿ vs bill.total
-    //   2) receiver account tail vs PROMPTPAY_TARGET (so a slip paid to
-    //      someone else's account is rejected)
+    //   2) receiver account tail vs configured receiver channels
+    //      (PromptPay, bank account, TrueMoney Wallet) so a slip paid to
+    //      someone else's account is rejected while every advertised
+    //      dorm receiver remains valid
     //   3) transaction_ref unique in DB (catches replay even when image
     //      bytes differ — re-screenshot, crop, recompress)
     // All three must pass for auto-verify; one mismatch → status='rejected'

@@ -1021,18 +1021,62 @@ test('/api/tenant/payments records method from the matched receiver channel', ()
   assert.ok(idx > 0, 'should find tenant payment upload handler');
   const end = server.indexOf('// Atomic:', idx);
   const body = server.slice(idx, end > idx ? end : idx + 16000);
+  const inferBody = server.slice(
+    server.indexOf('function inferSlipPaymentMethod'),
+    server.indexOf('function slipRejectCopy')
+  );
   assert.match(server, /function inferSlipPaymentMethod\(paymentBlock, verifyResult/,
     'server must derive ledger payment method from slip receiver match');
   assert.match(body, /const paymentMethod = inferSlipPaymentMethod/,
     'tenant upload must compute method before inserting payment row');
   assert.match(server, /verifyResult\?\.receiverMatch\?\.method/,
     'method inference must prefer slipVerifier receiverMatch metadata');
+  assert.ok(
+    inferBody.indexOf('verifyResult?.receiverMatch?.method') < inferBody.indexOf('normalizeUploadedSlipMethod(opts.requestedMethod)'),
+    'provider-verified receiver channel must outrank any user-selected payment method'
+  );
   assert.match(server, /raw === 'truemoney' \|\| raw === 'wallet'/,
     'TrueMoney uploads must be representable distinctly from PromptPay');
   assert.match(server, /VALUES \(\$1,\$2,\$3,\$4,\$5,\$6/,
     'payment INSERT must bind method as a parameter');
   assert.doesNotMatch(server, /VALUES \(\$1,\$2,\$3,'promptpay'/,
     'tenant slip upload must not hard-code every slip as PromptPay');
+});
+
+test('payment receiver guards allow bank/PromptPay but prevent double credit', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const migrate = fs.readFileSync(path.join(__dirname, '..', 'db', 'migrate.js'), 'utf8');
+  const idx = server.indexOf('async function tenantPaymentUploadHandler');
+  assert.ok(idx > 0, 'should find tenant payment upload handler');
+  const autoVerifyBlock = server.slice(idx, server.indexOf('// Decide the payment row', idx));
+  const txBlock = server.slice(server.indexOf('// Atomic:', idx), server.indexOf('const paymentNotice', idx));
+  const receiverHelper = server.slice(
+    server.indexOf('function paymentBlockReceiverTargetEntries'),
+    server.indexOf('function normalizeUploadedSlipMethod')
+  );
+
+  assert.match(receiverHelper, /add\('promptpay', promptpayTarget \|\| paymentBlock\.promptpayTarget, 'PromptPay'\)/,
+    'PromptPay receiver must be accepted when it is the configured payment target');
+  assert.match(receiverHelper, /add\('transfer', paymentBlock\.bankInfo\.account/,
+    'configured bank account must be accepted as a valid receiver');
+  assert.match(receiverHelper, /add\('truemoney', paymentBlock\.walletInfo\.phone/,
+    'configured TrueMoney wallet phone must be accepted as a valid receiver');
+  assert.match(autoVerifyBlock, /\.filter\(\(target\) => target\.method !== 'promptpay'\)/,
+    'bank/wallet receiver targets must be forwarded as additional targets without duplicating PromptPay');
+  assert.match(autoVerifyBlock, /additionalReceiverTargets:\s*extraTargets/,
+    'auto-verify must pass every visible non-QR receiver to the verifier');
+  assert.match(server, /verifyResult\?\.receiverMatch\?\.method/,
+    'payment ledger method must come from the receiver channel that actually matched the slip');
+  assert.match(server, /if \(attempts && attempts\.hasPending\)[\s\S]{0,160}PAYMENT_UNDER_REVIEW/,
+    'a second slip must be blocked while the first slip for the bill is pending review');
+  assert.match(txBlock, /UPDATE bills SET status='paid'[\s\S]{0,180}WHERE id=\$1 AND status IN \('pending','overdue'\)/,
+    'verified payment must only mark an unpaid bill as paid');
+  assert.match(migrate, /CREATE UNIQUE INDEX uq_payments_one_verified_per_bill[\s\S]{0,140}ON payments\(bill_id\) WHERE bill_id IS NOT NULL AND status='verified'/,
+    'database must reject two verified payments for the same bill even if they used different receiver channels');
+  assert.match(migrate, /CREATE UNIQUE INDEX uq_payments_tx_ref[\s\S]{0,140}ON payments\(transaction_ref\) WHERE transaction_ref IS NOT NULL AND status IN \('pending','verified'\)/,
+    'same bank transaction reference must not be credited twice');
 });
 
 test('/api/tenant/payments refuses orphan bills (BILL_NOT_LINKED)', () => {
