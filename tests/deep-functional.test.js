@@ -291,7 +291,9 @@ test('db/migrate: emits all required tables + new columns + admin bootstrap', as
   assert.ok(sql.includes('chk_payments_status_valid'), 'payments status CHECK constraint');
   assert.ok(sql.includes('uq_payments_one_verified_per_bill'),
     'one verified payment per bill guard');
-  assert.ok(sql.includes('uq_bills_room_period_active'), 'bills duplicate-period guard');
+  // R4 — the live duplicate-period guard is the tenant-aware index. Assert
+  // the CREATE'd name, not the legacy one (which now only appears in a DROP).
+  assert.ok(sql.includes('uq_bills_room_period_tenant_active'), 'bills duplicate-period guard');
   assert.ok(sql.includes('idx_payments_status_created'), 'slip queue index');
 });
 

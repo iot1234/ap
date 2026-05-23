@@ -4020,7 +4020,7 @@ test('contracts gain close audit columns in migration', () => {
 test('tenant checkin uses moveInDate not wallclock for welcome-bill period', () => {
   // Jan 31 move-in processed at 00:05 Feb 1 used to stamp period 2026-02
   // — wrong: tenant got a Feb-period welcome bill instead of Jan, and the
-  // Feb auto-bill duped (or was blocked by uq_bills_room_period_active).
+  // Feb auto-bill duped (or was blocked by uq_bills_room_period_tenant_active).
   const fs = require('node:fs');
   const path = require('node:path');
   const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'tenant-ops.js'), 'utf8');

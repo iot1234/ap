@@ -1832,7 +1832,7 @@ module.exports = function buildTenantOpsRouter(ctx) {
         // 00:05 Feb 1, using `new Date()` stamps the welcome bill as period
         // 2026-02 — wrong: tenant gets a Jan-period bill they never received,
         // and the Feb auto-bill uses the same room+period and either dups or
-        // is blocked by uq_bills_room_period_active.
+        // is blocked by uq_bills_room_period_tenant_active.
         //
         // If config.discounts.firstMonth is set, stack it on top of the
         // contract discount we just resolved (multiplicative — 10% + 5% =
@@ -2132,7 +2132,7 @@ module.exports = function buildTenantOpsRouter(ctx) {
 
         // Pro-rate closing bill: rent × (days_lived_this_period / days_in_month).
         // Only generate when there's no monthly bill already covering this
-        // period — the partial-unique index uq_bills_room_period_active
+        // period — the partial-unique index uq_bills_room_period_tenant_active
         // would block a duplicate anyway, but we want a clean result not
         // a 23505 error.
         let closingBill = null;

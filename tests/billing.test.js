@@ -278,6 +278,98 @@ test('validatePaidLedger: invalid inputs fail closed', () => {
   assert.equal(billing.validatePaidLedger({ paymentAmount: -100, billTotal: 5000 }).code, 'INVALID_PAID_LEDGER');
 });
 
+// --- Unmark-paid restore math ----------------------------------------------
+// POST /api/bills/:id/unmark-paid reverses a paid bill. The restored late_fee
+// must be recomputed from the PRINCIPAL (subtotal+vat), never from `total`
+// (which on an exact-tier payment still contains the previous fee). The
+// regression these guard against: recomputing on total → fee-on-fee +
+// total ≠ subtotal+vat+late_fee. Reference bill: principal 5000 (4900+100 vat),
+// 30 days overdue, 3%/month, grace 0 → fee = 5000 × 0.03 × 1 = 150.
+const DAY = 86_400_000;
+const dueT0 = '2026-01-01';
+const now30 = new Date(new Date(dueT0).getTime() + 30 * DAY);
+
+test('computeRestoredBillAmounts: exact-tier paid → overdue recomputes fee from principal (no fee-on-fee)', () => {
+  // Bill was paid in full incl. a 100฿ late_fee (total 5100). On unmark the
+  // fee must be recomputed on principal 5000 → 150, NOT on 5100 (→153) and
+  // NOT 5100+153.
+  const r = billing.computeRestoredBillAmounts({
+    subtotal: 4900, vat: 100, lateFee: 100, total: 5100,
+    dueDate: dueT0, now: now30,
+    lateFeeEnabled: true, ratePctPerMonth: 3, gracePeriodDays: 0,
+  });
+  assert.equal(r.status, 'overdue');
+  assert.equal(r.principal, 5000);
+  assert.equal(r.lateFee, 150);
+  assert.equal(r.total, 5150);
+  // Invariant holds: total === principal + lateFee.
+  assert.equal(r.total, r.principal + r.lateFee);
+});
+
+test('computeRestoredBillAmounts: principal-tier paid (fee waived) → overdue re-applies fee', () => {
+  // Previous verify waived the fee (late_fee 0, total 5000). Restoring an
+  // overdue bill re-applies the fee from principal.
+  const r = billing.computeRestoredBillAmounts({
+    subtotal: 4900, vat: 100, lateFee: 0, total: 5000,
+    dueDate: dueT0, now: now30,
+    lateFeeEnabled: true, ratePctPerMonth: 3, gracePeriodDays: 0,
+  });
+  assert.equal(r.lateFee, 150);
+  assert.equal(r.total, 5150);
+});
+
+test('computeRestoredBillAmounts: late-fee feature OFF preserves the assessed fee, keeps invariant', () => {
+  // Feature off → don't recompute, but don't silently forgive the fee that
+  // was already on the bill. Preserve 100 and keep total = principal + fee.
+  const r = billing.computeRestoredBillAmounts({
+    subtotal: 4900, vat: 100, lateFee: 100, total: 5100,
+    dueDate: dueT0, now: now30,
+    lateFeeEnabled: false,
+  });
+  assert.equal(r.status, 'overdue');
+  assert.equal(r.principal, 5000);
+  assert.equal(r.lateFee, 100);
+  assert.equal(r.total, 5100);
+});
+
+test('computeRestoredBillAmounts: not yet past due → pending, no late fee', () => {
+  const future = '2999-01-01';
+  const r = billing.computeRestoredBillAmounts({
+    subtotal: 5000, vat: 0, lateFee: 0, total: 5000,
+    dueDate: future, now: new Date('2026-05-23'),
+    lateFeeEnabled: true, ratePctPerMonth: 3, gracePeriodDays: 0,
+  });
+  assert.equal(r.status, 'pending');
+  assert.equal(r.lateFee, 0);
+  assert.equal(r.total, 5000);
+});
+
+test('computeRestoredBillAmounts: legacy row without subtotal/vat falls back to total - late_fee', () => {
+  // Pre-migration bills never persisted subtotal/vat. Principal must fall
+  // back to total - late_fee (5100 - 100 = 5000), not collapse to 0.
+  const r = billing.computeRestoredBillAmounts({
+    subtotal: 0, vat: 0, lateFee: 100, total: 5100,
+    dueDate: dueT0, now: now30,
+    lateFeeEnabled: true, ratePctPerMonth: 3, gracePeriodDays: 0,
+  });
+  assert.equal(r.principal, 5000);
+  assert.equal(r.lateFee, 150);
+  assert.equal(r.total, 5150);
+});
+
+test('computeRestoredBillAmounts: within grace window → fee 0 even when overdue', () => {
+  // 5 days overdue but 7-day grace → no fee yet.
+  const now5 = new Date(new Date(dueT0).getTime() + 5 * DAY);
+  const r = billing.computeRestoredBillAmounts({
+    subtotal: 4900, vat: 100, lateFee: 0, total: 5000,
+    dueDate: dueT0, now: now5,
+    lateFeeEnabled: true, ratePctPerMonth: 3, gracePeriodDays: 7,
+  });
+  assert.equal(r.status, 'overdue');
+  assert.equal(r.lateFee, 0);
+  assert.equal(r.total, 5000);
+});
+
 // --- Defensive readings handling -------------------------------------------
 // The bill PDF + tenant portal must always show before/after meter info
 // (even when one or both readings are missing) so the customer can audit

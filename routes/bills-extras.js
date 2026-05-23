@@ -663,7 +663,12 @@ module.exports = function buildBillsExtrasRouter(ctx) {
     } catch (err) {
       // A7 — translate the partial-unique constraint into a clear 409 so
       // the admin UI can show "already generated" instead of a generic 500.
-      if (err.code === '23505' && /uq_bills_room_period_active/.test(err.constraint || '')) {
+      // Match the `uq_bills_room_period` PREFIX, not the full legacy name:
+      // R4 renamed the index to uq_bills_room_period_tenant_active (the
+      // `_tenant_` infix means the old literal `uq_bills_room_period_active`
+      // is no longer a substring), so the previous exact-name regex silently
+      // fell through to a generic 500. The prefix matches both names.
+      if (err.code === '23505' && /uq_bills_room_period/.test(err.constraint || '')) {
         return res.status(409).json({
           error: 'มีบิลของรอบนี้อยู่แล้ว — ทำการ void ก่อนถ้าต้องการสร้างใหม่',
           code: 'BILL_DUPLICATE',
@@ -918,7 +923,13 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       try {
         await client.query('BEGIN');
         const bill = await client.query(
-          `SELECT id, bill_no, room_id, total, status, due_date, tenant_id
+          // subtotal/vat/late_fee are REQUIRED here: the restore math derives
+          // the principal (subtotal+vat) and must know the existing late_fee
+          // so it never recomputes a fee on a total that already contains one.
+          // Omitting them silently treated late_fee as 0 and recomputed on the
+          // full total → fee-on-fee compounding + broken total invariant.
+          `SELECT id, bill_no, room_id, total, subtotal, vat, late_fee,
+                  status, due_date, tenant_id
              FROM bills
             WHERE id=$1 AND deleted_at IS NULL
             FOR UPDATE`,
@@ -964,45 +975,40 @@ module.exports = function buildBillsExtrasRouter(ctx) {
               [id, `unmark_paid_correction: ${reason}`, unmarker]
             )
           : { rows: [] };
-        // Restore the bill status. Pick 'overdue' vs 'pending' based on
-        // due_date so the resulting state is consistent with what the
-        // daily overdue tick would set.
+        // Restore the bill status + amounts. Status mirrors the daily overdue
+        // tick (due_date past → 'overdue', else 'pending'). The late_fee is
+        // recomputed from the PRINCIPAL (subtotal+vat), never from `total`
+        // (which on an exact-tier payment still has the previous late_fee
+        // folded in) — see billing.computeRestoredBillAmounts. We re-read the
+        // current lateFee config because the policy may have changed between
+        // verify and unmark; on a load failure the fee already on the bill is
+        // preserved rather than silently forgiven.
         const now = new Date();
-        const dueDate = row.due_date ? new Date(row.due_date) : null;
-        const restoredStatus = dueDate && dueDate < now ? 'overdue' : 'pending';
-
-        // R2-followup — when the bill is being restored to 'overdue' AND
-        // the previous verify used the principal-tier waiver (bill.late_fee
-        // was zeroed in good faith), recompute the late_fee NOW so the
-        // restored bill immediately shows the right amount due. Without
-        // this, the bill sits at total=principal for up to 24h until
-        // tickLateFee Phase B re-applies the fee — admin who unmark-paid
-        // expects "overdue" to mean overdue right away, not tomorrow.
-        //
-        // Re-reads the current feature flag because lateFee config may
-        // have changed between verify and unmark. computeLateFee is pure +
-        // idempotent so re-running won't compound.
-        let restoredLateFee = Number(row.late_fee) || 0;
-        let restoredTotal = Number(row.total) || 0;
-        if (restoredStatus === 'overdue') {
-          try {
-            const flags = await features.load(pool).catch(() => ({}));
-            if (flags.lateFee?.enabled && Number(flags.lateFee.ratePctPerMonth) > 0) {
-              const base = restoredTotal - restoredLateFee;
-              const calc = billing.computeLateFee({
-                base,
-                dueDate: row.due_date,
-                ratePctPerMonth: Number(flags.lateFee.ratePctPerMonth),
-                gracePeriodDays: Number(flags.lateFee.gracePeriodDays || 0),
-                now,
-              });
-              if (calc.lateFee > 0 && calc.lateFee !== restoredLateFee) {
-                restoredLateFee = calc.lateFee;
-                restoredTotal = billing.round2(base + calc.lateFee);
-              }
-            }
-          } catch { /* feature load failure → keep existing late_fee */ }
-        }
+        let lateFeeEnabled = false;
+        let ratePctPerMonth = 0;
+        let gracePeriodDays = 0;
+        try {
+          const flags = await features.load(pool).catch(() => ({}));
+          if (flags.lateFee?.enabled) {
+            lateFeeEnabled = true;
+            ratePctPerMonth = Number(flags.lateFee.ratePctPerMonth) || 0;
+            gracePeriodDays = Number(flags.lateFee.gracePeriodDays) || 0;
+          }
+        } catch { /* feature load failure → preserve the fee already on the bill */ }
+        const restore = billing.computeRestoredBillAmounts({
+          subtotal: row.subtotal,
+          vat: row.vat,
+          lateFee: row.late_fee,
+          total: row.total,
+          dueDate: row.due_date,
+          now,
+          lateFeeEnabled,
+          ratePctPerMonth,
+          gracePeriodDays,
+        });
+        const restoredStatus = restore.status;
+        const restoredLateFee = restore.lateFee;
+        const restoredTotal = restore.total;
         const restored = await client.query(
           `UPDATE bills
               SET status=$2,

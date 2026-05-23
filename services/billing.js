@@ -495,7 +495,7 @@ function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
  * tenant who just moved in — services/billing.js can't tell on its own
  * because rooms_v2 only carries the current tenant pointer. Bill-gen
  * paths (manual POST, bulk-generate, scheduler) detect collision via the
- * partial-unique index `uq_bills_room_period_active` and retry with the
+ * partial-unique index `uq_bills_room_period_tenant_active` and retry with the
  * tenant suffix attached — see the conflict-recovery block in those routes.
  *
  * The `attempt` integer is for the rare belt-and-braces case where two
@@ -696,6 +696,86 @@ function computeLateFee({ base, dueDate, ratePctPerMonth = 0, gracePeriodDays = 
 }
 
 /**
+ * R2-followup — Compute the status + amounts to restore when an admin
+ * reverses a paid bill (POST /api/bills/:id/unmark-paid).
+ *
+ * A paid bill's `total` may already include a late_fee that was folded in
+ * when the bill went overdue (an exact-tier payment keeps the fee inside
+ * total). Restoring the bill MUST recompute the late fee from the PRINCIPAL
+ * (subtotal + vat), never from `total` — otherwise the fee is charged on a
+ * base that still contains the previous fee (the classic fee-on-fee bug, see
+ * computeLateFee) and the invariant
+ *     total = subtotal + vat + late_fee
+ * silently breaks. Principal is derived from subtotal + vat; for legacy rows
+ * that never persisted those columns it falls back to `total - late_fee`
+ * (which is why the caller MUST select late_fee from the bills row — passing
+ * an undefined late_fee here is exactly the bug this helper was extracted to
+ * prevent).
+ *
+ * Status mirrors the daily overdue tick: due_date in the past → 'overdue'
+ * (recompute the fee), otherwise → 'pending' (no fee at all). When the
+ * lateFee feature is off — or its config can't be loaded — the fee already
+ * assessed on the bill is PRESERVED on an overdue restore rather than
+ * silently forgiven.
+ *
+ * Pure function — no DB, no I/O. Unit-tested in tests/billing.test.js.
+ *
+ * @param {object} opts
+ * @param {number} opts.subtotal           - bills.subtotal (vatable base)
+ * @param {number} opts.vat                - bills.vat
+ * @param {number} [opts.lateFee]          - bills.late_fee at payment time
+ * @param {number} opts.total              - bills.total at payment time
+ * @param {string|Date} opts.dueDate       - bills.due_date
+ * @param {Date}   [opts.now]              - injectable; defaults to new Date()
+ * @param {boolean} [opts.lateFeeEnabled]  - features.lateFee.enabled
+ * @param {number} [opts.ratePctPerMonth]  - features.lateFee.ratePctPerMonth
+ * @param {number} [opts.gracePeriodDays]  - features.lateFee.gracePeriodDays
+ * @returns {{ status:'pending'|'overdue', principal:number, lateFee:number, total:number }}
+ *          All amounts round2'd. total always equals principal + lateFee, so
+ *          the chk_bills_amounts_nonnegative invariant holds by construction.
+ */
+function computeRestoredBillAmounts({
+  subtotal, vat, lateFee = 0, total,
+  dueDate, now,
+  lateFeeEnabled = false, ratePctPerMonth = 0, gracePeriodDays = 0,
+} = {}) {
+  const priorFee = Number(lateFee) || 0;
+  const subVat = round2((Number(subtotal) || 0) + (Number(vat) || 0));
+  // Prefer subtotal+vat; fall back to total-late_fee for legacy rows that
+  // predate the subtotal/vat columns (subVat would be 0 there). Both paths
+  // yield the principal = "everything owed BEFORE any late fee".
+  const principalRaw = subVat > 0
+    ? subVat
+    : round2((Number(total) || 0) - priorFee);
+  const principal = Number.isFinite(principalRaw) && principalRaw > 0 ? principalRaw : 0;
+
+  const ref = now instanceof Date && Number.isFinite(now.getTime()) ? now : new Date();
+  const due = dueDate instanceof Date ? dueDate : (dueDate ? new Date(dueDate) : null);
+  const isOverdue = !!(due && Number.isFinite(due.getTime()) && due.getTime() < ref.getTime());
+
+  if (!isOverdue) {
+    // Not yet past due → no late fee applies (R2). Restore to principal only.
+    return { status: 'pending', principal, lateFee: 0, total: principal };
+  }
+  // Overdue → preserve the fee already assessed by default; recompute it from
+  // PRINCIPAL when the feature is configured. Recomputing on principal (not
+  // total) is what makes this idempotent and free of fee-on-fee compounding.
+  let fee = priorFee;
+  if (lateFeeEnabled && Number(ratePctPerMonth) > 0) {
+    const calc = computeLateFee({
+      base: principal,
+      dueDate: due,
+      ratePctPerMonth,
+      gracePeriodDays,
+      now: ref,
+    });
+    fee = calc.lateFee;   // may legitimately be 0 if now within the grace window
+  }
+  const safeFee = Number.isFinite(fee) && fee > 0 ? round2(fee) : 0;
+  return { status: 'overdue', principal, lateFee: safeFee, total: round2(principal + safeFee) };
+}
+
+/**
  * R2-followup — Validate a payment amount against a bill that may have had
  * late_fee applied AFTER the tenant initiated payment.
  *
@@ -848,6 +928,7 @@ module.exports = {
   isFlatUtilityConfigured,
   isChargeApplicableForPeriod,
   computeLateFee,
+  computeRestoredBillAmounts,
   validatePaymentAmount,
   validatePaidLedger,
   PAYMENT_TOLERANCE_THB,
