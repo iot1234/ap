@@ -456,7 +456,19 @@ function App() {
       <section className="tenant-pay-panel" style={panel}>
         <div style={topline}>ชำระบิล</div>
         {loading ? <p style={muted}>กำลังโหลดข้อมูลบิล...</p> : null}
-        {err ? <div style={errorBox}>{err}</div> : null}
+        {err ? (
+          <div style={errorBox}>
+            <div style={{ whiteSpace: 'pre-line' }}>{err}</div>
+            {/* Every page-level error gets an explicit "contact admin"
+                line — at this point `data` hasn't loaded so we don't know
+                the building name yet, but the tenant still needs a clear
+                next step instead of being stranded on a raw error. */}
+            <div style={{ marginTop: 10, fontSize: 13.5, lineHeight: 1.55 }}>
+              หากเปิดลิงก์ไม่ได้หรือยังชำระไม่สำเร็จ รบกวนติดต่อแอดมินผู้ดูแลหอพักของท่าน
+              พร้อมบอกหมายเลขบิลในลิงก์เพื่อให้แอดมินตรวจสอบให้
+            </div>
+          </div>
+        ) : null}
 
         {bill ? (
           <>
@@ -616,12 +628,34 @@ function App() {
                 <button style={button} disabled={busy} onClick={upload}>
                   {busy ? 'กำลังประมวลผล...' : 'อัปโหลดสลิป'}
                 </button>
-                {message ? <div style={messageStyle}>{message}</div> : null}
+                {message ? (
+                  <div style={messageStyle}>
+                    <div style={{ whiteSpace: 'pre-line' }}>{message}</div>
+                    {/* On any error from the slip upload flow add an
+                        unmistakable "contact admin" reminder. The translated
+                        message itself already says contact-admin for most
+                        upstream rejection codes via verificationMessage(),
+                        but appending a separate line makes it impossible
+                        to miss when several lines stack above it. */}
+                    {messageKind === 'error' ? (
+                      <div style={{ marginTop: 10, fontSize: 13.5, lineHeight: 1.55, fontWeight: 600 }}>
+                        หากแก้ไขแล้วยังไม่สำเร็จ รบกวนติดต่อแอดมินผู้ดูแลหอพักของท่าน
+                        {data && data.building && data.building.name ? ` (${data.building.name}${data.building.phone ? ` โทร ${data.building.phone}` : ''})` : ''}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
             ) : null}
 
             {!paid && !canUpload ? (
-              <div style={errorBox}>{blockMessage(uploadState)}</div>
+              <div style={errorBox}>
+                <div style={{ whiteSpace: 'pre-line' }}>{blockMessage(uploadState)}</div>
+                <div style={{ marginTop: 10, fontSize: 13.5, lineHeight: 1.55, fontWeight: 600 }}>
+                  → ติดต่อแอดมินเพื่อให้ตรวจสอบการชำระเงินหรือเปิดรอบอัปโหลดใหม่
+                  {data && data.building && data.building.name ? ` (${data.building.name}${data.building.phone ? ` โทร ${data.building.phone}` : ''})` : ''}
+                </div>
+              </div>
             ) : null}
           </>
         ) : null}
