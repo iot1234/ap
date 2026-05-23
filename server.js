@@ -1406,8 +1406,21 @@ const rateLimitBookingSubmit = makeIpLimiter({
   message: 'ส่งคำขอจองถี่เกินไป กรุณารอสักครู่แล้วลองใหม่',
 });
 const rateLimitTicket  = makeIpLimiter({ windowMs: 60_000, max: 3 });
-const rateLimitQr      = makeIpLimiter({ windowMs: 60_000, max: 30 });
-const rateLimitPublicPayment = makeIpLimiter({ windowMs: 60_000, max: 10 });
+const rateLimitQr = makeIpLimiter({
+  windowMs: 60_000,
+  max: 120,
+  message: 'เปิด QR ถี่เกินไป กรุณารอสักครู่แล้วลองใหม่',
+});
+const rateLimitPublicPaymentView = makeIpLimiter({
+  windowMs: 60_000,
+  max: 120,
+  message: 'เปิดหน้าชำระเงินถี่เกินไป กรุณารอสักครู่แล้วลองใหม่',
+});
+const rateLimitPublicPaymentUpload = makeIpLimiter({
+  windowMs: 60_000,
+  max: 20,
+  message: 'ส่งสลิปถี่เกินไป กรุณารอสักครู่แล้วลองใหม่',
+});
 const rateLimitFileAccess = makeIpLimiter({
   windowMs: 60_000,
   max: 120,
@@ -2930,6 +2943,136 @@ function numOrNull(value) {
 // instead of drifting between two near-identical implementations.
 function storedUtilityUsage(b, prefix) {
   return billing.resolveUtilityUsageFromBillRow(b, prefix);
+}
+
+function parseBillOtherItems(raw) {
+  if (Array.isArray(raw)) return raw;
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+function lateFeePolicyFromFlags(flags) {
+  const lateFee = flags && flags.lateFee && flags.lateFee.enabled ? flags.lateFee : {};
+  return {
+    ratePctPerMonth: Number(lateFee.ratePctPerMonth) || 0,
+    gracePeriodDays: Number(lateFee.gracePeriodDays) || 0,
+  };
+}
+
+function fmtMoneyTH(n) {
+  return Number(n || 0).toLocaleString('th-TH', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+}
+
+function fmtNumberTH(n) {
+  const value = Number(n || 0);
+  return Number.isInteger(value) ? String(value) : value.toLocaleString('th-TH', { maximumFractionDigits: 2 });
+}
+
+function buildLateFeeCalculation(b, policy = {}) {
+  const lateFee = billing.round2(Number(b && b.late_fee) || 0);
+  if (lateFee <= 0) return null;
+  const total = Number(b && b.total) || 0;
+  const principal = billing.round2(Math.max(0, total - lateFee));
+  const ratePctPerMonth = Number(policy.ratePctPerMonth) || 0;
+  const gracePeriodDays = Math.max(0, Number(policy.gracePeriodDays) || 0);
+  const calc = billing.computeLateFee({
+    base: principal,
+    dueDate: b && b.due_date,
+    ratePctPerMonth,
+    gracePeriodDays,
+  });
+  const daysOver = Number(calc.daysOver) || 0;
+  const monthsOver = Number(calc.monthsOver) || 0;
+  let formulaText = `คำนวณจากยอดก่อนค่าปรับ ฿${fmtMoneyTH(principal)} = ค่าปรับ ฿${fmtMoneyTH(lateFee)}`;
+  if (ratePctPerMonth > 0 && daysOver > 0) {
+    formulaText = `คำนวณจากยอดก่อนค่าปรับ ฿${fmtMoneyTH(principal)} × ${fmtNumberTH(ratePctPerMonth)}%/เดือน × ${fmtNumberTH(daysOver)} วัน ÷ 30 = ฿${fmtMoneyTH(lateFee)}`;
+    if (gracePeriodDays > 0) formulaText += ` (หักระยะผ่อนผัน ${fmtNumberTH(gracePeriodDays)} วันแล้ว)`;
+  }
+  return {
+    amount: lateFee,
+    principal,
+    ratePctPerMonth,
+    gracePeriodDays,
+    daysOver,
+    monthsOver,
+    formulaText,
+  };
+}
+
+function buildOnlineBillLineItems(b, policy = {}) {
+  if (!b) return [];
+  const items = [];
+  const push = (item) => {
+    if (!item) return;
+    const amount = Number(item.amount);
+    items.push({
+      key: item.key || String(item.label || `item-${items.length}`),
+      label: String(item.label || ''),
+      qty: item.qty == null ? '' : String(item.qty),
+      detail: item.detail == null ? '' : String(item.detail),
+      amount: Number.isFinite(amount) ? amount : 0,
+    });
+  };
+
+  push({
+    key: 'rent',
+    label: 'ค่าเช่าห้องพัก',
+    qty: '1 เดือน',
+    detail: b.period ? `รอบบิล ${b.period}` : '',
+    amount: Number(b.rent) || 0,
+  });
+  push({
+    key: 'water',
+    ...billing.buildUtilityItem('ค่าน้ำ', storedUtilityUsage(b, 'water'), Number(b.water_rate) || 0, Number(b.water_amount) || 0),
+  });
+  push({
+    key: 'elec',
+    ...billing.buildUtilityItem('ค่าไฟฟ้า', storedUtilityUsage(b, 'elec'), Number(b.elec_rate) || 0, Number(b.elec_amount) || 0),
+  });
+  if (Number(b.wifi) > 0) {
+    push({
+      key: 'wifi',
+      label: 'ค่าอินเทอร์เน็ต',
+      qty: '1 เดือน',
+      detail: '',
+      amount: Number(b.wifi) || 0,
+    });
+  }
+  for (const [idx, it] of parseBillOtherItems(b.other).entries()) {
+    const amount = Number(it && it.amount);
+    if (!Number.isFinite(amount) || amount <= 0) continue;
+    push({
+      key: `other-${idx}`,
+      label: String((it && it.label) || 'อื่นๆ'),
+      qty: '',
+      detail: '',
+      amount,
+    });
+  }
+  if (Number(b.vat) > 0) {
+    push({ key: 'vat', label: 'ภาษีมูลค่าเพิ่ม', qty: '', detail: '', amount: Number(b.vat) || 0 });
+  }
+  const lateFeeCalculation = buildLateFeeCalculation(b, policy);
+  if (lateFeeCalculation) {
+    push({
+      key: 'late_fee',
+      label: 'ค่าปรับชำระล่าช้า',
+      qty: '',
+      detail: lateFeeCalculation.formulaText,
+      amount: lateFeeCalculation.amount,
+    });
+  }
+  return items;
 }
 
 // The tenant-side bill PDF endpoint (further down in this file) inlines
@@ -5004,13 +5147,13 @@ app.get('/p/bill-qr/:billId', rateLimitQr, async (req, res) => {
   }
 });
 
-app.get('/pay/:billId', rateLimitPublicPayment, (req, res) => {
+app.get('/pay/:billId', (req, res) => {
   const id = Number(req.params.billId);
   if (!Number.isInteger(id) || id < 1) return res.status(400).end();
   res.sendFile(path.join(__dirname, 'project', 'pay.html'));
 });
 
-app.get('/api/public/bills/:billId/payment', rateLimitPublicPayment, async (req, res) => {
+app.get('/api/public/bills/:billId/payment', rateLimitPublicPaymentView, async (req, res) => {
   const id = Number(req.params.billId);
   if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'ลิงก์ชำระเงินไม่ถูกต้อง กรุณาติดต่อแอดมิน' });
   const token = String(req.query.t || '');
@@ -5019,7 +5162,11 @@ app.get('/api/public/bills/:billId/payment', rateLimitPublicPayment, async (req,
   }
   try {
     const { rows } = await pool.query(
-      `SELECT b.id, b.bill_no, b.period, b.total, b.due_date, b.status, b.room_id, b.tenant_id,
+      `SELECT b.id, b.bill_no, b.period, b.rent,
+              b.water_prev_reading, b.water_current_reading, b.water_units, b.water_rate, b.water_amount,
+              b.elec_prev_reading, b.elec_current_reading, b.elec_units, b.elec_rate, b.elec_amount,
+              b.wifi, b.other, b.subtotal, b.vat, b.late_fee, b.total,
+              b.due_date, b.status, b.room_id, b.tenant_id,
               t.full_name, t.phone, t.email, t.line_user_id, t.line_oa_id,
               t.current_room_id, t.status AS tenant_status, t.deleted_at AS tenant_deleted_at
          FROM bills b
@@ -5037,6 +5184,7 @@ app.get('/api/public/bills/:billId/payment', rateLimitPublicPayment, async (req,
       });
     }
     const flags = await features.load(pool);
+    const lateFeePolicy = lateFeePolicyFromFlags(flags);
     const { config, paymentBlock } = await loadEffectivePaymentBlock();
     const billTotal = Number(bill.total);
     const payable = bill.status === 'pending' || bill.status === 'overdue';
@@ -5075,10 +5223,28 @@ app.get('/api/public/bills/:billId/payment', rateLimitPublicPayment, async (req,
         id: bill.id,
         billNo: bill.bill_no,
         period: bill.period,
+        rent: Number(bill.rent) || 0,
+        waterUnits: Number(bill.water_units) || 0,
+        waterRate: Number(bill.water_rate) || 0,
+        waterAmount: Number(bill.water_amount) || 0,
+        waterPrevReading: numOrNull(bill.water_prev_reading),
+        waterCurrentReading: numOrNull(bill.water_current_reading),
+        elecUnits: Number(bill.elec_units) || 0,
+        elecRate: Number(bill.elec_rate) || 0,
+        elecAmount: Number(bill.elec_amount) || 0,
+        elecPrevReading: numOrNull(bill.elec_prev_reading),
+        elecCurrentReading: numOrNull(bill.elec_current_reading),
+        wifi: Number(bill.wifi) || 0,
+        other: parseBillOtherItems(bill.other),
+        subtotal: Number(bill.subtotal) || 0,
+        vat: Number(bill.vat) || 0,
+        lateFee: Number(bill.late_fee) || 0,
+        lateFeeCalculation: buildLateFeeCalculation(bill, lateFeePolicy),
         total: billTotal,
         dueDate: bill.due_date,
         status: bill.status,
         roomId: bill.room_id,
+        lineItems: buildOnlineBillLineItems(bill, lateFeePolicy),
       },
       payment: paymentBlock,
       building: buildingInfo,
@@ -5102,7 +5268,7 @@ app.get('/api/public/bills/:billId/payment', rateLimitPublicPayment, async (req,
   }
 });
 
-app.post('/api/public/bills/:billId/payments', rateLimitPublicPayment, sameOrigin, async (req, res) => {
+app.post('/api/public/bills/:billId/payments', rateLimitPublicPaymentUpload, sameOrigin, async (req, res) => {
   const id = Number(req.params.billId);
   if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'ลิงก์ชำระเงินไม่ถูกต้อง กรุณาติดต่อแอดมิน' });
   const token = String(req.query.t || '');
@@ -5608,6 +5774,8 @@ app.get('/api/tenant/bills', requireTenant, async (req, res) => {
   }
   params.push(limit, offset);
   try {
+    const flags = await features.load(pool).catch(() => ({}));
+    const lateFeePolicy = lateFeePolicyFromFlags(flags);
     const { rows } = await pool.query(
       `SELECT id, bill_no, period, rent,
               water_prev_reading, water_current_reading, water_units, water_rate, water_amount,
@@ -5619,7 +5787,11 @@ app.get('/api/tenant/bills', requireTenant, async (req, res) => {
          ORDER BY created_at DESC LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params
     );
-    res.json({ ok: true, bills: rows, limit, offset });
+    const bills = rows.map((row) => ({
+      ...row,
+      late_fee_calculation: buildLateFeeCalculation(row, lateFeePolicy),
+    }));
+    res.json({ ok: true, bills, limit, offset });
   } catch (err) {
     console.error('tenant bills error:', err);
     res.status(500).json({ error: 'internal error' });

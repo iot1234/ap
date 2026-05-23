@@ -368,6 +368,70 @@ function deriveFloor(roomId) {
   return null;
 }
 
+function fmtReading(n) {
+  if (n == null || n === '') return '—';
+  const value = Number(n);
+  if (!Number.isFinite(value)) return '—';
+  return Number.isInteger(value) ? String(value) : value.toLocaleString('th-TH', { maximumFractionDigits: 2 });
+}
+
+function utilityDetailFromBill(bill, prefix, locale) {
+  const th = locale !== 'en';
+  const units = Number(bill && bill[`${prefix}_units`]);
+  const safeUnits = Number.isFinite(units) ? Math.max(0, units) : 0;
+  const prevRaw = bill && bill[`${prefix}_prev_reading`];
+  const currentRaw = bill && bill[`${prefix}_current_reading`];
+  const prev = prevRaw == null || prevRaw === '' ? null : Number(prevRaw);
+  const current = currentRaw == null || currentRaw === '' ? null : Number(currentRaw);
+  const hasPrev = Number.isFinite(prev);
+  const hasCurrent = Number.isFinite(current);
+  const unitText = th ? 'หน่วย' : 'units';
+  if (hasPrev && hasCurrent) {
+    return th
+      ? `เลขก่อน ${fmtReading(prev)} · เลขหลัง ${fmtReading(current)} · ใช้ ${fmtReading(safeUnits)} ${unitText}`
+      : `Previous ${fmtReading(prev)} · Current ${fmtReading(current)} · Used ${fmtReading(safeUnits)} ${unitText}`;
+  }
+  if (hasPrev || hasCurrent) {
+    return th
+      ? `เลขก่อน ${hasPrev ? fmtReading(prev) : '—'} · เลขหลัง ${hasCurrent ? fmtReading(current) : '—'} · ใช้ ${fmtReading(safeUnits)} ${unitText} (ข้อมูลมิเตอร์ไม่ครบ)`
+      : `Previous ${hasPrev ? fmtReading(prev) : '—'} · Current ${hasCurrent ? fmtReading(current) : '—'} · Used ${fmtReading(safeUnits)} ${unitText} (incomplete reading)`;
+  }
+  if (safeUnits > 0) {
+    return th
+      ? `ใช้ ${fmtReading(safeUnits)} ${unitText} (ไม่ได้บันทึกเลขมิเตอร์ก่อน/หลัง)`
+      : `Used ${fmtReading(safeUnits)} ${unitText} (no meter readings recorded)`;
+  }
+  return th ? 'ไม่มีการใช้งาน' : 'No usage recorded';
+}
+
+function lateFeeDetailFromBill(bill, locale) {
+  const th = locale !== 'en';
+  const lateFee = Number(bill && bill.late_fee);
+  if (!Number.isFinite(lateFee) || lateFee <= 0) return '';
+  const calc = bill && bill.late_fee_calculation && typeof bill.late_fee_calculation === 'object'
+    ? bill.late_fee_calculation
+    : {};
+  if (th && calc.formulaText) return String(calc.formulaText);
+  const principalRaw = Number(calc.principal);
+  const principal = Number.isFinite(principalRaw) && principalRaw > 0
+    ? principalRaw
+    : Math.max(0, (Number(bill && bill.total) || 0) - lateFee);
+  const rate = Number(calc.ratePctPerMonth);
+  const days = Number(calc.daysOver);
+  const grace = Number(calc.gracePeriodDays);
+  if (Number.isFinite(rate) && rate > 0 && Number.isFinite(days) && days > 0) {
+    const graceText = Number.isFinite(grace) && grace > 0
+      ? (th ? ` (หักระยะผ่อนผัน ${fmtReading(grace)} วันแล้ว)` : ` (after ${fmtReading(grace)} grace days)`)
+      : '';
+    return th
+      ? `คำนวณจากยอดก่อนค่าปรับ ฿${fmtMoney2(principal)} × ${fmtReading(rate)}%/เดือน × ${fmtReading(days)} วัน ÷ 30 = ฿${fmtMoney2(lateFee)}${graceText}`
+      : `Calculated from pre-penalty balance ฿${fmtMoney2(principal)} × ${fmtReading(rate)}%/month × ${fmtReading(days)} days ÷ 30 = ฿${fmtMoney2(lateFee)}${graceText}`;
+  }
+  return th
+    ? `คำนวณจากยอดก่อนค่าปรับ ฿${fmtMoney2(principal)} = ค่าปรับ ฿${fmtMoney2(lateFee)}`
+    : `Calculated from pre-penalty balance ฿${fmtMoney2(principal)} = penalty ฿${fmtMoney2(lateFee)}`;
+}
+
 // Translate server-stamped reject reasons + raw 3rd-party verifier strings
 // into tenant-friendly Thai. log.md #2 — the upstream slip provider was
 // leaking English error messages (e.g. "Please provide either a payload
@@ -741,14 +805,21 @@ function Avatar({ tenant, size = 48 }) {
   );
 }
 
-function KV({ label, value, mono, bold, hi, last }) {
+function KV({ label, value, mono, bold, hi, last, hint }) {
   return (
     <div style={{
       display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
       gap: 12, padding: '10px 0',
       borderBottom: last ? 'none' : '1px solid var(--line)',
     }}>
-      <span style={{ color: 'var(--muted)', fontSize: 13.5, minWidth: 0 }}>{label}</span>
+      <span style={{ color: 'var(--muted)', fontSize: 13.5, minWidth: 0 }}>
+        <span>{label}</span>
+        {hint ? (
+          <span style={{ display: 'block', marginTop: 3, fontSize: 12, lineHeight: 1.45, color: 'var(--muted)' }}>
+            {hint}
+          </span>
+        ) : null}
+      </span>
       <span style={{
         fontFamily: mono ? 'var(--font-mono)' : 'var(--font-display)',
         fontWeight: bold ? 700 : 500,
@@ -1811,35 +1882,26 @@ function BillDetailBody({ bill, locale, refresh, slipFeature }) {
             <Pill tone="muted">{t('billPeriod')} {fmtPeriod(bill.period, locale)}</Pill>
           </div>
           <KV label={t('rentRoom')} value={`฿${fmtMoney(bill.rent)}`} />
-          <KV label={`${t('waterFull')} · ${Number(bill.water_units) || 0} ${t('units')}${Number(bill.water_rate) ? ` × ${fmtMoney2(bill.water_rate)}` : ''}`}
+          <KV label={`${t('waterFull')}${Number(bill.water_rate) ? ` · ${fmtMoney2(bill.water_rate)}/${t('units')}` : ''}`}
+            hint={utilityDetailFromBill(bill, 'water', locale)}
             value={`฿${fmtMoney(bill.water_amount)}`} />
-          <KV label={`${t('elecFull')} · ${Number(bill.elec_units) || 0} ${t('units')}${Number(bill.elec_rate) ? ` × ${fmtMoney2(bill.elec_rate)}` : ''}`}
+          <KV label={`${t('elecFull')}${Number(bill.elec_rate) ? ` · ${fmtMoney2(bill.elec_rate)}/${t('units')}` : ''}`}
+            hint={utilityDetailFromBill(bill, 'elec', locale)}
             value={`฿${fmtMoney(bill.elec_amount)}`} />
           {Number(bill.wifi) > 0 ? <KV label={tr(locale, 'cat_wifi')} value={`฿${fmtMoney(bill.wifi)}`} /> : null}
           {Array.isArray(bill.other) ? bill.other.filter((o) => Number(o.amount) > 0).map((o, i) => (
             <KV key={i} label={String(o.label || 'อื่นๆ')} value={`฿${fmtMoney(o.amount)}`} />
           )) : null}
-          {Number(bill.late_fee) > 0 ? <KV label={t('lateFee')} value={`฿${fmtMoney(bill.late_fee)}`} /> : null}
+          {Number(bill.late_fee) > 0 ? (
+            <KV
+              label={t('lateFee')}
+              hint={lateFeeDetailFromBill(bill, locale)}
+              value={`฿${fmtMoney(bill.late_fee)}`}
+            />
+          ) : null}
           <div style={{ height: 12 }} />
           <KV label={t('dueDate')} value={fmtDate(bill.due_date, locale)} />
           <KV label={t('billTotal')} value={`฿${fmtMoney(bill.total)}`} bold hi last />
-          {/* R2-followup — surface the "principal vs total" tiering so the
-              tenant understands they can pay either amount in good faith.
-              tickLateFee's daily refresh can grow late_fee silently; without
-              this hint a tenant who already transferred the principal might
-              think they were undercharged. The fmtBillNoForTenant strip in
-              the title keeps the suffix out of view. */}
-          {Number(bill.late_fee) > 0 && bill.status !== 'paid' ? (
-            <div style={{
-              marginTop: 10, padding: '10px 12px', borderRadius: 10,
-              background: 'rgba(255, 200, 120, 0.10)',
-              border: '1px solid rgba(255, 200, 120, 0.35)',
-              color: '#5a4a2a', fontSize: 13, lineHeight: 1.55,
-            }}>
-              💡 ค่าปรับล่าช้า ฿{fmtMoney(bill.late_fee)} ถูกบวกเพิ่มอัตโนมัติเพราะบิลเลยกำหนด<br/>
-              หากคุณโอนตามยอดเดิม ฿{fmtMoney(Number(bill.total) - Number(bill.late_fee || 0))} แล้ว ระบบจะถือว่าจ่ายโดยสุจริต — แอดมินสามารถยกเว้นค่าปรับให้ได้
-            </div>
-          ) : null}
           <div style={{ display: 'flex', gap: 8, marginTop: 18, flexWrap: 'wrap' }}>
             <a href={`/api/tenant/bills/${bill.id}/pdf`} target="_blank" rel="noopener" style={{ textDecoration: 'none' }}>
               <Button variant="outline" icon="download">{bill.status === 'paid' ? t('receipt') : t('downloadPdf')}</Button>

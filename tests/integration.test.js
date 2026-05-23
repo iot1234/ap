@@ -1122,10 +1122,20 @@ test('public bill payment link is tokenized and does not require tenant login', 
     'server must verify public bill-payment tokens');
   assert.match(server, /app\.get\('\/pay\/:billId'/,
     'public pay page must be served without tenant auth');
+  assert.doesNotMatch(server, /app\.get\('\/pay\/:billId', rateLimit/,
+    'public pay HTML must not return a JSON rate-limit response when opened from LINE');
   assert.match(server, /app\.get\('\/api\/public\/bills\/:billId\/payment'/,
     'public payment info endpoint must exist');
   assert.match(server, /app\.post\('\/api\/public\/bills\/:billId\/payments'/,
     'public slip upload endpoint must exist');
+  assert.match(server, /const rateLimitPublicPaymentView = makeIpLimiter\(\{[\s\S]{0,120}max: 120/,
+    'public payment view API must tolerate LINE preview/reopen traffic');
+  assert.match(server, /const rateLimitPublicPaymentUpload = makeIpLimiter\(\{[\s\S]{0,120}max: 20/,
+    'public payment upload API must keep its own stricter limiter');
+  assert.match(server, /app\.get\('\/api\/public\/bills\/:billId\/payment', rateLimitPublicPaymentView/,
+    'public payment info must use the view limiter');
+  assert.match(server, /app\.post\('\/api\/public\/bills\/:billId\/payments', rateLimitPublicPaymentUpload/,
+    'public slip upload must use the upload limiter');
   assert.match(server, /verifyBillPayToken\(id, token\)/,
     'public endpoints must reject invalid or expired tokens');
   assert.match(server, /tenantPaymentUploadHandler\(req, res\)/,
@@ -1138,6 +1148,45 @@ test('public bill payment link is tokenized and does not require tenant login', 
     'public token page must not leak the full token URL as cross-origin referer');
 });
 
+test('public bill payment page shows itemized online bill details', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const pay = fs.readFileSync(path.join(__dirname, '..', 'project', 'pay.jsx'), 'utf8');
+  const idx = server.indexOf("app.get('/api/public/bills/:billId/payment'");
+  const body = server.slice(idx, server.indexOf("app.post('/api/public/bills/:billId/payments'", idx));
+  assert.match(body, /water_prev_reading[\s\S]*water_current_reading[\s\S]*water_units[\s\S]*water_rate[\s\S]*water_amount/,
+    'public payment endpoint must expose water usage snapshots');
+  assert.match(body, /elec_prev_reading[\s\S]*elec_current_reading[\s\S]*elec_units[\s\S]*elec_rate[\s\S]*elec_amount/,
+    'public payment endpoint must expose electricity usage snapshots');
+  assert.match(body, /lateFeeCalculation: buildLateFeeCalculation\(bill, lateFeePolicy\)/,
+    'public payment JSON must expose the late-fee calculation');
+  assert.match(body, /lineItems: buildOnlineBillLineItems\(bill, lateFeePolicy\)/,
+    'public payment JSON must include server-built line items');
+  assert.match(server, /billing\.buildUtilityItem\('ค่าน้ำ'[\s\S]*billing\.buildUtilityItem\('ค่าไฟฟ้า'/,
+    'online bill line items must reuse the shared meter-detail formatter');
+  assert.match(server, /detail: lateFeeCalculation\.formulaText/,
+    'online bill late-fee line item must explain the calculation');
+  assert.match(pay, /function BillBreakdown\(\{ bill \}\)/,
+    'public payment UI must render an itemized bill section');
+  assert.match(pay, /รายละเอียดค่าใช้จ่าย/,
+    'public payment UI must label the itemized bill details');
+  assert.match(pay, /it\.detail/,
+    'public payment UI must show meter detail text, not just amounts');
+  assert.match(pay, /class PayPageErrorBoundary extends React\.Component/,
+    'public payment UI must render a controlled fallback instead of a blank page on render errors');
+  assert.match(pay, /fetch\('\/api\/client-error'/,
+    'public payment UI must report render failures for admin diagnosis');
+  assert.match(pay, /data\.code === 'RATE_LIMIT'/,
+    'public payment UI must translate rate-limit JSON into a user-facing Thai message');
+  assert.doesNotMatch(pay, /โอนตามยอดเดิม/,
+    'public payment bill link must not tell tenants to pay the old amount');
+  assert.doesNotMatch(pay, /จ่ายโดยสุจริต/,
+    'public payment bill link must not show good-faith payment wording');
+  assert.doesNotMatch(pay, /ยกเว้นค่าปรับ/,
+    'public payment bill link must not promise penalty waivers');
+});
+
 test('public bill QR has a token-gated payload fallback and never trusts query target/amount', () => {
   const fs = require('node:fs');
   const path = require('node:path');
@@ -1146,6 +1195,8 @@ test('public bill QR has a token-gated payload fallback and never trusts query t
   assert.ok(idx > 0, 'public bill QR endpoint must exist');
   const end = server.indexOf("app.get('/pay/:billId'", idx);
   const body = server.slice(idx, end > idx ? end : idx + 4500);
+  assert.match(server, /const rateLimitQr = makeIpLimiter\(\{[\s\S]{0,100}max: 120/,
+    'public QR endpoint must tolerate LINE image proxy fetches');
   assert.match(body, /verifyBillQrToken\(id, token\)/,
     'public QR fallback must stay behind the signed QR token');
   assert.match(body, /SELECT id, total, status, tenant_id FROM bills/,
@@ -1366,8 +1417,12 @@ test('bill upload UIs refresh status and hide upload controls after paid', () =>
     'public pay page must derive a paid state');
   assert.match(pay, /const canUpload = !!\(data && data\.channels && data\.channels\.slip && !paid && \(!uploadState \|\| uploadState\.canUpload !== false\)\)/,
     'public pay page must disable upload controls once paid');
-  assert.match(pay, /setInterval\(\(\) => load\(true\), 5000\)/,
-    'public pay page must poll for near-real-time status updates');
+  assert.match(pay, /PUBLIC_PAY_REFRESH_MS\s*=\s*15000/,
+    'public pay page must avoid aggressive polling that trips the LINE link rate limit');
+  assert.match(pay, /setInterval\(\(\) => load\(true\), PUBLIC_PAY_REFRESH_MS\)/,
+    'public pay page must poll for status updates at the guarded interval');
+  assert.match(pay, /<PayPageErrorBoundary>[\s\S]*<App \/>[\s\S]*<\/PayPageErrorBoundary>/,
+    'public pay page must wrap the app in a render-error boundary');
   assert.match(tenant, /const \[fileInputKey, setFileInputKey\]/,
     'tenant upload UI must track a file input reset key');
   assert.match(tenant, /<input key=\{fileInputKey\} type="file"/,
@@ -1576,6 +1631,39 @@ test('tenant bill modal uses bill-owned QR endpoint', () => {
     'tenant UI must request server-owned bill QR');
   assert.doesNotMatch(tenant, /\/api\/promptpay\/qr\?target=\$\{encodeURIComponent\(pay\.promptpayTarget\)\}&amount=\$\{encodeURIComponent\(bill\.total\)\}/,
     'tenant UI must not build payment QR from browser-side target+amount');
+});
+
+test('tenant bill modal explains meter readings in utility rows', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const tenant = fs.readFileSync(path.join(__dirname, '..', 'project', 'tenant.jsx'), 'utf8');
+  assert.match(tenant, /function utilityDetailFromBill\(bill, prefix, locale\)/,
+    'tenant bill detail must have a shared meter-detail formatter');
+  assert.match(tenant, /function lateFeeDetailFromBill\(bill, locale\)/,
+    'tenant bill detail must have a dedicated late-fee calculation formatter');
+  assert.match(tenant, /\$\{prefix\}_prev_reading/,
+    'tenant bill detail must read previous meter readings');
+  assert.match(tenant, /\$\{prefix\}_current_reading/,
+    'tenant bill detail must read current meter readings');
+  assert.match(tenant, /ไม่ได้บันทึกเลขมิเตอร์ก่อน\/หลัง/,
+    'tenant bill detail must explicitly explain manual units without meter snapshots');
+  assert.match(tenant, /hint=\{utilityDetailFromBill\(bill, 'water', locale\)\}/,
+    'water row must show meter detail');
+  assert.match(tenant, /hint=\{utilityDetailFromBill\(bill, 'elec', locale\)\}/,
+    'electric row must show meter detail');
+  assert.match(server, /late_fee_calculation: buildLateFeeCalculation\(row, lateFeePolicy\)/,
+    'tenant bills API must send late-fee calculation details');
+  assert.match(tenant, /bill\.late_fee_calculation/,
+    'tenant bill detail must read the server-provided late-fee calculation');
+  assert.match(tenant, /hint=\{lateFeeDetailFromBill\(bill, locale\)\}/,
+    'late-fee row must show the calculation as row detail');
+  assert.doesNotMatch(tenant, /โอนตามยอดเดิม/,
+    'tenant bill detail must not tell tenants to pay the old amount');
+  assert.doesNotMatch(tenant, /จ่ายโดยสุจริต/,
+    'tenant bill detail must not show good-faith payment wording');
+  assert.doesNotMatch(tenant, /ยกเว้นค่าปรับ/,
+    'tenant bill detail must not promise penalty waivers');
 });
 
 test('tenant payment readiness controls QR and slip upload state', () => {
@@ -6563,9 +6651,12 @@ test('unmark-paid: recomputes late_fee when restoring to overdue (R2-followup)',
   const fs = require('node:fs');
   const path = require('node:path');
   const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'bills-extras.js'), 'utf8');
+  const billing = fs.readFileSync(path.join(__dirname, '..', 'services', 'billing.js'), 'utf8');
   assert.match(src, /restoredLateFee/, 'unmark-paid must compute restoredLateFee');
-  assert.match(src, /billing\.computeLateFee\(\{[\s\S]{0,400}\}\)/,
-    'unmark-paid must call computeLateFee with the principal base');
+  assert.match(src, /billing\.computeRestoredBillAmounts\(\{/,
+    'unmark-paid must delegate restore math to the shared billing helper');
+  assert.match(billing, /function computeRestoredBillAmounts\([\s\S]*computeLateFee\(\{/,
+    'restore helper must call computeLateFee with the principal base');
   assert.match(src, /SET status=\$2,\s*paid_at=NULL,\s*late_fee=\$3::numeric,\s*total=\$4::numeric/,
     'unmark-paid must write late_fee + total back atomically with status');
 });

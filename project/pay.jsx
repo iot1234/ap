@@ -1,4 +1,5 @@
 const { useEffect, useMemo, useState } = React;
+const PUBLIC_PAY_REFRESH_MS = 15000;
 
 function fmt(n) {
   return Number(n || 0).toLocaleString('th-TH', {
@@ -65,6 +66,17 @@ async function readJson(res) {
     throw err;
   }
   return data;
+}
+
+function userFacingError(e, fallback) {
+  const data = e && e.data;
+  if (data && data.code === 'RATE_LIMIT') {
+    const wait = Number(data.retryAfterSeconds);
+    return Number.isFinite(wait) && wait > 0
+      ? `มีการเปิดหรือรีเฟรชลิงก์นี้ถี่เกินไป กรุณารอ ${Math.ceil(wait)} วินาทีแล้วลองใหม่`
+      : 'มีการเปิดหรือรีเฟรชลิงก์นี้ถี่เกินไป กรุณารอสักครู่แล้วลองใหม่';
+  }
+  return (e && e.message) || fallback;
 }
 
 function statusText(status) {
@@ -144,6 +156,84 @@ function blockMessage(upload) {
   return 'ไม่สามารถอัปโหลดสลิปออนไลน์ได้ กรุณาติดต่อแอดมิน';
 }
 
+function BillBreakdown({ bill }) {
+  const items = Array.isArray(bill && bill.lineItems)
+    ? bill.lineItems.filter((it) => it && String(it.label || '').trim())
+    : [];
+  if (!items.length) return null;
+  return (
+    <div style={breakdownCard}>
+      <div style={breakdownHeader}>
+        <div style={{ fontWeight: 700 }}>รายละเอียดค่าใช้จ่าย</div>
+        {bill.subtotal != null ? <div style={muted}>ยอดก่อน VAT/ค่าปรับ ฿{fmt(bill.subtotal)}</div> : null}
+      </div>
+      <div style={breakdownList}>
+        {items.map((it, idx) => (
+          <div key={it.key || `${it.label}-${idx}`} style={breakdownRow}>
+            <div style={{ minWidth: 0 }}>
+              <div style={breakdownLabel}>{it.label}</div>
+              {it.qty ? <div style={breakdownMeta}>{it.qty}</div> : null}
+              {it.detail ? <div style={breakdownDetail}>{it.detail}</div> : null}
+            </div>
+            <div style={breakdownAmount}>฿{fmt(it.amount)}</div>
+          </div>
+        ))}
+      </div>
+      <div style={breakdownTotal}>
+        <span>รวมทั้งสิ้น</span>
+        <strong>฿{fmt(bill.total)}</strong>
+      </div>
+    </div>
+  );
+}
+
+class PayPageErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { failed: false };
+  }
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  componentDidCatch(error, info) {
+    try {
+      fetch('/api/client-error', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: String((error && error.message) || error || '').slice(0, 1000),
+          stack: String((error && error.stack) || '').slice(0, 4000),
+          componentStack: String((info && info.componentStack) || '').slice(0, 4000),
+          url: window.location.href,
+        }),
+      });
+    } catch { /* best-effort client error report */ }
+  }
+
+  render() {
+    if (this.state.failed) {
+      return (
+        <main className="tenant-public-shell" style={wrap}>
+          <section className="tenant-pay-panel" style={panel}>
+            <div style={topline}>ชำระบิล</div>
+            <h1 style={h1}>หน้านี้ขัดข้องชั่วคราว</h1>
+            <div style={errorBox}>
+              กรุณากดโหลดใหม่อีกครั้ง หากยังเปิดไม่ได้ให้ส่งลิงก์นี้ให้แอดมินตรวจสอบ
+            </div>
+            <button type="button" style={button} onClick={() => window.location.reload()}>
+              โหลดใหม่
+            </button>
+          </section>
+        </main>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 function App() {
   const match = window.location.pathname.match(/\/pay\/(\d+)/);
   const billId = match ? Number(match[1]) : 0;
@@ -184,7 +274,7 @@ function App() {
       setErr('');
       if (next.bill) setAmount(String(next.bill.total || ''));
     } catch (e) {
-      if (!silent) setErr(e.message || 'โหลดข้อมูลชำระเงินไม่สำเร็จ กรุณาติดต่อแอดมิน');
+      if (!silent) setErr(userFacingError(e, 'โหลดข้อมูลชำระเงินไม่สำเร็จ กรุณาติดต่อแอดมิน'));
     } finally {
       if (!silent) setLoading(false);
     }
@@ -196,7 +286,7 @@ function App() {
 
   useEffect(() => {
     if (!data || data.paid) return undefined;
-    const timer = setInterval(() => load(true), 5000);
+    const timer = setInterval(() => load(true), PUBLIC_PAY_REFRESH_MS);
     return () => clearInterval(timer);
   }, [data && data.paid, apiBase]);
 
@@ -274,7 +364,7 @@ function App() {
       const building = data && data.building;
       setMessage(e.data && e.data.verification
         ? verificationMessage(e.data, e.data.upload, building)
-        : `${e.message || 'อัปโหลดไม่สำเร็จ'}\n${contactAdminMessage(e.data && e.data.upload, building)}`);
+        : `${userFacingError(e, 'อัปโหลดไม่สำเร็จ')}\n${contactAdminMessage(e.data && e.data.upload, building)}`);
       await load(true);
     } finally {
       setBusy(false);
@@ -346,6 +436,8 @@ function App() {
               <div style={muted}>ยอดชำระ</div>
               <div style={amountText}>฿{fmt(bill.total)}</div>
             </div>
+
+            <BillBreakdown bill={bill} />
 
             {uploadState ? (
               <div style={uploadState.blocked ? errorBox : infoBox}>
@@ -519,6 +611,15 @@ const muted = { color: 'var(--muted)', fontSize: 13 };
 const pill = { display: 'inline-block', padding: '3px 10px', borderRadius: 999, fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap' };
 const amountBox = { marginTop: 18, padding: 16, border: '1px solid var(--border)', borderRadius: 8, background: '#fffaf2' };
 const amountText = { fontFamily: 'Sora, sans-serif', fontSize: 34, fontWeight: 700 };
+const breakdownCard = { marginTop: 14, padding: 14, border: '1px solid var(--border)', borderRadius: 8, background: '#fff' };
+const breakdownHeader = { display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'baseline', marginBottom: 8, flexWrap: 'wrap' };
+const breakdownList = { display: 'grid', gap: 0, borderTop: '1px solid var(--border)' };
+const breakdownRow = { display: 'grid', gridTemplateColumns: 'minmax(0,1fr) auto', gap: 12, padding: '10px 0', borderBottom: '1px solid var(--border)', alignItems: 'start' };
+const breakdownLabel = { fontWeight: 700, color: 'var(--text)' };
+const breakdownMeta = { marginTop: 2, color: 'var(--muted)', fontSize: 12.5 };
+const breakdownDetail = { marginTop: 3, color: 'var(--muted)', fontSize: 12.5, lineHeight: 1.45 };
+const breakdownAmount = { fontFamily: 'Sora, sans-serif', fontWeight: 700, whiteSpace: 'nowrap', color: 'var(--text)' };
+const breakdownTotal = { display: 'flex', justifyContent: 'space-between', gap: 12, paddingTop: 12, fontFamily: 'Sora, sans-serif', color: 'var(--text)' };
 const card = { marginTop: 14, padding: 14, border: '1px solid var(--border)', borderRadius: 8 };
 const qr = { display: 'block', margin: '0 auto 8px', background: '#fff', border: '1px solid var(--border)', borderRadius: 8, padding: 6 };
 const qrFallbackBox = { marginTop: 10, padding: 12, background: '#fff8e6', border: '1px solid #ead49a', borderRadius: 8, color: '#6b5b1a', lineHeight: 1.5 };
@@ -532,4 +633,8 @@ const processingBox = { marginTop: 12, padding: 12, background: '#fff8e6', borde
 const successBox = { marginTop: 14, padding: 12, background: '#eef8f1', border: '1px solid #bee4ca', borderRadius: 8, color: 'var(--green)', fontWeight: 600, whiteSpace: 'pre-line' };
 const errorBox = { marginTop: 12, padding: 12, background: '#fff4f1', border: '1px solid #f3c2b8', borderRadius: 8, color: 'var(--red)', lineHeight: 1.5, whiteSpace: 'pre-line' };
 
-ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+ReactDOM.createRoot(document.getElementById('root')).render(
+  <PayPageErrorBoundary>
+    <App />
+  </PayPageErrorBoundary>
+);
