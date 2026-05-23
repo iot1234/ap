@@ -8,24 +8,53 @@ function fmt(n) {
   });
 }
 
-// Match the same translator in tenant.jsx — keep public pay page from
-// surfacing dev-tagged rejection codes like "superseded_by_*". pay.html
-// is a minimal public bundle that doesn't load api-client.js, so we
-// inline the map here rather than rely on a shared window helper.
+// Keep this in sync with tenantRejectedReason in tenant.jsx — pay.html is
+// a minimal public bundle that doesn't share window helpers, so the map
+// is inlined here. We translate both server-side audit codes
+// (superseded_by_*) and the free-form English strings the upstream slip
+// verifiers (SlipOK / EasySlip / Slip2Go) leak ("too many requests",
+// "Please provide either a payload string, a image file, a base64
+// encoded image, or a image URL", "Unauthorized", "Duplicate slip" …)
+// so the tenant never sees raw English on the public pay page.
 function tenantRejectedReason(raw) {
   if (!raw) return raw;
   const s = String(raw);
-  if (s.startsWith('superseded_by_verified_sibling')) {
-    return 'ระบบรับสลิปอีกใบสำหรับบิลนี้ไปแล้ว';
+
+  // Server-side audit codes (structured, prefix-matched).
+  if (s.startsWith('superseded_by_verified_sibling')) return 'ระบบรับสลิปอีกใบสำหรับบิลนี้ไปแล้ว';
+  if (s.startsWith('superseded_by_manual_pay'))       return 'แอดมินบันทึกการชำระเงินด้วยช่องทางอื่น (เงินสด/โอน) แล้ว';
+  if (s.startsWith('superseded_by_void'))             return 'บิลนี้ถูกยกเลิกแล้ว — โปรดติดต่อแอดมิน';
+  if (s.startsWith('unmark_paid_correction'))         return 'แอดมินยกเลิกการบันทึกชำระ — โปรดติดต่อแอดมิน';
+
+  // Upstream slip-verifier strings.
+  const lower = s.toLowerCase();
+  if (/(payload string|image file|base64|image url|invalid image)/i.test(s)) {
+    return 'ไม่พบรูปสลิปหรือสลิปอ่านไม่ออก กรุณาอัปโหลดสลิปใหม่ที่ชัดเจน';
   }
-  if (s.startsWith('superseded_by_manual_pay')) {
-    return 'แอดมินบันทึกการชำระเงินด้วยช่องทางอื่น (เงินสด/โอน) แล้ว';
+  if (/invalid (api|signature|key|token)/i.test(s) || /unauthor/i.test(lower)) {
+    return 'ระบบตรวจสลิปเชื่อมต่อไม่สำเร็จ — โปรดติดต่อแอดมินเพื่อตรวจการตั้งค่า';
   }
-  if (s.startsWith('superseded_by_void')) {
-    return 'บิลนี้ถูกยกเลิกแล้ว — โปรดติดต่อแอดมิน';
+  if (/quota|rate.?limit|too many|429/i.test(s)) {
+    return 'ระบบตรวจสลิปใช้งานเกินโควต้า — รบกวนติดต่อแอดมิน';
   }
-  if (s.startsWith('unmark_paid_correction')) {
-    return 'แอดมินยกเลิกการบันทึกชำระ — โปรดติดต่อแอดมิน';
+  if (/duplicate|already (used|verified)/i.test(s)) {
+    return 'สลิปนี้ถูกใช้แล้ว — กรุณาอัปโหลดสลิปของรายการโอนใหม่';
+  }
+  if (/amount|number/i.test(s) && /mismatch|not match|differ|incorrect/i.test(s)) {
+    return 'ยอดในสลิปไม่ตรงกับยอดบิล กรุณาตรวจสอบและอัปโหลดสลิปใหม่';
+  }
+  if (/receiver|target|account|destination/i.test(s) && /mismatch|not match|differ|incorrect/i.test(s)) {
+    return 'บัญชีปลายทางในสลิปไม่ใช่ของหอพัก — กรุณาตรวจสอบบัญชีผู้รับ';
+  }
+  if (/network|timeout|econnreset|fetch failed|connect/i.test(lower)) {
+    return 'เชื่อมต่อระบบตรวจสลิปไม่สำเร็จ ลองอัปโหลดใหม่หรือแจ้งแอดมิน';
+  }
+
+  // English-looking free text → generic friendly fallback. Detect "looks
+  // English" via the presence of ASCII letters AND the absence of any Thai
+  // letters; anything Thai is already actionable.
+  if (/[A-Za-z]/.test(s) && !/[฀-๿]/.test(s)) {
+    return 'การตรวจสอบไม่ผ่าน ลองอัปโหลดสลิปใหม่หรือแจ้งแอดมิน';
   }
   return s;
 }
@@ -76,7 +105,17 @@ function userFacingError(e, fallback) {
       ? `มีการเปิดหรือรีเฟรชลิงก์นี้ถี่เกินไป กรุณารอ ${Math.ceil(wait)} วินาทีแล้วลองใหม่`
       : 'มีการเปิดหรือรีเฟรชลิงก์นี้ถี่เกินไป กรุณารอสักครู่แล้วลองใหม่';
   }
-  return (e && e.message) || fallback;
+  // If the server response leaked a raw English message (e.g. an upstream
+  // 429 that bypassed our IP limiter's Thai text, or a verifier provider
+  // string like "too many requests"), translate it through the same
+  // dictionary the rejected_reason renderer uses so the public pay page
+  // never shows raw English to a tenant.
+  const raw = (e && e.message) || '';
+  if (raw && /[A-Za-z]/.test(raw) && !/[฀-๿]/.test(raw)) {
+    const translated = tenantRejectedReason(raw);
+    if (translated && translated !== raw) return translated;
+  }
+  return raw || fallback;
 }
 
 function statusText(status) {
