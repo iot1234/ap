@@ -6516,6 +6516,26 @@ async function tenantPaymentUploadHandler(req, res) {
           existingPaymentId: existingVerified.rows[0].id,
         });
       }
+      // Re-check the per-bill upload cap under the lock. The pre-check at
+      // line 6218 runs before the verifier RPC (5-10s) — in that window,
+      // a tenant who fires N concurrent uploads could see remaining > 0
+      // on all of them and bypass the 3-strikes limit by ~tenant slip
+      // attempts. Re-counting here, with the bill row locked, makes the
+      // cap an actual cap rather than a soft hint.
+      const attemptsUnderLock = await loadBillPaymentAttemptSummary(
+        client, billId, req.tenant.tenant_id
+      );
+      if (attemptsUnderLock.remaining <= 0) {
+        await client.query('ROLLBACK');
+        if (slip && slip.id) {
+          require('./services/storage').remove(pool, slip.id).catch(() => {});
+        }
+        return res.status(429).json({
+          error: 'อัปโหลดสลิปครบ 3 ครั้งแล้ว กรุณาติดต่อแอดมิน',
+          code: 'SLIP_UPLOAD_LIMIT_REACHED',
+          upload: { ...attemptsUnderLock, canUpload: false },
+        });
+      }
       // Re-check the amount under the bill row lock. The first check happens
       // before a slow storage/verifier path; in that window an admin edit or
       // the late-fee scheduler can change bills.total. The locked check keeps
