@@ -635,6 +635,28 @@ function BookingDetail({ b }) {
         />
       </div>
 
+      {/* Audit trail — who handled this booking and when. Without this an
+          admin reading "อนุมัติแล้ว" had no way to see which staff member
+          approved it, so accountability for borderline approvals (large
+          deposits, blacklist overrides, etc.) was untraceable from the UI.
+          Server already stores approvedBy/approvedAt on approve-and-assign
+          and updatedBy/updatedAt on every status change. */}
+      {(b.approvedBy || b.approvedAt || b.updatedBy || b.updatedAt) ? (
+        <div>
+          <SectionHeading title="ผู้ดำเนินการ" level={3} />
+          <DefList
+            columns={2}
+            items={[
+              ...(b.approvedBy ? [{ label: 'อนุมัติโดย', value: <span style={{ fontWeight: 600 }}>👤 {b.approvedBy}</span> }] : []),
+              ...(b.approvedAt ? [{ label: 'อนุมัติเมื่อ', value: relTime(b.approvedAt) }] : []),
+              ...(b.updatedBy && b.updatedBy !== b.approvedBy ? [{ label: 'แก้ไขล่าสุดโดย', value: <span style={{ fontWeight: 600 }}>👤 {b.updatedBy}</span> }] : []),
+              ...(b.updatedAt && b.updatedAt !== b.approvedAt ? [{ label: 'แก้ไขล่าสุดเมื่อ', value: relTime(b.updatedAt) }] : []),
+              ...(b.reopenReason ? [{ label: 'เหตุผลทบทวนใหม่', value: b.reopenReason }] : []),
+            ]}
+          />
+        </div>
+      ) : null}
+
       <div style={{
         padding: 14, background: C.surfaceAlt,
         border: `1px solid ${C.accent}33`, borderRadius: 10,

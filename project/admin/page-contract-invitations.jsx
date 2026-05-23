@@ -136,7 +136,23 @@ function PageContractInvitations({ setToast, addActivity }) {
                       {inv.updated_at ? new Date(inv.updated_at).toLocaleString('th-TH', {
                         month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
                       }) : '-'}
-                      <div>{inv.created_by ? 'โดย ' + inv.created_by : ''}</div>
+                      {/* Surface the last actor responsible for the
+                          terminal state (approved / rejected / revoked).
+                          Fall back to created_by for pending rows so an
+                          admin still knows who issued the link. */}
+                      {inv.approved_by ? (
+                        <div style={{ color: C.success || C.accent }}>
+                          ✓ อนุมัติโดย {inv.approved_by}
+                        </div>
+                      ) : inv.rejected_by ? (
+                        <div style={{ color: '#c0392b' }}>
+                          ↩ ส่งกลับโดย {inv.rejected_by}
+                        </div>
+                      ) : inv.revoked_by ? (
+                        <div>⊘ ยกเลิกโดย {inv.revoked_by}</div>
+                      ) : inv.created_by ? (
+                        <div>โดย {inv.created_by}</div>
+                      ) : null}
                     </td>
                     <td style={td}>
                       <Btn size="sm" variant="ghost" onClick={() => setReviewing(inv)}>
@@ -432,10 +448,46 @@ function ReviewBody({ detail, approvalWarnings = [] }) {
         )}
       </Section>
 
-      {detail.submitted_at ? (
-        <div style={{ fontSize: 11, color: C.muted, textAlign: 'center', marginTop: 12 }}>
-          ผู้เช่าส่งเมื่อ {new Date(detail.submitted_at).toLocaleString('th-TH')}
-        </div>
+      {/* Audit trail — surface every admin action on this invitation so a
+          contract that ends up "locked" or "rejected" has a visible owner.
+          Server returns approved_by/approved_at, rejected_by/rejected_at
+          plus created_by/created_at on every contract_invitations row,
+          but the previous modal only displayed submitted_at from the
+          tenant side. */}
+      {(detail.created_by || detail.submitted_at || detail.approved_by
+        || detail.rejected_by || detail.revoked_by) ? (
+        <Section title="ประวัติการดำเนินการ">
+          {detail.created_by ? (
+            <KV k="แอดมินที่สร้างลิงก์" v={<span style={{ fontWeight: 600 }}>👤 {detail.created_by}</span>} />
+          ) : null}
+          {detail.created_at ? (
+            <KV k="สร้างเมื่อ" v={new Date(detail.created_at).toLocaleString('th-TH')} />
+          ) : null}
+          {detail.submitted_at ? (
+            <KV k="ผู้เช่าส่งเมื่อ" v={new Date(detail.submitted_at).toLocaleString('th-TH')} />
+          ) : null}
+          {detail.approved_by ? (
+            <KV k="อนุมัติโดย" v={<span style={{ fontWeight: 600, color: C.success || C.accent }}>👤 {detail.approved_by}</span>} />
+          ) : null}
+          {detail.approved_at ? (
+            <KV k="อนุมัติเมื่อ" v={new Date(detail.approved_at).toLocaleString('th-TH')} />
+          ) : null}
+          {detail.rejected_by ? (
+            <KV k="ส่งกลับให้แก้โดย" v={<span style={{ fontWeight: 600, color: '#c0392b' }}>👤 {detail.rejected_by}</span>} />
+          ) : null}
+          {detail.rejected_at ? (
+            <KV k="ส่งกลับเมื่อ" v={new Date(detail.rejected_at).toLocaleString('th-TH')} />
+          ) : null}
+          {detail.rejection_reason ? (
+            <KV k="เหตุผลที่ส่งกลับ" v={detail.rejection_reason} />
+          ) : null}
+          {detail.revoked_by ? (
+            <KV k="ยกเลิกลิงก์โดย" v={<span style={{ fontWeight: 600, color: C.muted }}>👤 {detail.revoked_by}</span>} />
+          ) : null}
+          {detail.revoked_at ? (
+            <KV k="ยกเลิกเมื่อ" v={new Date(detail.revoked_at).toLocaleString('th-TH')} />
+          ) : null}
+        </Section>
       ) : null}
     </div>
   );
