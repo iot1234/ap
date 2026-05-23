@@ -9,6 +9,21 @@
 
 const { useState, useEffect, useMemo } = React;
 
+function securityDetail(ev) {
+  const raw = ev && ev.detail;
+  let detail = raw;
+  if (typeof raw === 'string') {
+    try { detail = JSON.parse(raw); } catch { detail = {}; }
+  }
+  if (!detail || typeof detail !== 'object') detail = {};
+  return {
+    reason: detail.reason || '',
+    path: detail.path || ev.entity_id || '',
+    method: detail.method || '',
+    requestId: detail.requestId || '',
+  };
+}
+
 function PageSecurityEvents({ setToast }) {
   const C = window.ADMIN_C;
   const { Card, Pill, PageContainer, PageHeader, EmptyState, SectionHeading } = window;
@@ -112,38 +127,68 @@ function PageSecurityEvents({ setToast }) {
         {data.failed.length === 0 ? <EmptyState title="ไม่มีเหตุการณ์" /> : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 1, background: C.border, borderRadius: 8, overflow: 'hidden', maxHeight: 480, overflowY: 'auto' }}>
             {data.failed.map((ev) => (
-              <div key={ev.id} style={{
-                background: C.bg, padding: '10px 14px',
-                fontSize: 12,
-              }}>
-                {/* Header row: timestamp + action pill — wraps on narrow */}
-                <div style={{
-                  display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
-                  marginBottom: 4,
-                }}>
-                  <span style={{ color: C.muted }}>
-                    {new Date(ev.created_at).toLocaleString('th-TH', { hour12: false })}
-                  </span>
-                  <Pill color={ev.action.includes('locked') ? 'danger' : 'warning'} size="sm">
-                    {ev.action.replace('auth.', '').replace('tenant.', '')}
-                  </Pill>
-                </div>
-                {/* User + IP row — wraps gracefully on mobile */}
-                <div style={{
-                  display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap',
-                  fontFamily: 'JetBrains Mono, monospace', fontSize: 11.5,
-                }}>
-                  <code style={{ wordBreak: 'break-all' }}>{ev.user_id || '—'}</code>
-                  <span style={{ color: C.muted, wordBreak: 'break-all', marginLeft: 'auto' }}>
-                    {ev.ip || '—'}
-                  </span>
-                </div>
-              </div>
+              <SecurityEventRow key={ev.id} ev={ev} C={C} />
             ))}
           </div>
         )}
       </Card>
     </PageContainer>
+  );
+}
+
+function SecurityEventRow({ ev, C }) {
+  const detail = securityDetail(ev);
+  const tone = ev.action && ev.action.includes('admin_route_probe')
+    ? 'danger'
+    : ev.action && ev.action.includes('locked')
+      ? 'danger'
+      : 'warning';
+  return (
+    <div style={{
+      background: C.bg, padding: '10px 14px',
+      fontSize: 12,
+    }}>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
+        marginBottom: 4,
+      }}>
+        <span style={{ color: C.muted }}>
+          {new Date(ev.created_at).toLocaleString('th-TH', { hour12: false })}
+        </span>
+        <Pill color={tone} size="sm">
+          {ev.action.replace('security.', '').replace('auth.', '').replace('tenant.', '')}
+        </Pill>
+        {detail.method ? (
+          <span style={{ color: C.muted, fontFamily: 'JetBrains Mono, monospace', fontSize: 11 }}>
+            {detail.method}
+          </span>
+        ) : null}
+      </div>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap',
+        fontFamily: 'JetBrains Mono, monospace', fontSize: 11.5,
+      }}>
+        <code style={{ wordBreak: 'break-all' }}>{ev.user_id || '—'}</code>
+        <span style={{ color: C.muted, wordBreak: 'break-all', marginLeft: 'auto' }}>
+          {ev.ip || '—'}
+        </span>
+      </div>
+      {(detail.reason || detail.path) ? (
+        <div style={{
+          marginTop: 6,
+          color: C.muted,
+          display: 'grid',
+          gap: 3,
+          fontFamily: 'JetBrains Mono, monospace',
+          fontSize: 11,
+          wordBreak: 'break-all',
+        }}>
+          {detail.reason ? <span>reason: {detail.reason}</span> : null}
+          {detail.path ? <span>path: {detail.path}</span> : null}
+          {detail.requestId ? <span>request: {detail.requestId}</span> : null}
+        </div>
+      ) : null}
+    </div>
   );
 }
 

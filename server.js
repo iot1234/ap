@@ -449,6 +449,15 @@ function sendSecurityText(res, status) {
   return res.status(status).type('text/plain').send(SECURITY_WARNING_TEXT);
 }
 
+function sendSecurityHtml(req, res, status) {
+  applySecurityWarning(res);
+  res.status(status);
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.setHeader('X-Request-ID', req.id || '');
+  return res.sendFile(path.join(__dirname, 'project', 'security-warning.html'));
+}
+
 const SECURITY_ALERT_WINDOW_MS = 10 * 60_000;
 const SECURITY_ALERT_COOLDOWN_MS = 30 * 60_000;
 const SECURITY_ALERT_RULES = Object.freeze({
@@ -458,6 +467,7 @@ const SECURITY_ALERT_RULES = Object.freeze({
   'security.file_access_denied':   { threshold: 3, severity: 'high', title: 'พบการพยายามเปิดไฟล์ที่ไม่มีสิทธิ์' },
   'security.api_unknown_route':    { threshold: 12, severity: 'medium', title: 'พบการเดา API URL' },
   'security.public_unknown_route': { threshold: 8, severity: 'medium', title: 'พบการ probe URL สาธารณะ' },
+  'security.admin_route_probe':    { threshold: 3, severity: 'high', title: 'พบการเดา URL หลังบ้าน' },
   'security.device_token_rejected':{ threshold: 3, severity: 'high', title: 'พบ token อุปกรณ์ผิดซ้ำ' },
   'security.admin_forbidden_role': { threshold: 3, severity: 'medium', title: 'พบสิทธิ์ผู้ใช้ไม่พอซ้ำ' },
   'security.admin_unauthorized':   { threshold: 10, severity: 'medium', title: 'พบการเข้า admin endpoint โดยไม่มี session' },
@@ -551,6 +561,14 @@ function isProtectedSourceProbePath(pathValue) {
   return PROTECTED_SOURCE_PATH.test(pathValue);
 }
 const SUSPICIOUS_UNKNOWN_PATH = /(?:wp-admin|wp-login|xmlrpc|phpmyadmin|adminer|composer\.(?:json|lock)|vendor\/|backup|dump|database|config|setup|install|\.php|\.asp|\.aspx|\.jsp|\.cgi|\.sql|\.bak|\.old|\.zip|\.tar|\.gz|\.rar)/i;
+const ADMIN_CONSOLE_PROBE_PATH = /^\/(?:admin(?:\/.+|[-_a-z0-9]+)?|administrator|backend|backoffice|dashboard|cpanel|control-?panel|manage|manager|cms)(?:\/|$)/i;
+
+function adminConsoleProbePath(rawPath) {
+  const decoded = safeDecodePath(String(rawPath || '').split('?')[0] || '/');
+  const value = (decoded.ok ? decoded.value : String(rawPath || '')).replace(/\\/g, '/');
+  if (value === '/admin' || value === '/admin/') return false;
+  return ADMIN_CONSOLE_PROBE_PATH.test(value);
+}
 
 function suspiciousUnknownPath(rawPath) {
   const decoded = safeDecodePath(String(rawPath || '').split('?')[0] || '/');
@@ -14032,6 +14050,18 @@ app.get('/health/live', (_req, res) => {
 //     redownloading megabytes of admin JSX on every reload.
 //   - Other static assets (fonts, images) → 1h TTL since they rarely change.
 app.use((req, res, next) => {
+  const rawPath = String((req.originalUrl || req.url || '').split('?')[0] || '/');
+  if (!adminConsoleProbePath(rawPath)) return next();
+  if (req.session && req.session.user) return next();
+  recordSecurityEvent(req, 'security.admin_route_probe', {
+    reason: rawPath.startsWith('/admin/')
+      ? 'unauthenticated_admin_static_or_route'
+      : 'guessed_admin_console_path',
+    path: rawPath.slice(0, 500),
+  });
+  return sendSecurityHtml(req, res, 401);
+});
+app.use((req, res, next) => {
   if (/\.jsx$/i.test(req.path)) {
     // Revalidate on every reload, but do not block the browser from storing
     // the file. `no-store` forced a full transfer every time and made the
@@ -14182,8 +14212,9 @@ app.use((err, req, res, _next) => {
 // frontend then tries to JSON.parse and shows a confusing "Unexpected token <"
 // error. JSON 404 makes debugging instant.
 app.use('/api', (req, res) => {
-  recordSecurityEvent(req, 'security.api_unknown_route', {
-    reason: 'unknown_api_route',
+  const isAdminApiProbe = /^\/api\/admin(?:\/|$)/i.test(String(req.originalUrl || req.url || ''));
+  recordSecurityEvent(req, isAdminApiProbe ? 'security.admin_route_probe' : 'security.api_unknown_route', {
+    reason: isAdminApiProbe ? 'unknown_admin_api_route' : 'unknown_api_route',
     path: req.originalUrl || req.url,
   });
   applySecurityWarning(res);
@@ -14196,6 +14227,13 @@ app.use('/api', (req, res) => {
 });
 
 app.use((req, res) => {
+  if (adminConsoleProbePath(req.originalUrl || req.url)) {
+    recordSecurityEvent(req, 'security.admin_route_probe', {
+      reason: 'unknown_admin_console_route',
+      path: req.originalUrl || req.url,
+    });
+    return sendSecurityHtml(req, res, 404);
+  }
   if (suspiciousUnknownPath(req.originalUrl || req.url)) {
     recordSecurityEvent(req, 'security.public_unknown_route', {
       reason: 'suspicious_unknown_route',

@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<meta name="robots" content="noindex,nofollow"/>
+<title>คำขอถูกบันทึกเพื่อความปลอดภัย</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=Sora:wght@500;700&display=swap" rel="stylesheet"/>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; }
+  body {
+    font-family: "IBM Plex Sans Thai", "Sora", system-ui, sans-serif;
+    background: #17120f;
+    color: #f4eadb;
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+  }
+  main {
+    width: 100%;
+    max-width: 520px;
+    background: #fffaf2;
+    color: #2c241b;
+    border: 1px solid #ead9c2;
+    border-radius: 8px;
+    padding: 26px;
+    box-shadow: 0 26px 70px -34px rgba(0,0,0,.8);
+  }
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 10px;
+    border-radius: 999px;
+    background: #fff1df;
+    color: #9a4b25;
+    font-size: 12px;
+    font-weight: 700;
+    margin-bottom: 14px;
+  }
+  h1 {
+    margin: 0 0 10px;
+    font-family: "Sora", "IBM Plex Sans Thai", sans-serif;
+    font-size: 24px;
+    line-height: 1.2;
+    letter-spacing: 0;
+  }
+  p { margin: 0 0 12px; color: #625541; line-height: 1.65; }
+  .notice {
+    margin-top: 16px;
+    padding: 12px 14px;
+    border: 1px solid #f0c2b5;
+    background: #fff4f1;
+    color: #7b2c20;
+    border-radius: 8px;
+    line-height: 1.55;
+    font-size: 13.5px;
+  }
+  .actions {
+    margin-top: 20px;
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  a {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 40px;
+    padding: 8px 14px;
+    border-radius: 7px;
+    text-decoration: none;
+    font-weight: 700;
+    border: 1px solid #d9c7ad;
+    color: #2c241b;
+    background: #fff;
+  }
+  a.primary {
+    background: #2c241b;
+    color: #fffaf2;
+    border-color: #2c241b;
+  }
+</style>
+</head>
+<body>
+  <main>
+    <div class="badge">SECURITY NOTICE</div>
+    <h1>ไม่สามารถเปิดเส้นทางนี้ได้</h1>
+    <p>
+      เส้นทางที่เรียกไม่ใช่ช่องทางเข้าสู่ระบบที่อนุญาต หรือเป็นการเรียก URL หลังบ้านโดยตรง
+      ระบบจึงบันทึกเหตุการณ์นี้ไว้เพื่อความปลอดภัย
+    </p>
+    <div class="notice">
+      หากคุณเป็นผู้ดูแล ให้เข้าสู่ระบบผ่านหน้า Login ปกติเท่านั้น ห้ามเปิดไฟล์หรือเส้นทางหลังบ้านโดยตรง
+    </div>
+    <div class="actions">
+      <a class="primary" href="/login">ไปหน้าเข้าสู่ระบบ</a>
+      <a href="/">กลับหน้าแรก</a>
+    </div>
+  </main>
+</body>
+</html>
