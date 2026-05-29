@@ -897,7 +897,11 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         ? requestedDue
         : (Number.isFinite(configuredDue) && configuredDue >= 1 && configuredDue <= 28
           ? configuredDue
-          : 15);
+          // Fall back to 7 — the SAME default the bulk-generate UI sends
+          // (page-billing.jsx: dueOnDay || 7). Defaulting to 15 here made the
+          // preview show a due date the issued bill would not actually use when
+          // notify.dueOnDay is unconfigured.
+          : 7);
       const dueDate = billing.formatYMD(parsed.year, parsed.month, dueDay);
       const periodDisplay = parsed.period;
       const previewBills = [];

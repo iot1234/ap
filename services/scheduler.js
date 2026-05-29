@@ -297,6 +297,16 @@ async function tickLateFee(pool, flags, now, state) {
           ).catch(() => { /* best-effort */ });
           continue;
         }
+        // Match Phase B's ex-tenant exclusion: don't apply a growing late fee
+        // to a bill whose tenant has moved out / been soft-deleted (orphan
+        // bills with tenant_id NULL are still penalised, same as Phase B).
+        // Otherwise a bill that flips overdue the same day its tenant is
+        // reconciled would get an initial fee Phase B then refuses to grow —
+        // the two phases would disagree on the exact case the filter handles.
+        if (b.tenant_id != null
+            && (b.deleted_at != null || (b.tenant_status || 'active') !== 'active')) {
+          continue;
+        }
         const base = (Number(b.total) || 0) - (Number(b.late_fee) || 0);
         const calc = billing.computeLateFee({
           base,

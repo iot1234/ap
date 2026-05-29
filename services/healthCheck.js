@@ -783,8 +783,12 @@ async function checkFeatureDependencies(features, pool) {
   // SESSION_SECRET. It works, but rotating SESSION_SECRET later makes every
   // stored citizen ID undecryptable. Same gap the boot log warns about; surface
   // it where the operator toggles features too.
-  if (features?.citizenIdEncryption?.enabled
-      && !process.env.CITIZEN_ID_KEY && !process.env.ENCRYPTION_KEY_V1) {
+  // Only CITIZEN_ID_KEY clears this — services/crypto.js (citizen-ID PII) reads
+  // ONLY CITIZEN_ID_KEY (else HKDF from SESSION_SECRET); it never reads
+  // ENCRYPTION_KEY_V* (those feed services/encryption.js: secrets/OA tokens, a
+  // separate key system). Treating ENCRYPTION_KEY_V1 as covering citizen IDs
+  // gave a false "safe" signal — matches the checkBootConfig fix.
+  if (features?.citizenIdEncryption?.enabled && !process.env.CITIZEN_ID_KEY) {
     warnings.push({
       flag: 'citizenIdEncryption',
       issue: 'citizenIdEncryption เปิด แต่ไม่ได้ตั้ง CITIZEN_ID_KEY — ใช้คีย์ที่ derive จาก SESSION_SECRET ถ้าเปลี่ยน SESSION_SECRET ภายหลัง ข้อมูลบัตรเดิมจะถอดรหัสไม่ได้ (กู้คืนไม่ได้)',
