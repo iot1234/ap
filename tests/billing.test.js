@@ -32,6 +32,33 @@ test('buildBill: basic line items + total', () => {
   assert.ok(bill.billNo.startsWith('INV-'));
 });
 
+test('buildBill: common-area fee billed as a flat monthly item (ungated by recurringCharges)', () => {
+  const cfg = { ...baseConfig, utilities: { ...baseConfig.utilities, commonFee: 200 } };
+  const flags = { lateFee: { enabled: false }, vat: { enabled: false }, recurringCharges: { enabled: false } };
+  const bill = billing.buildBill({ room: baseRoom, config: cfg, features: flags });
+  assert.equal(bill.commonFee, 200);
+  assert.equal(bill.subtotal, 6340);   // 5000 + 90 + 800 + 250 + 200
+  assert.equal(bill.total, 6340);
+  assert.ok(bill.items.some((it) => /ส่วนกลาง/.test(it.label) && it.amount === 200),
+    'bill items must include a ค่าส่วนกลาง line');
+
+  // absent/zero commonFee → no line, no charge (rooms that don't set it)
+  const noCf = billing.buildBill({ room: baseRoom, config: baseConfig, features: flags });
+  assert.equal(noCf.commonFee, 0);
+  assert.ok(!noCf.items.some((it) => /ส่วนกลาง/.test(it.label)));
+
+  // per-room override beats the global rate
+  const ov = billing.buildBill({ room: { ...baseRoom, commonFeeOverride: 350 }, config: cfg, features: flags });
+  assert.equal(ov.commonFee, 350);
+  assert.equal(ov.commonFeeSource, 'override');
+
+  // VAT applies to the common fee (it sits inside vatBase, like wifi)
+  const vbill = billing.buildBill({ room: baseRoom, config: cfg, features: { vat: { enabled: true, ratePct: 7 }, lateFee: { enabled: false } } });
+  assert.equal(vbill.subtotal, 6340);
+  assert.equal(vbill.vat, 443.8);      // round2(6340 * 7%)
+  assert.equal(vbill.total, 6783.8);
+});
+
 test('buildBill: utility readings use before/after meter deltas', () => {
   const flags = { lateFee: { enabled: false }, vat: { enabled: false } };
   const bill = billing.buildBill({
@@ -97,7 +124,12 @@ test('buildBill: recurring charges only when enabled', () => {
 test('statusOf: paid > overdue > pending', () => {
   assert.equal(billing.statusOf({ paid_at: '2025-01-01' }), 'paid');
   assert.equal(billing.statusOf({ paid_at: null, due_date: '2020-01-01' }), 'overdue');
-  const future = new Date(Date.now() + 86400_000).toISOString().slice(0, 10);
+  // +7 days, not +1: statusOf parses due_date as LOCAL midnight while
+  // toISOString() yields a UTC date. At +1 day, in a UTC+7 timezone during the
+  // early-morning hours the UTC "tomorrow" resolves to the LOCAL "today",
+  // making the bill read overdue and flaking the test. 7 days clears any
+  // timezone skew so the due date is unambiguously in the future.
+  const future = new Date(Date.now() + 7 * 86400_000).toISOString().slice(0, 10);
   assert.equal(billing.statusOf({ paid_at: null, due_date: future }), 'pending');
 });
 

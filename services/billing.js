@@ -75,9 +75,21 @@ function buildBill({ room, contract = null, config, features, recurring = [], pe
   const wifiFee = wifiOverrideRaw != null && wifiOverrideRaw !== '' && Number.isFinite(Number(wifiOverrideRaw))
     ? Math.max(0, Number(wifiOverrideRaw))
     : globalWifiFee;
+  // Common-area fee (ค่าส่วนกลาง: security/cleaning/garbage). Configured in
+  // /admin#pricing as a per-MONTH charge and shown in the monthly-cost preview
+  // total there + on the contract PDF — but it was never actually billed,
+  // silently undercharging every occupied room. Treat it as a flat monthly
+  // line item exactly like wifi (ungated, building-wide with optional per-room
+  // override), so the pricing UI, the contract, and the issued bill all agree.
+  const globalCommonFee = Number(u.commonFee ?? 0);
+  const commonOverrideRaw = r.commonFeeOverride ?? r.common_fee_override ?? r.commonFee ?? r.common_fee;
+  const commonFee = commonOverrideRaw != null && commonOverrideRaw !== '' && Number.isFinite(Number(commonOverrideRaw))
+    ? Math.max(0, Number(commonOverrideRaw))
+    : (Number.isFinite(globalCommonFee) && globalCommonFee > 0 ? globalCommonFee : 0);
   const waterRateSource = waterRate !== globalWaterRate ? 'override' : 'global';
   const elecRateSource  = elecRate  !== globalElecRate  ? 'override' : 'global';
   const wifiFeeSource   = wifiFee   !== globalWifiFee   ? 'override' : 'global';
+  const commonFeeSource = commonFee !== globalCommonFee ? 'override' : 'global';
 
   // Resolver picks the right rent source. See services/pricing.js for
   // priority + rationale.
@@ -172,6 +184,9 @@ function buildBill({ room, contract = null, config, features, recurring = [], pe
       : buildUtilityItem('ค่าไฟฟ้า', elecUsage, elecRate, elecAmount),
   ];
   if (wifiFee > 0) items.push({ label: 'ค่าอินเทอร์เน็ต', qty: '1 เดือน', amount: wifiFee });
+  // Common-area fee — flat monthly, ungated (NOT behind recurringCharges; it's
+  // a utility-class charge like wifi). Folds into vatBase below like any item.
+  if (commonFee > 0) items.push({ label: 'ค่าส่วนกลาง', qty: '1 เดือน', amount: commonFee });
   if (discountAmount > 0) {
     items.push({
       label: `ส่วนลดสัญญา ${safePct}%`,
@@ -250,6 +265,8 @@ function buildBill({ room, contract = null, config, features, recurring = [], pe
     elecCurrentReading: elecModeInfo.mode === 'flat' ? null : elecUsage.currentReading,
     wifi: wifiFee,
     wifiFeeSource,
+    commonFee,
+    commonFeeSource,
     subtotal: round2(subtotal),
     vat,
     lateFee,

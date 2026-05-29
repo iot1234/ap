@@ -380,6 +380,13 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         const wifi = (wifiRaw != null && wifiRaw !== '' && Number.isFinite(Number(wifiRaw)))
           ? Math.max(0, Number(wifiRaw))
           : globalWifiFee;
+        // Common-area fee — flat monthly, mirrors services/billing.js so the
+        // preview total matches the issued bill (it bills this ungated, like wifi).
+        const globalCommonFee = Number(config.utilities?.commonFee) || 0;
+        const commonRaw = rr.commonFeeOverride ?? rr.commonFee;
+        const commonFee = (commonRaw != null && commonRaw !== '' && Number.isFinite(Number(commonRaw)))
+          ? Math.max(0, Number(commonRaw))
+          : (globalCommonFee > 0 ? globalCommonFee : 0);
         // Bill line items come from /api/recurring-charges (active rows).
         // Server's bulk-generate merges these via services/billing.js, so
         // mirroring them here keeps the preview totals in sync with what
@@ -390,7 +397,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         const chargesTotal = charges.reduce((s, c) => s + (Number(c.amount) || 0), 0);
         const rentInfo = resolveRoomRent ? resolveRoomRent(rr, config) : { rent: rr.rent, source: 'legacy' };
         const previewRent = Number(rentInfo.rent) || 0;
-        const total = previewRent + water + elec + wifi + chargesTotal;
+        const total = previewRent + water + elec + wifi + commonFee + chargesTotal;
         const overdue = r.status === 'overdue';
         // Late fee is computed server-side at bill-gen time using
         // features.lateFee.ratePctPerMonth + gracePeriodDays (the canonical
@@ -411,7 +418,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
           periodDisplay,                 // for UI
           rent: previewRent,
           rentSource: rentInfo.source,
-          water, elec, wifi,
+          water, elec, wifi, commonFee,
           waterUnits,
           waterRate,
           waterPrevReading: waterPair.prev,
@@ -464,6 +471,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
           elecPrevReading: numOrNull(real.elec_prev_reading),
           elecCurrentReading: numOrNull(real.elec_current_reading),
           wifi: numOrNull(real.wifi) ?? est.wifi,
+          commonFee: est.commonFee || 0,             // no DB column; stored in `other`, mirrors config
           total: Number(real.total) || est.total,    // trust DB total over estimate
           // Slip summary (only present when fetched with withPayments=1).
           // Used by the row "การชำระ" column + the "รอตรวจสลิป" tab
@@ -1723,9 +1731,14 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
                 },
                 { label: 'ค่า Wi-Fi', amount: b.wifi || 0 },
               ];
-              // Maintenance / repair charges from completed tickets.
+              if (Number(b.commonFee) > 0) items.push({ label: 'ค่าส่วนกลาง', amount: Number(b.commonFee) });
+              // Maintenance / repair charges from completed tickets. Filter out
+              // any common-fee line so it isn't shown twice (it's already added
+              // above; DB bills also carry it inside `other`/charges).
               if (Array.isArray(b.charges)) {
-                b.charges.forEach((c) => items.push({ label: c.label, amount: Number(c.amount) || 0 }));
+                b.charges
+                  .filter((c) => !/ส่วนกลาง/.test(String((c && c.label) || '')))
+                  .forEach((c) => items.push({ label: c.label, amount: Number(c.amount) || 0 }));
               }
               if (b.penalty > 0) {
                 items.push({ label: `ค่าปรับล่าช้า (${b.overdueDays || 0} วัน)`, amount: b.penalty });
@@ -2461,6 +2474,7 @@ function BillPreview({ b }) {
     },
     { label: 'ค่า Wi-Fi', value: b.wifi },
   ];
+  if (Number(b.commonFee) > 0) rows.push({ label: 'ค่าส่วนกลาง', value: b.commonFee });
   if (b.penalty > 0) rows.push({ label: `ค่าปรับชำระล่าช้า (${b.overdueDays} วัน)`, value: b.penalty, danger: true });
 
   return (

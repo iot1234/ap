@@ -258,6 +258,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       elecPrevReading: bill.elecPrevReading,
       elecCurrentReading: bill.elecCurrentReading,
       wifi: bill.wifi,
+      commonFee: bill.commonFee || 0,
       charges: recurringList,
       chargesTotal: recurringList.reduce((sum, x) => sum + (Number(x.amount) || 0), 0),
       subtotal: bill.subtotal,
@@ -616,6 +617,15 @@ module.exports = function buildBillsExtrasRouter(ctx) {
     }
     const totalAmount = Number(computed.total);
     const subtotalAmount = computed.subtotal == null ? totalAmount : Number(computed.subtotal);
+    // Persist the common-area fee as a visible line in `other` so the stored
+    // bill + its PDF reconstruction show it. It is ALREADY folded into
+    // computed.subtotal/total by buildBill (so the total=subtotal+vat+late_fee
+    // invariant is unaffected); this only adds the display line. Guard against
+    // a double-append (ON CONFLICT update re-runs this handler body once).
+    const commonFeeAmt = Number(computed.commonFee) || 0;
+    if (commonFeeAmt > 0 && !otherForStorage.some((x) => /ส่วนกลาง/.test(String((x && x.label) || '')))) {
+      otherForStorage = [...otherForStorage, { label: 'ค่าส่วนกลาง', amount: commonFeeAmt }];
+    }
     if (!computed.billNo || !computed.roomId || !computed.period || !computed.dueDate
         || !Number.isFinite(totalAmount) || totalAmount <= 0 || totalAmount > MAX_AMOUNT
         || !Number.isFinite(subtotalAmount) || subtotalAmount < 0) {
@@ -1734,7 +1744,15 @@ module.exports = function buildBillsExtrasRouter(ctx) {
                 elec: !!bill.elecFlatFellBack,
               });
             }
-            const otherJson = JSON.stringify(recurring || []);
+            // Include the common-area fee as a visible `other` line (it's
+            // already in bill.subtotal/total via buildBill; this is for display
+            // + PDF reconstruction parity with the single-bill path).
+            const otherItems = Array.isArray(recurring) ? [...recurring] : [];
+            if (Number(bill.commonFee) > 0
+                && !otherItems.some((x) => /ส่วนกลาง/.test(String((x && x.label) || '')))) {
+              otherItems.push({ label: 'ค่าส่วนกลาง', amount: Number(bill.commonFee) });
+            }
+            const otherJson = JSON.stringify(otherItems);
             // R4 — try the default bill_no first; on collision retry once
             // with the `-T${tenantId}` suffix (only when there's actually
             // a different tenant taking up the room+period slot). Keeps the
