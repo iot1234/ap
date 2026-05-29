@@ -204,6 +204,10 @@ function TweaksPanel({ title = 'Tweaks', children }) {
 
   React.useEffect(() => {
     const onMsg = (e) => {
+      // Only honor same-origin messages — don't act on postMessage from an
+      // embedding/cross-origin frame (defense-in-depth; this dev panel never
+      // ships active to production, but the listener shouldn't trust any origin).
+      if (e.origin !== window.location.origin) return;
       const t = e?.data?.type;
       if (t === '__activate_edit_mode') setOpen(true);
       else if (t === '__deactivate_edit_mode') setOpen(false);

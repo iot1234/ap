@@ -8,6 +8,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const secrets = require('./secrets');
+const ssrfGuard = require('./ssrfGuard');
 
 // Lazy-loaded S3 client, only created when R2 credentials are present.
 // Re-using the client across uploads avoids paying connection setup per file.
@@ -19,6 +20,13 @@ function getS3Client() {
   const ep = secrets.get('R2_ENDPOINT');
   const region = secrets.get('R2_REGION') || 'auto';
   if (!id || !sec || !ep) return null;
+  // SSRF guard: R2_ENDPOINT is operator-supplied free text and is used as the
+  // S3 endpoint for uploads/reads/backups (and is reachable on demand via the
+  // "test connection" button). Reject https-less / internal targets so it can't
+  // be pointed at cloud metadata or the platform's private network (which would
+  // also exfiltrate uploaded slips/citizen-ID images to an attacker endpoint).
+  try { ssrfGuard.assertSafeUrl(ep); }
+  catch (e) { console.error('[storage] R2_ENDPOINT rejected (SSRF guard):', e.message); return null; }
   const cacheKey = `${id}|${ep}|${region}`;
   if (_s3Client && _s3ClientKey === cacheKey) return _s3Client;
   let lib;

@@ -18,6 +18,7 @@
 //   - CITIZEN_ID_KEY (legacy alias) — same
 
 const encryption = require('./encryption');
+const ssrfGuard = require('./ssrfGuard');
 
 // Catalog of every key the admin UI knows about. Keep this list aligned
 // with the page-secrets.jsx field groups so adding a key is a one-line
@@ -180,6 +181,15 @@ async function set(pool, key, value, updatedBy) {
     if (cleaned.length === 0) {
       // Was all-whitespace; treat as delete.
       cleaned = '';
+    }
+    // SSRF guard at write time for operator-supplied OUTBOUND URLs. These feed
+    // server-side requests (Slip2Go verify call, R2/S3 endpoint), so reject
+    // https-less / internal-network / metadata targets before they persist —
+    // belt-and-suspenders with the call-site checks in slipVerifier/storage.
+    if (cleaned && (key === 'SLIP2GO_API_URL' || key === 'R2_ENDPOINT')) {
+      const candidate = /^https?:\/\//i.test(cleaned) ? cleaned : `https://${cleaned}`;
+      try { ssrfGuard.assertSafeUrl(candidate); }
+      catch (e) { throw new Error(`${key}: ${e.message}`); }
     }
   }
   if (cleaned == null || cleaned === '') {

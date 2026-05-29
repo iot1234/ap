@@ -54,6 +54,7 @@ const http = require('http');
 const https = require('https');
 const crypto = require('crypto');
 const secrets = require('./secrets');
+const ssrfGuard = require('./ssrfGuard');
 
 const TIMEOUT_MS = 10_000;
 
@@ -179,10 +180,10 @@ function normalizeHttpBaseUrl(raw) {
   const value = String(raw || '').trim();
   if (!value) return null;
   const withScheme = /^https?:\/\//i.test(value) ? value : `https://${value}`;
-  const parsed = new URL(withScheme);
-  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
-    throw new Error('base URL must use http or https');
-  }
+  // SSRF guard: require https + reject internal/reserved hosts. This is a
+  // payment-verification API the tenant slip-upload path calls with a bearer
+  // token, so an internal target would leak the token + enable blind SSRF.
+  const parsed = ssrfGuard.assertSafeUrl(withScheme);
   parsed.pathname = parsed.pathname.replace(/\/+$/, '');
   parsed.search = '';
   parsed.hash = '';
@@ -788,6 +789,10 @@ async function verifyViaSlip2Go(buffer, expected) {
   const apiKey = secrets.get('SLIP2GO_API_KEY');
   if (!apiKey) throw new Error('SLIP2GO_API_KEY not configured');
   const endpoint = endpointFromBase(secrets.get('SLIP2GO_API_URL'), '/api/verify-slip/qr-image/info');
+  // Re-validate at request time WITH DNS resolution — this path is reachable
+  // by any tenant uploading a slip, so a hostname that (re)resolves to an
+  // internal IP must be blocked before we send the bearer token to it.
+  await ssrfGuard.assertSafeUrlResolved(endpoint.href);
   const expectedAmount = Number(expected?.amount);
   const payload = { checkDuplicate: true };
   if (Number.isFinite(expectedAmount) && expectedAmount > 0) {
