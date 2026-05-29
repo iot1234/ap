@@ -74,6 +74,149 @@ function retryKeyForRowId(rowId) {
   ].join('-');
 }
 
+const PAYABLE_BILL_STATUSES = new Set(['pending', 'overdue']);
+
+function normalizePayload(raw) {
+  if (!raw) return {};
+  if (typeof raw === 'object') return raw;
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+  return {};
+}
+
+function fatalBillQueueError(code, message) {
+  const err = new Error(`${code}: ${message}`);
+  err.code = code;
+  err.fatal = true;
+  return err;
+}
+
+function formatPaidAt(value) {
+  if (!value) return null;
+  const d = new Date(value);
+  if (!Number.isFinite(d.getTime())) return null;
+  return d.toLocaleString('th-TH', {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+function paidBillNoticeText(row, state) {
+  return [
+    '✅ บิลนี้ชำระแล้ว',
+    row.subject ? String(row.subject) : null,
+    state?.paid_at ? `เวลาชำระ: ${formatPaidAt(state.paid_at) || state.paid_at}` : null,
+    'ไม่ต้องสแกน QR โอนเงิน หรือส่งสลิปเพิ่ม',
+  ].filter(Boolean).join('\n');
+}
+
+function paidBillStatusBox(state) {
+  const paidAt = formatPaidAt(state?.paid_at);
+  return {
+    type: 'box',
+    layout: 'vertical',
+    backgroundColor: '#e8f5ec',
+    cornerRadius: 'md',
+    paddingAll: 'lg',
+    margin: 'md',
+    spacing: 'xs',
+    contents: [
+      { type: 'text', text: 'ชำระแล้ว', weight: 'bold', size: 'xl', align: 'center', color: '#1f7a3f' },
+      {
+        type: 'text',
+        text: paidAt ? `ตรวจพบการชำระเมื่อ ${paidAt}` : 'ตรวจพบว่าบิลนี้ชำระแล้ว',
+        size: 'sm',
+        align: 'center',
+        color: '#5f5448',
+        wrap: true,
+      },
+      { type: 'text', text: 'ไม่ต้องสแกน QR หรือส่งสลิปเพิ่ม', size: 'sm', align: 'center', color: '#5f5448', wrap: true },
+    ],
+  };
+}
+
+function sanitizePaidBillLineMessages(messages, row, state) {
+  const paidText = { type: 'text', text: paidBillNoticeText(row, state) };
+  const source = Array.isArray(messages) ? messages : [];
+  const flex = source.find((msg) => msg && msg.type === 'flex' && msg.contents);
+  if (!flex) return [paidText];
+  let clone;
+  try {
+    clone = JSON.parse(JSON.stringify(flex));
+  } catch {
+    return [paidText];
+  }
+  const body = clone?.contents?.body;
+  if (!body || !Array.isArray(body.contents)) return [paidText];
+  const retained = body.contents.slice(0, 3);
+  body.contents = [
+    ...retained,
+    { type: 'separator', margin: 'lg' },
+    paidBillStatusBox(state),
+  ];
+  if (clone.contents?.footer?.contents?.[0]?.action) {
+    clone.contents.footer.contents[0].action.label = 'ดูรายละเอียดบิล';
+  }
+  clone.altText = 'บิลนี้ชำระแล้ว';
+  return [clone, paidText];
+}
+
+async function loadBillNotificationState(pool, billId) {
+  const id = Number(billId);
+  if (!Number.isInteger(id) || id < 1) {
+    throw fatalBillQueueError('INVALID_BILL_ID', 'notification payload has an invalid billId');
+  }
+  const { rows } = await pool.query(
+    `SELECT id, status, paid_at, deleted_at
+       FROM bills
+      WHERE id=$1
+      LIMIT 1`,
+    [id]
+  );
+  if (!rows.length || rows[0].deleted_at) {
+    throw fatalBillQueueError('BILL_NOT_FOUND', `bill ${id} no longer exists`);
+  }
+  return rows[0];
+}
+
+async function guardBillNotificationPayload(pool, row, payload) {
+  const rawBillId = payload?.billId;
+  if (rawBillId == null || rawBillId === '') {
+    return { payload, subject: row.subject, body: row.body };
+  }
+  const billId = Number(rawBillId);
+  if (!Number.isInteger(billId) || billId < 1) {
+    throw fatalBillQueueError('INVALID_BILL_ID', 'notification payload has an invalid billId');
+  }
+  const state = await loadBillNotificationState(pool, billId);
+  const status = String(state.status || '').toLowerCase();
+  if (status === 'paid') {
+    const body = paidBillNoticeText(row, state);
+    return {
+      payload: {
+        ...payload,
+        billStatus: 'paid',
+        messages: sanitizePaidBillLineMessages(payload.messages, row, state),
+      },
+      subject: row.subject || 'บิลนี้ชำระแล้ว',
+      body,
+    };
+  }
+  if (!PAYABLE_BILL_STATUSES.has(status)) {
+    throw fatalBillQueueError('BILL_NOT_PAYABLE', `bill ${billId} is ${status || 'unknown'}, notification blocked`);
+  }
+  return { payload, subject: row.subject, body: row.body };
+}
+
 async function logResult(pool, row, result, error) {
   try {
     await pool.query(
@@ -123,7 +266,9 @@ async function dispatch(pool, features, row) {
     // Falls back to the default OA when payload doesn't carry one (e.g.
     // owner-channel notifications) or when no DB OA is registered yet
     // (legacy env-OA deploys).
-    const payload = row.payload && typeof row.payload === 'object' ? row.payload : {};
+    let payload = normalizePayload(row.payload);
+    const guarded = await guardBillNotificationPayload(pool, row, payload);
+    payload = guarded.payload;
     const oaIdHint = payload.oaId != null ? Number(payload.oaId) : null;
     let oa = null;
     try {
@@ -164,22 +309,26 @@ async function dispatch(pool, features, row) {
       await lineNotify.pushMessagesStrict(oa, row.recipient, payload.messages, { retryKey });
       return;
     }
-    await lineNotify.pushTextStrict(oa, row.recipient, row.body || row.subject || '', { retryKey });
+    await lineNotify.pushTextStrict(oa, row.recipient, guarded.body || guarded.subject || '', { retryKey });
     return;
   }
   if (channel === 'email') {
     if (!email.isConfigured(features)) throw new Error('email not configured');
+    const payload = normalizePayload(row.payload);
+    const guarded = await guardBillNotificationPayload(pool, row, payload);
     const ok = await email.send(features, {
       to: row.recipient,
-      subject: row.subject || '(no subject)',
-      text: row.body || '',
+      subject: guarded.subject || '(no subject)',
+      text: guarded.body || '',
     });
     if (!ok) throw new Error('email send returned false');
     return;
   }
   if (channel === 'sms') {
     if (!sms.isConfigured(features)) throw new Error('SMS provider not configured');
-    const ok = await sms.send(features, { to: row.recipient, text: row.body || row.subject || '' });
+    const payload = normalizePayload(row.payload);
+    const guarded = await guardBillNotificationPayload(pool, row, payload);
+    const ok = await sms.send(features, { to: row.recipient, text: guarded.body || guarded.subject || '' });
     if (!ok) throw new Error('SMS send returned false');
     return;
   }
@@ -414,4 +563,6 @@ module.exports = {
   retryById,
   diagnoseFailure,
   _retryKeyForRowId: retryKeyForRowId,
+  _sanitizePaidBillLineMessages: sanitizePaidBillLineMessages,
+  _guardBillNotificationPayload: guardBillNotificationPayload,
 };

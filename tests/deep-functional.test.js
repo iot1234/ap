@@ -313,6 +313,47 @@ test('notifQueue LINE retry key is a deterministic UUID accepted by LINE', () =>
     'LINE rejects ad-hoc keys like notifq-160; use UUID format');
 });
 
+test('notifQueue paid bill sanitizer replaces stale QR Flex with paid notice', () => {
+  const notifQueue = require('../services/notificationQueue');
+  const staleMessages = [{
+    type: 'flex',
+    altText: 'old payment reminder',
+    contents: {
+      type: 'bubble',
+      body: {
+        type: 'box',
+        layout: 'vertical',
+        contents: [
+          { type: 'text', text: 'Bill #1' },
+          { type: 'separator', margin: 'md' },
+          { type: 'box', layout: 'vertical', contents: [{ type: 'text', text: 'Room 101' }] },
+          { type: 'separator', margin: 'lg' },
+          { type: 'text', text: 'scan PromptPay' },
+          { type: 'image', url: 'https://example.com/p/bill-qr/1?t=old' },
+        ],
+      },
+      footer: {
+        type: 'box',
+        layout: 'vertical',
+        contents: [{ type: 'button', action: { type: 'uri', label: 'pay and upload slip', uri: 'https://example.com/pay/1' } }],
+      },
+    },
+  }, { type: 'text', text: 'pay now' }];
+
+  const out = notifQueue._sanitizePaidBillLineMessages(staleMessages, { subject: 'Bill #1' }, {
+    paid_at: '2026-05-29T01:00:00.000Z',
+  });
+  assert.equal(out.length, 2);
+  assert.equal(out[0].type, 'flex');
+  assert.equal(out[0].altText, 'บิลนี้ชำระแล้ว');
+  assert.equal(out[0].contents.footer.contents[0].action.label, 'ดูรายละเอียดบิล');
+  const rendered = JSON.stringify(out);
+  assert.doesNotMatch(rendered, /bill-qr\/1|PromptPay|pay now/,
+    'stale QR URL and payment-copy text must not survive paid sanitization');
+  assert.match(rendered, /ชำระแล้ว/,
+    'sanitized LINE payload must clearly say the bill is paid');
+});
+
 test('notifQueue explains provider-configuration failures for admins', () => {
   const notifQueue = require('../services/notificationQueue');
   const emailDiag = notifQueue.diagnoseFailure({

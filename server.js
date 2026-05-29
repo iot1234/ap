@@ -4764,6 +4764,138 @@ function verifyBillQrToken(billId, token) {
   } catch { return false; }
 }
 
+const BILL_QR_STATUS_IMAGE_CACHE = new Map();
+const PNG_CRC_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+    table[n] = c >>> 0;
+  }
+  return table;
+})();
+
+function pngCrc32(buf) {
+  let crc = 0xffffffff;
+  for (let i = 0; i < buf.length; i++) crc = PNG_CRC_TABLE[(crc ^ buf[i]) & 0xff] ^ (crc >>> 8);
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function pngChunk(type, data) {
+  const typeBuf = Buffer.from(type, 'ascii');
+  const out = Buffer.alloc(12 + data.length);
+  out.writeUInt32BE(data.length, 0);
+  typeBuf.copy(out, 4);
+  data.copy(out, 8);
+  out.writeUInt32BE(pngCrc32(Buffer.concat([typeBuf, data])), 8 + data.length);
+  return out;
+}
+
+function renderPaidBillQrStatusPng() {
+  const cached = BILL_QR_STATUS_IMAGE_CACHE.get('paid');
+  if (cached) return cached;
+  const zlib = require('zlib');
+  const width = 640;
+  const height = 640;
+  const raw = Buffer.alloc((width * 4 + 1) * height);
+  const bg = [240, 253, 244, 255];
+  const green = [22, 101, 52, 255];
+  const green2 = [21, 128, 61, 255];
+  const white = [255, 255, 255, 255];
+  const gray = [73, 83, 75, 255];
+  function put(x, y, color) {
+    if (x < 0 || y < 0 || x >= width || y >= height) return;
+    const off = y * (width * 4 + 1) + 1 + x * 4;
+    raw[off] = color[0];
+    raw[off + 1] = color[1];
+    raw[off + 2] = color[2];
+    raw[off + 3] = color[3];
+  }
+  function fillRect(x, y, w, h, color) {
+    const x0 = Math.max(0, Math.floor(x));
+    const y0 = Math.max(0, Math.floor(y));
+    const x1 = Math.min(width, Math.ceil(x + w));
+    const y1 = Math.min(height, Math.ceil(y + h));
+    for (let yy = y0; yy < y1; yy++) for (let xx = x0; xx < x1; xx++) put(xx, yy, color);
+  }
+  function disk(cx, cy, r, color) {
+    const r2 = r * r;
+    for (let y = Math.floor(cy - r); y <= Math.ceil(cy + r); y++) {
+      for (let x = Math.floor(cx - r); x <= Math.ceil(cx + r); x++) {
+        const dx = x - cx;
+        const dy = y - cy;
+        if (dx * dx + dy * dy <= r2) put(x, y, color);
+      }
+    }
+  }
+  function line(x0, y0, x1, y1, thickness, color) {
+    const steps = Math.max(Math.abs(x1 - x0), Math.abs(y1 - y0));
+    for (let i = 0; i <= steps; i++) {
+      const t = steps === 0 ? 0 : i / steps;
+      disk(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, thickness / 2, color);
+    }
+  }
+  for (let y = 0; y < height; y++) {
+    raw[y * (width * 4 + 1)] = 0;
+    for (let x = 0; x < width; x++) put(x, y, bg);
+  }
+  fillRect(0, 0, width, 18, green2);
+  fillRect(0, height - 18, width, 18, green2);
+  fillRect(0, 0, 18, height, green2);
+  fillRect(width - 18, 0, 18, height, green2);
+  disk(320, 210, 94, green2);
+  line(268, 212, 306, 250, 22, white);
+  line(306, 250, 380, 162, 22, white);
+
+  const font = {
+    A: ['01110', '10001', '10001', '11111', '10001', '10001', '10001'],
+    B: ['11110', '10001', '10001', '11110', '10001', '10001', '11110'],
+    D: ['11110', '10001', '10001', '10001', '10001', '10001', '11110'],
+    I: ['11111', '00100', '00100', '00100', '00100', '00100', '11111'],
+    L: ['10000', '10000', '10000', '10000', '10000', '10000', '11111'],
+    P: ['11110', '10001', '10001', '11110', '10000', '10000', '10000'],
+  };
+  function measure(text, scale) {
+    let total = 0;
+    for (const ch of text) total += (ch === ' ' ? 3 : 5) * scale + scale;
+    return Math.max(0, total - scale);
+  }
+  function drawText(text, x, y, scale, color) {
+    let cx = x;
+    for (const ch of text.toUpperCase()) {
+      if (ch === ' ') {
+        cx += 4 * scale;
+        continue;
+      }
+      const rows = font[ch];
+      if (!rows) continue;
+      for (let yy = 0; yy < rows.length; yy++) {
+        for (let xx = 0; xx < rows[yy].length; xx++) {
+          if (rows[yy][xx] === '1') fillRect(cx + xx * scale, y + yy * scale, scale, scale, color);
+        }
+      }
+      cx += 6 * scale;
+    }
+  }
+  drawText('BILL', Math.round((width - measure('BILL', 10)) / 2), 338, 10, gray);
+  drawText('PAID', Math.round((width - measure('PAID', 24)) / 2), 392, 24, green);
+
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 6;
+  const png = Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk('IHDR', ihdr),
+    pngChunk('IDAT', zlib.deflateSync(raw)),
+    pngChunk('IEND', Buffer.alloc(0)),
+  ]);
+  const rendered = { contentType: 'image/png', renderer: 'status-png', body: png };
+  BILL_QR_STATUS_IMAGE_CACHE.set('paid', rendered);
+  return rendered;
+}
+
 const BILL_PAY_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;   // 30 days
 function _billPaySigningKey() {
   return _crypto.createHash('sha256').update(_runtimeSessionSecret + '|bill-pay').digest();
@@ -5129,6 +5261,26 @@ app.get('/p/bill-qr/:billId', rateLimitQr, async (req, res) => {
     );
     if (!rows.length) return res.status(404).end();
     const bill = rows[0];
+    const format = String(req.query.format || 'png').toLowerCase();
+    if (bill.status === 'paid') {
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('X-Bill-QR-State', 'paid');
+      if (format === 'json' || format === 'payload') {
+        return res.status(409).json({
+          ok: false,
+          error: 'bill is already paid',
+          code: 'BILL_ALREADY_PAID',
+          status: bill.status,
+          paid: true,
+          billId: bill.id,
+        });
+      }
+      const rendered = renderPaidBillQrStatusPng();
+      res.setHeader('Content-Type', rendered.contentType);
+      res.setHeader('X-QR-Renderer', rendered.renderer);
+      return res.end(rendered.body);
+    }
     if (bill.status !== 'pending' && bill.status !== 'overdue') {
       return res.status(409).json({
         error: 'bill is not payable',
@@ -5147,7 +5299,6 @@ app.get('/p/bill-qr/:billId', rateLimitQr, async (req, res) => {
     if (isDemoTarget(paymentBlock.promptpayTarget)) {
       return res.status(503).json({ error: 'PromptPay still on demo target' });
     }
-    const format = String(req.query.format || 'png').toLowerCase();
     if (format === 'json' || format === 'payload') {
       const payload = buildPromptPayPayload(paymentBlock.promptpayTarget, amount);
       let dataUrl = null;

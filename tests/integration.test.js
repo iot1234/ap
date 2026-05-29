@@ -993,6 +993,32 @@ test('LINE bill notification only advertises usable PromptPay QR', () => {
     'bank-transfer-only LINE Flex should still be allowed when a public URL exists');
 });
 
+test('LINE bill notification renders paid/not-payable state instead of payment instructions', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const route = fs.readFileSync(path.join(__dirname, '..', 'routes', 'bills-extras.js'), 'utf8');
+  const msgStart = route.indexOf('function buildBillLineMessages');
+  assert.ok(msgStart > 0, 'should find LINE bill message builder');
+  const msgBody = route.slice(msgStart, route.indexOf('  function rowKV', msgStart));
+
+  assert.match(msgBody, /const billStatus = String\(b\.status \|\| 'pending'\)\.toLowerCase\(\)/,
+    'LINE bill message must read the persisted bill status');
+  assert.match(msgBody, /const isPaid = billStatus === 'paid'/,
+    'LINE bill message must explicitly branch paid bills');
+  assert.match(msgBody, /const isPayable = billStatus === 'pending' \|\| billStatus === 'overdue'/,
+    'LINE bill message must only show payment choices for payable bills');
+  assert.match(msgBody, /const qrUrl = isPayable && publicUrl && qrToken/,
+    'paid/not-payable bills must not receive a PromptPay QR image URL');
+  assert.match(msgBody, /const hasBankInfo = isPayable && !isPaid/,
+    'paid bills must not show bank-transfer details for a second payment');
+  assert.match(msgBody, /statusNoticeBox/,
+    'LINE Flex must render a status block where the QR/payment block would be');
+  assert.match(msgBody, /const textMsg = isPaid \?/,
+    'plain-text fallback must also say the bill is already paid');
+  assert.match(msgBody, /bubble\.footer\.contents\[0\]\.action\.label =/,
+    'paid/not-payable footer must stop asking the tenant to send a slip');
+});
+
 test('healthCheck flags duplicate verified payments and invalid ledger rows', () => {
   const fs = require('node:fs');
   const path = require('node:path');
@@ -1219,8 +1245,16 @@ test('public bill QR has a token-gated payload fallback and never trusts query t
     'public QR fallback must stay behind the signed QR token');
   assert.match(body, /SELECT id, total, status, tenant_id FROM bills/,
     'public QR must read the amount from the persisted bill row');
+  assert.match(body, /if \(bill\.status === 'paid'\)/,
+    'paid bills must be handled before serving any payable QR payload');
+  assert.match(body, /renderPaidBillQrStatusPng\(\)/,
+    'paid bills must render a paid status image in place of the old QR');
+  assert.match(body, /X-Bill-QR-State', 'paid'/,
+    'paid-image responses must be explicit for cache/proxy diagnostics');
+  assert.match(body, /code: 'BILL_ALREADY_PAID'/,
+    'JSON fallback for a paid QR link must clearly say the bill was already paid');
   assert.match(body, /bill\.status !== 'pending' && bill\.status !== 'overdue'/,
-    'public QR must refuse paid/void/stale bill links');
+    'public QR must refuse void/stale bill links after paid is handled separately');
   assert.match(body, /format === 'json' \|\| format === 'payload'/,
     'public QR must expose a JSON/payload fallback for broken images');
   assert.match(body, /buildPromptPayPayload\(paymentBlock\.promptpayTarget, amount\)/,
@@ -6881,6 +6915,26 @@ test('notificationQueue: disabled OA throws fatal (no retry loop)', () => {
     'dispatch must check oa.enabled before pushing');
   assert.match(src, /fatalErr\.fatal = true/,
     'disabled-OA error must be marked fatal so processOne parks immediately');
+});
+
+test('notificationQueue: stale bill notifications re-check paid/not-payable state before dispatch', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'notificationQueue.js'), 'utf8');
+  assert.match(src, /async function loadBillNotificationState/,
+    'queue dispatch must re-read the bill row instead of trusting stale payload.messages');
+  assert.match(src, /SELECT id, status, paid_at, deleted_at/,
+    'queue status guard must read status, paid_at, and deleted_at');
+  assert.match(src, /status === 'paid'/,
+    'paid bills must take a dedicated path instead of sending payment instructions');
+  assert.match(src, /sanitizePaidBillLineMessages/,
+    'stale LINE Flex payload must be rewritten to paid status before push');
+  assert.match(src, /PAYABLE_BILL_STATUSES = new Set\(\['pending', 'overdue'\]\)/,
+    'only pending/overdue bills may continue using payment reminders');
+  assert.match(src, /BILL_NOT_PAYABLE/,
+    'void/deleted/unknown bill states must fail loudly instead of sending stale QR');
+  assert.match(src, /guardBillNotificationPayload\(pool, row, payload\)/,
+    'dispatch paths must call the shared bill-state guard');
 });
 
 test('booking cancel/reject: revokes LINE binding codes anchored at the booking', () => {

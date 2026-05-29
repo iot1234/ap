@@ -1265,13 +1265,32 @@ module.exports = function buildBillsExtrasRouter(ctx) {
     const { publicUrl, billLink, dueDateStr, billNo, qrToken, bankInfo, lineCount } = opts;
     const total = Number(b.total) || 0;
     const totalStr = total.toLocaleString('th-TH', { minimumFractionDigits: 2 });
-    const hasBankInfo = !!(bankInfo && bankInfo.account);
+    const billStatus = String(b.status || 'pending').toLowerCase();
+    const isPaid = billStatus === 'paid';
+    const isPayable = billStatus === 'pending' || billStatus === 'overdue';
+    const billStatusLabel = isPaid
+      ? 'ชำระแล้ว'
+      : (isPayable ? 'ยังไม่ชำระ' : 'ไม่อยู่ในสถานะที่ชำระได้');
+    const hasBankInfo = isPayable && !isPaid && !!(bankInfo && bankInfo.account);
     // QR image URL — public endpoint with HMAC token so LINE Platform can
     // fetch it without auth. signBillQrToken is injected via ctx so this
     // module doesn't need to know about session secrets.
-    const qrUrl = publicUrl && qrToken
+    const qrUrl = isPayable && publicUrl && qrToken
       ? `${publicUrl}/p/bill-qr/${encodeURIComponent(b.id)}?t=${encodeURIComponent(qrToken)}`
       : null;
+    const statusNoticeBox = (title, detail, titleColor, backgroundColor) => ({
+      type: 'box',
+      layout: 'vertical',
+      backgroundColor,
+      cornerRadius: 'md',
+      paddingAll: 'lg',
+      margin: 'md',
+      spacing: 'xs',
+      contents: [
+        { type: 'text', text: title, weight: 'bold', size: 'xl', align: 'center', color: titleColor },
+        { type: 'text', text: detail, size: 'sm', align: 'center', color: '#5f5448', wrap: true },
+      ],
+    });
     // Flex bubble layout — single column, top-down:
     //   ▸ "บิลใหม่" header band (accent colour)
     //   ▸ Room + period + due date + amount block
@@ -1289,6 +1308,18 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         rowKV('LINE ที่ผูก', `${Number(lineCount) || 0} บัญชี`),
       ]},
     ];
+    const summaryBox = flexBody.find((part) =>
+      part && part.type === 'box' && part.layout === 'vertical' && Array.isArray(part.contents));
+    if (summaryBox) summaryBox.contents.push(rowKV('สถานะ', billStatusLabel, isPaid || !isPayable));
+    if (isPaid) {
+      flexBody.push(
+        { type: 'separator', margin: 'lg' },
+        statusNoticeBox('ชำระแล้ว', 'ไม่ต้องสแกน QR หรือส่งสลิปเพิ่ม', '#1f7a3f', '#e8f5ec'));
+    } else if (!isPayable) {
+      flexBody.push(
+        { type: 'separator', margin: 'lg' },
+        statusNoticeBox('ชำระไม่ได้', `สถานะปัจจุบัน: ${billStatus || '-'}`, '#8a4b12', '#fff4d8'));
+    }
     if (qrUrl) {
       flexBody.push(
         { type: 'separator', margin: 'lg' },
@@ -1323,15 +1354,42 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         ],
       } : undefined,
     };
+    if (bubble.footer?.contents?.[0]?.action && (isPaid || !isPayable)) {
+      bubble.footer.contents[0].action.label = 'ดูรายละเอียดบิล';
+    }
     const flexMsg = {
       type: 'flex',
       altText: `บิลใหม่ห้อง ${b.room_id} ยอด ฿${totalStr}`,
       contents: bubble,
     };
+    if (isPaid) flexMsg.altText = `บิลห้อง ${b.room_id} ชำระแล้ว`;
+    else if (!isPayable) flexMsg.altText = `บิลห้อง ${b.room_id} ยังชำระไม่ได้`;
     // Plain-text fallback message for clients that won't render Flex. Sent
     // alongside the Flex so the user always gets the text version too —
     // tracks better in LINE search and is copyable.
-    const textMsg = {
+    const textMsg = isPaid ? {
+      type: 'text',
+      text: [
+        `✅ บิลนี้ชำระแล้ว — ${b.period || '-'}`,
+        ``,
+        `ห้อง: ${b.room_id || '-'}`,
+        `ยอดบิล: ฿${totalStr}`,
+        `สถานะ: ชำระแล้ว`,
+        `ไม่ต้องสแกน QR หรือส่งสลิปเพิ่ม`,
+        billLink ? `\nดูรายละเอียดบิล:\n👉 ${billLink}` : null,
+      ].filter(Boolean).join('\n'),
+    } : (!isPayable ? {
+      type: 'text',
+      text: [
+        `⚠️ บิลนี้ยังชำระผ่านลิงก์ไม่ได้ — ${b.period || '-'}`,
+        ``,
+        `ห้อง: ${b.room_id || '-'}`,
+        `ยอดบิล: ฿${totalStr}`,
+        `สถานะปัจจุบัน: ${billStatus || '-'}`,
+        `กรุณาติดต่อแอดมินก่อนชำระเงิน`,
+        billLink ? `\nดูรายละเอียดบิล:\n👉 ${billLink}` : null,
+      ].filter(Boolean).join('\n'),
+    } : {
       type: 'text',
       text: [
         `📋 บิลใหม่ — ${b.period || '-'}`,
@@ -1351,7 +1409,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         ].filter(Boolean).join('\n') : null,
         billLink ? `\nส่งสลิป / ดูบิล:\n👉 ${billLink}` : null,
       ].filter(Boolean).join('\n'),
-    };
+    });
     return [flexMsg, textMsg];
   }
   function rowKV(label, value, bold) {
