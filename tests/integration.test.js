@@ -967,7 +967,7 @@ test('LINE bill notification offers both PromptPay QR and bank transfer details'
   const helperBody = route.slice(helperStart, route.indexOf('  // POST /api/bills/:id/send', helperStart));
   assert.match(helperBody, /billing\.buildPaymentBlock\(configRow\.rows\[0\]\?\.value \|\| \{\}\)/,
     'bill send helper must load configured payment block before composing LINE');
-  assert.match(helperBody, /buildBillLineMessages\(b,[\s\S]{0,200}bankInfo/,
+  assert.match(helperBody, /buildBillLineMessages\(b,[\s\S]{0,320}bankInfo/,
     'bill send helper must pass bankInfo into LINE messages');
 });
 
@@ -987,8 +987,12 @@ test('LINE bill notification only advertises usable PromptPay QR', () => {
     'QR payment choice must be gated by PromptPay readiness');
   assert.match(helperBody, /const canEmbedPromptPayQr = !!\(publicUrl && qrToken && canShowPromptPayQr\)/,
     'LINE QR image requires public URL, signed token, and a usable PromptPay target');
+  assert.match(helperBody, /const qrVersion = `\$\{billId\}-\$\{String\(b\.status \|\| 'pending'\)\}-\$\{Date\.now\(\)\}`/,
+    'LINE QR image URL must get a fresh cache-buster each time a bill is resent after status reversal');
   assert.match(helperBody, /qrToken: canEmbedPromptPayQr \? qrToken : null/,
     'Flex builder must not receive a QR token when QR should be hidden');
+  assert.match(helperBody, /qrVersion: canEmbedPromptPayQr \? qrVersion : null/,
+    'Flex builder must receive the cache-buster only when a QR is actually embedded');
   assert.match(helperBody, /publicUrl && \(canEmbedPromptPayQr \|\| bankInfo\)/,
     'bank-transfer-only LINE Flex should still be allowed when a public URL exists');
 });
@@ -1009,6 +1013,8 @@ test('LINE bill notification renders paid/not-payable state instead of payment i
     'LINE bill message must only show payment choices for payable bills');
   assert.match(msgBody, /const qrUrl = isPayable && publicUrl && qrToken/,
     'paid/not-payable bills must not receive a PromptPay QR image URL');
+  assert.match(msgBody, /&v=\$\{encodeURIComponent\(qrCacheVersion\)\}/,
+    'LINE QR URL must change across paid -> unpaid -> resend so LINE image cache cannot reuse the paid placeholder');
   assert.match(msgBody, /const hasBankInfo = isPayable && !isPaid/,
     'paid bills must not show bank-transfer details for a second payment');
   assert.match(msgBody, /statusNoticeBox/,
@@ -1207,6 +1213,10 @@ test('public bill payment page shows itemized online bill details', () => {
     'public payment JSON must expose the late-fee calculation');
   assert.match(body, /lineItems: buildOnlineBillLineItems\(bill, lateFeePolicy\)/,
     'public payment JSON must include server-built line items');
+  assert.match(body, /const qrVersion = `\$\{id\}-\$\{String\(bill\.status \|\| 'pending'\)\}-\$\{Date\.now\(\)\}`/,
+    'public payment QR URL must change after paid -> unpaid correction to avoid stale paid images');
+  assert.match(body, /&v=\$\{encodeURIComponent\(qrVersion\)\}/,
+    'public payment QR URL must carry an explicit cache-buster');
   assert.match(server, /billing\.buildUtilityItem\('ค่าน้ำ'[\s\S]*billing\.buildUtilityItem\('ค่าไฟฟ้า'/,
     'online bill line items must reuse the shared meter-detail formatter');
   assert.match(server, /detail: lateFeeCalculation\.formulaText/,
@@ -1620,6 +1630,21 @@ test('admin billing mark-paid slip upload validates client-side and uses inline 
     'mark-paid slip upload must not use blocking window.alert');
   assert.match(src, /<div role="alert"[\s\S]{0,520}\{markPaidPrompt\.slipError\}/,
     'modal must render file validation errors with an accessible alert');
+});
+
+test('admin billing resend ack sends force flag to bypass short cooldown', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-billing.jsx'), 'utf8');
+  const idx = src.indexOf('const doSendReminder = async');
+  assert.ok(idx > 0, 'should find doSendReminder');
+  const body = src.slice(idx, src.indexOf('const handleSendReminder', idx));
+  assert.match(body, /const sh = sendConfirm\?\.readiness\?\.summary\?\.sendHistory/,
+    'send action must read the preflight send history');
+  assert.match(body, /const force = !!\(sh && sh\.veryRecently && justSentAck\)/,
+    'checking the resend acknowledgement must map to force=true');
+  assert.match(body, /JSON\.stringify\(force \? \{ force: true \} : \{\}\)/,
+    'server cooldown override must be sent in the POST body');
 });
 
 test('admin billing selected period drives estimates and bulk generation', () => {
@@ -6809,6 +6834,8 @@ test('unmark-paid: recomputes late_fee when restoring to overdue (R2-followup)',
     'restore helper must call computeLateFee with the principal base');
   assert.match(src, /SET status=\$2,\s*paid_at=NULL,\s*late_fee=\$3::numeric,\s*total=\$4::numeric/,
     'unmark-paid must write late_fee + total back atomically with status');
+  assert.match(src, /last_reminded_at=NULL/,
+    'unmark-paid must clear the short resend cooldown so admin can send the corrected bill immediately');
 });
 
 test('revenue report: breaks down rent / utilities / vat / late_fee (R2-followup)', () => {

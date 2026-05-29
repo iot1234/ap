@@ -728,8 +728,10 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
     const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
     try {
       if (b._source === 'db' && b.dbBillId) {
+        const sh = sendConfirm?.readiness?.summary?.sendHistory;
+        const force = !!(sh && sh.veryRecently && justSentAck);
         await apiCall(`/api/bills/${b.dbBillId}/send`, {
-          method: 'POST', body: JSON.stringify({}),
+          method: 'POST', body: JSON.stringify(force ? { force: true } : {}),
         });
       } else {
         await apiCall('/api/notify/bill', {

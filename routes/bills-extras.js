@@ -1232,12 +1232,16 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         const restoredStatus = restore.status;
         const restoredLateFee = restore.lateFee;
         const restoredTotal = restore.total;
+        // The paid -> unpaid transition invalidates the previous reminder's
+        // QR image/cache state. Clear the short resend cooldown so admin can
+        // immediately send a fresh bill message with a new QR URL.
         const restored = await client.query(
           `UPDATE bills
               SET status=$2,
                   paid_at=NULL,
                   late_fee=$3::numeric,
-                  total=$4::numeric
+                  total=$4::numeric,
+                  last_reminded_at=NULL
             WHERE id=$1
           RETURNING *`,
           [id, restoredStatus, restoredLateFee, restoredTotal]
@@ -1290,7 +1294,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
   // Counts as ONE push toward LINE's rate limit (Messaging API bundles
   // up to 5 messages per push).
   function buildBillLineMessages(b, opts = {}) {
-    const { publicUrl, billLink, dueDateStr, billNo, qrToken, bankInfo, lineCount } = opts;
+    const { publicUrl, billLink, dueDateStr, billNo, qrToken, qrVersion, bankInfo, lineCount } = opts;
     const total = Number(b.total) || 0;
     const totalStr = total.toLocaleString('th-TH', { minimumFractionDigits: 2 });
     const billStatus = String(b.status || 'pending').toLowerCase();
@@ -1303,8 +1307,9 @@ module.exports = function buildBillsExtrasRouter(ctx) {
     // QR image URL — public endpoint with HMAC token so LINE Platform can
     // fetch it without auth. signBillQrToken is injected via ctx so this
     // module doesn't need to know about session secrets.
+    const qrCacheVersion = qrVersion || `${billStatus}-${Date.now()}`;
     const qrUrl = isPayable && publicUrl && qrToken
-      ? `${publicUrl}/p/bill-qr/${encodeURIComponent(b.id)}?t=${encodeURIComponent(qrToken)}`
+      ? `${publicUrl}/p/bill-qr/${encodeURIComponent(b.id)}?t=${encodeURIComponent(qrToken)}&v=${encodeURIComponent(qrCacheVersion)}`
       : null;
     const statusNoticeBox = (title, detail, titleColor, backgroundColor) => ({
       type: 'box',
@@ -1971,6 +1976,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       ? signBillQrToken(billId)
       : null;
     const canEmbedPromptPayQr = !!(publicUrl && qrToken && canShowPromptPayQr);
+    const qrVersion = `${billId}-${String(b.status || 'pending')}-${Date.now()}`;
     const billLink = (publicUrl && payToken)
       ? `${publicUrl}/pay/${encodeURIComponent(billId)}?t=${encodeURIComponent(payToken)}`
       : `${publicUrl}/tenant?bill=${encodeURIComponent(billId)}`;
@@ -2048,6 +2054,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             dueDateStr,
             billNo: b.bill_no,
             qrToken: canEmbedPromptPayQr ? qrToken : null,
+            qrVersion: canEmbedPromptPayQr ? qrVersion : null,
             bankInfo,
             lineCount: lineBindingCount,
           })

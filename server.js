@@ -5301,6 +5301,8 @@ app.get('/p/bill-qr/:billId', rateLimitQr, async (req, res) => {
     const format = String(req.query.format || 'png').toLowerCase();
     if (bill.status === 'paid') {
       res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
       res.setHeader('X-Content-Type-Options', 'nosniff');
       res.setHeader('X-Bill-QR-State', 'paid');
       if (format === 'json' || format === 'payload') {
@@ -5319,6 +5321,11 @@ app.get('/p/bill-qr/:billId', rateLimitQr, async (req, res) => {
       return res.end(rendered.body);
     }
     if (bill.status !== 'pending' && bill.status !== 'overdue') {
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('X-Bill-QR-State', String(bill.status || 'not-payable'));
       return res.status(409).json({
         error: 'bill is not payable',
         code: 'BILL_NOT_PAYABLE',
@@ -5357,6 +5364,8 @@ app.get('/p/bill-qr/:billId', rateLimitQr, async (req, res) => {
         }
       }
       res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
       res.setHeader('X-Content-Type-Options', 'nosniff');
       return res.json({
         ok: true,
@@ -5375,7 +5384,10 @@ app.get('/p/bill-qr/:billId', rateLimitQr, async (req, res) => {
     const rendered = await renderQrWithFallback(paymentBlock.promptpayTarget, amount);
     res.setHeader('Content-Type', rendered.contentType);
     res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
     res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Bill-QR-State', bill.status);
     res.setHeader('X-QR-Renderer', rendered.renderer);
     return res.end(rendered.body);
   } catch (err) {
@@ -5449,7 +5461,8 @@ app.get('/api/public/bills/:billId/payment', rateLimitPublicPaymentView, async (
     if (qrUsable) {
       try {
         normaliseTarget(paymentBlock.promptpayTarget);
-        qrUrl = `/p/bill-qr/${encodeURIComponent(id)}?t=${encodeURIComponent(signBillQrToken(id))}`;
+        const qrVersion = `${id}-${String(bill.status || 'pending')}-${Date.now()}`;
+        qrUrl = `/p/bill-qr/${encodeURIComponent(id)}?t=${encodeURIComponent(signBillQrToken(id))}&v=${encodeURIComponent(qrVersion)}`;
       } catch {
         qrUrl = null;
       }
