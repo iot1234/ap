@@ -596,6 +596,12 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             // Override accepted — record the drift for the audit log below.
             driftReport = { drifts, reason: reason.slice(0, 500) };
           }
+        } else {
+          // Room not found in the blob (deleted/renamed since the form was
+          // opened, or a crafted roomId). We can't drift-check against a
+          // recompute here, but the total = subtotal + vat + late_fee
+          // invariant below still guards the ledger from an inconsistent total.
+          console.warn(`[bill.create] recompute skipped — room ${b.roomId} not found in blob; relying on ledger invariant`);
         }
       } catch (err) {
         // Defensive — if recompute itself errored, refuse to silently
@@ -629,6 +635,24 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         return res.status(400).json({
           error: `invalid nonnegative bill field: ${field}`,
           code: 'INVALID_BILL_AMOUNT',
+        });
+      }
+    }
+    // Ledger invariant: a well-formed bill always has total = subtotal + vat +
+    // late_fee. Enforce it (within payment tolerance) so a manual / override
+    // bill — or one whose drift recompute was skipped because the room is gone
+    // — can't persist a total that doesn't match its parts (which would let a
+    // tiny payment close a large bill). Only checked when subtotal is explicit;
+    // legacy rows that never sent subtotal fall back to total and are skipped.
+    if (computed.subtotal != null) {
+      const vatN = Number(computed.vat || 0);
+      const lateN = Number(computed.lateFee || 0);
+      const partsSum = billing.round2(subtotalAmount + vatN + lateN);
+      if (Number.isFinite(partsSum)
+          && Math.abs(totalAmount - partsSum) > billing.PAYMENT_TOLERANCE_THB) {
+        return res.status(400).json({
+          error: `ยอดรวมไม่สอดคล้อง: total (${totalAmount}) ≠ subtotal+vat+lateFee (${partsSum})`,
+          code: 'BILL_TOTAL_MISMATCH',
         });
       }
     }

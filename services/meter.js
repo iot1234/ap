@@ -314,7 +314,11 @@ async function detectAnomaly(pool, roomId, meterType, sigmas = 3) {
   if (deltas.length < 4) return null;
   const last = deltas.pop();
   const mean = deltas.reduce((s, x) => s + x, 0) / deltas.length;
-  const variance = deltas.reduce((s, x) => s + (x - mean) ** 2, 0) / deltas.length;
+  // Sample variance (÷ n-1, Bessel's correction). Population variance (÷ n)
+  // underestimates σ on the small windows here, making the n-σ test trip too
+  // easily → false-positive anomaly alerts on young meters. We required ≥4
+  // deltas before the pop above, so n≥3 here and n-1≥2 — never divides by zero.
+  const variance = deltas.reduce((s, x) => s + (x - mean) ** 2, 0) / (deltas.length - 1);
   const std = Math.sqrt(variance);
   // Constant-consumption rooms (e.g. unoccupied with steady leak, or fully
   // automated flat charges) produce std === 0. The original code returned

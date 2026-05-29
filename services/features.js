@@ -205,6 +205,11 @@ function deepMerge(base, over) {
   if (!over || typeof over !== 'object' || Array.isArray(over)) return base;
   const out = Array.isArray(base) ? [...base] : { ...base };
   for (const k of Object.keys(over)) {
+    // Defence-in-depth against prototype pollution. The PUT /api/admin/features
+    // route already rejects these keys, but features.save/withDefaults can be
+    // reached from other callers (restore, future code) — never let a stored
+    // blob walk the prototype chain during merge.
+    if (k === '__proto__' || k === 'constructor' || k === 'prototype') continue;
     const a = base ? base[k] : undefined;
     const b = over[k];
     if (a && typeof a === 'object' && !Array.isArray(a) && b && typeof b === 'object' && !Array.isArray(b)) {
@@ -313,6 +318,53 @@ async function attach(req, res, next) {
   }
 }
 
+// Hard validation for numeric/enum config in a PARTIAL feature update. Returns
+// an array of { flag, field, message } for clearly-invalid values so the admin
+// PUT can refuse to persist a config that would break a feature (a typo'd VAT
+// rate of 700, a 0-day session, a negative deposit, an out-of-range backup
+// hour, …). Only fields PRESENT in the partial are checked — a normal
+// { slipUpload: { enabled: true } } toggle validates nothing extra, and saving
+// the full DEFAULTS object passes (every default is inside these bounds).
+// Defensive: never throws, whatever shape the caller passes.
+function validateConfig(partial) {
+  const errors = [];
+  if (!partial || typeof partial !== 'object' || Array.isArray(partial)) return errors;
+  const has = (o, k) => o && typeof o === 'object' && Object.prototype.hasOwnProperty.call(o, k);
+  const num = (v) => (v === '' || v == null ? NaN : Number(v));
+  const need = (ok, flag, field, message) => { if (!ok) errors.push({ flag, field, message }); };
+  const range = (flag, field, v, lo, hi, label, integer) => {
+    const n = num(v);
+    const okType = integer ? Number.isInteger(n) : Number.isFinite(n);
+    need(okType && n >= lo && n <= hi, flag, field, `${flag}.${field} ${label}`);
+  };
+  const f = partial;
+  try {
+    if (has(f, 'vat') && has(f.vat, 'ratePct')) range('vat', 'ratePct', f.vat.ratePct, 0, 30, 'ต้องเป็นตัวเลข 0–30 (%)');
+    if (has(f, 'lateFee') && has(f.lateFee, 'ratePctPerMonth')) range('lateFee', 'ratePctPerMonth', f.lateFee.ratePctPerMonth, 0, 100, 'ต้องเป็น 0–100 (%/เดือน)');
+    if (has(f, 'lateFee') && has(f.lateFee, 'gracePeriodDays')) range('lateFee', 'gracePeriodDays', f.lateFee.gracePeriodDays, 0, 365, 'ต้องเป็นจำนวนเต็ม 0–365 วัน', true);
+    if (has(f, 'meterIot') && has(f.meterIot, 'anomalySigmas')) range('meterIot', 'anomalySigmas', f.meterIot.anomalySigmas, 1, 10, 'ต้องเป็น 1–10');
+    if (has(f, 'tenantPortal') && has(f.tenantPortal, 'sessionDays')) range('tenantPortal', 'sessionDays', f.tenantPortal.sessionDays, 1, 365, 'ต้องเป็นจำนวนเต็ม 1–365 วัน', true);
+    if (has(f, 'roomBooking') && has(f.roomBooking, 'holdMinutes')) range('roomBooking', 'holdMinutes', f.roomBooking.holdMinutes, 1, 1440, 'ต้องเป็นจำนวนเต็ม 1–1440 นาที', true);
+    for (const fld of ['depositAmount', 'minimumAmount']) {
+      if (has(f, 'roomBooking') && has(f.roomBooking, fld)) range('roomBooking', fld, f.roomBooking[fld], 0, 10_000_000, 'ต้องเป็นตัวเลข 0–10,000,000 บาท');
+    }
+    if (has(f, 'accessControl') && has(f.accessControl, 'overdueDaysThreshold')) range('accessControl', 'overdueDaysThreshold', f.accessControl.overdueDaysThreshold, 0, 365, 'ต้องเป็นจำนวนเต็ม 0–365 วัน', true);
+    if (has(f, 'autoBackup') && has(f.autoBackup, 'hourUtc')) range('autoBackup', 'hourUtc', f.autoBackup.hourUtc, 0, 23, 'ต้องเป็นจำนวนเต็ม 0–23', true);
+    if (has(f, 'autoBackup') && has(f.autoBackup, 'retainDays')) range('autoBackup', 'retainDays', f.autoBackup.retainDays, 1, 3650, 'ต้องเป็นจำนวนเต็ม 1–3650 วัน', true);
+    if (has(f, 'billAutoGenerate') && has(f.billAutoGenerate, 'dayOfMonth')) range('billAutoGenerate', 'dayOfMonth', f.billAutoGenerate.dayOfMonth, 1, 28, 'ต้องเป็นจำนวนเต็ม 1–28 (เลี่ยงวันที่ 29–31 ที่บางเดือนไม่มี)', true);
+    // Upload size caps: 10KB–10MB. A typo here either opens a memory-exhaustion
+    // hole (huge) or makes every upload fail (tiny).
+    for (const flag of ['slipUpload', 'photoUpload', 'roomBooking']) {
+      if (has(f, flag) && has(f[flag], 'maxBytes')) range(flag, 'maxBytes', f[flag].maxBytes, 10_000, 10_000_000, 'ต้องเป็น 10,000–10,000,000 ไบต์', true);
+    }
+    // Enum checks (meterIot.mode is handled in the route with its own codes).
+    if (has(f, 'slipUpload') && has(f.slipUpload, 'provider')) need(['slipok', 'easyslip', 'slip2go'].includes(f.slipUpload.provider), 'slipUpload', 'provider', 'slipUpload.provider ต้องเป็น slipok | easyslip | slip2go');
+    if (has(f, 'sms') && has(f.sms, 'provider')) need(['thsms', 'twilio'].includes(f.sms.provider), 'sms', 'provider', 'sms.provider ต้องเป็น thsms | twilio');
+    if (has(f, 'i18n') && has(f.i18n, 'defaultLocale')) need(['th', 'en'].includes(f.i18n.defaultLocale), 'i18n', 'defaultLocale', 'i18n.defaultLocale ต้องเป็น th | en');
+  } catch { /* never let validation itself throw */ }
+  return errors;
+}
+
 module.exports = {
   DEFAULTS,
   FEATURES_KEY,
@@ -321,5 +373,6 @@ module.exports = {
   requireFeature,
   attach,
   withDefaults,
+  validateConfig,
   disabledPayload,
 };

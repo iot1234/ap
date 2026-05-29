@@ -84,8 +84,21 @@ module.exports = function buildWebhooksRouter(ctx) {
           hint: `OA "${oa.name || oa.slug}" ถูกปิดอยู่ — เปิดที่ /admin#line-oas ก่อน`,
         });
       }
-      const raw = req.rawBody || JSON.stringify(req.body || {});
+      // The HMAC must be computed over the EXACT bytes LINE sent. express.json's
+      // verify hook captures them into req.rawBody for /webhook/* routes, but
+      // only when the body actually parsed as application/json (which every
+      // genuine LINE webhook is). If it's missing, the request didn't arrive as
+      // JSON — reject rather than HMAC a re-stringified `req.body`, which would
+      // silently change what's signed and weaken the verification contract.
+      const raw = req.rawBody;
       const sig = req.headers['x-line-signature'];
+      if (!raw) {
+        await logWebhookFailure(req, 'no_raw_body', {
+          oaId: oa.id, slug: oa.slug,
+          hint: 'webhook must POST a JSON body with Content-Type: application/json',
+        });
+        return res.status(403).json({ error: 'missing or non-json body', code: 'NO_RAW_BODY' });
+      }
       if (!lineSvc.verifyWebhookSignature(oa, raw, sig)) {
         // Distinguish "no signature header" from "bad signature" so the
         // diagnostic panel can hint at the right fix. LINE always sends

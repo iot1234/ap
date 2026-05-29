@@ -109,6 +109,10 @@ function PageFeatures({ setToast, embedded = false, currentUser = null }) {
   const [err, setErr] = useState('');
   const [canEdit, setCanEdit] = useState(currentUser?.role === 'owner');
   const [viewerRole, setViewerRole] = useState(currentUser?.role || '');
+  // Authoritative cross-feature warnings from the server (it can read secrets
+  // + carries severity). null = not provided yet / older server → fall back to
+  // the client-side mirror below.
+  const [serverWarnings, setServerWarnings] = useState(null);
 
   useEffect(() => { load(); }, []);
   useEffect(() => {
@@ -125,6 +129,7 @@ function PageFeatures({ setToast, embedded = false, currentUser = null }) {
       setFeatures(d.features); setDefaults(d.defaults);
       if (typeof d.canEdit === 'boolean') setCanEdit(d.canEdit);
       if (d.role) setViewerRole(d.role);
+      setServerWarnings(Array.isArray(d.warnings) ? d.warnings : null);
     } catch (e) { setErr(e.message); }
   }
 
@@ -147,6 +152,9 @@ function PageFeatures({ setToast, embedded = false, currentUser = null }) {
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || 'save failed');
       setFeatures(d.features);
+      // PUT now returns fresh consistency warnings — update the banner so the
+      // admin sees the consequence of THIS toggle immediately.
+      setServerWarnings(Array.isArray(d.warnings) ? d.warnings : null);
       setToast && setToast({ kind: 'success', message:'บันทึกแล้ว' });
     } catch (e) { setErr(e.message); setToast && setToast({ kind: 'error', message:e.message }); }
     finally { setBusy(false); }
@@ -221,6 +229,22 @@ function PageFeatures({ setToast, embedded = false, currentUser = null }) {
   // on the first render and triggered Minified React error #310 the moment
   // /api/admin/features resolved.
   const dependencyWarnings = useMemo(() => {
+    // The server's checkFeatureDependencies() is authoritative: it can read
+    // secrets (so it knows whether SMTP/R2/Sentry/slip-provider keys are
+    // ACTUALLY missing, not merely "enabled") and carries severity plus extra
+    // checks (vat/lateFee rate=0, citizen-ID key, checkin-blocked). Prefer it
+    // whenever the server returned a warnings array; fall back to this
+    // client-side mirror only before the first load resolves or on an older
+    // server build that doesn't return `warnings`.
+    if (Array.isArray(serverWarnings)) {
+      return serverWarnings.map((w) => ({
+        flag: w.flag,
+        msg: w.issue || w.msg || '',
+        fix: w.fix || '',
+        severity: w.severity || 'warning',
+        soft: w.severity ? w.severity !== 'critical' : !!w.soft,
+      }));
+    }
     if (!features) return [];
     const w = [];
     if (features.slipUpload?.enabled && !features.tenantPortal?.enabled) {
@@ -301,7 +325,7 @@ function PageFeatures({ setToast, embedded = false, currentUser = null }) {
       });
     }
     return w;
-  }, [features]);
+  }, [features, serverWarnings]);
 
   if (!features) {
     return (
@@ -313,6 +337,7 @@ function PageFeatures({ setToast, embedded = false, currentUser = null }) {
   }
 
   const readOnlyReason = canEdit ? '' : `บัญชี ${viewerRole || 'ปัจจุบัน'} ดูค่าได้เท่านั้น ต้องใช้ role owner เพื่อบันทึก`;
+  const criticalWarnCount = dependencyWarnings.filter((w) => w.severity === 'critical').length;
 
   // Render row helper
   const Row = ({ id, title, desc, children }) => {
@@ -410,16 +435,17 @@ function PageFeatures({ setToast, embedded = false, currentUser = null }) {
 
       {dependencyWarnings.length > 0 && (
         <Card style={{
-          background: C.warningSoft || '#fbf1de',
-          borderLeft: `4px solid ${C.warning || '#c98a2b'}`,
+          background: criticalWarnCount ? (C.dangerSoft || '#fdecea') : (C.warningSoft || '#fbf1de'),
+          borderLeft: `4px solid ${criticalWarnCount ? (C.danger || '#c0392b') : (C.warning || '#c98a2b')}`,
           marginBottom: 12,
         }}>
           <div style={{ fontFamily: 'IBM Plex Sans Thai', fontSize: 14, fontWeight: 600, marginBottom: 6 }}>
-            ⚠️ ความสัมพันธ์ของ flag ที่ต้องตรวจ ({dependencyWarnings.length})
+            {criticalWarnCount ? '🔴' : '⚠️'} ความสัมพันธ์ของ flag ที่ต้องตรวจ ({dependencyWarnings.length}{criticalWarnCount ? ` · วิกฤต ${criticalWarnCount}` : ''})
           </div>
           <ul style={{ margin: 0, paddingLeft: 20, fontSize: 13, lineHeight: 1.7, color: C.ink2 }}>
             {dependencyWarnings.map((w, i) => (
-              <li key={i} style={{ opacity: w.soft ? 0.8 : 1 }}>
+              <li key={i} style={{ opacity: w.soft ? 0.85 : 1, fontWeight: w.severity === 'critical' ? 600 : 400 }}>
+                <span style={{ marginRight: 4 }}>{w.severity === 'critical' ? '🔴' : '🟡'}</span>
                 <code style={{ background: 'rgba(0,0,0,0.06)', padding: '1px 5px', borderRadius: 3, fontSize: 11.5 }}>{w.flag}</code>{' '}
                 {w.msg}
                 <span style={{ color: C.muted, fontSize: 12, marginLeft: 6 }}>→ {w.fix}</span>

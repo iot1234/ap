@@ -1374,7 +1374,16 @@ app.delete('/api/data/:key', sameOrigin, csrfGuard, requireAuth, requireRole('ow
         });
       }
     } catch (err) {
-      console.warn('[data DELETE] production-data check skipped:', err.message);
+      // Fail CLOSED: if we can't verify the system is empty (DB hiccup /
+      // circuit breaker / statement timeout), refuse the destructive wipe
+      // rather than assuming there's no real data behind it. The operator can
+      // retry, or pass ?force=1 after confirming in the UI.
+      console.error('[data DELETE] production-data check failed — refusing:', err.message);
+      return res.status(503).json({
+        error: 'ตรวจสอบข้อมูลจริงไม่สำเร็จ — ยังไม่ลบเพื่อความปลอดภัย โปรดลองใหม่อีกครั้ง',
+        code: 'PRODUCTION_DATA_CHECK_FAILED',
+        hint: 'ส่ง ?force=1 เพื่อยืนยันการลบ (จะถูกบันทึกใน audit log)',
+      });
     }
   }
   try {
@@ -3517,12 +3526,20 @@ app.get('/api/admin/features', requireAuth, requireRole('owner', 'manager', 'sta
     const f = await features.load(pool);
     // Never echo a secret. SMTP_PASS is env-only and not in DB anyway.
     const role = req.session.user.role;
+    // Current cross-feature consistency warnings so the Features page can show
+    // them on load (not only after a toggle). Non-fatal if the check throws.
+    let warnings = [];
+    try {
+      const dep = await require('./services/healthCheck').checkFeatureDependencies(f, pool);
+      warnings = (dep && dep.detail && dep.detail.warnings) || [];
+    } catch { /* surface no warnings rather than failing the page */ }
     res.json({
       ok: true,
       features: f,
       defaults: features.DEFAULTS,
       role,
       canEdit: role === 'owner',
+      warnings,
     });
   } catch (err) {
     console.error('features admin GET error:', err);
@@ -3642,10 +3659,30 @@ app.put('/api/admin/features', sameOrigin, csrfGuard, requireAuth, requireRole('
       hint: 'ตั้ง mode = "manual" แทน',
     });
   }
+  // Reject clearly-invalid numeric/enum config BEFORE persisting, so a typo
+  // (VAT 700%, a 0-day session, a negative deposit, an out-of-range backup
+  // hour) can't quietly break a feature or open a resource hole.
+  const cfgErrors = features.validateConfig(partial);
+  if (cfgErrors.length) {
+    return res.status(400).json({
+      error: 'ค่าตั้งฟีเจอร์ไม่ถูกต้อง: ' + cfgErrors.map((e) => e.message).join('; '),
+      code: 'INVALID_FEATURE_CONFIG',
+      errors: cfgErrors,
+    });
+  }
   try {
     const next = await features.save(pool, partial, req.session.user.username);
     audit(req, 'features.update', 'config', 'features', { keys: Object.keys(partial) });
-    res.json({ ok: true, features: next });
+    // Surface cross-feature consistency warnings at the MOMENT of the toggle —
+    // an admin who turns on slipUpload without tenantPortal (or sets VAT on with
+    // a 0% rate, etc.) sees it immediately instead of discovering the silent
+    // failure days later. Non-blocking: the save already succeeded.
+    let warnings = [];
+    try {
+      const dep = await require('./services/healthCheck').checkFeatureDependencies(next, pool);
+      warnings = (dep && dep.detail && dep.detail.warnings) || [];
+    } catch (e) { console.warn('[features] consistency check skipped:', e.message); }
+    res.json({ ok: true, features: next, warnings });
   } catch (err) {
     console.error('features admin PUT error:', err);
     res.status(500).json({ error: 'internal error' });
@@ -7913,6 +7950,22 @@ app.get('/api/bookings/:id', requireAuth, async (req, res) => {
       pool,
       composeBookingDetail(row, blobBooking)
     );
+    // Citizen-ID card images are PII restricted to owner/manager, matching
+    // /api/tenants/:id?includeCitizen and the /files/ sensitive-category gate.
+    // This endpoint is requireAuth-only so staff can manage bookings (name/
+    // phone/email stay visible) — but lower roles must not pull ID images by
+    // iterating booking ids.
+    const viewerRole = req.session && req.session.user && req.session.user.role;
+    if (viewerRole !== 'owner' && viewerRole !== 'manager') {
+      for (const k of [
+        'citizen_id_image_front_url', 'citizenIdImageFrontUrl',
+        'citizen_id_image_uploaded_at', 'citizenIdImageUploadedAt',
+        'citizenIdImageFront', 'citizenIdImageBack',
+      ]) {
+        if (booking && k in booking) delete booking[k];
+        if (blobBooking && typeof blobBooking === 'object' && k in blobBooking) delete blobBooking[k];
+      }
+    }
     res.json({
       ok: true,
       booking,
@@ -8934,6 +8987,29 @@ app.post('/api/meters/:roomId/readings', sameOrigin, csrfGuard, requireAuth, req
   const roomId = String(req.params.roomId).slice(0, 32);
   const { meterType, reading, period } = req.body || {};
   try {
+    // Reject readings for rooms that don't exist — otherwise a typo'd/crafted
+    // room code creates orphan meter rows (anomaly-detector noise) that never
+    // reach a bill. Mirrors routes/recurring-charges.js#roomExists.
+    let roomFound = false;
+    try {
+      const rv2 = await pool.query(
+        `SELECT 1 FROM rooms_v2 WHERE room_code=$1 AND deleted_at IS NULL LIMIT 1`,
+        [roomId]
+      );
+      roomFound = rv2.rows.length > 0;
+    } catch (err) {
+      if (err.code !== '42P01') throw err; // pre-migration deploy: no rooms_v2 yet
+    }
+    if (!roomFound) {
+      const legacy = await pool.query(
+        `SELECT 1 FROM app_data WHERE key='baankarn_rooms_v1' AND value ? $1 LIMIT 1`,
+        [roomId]
+      );
+      roomFound = legacy.rows.length > 0;
+    }
+    if (!roomFound) {
+      return res.status(404).json({ error: 'room not found', code: 'ROOM_NOT_FOUND' });
+    }
     const row = await meter.record(pool, {
       roomId, meterType, reading,
       // A2 — only 'manual' is appropriate for admin-entered readings; an
@@ -9484,7 +9560,9 @@ app.delete('/api/admin/access-devices/:id', sameOrigin, csrfGuard, requireAuth, 
 });
 
 // === v2: Notifications log (read-only admin viewer) ========================
-app.get('/api/notifications/log', requireAuth, async (req, res) => {
+// owner/manager only — the log holds recipient contact info + message bodies,
+// and the UI page (page-notifications.jsx) is already minRole:'manager'.
+app.get('/api/notifications/log', requireAuth, requireRole('owner', 'manager'), async (req, res) => {
   const limit = Math.min(Math.max(Number(req.query.limit) || 100, 1), 500);
   try {
     const { rows } = await pool.query(
@@ -11663,7 +11741,7 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
       }
 
       const contractNo = `C-${new Date().getFullYear()}-${String(tenantId).padStart(4, '0')}-`
-                       + Math.random().toString(36).slice(2, 6).toUpperCase();
+                       + require('crypto').randomBytes(3).toString('hex').toUpperCase();
       const cIns = await client.query(
         `INSERT INTO contracts (contract_no, tenant_id, room_id, start_date, end_date,
                                 monthly_rent, deposit, status, term_months, discount_pct,

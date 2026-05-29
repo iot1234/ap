@@ -759,6 +759,65 @@ async function checkFeatureDependencies(features, pool) {
     }
   }
 
+  // vat enabled but rate ≤ 0 → every bill's VAT line is 0; the operator almost
+  // certainly meant 7%. Surface rather than silently billing without tax.
+  if (features?.vat?.enabled && !(Number(features.vat.ratePct) > 0)) {
+    warnings.push({
+      flag: 'vat',
+      issue: 'vat เปิด แต่ ratePct ≤ 0 — ทุกบิลจะคิด VAT = 0',
+      fix: 'ตั้ง vat.ratePct (เช่น 7) ในหน้า Features',
+    });
+  }
+
+  // lateFee enabled but rate ≤ 0 → bills still flip to 'overdue' but the penalty
+  // is always 0, so the feature does nothing the operator can see.
+  if (features?.lateFee?.enabled && !(Number(features.lateFee.ratePctPerMonth) > 0)) {
+    warnings.push({
+      flag: 'lateFee',
+      issue: 'lateFee เปิด แต่ ratePctPerMonth ≤ 0 — บิลค้างจะไม่ถูกคิดค่าปรับ',
+      fix: 'ตั้ง lateFee.ratePctPerMonth (เช่น 1.5) หรือปิด lateFee',
+    });
+  }
+
+  // citizenIdEncryption on but no dedicated key → the key is HKDF-derived from
+  // SESSION_SECRET. It works, but rotating SESSION_SECRET later makes every
+  // stored citizen ID undecryptable. Same gap the boot log warns about; surface
+  // it where the operator toggles features too.
+  if (features?.citizenIdEncryption?.enabled
+      && !process.env.CITIZEN_ID_KEY && !process.env.ENCRYPTION_KEY_V1) {
+    warnings.push({
+      flag: 'citizenIdEncryption',
+      issue: 'citizenIdEncryption เปิด แต่ไม่ได้ตั้ง CITIZEN_ID_KEY — ใช้คีย์ที่ derive จาก SESSION_SECRET ถ้าเปลี่ยน SESSION_SECRET ภายหลัง ข้อมูลบัตรเดิมจะถอดรหัสไม่ได้ (กู้คืนไม่ได้)',
+      fix: 'ตั้ง CITIZEN_ID_KEY (base64 32 ไบต์) ใน env ของ deploy',
+    });
+  }
+
+  // tenancyContract requires ID images at checkin, but photoUpload (the gate on
+  // /api/uploads) is off → admin literally cannot upload the required images,
+  // so every checkin is blocked.
+  if (features?.tenancyContract?.requireIdentityImages && !features?.photoUpload?.enabled) {
+    warnings.push({
+      flag: 'tenancyContract',
+      issue: 'tenancyContract.requireIdentityImages เปิด แต่ photoUpload ปิด — อัปโหลดรูปบัตรไม่ได้ ทำให้ checkin ค้างทุกครั้ง',
+      fix: 'เปิด photoUpload หรือปิด requireIdentityImages',
+    });
+  }
+
+  // Severity tagging so the UI + nightly alert can prioritise. Critical = a
+  // security exposure, irreversible-data risk, or a feature that is completely
+  // non-functional as configured. Everything else stays a 'warning'. Each
+  // distinct issue above uses a distinct `flag` string, so keying off it is
+  // precise.
+  const CRITICAL_FLAGS = new Set([
+    'slipUpload',                            // tenants literally can't upload (no portal)
+    'slipUpload.allowUnverifiedAutoApprove', // bills paid with zero verification
+    'citizenIdEncryption',                   // SESSION_SECRET rotation => unrecoverable PII
+    'tenancyContract',                       // checkin blocked
+  ]);
+  for (const w of warnings) {
+    if (!w.severity) w.severity = CRITICAL_FLAGS.has(w.flag) ? 'critical' : 'warning';
+  }
+
   if (warnings.length === 0) {
     return { status: 'ok', message: 'Feature dependencies look consistent' };
   }
@@ -1659,4 +1718,4 @@ async function runChecks(pool) {
   };
 }
 
-module.exports = { runChecks, CHECKS, checkUploadStorage };
+module.exports = { runChecks, CHECKS, checkUploadStorage, checkFeatureDependencies };

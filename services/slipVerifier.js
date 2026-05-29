@@ -350,11 +350,23 @@ async function verifyOne(providerId, buffer, expected) {
   // Shared with /api/tenant/payments, /api/payments/:id/verify, etc. so
   // a tightening here automatically applies everywhere. See services/billing.js.
   const { PAYMENT_TOLERANCE_THB } = require('./billing');
-  if (Math.abs(Number(result.amount) - Number(expected.amount)) > PAYMENT_TOLERANCE_THB) {
+  const slipAmt = Number(result.amount);
+  const expAmt = Number(expected.amount);
+  // A non-finite slip amount must FAIL this check, not skip it: Math.abs(NaN) >
+  // tol is false, so a provider returning ok:true with a missing/garbage amount
+  // would otherwise bypass the amount cross-check entirely and let an unrelated
+  // slip mark a bill paid. Reject unless BOTH amounts are finite AND within tol.
+  if (!Number.isFinite(slipAmt) || !Number.isFinite(expAmt)
+      || Math.abs(slipAmt - expAmt) > PAYMENT_TOLERANCE_THB) {
+    const slipShown = Number.isFinite(slipAmt)
+      ? `฿${slipAmt.toLocaleString('th-TH', { minimumFractionDigits: 2 })}`
+      : '(อ่านยอดจากสลิปไม่ได้)';
+    const expShown = Number.isFinite(expAmt)
+      ? `฿${expAmt.toLocaleString('th-TH', { minimumFractionDigits: 2 })}`
+      : '(ไม่ทราบยอดบิล)';
     return {
       ok: false,
-      error: `ยอดไม่ตรง — สลิปแสดง ฿${Number(result.amount).toLocaleString('th-TH', { minimumFractionDigits: 2 })} ` +
-             `แต่บิลนี้ ฿${Number(expected.amount).toLocaleString('th-TH', { minimumFractionDigits: 2 })}`,
+      error: `ยอดไม่ตรง — สลิปแสดง ${slipShown} แต่บิลนี้ ${expShown}`,
       code: 'AMOUNT_MISMATCH',
       transRef: result.transRef,
       amount: result.amount,

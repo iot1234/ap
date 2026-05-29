@@ -13,6 +13,27 @@ const crypto = require('crypto');
 
 const MAX_RETRY = 3;
 const BACKOFF_MIN = [60_000, 5 * 60_000, 30 * 60_000]; // 1m, 5m, 30m
+// Per-dispatch ceiling. LINE pushes already time out at ~5s internally, but
+// email (nodemailer) and SMS have no enforced limit — a hung SMTP connect on
+// one row stalls the whole sequential batch until the 10-minute reaper flips
+// it back to 'pending', and a sibling re-dispatches it (duplicate email/SMS,
+// which have no retry-key dedup). Bounding each dispatch to 30s (well under
+// the reap window) keeps one slow row from stalling the batch; a timeout is
+// non-fatal so the row just falls into normal backoff.
+const DISPATCH_TIMEOUT_MS = 30_000;
+
+function withTimeout(promise, ms, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const e = new Error(`${label} timed out after ${ms}ms`);
+      e.timeout = true;
+      reject(e);
+    }, ms);
+    if (timer.unref) timer.unref();
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
 
 function diagnoseFailure(row) {
   const channel = String(row?.channel || '').toLowerCase();
@@ -337,7 +358,11 @@ async function dispatch(pool, features, row) {
 
 async function processOne(pool, features, row) {
   try {
-    await dispatch(pool, features, row);
+    await withTimeout(
+      dispatch(pool, features, row),
+      DISPATCH_TIMEOUT_MS,
+      `dispatch ${row.channel} #${row.id}`
+    );
     // Only mark sent if WE still own this claim — the reaper may have flipped
     // the row back to 'pending' if our dispatch hung past 10 minutes, and a
     // sibling worker may have picked it up. Without the status guard we'd

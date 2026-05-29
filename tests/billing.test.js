@@ -798,3 +798,43 @@ test('buildBill: includes paymentMethods + bankInfo from config.payment', () => 
   assert.equal(bill.bankInfo.account, '111-2-22222-2');
   assert.ok(bill.paymentMethods.find((m) => m.key === 'linePay'));
 });
+
+// --- Timezone stability — late fee must not oscillate by tick hour ----------
+// db/pool.js returns DATE columns as raw "YYYY-MM-DD" strings. Parsing those
+// as UTC midnight (the old bug) made daysOver/lateFee jump by ±1 depending on
+// the hour the hourly scheduler ran, during the 00:00–07:00 Asia/Bangkok
+// window. parseDueDateLocal anchors to LOCAL midnight so the count is stable
+// for the whole calendar day. These tests force TZ-sensitive instants.
+test('computeLateFee: daysOver is stable across the local day (no UTC off-by-one)', () => {
+  const prevTZ = process.env.TZ;
+  process.env.TZ = 'Asia/Bangkok';
+  try {
+    const dueDate = '2026-05-29'; // string, exactly as it comes back from pg
+    const at = (iso) => billing.computeLateFee({
+      base: 5000, dueDate, ratePctPerMonth: 10, gracePeriodDays: 0, now: new Date(iso),
+    }).daysOver;
+    // Every hour of May 30 (Bangkok) must report the SAME 1 day overdue.
+    assert.equal(at('2026-05-30T00:30:00+07:00'), 1, '00:30 ICT');
+    assert.equal(at('2026-05-30T06:59:00+07:00'), 1, '06:59 ICT (was 0 under the UTC bug)');
+    assert.equal(at('2026-05-30T12:00:00+07:00'), 1, '12:00 ICT');
+    assert.equal(at('2026-05-30T23:59:00+07:00'), 1, '23:59 ICT');
+    // Due date itself → 0; the next calendar day → 2.
+    assert.equal(at('2026-05-29T15:00:00+07:00'), 0, 'on the due date');
+    assert.equal(at('2026-05-31T01:00:00+07:00'), 2, 'two days later');
+  } finally {
+    process.env.TZ = prevTZ;
+  }
+});
+
+test('parseDueDateLocal: string → local midnight; Date → passthrough; junk → null', () => {
+  const d = billing.parseDueDateLocal('2026-05-29');
+  assert.equal(d.getFullYear(), 2026);
+  assert.equal(d.getMonth(), 4); // May (0-indexed)
+  assert.equal(d.getDate(), 29);
+  assert.equal(d.getHours(), 0, 'anchored to local midnight');
+  const real = new Date('2026-01-02T03:04:05Z');
+  assert.equal(billing.parseDueDateLocal(real), real, 'Date instance passes through');
+  assert.equal(billing.parseDueDateLocal('not-a-date'), null);
+  assert.equal(billing.parseDueDateLocal(''), null);
+  assert.equal(billing.parseDueDateLocal(null), null);
+});

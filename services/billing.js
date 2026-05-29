@@ -575,12 +575,37 @@ function isFlatUtilityConfigured(room, prefix) {
 }
 
 /**
+ * Parse a bill due-date into a LOCAL Date. db/pool.js returns DATE columns as
+ * raw "YYYY-MM-DD" strings; `new Date("YYYY-MM-DD")` parses them as UTC
+ * midnight, which — compared against a wall-clock `now` in Asia/Bangkok —
+ * makes the day count (and therefore the late fee) jump by ±1 depending on
+ * the hour the scheduler happens to run (verified: 0 days at 01:00 ICT vs 1
+ * day at 12:00 ICT for the same bill on the same calendar day). Anchoring to
+ * LOCAL midnight keeps the count stable within a calendar day and consistent
+ * with the SQL `CURRENT_DATE - due_date` the digests/access-control use. Date
+ * instances pass through unchanged so test/callers that inject a Date are
+ * unaffected.
+ *
+ * @param {string|Date} dueDate
+ * @returns {Date|null}
+ */
+function parseDueDateLocal(dueDate) {
+  if (dueDate instanceof Date) return dueDate;
+  if (dueDate == null || dueDate === '') return null;
+  const m = String(dueDate).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (m) return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])); // local midnight
+  const d = new Date(dueDate);
+  return Number.isFinite(d.getTime()) ? d : null;
+}
+
+/**
  * Decide a bill's status from due_date + paid_at.
  */
 function statusOf(bill, now = new Date()) {
   if (bill.paid_at) return 'paid';
   if (!bill.due_date) return 'pending';
-  const due = new Date(bill.due_date);
+  const due = parseDueDateLocal(bill.due_date);
+  if (!due || !Number.isFinite(due.getTime())) return 'pending';
   if (due.getTime() < now.getTime()) return 'overdue';
   return 'pending';
 }
@@ -679,7 +704,7 @@ function computeLateFee({ base, dueDate, ratePctPerMonth = 0, gracePeriodDays = 
       || !Number.isFinite(ratePct) || ratePct <= 0) {
     return { lateFee: 0, daysOver: 0, monthsOver: 0, base: Number.isFinite(safeBase) ? safeBase : 0 };
   }
-  const due = dueDate instanceof Date ? dueDate : (dueDate ? new Date(dueDate) : null);
+  const due = parseDueDateLocal(dueDate);
   if (!due || !Number.isFinite(due.getTime())) {
     return { lateFee: 0, daysOver: 0, monthsOver: 0, base: safeBase };
   }
@@ -750,7 +775,7 @@ function computeRestoredBillAmounts({
   const principal = Number.isFinite(principalRaw) && principalRaw > 0 ? principalRaw : 0;
 
   const ref = now instanceof Date && Number.isFinite(now.getTime()) ? now : new Date();
-  const due = dueDate instanceof Date ? dueDate : (dueDate ? new Date(dueDate) : null);
+  const due = parseDueDateLocal(dueDate);
   const isOverdue = !!(due && Number.isFinite(due.getTime()) && due.getTime() < ref.getTime());
 
   if (!isOverdue) {
@@ -923,7 +948,7 @@ function validatePaidLedger({ paymentAmount, billTotal, tolerance } = {}) {
 
 module.exports = {
   buildBill, buildPaymentBlock, statusOf, makeBillNo,
-  formatPeriodNow, formatDueDate, formatYMD, round2,
+  formatPeriodNow, formatDueDate, formatYMD, parseDueDateLocal, round2,
   resolveUtilityUsage, resolveUtilityUsageFromBillRow, buildUtilityItem,
   isFlatUtilityConfigured,
   isChargeApplicableForPeriod,

@@ -108,3 +108,53 @@ test('record period reading upserts by month and does not mutate room units', as
   assert.equal(calls.some((sql) => /UPDATE app_data/.test(sql)), false,
     'period-scoped meter entry must not overwrite room-level monthly units');
 });
+
+// --- detectAnomaly — previously untested; also pins the sample-variance fix ---
+// Mock pool returns readings in DESC order (as the SQL ORDER BY reading_at DESC
+// would); detectAnomaly reverses them to oldest→newest internally.
+function poolFromReadings(oldestToNewest) {
+  const rowsDesc = oldestToNewest
+    .map((reading, i) => ({ reading, reading_at: `2026-01-${String(i + 1).padStart(2, '0')}T00:00:00Z` }))
+    .reverse();
+  return { async query() { return { rows: rowsDesc }; } };
+}
+
+test('detectAnomaly: too few readings → null', async () => {
+  assert.equal(await meter.detectAnomaly(poolFromReadings([100]), '201', 'elec', 3), null);
+});
+
+test('detectAnomaly: meter rollback (negative delta) flagged regardless of history', async () => {
+  const a = await meter.detectAnomaly(poolFromReadings([100, 110, 120, 130, 140, 135]), '201', 'elec', 3);
+  assert.ok(a && a.kind === 'rollback', 'a reading lower than the previous one is a rollback');
+  assert.ok(a.last < 0);
+});
+
+test('detectAnomaly: steady consumption → no anomaly', async () => {
+  const a = await meter.detectAnomaly(poolFromReadings([100, 110, 120, 130, 140, 150]), '201', 'elec', 3);
+  assert.equal(a, null);
+});
+
+test('detectAnomaly: zero-variance baseline then a jump → zero-variance anomaly', async () => {
+  const a = await meter.detectAnomaly(poolFromReadings([100, 110, 120, 130, 140, 200]), '201', 'elec', 3);
+  assert.ok(a && a.kind === 'zero-variance', 'flat baseline broken by a jump');
+});
+
+test('detectAnomaly: clear outlier on a varied baseline → sigma anomaly', async () => {
+  // prior deltas 10,12,8,11,9 (mean 10), then a +100 jump
+  const a = await meter.detectAnomaly(poolFromReadings([100, 110, 122, 130, 141, 150, 250]), '201', 'elec', 3);
+  assert.ok(a && a.kind === 'sigma', 'a large outlier should trip the n-σ test');
+  assert.ok(Math.abs(a.z) >= 3);
+});
+
+test('detectAnomaly: young meter (<5 readings) uses 5x heuristic', async () => {
+  assert.ok((await meter.detectAnomaly(poolFromReadings([100, 110, 600]), '201', 'elec', 3))?.kind === 'jump');
+  assert.equal(await meter.detectAnomaly(poolFromReadings([100, 110, 120]), '201', 'elec', 3), null);
+});
+
+test('detectAnomaly: sample variance — borderline case must NOT false-positive', async () => {
+  // prior deltas 8,10,12,10 (mean 10); last delta 14.5.
+  //   population σ (÷n=4)  → 1.414 → z=3.18  → would FALSE-flag (the old bug)
+  //   sample σ     (÷n-1=3) → 1.633 → z=2.76 → correctly NOT flagged
+  const a = await meter.detectAnomaly(poolFromReadings([0, 8, 18, 30, 40, 54.5]), '201', 'elec', 3);
+  assert.equal(a, null, 'sample variance must not flag a borderline 2.76σ delta at 3σ');
+});

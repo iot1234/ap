@@ -574,12 +574,18 @@ module.exports = function buildReportsRouter(ctx) {
     const months = Math.min(Math.max(Number(req.query.months) || 12, 1), 24);
     try {
       const avg = await pool.query(`
-        SELECT AVG(total)::numeric(12,2) AS avg_per_bill,
-               COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '90 days')::int AS recent_count
+        SELECT COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '90 days')::int AS recent_count,
+               COALESCE(SUM(total) FILTER (WHERE created_at > NOW() - INTERVAL '90 days'), 0)::numeric(14,2) AS recent_sum
           FROM bills WHERE deleted_at IS NULL AND status = 'paid'
       `);
       const a = avg.rows[0];
-      const monthlyRevenueEst = (Number(a.avg_per_bill) || 0) * (a.recent_count / 3);  // rough monthly
+      // Trailing 3-month average of actually-paid revenue. The previous formula
+      // multiplied the ALL-TIME average bill size by the RECENT bill count,
+      // over-projecting whenever bill sizes trended up, and always divided by 3
+      // even on a 2-week-old deploy. Dividing the recent 90-day SUM by 3 keeps
+      // numerator and denominator on the same window. (A young deployment
+      // under-projects slightly — conservative by design.)
+      const monthlyRevenueEst = (Number(a.recent_sum) || 0) / 3;
       const rows = [];
       const now = new Date();
       for (let i = 0; i < months; i++) {
