@@ -123,6 +123,21 @@ test('admin security events include central security.* audit records', () => {
     'security events page must show blocked access, role denial, file denial, and token rejection events');
 });
 
+test('admin log endpoints clamp negative limit query values', () => {
+  const src = serverSource();
+  for (const route of [
+    '/api/access/logs',
+    '/api/admin/security-events',
+    '/api/notifications/log',
+  ]) {
+    const start = src.indexOf(`app.get('${route}'`);
+    assert.ok(start > 0, `${route} endpoint must exist`);
+    const block = src.slice(start, src.indexOf('});', start) + 3);
+    assert.match(block, /Math\.min\(Math\.max\(Number\(req\.query\.limit\) \|\| 100, 1\), 500\)/,
+      `${route} must clamp limit to 1..500 instead of passing negative LIMIT to SQL`);
+  }
+});
+
 test('admin security events UI surfaces blocked path and reason', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-security-events.jsx'), 'utf8');
   assert.match(src, /function securityDetail\(ev\)/,

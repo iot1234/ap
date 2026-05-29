@@ -8900,7 +8900,7 @@ app.post('/api/access/log', deviceOrSameOrigin, requireDeviceOrAdmin, features.r
 });
 
 app.get('/api/access/logs', requireAuth, features.requireFeature('accessControl'), async (req, res) => {
-  const limit = Math.min(Number(req.query.limit) || 100, 500);
+  const limit = Math.min(Math.max(Number(req.query.limit) || 100, 1), 500);
   try {
     const { rows } = await pool.query(
       `SELECT * FROM access_logs ORDER BY occurred_at DESC LIMIT $1`,
@@ -9258,7 +9258,7 @@ async function notifyOtherOwners(req, msg) {
 // Read-only viewer of recent auth_failures. Helps owner spot brute-force
 // before it succeeds.
 app.get('/api/admin/security-events', requireAuth, requireRole('owner', 'manager'), async (req, res) => {
-  const limit = Math.min(Number(req.query.limit) || 100, 500);
+  const limit = Math.min(Math.max(Number(req.query.limit) || 100, 1), 500);
   try {
     const [failed, locked] = await Promise.all([
       pool.query(
@@ -9334,7 +9334,7 @@ app.delete('/api/admin/access-devices/:id', sameOrigin, csrfGuard, requireAuth, 
 
 // === v2: Notifications log (read-only admin viewer) ========================
 app.get('/api/notifications/log', requireAuth, async (req, res) => {
-  const limit = Math.min(Number(req.query.limit) || 100, 500);
+  const limit = Math.min(Math.max(Number(req.query.limit) || 100, 1), 500);
   try {
     const { rows } = await pool.query(
       `SELECT * FROM notifications_log ORDER BY created_at DESC LIMIT $1`,
