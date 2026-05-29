@@ -186,18 +186,25 @@ function PageMeters({ rooms, setToast }) {
       if (d.anomaly) {
         const a = d.anomaly;
         const t = type === 'water' ? 'ค่าน้ำ' : 'ค่าไฟ';
-        const isRollback = a.kind === 'rollback';
-        setToast && setToast({
-          kind: 'warning',
-          message: {
-            title: isRollback
-              ? `บันทึกแล้ว — แต่${t}ลดลงผิดปกติ`
-              : `บันทึกแล้ว — แต่${t}ผิดปกติ (>${a.threshold}σ)`,
-            description: isRollback
-              ? `ค่าลดลง ${Math.abs(Number(a.last)).toFixed(2)} หน่วย — อาจเป็นการ reset มิเตอร์หรือพิมพ์ผิด ตรวจสอบก่อนออกบิล`
-              : `z=${Number(a.z).toFixed(2)} · ค่าล่าสุด ${a.last} · เฉลี่ย ${Number(a.mean).toFixed(2)}`,
-          },
-        });
+        // detectAnomaly returns different shapes per kind: only 'sigma' has z,
+        // only 'sigma'/'zero-variance' have mean. Format per-kind so the toast
+        // never shows "z=NaN · เฉลี่ย NaN" for jump / zero-variance anomalies.
+        const num = (v, dgt = 2) => (Number.isFinite(Number(v)) ? Number(v).toFixed(dgt) : '—');
+        let title, description;
+        if (a.kind === 'rollback') {
+          title = `บันทึกแล้ว — แต่${t}ลดลงผิดปกติ`;
+          description = `ค่าลดลง ${num(Math.abs(Number(a.last)))} หน่วย — อาจเป็นการ reset มิเตอร์หรือพิมพ์ผิด ตรวจสอบก่อนออกบิล`;
+        } else if (a.kind === 'jump') {
+          title = `บันทึกแล้ว — แต่${t}พุ่งสูงผิดปกติ`;
+          description = `รอบนี้ ${num(a.last)} หน่วย ≈ ${num(a.ratio, 1)}× ของรอบก่อน (${num(a.prev)} หน่วย) — ตรวจสอบการพิมพ์เลข`;
+        } else if (a.kind === 'zero-variance') {
+          title = `บันทึกแล้ว — แต่${t}เปลี่ยนกะทันหัน`;
+          description = `เคยใช้คงที่ ${num(a.mean)} หน่วย แต่รอบนี้ ${num(a.last)} หน่วย — ตรวจสอบก่อนออกบิล`;
+        } else {
+          title = `บันทึกแล้ว — แต่${t}ผิดปกติ (>${num(a.threshold, 0)}σ)`;
+          description = `z=${num(a.z)} · ค่าล่าสุด ${num(a.last)} · เฉลี่ย ${num(a.mean)}`;
+        }
+        setToast && setToast({ kind: 'warning', message: { title, description } });
       } else {
         setToast && setToast({ kind: 'success', message: `บันทึก${type === 'water' ? 'ค่าน้ำ' : 'ค่าไฟ'}ห้อง ${roomId} รอบ ${period} แล้ว` });
       }

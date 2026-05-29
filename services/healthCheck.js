@@ -490,8 +490,21 @@ async function checkBootConfig() {
   // Soft validations that don't block boot but are worth nagging about.
   const issues = [];
   if (process.env.NODE_ENV === 'production') {
-    if (!process.env.CITIZEN_ID_KEY && !process.env.ENCRYPTION_KEY_V1) {
-      issues.push('No CITIZEN_ID_KEY / ENCRYPTION_KEY_V1 — falling back to HKDF(SESSION_SECRET)');
+    // Citizen-ID PII is encrypted by services/crypto.js, which reads ONLY
+    // CITIZEN_ID_KEY (or derives from SESSION_SECRET via HKDF). It does NOT
+    // read ENCRYPTION_KEY_V* — those feed services/encryption.js (secrets
+    // table + LINE OA tokens), a SEPARATE key system. Treating ENCRYPTION_KEY_V1
+    // as covering citizen IDs gave a false "healthy" signal: an operator who
+    // set only ENCRYPTION_KEY_V1 still had citizen IDs bound to SESSION_SECRET,
+    // so rotating SESSION_SECRET silently made every stored citizen ID
+    // permanently undecryptable. Only CITIZEN_ID_KEY clears this warning.
+    if (!process.env.CITIZEN_ID_KEY) {
+      issues.push(
+        'Citizen-ID PII has no dedicated key (CITIZEN_ID_KEY unset) — it is derived from '
+        + 'SESSION_SECRET via HKDF. Rotating SESSION_SECRET will make all stored citizen IDs '
+        + 'undecryptable. Set CITIZEN_ID_KEY (32-byte base64). '
+        + 'NOTE: ENCRYPTION_KEY_V* does NOT protect citizen IDs — it only covers the secrets/OA-token store.'
+      );
     }
     if (!process.env.SENTRY_DSN && (!secrets.get('SENTRY_DSN'))) {
       // Sentry is optional; only warn when errorTracking flag is on.

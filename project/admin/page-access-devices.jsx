@@ -32,7 +32,16 @@ function PageAccessDevices({ setToast, embedded = false }) {
         );
       }
     : function StandaloneHeader(props) { return <PageHeader {...props} />; };
-  const apiFetch = window.requireApiFetch ? window.requireApiFetch() : window.apiFetch;
+  // Resolve apiFetch defensively. requireApiFetch() THROWS if hooks.jsx
+  // hasn't registered window.apiFetch yet; calling it unguarded at render
+  // crashed the page to the ErrorBoundary on a slow/partial script load.
+  // Fall back to window.apiFetch (possibly undefined) so any genuine
+  // "not loaded" error surfaces inside a handler's try/catch as a toast
+  // instead of taking down the whole page.
+  const apiFetch = (() => {
+    try { return window.requireApiFetch ? window.requireApiFetch() : window.apiFetch; }
+    catch { return window.apiFetch; }
+  })();
   const [devices, setDevices] = useState([]);
   const [showNew, setShowNew] = useState(false);
   const [form, setForm] = useState({ deviceId: '', description: '' });
@@ -190,4 +199,14 @@ function PageAccessDevices({ setToast, embedded = false }) {
   );
 }
 
-window.PageAccessDevices = PageAccessDevices;
+// Gate the standalone deep-link (/admin#access-devices) on the accessControl
+// flag, same as PageAccess. When embedded as a tab it already inherits
+// PageAccess's gate, but the direct hash route rendered this raw — reachable
+// even with access control turned off, contradicting the feature flag.
+window.PageAccessDevices = window.FeatureGate
+  ? function PageAccessDevicesGated(props) {
+      return React.createElement(window.FeatureGate,
+        { flag: 'accessControl', label: 'อุปกรณ์เข้า-ออก' },
+        React.createElement(PageAccessDevices, props));
+    }
+  : PageAccessDevices;

@@ -157,6 +157,18 @@ module.exports = function buildWebhooksRouter(ctx) {
       );
     } catch { /* ignore */ }
 
+    // Idempotency guard. LINE re-delivers an event when it didn't receive our
+    // 200 (e.g. the response was lost on the wire / timed out). We send the
+    // 200 BEFORE processing and handle events asynchronously, so a redelivery
+    // means the original was already processed — reprocessing would duplicate
+    // side effects (most importantly a second pending payment row for the same
+    // slip image, inflating the admin review queue). We've already logged the
+    // event above for forensics; skip the state-changing handlers.
+    if (ev.deliveryContext && ev.deliveryContext.isRedelivery) {
+      console.log(`[line:${oa.slug}] skipping redelivered event ${ev.webhookEventId || '(no id)'}`);
+      return;
+    }
+
     if (!userId || !ev.replyToken) return;
     if (ev.type !== 'message') return;
 

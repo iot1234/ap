@@ -389,9 +389,18 @@ function start(pool, getFeatures) {
 function stop() { if (_interval) clearInterval(_interval); _interval = null; }
 
 async function retryById(pool, id) {
+  // Manual "retry now". Only RESET the backoff counter for terminal 'failed'
+  // rows (the operator is giving an exhausted send a fresh start). For a row
+  // that's still 'pending' (mid exponential backoff), just pull its next
+  // attempt forward to NOW() and KEEP retry_count/last_error — otherwise a
+  // permanently-broken recipient could be reset to attempt 0 on every click,
+  // burning the full retry cycle again and again.
   await pool.query(
     `UPDATE notifications_queue
-       SET status='pending', next_attempt_at=NOW(), retry_count=0, last_error=NULL
+       SET status='pending',
+           next_attempt_at=NOW(),
+           retry_count = CASE WHEN status='failed' THEN 0 ELSE retry_count END,
+           last_error  = CASE WHEN status='failed' THEN NULL ELSE last_error END
        WHERE id=$1`,
     [id]
   );

@@ -136,17 +136,40 @@ async function notifyOwner(ctx, msg) {
   // the SAME OA — the worker retried 3× through the same channel access
   // token, generating 4 failure log rows for one alert.
   let lineInlineTried = false;
+  // Transient = network / timeout / 429 / 5xx — the alert can still be
+  // delivered later, so we re-queue it. Structural = bad token / OA disabled /
+  // invalid userId / 4xx — won't fix itself, so re-queuing would only burn
+  // retries on a broken channel. We branch the queue fallback on this.
+  let lineTransientFail = false;
   let emailInlineTried = false;
   if (oaForOwner && oaForOwner.channelAccessToken && lineOwner) {
     lineInlineTried = true;
-    const ok = await lineNotify.pushText(oaForOwner, lineOwner, text);
-    await logResult(pool, {
-      channel: 'line',
-      recipient: lineOwner,
-      subject, body: `[oa:${oaForOwner.slug}] ${text}`,
-      status: ok ? 'sent' : 'failed',
-    });
-    if (ok) return { channel: 'line', ok: true, oa: oaForOwner.slug };
+    try {
+      // pushTextStrict THROWS on failure with .status / .fatal attached, so we
+      // can classify the failure. (The boolean pushText collapsed every cause
+      // to false, which is why transient LINE blips used to be dropped here.)
+      await lineNotify.pushTextStrict(oaForOwner, lineOwner, text);
+      await logResult(pool, {
+        channel: 'line',
+        recipient: lineOwner,
+        subject, body: `[oa:${oaForOwner.slug}] ${text}`,
+        status: 'sent',
+      });
+      return { channel: 'line', ok: true, oa: oaForOwner.slug };
+    } catch (err) {
+      const status = Number(err && err.status);
+      const structural = (err && err.fatal === true)
+        || (Number.isFinite(status) && status >= 400 && status < 500 && status !== 429);
+      lineTransientFail = !structural;
+      await logResult(pool, {
+        channel: 'line',
+        recipient: lineOwner,
+        subject, body: `[oa:${oaForOwner.slug}] ${text}`,
+        status: 'failed',
+        error: `${structural ? 'structural' : 'transient'}: ${(err && err.message) || 'push failed'}`
+          + (Number.isFinite(status) ? ` (HTTP ${status})` : ''),
+      });
+    }
   }
 
   // 2. Email (fallback)
@@ -165,18 +188,19 @@ async function notifyOwner(ctx, msg) {
     if (ok) return { channel: 'email', ok: true };
   }
 
-  // 3. Queue fallback — only for channels NOT yet attempted inline.
-  // If LINE was tried inline and failed, the OA/token is likely
-  // structurally broken (401, OA disabled), and re-queuing would just
-  // burn retries on the same problem. The inline 'failed' log row is
-  // already there for admin to act on. Same for email.
+  // 3. Queue fallback. We re-queue LINE when it was either NOT attempted
+  // inline, OR attempted and failed *transiently* (network/timeout/429/5xx) —
+  // those are exactly what the queue's retry/backoff exists to ride out, so a
+  // brief LINE outage never silently drops a high-priority owner alert. We do
+  // NOT re-queue a *structural* failure (bad token, OA disabled, 4xx): it
+  // won't fix itself and re-queuing would just burn retries and spam the log.
   //
-  // Owner alerts are the highest-priority class (anomaly detector,
-  // contract expiry, slip queue summary), so silent loss is bad — but
-  // duplicate-spam through a broken channel is worse for signal/noise.
+  // Owner alerts are the highest-priority class (anomaly detector, contract
+  // expiry, slip queue summary), so silent loss on a transient blip is bad —
+  // but duplicate-spam through a broken channel is worse for signal/noise.
   const queue = getQueue();
   if (queue) {
-    if (oaForOwner && oaForOwner.channelAccessToken && lineOwner && !lineInlineTried) {
+    if (oaForOwner && oaForOwner.channelAccessToken && lineOwner && (!lineInlineTried || lineTransientFail)) {
       try {
         await queue.enqueue(pool, {
           channel: 'line', recipient: lineOwner, subject, body: text,
@@ -184,7 +208,10 @@ async function notifyOwner(ctx, msg) {
         });
         await logResult(pool, {
           channel: 'queue', recipient: lineOwner, subject, body: text,
-          status: 'queued', error: 'owner LINE not attempted inline — enqueued',
+          status: 'queued',
+          error: lineTransientFail
+            ? 'owner LINE failed transiently — re-queued for retry'
+            : 'owner LINE not attempted inline — enqueued',
         });
         return { channel: 'queue', ok: false, queued: true };
       } catch { /* fall through */ }

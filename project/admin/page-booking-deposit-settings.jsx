@@ -82,7 +82,14 @@ function bookingDepositNeedsPaymentSetup(draft, paymentKnown, paymentReady) {
 function PageBookingDepositSettings({ setToast, embedded = false, currentUser = null }) {
   const C = window.ADMIN_C;
   const { Card, SectionHeading, Btn, Pill, PageContainer, PageHeader, Toggle, Input } = window;
-  const apiFetch = window.requireApiFetch ? window.requireApiFetch() : window.apiFetch;
+  // Defensive: requireApiFetch() throws if hooks.jsx hasn't registered
+  // window.apiFetch yet — resolving it unguarded at render crashed the page to
+  // the ErrorBoundary on a slow/partial load. Fall back so the error surfaces
+  // in a handler's try/catch instead of taking down the whole page.
+  const apiFetch = (() => {
+    try { return window.requireApiFetch ? window.requireApiFetch() : window.apiFetch; }
+    catch { return window.apiFetch; }
+  })();
   const Wrapper = embedded
     ? ({ children }) => <div>{children}</div>
     : ({ children }) => <PageContainer>{children}</PageContainer>;

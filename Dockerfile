@@ -16,11 +16,18 @@ FROM node:20-alpine AS runtime
 WORKDIR /app
 
 # Tini gives us a proper PID-1 init process so SIGTERM propagates to node.
-RUN apk add --no-cache tini
+# tzdata is required for TZ=Asia/Bangkok to actually resolve on alpine (which
+# ships no zoneinfo); without it Node silently falls back to UTC.
+RUN apk add --no-cache tini tzdata
 
+# TZ: the scheduler computes bill periods / late-fee days / reminders from
+# local calendar time and assumes Asia/Bangkok. node:*-alpine defaults to UTC
+# (and has no tzdata), so we install tzdata and pin TZ. server.js also defaults
+# TZ at runtime as a belt-and-suspenders guard.
 ENV NODE_ENV=production \
     PORT=3000 \
-    NPM_CONFIG_LOGLEVEL=warn
+    NPM_CONFIG_LOGLEVEL=warn \
+    TZ=Asia/Bangkok
 
 # Copy installed deps and app code
 COPY --from=deps /app/node_modules ./node_modules

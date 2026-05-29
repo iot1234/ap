@@ -343,8 +343,20 @@ async function roomDeleteRefs(pool, roomCode) {
           WHERE room_id=$1 AND deleted_at IS NULL AND status IN ('active','pending','signed')) AS contracts,
        (SELECT COUNT(*)::int FROM maintenance_tickets
           WHERE room_id=$1 AND status NOT IN ('completed','cancelled')) AS open_tickets,
-       (SELECT COUNT(*)::int FROM bookings
-          WHERE room_id=$1 AND status IN ('pending','reviewing','approved')) AS active_bookings`,
+       -- Active bookings live canonically in the JSONB blob
+       -- (app_data baankarn_bookings_v1, an array). The relational bookings
+       -- table is only best-effort dual-written, so counting it here missed
+       -- bookings whose dual-write failed/lagged — letting an admin
+       -- delete/rename a room that still has a live reservation and orphan it.
+       -- Count from the authoritative blob instead.
+       (SELECT COUNT(*)::int
+          FROM app_data ad
+          CROSS JOIN LATERAL jsonb_array_elements(
+            CASE WHEN jsonb_typeof(ad.value)='array' THEN ad.value ELSE '[]'::jsonb END
+          ) AS b
+         WHERE ad.key='baankarn_bookings_v1'
+           AND b->>'roomId' = $1
+           AND b->>'status' IN ('pending','reviewing','approved')) AS active_bookings`,
     [roomCode]
   );
   const refs = rows[0] || {};
