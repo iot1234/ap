@@ -56,6 +56,14 @@ function diagnoseFailure(row) {
       retryAfterFix: true,
     };
   }
+  if (channel === 'line' && /invalid line recipient|recipient missing|invalid .*user\s?id|userid shape/.test(lower)) {
+    return {
+      code: 'LINE_RECIPIENT_INVALID',
+      title: 'ผู้รับ LINE ไม่ถูกต้อง / ยังไม่ผูก',
+      hint: 'ผู้เช่ายังไม่ได้ผูก LINE (line_user_id ว่างหรือไม่ใช่ userId ที่ถูกต้อง) — ให้ผู้เช่าผูก LINE ใหม่ผ่านพอร์ทัล/สแกน QR แล้วค่อย Retry (การตั้งค่า OA ไม่ช่วยกรณีนี้)',
+      retryAfterFix: true,
+    };
+  }
   if (channel === 'sms' && /sms provider not configured|not implemented|provider .*not configured/.test(lower)) {
     return {
       code: 'SMS_NOT_CONFIGURED',
@@ -114,6 +122,20 @@ function normalizePayload(raw) {
 function fatalBillQueueError(code, message) {
   const err = new Error(`${code}: ${message}`);
   err.code = code;
+  err.fatal = true;
+  return err;
+}
+
+// Structural dispatch errors that CANNOT improve by retrying within the backoff
+// window (channel not configured, malformed recipient, unknown channel). Mark
+// them fatal so the row parks at 'failed' on the FIRST attempt with a clear
+// reason instead of burning all 3 retries on a condition only an admin can fix
+// (e.g. configure SMTP / add a LINE OA). diagnoseFailure() turns these into
+// actionable hints, and the row can be retried from the admin queue after the
+// fix. Transient causes ("send returned false", OA resolve/DB hiccup, 5xx/429)
+// are intentionally NOT marked fatal so they still get the retry/backoff.
+function fatalDispatchError(message) {
+  const err = new Error(message);
   err.fatal = true;
   return err;
 }
@@ -281,8 +303,8 @@ async function enqueue(pool, msg) {
 async function dispatch(pool, features, row) {
   const channel = row.channel;
   if (channel === 'line') {
-    if (!row.recipient) throw new Error('LINE recipient missing');
-    if (!lineNotify.isLikelyUserId(row.recipient)) throw new Error('invalid LINE recipient');
+    if (!row.recipient) throw fatalDispatchError('LINE recipient missing');
+    if (!lineNotify.isLikelyUserId(row.recipient)) throw fatalDispatchError('invalid LINE recipient');
     // Multi-OA aware: payload.oaId picks which OA to push through.
     // Falls back to the default OA when payload doesn't carry one (e.g.
     // owner-channel notifications) or when no DB OA is registered yet
@@ -299,7 +321,7 @@ async function dispatch(pool, features, row) {
     } catch (err) {
       throw new Error(`LINE OA resolve failed: ${err.message}`);
     }
-    if (!oa || !oa.channelAccessToken) throw new Error('LINE not configured');
+    if (!oa || !oa.channelAccessToken) throw fatalDispatchError('LINE not configured');
     // Refuse dispatch through a disabled OA. Admin may have disabled the
     // OA mid-flight (e.g. migrating tenants off it, suspected compromise),
     // but enqueued rows from before still point at it. Pushing anyway
@@ -334,7 +356,7 @@ async function dispatch(pool, features, row) {
     return;
   }
   if (channel === 'email') {
-    if (!email.isConfigured(features)) throw new Error('email not configured');
+    if (!email.isConfigured(features)) throw fatalDispatchError('email not configured');
     const payload = normalizePayload(row.payload);
     const guarded = await guardBillNotificationPayload(pool, row, payload);
     const ok = await email.send(features, {
@@ -346,14 +368,14 @@ async function dispatch(pool, features, row) {
     return;
   }
   if (channel === 'sms') {
-    if (!sms.isConfigured(features)) throw new Error('SMS provider not configured');
+    if (!sms.isConfigured(features)) throw fatalDispatchError('SMS provider not configured');
     const payload = normalizePayload(row.payload);
     const guarded = await guardBillNotificationPayload(pool, row, payload);
     const ok = await sms.send(features, { to: row.recipient, text: guarded.body || guarded.subject || '' });
     if (!ok) throw new Error('SMS send returned false');
     return;
   }
-  throw new Error(`unknown channel: ${channel}`);
+  throw fatalDispatchError(`unknown channel: ${channel}`);
 }
 
 async function processOne(pool, features, row) {

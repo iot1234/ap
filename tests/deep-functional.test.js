@@ -376,6 +376,15 @@ test('notifQueue explains provider-configuration failures for admins', () => {
   });
   assert.equal(rateDiag.code, 'PROVIDER_RATE_LIMIT');
   assert.equal(rateDiag.retryAfterFix, false);
+
+  // Recipient-binding failures are distinct from provider-config failures:
+  // fixing API keys won't help — the tenant must (re-)link LINE.
+  for (const e of ['invalid LINE recipient', 'LINE recipient missing']) {
+    const d = notifQueue.diagnoseFailure({ channel: 'line', last_error: e });
+    assert.equal(d.code, 'LINE_RECIPIENT_INVALID', `expected recipient diagnosis for "${e}"`);
+    assert.equal(d.retryAfterFix, true);
+    assert.match(d.hint, /ผูก LINE/);
+  }
 });
 
 test('notifQueue.tick: claims pending rows + retries on failure with exponential backoff', async () => {
@@ -399,12 +408,18 @@ test('notifQueue.tick: claims pending rows + retries on failure with exponential
     if (claimedOnce) return { rows: [] };
     claimedOnce = true;
     return { rows: [{
-      id: 1, channel: 'line', recipient: 'Uxxx',
+      // Valid LINE userId (U + 20-80 word chars) so it PASSES the recipient
+      // check and reaches the OA-resolve step — an invalid recipient is now a
+      // FATAL error that would park without exercising backoff.
+      id: 1, channel: 'line', recipient: 'U' + '0'.repeat(32),
       subject: 's', body: 'b', payload: {}, retry_count: 0,
     }] };
   });
-  // Fail LINE dispatch by returning no OA.
-  m.on('FROM line_oas', () => ({ rows: [] }));
+  // Fail LINE dispatch TRANSIENTLY (DB hiccup while resolving the OA) so the
+  // row is retried with backoff. NOTE: a missing/empty OA ("LINE not
+  // configured") is now a FATAL config error that parks the row immediately —
+  // so to exercise the retry/backoff path we simulate a transient DB error.
+  m.on('FROM line_oas', () => { throw new Error('temporary db error'); });
   // Capture the retry UPDATE shape — params [id, errMsg, waitMs].
   let retryWait = null;
   const originalQuery = m.pool.query.bind(m.pool);
@@ -419,6 +434,40 @@ test('notifQueue.tick: claims pending rows + retries on failure with exponential
   assert.equal(processed, 1, 'tick should process exactly 1 claimed row');
   assert.equal(retryWait, 60_000,
     'first retry must schedule next_attempt_at = NOW + 60000ms (1 minute)');
+});
+
+test('notifQueue.tick: unconfigured channel fails fast (fatal) — no wasted retries', async () => {
+  // Guard regression: an unconfigured channel (e.g. SMTP not set up) used to
+  // burn all 3 retries before parking at 'failed', flooding the log. It must
+  // now fail fast on the FIRST attempt with a clear reason.
+  const m = makeMockPool();
+  let claimedOnce = false;
+  m.on('UPDATE notifications_queue', (text) => {
+    if (text.includes("status='pending'") && text.includes('reaped')) return { rowCount: 0 };
+    return { rowCount: 1 };
+  });
+  m.on('SELECT id, channel, recipient', () => {
+    if (claimedOnce) return { rows: [] };
+    claimedOnce = true;
+    return { rows: [{
+      id: 7, channel: 'email', recipient: 'a@b.com',
+      subject: 's', body: 'b', payload: {}, retry_count: 0,
+    }] };
+  });
+  let failedNoRetry = false, scheduledRetry = false, lastErr = null;
+  const orig = m.pool.query.bind(m.pool);
+  m.pool.query = async (text, params) => {
+    if (text.includes("status='failed'") && !text.includes('next_attempt_at')) { failedNoRetry = true; lastErr = params?.[1]; }
+    if (text.includes('next_attempt_at=NOW()') && text.includes('INTERVAL')) scheduledRetry = true;
+    return orig(text, params);
+  };
+  const notifQueue = require('../services/notificationQueue');
+  // email feature OFF → dispatch throws fatal 'email not configured'.
+  const processed = await notifQueue.tick(m.pool, { email: { enabled: false }, sms: { enabled: false } }, 1);
+  assert.equal(processed, 1, 'tick should process exactly 1 claimed row');
+  assert.equal(scheduledRetry, false, 'fatal config error must NOT schedule a backoff retry');
+  assert.equal(failedNoRetry, true, 'fatal config error must park the row at failed on the first attempt');
+  assert.match(String(lastErr), /email not configured/);
 });
 
 // =====================================================================

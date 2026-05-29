@@ -422,6 +422,21 @@ async function checkNotificationQueue(pool) {
         },
       };
     }
+    // Distinct from provider-config failures: the channel works, but the
+    // recipient has no valid LINE binding. Fixing API keys won't help — the
+    // tenant must (re-)link LINE. Surfacing this separately tells the operator
+    // exactly which lever to pull instead of lumping it into "review provider".
+    const recipientFailures = breakdown.filter((x) => /invalid .*recipient|recipient missing|invalid .*user\s?id|userid shape/i.test(x.error));
+    if (recipientFailures.length > 0) {
+      return {
+        status: 'warn',
+        message: `${recipientFailures.reduce((sum, x) => sum + x.count, 0)} notifications undeliverable — recipients have no valid LINE binding`,
+        detail: {
+          ...detail,
+          nextAction: 'These recipients have not linked LINE (or stored an invalid userId). Ask them to re-link via the tenant portal / scan the OA QR — provider configuration will not fix these.',
+        },
+      };
+    }
     if (stuck > 5)  return { status: 'error', message: `${stuck} notifications stuck > 15min — queue worker may be wedged`, detail };
     if (failed > 20) return { status: 'warn', message: `${failed} notifications failed in the last hour`, detail };
     if (failedTotal > 50) return { status: 'warn', message: `${failedTotal} failed notifications in backlog — review provider/secrets before relying on alerts`, detail };
