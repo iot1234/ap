@@ -3248,6 +3248,14 @@ test('admin shell surfaces background room-save failures from api-client', () =>
     'api-client must emit a visible event when background localStorage sync fails');
   assert.match(apiClient, /new CustomEvent\('ap:sync-error'/,
     'sync failure event name must be stable for the admin shell');
+  assert.match(apiClient, /async function fetchWithCsrfRetry\(url, opts = \{\}\)/,
+    'api-client background sync must share a CSRF retry helper');
+  assert.match(apiClient, /if \(res\.status === 403\)[\s\S]{0,220}retryHeaders\['X-CSRF-Token'\]/,
+    'background sync must refresh the CSRF token and retry once before surfacing a 403');
+  assert.match(apiClient, /const res = await fetchWithCsrfRetry\(`\/api\/data\/\$\{encodeURIComponent\(key\)\}`/,
+    'debounced localStorage PUT must use the CSRF retry helper');
+  assert.match(apiClient, /fetchWithCsrfRetry\(`\/api\/data\/\$\{encodeURIComponent\(key\)\}`,[\s\S]{0,80}method: 'DELETE'/,
+    'localStorage DELETE sync must also use the CSRF retry helper');
   assert.match(apiClient, /emitSyncError\(key, \{[\s\S]{0,180}status: res\.status/,
     'failed PUT responses must dispatch status details');
   assert.match(apiClient, /BAD_LOCAL_SHAPE/,

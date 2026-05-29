@@ -31,8 +31,9 @@
   // header on every state-changing request. We fetch once and reuse; a 403
   // response invalidates the cache so the next call refetches.
   let _csrfToken = null;
-  async function getCsrfToken() {
-    if (_csrfToken) return _csrfToken;
+  async function getCsrfToken(forceRefresh = false) {
+    if (_csrfToken && !forceRefresh) return _csrfToken;
+    if (forceRefresh) _csrfToken = null;
     try {
       const r = await fetch('/api/csrf-token', { credentials: 'include' });
       if (!r.ok) return null;
@@ -45,6 +46,27 @@
   async function csrfHeaders(extra = {}) {
     const t = await getCsrfToken();
     return { 'Content-Type': 'application/json', ...(t ? { 'X-CSRF-Token': t } : {}), ...extra };
+  }
+  async function fetchWithCsrfRetry(url, opts = {}) {
+    const headers = await csrfHeaders(opts.headers || {});
+    let res = await fetch(url, {
+      credentials: 'include',
+      ...opts,
+      headers,
+    });
+    if (res.status === 403) {
+      _csrfToken = null;
+      const retryHeaders = await csrfHeaders(opts.headers || {});
+      if (retryHeaders['X-CSRF-Token']) {
+        res = await fetch(url, {
+          credentials: 'include',
+          ...opts,
+          headers: retryHeaders,
+        });
+      }
+    }
+    if (res.status === 403) _csrfToken = null;
+    return res;
   }
 
   // Save references to original methods BEFORE we wrap them
@@ -165,13 +187,10 @@
     retryQueue.clear();
     for (const [key, value] of entries) {
       try {
-        const r = await fetch(`/api/data/${encodeURIComponent(key)}`, {
+        const r = await fetchWithCsrfRetry(`/api/data/${encodeURIComponent(key)}`, {
           method: 'PUT',
-          credentials: 'include',
-          headers: await csrfHeaders(),
           body: JSON.stringify({ value }),
         });
-        if (r.status === 403) _csrfToken = null;     // token rotated → refetch
         if (!r.ok) {
           console.warn(`[api-client] retry PUT ${key} failed`, r.status);
           emitSyncError(key, { status: r.status, error: `retry PUT failed (${r.status})` });
@@ -192,13 +211,10 @@
       try { value = JSON.parse(rawJson); } catch { return; }
       inflight.add(key);
       try {
-        const res = await fetch(`/api/data/${encodeURIComponent(key)}`, {
+        const res = await fetchWithCsrfRetry(`/api/data/${encodeURIComponent(key)}`, {
           method: 'PUT',
-          credentials: 'include',
-          headers: await csrfHeaders(),
           body: JSON.stringify({ value }),
         });
-        if (res.status === 403) _csrfToken = null;   // token rotated → refetch
         if (res.status === 401) {
           // Session expired or never authenticated. Stash the value so we
           // don't lose admin's edit on the next page load — flushed by
@@ -287,15 +303,9 @@
         clearTimeout(pendingTimers.get(key));
         pendingTimers.delete(key);
       }
-      // DELETE also goes through csrfGuard now — fetch token first.
-      csrfHeaders().then((headers) =>
-        fetch(`/api/data/${encodeURIComponent(key)}`, {
-          method: 'DELETE',
-          credentials: 'include',
-          headers,
-        })
-      ).then((r) => {
-        if (r.status === 403) _csrfToken = null;
+      // DELETE also goes through csrfGuard now, with one token refresh retry.
+      fetchWithCsrfRetry(`/api/data/${encodeURIComponent(key)}`, {
+        method: 'DELETE',
       }).catch((err) => console.warn(`[api-client] DELETE ${key} error`, err));
     }
   };
