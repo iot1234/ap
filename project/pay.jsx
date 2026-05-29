@@ -324,10 +324,10 @@ function App() {
   }, [apiBase]);
 
   useEffect(() => {
-    if (!data || data.paid) return undefined;
+    if (!data || data?.bill?.status === 'void') return undefined;
     const timer = setInterval(() => load(true), PUBLIC_PAY_REFRESH_MS);
     return () => clearInterval(timer);
-  }, [data && data.paid, apiBase]);
+  }, [data && data.bill && data.bill.status, apiBase]);
 
   useEffect(() => {
     setQrFallback(null);
@@ -510,6 +510,7 @@ function App() {
                 <div style={{ fontWeight: 600, marginBottom: 10 }}>สแกน PromptPay</div>
                 {!qrFallback ? (
                   <img
+                    key={data.qrUrl}
                     src={data.qrUrl}
                     alt="PromptPay QR"
                     width="180"

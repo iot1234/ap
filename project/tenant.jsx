@@ -342,6 +342,10 @@ function fileToDataUrl(file) {
     r.readAsDataURL(file);
   });
 }
+function appendQuery(url, params) {
+  const qs = new URLSearchParams(params).toString();
+  return `${url}${String(url || '').includes('?') ? '&' : '?'}${qs}`;
+}
 function safeStorageGet(key) {
   try { return localStorage.getItem(key); }
   catch { return null; }
@@ -1734,17 +1738,25 @@ function BillDetailBody({ bill, locale, refresh, slipFeature }) {
         });
       });
     return () => { cancelled = true; };
-  }, [bill.id, locale]);
+  }, [bill.id, bill.status, bill.total, locale]);
 
   useEffect(() => {
-    if (bill.status === 'paid' || bill.status === 'void') return undefined;
-    const timer = setInterval(() => { if (typeof refresh === 'function') refresh(); }, 5000);
+    if (bill.status === 'void') return undefined;
+    const intervalMs = bill.status === 'paid' ? 15000 : 5000;
+    const timer = setInterval(() => { if (typeof refresh === 'function') refresh(); }, intervalMs);
     return () => clearInterval(timer);
   }, [bill.id, bill.status, refresh]);
 
+  const readinessQrVersion = readiness?.qrVersion || `${bill.id}-${readiness?.bill?.status || bill.status || 'pending'}`;
   const qrUrl = (readiness?.channels?.qr === true)
-    ? `/api/tenant/bills/${encodeURIComponent(bill.id)}/qr`
+    ? (readiness.qrUrl || `/api/tenant/bills/${encodeURIComponent(bill.id)}/qr?v=${encodeURIComponent(readinessQrVersion)}`)
     : null;
+
+  useEffect(() => {
+    setQrBroken(false);
+    setQrFallback(null);
+    setCopied(false);
+  }, [qrUrl]);
   const billTotal = Number(bill.total);
   const paymentAmount = Number(amount);
   const amountInvalid = !Number.isFinite(paymentAmount) || paymentAmount <= 0;
@@ -1939,11 +1951,11 @@ function BillDetailBody({ bill, locale, refresh, slipFeature }) {
             {showQrPane ? (
               <>
             {qrUrl && !qrBroken ? (
-              <img src={qrUrl} alt="PromptPay QR" width="180" height="180"
+              <img key={qrUrl} src={qrUrl} alt="PromptPay QR" width="180" height="180"
                 style={{ borderRadius: 12, padding: 8, background: '#fff', border: '1px solid var(--line)' }}
                 onError={() => {
                   setQrBroken(true);
-                  fetch(`${qrUrl}?format=json`, { credentials: 'same-origin' })
+                  fetch(appendQuery(qrUrl, { format: 'json' }), { credentials: 'same-origin' })
                     .then((r) => r.ok ? r.json() : null)
                     .then((d) => { if (d && d.payload) setQrFallback(d); })
                     .catch(() => {});

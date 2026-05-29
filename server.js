@@ -4118,8 +4118,19 @@ app.get('/api/tenant/pay-readiness/:billId', requireTenant, async (req, res) => 
       }
     } catch { /* non-blocking */ }
 
+    const qrVersion = channels.qr === true
+      ? `${bill.id}-${String(bill.status || 'pending')}-${Date.now()}`
+      : null;
+    const qrUrl = qrVersion
+      ? `/api/tenant/bills/${encodeURIComponent(bill.id)}/qr?v=${encodeURIComponent(qrVersion)}`
+      : null;
+
     res.json({
       ok: true,
+      paid: bill.status === 'paid',
+      payable: isBillPayable,
+      qrVersion,
+      qrUrl,
       channels,
       issues,
       bill: {
@@ -5632,7 +5643,33 @@ app.get('/api/tenant/bills/:id/qr', rateLimitQr, requireTenant, async (req, res)
     if (Number(bill.tenant_id) !== Number(req.tenant.tenant_id)) {
       return res.status(403).json({ error: 'not your bill' });
     }
+    const format = String(req.query.format || 'png').toLowerCase();
+    const setQrNoStoreHeaders = (state) => {
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      if (state) res.setHeader('X-Bill-QR-State', String(state));
+    };
+    if (bill.status === 'paid') {
+      setQrNoStoreHeaders('paid');
+      if (format === 'json' || format === 'payload') {
+        return res.status(409).json({
+          ok: false,
+          error: 'bill is already paid',
+          code: 'BILL_ALREADY_PAID',
+          status: bill.status,
+          paid: true,
+          billId: bill.id,
+        });
+      }
+      const rendered = renderPaidBillQrStatusPng();
+      res.setHeader('Content-Type', rendered.contentType);
+      res.setHeader('X-QR-Renderer', rendered.renderer);
+      return res.end(rendered.body);
+    }
     if (bill.status !== 'pending' && bill.status !== 'overdue') {
+      setQrNoStoreHeaders(bill.status || 'not-payable');
       return res.status(409).json({
         error: 'bill is not payable',
         code: 'BILL_NOT_PAYABLE',
@@ -5641,6 +5678,7 @@ app.get('/api/tenant/bills/:id/qr', rateLimitQr, requireTenant, async (req, res)
     }
     const amount = Number(bill.total);
     if (!Number.isFinite(amount) || amount <= 0 || amount > MAX_AMOUNT) {
+      setQrNoStoreHeaders(bill.status || 'invalid-total');
       return res.status(409).json({
         error: 'bill amount cannot be encoded as PromptPay QR',
         code: 'INVALID_BILL_TOTAL',
@@ -5649,6 +5687,7 @@ app.get('/api/tenant/bills/:id/qr', rateLimitQr, requireTenant, async (req, res)
 
     const { paymentBlock } = await loadEffectivePaymentBlock();
     if (!paymentBlock.promptpayTarget) {
+      setQrNoStoreHeaders(bill.status);
       return res.status(503).json({
         error: 'PromptPay is not configured',
         code: 'PROMPTPAY_NOT_CONFIGURED',
@@ -5657,6 +5696,7 @@ app.get('/api/tenant/bills/:id/qr', rateLimitQr, requireTenant, async (req, res)
     try {
       paymentBlock.promptpayTarget = normaliseTarget(paymentBlock.promptpayTarget);
     } catch (err) {
+      setQrNoStoreHeaders(bill.status);
       return res.status(503).json({
         error: 'PromptPay target is invalid',
         code: 'PROMPTPAY_INVALID_CONFIG',
@@ -5668,6 +5708,7 @@ app.get('/api/tenant/bills/:id/qr', rateLimitQr, requireTenant, async (req, res)
     // go to nobody. Catch it here so the failure is loud + actionable
     // ("admin: go set PromptPay") instead of silent + financial.
     if (isDemoTarget(paymentBlock.promptpayTarget)) {
+      setQrNoStoreHeaders(bill.status);
       return res.status(503).json({
         error: 'หอพักยังใช้ PromptPay demo — แจ้งเจ้าหน้าที่ให้ตั้งบัญชีจริงก่อน',
         code: 'PROMPTPAY_DEMO',
@@ -5684,7 +5725,6 @@ app.get('/api/tenant/bills/:id/qr', rateLimitQr, requireTenant, async (req, res)
     //                  rendering with a browser-side QR library OR by
     //                  showing a copyable text fallback.
     //   default      → image/png (legacy path, unchanged)
-    const format = String(req.query.format || 'png').toLowerCase();
     if (format === 'json' || format === 'payload') {
       // Build the EMV payload first — that's the durable contract value
       // (a Thai banking-app-readable string) that doesn't require the
@@ -5716,7 +5756,7 @@ app.get('/api/tenant/bills/:id/qr', rateLimitQr, requireTenant, async (req, res)
           console.error('[qr] svg fallback also failed:', svgErr.message);
         }
       }
-      res.setHeader('Cache-Control', 'no-store');
+      setQrNoStoreHeaders(bill.status);
       return res.json({
         ok: true,
         payload,
@@ -5742,8 +5782,7 @@ app.get('/api/tenant/bills/:id/qr', rateLimitQr, requireTenant, async (req, res)
     // in <img> tags, so the tenant UI doesn't have to branch on the type.
     const rendered = await renderQrWithFallback(paymentBlock.promptpayTarget, amount);
     res.setHeader('Content-Type', rendered.contentType);
-    res.setHeader('Cache-Control', 'no-store');
-    res.setHeader('X-Content-Type-Options', 'nosniff');
+    setQrNoStoreHeaders(bill.status);
     // Expose which renderer answered so admins debugging "why is the QR an
     // SVG today?" can grep response headers to see the primary failure.
     res.setHeader('X-QR-Renderer', rendered.renderer);

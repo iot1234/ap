@@ -1223,6 +1223,12 @@ test('public bill payment page shows itemized online bill details', () => {
     'online bill late-fee line item must explain the calculation');
   assert.match(pay, /function BillBreakdown\(\{ bill \}\)/,
     'public payment UI must render an itemized bill section');
+  assert.match(pay, /if \(!data \|\| data\?\.bill\?\.status === 'void'\) return undefined/,
+    'public pay page must keep polling paid bills so admin payment reversals restore QR state');
+  assert.match(pay, /key=\{data\.qrUrl\}[\s\S]{0,80}src=\{data\.qrUrl\}/,
+    'public pay QR image must remount when the cache-busted URL changes');
+  assert.doesNotMatch(pay, /if \(!data \|\| data\.paid\) return undefined/,
+    'public pay page must not stop polling just because a bill is currently paid');
   assert.match(pay, /รายละเอียดค่าใช้จ่าย/,
     'public payment UI must label the itemized bill details');
   assert.match(pay, /it\.detail/,
@@ -1473,8 +1479,8 @@ test('bill upload UIs refresh status and hide upload controls after paid', () =>
   const path = require('node:path');
   const tenant = fs.readFileSync(path.join(__dirname, '..', 'project', 'tenant.jsx'), 'utf8');
   const pay = fs.readFileSync(path.join(__dirname, '..', 'project', 'pay.jsx'), 'utf8');
-  assert.match(tenant, /setInterval\(\(\) => \{\s*if \(typeof refresh === 'function'\) refresh\(\);[\s\S]*5000/,
-    'tenant bill modal must poll for payment status changes while open');
+  assert.match(tenant, /const intervalMs = bill\.status === 'paid' \? 15000 : 5000[\s\S]{0,140}setInterval\(\(\) => \{\s*if \(typeof refresh === 'function'\) refresh\(\);/,
+    'tenant bill modal must poll for payment status changes while open, including paid bills that may be reversed');
   assert.match(pay, /const paid = !!\(data && data\.paid\)/,
     'public pay page must derive a paid state');
   assert.match(pay, /const canUpload = !!\(data && data\.channels && data\.channels\.slip && !paid && \(!uploadState \|\| uploadState\.canUpload !== false\)\)/,
@@ -1570,8 +1576,18 @@ test('GET /api/tenant/bills/:id/qr uses DB bill total, not browser query amount'
     'tenant bill QR must enforce bill ownership');
   assert.match(body, /const amount = Number\(bill\.total\)/,
     'tenant bill QR amount must come from bills.total');
+  assert.match(body, /if \(bill\.status === 'paid'\)/,
+    'tenant bill QR must handle paid bills before serving any payable QR payload');
+  assert.match(body, /renderPaidBillQrStatusPng\(\)/,
+    'tenant bill QR must render a paid status image in place of a stale QR');
+  assert.match(body, /X-Bill-QR-State/,
+    'tenant bill QR responses must expose the bill state for cache diagnostics');
+  assert.match(body, /code: 'BILL_ALREADY_PAID'/,
+    'tenant bill QR JSON fallback must clearly report already-paid bills');
   assert.match(body, /renderQrWithFallback\(paymentBlock\.promptpayTarget, amount\)/,
     'tenant bill QR must render with DB amount');
+  assert.match(body, /setQrNoStoreHeaders\(bill\.status\)/,
+    'tenant bill QR must disable browser/proxy caching on current-state images');
   assert.doesNotMatch(body, /req\.query\.(?:amount|target)/,
     'tenant bill QR must not trust query amount or target');
 });
@@ -1706,6 +1722,12 @@ test('tenant bill modal uses bill-owned QR endpoint', () => {
   const tenant = fs.readFileSync(path.join(__dirname, '..', 'project', 'tenant.jsx'), 'utf8');
   assert.match(tenant, /\/api\/tenant\/bills\/\$\{encodeURIComponent\(bill\.id\)\}\/qr/,
     'tenant UI must request server-owned bill QR');
+  assert.match(tenant, /readiness\.qrUrl \|\| `\/api\/tenant\/bills\/\$\{encodeURIComponent\(bill\.id\)\}\/qr\?v=\$\{encodeURIComponent\(readinessQrVersion\)\}`/,
+    'tenant UI must use a state-versioned QR URL so paid/unpaid reversals do not reuse stale images');
+  assert.match(tenant, /key=\{qrUrl\} src=\{qrUrl\}/,
+    'tenant QR image must remount when the versioned URL changes');
+  assert.match(tenant, /fetch\(appendQuery\(qrUrl, \{ format: 'json' \}\)/,
+    'tenant QR fallback must append format=json safely when qrUrl already has a cache-buster');
   assert.doesNotMatch(tenant, /\/api\/promptpay\/qr\?target=\$\{encodeURIComponent\(pay\.promptpayTarget\)\}&amount=\$\{encodeURIComponent\(bill\.total\)\}/,
     'tenant UI must not build payment QR from browser-side target+amount');
 });
@@ -1763,6 +1785,14 @@ test('tenant payment readiness controls QR and slip upload state', () => {
     'readiness must surface pending/limit slip blocks before the upload button is enabled');
   assert.match(route, /upload: uploadAttempts/,
     'readiness must return upload attempt state to the tenant UI');
+  assert.match(route, /const qrVersion = channels\.qr === true[\s\S]{0,140}Date\.now\(\)/,
+    'readiness must create a fresh QR version after paid/unpaid state changes');
+  assert.match(route, /qrUrl,[\s\S]{0,90}channels/,
+    'readiness must return the server-built QR URL beside channel flags');
+  assert.match(route, /paid: bill\.status === 'paid'/,
+    'readiness must explicitly report paid state to clients');
+  assert.match(route, /payable: isBillPayable/,
+    'readiness must explicitly report whether the bill can be paid');
   assert.doesNotMatch(route, /ready\.length > 0 && paymentBlock\.promptpayTarget/,
     'autoVerify must not rely on raw promptpay presence');
 
@@ -1781,6 +1811,10 @@ test('tenant payment readiness controls QR and slip upload state', () => {
     'payment card must not disappear when payment-info fails but bill QR readiness still works');
   assert.match(tenant, /const readinessLoading = !readiness && !readinessError/,
     'tenant UI must model the readiness-loading state explicitly');
+  assert.match(tenant, /\}, \[bill\.id, bill\.status, bill\.total, locale\]\)/,
+    'tenant bill modal must refetch readiness when admin changes paid/unpaid state');
+  assert.match(tenant, /bill\.status === 'paid' \? 15000 : 5000/,
+    'tenant bill modal must keep polling paid bills so admin payment reversals update the QR');
   assert.match(tenant, /const slipUploadBlocked = readinessLoading[\s\S]{0,180}amountMismatch/,
     'tenant upload button must stay disabled until readiness returns');
   assert.match(tenant, /if \(readinessLoading\) \{[\s\S]{0,240}kind: 'pending'/,
