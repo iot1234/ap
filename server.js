@@ -3600,6 +3600,21 @@ app.put('/api/admin/features', sameOrigin, csrfGuard, requireAuth, requireRole('
   if (!partial || typeof partial !== 'object') {
     return res.status(400).json({ error: 'features object required' });
   }
+  // Defense-in-depth: reject prototype-polluting keys anywhere in the payload
+  // before it reaches the recursive deepMerge in features.save(). The merge is
+  // already pollution-resistant (it builds fresh objects), but refusing these
+  // keys outright removes the foot-gun entirely and keeps the flag config clean.
+  const hasDangerousKey = (o, depth = 0) => {
+    if (!o || typeof o !== 'object' || depth > 6) return false;
+    for (const k of Object.keys(o)) {
+      if (k === '__proto__' || k === 'constructor' || k === 'prototype') return true;
+      if (hasDangerousKey(o[k], depth + 1)) return true;
+    }
+    return false;
+  };
+  if (hasDangerousKey(partial)) {
+    return res.status(400).json({ error: 'invalid feature key', code: 'BAD_KEY' });
+  }
   // MQTT is not wired in this build. Refuse it at save-time instead of
   // advertising a mode that silently receives no readings.
   if (partial.meterIot && partial.meterIot.mode === 'mqtt') {

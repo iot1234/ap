@@ -368,6 +368,24 @@ test('settings bill schedule does not expose dead auto-bill date control', () =>
     'manual bill due-day default remains editable for the Billing page');
 });
 
+test('feature settings reject prototype-polluting keys before save', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const start = server.indexOf("app.put('/api/admin/features'");
+  assert.ok(start > 0, 'admin feature settings route must exist');
+  const route = server.slice(start, server.indexOf("app.get('/api/owners/alerts'", start));
+
+  assert.match(route, /const hasDangerousKey = \(o, depth = 0\) =>/,
+    'feature settings route must scan nested payload keys');
+  assert.match(route, /k === '__proto__' \|\| k === 'constructor' \|\| k === 'prototype'/,
+    'feature settings route must reject prototype-polluting key names');
+  assert.ok(route.indexOf('hasDangerousKey(partial)') < route.indexOf('features.save(pool, partial'),
+    'dangerous feature keys must be blocked before features.save mutates config');
+  assert.match(route, /code: 'BAD_KEY'/,
+    'feature settings route must return a structured error code for bad keys');
+});
+
 test('bill generation honors recurringCharges.autoIncludeOnBillGen', () => {
   const fs = require('node:fs');
   const path = require('node:path');
@@ -2417,7 +2435,7 @@ test('admin toast auto-dismiss pauses while the mouse is hovering', () => {
   const path = require('node:path');
   const ui = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'ui.jsx'), 'utf8');
   const shell = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'shell.jsx'), 'utf8');
-  const toastBlock = ui.match(/function Toast\([\s\S]*?\n}\n\n\/\/ --- Alert/);
+  const toastBlock = ui.match(/function Toast\([\s\S]*?\r?\n}\r?\n\r?\n\/\/ --- Alert/);
   assert.ok(toastBlock, 'Toast component must remain in the shared admin UI module');
   const src = toastBlock[0];
 
