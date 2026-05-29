@@ -1,8 +1,24 @@
-﻿// === Production server: Express + PostgreSQL + sessions ====================
+// === Production server: Express + PostgreSQL + sessions ====================
 // - Serves static React app from project/
 // - REST API: /api/data/:key (GET public, PUT admin-only) backed by JSONB store
 // - Auth: /api/auth/login (bcrypt + session), /api/auth/me, /api/auth/logout
 // - Schema migration runs on boot; bootstraps single admin user from env vars
+
+// --- Timezone guard (MUST run before any Date is constructed) --------------
+// The entire scheduler (auto bill-gen, late-fee marking, payment reminders,
+// overdue digests, backups) computes calendar days/months from local time
+// and EXPECTS Asia/Bangkok (UTC+7). Containers (node:*-alpine) default to UTC
+// when no TZ is set, which silently shifts every job by ~7h and can stamp
+// bills with the wrong day/month near midnight. We default TZ here — Node
+// re-reads process.env.TZ for every subsequent Date — and log loudly so the
+// behaviour is never a silent surprise. Operators can override via the TZ env.
+if (!process.env.TZ) {
+  process.env.TZ = 'Asia/Bangkok';
+  console.log('[boot] TZ not set — defaulting to Asia/Bangkok (UTC+7) for scheduler date math.');
+} else if (process.env.TZ !== 'Asia/Bangkok') {
+  console.warn(`[boot] TZ=${process.env.TZ} (not Asia/Bangkok). Scheduler day/month math assumes ICT; `
+    + 'bill periods and reminder days may be off if this is intentional, set it deliberately.');
+}
 
 const express = require('express');
 const path = require('path');
@@ -4292,7 +4308,7 @@ app.get('/api/admin/billing-readiness',
           });
         } else if (noMeter.length > 0) {
           issues.push({
-            sev: 'med', code: 'NO_METER_READINGS', area: ['issue'],
+            sev: 'high', code: 'NO_METER_READINGS', area: ['issue'],
             msg: `${noMeter.length} ห้องยังไม่มีเลขมิเตอร์ครบสำหรับรอบ ${readinessPeriod} — บิลส่วนน้ำ/ไฟอาจเป็น 0 หรือข้อมูลไม่ครบ`,
             fix: `/admin#meters → เลือกรอบ ${readinessPeriod} แล้วบันทึกเลขมิเตอร์ก่อนออกบิล`,
             detail: { period: readinessPeriod, count: noMeter.length, rooms: noMeter.map((r) => {
@@ -7538,6 +7554,18 @@ function composeBookingDetail(row, blobBooking) {
   if (!row && !blobBooking) return null;
   const externalId = (row && row.external_id) || (blobBooking && blobBooking.id);
   const out = { ...(blobBooking || {}), ...(row || {}) };
+  // The JSONB blob is the canonical booking store — it's updated on every
+  // workflow path (approve-and-assign, PUT, hold sweeper). The relational
+  // `bookings` row is only best-effort dual-written (its UPDATEs are wrapped
+  // in try/catch and merely warn on failure), so spreading `row` last would
+  // let a lagged/failed dual-write clobber the authoritative status/notes with
+  // a stale value — the booking drawer would then show e.g. "pending" for an
+  // already-approved booking. Re-assert the canonical workflow fields from the
+  // blob whenever it has them.
+  if (blobBooking) {
+    if (blobBooking.status != null) out.status = blobBooking.status;
+    if (blobBooking.notes != null) out.notes = blobBooking.notes;
+  }
   if (externalId) out.id = String(externalId);
   if (row && row.id != null) out.rowId = row.id;
   if (row && row.citizen_id_image_front_url && !out.citizenIdImageFrontUrl) {
@@ -8697,6 +8725,45 @@ app.post('/api/uploads', sameOrigin, csrfGuard, requireAuth, requireRole('owner'
 // one router (round 9). Live code: routes/tenant-ops.js.
 
 // === v2: Meter readings ===================================================
+
+// Compose an owner-facing alert from a meter anomaly. detectAnomaly returns
+// one of four shapes; each carries different fields. This formats each kind
+// using only the fields it actually has so the alert is always readable
+// (no "z=NaN" / "ค่าเฉลี่ย NaN"). Mirrored client-side in page-meters.jsx.
+function describeMeterAnomaly(roomId, meterType, anomaly, sigmas) {
+  const head = `ห้อง ${roomId} (${meterType})`;
+  const num = (v, d = 2) => (Number.isFinite(Number(v)) ? Number(v).toFixed(d) : '—');
+  switch (anomaly && anomaly.kind) {
+    case 'rollback':
+      return {
+        subject: '⚠️ มิเตอร์ค่าลดลง',
+        text: `${head} ค่ามิเตอร์ลดลง ${num(anomaly.last)} หน่วย\n`
+          + 'น่าจะเป็น meter reset / ป้อนค่าผิด — โปรดตรวจสอบก่อนออกบิล',
+      };
+    case 'jump':
+      return {
+        subject: '⚠️ มิเตอร์พุ่งสูงผิดปกติ',
+        text: `${head} การใช้พุ่งสูงผิดปกติ: รอบนี้ ${num(anomaly.last)} หน่วย `
+          + `≈ ${num(anomaly.ratio, 1)} เท่าของรอบก่อน (${num(anomaly.prev)} หน่วย)\n`
+          + 'อาจเป็นการป้อนเลขผิด — โปรดตรวจสอบก่อนออกบิล',
+      };
+    case 'zero-variance':
+      return {
+        subject: '⚠️ มิเตอร์ผิดปกติ',
+        text: `${head} เคยใช้คงที่ ${num(anomaly.mean)} หน่วยมาตลอด `
+          + `แต่รอบนี้ ${num(anomaly.last)} หน่วย\n`
+          + 'การใช้เปลี่ยนกะทันหันจากค่าคงที่ — โปรดตรวจสอบ',
+      };
+    case 'sigma':
+    default:
+      return {
+        subject: '⚠️ มิเตอร์ผิดปกติ',
+        text: `${head} ใช้ผิดปกติ z=${num(anomaly && anomaly.z)} (เกิน ${num(sigmas, 0)}σ)\n`
+          + `ค่าล่าสุด: ${num(anomaly && anomaly.last)} หน่วย, ค่าเฉลี่ย: ${num(anomaly && anomaly.mean)} หน่วย`,
+      };
+  }
+}
+
 app.post('/api/meters/:roomId/readings', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager', 'staff'), features.requireFeature('meterIot'), async (req, res) => {
   const roomId = String(req.params.roomId).slice(0, 32);
   const { meterType, reading, period } = req.body || {};
@@ -8721,20 +8788,26 @@ app.post('/api/meters/:roomId/readings', sameOrigin, csrfGuard, requireAuth, req
       anomaly = await meter.detectAnomaly(pool, roomId, row.meter_type, sigmas);
     } catch (e) { console.warn('[meter] anomaly detect failed:', e.message); }
     if (anomaly) {
-      const isRollback = anomaly.kind === 'rollback';
-      const subject = isRollback ? '⚠️ มิเตอร์ค่าลดลง' : '⚠️ มิเตอร์ผิดปกติ';
-      const text = isRollback
-        ? `ห้อง ${roomId} (${row.meter_type}) ค่ามิเตอร์ลดลง ${Number(anomaly.last).toFixed(2)} หน่วย\n`
-          + `น่าจะเป็น meter reset / ป้อนค่าผิด — โปรดตรวจสอบก่อนออกบิล`
-        : `ห้อง ${roomId} (${row.meter_type}) z=${Number(anomaly.z).toFixed(2)} เกิน ${sigmas}σ\n`
-          + `ค่าล่าสุด: ${anomaly.last}, ค่าเฉลี่ย: ${Number(anomaly.mean).toFixed(2)}`;
+      // Build a clear, per-kind message. detectAnomaly returns different
+      // shapes per kind — only 'sigma' carries z, only 'sigma'/'zero-variance'
+      // carry mean — so a single z/mean template printed "z=NaN … ค่าเฉลี่ย NaN"
+      // for 'jump' and 'zero-variance' alerts (the exact young-meter / flat-
+      // baseline fraud cases these branches exist to catch). Format each kind
+      // with the fields it actually has, and never call toFixed on undefined.
+      const { subject, text } = describeMeterAnomaly(roomId, row.meter_type, anomaly, sigmas);
       notifier.notifyOwner(
         { pool, features: flags },
         { subject, text }
       ).catch(() => {});
       audit(req, 'meter.anomaly', 'meter', String(row.id), {
         kind: anomaly.kind || 'sigma',
-        z: anomaly.z, sigmas, mean: anomaly.mean,
+        sigmas,
+        // Keep whichever metrics this kind produced (omit undefined so the
+        // audit row never stores NaN/null noise).
+        ...(Number.isFinite(anomaly.z) ? { z: Number(anomaly.z.toFixed(3)) } : {}),
+        ...(Number.isFinite(anomaly.mean) ? { mean: Number(anomaly.mean.toFixed(3)) } : {}),
+        ...(Number.isFinite(anomaly.ratio) ? { ratio: Number(anomaly.ratio.toFixed(2)) } : {}),
+        ...(Number.isFinite(anomaly.last) ? { last: anomaly.last } : {}),
       });
     }
     audit(req, 'meter.record', 'meter', String(row.id), { meterType: row.meter_type, reading: row.reading, period: row.period || null });
@@ -12711,7 +12784,7 @@ app.post('/api/contract-fill/:token/upload', rateLimitContractFill, sameOrigin, 
       if (!upd.rows.length) {
         await storage.remove(pool, out.id).catch(() => {});
         return res.status(409).json({
-          error: 'à¸ªà¹ˆà¸‡à¹ƒà¸«à¹‰à¸•à¸£à¸§à¸ˆà¸ªà¸­à¸šà¹à¸¥à¹‰à¸§ â€” à¹à¸à¹‰à¹„à¸‚à¹„à¸¡à¹ˆà¹„à¸”à¹‰',
+          error: 'ส่งให้ตรวจสอบแล้ว — แก้ไขไม่ได้',
           code: 'NOT_EDITABLE',
         });
       }

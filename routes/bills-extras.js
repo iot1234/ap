@@ -165,10 +165,8 @@ async function loadRecurringFor(pool, { tenantId, roomId }) {
   if (roomId)   { params.push(roomId);   ors.push(`room_id = $${params.length}`); }
   if (!ors.length) return [];
   where.push(`(${ors.join(' OR ')})`);
-  where.push(`(start_at IS NULL OR start_at <= CURRENT_DATE)`);
-  where.push(`(end_at IS NULL OR end_at >= CURRENT_DATE)`);
   const { rows } = await pool.query(
-    `SELECT id, label, amount, frequency FROM recurring_charges
+    `SELECT id, label, amount, frequency, start_at, end_at FROM recurring_charges
        WHERE ${where.join(' AND ')} ORDER BY created_at ASC`,
     params
   );
@@ -186,6 +184,94 @@ module.exports = function buildBillsExtrasRouter(ctx) {
     sanitizeError,
   } = ctx;
   const r = express.Router();
+
+  function parseBillingPeriod(raw) {
+    const period = raw != null ? String(raw).trim().slice(0, 16) : billing.formatPeriodNow();
+    const m = period.match(/^(\d{4})-(0[1-9]|1[0-2])$/);
+    if (!m) return null;
+    const year = Number(m[1]);
+    if (year < 2020 || year > 2100) return null;
+    return { period, year, month: Number(m[2]) };
+  }
+
+  async function activeTenantForRoom(client, roomId, blobTenant) {
+    try {
+      const tq = await client.query(
+        `SELECT id, full_name, phone
+           FROM tenants
+          WHERE current_room_id=$1 AND status='active' AND deleted_at IS NULL
+          ORDER BY updated_at DESC LIMIT 1`,
+        [roomId]
+      );
+      if (tq.rows[0]) {
+        return {
+          id: tq.rows[0].id,
+          name: tq.rows[0].full_name || blobTenant?.name || '',
+          phone: tq.rows[0].phone || blobTenant?.phone || '',
+        };
+      }
+    } catch { /* legacy deploy without tenants table */ }
+    return blobTenant || null;
+  }
+
+  async function activeContractForRoom(client, roomId) {
+    try {
+      const cq = await client.query(
+        `SELECT id, monthly_rent, discount_pct, status
+           FROM contracts
+          WHERE room_id=$1 AND status='active' AND deleted_at IS NULL
+          ORDER BY start_date DESC LIMIT 1`,
+        [roomId]
+      );
+      return cq.rows[0] || null;
+    } catch {
+      return null;
+    }
+  }
+
+  function billPreviewPayload(bill, recurringList, room, periodDisplay) {
+    return {
+      id: bill.billNo || `INV-${bill.period}-${bill.roomId}`,
+      billNo: bill.billNo,
+      roomId: bill.roomId,
+      tenant: bill.tenantName,
+      phone: bill.tenantPhone,
+      period: bill.period,
+      periodDisplay,
+      rent: bill.rent,
+      rentBase: bill.rentBase,
+      rentSource: bill.rentSource,
+      rentSourceContractId: bill.rentSourceContractId,
+      rentSourceReason: bill.rentSourceReason,
+      water: bill.waterAmount,
+      waterUnits: bill.waterUnits,
+      waterRate: bill.waterRate,
+      waterMode: bill.waterMode,
+      waterFlatFellBack: bill.waterFlatFellBack,
+      waterPrevReading: bill.waterPrevReading,
+      waterCurrentReading: bill.waterCurrentReading,
+      elec: bill.elecAmount,
+      elecUnits: bill.elecUnits,
+      elecRate: bill.elecRate,
+      elecMode: bill.elecMode,
+      elecFlatFellBack: bill.elecFlatFellBack,
+      elecPrevReading: bill.elecPrevReading,
+      elecCurrentReading: bill.elecCurrentReading,
+      wifi: bill.wifi,
+      charges: recurringList,
+      chargesTotal: recurringList.reduce((sum, x) => sum + (Number(x.amount) || 0), 0),
+      subtotal: bill.subtotal,
+      vat: bill.vat,
+      penalty: bill.lateFee,
+      lateFee: bill.lateFee,
+      total: bill.total,
+      dueDate: bill.dueDate,
+      dueDateDisplay: bill.dueDate,
+      status: room?.billPaidAt ? 'paid' : 'unpaid',
+      overdueDays: room?.overdueDays || 0,
+      _source: 'server-preview',
+    };
+  }
 
   // notifyBillVoided lives in the closure (not module scope) because it
   // captures `pool` via the ctx pattern — keeping it here avoids passing
@@ -761,6 +847,115 @@ module.exports = function buildBillsExtrasRouter(ctx) {
   });
 
   // PUT /api/bills/:id/void — admin voids a bill. Single transaction with
+  // GET /api/bills/preview-period?period=YYYY-MM
+  // Canonical bill preview for the admin billing page. It uses the same
+  // server-side inputs as actual bill generation: active contract rent,
+  // period-scoped meter readings, recurring charge frequency, feature flags,
+  // and payment config. The browser keeps its old local estimate only as a
+  // degraded fallback when this endpoint is unavailable.
+  r.get('/preview-period', requireAuth, requireRole('owner', 'manager'), async (req, res) => {
+    try {
+      const parsed = parseBillingPeriod(req.query.period);
+      if (!parsed) {
+        return res.status(400).json({ error: 'period must be YYYY-MM', code: 'INVALID_PERIOD' });
+      }
+      const [flags, roomsRow, configRow] = await Promise.all([
+        features.load(pool),
+        pool.query(`SELECT value FROM app_data WHERE key='baankarn_rooms_v1'`),
+        pool.query(`SELECT value FROM app_data WHERE key='baankarn_config_v1'`),
+      ]);
+      const roomsObj = roomsRow.rows.length ? roomsRow.rows[0].value : {};
+      const rooms = Object.values(roomsObj || {});
+      const config = configRow.rows.length ? configRow.rows[0].value : {};
+      const configuredDue = Number(config?.notify?.dueOnDay);
+      const requestedDue = Number(req.query.dueDay);
+      const dueDay = Number.isFinite(requestedDue) && requestedDue >= 1 && requestedDue <= 28
+        ? requestedDue
+        : (Number.isFinite(configuredDue) && configuredDue >= 1 && configuredDue <= 28
+          ? configuredDue
+          : 15);
+      const dueDate = billing.formatYMD(parsed.year, parsed.month, dueDay);
+      const periodDisplay = parsed.period;
+      const previewBills = [];
+      const issues = [];
+
+      for (const rawRoom of rooms) {
+        if (!rawRoom || !rawRoom.tenant) continue;
+        if (rawRoom.status !== 'occupied' && rawRoom.status !== 'overdue') continue;
+        const roomId = String(rawRoom.id || '').slice(0, 64);
+        if (!roomId) continue;
+        const tenant = await activeTenantForRoom(pool, roomId, rawRoom.tenant);
+        if (!tenant) {
+          issues.push({
+            sev: 'high',
+            code: 'NO_ACTIVE_TENANT',
+            roomId,
+            msg: `room ${roomId} has a tenant blob but no active tenant row`,
+          });
+          continue;
+        }
+        const room = { ...rawRoom, tenant };
+        const activeContract = await activeContractForRoom(pool, roomId);
+        const recurringRows = flags.recurringCharges?.enabled
+          && flags.recurringCharges?.autoIncludeOnBillGen !== false
+          ? await loadRecurringFor(pool, { tenantId: tenant.id || null, roomId })
+          : [];
+        const applicableRecurring = recurringRows
+          .filter((x) => billing.isChargeApplicableForPeriod(x, parsed.period));
+        const recurringList = applicableRecurring
+          .map((x) => ({ label: x.label, amount: Number(x.amount) || 0 }));
+        const roomForBilling = await meter.attachBillingReadingsForPeriod(pool, room, parsed.period);
+        const bill = billing.buildBill({
+          room: roomForBilling,
+          contract: activeContract,
+          config,
+          features: flags,
+          recurring: recurringList,
+          period: parsed.period,
+          dueDate,
+          discountPct: Number(activeContract?.discount_pct) || 0,
+        });
+        const missingFields = [];
+        if (!billing.isFlatUtilityConfigured(roomForBilling, 'water')
+            && bill.waterCurrentReading == null) missingFields.push('water');
+        if (!billing.isFlatUtilityConfigured(roomForBilling, 'elec')
+            && bill.elecCurrentReading == null) missingFields.push('elec');
+        const payload = billPreviewPayload(bill, recurringList, rawRoom, periodDisplay);
+        if (missingFields.length) {
+          payload.issues = [{
+            sev: 'high',
+            code: 'NO_METER_READINGS',
+            fields: missingFields,
+          }];
+          issues.push({
+            sev: 'high',
+            code: 'NO_METER_READINGS',
+            roomId,
+            tenant: tenant.name || '',
+            fields: missingFields,
+          });
+        }
+        previewBills.push(payload);
+      }
+
+      res.json({
+        ok: true,
+        period: parsed.period,
+        dueDate,
+        bills: previewBills,
+        summary: {
+          billableRooms: previewBills.length,
+          issues: issues.length,
+          total: previewBills.reduce((sum, b) => sum + (Number(b.total) || 0), 0),
+        },
+        issues: issues.slice(0, 100),
+      });
+    } catch (err) {
+      console.error('bill preview-period error:', err);
+      res.status(500).json({ error: 'preview failed' });
+    }
+  });
+
   // FOR UPDATE locks: previously the "any verified payment?" check and the
   // UPDATE-to-void ran as two separate pool queries. A concurrent /pay or
   // slip /verify could land a verified payment row between the two queries
@@ -1288,6 +1483,25 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             fix: '/admin#pricing → ค่าน้ำ-ไฟ หรือ ตั้งค่าไฟแบบเหมาในทุกห้องที่ไม่ใช้มิเตอร์',
             detail: { period, count: meteredElecRooms.length, rooms: meteredElecRooms.map((r) => issueRoom(r, ['elec'])).slice(0, 20) } });
         }
+        const periodMeters = await meter.buildPeriodSummary(pool, rooms, period);
+        const hasPeriodReading = (r, prefix) => {
+          const m = periodMeters[String(r?.id || '')] || {};
+          return m[`${prefix}CurrentReading`] != null;
+        };
+        const missingMeterRooms = eligibleRooms
+          .map((r) => {
+            const fields = [];
+            if (!billing.isFlatUtilityConfigured(r, 'water') && !hasPeriodReading(r, 'water')) fields.push('water');
+            if (!billing.isFlatUtilityConfigured(r, 'elec') && !hasPeriodReading(r, 'elec')) fields.push('elec');
+            return fields.length ? issueRoom(r, fields) : null;
+          })
+          .filter(Boolean);
+        if (missingMeterRooms.length > 0) {
+          issues.push({ sev: 'high', code: 'NO_METER_READINGS',
+            msg: `${missingMeterRooms.length} ห้องยังไม่มีเลขมิเตอร์ครบสำหรับรอบ ${period} — ระบบจะไม่ออกบิลเงียบ ๆ ด้วยหน่วยเก่าหรือยอด 0`,
+            fix: `/admin#meters → เลือกรอบ ${period} แล้วบันทึกเลขมิเตอร์ก่อนออกบิล หรือ force:true เฉพาะกรณีตั้งใจใช้ค่าปัจจุบัน`,
+            detail: { period, count: missingMeterRooms.length, rooms: missingMeterRooms.slice(0, 20) } });
+        }
         if (eligibleRooms.length === 0) {
           issues.push({ sev: 'high', code: 'NO_ELIGIBLE_ROOMS',
             msg: 'ไม่มีห้องที่มีผู้เช่าแสดงสถานะ occupied/overdue — จะออกบิล 0 ใบ',
@@ -1400,8 +1614,6 @@ module.exports = function buildBillsExtrasRouter(ctx) {
                 const rc = await billClient.query(
                   `SELECT id, label, amount, frequency, start_at, end_at FROM recurring_charges
                      WHERE active = TRUE AND (${ors.join(' OR ')})
-                       AND (start_at IS NULL OR start_at <= CURRENT_DATE)
-                       AND (end_at IS NULL OR end_at >= CURRENT_DATE)
                      FOR UPDATE`,
                   params
                 );
@@ -2233,15 +2445,80 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       }
     });
 
-  // POST /api/bills/bulk-send — enqueue all pending/overdue. Calls the
-  // shared helper directly (no self-HTTP) so admin session and CSRF token
-  // don't need to round-trip.
+  // POST /api/bills/bulk-send — enqueue pending/overdue bill reminders for a
+  // deliberate scope: { period }, { billIds }, or { all:true }. Requiring a
+  // scope keeps the billing page from showing one period in the preview and
+  // accidentally blasting every unpaid historical bill in the system.
   r.post('/bulk-send', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'),
     async (req, res) => {
       try {
-        const { rows } = await pool.query(
-          `SELECT id FROM bills WHERE deleted_at IS NULL AND status IN ('pending','overdue')`
-        );
+        const b = req.body || {};
+        const rawIds = Array.isArray(b.billIds) ? b.billIds : [];
+        const billIds = Array.from(new Set(rawIds
+          .map((x) => Number(x))
+          .filter((x) => Number.isInteger(x) && x > 0)));
+        if (rawIds.length && billIds.length !== rawIds.length) {
+          return res.status(400).json({
+            error: 'billIds must contain only positive integers',
+            code: 'INVALID_BILL_IDS',
+          });
+        }
+        if (billIds.length > 500) {
+          return res.status(400).json({
+            error: 'billIds limit is 500 per bulk-send request',
+            code: 'BILL_IDS_LIMIT',
+          });
+        }
+        const period = b.period != null ? String(b.period).trim().slice(0, 16) : null;
+        if (period && !/^\d{4}-(0[1-9]|1[0-2])$/.test(period)) {
+          return res.status(400).json({
+            error: 'period must be YYYY-MM',
+            code: 'INVALID_PERIOD',
+          });
+        }
+        const sendAll = b.all === true;
+        if (!billIds.length && !period && !sendAll) {
+          return res.status(400).json({
+            error: 'bulk-send requires a scope: period, billIds, or all:true',
+            code: 'BULK_SEND_SCOPE_REQUIRED',
+            hint: 'Pass { period: "YYYY-MM" } from the billing page, { billIds:[...] } for selected rows, or { all:true } only for an intentional system-wide reminder.',
+          });
+        }
+
+        let rows = [];
+        let scope = null;
+        if (billIds.length) {
+          const q = await pool.query(
+            `SELECT id FROM bills
+              WHERE deleted_at IS NULL
+                AND status IN ('pending','overdue')
+                AND id = ANY($1::bigint[])
+              ORDER BY due_date NULLS LAST, id ASC`,
+            [billIds]
+          );
+          rows = q.rows;
+          scope = { billIds };
+        } else if (period) {
+          const q = await pool.query(
+            `SELECT id FROM bills
+              WHERE deleted_at IS NULL
+                AND status IN ('pending','overdue')
+                AND period=$1
+              ORDER BY due_date NULLS LAST, id ASC`,
+            [period]
+          );
+          rows = q.rows;
+          scope = { period };
+        } else {
+          const q = await pool.query(
+            `SELECT id FROM bills
+              WHERE deleted_at IS NULL
+                AND status IN ('pending','overdue')
+              ORDER BY due_date NULLS LAST, id ASC`
+          );
+          rows = q.rows;
+          scope = { all: true };
+        }
         let enqueued = 0, failed = 0;
         for (const row of rows) {
           try {
@@ -2249,8 +2526,8 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             if (out.ok) enqueued++; else failed++;
           } catch { failed++; }
         }
-        audit(req, 'bill.bulk_send', null, null, { attempted: rows.length, enqueued, failed });
-        res.json({ ok: true, attempted: rows.length, enqueued, failed });
+        audit(req, 'bill.bulk_send', null, null, { scope, attempted: rows.length, enqueued, failed });
+        res.json({ ok: true, scope, attempted: rows.length, enqueued, failed });
       } catch (err) {
         console.error('bulk-send error:', err);
         res.status(500).json({ error: 'internal error', code: 'DB_ERROR' });

@@ -2540,6 +2540,104 @@ test('isChargeApplicableForPeriod honors quarterly frequency', () => {
     { frequency: 'monthly', end_at: '2026-04-30' }, '2026-05'), false, 'after end');
 });
 
+test('recurring charges are selected by bill period, not wall-clock date', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const bills = fs.readFileSync(path.join(__dirname, '..', 'routes', 'bills-extras.js'), 'utf8');
+  const sched = fs.readFileSync(path.join(__dirname, '..', 'services', 'scheduler.js'), 'utf8');
+  assert.match(bills, /SELECT id, label, amount, frequency, start_at, end_at FROM recurring_charges/,
+    'bill routes must load recurring start/end dates for period filtering');
+  assert.doesNotMatch(bills, /start_at IS NULL OR start_at <= CURRENT_DATE/,
+    'manual/bulk billing must not pre-filter recurring charges by today');
+  assert.doesNotMatch(sched, /start_at IS NULL OR start_at <= CURRENT_DATE/,
+    'scheduler billing must not pre-filter recurring charges by today');
+  assert.match(bills, /isChargeApplicableForPeriod\(.*period/s,
+    'bill routes must defer recurring inclusion to period-aware helper');
+  assert.match(sched, /isChargeApplicableForPeriod\(.*period/s,
+    'scheduler must defer recurring inclusion to period-aware helper');
+});
+
+test('billing preview filters recurring charges by selected period', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-billing.jsx'), 'utf8');
+  assert.match(src, /function recurringAppliesToPeriod\(charge, period\)/,
+    'admin preview needs the same period-aware recurring filter concept as the server');
+  assert.match(src, /if \(!recurringAppliesToPeriod\(c, currentPeriod\)\) continue;/,
+    'preview must not show future, expired, or off-quarter recurring rows');
+  assert.match(src, /start_at: c\.start_at \|\| c\.startAt \|\| null/,
+    'preview should preserve recurring start date for diagnostics');
+  assert.match(src, /end_at: c\.end_at \|\| c\.endAt \|\| null/,
+    'preview should preserve recurring end date for diagnostics');
+});
+
+test('billing preview uses server-side canonical bill calculation', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const bills = fs.readFileSync(path.join(__dirname, '..', 'routes', 'bills-extras.js'), 'utf8');
+  const ui = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-billing.jsx'), 'utf8');
+  assert.match(bills, /r\.get\('\/preview-period'/,
+    'bills router must expose a canonical preview endpoint');
+  assert.match(bills, /activeContractForRoom\(pool, roomId\)/,
+    'preview must load active contracts so locked rent matches generated bills');
+  assert.match(bills, /meter\.attachBillingReadingsForPeriod\(pool, room, parsed\.period\)/,
+    'preview must use period-scoped meter readings');
+  assert.match(bills, /billing\.buildBill\(\{/,
+    'preview must use the same bill builder as real issue paths');
+  assert.match(bills, /billing\.isChargeApplicableForPeriod\(x, parsed\.period\)/,
+    'preview must filter recurring charges by selected bill period');
+  assert.match(ui, /serverPreviewBills/,
+    'admin billing page must keep server preview rows');
+  assert.match(ui, /\/api\/bills\/preview-period\?period=\$\{encodeURIComponent\(currentPeriod\)\}/,
+    'admin billing page must request canonical preview for the selected period');
+});
+
+test('bill generation blocks missing period meter readings unless forced', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const route = fs.readFileSync(path.join(__dirname, '..', 'routes', 'bills-extras.js'), 'utf8');
+  const scheduler = fs.readFileSync(path.join(__dirname, '..', 'services', 'scheduler.js'), 'utf8');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const ui = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-billing.jsx'), 'utf8');
+  const start = route.indexOf("r.post('/bulk-generate'");
+  const end = route.indexOf('// Build YYYY-MM-DD', start);
+  assert.ok(start > -1 && end > start, 'bulk-generate preflight block must be locatable');
+  const block = route.slice(start, end);
+  assert.match(block, /meter\.buildPeriodSummary\(pool, rooms, period\)/,
+    'bulk-generate must inspect meter readings for the selected period');
+  assert.match(block, /sev: 'high', code: 'NO_METER_READINGS'/,
+    'missing period meter readings must be a hard precondition failure');
+  assert.match(block, /force:true/,
+    'response hint must keep the intentional override path explicit');
+  assert.match(scheduler, /meter\.buildPeriodSummary\(pool, rooms, period\)/,
+    'scheduler auto-generation must run the same missing-meter check');
+  assert.match(server, /sev: 'high', code: 'NO_METER_READINGS'/,
+    'billing-readiness must surface missing meters as high severity');
+  assert.match(ui, /sev: 'high'[\s\S]{0,120}code: 'NO_METER_READINGS'/,
+    'billing UI fallback preflight must also treat missing meters as high severity');
+});
+
+test('bill bulk-send requires an explicit scope', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const bills = fs.readFileSync(path.join(__dirname, '..', 'routes', 'bills-extras.js'), 'utf8');
+  const ui = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-billing.jsx'), 'utf8');
+  const start = bills.indexOf("r.post('/bulk-send'");
+  const end = bills.indexOf("  // POST /api/bills/:id/pay", start);
+  assert.ok(start > -1 && end > start, 'bulk-send handler must be locatable');
+  const block = bills.slice(start, end);
+  assert.match(block, /BULK_SEND_SCOPE_REQUIRED/,
+    'bulk-send must fail closed when caller omits period, billIds, or all:true');
+  assert.match(block, /period=\$1/,
+    'bulk-send must support period-scoped reminders');
+  assert.match(block, /id = ANY\(\$1::bigint\[\]\)/,
+    'bulk-send must support selected bill IDs');
+  assert.match(block, /b\.all === true/,
+    'system-wide send must be an explicit all:true action');
+  assert.match(ui, /apiCall\('\/api\/bills\/bulk-send'[\s\S]{0,180}period: currentPeriod/,
+    'billing page bulk-send must pass the selected period');
+});
+
 test('buildBill applies contract-length discount to rent only', () => {
   const billing = require('../services/billing');
   const room = { id: '101', rent: 5000, waterUnits: 5, elecUnits: 100, tenant: { name: 'T' } };

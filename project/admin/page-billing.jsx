@@ -29,6 +29,37 @@ function unitsFromReadingsOrFallback(room, prefix) {
   return Math.max(0, Number(room?.[`${prefix}Units`]) || 0);
 }
 
+function recurringAppliesToPeriod(charge, period) {
+  if (!charge || !period) return false;
+  const match = String(period).match(/^(\d{4})-(\d{2})$/);
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  if (month < 1 || month > 12) return false;
+  const periodStart = new Date(Date.UTC(year, month - 1, 1));
+  const periodEnd = new Date(Date.UTC(year, month, 0, 23, 59, 59));
+  const startRaw = charge.start_at || charge.startAt;
+  if (startRaw) {
+    const start = new Date(startRaw);
+    if (Number.isFinite(start.getTime()) && start.getTime() > periodEnd.getTime()) return false;
+  }
+  const endRaw = charge.end_at || charge.endAt;
+  if (endRaw) {
+    const end = new Date(endRaw);
+    if (Number.isFinite(end.getTime()) && end.getTime() < periodStart.getTime()) return false;
+  }
+  const frequency = charge.frequency || 'monthly';
+  if (frequency === 'monthly' || frequency === 'one_off') return true;
+  if (frequency === 'quarterly') {
+    const start = startRaw ? new Date(startRaw) : null;
+    const anchorMonth = start && Number.isFinite(start.getTime())
+      ? start.getUTCMonth() + 1
+      : 1;
+    return (((month - anchorMonth) % 3) + 3) % 3 === 0;
+  }
+  return true;
+}
+
 function utilityDetailFromBill(b, prefix) {
   // Mirror services/billing.js#buildUtilityItem detail logic so the admin
   // table cell shows the same before/after string the tenant sees on the
@@ -186,6 +217,27 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
     return () => { cancel = true; };
   }, [currentPeriod]);
 
+  // Server-side canonical preview. This path uses the same rent resolver,
+  // active contract lookup, period meter readings, and recurring-charge
+  // filter as actual bill generation. The older browser calculation below is
+  // retained only as an offline/degraded fallback.
+  const [serverPreviewBills, setServerPreviewBills] = React.useState(null);
+  React.useEffect(() => {
+    let cancel = false;
+    setServerPreviewBills(null);
+    fetch(`/api/bills/preview-period?period=${encodeURIComponent(currentPeriod)}`, {
+      credentials: 'same-origin',
+    })
+      .then(async (r) => {
+        const d = await r.json().catch(() => ({}));
+        if (cancel) return;
+        if (r.ok && d.ok && Array.isArray(d.bills)) setServerPreviewBills(d.bills);
+        else setServerPreviewBills(null);
+      })
+      .catch(() => { if (!cancel) setServerPreviewBills(null); });
+    return () => { cancel = true; };
+  }, [currentPeriod, dbBills]);
+
   // Active recurring charges keyed by roomId. Tenant-scoped rows are resolved
   // through /api/tenants?status=active so the preview matches the server's
   // loadRecurringFor({ tenantId, roomId }) behaviour during real bill create.
@@ -216,12 +268,15 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         }
         const byRoom = {};
         for (const c of (d.charges || [])) {
+          if (!recurringAppliesToPeriod(c, currentPeriod)) continue;
           const rid = c.room_id || c.roomId || tenantById[String(c.tenant_id || c.tenantId || '')];
           if (!rid) continue;
           (byRoom[rid] = byRoom[rid] || []).push({
             label: c.label,
             amount: Number(c.amount) || 0,
             frequency: c.frequency,
+            start_at: c.start_at || c.startAt || null,
+            end_at: c.end_at || c.endAt || null,
           });
         }
         setActiveRecurring(byRoom);
@@ -239,18 +294,10 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
     return map;
   }, [dbBills]);
 
-  // Generate bills from rooms — recompute with CURRENT config rates so
-  // changes in Pricing engine reflect immediately in this month's bills.
-  // Uses resolveRoomRent (override > formula > legacy) instead of the static
-  // room.rent snapshot so admin's pricing edits show up in the preview
-  // without waiting for someone to "Save" each room. For occupied rooms
-  // with an active contract, the server-side bill engine still bills the
-  // contract.monthly_rent locked at signing (see services/pricing.js); we
-  // can't see contracts here client-side, so existing tenants will preview
-  // formula but get billed the locked rate. That's a UX gap (preview != bill
-  // for occupied rooms) but it's the lesser of two evils — the alternative,
-  // showing room.rent, was a STALE snapshot that didn't track pricing edits
-  // at all.
+  // Generate preview rows. Prefer serverPreviewBills because it uses the
+  // same resolver as actual bill generation, including active contract rent.
+  // The local calculation remains as a degraded fallback for offline/local
+  // preview only.
   const bills = useMemo(() => {
     const globalWaterRate = config.utilities?.waterRate ?? 18;
     const globalElecRate  = config.utilities?.elecRate  ?? 8;
@@ -270,7 +317,40 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
     const periodDisplay = fmtMonthTH(currentPeriodDate);
     const dueDay = Math.max(1, Math.min(28, Number(config.notify?.dueOnDay) || 7));
     const dueIso = `${currentPeriod}-${String(dueDay).padStart(2, '0')}`;
-    return Object.values(rooms)
+    const estimates = Array.isArray(serverPreviewBills)
+      ? serverPreviewBills.map((b) => ({
+        ...b,
+        id: b.id || b.billNo || `INV-${currentPeriod}-${b.roomId}`,
+        roomId: b.roomId,
+        tenant: b.tenant || b.tenantName || '',
+        phone: b.phone || b.tenantPhone || '',
+        period: b.period || currentPeriod,
+        periodDisplay: b.periodDisplay || periodDisplay,
+        rent: Number(b.rent) || 0,
+        rentSource: b.rentSource || null,
+        water: Number(b.water ?? b.waterAmount) || 0,
+        elec: Number(b.elec ?? b.elecAmount) || 0,
+        wifi: Number(b.wifi) || 0,
+        waterUnits: Number(b.waterUnits) || 0,
+        waterRate: Number(b.waterRate) || 0,
+        waterPrevReading: numOrNull(b.waterPrevReading),
+        waterCurrentReading: numOrNull(b.waterCurrentReading),
+        elecUnits: Number(b.elecUnits) || 0,
+        elecRate: Number(b.elecRate) || 0,
+        elecPrevReading: numOrNull(b.elecPrevReading),
+        elecCurrentReading: numOrNull(b.elecCurrentReading),
+        charges: Array.isArray(b.charges) ? b.charges : [],
+        chargesTotal: Number(b.chargesTotal) || 0,
+        subtotal: Number(b.subtotal) || 0,
+        penalty: Number(b.penalty ?? b.lateFee) || 0,
+        total: Number(b.total) || 0,
+        dueDate: b.dueDate || dueIso,
+        dueDateDisplay: b.dueDateDisplay || `${dueDay} ${periodDisplay}`,
+        status: b.status || 'unpaid',
+        overdueDays: Number(b.overdueDays) || 0,
+        _source: 'server-preview',
+      }))
+      : Object.values(rooms)
       .filter(r => r.tenant && (r.status === 'occupied' || r.status === 'overdue'))
       .map(r => {
         // Flat-mode preview matches services/billing.js — if room mode is
@@ -354,7 +434,8 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
           status: r.billPaidAt ? 'paid' : 'unpaid',
           overdueDays: r.overdueDays || 0,
         };
-      })
+      });
+    return estimates
       // Overlay real DB bill status on top of the estimate so the row
       // accurately reflects what was actually issued + collected. The
       // estimate stays as the breakdown source (waterUnits/elecUnits etc.
@@ -363,7 +444,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
       // the per-row "ออกแล้ว/ประมาณ" badge in the table.
       .map((est) => {
         const real = realBillsByRoom[String(est.roomId)];
-        if (!real) return { ...est, _source: 'estimate' };
+        if (!real) return { ...est, _source: est._source || 'estimate' };
         return {
           ...est,
           _source: 'db',
@@ -396,7 +477,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
           latestPaidAt: real.latest_paid_at || null,
         };
       });
-  }, [rooms, config, realBillsByRoom, currentPeriod, currentPeriodDate, activeRecurring, periodMeters]);
+  }, [rooms, config, realBillsByRoom, currentPeriod, currentPeriodDate, activeRecurring, periodMeters, serverPreviewBills]);
 
   const filtered = useMemo(() => {
     if (tab === 'current') return bills;
@@ -806,7 +887,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
       );
       if (noMeter.length > 0) {
         issues.push({
-          sev: 'med',
+          sev: 'high',
           code: 'NO_METER_READINGS',
           msg: `${noMeter.length} ห้องยังไม่มีเลขมิเตอร์ครบสำหรับรอบ ${currentPeriod} — บิลส่วนน้ำ/ไฟอาจเป็น 0 หรือข้อมูลไม่ครบ`,
           fix: `/admin#meters → เลือกรอบ ${currentPeriod} แล้วบันทึกเลขมิเตอร์ก่อนออกบิล`,
@@ -973,7 +1054,10 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         });
         setSelected(new Set());
       } else {
-        const d = await apiCall('/api/bills/bulk-send', { method: 'POST' });
+        const d = await apiCall('/api/bills/bulk-send', {
+          method: 'POST',
+          body: JSON.stringify({ period: currentPeriod }),
+        });
         setToast && setToast({
           kind: d.enqueued > 0 ? 'success' : 'info',
           message: d.enqueued > 0

@@ -347,11 +347,22 @@ async function tickLateFee(pool, flags, now, state) {
         // cheaper than per-row checks, and the index on
         // payments(status, created_at DESC) makes the subquery fast.
         const { rows: stillOverdue } = await pool.query(
-          `SELECT id, total, late_fee, due_date
+          // Same EXCLUDE-ex-tenant filter as the overdue digest (see below):
+          // keep orphan bills (tenant_id NULL) but stop growing late_fee on
+          // bills whose tenant has moved out / been soft-deleted. Previously
+          // Phase B grew penalties on ex-tenants' bills forever while the
+          // digest hid them, so the two views disagreed and the fee ballooned
+          // unmonitored. Those bills should be reconciled, not auto-penalised.
+          `SELECT b.id, b.total, b.late_fee, b.due_date
              FROM bills b
+             LEFT JOIN tenants t ON t.id = b.tenant_id
             WHERE b.status = 'overdue'
               AND b.deleted_at IS NULL
               AND b.paid_at IS NULL
+              AND (
+                b.tenant_id IS NULL
+                OR (t.deleted_at IS NULL AND COALESCE(t.status,'active')='active')
+              )
               AND NOT EXISTS (
                 SELECT 1 FROM payments p
                  WHERE p.bill_id = b.id AND p.status = 'pending'
@@ -594,6 +605,24 @@ async function tickBillGen(pool, flags, now, state) {
     if (anyMeteredWater && (!Number.isFinite(wRate) || wRate <= 0)) issues.push('waterRate ไม่ตั้ง / ≤ 0');
     if (anyMeteredElec  && (!Number.isFinite(eRate) || eRate <= 0)) issues.push('elecRate ไม่ตั้ง / ≤ 0');
     if (eligibleRooms.length === 0) issues.push('ไม่มีห้อง occupied/overdue ที่จะออกบิล');
+    if (eligibleRooms.length > 0) {
+      const periodMeters = await meter.buildPeriodSummary(pool, rooms, period);
+      const missingMeters = [];
+      for (const r of eligibleRooms) {
+        const fields = [];
+        const m = periodMeters[String(r.id)] || {};
+        if (!billing.isFlatUtilityConfigured(r, 'water') && m.waterCurrentReading == null) fields.push('water');
+        if (!billing.isFlatUtilityConfigured(r, 'elec') && m.elecCurrentReading == null) fields.push('elec');
+        if (fields.length) {
+          missingMeters.push(`${r.id || '-'}:${fields.join('+')}`);
+        }
+      }
+      if (missingMeters.length) {
+        issues.push(
+          `ไม่มีเลขมิเตอร์รอบ ${period} ครบ ${missingMeters.length} ห้อง (${missingMeters.slice(0, 10).join(', ')})`
+        );
+      }
+    }
 
     if (issues.length > 0) {
       // Latch via state so we don't re-alert every hourly tick — only
@@ -712,8 +741,6 @@ async function tickBillGen(pool, flags, now, state) {
             const rc = await billClient.query(
               `SELECT id, label, amount, frequency, start_at, end_at FROM recurring_charges
                  WHERE active = TRUE AND (${ors.join(' OR ')})
-                   AND (start_at IS NULL OR start_at <= CURRENT_DATE)
-                   AND (end_at IS NULL OR end_at >= CURRENT_DATE)
                  FOR UPDATE`,
               params
             );
@@ -1858,8 +1885,15 @@ async function tickPaymentReminder(pool, flags, now, state) {
       const dueDayStr = dueDt
         ? dueDt.toLocaleDateString('th-TH', { year: 'numeric', month: 'long', day: 'numeric' })
         : '-';
+      // Whole-CALENDAR-day difference, not a raw timestamp delta. due_date is
+      // a date-only column (local midnight); `now` carries the time of day, so
+      // subtracting the raw getTime() values yielded a fractional day that
+      // Math.round flipped to -1 once the tick fired after ~noon — making a
+      // bill due TODAY render "🔔 อีก -1 วันครบกำหนด" and never hitting the
+      // "วันนี้ครบกำหนด" tier. Normalise both sides to local midnight first.
+      const startOfDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
       const daysUntilDue = dueDt
-        ? Math.round((dueDt.getTime() - now.getTime()) / 86_400_000)
+        ? Math.round((startOfDay(dueDt).getTime() - startOfDay(now).getTime()) / 86_400_000)
         : null;
       const isToday = daysUntilDue === 0;
       const isOverdueRow = b.status === 'overdue';
