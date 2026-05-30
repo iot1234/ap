@@ -2149,11 +2149,28 @@ module.exports = function buildTenantOpsRouter(ctx) {
         // cycle. Room-scoped recurring charges (room_id set, tenant_id
         // null) stay active because they belong to the unit, not the
         // person — the next tenant inherits them.
+        // Carried late fees (one_off charges an admin created via the 'carry'
+        // decision) must NOT silently vanish on checkout — fold them into the
+        // closing bill below so the tenant still pays what they owe. Capture
+        // them first, then EXCLUDE them from the bulk auto-deactivation so they
+        // survive to be folded in (or stay collectible if no closing bill runs).
+        const carriedLF = await client.query(
+          `SELECT id, amount FROM recurring_charges
+            WHERE tenant_id=$1 AND active=TRUE AND frequency='one_off'
+              AND label LIKE 'ค่าปรับล่าช้า%'`,
+          [id]
+        ).catch((err) => { if (err.code === '42P01') return { rows: [] }; throw err; });
+        const carriedLateFeeRows = carriedLF.rows || [];
+        const carriedLateFeeTotal = Math.round(
+          carriedLateFeeRows.reduce((s, r) => s + (Number(r.amount) || 0), 0) * 100
+        ) / 100;
+
         const deactivatedRecurring = await client.query(
           `UPDATE recurring_charges
               SET active=FALSE, updated_at=NOW(),
                   notes = COALESCE(notes,'') || E'\n[auto] deactivated on checkout at ' || NOW()::text
             WHERE tenant_id=$1 AND active=TRUE
+              AND NOT (frequency='one_off' AND label LIKE 'ค่าปรับล่าช้า%')
             RETURNING id, label, frequency`,
           [id]
         ).catch((err) => {
@@ -2206,18 +2223,39 @@ module.exports = function buildTenantOpsRouter(ctx) {
             ) / 100;
             const billNo = billing.makeBillNo(`${billingRoom}-X`, period, { tenantId: id });
             const dueDate = billing.formatYMD(ty, tm, Math.min(daysInMonth, daysLived + 7));
+            // Fold any carried late fees onto the closing bill (as the bill's
+            // late_fee) so the moving-out tenant still settles them.
+            const closingLateFee = carriedLateFeeTotal > 0 ? carriedLateFeeTotal : 0;
+            const closingTotal = Math.round((proRatedRent + closingLateFee) * 100) / 100;
+            const otherLines = [{ label: 'pro-rate', amount: proRatedRent, daysLived, daysInMonth }];
+            if (closingLateFee > 0) {
+              otherLines.push({ label: 'ค่าปรับล่าช้าค้างยกมา', amount: closingLateFee });
+            }
             try {
               const ins = await client.query(
                 `INSERT INTO bills
-                   (bill_no, tenant_id, room_id, period, rent, subtotal, total, due_date, status,
+                   (bill_no, tenant_id, room_id, period, rent, subtotal, late_fee, total, due_date, status,
                     other)
-                 VALUES ($1,$2,$3,$4,$5,$5,$5,$6,'pending',$7::jsonb)
+                 VALUES ($1,$2,$3,$4,$5,$5,$8,$9,$6,'pending',$7::jsonb)
                  ON CONFLICT (bill_no) DO NOTHING
                  RETURNING id, bill_no, total, due_date`,
                 [billNo, id, billingRoom, period, proRatedRent, dueDate,
-                 JSON.stringify([{ label: 'pro-rate', amount: proRatedRent, daysLived, daysInMonth }])]
+                 JSON.stringify(otherLines), closingLateFee, closingTotal]
               );
               closingBill = ins.rows[0] || null;
+              // Only deactivate the carried charges once they are safely folded
+              // into a created closing bill (don't lose them on an ON CONFLICT
+              // skip). If no closing bill was created, they stay active so admin
+              // can still collect them.
+              if (closingBill && closingLateFee > 0 && carriedLateFeeRows.length) {
+                await client.query(
+                  `UPDATE recurring_charges
+                      SET active=FALSE, updated_at=NOW(),
+                          notes = COALESCE(notes,'') || E'\n[auto] folded into closing bill ' || $2
+                    WHERE id = ANY($1::bigint[]) AND active=TRUE`,
+                  [carriedLateFeeRows.map((r) => Number(r.id)), String(closingBill.bill_no || closingBill.id)]
+                ).catch(() => { /* best-effort — leave active if this fails */ });
+              }
             } catch (err) {
               if (err.code !== '23505') throw err;
               // Race against partial-unique — fine, just skip.

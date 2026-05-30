@@ -7462,3 +7462,14 @@ test("full citizen-ID reveal is audited", () => {
   const src = fs.readFileSync(path.join(__dirname, "..", "routes", "tenant-ops.js"), "utf8");
   assert.ok(src.includes("tenant.citizen_reveal"), "a successful full citizen-ID decrypt must write an audit row");
 });
+
+test("checkout folds carried late fees into the closing bill instead of dropping them", () => {
+  const fs = require("node:fs"); const path = require("node:path");
+  const src = fs.readFileSync(path.join(__dirname, "..", "routes", "tenant-ops.js"), "utf8");
+  // Carried one_off late fees must be excluded from the bulk auto-deactivation
+  assert.ok(src.includes("AND NOT (frequency="), "bulk deactivation must exclude carried late-fee one_offs");
+  assert.ok(src.includes("carriedLateFeeTotal"), "checkout must total the carried late fees");
+  // and folded onto the closing bill as its late_fee
+  assert.ok(src.includes("closingLateFee"), "closing bill must carry the folded late fee");
+  assert.ok(src.includes("folded into closing bill"), "folded carries must be deactivated with an audit note");
+});
