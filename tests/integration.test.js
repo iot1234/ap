@@ -923,6 +923,10 @@ test('GET /api/bills can be scoped by tenantId so old room bills do not bleed in
     'invalid tenantId response must tell admin how to recover');
   assert.match(body, /where\.push\(`b\.tenant_id=\$\$\{params\.length\}`\)/,
     'tenantId filter must constrain bills by bills.tenant_id');
+  assert.match(body, /LEFT JOIN tenants t ON t\.id = b\.tenant_id/,
+    'bill list must join tenants so callers can display the bill owner, not only the room');
+  assert.match(body, /t\.full_name AS bill_tenant_name[\s\S]{0,180}t\.status AS bill_tenant_status/,
+    'bill list must expose an owner snapshot for history/audit screens');
 });
 
 test('/api/notify/bill resolves the tenant instead of notifying only the owner', () => {
@@ -1749,7 +1753,7 @@ test('admin billing selected period drives estimates and bulk generation', () =>
   // recurring_charges merge the server does — admin sees the same line
   // items pre- and post-issue. The deps must include it so the memo
   // re-runs when a row is added/removed mid-session.
-  assert.match(billsBlock, /\[rooms, config, realBillsByRoom, currentPeriod, currentPeriodDate, activeRecurring(,\s*\w+)*\]/,
+  assert.match(billsBlock, /\[rooms, config, realBillsByOwnerKey, legacyRealBillsByRoom, dbBills, currentPeriod, currentPeriodDate, activeRecurring(,\s*\w+)*\]/,
     'estimate must recompute after period changes + when recurring charges refresh');
 
   const genIdx = src.indexOf('const handleGenerate = async');
@@ -1759,6 +1763,26 @@ test('admin billing selected period drives estimates and bulk generation', () =>
     'bulk-generate payload must use the selected period');
   assert.doesNotMatch(generateBlock, /const now = new Date\(\)[\s\S]{0,120}const period =/,
     'bulk generation must not silently switch back to wall-clock month');
+});
+
+test('admin billing table preserves DB bill owner history by tenant_id', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-billing.jsx'), 'utf8');
+  assert.match(src, /function ownerTenantId\(row\)/,
+    'billing page must normalize bill/preview tenant ids');
+  assert.match(src, /billOwnerKey\(b\.room_id, tenantId\)/,
+    'real DB bills must be keyed by room + tenant id');
+  assert.match(src, /const consumedDbBillIds = new Set\(\)/,
+    'merged preview must track which DB bills were already displayed');
+  assert.match(src, /rows\.push\(rowFromDbBill\(real\)\)/,
+    'DB-only bills such as moved-out closing bills must stay visible');
+  assert.doesNotMatch(src, /const realBillsByRoom = useMemo/,
+    'room-only bill overlay would hide old tenant bills in the same room');
+  assert.match(src, /key: 'tenant', label: 'เจ้าของบิล'/,
+    'table must label the owner column explicitly');
+  assert.match(src, /tenant_id=\{b\.tenantId \|\| '-'\}/,
+    'table must display the persisted bills.tenant_id for auditability');
 });
 
 test('admin billing UI uses text labels instead of ambiguous icon-only controls', () => {
@@ -3138,6 +3162,10 @@ test('admin tenants page uses tenant rows as source of truth and has audit histo
     'history tab must call the tenant history endpoint by tenant id');
   assert.match(tenants, /tenantId=\$\{encodeURIComponent\(t\.dbId\)\}[\s\S]{0,160}\/api\/bills\?\$\{qs\}&limit=24/,
     'bill tab must prefer tenantId so room turnover does not mix ledgers');
+  assert.match(tenants, /bill_tenant_name/,
+    'tenant bill/history tabs must render the owner snapshot returned by bill APIs');
+  assert.match(tenants, /tenant_id=\{tenantId \|\| '-'\}/,
+    'tenant bill tab must show which tenant_id each bill belongs to');
   assert.match(tenants, /ผู้เช่าเก่ายังมีบัตร active[\s\S]{0,260}ยอดค้างรวม/,
     'history tab must surface high-risk follow-up alerts');
   assert.match(tenants, /การชำระเงิน/,
@@ -6672,6 +6700,10 @@ test('GET /api/tenants/:id/history returns combined view (works on moved_out)', 
   assert.match(src, /paymentsTotal/, 'totals must include verified-payments sum');
   assert.match(src, /accessCardsActive[\s\S]{0,200}accessCardsRevoked/,
     'totals must include card-status counts');
+  assert.match(src, /\$2::text AS bill_tenant_name[\s\S]{0,120}\$4::text AS bill_tenant_status/,
+    'history bills must include a clear owner snapshot for moved-out debt review');
+  assert.match(src, /tenant_id/,
+    'history bills must carry tenant_id so admins can identify whose bill it is');
 });
 
 test('GET /api/rooms/:id/history reads contract history, not only current_room_id', () => {

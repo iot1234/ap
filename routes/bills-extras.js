@@ -244,6 +244,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       id: bill.billNo || `INV-${bill.period}-${bill.roomId}`,
       billNo: bill.billNo,
       roomId: bill.roomId,
+      tenantId: room?.tenant?.id || null,
       tenant: bill.tenantName,
       phone: bill.tenantPhone,
       period: bill.period,
@@ -376,6 +377,13 @@ module.exports = function buildBillsExtrasRouter(ctx) {
     try {
       const sql = withPayments
         ? `SELECT b.*,
+                  t.id AS bill_tenant_id,
+                  t.full_name AS bill_tenant_name,
+                  t.phone AS bill_tenant_phone,
+                  t.email AS bill_tenant_email,
+                  t.status AS bill_tenant_status,
+                  t.current_room_id AS bill_tenant_current_room_id,
+                  t.deleted_at AS bill_tenant_deleted_at,
                   COUNT(p.id) FILTER (WHERE p.status='pending')::int  AS pending_slip_count,
                   COUNT(p.id) FILTER (WHERE p.status='verified')::int AS verified_slip_count,
                   COUNT(p.id) FILTER (WHERE p.status='rejected')::int AS rejected_slip_count,
@@ -395,12 +403,24 @@ module.exports = function buildBillsExtrasRouter(ctx) {
                      ORDER BY verified_at DESC LIMIT 1
                   ) AS latest_paid_provider
              FROM bills b
+             LEFT JOIN tenants t ON t.id = b.tenant_id
              LEFT JOIN payments p ON p.bill_id = b.id
             WHERE ${where.join(' AND ')}
-            GROUP BY b.id
+            GROUP BY b.id, t.id, t.full_name, t.phone, t.email, t.status,
+                     t.current_room_id, t.deleted_at
             ORDER BY b.created_at DESC
             LIMIT $${params.length - 1} OFFSET $${params.length}`
-        : `SELECT b.* FROM bills b WHERE ${where.join(' AND ')}
+        : `SELECT b.*,
+                  t.id AS bill_tenant_id,
+                  t.full_name AS bill_tenant_name,
+                  t.phone AS bill_tenant_phone,
+                  t.email AS bill_tenant_email,
+                  t.status AS bill_tenant_status,
+                  t.current_room_id AS bill_tenant_current_room_id,
+                  t.deleted_at AS bill_tenant_deleted_at
+             FROM bills b
+             LEFT JOIN tenants t ON t.id = b.tenant_id
+            WHERE ${where.join(' AND ')}
             ORDER BY b.created_at DESC
             LIMIT $${params.length - 1} OFFSET $${params.length}`;
       const { rows } = await pool.query(sql, params);

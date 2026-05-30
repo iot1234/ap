@@ -421,13 +421,17 @@ module.exports = function buildTenantOpsRouter(ctx) {
 
         // Bills (every status, soft-deleted excluded). Latest first.
         const bills = await pool.query(
-          `SELECT id, bill_no, room_id, period, total, due_date, paid_at, status,
+          `SELECT id, bill_no, tenant_id,
+                  $2::text AS bill_tenant_name,
+                  $3::text AS bill_tenant_phone,
+                  $4::text AS bill_tenant_status,
+                  room_id, period, total, due_date, paid_at, status,
                   rent, water_amount, elec_amount, wifi, late_fee, vat,
                   created_at
              FROM bills
             WHERE tenant_id=$1 AND deleted_at IS NULL
             ORDER BY created_at DESC LIMIT 200`,
-          [id]
+          [id, tQ.rows[0].full_name || '', tQ.rows[0].phone || '', tQ.rows[0].status || '']
         );
 
         // Payments (joined to bill_no for display).

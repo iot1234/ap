@@ -2234,9 +2234,23 @@ function TabBills({ t }) {
   };
   const statusLabel = { paid: 'ชำระแล้ว', pending: 'รอชำระ', overdue: 'ค้างชำระ', void: 'ยกเลิก' };
   const statusColor = { paid: 'success', pending: 'warning', overdue: 'danger', void: 'muted' };
+  const ownerCell = (b) => {
+    const tenantId = b.tenant_id || b.bill_tenant_id || t.dbId || '';
+    const name = b.bill_tenant_name || t.name || (tenantId ? `tenant_id ${tenantId}` : '-');
+    const phone = b.bill_tenant_phone || t.phone || '';
+    return (
+      <div style={{ lineHeight: 1.35 }}>
+        <div style={{ fontSize: 12.5, color: C.ink, fontWeight: 500 }}>{name}</div>
+        <div style={{ fontSize: 10.5, color: C.muted }}>
+          tenant_id={tenantId || '-'}{phone ? ` · ${phone}` : ''}
+        </div>
+      </div>
+    );
+  };
 
   const columns = [
     { key: 'bill_no', label: 'เลขที่บิล', minWidth: 140, render: b => <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 12 }}>{b.bill_no || `#${b.id}`}</span> },
+    { key: 'owner', label: 'เจ้าของ', minWidth: 170, render: ownerCell },
     { key: 'period',  label: 'งวด',     minWidth: 100, render: b => periodTH(b.period) },
     { key: 'total',   label: 'จำนวน',   align: 'right', minWidth: 110,
       render: b => <span style={{ fontWeight: 600 }}>{fmtCurrency(Number(b.total) || 0)}</span> },
@@ -2349,6 +2363,12 @@ function TabHistory({ t }) {
   ];
   const billCols = [
     { key: 'bill_no', label: 'บิล', minWidth: 130 },
+    { key: 'owner', label: 'เจ้าของ', minWidth: 165, render: b => (
+      <div style={{ lineHeight: 1.35 }}>
+        <div style={{ fontSize: 12.5 }}>{b.bill_tenant_name || t.name || '-'}</div>
+        <div style={{ fontSize: 10.5, color: C.muted }}>tenant_id={b.tenant_id || '-'}</div>
+      </div>
+    ) },
     { key: 'room_id', label: 'ห้อง', minWidth: 70 },
     { key: 'period', label: 'รอบ', minWidth: 80 },
     { key: 'total', label: 'ยอด', align: 'right', minWidth: 90, render: b => Number(b.total || 0).toLocaleString('th-TH', { minimumFractionDigits: 2 }) },

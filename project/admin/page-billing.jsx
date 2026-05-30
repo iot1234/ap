@@ -10,6 +10,27 @@ function numOrNull(value) {
   return Number.isFinite(n) ? n : null;
 }
 
+function ownerTenantId(row) {
+  const raw = row?.tenantId ?? row?.tenant_id ?? row?.bill_tenant_id ?? row?.dbId;
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? String(n) : '';
+}
+
+function billOwnerKey(roomId, tenantId) {
+  return `${String(roomId || '')}::${String(tenantId || '')}`;
+}
+
+function parseBillOther(raw) {
+  if (Array.isArray(raw)) return raw;
+  if (typeof raw !== 'string' || !raw.trim()) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
 function fmtQty(n) {
   const value = Number(n) || 0;
   return Number.isInteger(value) ? String(value) : value.toFixed(2);
@@ -132,7 +153,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
   // Real bills from DB for the current period. Falls back to client estimate
   // (computed from rooms blob below) when no bills have been issued yet, so
   // the page still shows what bills WOULD look like — the difference is now
-  // visible via `realBillsByRoom` so admin can tell estimate from issued.
+  // visible via the owner-aware DB overlay so admin can tell estimate from issued.
   const currentPeriod = useMemo(() => {
     const now = new Date();
     const dt = new Date(now.getFullYear(), now.getMonth() + periodOffset, 1);
@@ -286,11 +307,24 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
     return () => { cancel = true; };
   }, [currentPeriod, dbBills]);
 
-  // Map room_id → real DB bill so the in-memory estimate can adopt the
-  // real status / total for any room that's already been billed this month.
-  const realBillsByRoom = useMemo(() => {
+  // Map room_id + tenant_id → real DB bill so a moved-out tenant's closing
+  // bill is not overwritten by the current tenant in the same room.
+  const realBillsByOwnerKey = useMemo(() => {
     const map = {};
-    (dbBills || []).forEach((b) => { if (b.room_id) map[String(b.room_id)] = b; });
+    (dbBills || []).forEach((b) => {
+      const tenantId = ownerTenantId(b);
+      const key = billOwnerKey(b.room_id, tenantId);
+      if (b.room_id && tenantId && !map[key]) map[key] = b;
+    });
+    return map;
+  }, [dbBills]);
+
+  const legacyRealBillsByRoom = useMemo(() => {
+    const map = {};
+    (dbBills || []).forEach((b) => {
+      const key = String(b.room_id);
+      if (b.room_id && !ownerTenantId(b) && !map[key]) map[key] = b;
+    });
     return map;
   }, [dbBills]);
 
@@ -322,6 +356,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         ...b,
         id: b.id || b.billNo || `INV-${currentPeriod}-${b.roomId}`,
         roomId: b.roomId,
+        tenantId: ownerTenantId(b),
         tenant: b.tenant || b.tenantName || '',
         phone: b.phone || b.tenantPhone || '',
         period: b.period || currentPeriod,
@@ -412,6 +447,8 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         return {
           id: `INV-${periodIso}-${r.id}`,
           roomId: r.id,
+          tenantId: ownerTenantId(r.tenant)
+            || (Number.isInteger(Number(r.tenant?.id)) && Number(r.tenant.id) > 0 ? String(Number(r.tenant.id)) : ''),
           tenant: r.tenant.name,
           phone: r.tenant.phone,
           period: periodIso,            // for API
@@ -442,50 +479,89 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
           overdueDays: r.overdueDays || 0,
         };
       });
-    return estimates
-      // Overlay real DB bill status on top of the estimate so the row
-      // accurately reflects what was actually issued + collected. The
-      // estimate stays as the breakdown source (waterUnits/elecUnits etc.
-      // from the rooms blob), but status + total come from the bills row
-      // when one exists for this room+period. The `_source` flag drives
-      // the per-row "ออกแล้ว/ประมาณ" badge in the table.
-      .map((est) => {
-        const real = realBillsByRoom[String(est.roomId)];
-        if (!real) return { ...est, _source: est._source || 'estimate' };
-        return {
-          ...est,
-          _source: 'db',
-          dbBillId: real.id,
-          dbBillNo: real.bill_no,
-          status: real.status === 'paid' ? 'paid' : 'unpaid',
-          dbStatus: real.status,                     // pending / paid / overdue / void
-          rent: numOrNull(real.rent) ?? est.rent,
-          water: numOrNull(real.water_amount) ?? est.water,
-          waterUnits: numOrNull(real.water_units) ?? est.waterUnits,
-          waterRate: numOrNull(real.water_rate) ?? est.waterRate,
-          waterPrevReading: numOrNull(real.water_prev_reading),
-          waterCurrentReading: numOrNull(real.water_current_reading),
-          elec: numOrNull(real.elec_amount) ?? est.elec,
-          elecUnits: numOrNull(real.elec_units) ?? est.elecUnits,
-          elecRate: numOrNull(real.elec_rate) ?? est.elecRate,
-          elecPrevReading: numOrNull(real.elec_prev_reading),
-          elecCurrentReading: numOrNull(real.elec_current_reading),
-          wifi: numOrNull(real.wifi) ?? est.wifi,
-          commonFee: est.commonFee || 0,             // no DB column; stored in `other`, mirrors config
-          total: Number(real.total) || est.total,    // trust DB total over estimate
-          // Slip summary (only present when fetched with withPayments=1).
-          // Used by the row "การชำระ" column + the "รอตรวจสลิป" tab
-          // so admin can see at-a-glance which bills have slips waiting,
-          // which were auto-paid, and which were admin-approved.
-          pendingSlipCount: Number(real.pending_slip_count) || 0,
-          verifiedSlipCount: Number(real.verified_slip_count) || 0,
-          rejectedSlipCount: Number(real.rejected_slip_count) || 0,
-          latestPaidBy: real.latest_paid_by || null,
-          latestPaidProvider: real.latest_paid_provider || null,
-          latestPaidAt: real.latest_paid_at || null,
-        };
-      });
-  }, [rooms, config, realBillsByRoom, currentPeriod, currentPeriodDate, activeRecurring, periodMeters, serverPreviewBills]);
+    const periodLabelFor = (period) => {
+      if (!period || typeof period !== 'string') return period || periodDisplay;
+      const m = period.match(/^(\d{4})-(\d{2})/);
+      if (!m) return period;
+      const d = new Date(Number(m[1]), Number(m[2]) - 1, 1);
+      return fmtMonthTH ? fmtMonthTH(d) : period;
+    };
+    const overdueDaysFor = (real) => {
+      if (real.status !== 'overdue' || !real.due_date) return 0;
+      const due = new Date(`${String(real.due_date).slice(0, 10)}T00:00:00+07:00`);
+      if (!Number.isFinite(due.getTime())) return 0;
+      return Math.max(0, Math.floor((Date.now() - due.getTime()) / 86400000));
+    };
+    const rowFromDbBill = (real, est = {}) => {
+      const tenantId = ownerTenantId(real) || ownerTenantId(est);
+      const other = parseBillOther(real.other);
+      const chargesTotal = other.reduce((s, c) => s + (Number(c && c.amount) || 0), 0);
+      const period = real.period || est.period || currentPeriod;
+      return {
+        ...est,
+        id: real.bill_no || (real.id ? `DB-${real.id}` : est.id),
+        roomId: real.room_id || est.roomId,
+        tenantId,
+        tenant: real.bill_tenant_name || est.tenant || (tenantId ? `tenant_id ${tenantId}` : 'ไม่ผูกผู้เช่า'),
+        phone: real.bill_tenant_phone || est.phone || '',
+        tenantStatus: real.bill_tenant_status || est.tenantStatus || null,
+        tenantCurrentRoomId: real.bill_tenant_current_room_id || null,
+        tenantDeletedAt: real.bill_tenant_deleted_at || null,
+        period,
+        periodDisplay: periodLabelFor(period),
+        rent: numOrNull(real.rent) ?? est.rent ?? 0,
+        rentSource: est.rentSource || null,
+        water: numOrNull(real.water_amount) ?? est.water ?? 0,
+        waterUnits: numOrNull(real.water_units) ?? est.waterUnits ?? 0,
+        waterRate: numOrNull(real.water_rate) ?? est.waterRate ?? 0,
+        waterPrevReading: numOrNull(real.water_prev_reading),
+        waterCurrentReading: numOrNull(real.water_current_reading),
+        elec: numOrNull(real.elec_amount) ?? est.elec ?? 0,
+        elecUnits: numOrNull(real.elec_units) ?? est.elecUnits ?? 0,
+        elecRate: numOrNull(real.elec_rate) ?? est.elecRate ?? 0,
+        elecPrevReading: numOrNull(real.elec_prev_reading),
+        elecCurrentReading: numOrNull(real.elec_current_reading),
+        wifi: numOrNull(real.wifi) ?? est.wifi ?? 0,
+        commonFee: est.commonFee || 0,
+        charges: other.length ? other : (est.charges || []),
+        chargesTotal: other.length ? chargesTotal : (est.chargesTotal || 0),
+        subtotal: numOrNull(real.subtotal) ?? est.subtotal ?? 0,
+        penalty: numOrNull(real.late_fee) ?? est.penalty ?? 0,
+        lateFee: numOrNull(real.late_fee) ?? est.lateFee ?? 0,
+        vat: numOrNull(real.vat) ?? est.vat ?? 0,
+        total: Number(real.total) || est.total || 0,
+        dueDate: real.due_date || est.dueDate || dueIso,
+        dueDateDisplay: real.due_date || est.dueDateDisplay || `${dueDay} ${periodLabelFor(period)}`,
+        status: real.status === 'paid' ? 'paid' : 'unpaid',
+        dbStatus: real.status,
+        overdueDays: real.status === 'overdue' ? overdueDaysFor(real) : (est.overdueDays || 0),
+        _source: 'db',
+        dbBillId: real.id,
+        dbBillNo: real.bill_no,
+        pendingSlipCount: Number(real.pending_slip_count) || 0,
+        verifiedSlipCount: Number(real.verified_slip_count) || 0,
+        rejectedSlipCount: Number(real.rejected_slip_count) || 0,
+        latestPaidBy: real.latest_paid_by || null,
+        latestPaidProvider: real.latest_paid_provider || null,
+        latestPaidAt: real.latest_paid_at || null,
+      };
+    };
+
+    const consumedDbBillIds = new Set();
+    const rows = estimates.map((est) => {
+      const tenantId = ownerTenantId(est);
+      const real = tenantId
+        ? realBillsByOwnerKey[billOwnerKey(est.roomId, tenantId)]
+        : legacyRealBillsByRoom[String(est.roomId)];
+      if (!real) return { ...est, _source: est._source || 'estimate' };
+      consumedDbBillIds.add(Number(real.id));
+      return rowFromDbBill(real, est);
+    });
+    (dbBills || []).forEach((real) => {
+      if (!consumedDbBillIds.has(Number(real.id))) rows.push(rowFromDbBill(real));
+    });
+    return rows;
+  }, [rooms, config, realBillsByOwnerKey, legacyRealBillsByRoom, dbBills, currentPeriod, currentPeriodDate, activeRecurring, periodMeters, serverPreviewBills]);
 
   const filtered = useMemo(() => {
     if (tab === 'current') return bills;
@@ -1178,23 +1254,50 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
     },
     {
       key: 'id', label: 'เลขที่', minWidth: 145,
-      render: b => <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 12 }}>{b.id}</span>,
+      render: b => (
+        <div>
+          <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 12 }}>{b.dbBillNo || b.id}</span>
+          {b.dbBillId && (
+            <div style={{ fontSize: 10.5, color: C.muted, marginTop: 2 }}>DB #{b.dbBillId}</div>
+          )}
+        </div>
+      ),
     },
     {
       key: 'roomId', label: 'ห้อง', minWidth: 60,
       render: b => <span style={{ fontWeight: 600, fontFamily: 'IBM Plex Sans Thai, sans-serif' }}>{b.roomId}</span>,
     },
     {
-      key: 'tenant', label: 'ผู้เช่า', minWidth: 170,
-      render: b => (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <Avatar name={b.tenant} size={28} />
-          <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 12.5, color: C.ink, fontWeight: 500 }}>{b.tenant}</div>
-            <div style={{ fontSize: 11, color: C.muted }}>{b.phone}</div>
+      key: 'tenant', label: 'เจ้าของบิล', minWidth: 220,
+      render: b => {
+        const statusLabel = {
+          active: 'ปัจจุบัน',
+          moved_out: 'ย้ายออกแล้ว',
+          blacklist: 'บัญชีเฝ้าระวัง',
+          inactive: 'ไม่ใช้งาน',
+        };
+        const statusText = b.tenantDeletedAt
+          ? 'ถูกลบ'
+          : (statusLabel[b.tenantStatus] || b.tenantStatus || '');
+        const movedRoom = b.tenantCurrentRoomId
+          && String(b.tenantCurrentRoomId) !== String(b.roomId);
+        return (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Avatar name={b.tenant} size={28} />
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 12.5, color: C.ink, fontWeight: 500 }}>{b.tenant}</div>
+              <div style={{ fontSize: 11, color: C.muted }}>{b.phone || '-'}</div>
+              {b._source === 'db' && (
+                <div style={{ fontSize: 10.5, color: C.muted, display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 2 }}>
+                  <span title={`bills.tenant_id=${b.tenantId || '-'}`}>tenant_id={b.tenantId || '-'}</span>
+                  {statusText && <span>· {statusText}</span>}
+                  {movedRoom && <span>· ปัจจุบันห้อง {b.tenantCurrentRoomId}</span>}
+                </div>
+              )}
+            </div>
           </div>
-        </div>
-      ),
+        );
+      },
     },
     { key: 'period', label: 'งวด', minWidth: 90, render: b => <span style={{ fontSize: 12.5 }}>{b.periodDisplay || b.period}</span> },
     {
