@@ -2905,8 +2905,13 @@ test('scheduler tickContractExpiry expires + alerts upcoming', () => {
   // same statement that flips status='expired'.
   assert.match(sched, /UPDATE contracts(?: c)? SET status='expired'[\s\S]{0,400}end_date < CURRENT_DATE/,
     'must auto-expire past-due contracts');
-  assert.match(sched, /CURRENT_DATE \+ INTERVAL '30 days'/,
-    'must scan 30 days ahead for upcoming expiries');
+  // The upcoming-expiry window is now operator-configurable via
+  // config.notify.contractEndDays (default 30), parameterized into the query —
+  // was previously a hardcoded INTERVAL '30 days' that ignored the setting.
+  assert.match(sched, /CURRENT_DATE \+ make_interval\(days => \$1\)/,
+    'upcoming-expiry window must be parameterized from config.notify.contractEndDays');
+  assert.match(sched, /contractEndDays/,
+    'tickContractExpiry must read config.notify.contractEndDays');
   // Must be wired into the tick pipeline. The advisory-lock wrapper
   // means the call no longer reads "tickContractExpiry(pool, flags, now,
   // state)" verbatim — match the wrapped form too.
@@ -7472,4 +7477,15 @@ test("checkout folds carried late fees into the closing bill instead of dropping
   // and folded onto the closing bill as its late_fee
   assert.ok(src.includes("closingLateFee"), "closing bill must carry the folded late fee");
   assert.ok(src.includes("folded into closing bill"), "folded carries must be deactivated with an audit note");
+});
+
+test("scheduler honors config.notify contract-expiry window + reminder days", () => {
+  const fs = require("node:fs"); const path = require("node:path");
+  const sched = fs.readFileSync(path.join(__dirname, "..", "services", "scheduler.js"), "utf8");
+  // contract expiry window comes from config.notify.contractEndDays, not a literal 30
+  assert.ok(sched.includes("contractEndDays"), "contract expiry must read config.notify.contractEndDays");
+  assert.ok(sched.includes("make_interval(days => $1)"), "expiry window must be parameterized");
+  // payment reminder folds in config.notify.reminder1 / reminder2
+  assert.ok(sched.includes("cfgReminder1"), "reminder1 must feed the pre-due offsets");
+  assert.ok(sched.includes("cfgReminder2On"), "reminder2>0 must enable overdue reminders");
 });

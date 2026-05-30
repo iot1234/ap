@@ -1371,9 +1371,20 @@ async function tickContractExpiry(pool, _flags, now, state) {
       console.log(`[scheduler] auto-expired ${expired.rowCount} contract(s) past end_date`);
     }
 
-    // (2) upcoming expiries — anything ending in the next 30 days that's
-    // still active. Send ONE consolidated message to the owner so we don't
-    // spam them when 5 contracts end in the same week.
+    // (2) upcoming expiries — anything ending within the operator-configured
+    // window (config.notify.contractEndDays, default 30, clamped 1-365) that's
+    // still active. Previously hardcoded to 30, so the Settings field did
+    // nothing. Send ONE consolidated message to the owner so we don't spam them
+    // when 5 contracts end in the same week.
+    let expiryWindowDays = 30;
+    try {
+      const { rows: cfgRows } = await pool.query(
+        `SELECT value FROM app_data WHERE key='baankarn_config_v1' LIMIT 1`
+      );
+      const v = Number(cfgRows[0] && cfgRows[0].value && cfgRows[0].value.notify
+        && cfgRows[0].value.notify.contractEndDays);
+      if (Number.isFinite(v) && v >= 1 && v <= 365) expiryWindowDays = Math.floor(v);
+    } catch { /* config missing — keep default 30 */ }
     const { rows: upcoming } = await pool.query(
       `SELECT c.id, c.contract_no, c.end_date, c.room_id,
               t.id AS tenant_id, t.full_name, t.phone, t.email, t.line_user_id, t.line_oa_id,
@@ -1384,8 +1395,9 @@ async function tickContractExpiry(pool, _flags, now, state) {
         WHERE c.status='active'
           AND c.end_date IS NOT NULL
           AND c.end_date >= CURRENT_DATE
-          AND c.end_date <  CURRENT_DATE + INTERVAL '30 days'
-        ORDER BY c.end_date ASC`
+          AND c.end_date <  CURRENT_DATE + make_interval(days => $1)
+        ORDER BY c.end_date ASC`,
+      [expiryWindowDays]
     );
 
     if (upcoming.length > 0 || expired.rowCount > 0) {
@@ -1837,20 +1849,40 @@ async function tickPaymentReminder(pool, flags, now, state) {
   const todayKey = now.toISOString().slice(0, 10);
   if (state.lastPaymentReminderAt === todayKey) return;
 
+  // Front-back reconciliation for the Settings → การแจ้งเตือน fields, which
+  // used to be ignored: config.notify.reminder1 (days BEFORE due) is folded into
+  // the pre-due offsets, and config.notify.reminder2 > 0 (days after due) turns
+  // on the overdue reminders. The feature-flag list (daysBeforeDue/includeOverdue)
+  // still applies; the two sources are unioned so either UI works.
+  let cfgReminder1 = null;
+  let cfgReminder2On = false;
+  try {
+    const { rows: cfgRows } = await pool.query(
+      `SELECT value FROM app_data WHERE key='baankarn_config_v1' LIMIT 1`
+    );
+    const notify = cfgRows[0] && cfgRows[0].value && cfgRows[0].value.notify;
+    if (notify) {
+      const r1 = Number(notify.reminder1);
+      if (Number.isInteger(r1) && r1 >= 0 && r1 <= 30) cfgReminder1 = r1;
+      cfgReminder2On = Number(notify.reminder2) > 0;
+    }
+  } catch { /* config missing — feature flag values still apply */ }
+
   // Sanitize the configured reminder days: keep integers in [0, 30] only.
   // 30 is more than the usual ~15-day bill window — anything beyond is
   // almost certainly a typo. Negative days don't make sense (those are
   // "after due date" which is overdue territory, handled separately).
   const rawDays = Array.isArray(flags.paymentReminder.daysBeforeDue)
-    ? flags.paymentReminder.daysBeforeDue
+    ? [...flags.paymentReminder.daysBeforeDue]   // copy — never mutate the flags cache
     : [3, 0];
+  if (cfgReminder1 != null) rawDays.push(cfgReminder1);
   const dueOffsets = [...new Set(rawDays
     .map((d) => Number(d))
     .filter((d) => Number.isInteger(d) && d >= 0 && d <= 30)
   )].sort((a, b) => b - a);   // most-future first so T-3 fires before T-0
   if (dueOffsets.length === 0) return;
 
-  const includeOverdue = flags.paymentReminder.includeOverdue === true;
+  const includeOverdue = flags.paymentReminder.includeOverdue === true || cfgReminder2On;
 
   try {
     // Query bills that hit any of the configured offsets today.
