@@ -285,6 +285,20 @@ async function migrate(pool, opts = {}) {
             AND COALESCE(late_fee,0) >= 0 AND total > 0
           ) NOT VALID;
       END IF;
+      -- Core money invariant: total = subtotal + vat + late_fee. Previously
+      -- ONLY a health-check scanner detected drift AFTER the fact (up to 1h
+      -- later, possibly after a wrong total reached a tenant's invoice). Enforce
+      -- it at write time. Tolerance 0.02 matches the scanner and absorbs
+      -- two-direction round2() rounding across the three components. NOT VALID
+      -- so any pre-existing drifted row isn't rejected on deploy — new writes
+      -- and updates must satisfy it (every legitimate path — buildBill, late-fee
+      -- recompute, void/unmark — already does).
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_bills_total_breakdown') THEN
+        ALTER TABLE bills ADD CONSTRAINT chk_bills_total_breakdown
+          CHECK (
+            ABS(total - (COALESCE(subtotal,0) + COALESCE(vat,0) + COALESCE(late_fee,0))) <= 0.02
+          ) NOT VALID;
+      END IF;
       IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_payments_status_valid') THEN
         ALTER TABLE payments ADD CONSTRAINT chk_payments_status_valid
           CHECK (status IN ('pending','verified','rejected')) NOT VALID;

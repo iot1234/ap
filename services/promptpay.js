@@ -33,10 +33,16 @@ function normaliseTarget(target) {
 function normaliseAmount(amount) {
   if (amount == null || amount === '') return undefined;
   const n = Number(amount);
-  if (!Number.isFinite(n) || n <= 0 || n > MAX_AMOUNT) {
+  // Round to 2 decimals BEFORE validating. If we checked `n > 0` first, a
+  // sub-cent value like 0.004 passes, then rounds to 0 — and promptpay-qr
+  // treats amount 0 as falsy and OMITS the amount tag, producing a
+  // scan-to-pay-ANY-amount QR (worst failure mode for billing). Rounding
+  // first means sub-cent amounts are rejected here instead.
+  const rounded = Math.round(n * 100) / 100;
+  if (!Number.isFinite(rounded) || rounded <= 0 || rounded > MAX_AMOUNT) {
     throw new Error(`PromptPay amount must be greater than 0 and <= ${MAX_AMOUNT}`);
   }
-  return Math.round(n * 100) / 100;
+  return rounded;
 }
 
 function isDemoTarget(target) {

@@ -34,10 +34,17 @@ const THAI_MONTHS = [
 ];
 
 function fmtThaiDate(d = new Date()) {
+  // Guard invalid dates (e.g. an unparseable bill.paidAt from the client-
+  // supplied render body) — without this, THAI_MONTHS[NaN] prints the literal
+  // "NaN undefined NaN" on a customer-facing receipt. Mirrors contractPdf.
+  if (!(d instanceof Date) || !Number.isFinite(d.getTime())) return '—';
   return `${d.getDate()} ${THAI_MONTHS[d.getMonth()]} ${d.getFullYear() + 543}`;
 }
 
 function fmtCurrency(n) {
+  // Guard non-finite (Infinity/NaN/1e21) so a bad client-supplied amount can't
+  // print "∞" or a 22-digit string on the receipt. Mirrors contractPdf.
+  if (!Number.isFinite(Number(n))) return '0.00';
   return Number(n || 0).toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 

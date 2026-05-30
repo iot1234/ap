@@ -1180,8 +1180,51 @@ module.exports = function buildTenantOpsRouter(ctx) {
   r.delete('/:id', sameOrigin, csrfGuard, requireAuth, requireRole('owner'), async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+    const force = !!(req.body && req.body.force === true);
     try {
       const flags = await features.load(pool);
+      // Guard (mirrors the PUT→moved_out precheck): refuse to delete a tenant
+      // that still has live links. A bare delete — soft OR hard — does NOT
+      // cascade, so it would orphan the active contract (the room stays
+      // "occupied" via uq_contracts_active_room, blocking re-rental and 500'ing
+      // the next check-in on that room), leave access cards valid, and keep
+      // recurring charges billing a ghost. Route admin through checkout first;
+      // force:true keeps a migration / cleanup escape hatch (audit-logged).
+      if (!force) {
+        try {
+          const cur = await pool.query(
+            `SELECT t.status AS tenant_status, t.current_room_id,
+                    (SELECT COUNT(*)::int FROM contracts
+                       WHERE tenant_id=t.id AND status='active' AND deleted_at IS NULL) AS active_contracts,
+                    (SELECT COUNT(*)::int FROM access_cards
+                       WHERE tenant_id=t.id AND status='active') AS active_cards
+               FROM tenants t
+              WHERE t.id=$1 AND t.deleted_at IS NULL`,
+            [id]
+          );
+          const row = cur.rows[0];
+          if (row && row.tenant_status === 'active'
+              && (row.current_room_id || row.active_contracts > 0 || row.active_cards > 0)) {
+            return res.status(409).json({
+              error: 'ลบไม่ได้ — ผู้เช่ายัง active อยู่ (ห้อง/สัญญา/บัตร) ใช้ POST /api/tenants/:id/checkout เพื่อปิดสัญญา + คืนห้อง + เพิกถอนบัตรก่อน',
+              code: 'USE_CHECKOUT_ENDPOINT',
+              checkoutUrl: `/api/tenants/${id}/checkout`,
+              detail: {
+                currentRoom: row.current_room_id,
+                activeContracts: row.active_contracts,
+                activeCards: row.active_cards,
+              },
+              hint: 'ถ้าต้องการลบเฉพาะข้อมูล (migrate / cleanup ghost) ส่ง { force: true } พร้อม audit log',
+            });
+          }
+        } catch (err) {
+          console.error('[tenant.delete] live-link precheck failed:', err.message);
+          return res.status(500).json({
+            error: 'ตรวจสถานะปัจจุบันไม่สำเร็จ — ลองใหม่หรือใช้ /checkout endpoint',
+            code: 'DELETE_PRECHECK_FAILED',
+          });
+        }
+      }
       if (flags.softDelete && flags.softDelete.enabled) {
         await pool.query(`UPDATE tenants SET deleted_at=NOW() WHERE id=$1`, [id]);
       } else {
@@ -1203,7 +1246,7 @@ module.exports = function buildTenantOpsRouter(ctx) {
           throw err;
         }
       }
-      audit(req, 'tenant.delete', 'tenant', String(id));
+      audit(req, 'tenant.delete', 'tenant', String(id), { force });
       res.json({ ok: true });
     } catch (err) {
       console.error('tenant delete error:', err);

@@ -439,9 +439,21 @@ function AddTenantModal({ open, onClose, rooms, setRooms, busy, setBusy, initial
       setToast && setToast({ kind: 'error', message: 'เบอร์โทรไม่ถูกต้อง (ขึ้นต้น 0 ตามด้วย 9-10 หลัก)' });
       return;
     }
-    if (form.citizenId && !/^\d{13}$/.test(form.citizenId.replace(/[\s-]/g, ''))) {
+    const cidDigits = form.citizenId ? form.citizenId.replace(/[\s-]/g, '') : '';
+    if (cidDigits && !/^\d{13}$/.test(cidDigits)) {
       setToast && setToast({ kind: 'error', message: 'เลขบัตรประชาชนต้อง 13 หลัก' });
       return;
+    }
+    if (cidDigits && /^\d{13}$/.test(cidDigits)) {
+      // Thai national-ID mod-11 check digit: Σ(digit[i] × (13−i)) for i=0..11,
+      // then (11 − sum%11) % 10 must equal digit[12]. Catches transposed/typo'd
+      // IDs before the round-trip (the server enforces the same mod-11 check).
+      let sum = 0;
+      for (let i = 0; i < 12; i++) sum += Number(cidDigits[i]) * (13 - i);
+      if ((11 - (sum % 11)) % 10 !== Number(cidDigits[12])) {
+        setToast && setToast({ kind: 'error', message: 'เลขบัตรประชาชนไม่ถูกต้อง (เลขตรวจสอบ mod-11 ไม่ผ่าน)' });
+        return;
+      }
     }
     // Pre-flight duplicate check: hit /api/tenants?q=<phone> to see if the
     // phone is already on a tenant row. The server's mirrorRoomsToTenants

@@ -14509,7 +14509,13 @@ app.get('/api/admin/production-readiness', requireAuth, requireRole('owner'), as
     { key: 'SESSION_SECRET',    label: 'SESSION_SECRET',     fatal: true,
       val: SESSION_SECRET, fromEnv: true },
     { key: 'CITIZEN_ID_KEY',    label: 'CITIZEN_ID_KEY',     fatal: false,
-      val: process.env.CITIZEN_ID_KEY || process.env.ENCRYPTION_KEY_V1,
+      // crypto.js (citizen-ID PII) reads ONLY CITIZEN_ID_KEY, else derives from
+      // SESSION_SECRET via HKDF — it never reads ENCRYPTION_KEY_V1 (that feeds
+      // the separate secrets/OA-token store in encryption.js). Treating
+      // ENCRYPTION_KEY_V1 as covering citizen IDs is a false green: the
+      // operator thinks PII is rotation-safe while it's still bound to
+      // SESSION_SECRET, so rotating it silently destroys every stored ID.
+      val: process.env.CITIZEN_ID_KEY,
       hint: 'ป้องกัน citizen-id ถ้าหมุน SESSION_SECRET — ถ้าไม่ตั้ง ข้อมูลที่เข้ารหัสไว้จะถอดไม่ได้หลังหมุน' },
     { key: 'LINE_CHANNEL_ACCESS_TOKEN', label: 'LINE Channel Access Token', fatal: false,
       val: sec.get('LINE_CHANNEL_ACCESS_TOKEN'),

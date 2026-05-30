@@ -298,11 +298,31 @@ async function tickLateFee(pool, flags, now, state) {
               b.due_date, b.bill_no, b.period,
               t.full_name, t.phone, t.email, t.line_user_id, t.line_oa_id,
               t.status AS tenant_status, t.deleted_at,
+              (SELECT (c.terms_template_snapshot->'financials'->>'lateFeeRate')::numeric
+                 FROM contracts c
+                WHERE c.room_id = b.room_id AND c.tenant_id = b.tenant_id
+                  AND c.locked_at IS NOT NULL
+                  AND c.terms_template_snapshot IS NOT NULL
+                ORDER BY c.start_date DESC NULLS LAST, c.id DESC
+                LIMIT 1) AS contract_late_fee_rate,
               (SELECT COUNT(*)::int FROM payments p
                  WHERE p.bill_id = b.id AND p.status = 'pending') AS pending_slip_count
          FROM bumped b
          LEFT JOIN tenants t ON t.id = b.tenant_id`
     );
+
+    // Resolve the late-fee RATE for a specific bill: prefer the rate LOCKED into
+    // the tenant's signed contract snapshot (so a later change to the global
+    // features.lateFee.ratePctPerMonth doesn't retroactively override a rate the
+    // tenant agreed to in their PDF), and only fall back to the current global
+    // rate when the bill has no locked contract snapshot. Mirrors the PDF
+    // render logic in server.js (prefer snapshot.financials.lateFeeRate). Grace
+    // period stays global — the snapshot only locks the rate + due day.
+    const resolveBillRate = (b) => {
+      const cr = Number(b.contract_late_fee_rate);
+      return (b.contract_late_fee_rate != null && Number.isFinite(cr) && cr >= 0)
+        ? cr : ratePctMonth;
+    };
 
     // Phase A: apply late_fee to each just-flipped bill. Skip when the
     // feature is off — the bill still flips to overdue so the tenant gets
@@ -344,11 +364,12 @@ async function tickLateFee(pool, flags, now, state) {
         }
         // Per-room exemption — this room is configured "ไม่เก็บค่าล่าช้า".
         if (lateFeeExemptRooms.has(String(b.room_id))) continue;
+        const effRate = resolveBillRate(b);
         const base = (Number(b.total) || 0) - (Number(b.late_fee) || 0);
         const calc = billing.computeLateFee({
           base,
           dueDate: b.due_date,
-          ratePctPerMonth: ratePctMonth,
+          ratePctPerMonth: effRate,
           gracePeriodDays,
           maxPctOfPrincipal,
           maxBaht: maxLateFeeBaht,
@@ -373,7 +394,8 @@ async function tickLateFee(pool, flags, now, state) {
               ['system:scheduler', 'bill.late_fee_applied', 'bill', String(b.id),
                  JSON.stringify({
                    lateFee: calc.lateFee, base, daysOver: calc.daysOver,
-                   monthsOver: calc.monthsOver, ratePctPerMonth: ratePctMonth,
+                   monthsOver: calc.monthsOver, ratePctPerMonth: effRate,
+                   rateSource: effRate === ratePctMonth ? 'global' : 'contract',
                    gracePeriodDays, maxPctOfPrincipal, maxLateFeeBaht,
                    capped: !!calc.capped, due_date: b.due_date, phase: 'A-flip',
                  })]
@@ -403,7 +425,14 @@ async function tickLateFee(pool, flags, now, state) {
           // Phase B grew penalties on ex-tenants' bills forever while the
           // digest hid them, so the two views disagreed and the fee ballooned
           // unmonitored. Those bills should be reconciled, not auto-penalised.
-          `SELECT b.id, b.room_id, b.total, b.late_fee, b.due_date
+          `SELECT b.id, b.room_id, b.tenant_id, b.total, b.late_fee, b.due_date,
+                  (SELECT (c.terms_template_snapshot->'financials'->>'lateFeeRate')::numeric
+                     FROM contracts c
+                    WHERE c.room_id = b.room_id AND c.tenant_id = b.tenant_id
+                      AND c.locked_at IS NOT NULL
+                      AND c.terms_template_snapshot IS NOT NULL
+                    ORDER BY c.start_date DESC NULLS LAST, c.id DESC
+                    LIMIT 1) AS contract_late_fee_rate
              FROM bills b
              LEFT JOIN tenants t ON t.id = b.tenant_id
             WHERE b.status = 'overdue'
@@ -421,11 +450,12 @@ async function tickLateFee(pool, flags, now, state) {
         for (const b of stillOverdue) {
           if (flippedIds.has(Number(b.id))) continue;   // already done in Phase A
           if (lateFeeExemptRooms.has(String(b.room_id))) continue;   // room exempt
+          const effRate = resolveBillRate(b);
           const base = (Number(b.total) || 0) - (Number(b.late_fee) || 0);
           const calc = billing.computeLateFee({
             base,
             dueDate: b.due_date,
-            ratePctPerMonth: ratePctMonth,
+            ratePctPerMonth: effRate,
             gracePeriodDays,
             maxPctOfPrincipal,
             maxBaht: maxLateFeeBaht,
@@ -448,7 +478,8 @@ async function tickLateFee(pool, flags, now, state) {
                 ['system:scheduler', 'bill.late_fee_applied', 'bill', String(b.id),
                  JSON.stringify({
                    lateFee: calc.lateFee, base, daysOver: calc.daysOver,
-                   monthsOver: calc.monthsOver, ratePctPerMonth: ratePctMonth,
+                   monthsOver: calc.monthsOver, ratePctPerMonth: effRate,
+                   rateSource: effRate === ratePctMonth ? 'global' : 'contract',
                    gracePeriodDays, maxPctOfPrincipal, maxLateFeeBaht,
                    capped: !!calc.capped, due_date: b.due_date,
                    prevLateFee: Number(b.late_fee) || 0, phase: 'B-refresh',
