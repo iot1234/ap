@@ -192,7 +192,8 @@ module.exports = function buildWebhooksRouter(ctx) {
 
     if (ev.message?.type !== 'text') return;
 
-    const text = String(ev.message.text || '').trim();
+    const text = normaliseLineText(ev.message.text);
+    if (!text) return;
 
     // 0) Owner-claim code — match OWNER-XXXXXXXX. Checked BEFORE tenant
     //    bind so the two namespaces never collide. The admin issuing the
@@ -232,7 +233,7 @@ module.exports = function buildWebhooksRouter(ctx) {
     }
 
     // 1) Binding code — match BIND-XXXXXXXX (case-insensitive, 4-16 hex)
-    if (/^BIND-[A-F0-9]{4,16}$/i.test(text)) {
+    if (isBindCode(text)) {
       let result;
       try {
         result = await lineBinding.tryBind(pool, {
@@ -310,7 +311,7 @@ module.exports = function buildWebhooksRouter(ctx) {
     }
 
     // 2) Help / menu command
-    if (/^(help|ช่วย|เริ่ม|start|menu|เมนู)$/i.test(text)) {
+    if (isHelpCommand(text)) {
       await lineSvc.replyText(oa, ev.replyToken,
         `📌 คำสั่งที่ใช้ได้ (${oa.name}):\n` +
         '• BIND-XXXXXXXX — ผูกบัญชี (ขอรหัสจากแอดมิน)\n' +
@@ -322,29 +323,28 @@ module.exports = function buildWebhooksRouter(ctx) {
       return;
     }
 
-    // 3) Intent matching for already-bound tenants — scoped to THIS OA so
-    //    tenant on OA #2 doesn't accidentally read tenant #1's bills via the
-    //    same human userId across different OAs.
-    const tenantRow = await getBoundTenant(userId, oa.id || null);
-
-    if (/^(บิล|bills?|invoice)$/i.test(text)) {
-      if (!tenantRow) return await replyUnbound(oa, ev.replyToken, userId);
-      await replyLatestBill(oa, ev.replyToken, tenantRow);
-      return;
-    }
-
-    if (/^(สถานะ|status|ห้อง|room)$/i.test(text)) {
-      if (!tenantRow) return await replyUnbound(oa, ev.replyToken, userId);
-      await replyRoomStatus(oa, ev.replyToken, tenantRow);
-      return;
-    }
-
-    if (/^(แจ้งซ่อม|maintenance|ซ่อม|repair)$/i.test(text)) {
+    if (isMaintenanceCommand(text)) {
       const base = process.env.PUBLIC_BASE_URL || '';
       await lineSvc.replyText(oa, ev.replyToken,
         '🔧 แจ้งซ่อม:\n' + (base ? `${base}/maintenance` : '/maintenance') +
         '\n\nหรือพิมพ์ "help" เพื่อดูคำสั่งทั้งหมด'
       );
+      return;
+    }
+
+    // 3) Bound-tenant commands. Only these paths need a tenant lookup; free
+    //    text must stay side-effect free and must not depend on DB health.
+    if (isBillCommand(text)) {
+      const tenantRow = await getBoundTenant(userId, oa.id || null);
+      if (!tenantRow) return await replyUnbound(oa, ev.replyToken, userId);
+      await replyLatestBill(oa, ev.replyToken, tenantRow);
+      return;
+    }
+
+    if (isRoomStatusCommand(text)) {
+      const tenantRow = await getBoundTenant(userId, oa.id || null);
+      if (!tenantRow) return await replyUnbound(oa, ev.replyToken, userId);
+      await replyRoomStatus(oa, ev.replyToken, tenantRow);
       return;
     }
 
@@ -355,6 +355,33 @@ module.exports = function buildWebhooksRouter(ctx) {
   }
 
   // --- intent helpers ----------------------------------------------------
+  function normaliseLineText(value) {
+    return String(value || '')
+      .normalize('NFKC')
+      .replace(/[\u200B-\u200D\uFEFF]/g, '')
+      .trim();
+  }
+
+  function isBindCode(text) {
+    return /^BIND-[A-F0-9]{4,16}$/i.test(text);
+  }
+
+  function isHelpCommand(text) {
+    return /^(help|ช่วย|เริ่ม|start|menu|เมนู)$/i.test(text);
+  }
+
+  function isBillCommand(text) {
+    return /^(บิล|bills?|invoice)$/i.test(text);
+  }
+
+  function isRoomStatusCommand(text) {
+    return /^(สถานะ|status|ห้อง|room)$/i.test(text);
+  }
+
+  function isMaintenanceCommand(text) {
+    return /^(แจ้งซ่อม|maintenance|ซ่อม|repair)$/i.test(text);
+  }
+
   // Lookup must include the OA scope: a single human has different LINE
   // userIds in different OAs, but the userId space is global per-OA so two
   // tenants COULD share a userId across OAs without colliding.
