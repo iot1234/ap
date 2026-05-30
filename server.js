@@ -6543,6 +6543,20 @@ async function tenantPaymentUploadHandler(req, res) {
         code: 'DUPLICATE_SLIP_HASH',
       });
     }
+    // Cross-flow replay guard: the same bank-slip image already accepted as a
+    // BOOKING deposit must not be reused to "pay" a real bill (the bill-pay
+    // dedup above only scans the payments table). Booking deposits live in the
+    // bookings table with their own deposit_slip_hash, so check it too.
+    const dupBookingSlip = await pool.query(
+      `SELECT external_id FROM bookings WHERE deposit_slip_hash=$1 LIMIT 1`,
+      [slipHash]
+    );
+    if (dupBookingSlip.rows.length) {
+      return res.status(409).json({
+        error: 'สลิปนี้ถูกใช้เป็นมัดจำการจองไปแล้ว — ไม่สามารถนำมาชำระบิลซ้ำ',
+        code: 'DUPLICATE_SLIP_HASH',
+      });
+    }
 
     const slip = await storage.saveBase64({
       pool,

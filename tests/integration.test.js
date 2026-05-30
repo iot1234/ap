@@ -7360,3 +7360,13 @@ test("scheduler tickLateFee honors late-fee caps + per-room exemption", () => {
   const passes = sched.split("maxBaht: maxLateFeeBaht").length - 1;
   assert.ok(passes >= 2, "both phases must pass the caps to computeLateFee");
 });
+
+test("tenant slip upload rejects a slip already used as a booking deposit", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const server = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  // The bill-pay slip dedup must ALSO scan bookings.deposit_slip_hash, not just
+  // the payments table, so a booking-fee slip cannot be reused to pay a bill.
+  assert.ok(server.includes("SELECT external_id FROM bookings WHERE deposit_slip_hash=$1"), "bill-pay dedup must cross-check booking deposit slips");
+  assert.match(server, /มัดจำการจองไปแล้ว/, "must give a clear booking-reuse rejection message");
+});
