@@ -7525,5 +7525,10 @@ test("locked contract PDF uses the signing snapshot financials, not live config"
   assert.ok(server.includes("financials"), "snapshot must capture financial terms");
   // PDF path prefers the snapshot for locked contracts
   assert.ok(server.includes("terms_template_snapshot.financials"), "PDF must read the snapshot financials");
+  const snapshotReads = server.split("terms_template_snapshot.financials").length - 1;
+  assert.ok(snapshotReads >= 2,
+    "both tenant and admin contract PDF endpoints must read snapshot financials");
+  assert.match(server, /snapDueDay[\s\S]{0,120}snapDueDay >= 1 && snapDueDay <= 28/,
+    "snapshot due-day reads must keep the same 1..28 bounds as live config");
   assert.ok(server.includes("contract.locked_at"), "snapshot preference gated on locked_at");
 });

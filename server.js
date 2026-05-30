@@ -6057,8 +6057,14 @@ app.get('/api/tenant/contract/:id/pdf', requireTenant, async (req, res) => {
       && contract.terms_template_snapshot
       && contract.terms_template_snapshot.financials;
     if (snapFin) {
-      if (Number.isFinite(Number(snapFin.dueDay))) dueDay = Number(snapFin.dueDay);
-      if (Number.isFinite(Number(snapFin.lateFeeRate))) lateFeeRate = Number(snapFin.lateFeeRate);
+      const snapDueDay = Number(snapFin.dueDay);
+      const snapLateFeeRate = Number(snapFin.lateFeeRate);
+      if (Number.isFinite(snapDueDay) && snapDueDay >= 1 && snapDueDay <= 28) {
+        dueDay = Math.floor(snapDueDay);
+      }
+      if (Number.isFinite(snapLateFeeRate) && snapLateFeeRate >= 0) {
+        lateFeeRate = snapLateFeeRate;
+      }
     }
 
     const contractPdf = require('./services/contractPdf');
@@ -13897,6 +13903,22 @@ app.get('/api/contracts/:id/pdf', requireAuth, requireRole('owner', 'manager'),
           dueDay = Number(cfg.notify.dueOnDay);
         }
       } catch { /* keep defaults */ }
+
+      // Same invariant as the tenant PDF endpoint: signed/locked contracts
+      // render the financial terms captured at signing time, not today's config.
+      const snapFin = contract.locked_at
+        && contract.terms_template_snapshot
+        && contract.terms_template_snapshot.financials;
+      if (snapFin) {
+        const snapDueDay = Number(snapFin.dueDay);
+        const snapLateFeeRate = Number(snapFin.lateFeeRate);
+        if (Number.isFinite(snapDueDay) && snapDueDay >= 1 && snapDueDay <= 28) {
+          dueDay = Math.floor(snapDueDay);
+        }
+        if (Number.isFinite(snapLateFeeRate) && snapLateFeeRate >= 0) {
+          lateFeeRate = snapLateFeeRate;
+        }
+      }
 
       // Mask the citizen ID — the PDF can be shared / reprinted. Last 4 digits
       // + asterisks matches the masking convention used elsewhere.
