@@ -28,6 +28,21 @@ test('withDefaults preserves nested config', () => {
   assert.equal(f.lateFee.enabled, true);
   assert.equal(f.lateFee.ratePctPerMonth, 2.0);
   assert.equal(f.lateFee.gracePeriodDays, 7);
+  assert.equal(f.lateFee.maxPctOfPrincipal, 0);
+  assert.equal(f.lateFee.maxLateFeeBaht, 0);
+});
+
+test('validateConfig validates late-fee caps', () => {
+  assert.deepEqual(
+    features.validateConfig({ lateFee: { maxPctOfPrincipal: 50, maxLateFeeBaht: 500 } }),
+    []
+  );
+  const bad = features.validateConfig({
+    lateFee: { maxPctOfPrincipal: 101, maxLateFeeBaht: -1 },
+  });
+  assert.equal(bad.length, 2);
+  assert.ok(bad.some((e) => e.field === 'maxPctOfPrincipal'));
+  assert.ok(bad.some((e) => e.field === 'maxLateFeeBaht'));
 });
 
 test('slipUpload does not trust tenant uploads by default', () => {

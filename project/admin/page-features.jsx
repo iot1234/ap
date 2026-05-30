@@ -528,6 +528,8 @@ function PageFeatures({ setToast, embedded = false, currentUser = null }) {
           desc="คำนวณจากยอดบิลก่อนหน้าที่เกินกำหนด">
           <Field id="lateFee" field="ratePctPerMonth" label="อัตรา %/เดือน" type="number" step="0.1" />
           <Field id="lateFee" field="gracePeriodDays" label="ผ่อนผัน (วัน)" type="number" />
+          <Field id="lateFee" field="maxPctOfPrincipal" label="เพดาน % ของยอดก่อนค่าปรับ (0 = ไม่จำกัด)" type="number" step="0.1" />
+          <Field id="lateFee" field="maxLateFeeBaht" label="เพดานสูงสุด (บาท, 0 = ไม่จำกัด)" type="number" />
         </Row>
         <Row id="vat"
           title="ภาษีมูลค่าเพิ่ม (VAT)"

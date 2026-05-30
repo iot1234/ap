@@ -7350,6 +7350,9 @@ test("scheduler tickLateFee honors late-fee caps + per-room exemption", () => {
   const fs = require("node:fs");
   const path = require("node:path");
   const sched = fs.readFileSync(path.join(__dirname, "..", "services", "scheduler.js"), "utf8");
+  const server = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  const features = fs.readFileSync(path.join(__dirname, "..", "services", "features.js"), "utf8");
+  const ui = fs.readFileSync(path.join(__dirname, "..", "project", "admin", "page-features.jsx"), "utf8");
   assert.match(sched, /maxPctOfPrincipal/, "scheduler must read the % cap");
   assert.match(sched, /maxLateFeeBaht/, "scheduler must read the baht cap");
   assert.match(sched, /lateFeeExemptRooms/, "scheduler must load per-room exemptions");
@@ -7359,6 +7362,22 @@ test("scheduler tickLateFee honors late-fee caps + per-room exemption", () => {
   // computeLateFee gets the caps passed through.
   const passes = sched.split("maxBaht: maxLateFeeBaht").length - 1;
   assert.ok(passes >= 2, "both phases must pass the caps to computeLateFee");
+  assert.match(sched, /capped: !!calc\.capped/,
+    "audit log must record whether the applied late fee was capped");
+  assert.match(features, /range\('lateFee', 'maxPctOfPrincipal'/,
+    "feature validation must reject invalid percentage caps");
+  assert.match(features, /range\('lateFee', 'maxLateFeeBaht'/,
+    "feature validation must reject invalid baht caps");
+  assert.match(ui, /field="maxPctOfPrincipal"/,
+    "features UI must let admin configure the percentage cap");
+  assert.match(ui, /field="maxLateFeeBaht"/,
+    "features UI must let admin configure the baht cap");
+  assert.match(server, /maxPctOfPrincipal: Number\(lateFee\.maxPctOfPrincipal\) \|\| 0/,
+    "tenant/public bill calculation policy must carry the percentage cap");
+  assert.match(server, /maxBaht: maxLateFeeBaht/,
+    "tenant/public bill calculation must pass the baht cap to computeLateFee");
+  assert.match(server, /calc\.capped[\s\S]{0,240}จำกัดตามเพดานค่าปรับ/,
+    "tenant/public bill explanation must say when the fee was capped");
 });
 
 test("tenant slip upload rejects a slip already used as a booking deposit", () => {

@@ -747,18 +747,18 @@ function computeLateFee({ base, dueDate, ratePctPerMonth = 0, gracePeriodDays = 
   // bills.late_fee column and breaks downstream chk_bills_amounts_nonnegative.
   if (!Number.isFinite(safeBase) || safeBase <= 0
       || !Number.isFinite(ratePct) || ratePct <= 0) {
-    return { lateFee: 0, daysOver: 0, monthsOver: 0, base: Number.isFinite(safeBase) ? safeBase : 0, capped: false };
+    return { lateFee: 0, daysOver: 0, monthsOver: 0, base: Number.isFinite(safeBase) ? safeBase : 0, uncappedLateFee: 0, capped: false };
   }
   const due = parseDueDateLocal(dueDate);
   if (!due || !Number.isFinite(due.getTime())) {
-    return { lateFee: 0, daysOver: 0, monthsOver: 0, base: safeBase, capped: false };
+    return { lateFee: 0, daysOver: 0, monthsOver: 0, base: safeBase, uncappedLateFee: 0, capped: false };
   }
   const reference = now instanceof Date && Number.isFinite(now.getTime()) ? now : new Date();
   const safeGrace = Number.isFinite(grace) ? Math.max(0, grace) : 0;
   const rawDays = Math.floor((reference.getTime() - due.getTime()) / 86_400_000);
   const daysOver = Math.max(0, rawDays - safeGrace);
   if (daysOver <= 0) {
-    return { lateFee: 0, daysOver: 0, monthsOver: 0, base: safeBase, capped: false };
+    return { lateFee: 0, daysOver: 0, monthsOver: 0, base: safeBase, uncappedLateFee: 0, capped: false };
   }
   const monthsOver = daysOver / 30;
   const uncapped = round2(safeBase * (ratePct / 100) * monthsOver);
@@ -776,7 +776,7 @@ function computeLateFee({ base, dueDate, ratePctPerMonth = 0, gracePeriodDays = 
   if (Number.isFinite(capBaht) && capBaht > 0) {
     lateFee = Math.min(lateFee, round2(capBaht));
   }
-  return { lateFee, daysOver, monthsOver, base: safeBase, capped: lateFee < uncapped };
+  return { lateFee, daysOver, monthsOver, base: safeBase, uncappedLateFee: uncapped, capped: lateFee < uncapped };
 }
 
 /**

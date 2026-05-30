@@ -3018,6 +3018,8 @@ function lateFeePolicyFromFlags(flags) {
   return {
     ratePctPerMonth: Number(lateFee.ratePctPerMonth) || 0,
     gracePeriodDays: Number(lateFee.gracePeriodDays) || 0,
+    maxPctOfPrincipal: Number(lateFee.maxPctOfPrincipal) || 0,
+    maxLateFeeBaht: Number(lateFee.maxLateFeeBaht) || 0,
   };
 }
 
@@ -3040,26 +3042,41 @@ function buildLateFeeCalculation(b, policy = {}) {
   const principal = billing.round2(Math.max(0, total - lateFee));
   const ratePctPerMonth = Number(policy.ratePctPerMonth) || 0;
   const gracePeriodDays = Math.max(0, Number(policy.gracePeriodDays) || 0);
+  const maxPctOfPrincipal = Math.max(0, Number(policy.maxPctOfPrincipal) || 0);
+  const maxLateFeeBaht = Math.max(0, Number(policy.maxLateFeeBaht) || 0);
   const calc = billing.computeLateFee({
     base: principal,
     dueDate: b && b.due_date,
     ratePctPerMonth,
     gracePeriodDays,
+    maxPctOfPrincipal,
+    maxBaht: maxLateFeeBaht,
   });
   const daysOver = Number(calc.daysOver) || 0;
   const monthsOver = Number(calc.monthsOver) || 0;
   let formulaText = `คำนวณจากยอดก่อนค่าปรับ ฿${fmtMoneyTH(principal)} = ค่าปรับ ฿${fmtMoneyTH(lateFee)}`;
   if (ratePctPerMonth > 0 && daysOver > 0) {
-    formulaText = `คำนวณจากยอดก่อนค่าปรับ ฿${fmtMoneyTH(principal)} × ${fmtNumberTH(ratePctPerMonth)}%/เดือน × ${fmtNumberTH(daysOver)} วัน ÷ 30 = ฿${fmtMoneyTH(lateFee)}`;
+    const uncappedLateFee = Number(calc.uncappedLateFee) || lateFee;
+    formulaText = `คำนวณจากยอดก่อนค่าปรับ ฿${fmtMoneyTH(principal)} × ${fmtNumberTH(ratePctPerMonth)}%/เดือน × ${fmtNumberTH(daysOver)} วัน ÷ 30 = ฿${fmtMoneyTH(uncappedLateFee)}`;
     if (gracePeriodDays > 0) formulaText += ` (หักระยะผ่อนผัน ${fmtNumberTH(gracePeriodDays)} วันแล้ว)`;
+    if (calc.capped) {
+      const caps = [];
+      if (maxPctOfPrincipal > 0) caps.push(`${fmtNumberTH(maxPctOfPrincipal)}% ของยอดก่อนค่าปรับ`);
+      if (maxLateFeeBaht > 0) caps.push(`฿${fmtMoneyTH(maxLateFeeBaht)}`);
+      formulaText += `; จำกัดตามเพดานค่าปรับ${caps.length ? ` (${caps.join(' / ')})` : ''} เหลือ ฿${fmtMoneyTH(lateFee)}`;
+    }
   }
   return {
     amount: lateFee,
     principal,
     ratePctPerMonth,
     gracePeriodDays,
+    maxPctOfPrincipal,
+    maxLateFeeBaht,
     daysOver,
     monthsOver,
+    capped: !!calc.capped,
+    uncappedLateFee: Number(calc.uncappedLateFee) || lateFee,
     formulaText,
   };
 }

@@ -985,6 +985,7 @@ test("computeLateFee: caps (maxPctOfPrincipal / maxBaht) bound runaway accrual",
   // Cap at 5% of principal = 500.
   const cappedPct = billing.computeLateFee({ ...opts, maxPctOfPrincipal: 5 });
   assert.equal(cappedPct.lateFee, 500, "capped at 5% of principal");
+  assert.equal(cappedPct.uncappedLateFee, uncapped.lateFee, "keeps the uncapped amount for audit/display");
   assert.equal(cappedPct.capped, true);
   // Absolute ฿300 cap wins when lower.
   const cappedBaht = billing.computeLateFee({ ...opts, maxBaht: 300 });

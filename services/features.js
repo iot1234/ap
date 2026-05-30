@@ -354,6 +354,8 @@ function validateConfig(partial) {
     if (has(f, 'vat') && has(f.vat, 'ratePct')) range('vat', 'ratePct', f.vat.ratePct, 0, 30, 'ต้องเป็นตัวเลข 0–30 (%)');
     if (has(f, 'lateFee') && has(f.lateFee, 'ratePctPerMonth')) range('lateFee', 'ratePctPerMonth', f.lateFee.ratePctPerMonth, 0, 100, 'ต้องเป็น 0–100 (%/เดือน)');
     if (has(f, 'lateFee') && has(f.lateFee, 'gracePeriodDays')) range('lateFee', 'gracePeriodDays', f.lateFee.gracePeriodDays, 0, 365, 'ต้องเป็นจำนวนเต็ม 0–365 วัน', true);
+    if (has(f, 'lateFee') && has(f.lateFee, 'maxPctOfPrincipal')) range('lateFee', 'maxPctOfPrincipal', f.lateFee.maxPctOfPrincipal, 0, 100, 'ต้องเป็น 0–100 (% ของยอดก่อนค่าปรับ)');
+    if (has(f, 'lateFee') && has(f.lateFee, 'maxLateFeeBaht')) range('lateFee', 'maxLateFeeBaht', f.lateFee.maxLateFeeBaht, 0, 10_000_000, 'ต้องเป็นตัวเลข 0–10,000,000 บาท');
     if (has(f, 'meterIot') && has(f.meterIot, 'anomalySigmas')) range('meterIot', 'anomalySigmas', f.meterIot.anomalySigmas, 1, 10, 'ต้องเป็น 1–10');
     if (has(f, 'tenantPortal') && has(f.tenantPortal, 'sessionDays')) range('tenantPortal', 'sessionDays', f.tenantPortal.sessionDays, 1, 365, 'ต้องเป็นจำนวนเต็ม 1–365 วัน', true);
     if (has(f, 'roomBooking') && has(f.roomBooking, 'holdMinutes')) range('roomBooking', 'holdMinutes', f.roomBooking.holdMinutes, 1, 1440, 'ต้องเป็นจำนวนเต็ม 1–1440 นาที', true);

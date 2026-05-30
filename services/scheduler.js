@@ -353,11 +353,12 @@ async function tickLateFee(pool, flags, now, state) {
               `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, detail)
                VALUES ($1, $2, $3, $4, $5::jsonb)`,
               ['system:scheduler', 'bill.late_fee_applied', 'bill', String(b.id),
-               JSON.stringify({
-                 lateFee: calc.lateFee, base, daysOver: calc.daysOver,
-                 monthsOver: calc.monthsOver, ratePctPerMonth: ratePctMonth,
-                 gracePeriodDays, due_date: b.due_date, phase: 'A-flip',
-               })]
+                 JSON.stringify({
+                   lateFee: calc.lateFee, base, daysOver: calc.daysOver,
+                   monthsOver: calc.monthsOver, ratePctPerMonth: ratePctMonth,
+                   gracePeriodDays, maxPctOfPrincipal, maxLateFeeBaht,
+                   capped: !!calc.capped, due_date: b.due_date, phase: 'A-flip',
+                 })]
             ).catch(() => { /* audit best-effort */ });
           } catch (err) {
             console.warn(`[scheduler] late-fee apply Phase A bill ${b.id} failed:`, err.message);
@@ -430,7 +431,8 @@ async function tickLateFee(pool, flags, now, state) {
                  JSON.stringify({
                    lateFee: calc.lateFee, base, daysOver: calc.daysOver,
                    monthsOver: calc.monthsOver, ratePctPerMonth: ratePctMonth,
-                   gracePeriodDays, due_date: b.due_date,
+                   gracePeriodDays, maxPctOfPrincipal, maxLateFeeBaht,
+                   capped: !!calc.capped, due_date: b.due_date,
                    prevLateFee: Number(b.late_fee) || 0, phase: 'B-refresh',
                  })]
               ).catch(() => { /* best-effort */ });
