@@ -309,7 +309,7 @@ module.exports = function buildWebhooksRouter(ctx) {
       return;
     }
 
-    // 2) Help / unknown — guide the tenant
+    // 2) Help / menu command
     if (/^(help|ช่วย|เริ่ม|start|menu|เมนู)$/i.test(text)) {
       await lineSvc.replyText(oa, ev.replyToken,
         `📌 คำสั่งที่ใช้ได้ (${oa.name}):\n` +
@@ -348,10 +348,10 @@ module.exports = function buildWebhooksRouter(ctx) {
       return;
     }
 
-    if (text.length < 200) {
-      await lineSvc.replyText(oa, ev.replyToken,
-        'ขอบคุณค่ะ — พิมพ์ "help" เพื่อดูคำสั่งที่ใช้ได้\nหรือรอแอดมินตอบกลับ');
-    }
+    // Unknown normal text is intentionally silent. LINE is also used as an
+    // admin chat surface, so the bot must reply only to verified keys and
+    // explicit commands.
+    return;
   }
 
   // --- intent helpers ----------------------------------------------------
