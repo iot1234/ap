@@ -6856,7 +6856,7 @@ async function tenantPaymentUploadHandler(req, res) {
         lateFee: finalAmountCheck.lateFee,
         autoWaive: !!(req.features && req.features.lateFee && req.features.lateFee.autoWaiveOnPrincipal),
       });
-      if (initialStatus === 'verified' && tenantLateFeePolicy.applies && !tenantLateFeePolicy.waive) {
+      if (initialStatus === 'verified' && tenantLateFeePolicy.applies && !tenantLateFeePolicy.settle) {
         initialStatus = 'pending';
         initialReason = `ผู้เช่าชำระยอดก่อนค่าปรับ (฿${finalAmountCheck.principal.toLocaleString('th-TH')}) — ค่าปรับ ฿${finalAmountCheck.lateFee.toLocaleString('th-TH')} รอแอดมินตัดสินใจ (ยกเว้น หรือ เก็บเพิ่ม)`;
       }
@@ -7591,7 +7591,7 @@ app.put('/api/payments/:id/verify', sameOrigin, csrfGuard, requireAuth, requireR
         });
       }
       const bill = await client.query(
-        `SELECT id, status, total, late_fee, subtotal, vat, deleted_at FROM bills WHERE id=$1 FOR UPDATE`,
+        `SELECT id, status, total, late_fee, subtotal, vat, deleted_at, tenant_id, room_id, period FROM bills WHERE id=$1 FOR UPDATE`,
         [billId]
       );
       // Now lock the payment row in the canonical order. Re-check status
@@ -7663,14 +7663,19 @@ app.put('/api/payments/:id/verify', sameOrigin, csrfGuard, requireAuth, requireR
       // admin must explicitly DECIDE — we no longer silently forgive it. The
       // "อนุมัติ + ยกค่าปรับ" action sends waiveLateFee:true to waive; a plain
       // approve gets LATE_FEE_DECISION_REQUIRED so the UI prompts for the choice.
-      const adminWaive = req.body && req.body.waiveLateFee === true;
+      // The admin DECIDES via lateFeeAction: 'waive' forgives the fee; 'carry'
+      // settles this bill at principal and bills the fee next month (one-off
+      // charge). Legacy waiveLateFee:true still maps to 'waive'. No decision →
+      // LATE_FEE_DECISION_REQUIRED so the UI prompts for the choice.
+      const lateFeeAction = (req.body && req.body.lateFeeAction)
+        || (req.body && req.body.waiveLateFee === true ? 'waive' : undefined);
       const lateFeePolicy = billing.resolvePrincipalLateFee({
-        tier: amountCheck.tier, lateFee: billLateFee, adminWaive,
+        tier: amountCheck.tier, lateFee: billLateFee, action: lateFeeAction,
       });
-      if (lateFeePolicy.applies && !lateFeePolicy.waive) {
+      if (lateFeePolicy.applies && !lateFeePolicy.settle) {
         await client.query('ROLLBACK');
         return res.status(409).json({
-          error: 'ผู้เช่าชำระเฉพาะยอดก่อนค่าปรับ — เลือก "อนุมัติ + ยกค่าปรับ" หรือปฏิเสธให้จ่ายค่าปรับเพิ่ม',
+          error: 'ผู้เช่าชำระเฉพาะยอดก่อนค่าปรับ — เลือกจัดการค่าปรับ: ยกค่าปรับ / เก็บรอบหน้า หรือปฏิเสธให้จ่ายเพิ่ม',
           code: 'LATE_FEE_DECISION_REQUIRED',
           billTotal,
           billPrincipal: amountCheck.principal,
@@ -7678,9 +7683,21 @@ app.put('/api/payments/:id/verify', sameOrigin, csrfGuard, requireAuth, requireR
           paymentAmount,
         });
       }
-      let waivedLateFee = 0;
-      if (lateFeePolicy.applies && lateFeePolicy.waive) {
-        waivedLateFee = billLateFee;
+      let carriedChargeId = null;
+      if (lateFeePolicy.applies && lateFeePolicy.settle) {
+        // 'carry' depends on the recurring-charges feature (next bill-gen pulls
+        // the one-off in). Block it when disabled so the fee can't silently
+        // vanish — admin must enable the feature or waive instead.
+        if (lateFeePolicy.action === 'carry') {
+          const flags = await features.load(pool).catch(() => ({}));
+          if (!(flags.recurringCharges && flags.recurringCharges.enabled)) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({
+              error: 'ต้องเปิดฟีเจอร์ "ค่าใช้จ่ายประจำ" ก่อนจึงจะเก็บค่าปรับรอบหน้าได้ — หรือเลือกยกค่าปรับแทน',
+              code: 'RECURRING_CHARGES_REQUIRED_FOR_CARRY',
+            });
+          }
+        }
         await client.query(
           `UPDATE bills
               SET late_fee = 0,
@@ -7688,20 +7705,39 @@ app.put('/api/payments/:id/verify', sameOrigin, csrfGuard, requireAuth, requireR
             WHERE id = $1 AND deleted_at IS NULL`,
           [row.bill_id, amountCheck.principal]
         );
+        if (lateFeePolicy.action === 'carry') {
+          carriedChargeId = await billPayments.carryLateFeeToNextBill(client, {
+            tenantId: bill.rows[0].tenant_id,
+            roomId: bill.rows[0].room_id,
+            amount: billLateFee,
+            fromPeriod: bill.rows[0].period,
+            createdBy: req.session?.user?.username || 'admin:unknown',
+          });
+          if (!carriedChargeId) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({
+              error: 'ไม่สามารถสร้างรายการเก็บค่าปรับรอบหน้าได้ กรุณาตรวจข้อมูลผู้เช่า/ห้อง หรือเลือกยกค่าปรับแทน',
+              code: 'LATE_FEE_CARRY_FAILED',
+            });
+          }
+        }
+        const auditAction = lateFeePolicy.action === 'carry'
+          ? 'bill.late_fee_carried_forward_on_principal_payment'
+          : 'bill.late_fee_waived_on_principal_payment';
         await client.query(
           `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, detail)
            VALUES ($1, $2, $3, $4, $5::jsonb)`,
           [req.session?.user?.username || 'admin:unknown',
-           'bill.late_fee_waived_on_principal_payment',
+           auditAction,
            'bill', String(row.bill_id),
            JSON.stringify({
-             waivedLateFee,
+             lateFee: billLateFee,
+             action: lateFeePolicy.action,
+             carriedChargeId,
              paymentId: id,
              paymentAmount,
              principalAtVerify: amountCheck.principal,
-             billTotalBeforeWaive: billTotal,
-             adminWaive: true,
-             reason: 'admin explicitly waived late fee on principal payment',
+             billTotalBeforeSettle: billTotal,
            })]
         ).catch(() => { /* audit best-effort */ });
       }

@@ -2726,7 +2726,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       try {
         await client.query('BEGIN');
         const bill = await client.query(
-          `SELECT id, bill_no, period, total, late_fee, subtotal, vat, status, tenant_id
+          `SELECT id, bill_no, period, total, late_fee, subtotal, vat, status, tenant_id, room_id
              FROM bills
             WHERE id=$1 AND deleted_at IS NULL
             FOR UPDATE`,
@@ -2781,18 +2781,24 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           });
         }
         let waivedLateFee = 0;
+        let carriedLateFee = 0;
         let effectiveTotal = billTotal;
-        // Late-fee policy (services/billing.js#resolvePrincipalLateFee): recording
-        // an offline payment that only covers the principal requires an explicit
-        // admin choice. waiveLateFee:true waives; otherwise we refuse and ask.
-        const adminWaive = req.body && req.body.waiveLateFee === true;
+        let carriedChargeId = null;
+        // Late-fee policy (services/billing.js#resolvePrincipalLateFee). Recording
+        // an offline/counter payment that only covers the principal requires an
+        // explicit admin choice via lateFeeAction: 'waive' forgives; 'carry'
+        // settles + bills the fee next month. Legacy waiveLateFee:true → 'waive'.
+        // (To collect the late fee at the counter NOW, the admin simply records
+        //  the FULL amount incl. late fee — that's tier='exact', no decision.)
+        const lateFeeAction = (req.body && req.body.lateFeeAction)
+          || (req.body && req.body.waiveLateFee === true ? 'waive' : undefined);
         const lateFeePolicy = billing.resolvePrincipalLateFee({
-          tier: amountCheck.tier, lateFee: billLateFee, adminWaive,
+          tier: amountCheck.tier, lateFee: billLateFee, action: lateFeeAction,
         });
-        if (lateFeePolicy.applies && !lateFeePolicy.waive) {
+        if (lateFeePolicy.applies && !lateFeePolicy.settle) {
           await rollbackManualPay();
           return res.status(409).json({
-            error: 'ยอดที่บันทึกเท่ากับยอดก่อนค่าปรับ — เลือก "บันทึก + ยกค่าปรับ" หรือเก็บค่าปรับเพิ่ม',
+            error: 'ยอดที่บันทึกเท่ากับยอดก่อนค่าปรับ — เลือกจัดการค่าปรับ: ยกค่าปรับ / เก็บรอบหน้า หรือบันทึกยอดเต็มรวมค่าปรับ',
             code: 'LATE_FEE_DECISION_REQUIRED',
             billTotal,
             billPrincipal: amountCheck.principal,
@@ -2800,8 +2806,19 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             paymentAmount: requestedAmount,
           });
         }
-        if (lateFeePolicy.applies && lateFeePolicy.waive) {
-          waivedLateFee = billLateFee;
+        if (lateFeePolicy.applies && lateFeePolicy.settle) {
+          if (lateFeePolicy.action === 'carry') {
+            const carryFlags = await features.load(pool).catch(() => ({}));
+            if (!(carryFlags.recurringCharges && carryFlags.recurringCharges.enabled)) {
+              await rollbackManualPay();
+              return res.status(409).json({
+                error: 'ต้องเปิดฟีเจอร์ "ค่าใช้จ่ายประจำ" ก่อนจึงจะเก็บค่าปรับรอบหน้าได้ — หรือเลือกยกค่าปรับแทน',
+                code: 'RECURRING_CHARGES_REQUIRED_FOR_CARRY',
+              });
+            }
+          }
+          waivedLateFee = lateFeePolicy.action === 'waive' ? billLateFee : 0;
+          carriedLateFee = lateFeePolicy.action === 'carry' ? billLateFee : 0;
           effectiveTotal = amountCheck.principal;
           await client.query(
             `UPDATE bills
@@ -2810,18 +2827,37 @@ module.exports = function buildBillsExtrasRouter(ctx) {
               WHERE id = $1 AND deleted_at IS NULL`,
             [id, amountCheck.principal]
           );
+          if (lateFeePolicy.action === 'carry') {
+            carriedChargeId = await billPayments.carryLateFeeToNextBill(client, {
+              tenantId: bill.rows[0].tenant_id,
+              roomId: bill.rows[0].room_id,
+              amount: billLateFee,
+              fromPeriod: bill.rows[0].period,
+              createdBy: verifier,
+            });
+            if (!carriedChargeId) {
+              await rollbackManualPay();
+              return res.status(409).json({
+                error: 'ไม่สามารถสร้างรายการเก็บค่าปรับรอบหน้าได้ กรุณาตรวจข้อมูลผู้เช่า/ห้อง หรือเลือกยกค่าปรับแทน',
+                code: 'LATE_FEE_CARRY_FAILED',
+              });
+            }
+          }
+          const auditAction = lateFeePolicy.action === 'carry'
+            ? 'bill.late_fee_carried_forward_on_principal_payment'
+            : 'bill.late_fee_waived_on_principal_payment';
           await client.query(
             `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, detail)
              VALUES ($1, $2, $3, $4, $5::jsonb)`,
-            [verifier, 'bill.late_fee_waived_on_principal_payment', 'bill', String(id),
+            [verifier, auditAction, 'bill', String(id),
              JSON.stringify({
-               waivedLateFee,
+               lateFee: billLateFee,
+               action: lateFeePolicy.action,
+               carriedChargeId,
                paymentAmount: requestedAmount,
                principalAtVerify: amountCheck.principal,
-               billTotalBeforeWaive: billTotal,
+               billTotalBeforeSettle: billTotal,
                method,
-               adminWaive: true,
-               reason: 'admin explicitly waived late fee on offline principal payment',
              })]
           ).catch(() => { /* audit best-effort */ });
         }
@@ -2877,6 +2913,9 @@ module.exports = function buildBillsExtrasRouter(ctx) {
               billLateFeeAtVerify: billLateFee,
               principalAtVerify: amountCheck.principal,
               waivedLateFee,
+              carriedLateFee,
+              lateFeeAction: lateFeePolicy.action,
+              carriedChargeId,
             }),
           ]
         );
@@ -2926,6 +2965,9 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           requestedAmount,
           amountTier: amountCheck.tier,
           waivedLateFee,
+          carriedLateFee,
+          lateFeeAction: lateFeePolicy.action,
+          carriedChargeId,
           method,
           supersededPaymentIds: supersededPending.rows.map((r) => r.id),
         });
@@ -2988,7 +3030,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       try {
         await client.query('BEGIN');
         const bill = await client.query(
-          `SELECT id, status, total, late_fee, subtotal, vat, deleted_at FROM bills WHERE id=$1 FOR UPDATE`,
+          `SELECT id, status, total, late_fee, subtotal, vat, deleted_at, room_id, period FROM bills WHERE id=$1 FOR UPDATE`,
           [id]
         );
         if (!bill.rows.length || bill.rows[0].deleted_at) {
@@ -3006,7 +3048,6 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           return res.status(404).json({ error: 'no pending slip for this bill' });
         }
         const pid = pres.rows[0].id;
-        let waivedLateFee = 0;   // surfaced in audit when principal tier matches
         if (accept) {
           if (bill.rows[0].status !== 'pending' && bill.rows[0].status !== 'overdue') {
             await client.query('ROLLBACK');
@@ -3044,14 +3085,18 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           // Late-fee policy (services/billing.js#resolvePrincipalLateFee): admin
           // must explicitly choose on a principal-only payment. waiveLateFee:true
           // waives; otherwise return LATE_FEE_DECISION_REQUIRED for the UI prompt.
-          const adminWaive = req.body && req.body.waiveLateFee === true;
+          // Admin decides via lateFeeAction: 'waive' forgives; 'carry' settles
+          // at principal + bills the fee next month. Legacy waiveLateFee:true →
+          // 'waive'. No decision → LATE_FEE_DECISION_REQUIRED.
+          const lateFeeAction = (req.body && req.body.lateFeeAction)
+            || (req.body && req.body.waiveLateFee === true ? 'waive' : undefined);
           const lateFeePolicy = billing.resolvePrincipalLateFee({
-            tier: amountCheck.tier, lateFee: billLateFee, adminWaive,
+            tier: amountCheck.tier, lateFee: billLateFee, action: lateFeeAction,
           });
-          if (lateFeePolicy.applies && !lateFeePolicy.waive) {
+          if (lateFeePolicy.applies && !lateFeePolicy.settle) {
             await client.query('ROLLBACK');
             return res.status(409).json({
-              error: 'ผู้เช่าชำระเฉพาะยอดก่อนค่าปรับ — เลือก "อนุมัติ + ยกค่าปรับ" หรือปฏิเสธให้จ่ายค่าปรับเพิ่ม',
+              error: 'ผู้เช่าชำระเฉพาะยอดก่อนค่าปรับ — เลือกจัดการค่าปรับ: ยกค่าปรับ / เก็บรอบหน้า หรือปฏิเสธให้จ่ายเพิ่ม',
               code: 'LATE_FEE_DECISION_REQUIRED',
               billTotal,
               billPrincipal: amountCheck.principal,
@@ -3059,8 +3104,17 @@ module.exports = function buildBillsExtrasRouter(ctx) {
               paymentAmount,
             });
           }
-          if (lateFeePolicy.applies && lateFeePolicy.waive) {
-            waivedLateFee = billLateFee;
+          if (lateFeePolicy.applies && lateFeePolicy.settle) {
+            if (lateFeePolicy.action === 'carry') {
+              const flags = await features.load(pool).catch(() => ({}));
+              if (!(flags.recurringCharges && flags.recurringCharges.enabled)) {
+                await client.query('ROLLBACK');
+                return res.status(409).json({
+                  error: 'ต้องเปิดฟีเจอร์ "ค่าใช้จ่ายประจำ" ก่อนจึงจะเก็บค่าปรับรอบหน้าได้ — หรือเลือกยกค่าปรับแทน',
+                  code: 'RECURRING_CHARGES_REQUIRED_FOR_CARRY',
+                });
+              }
+            }
             await client.query(
               `UPDATE bills
                   SET late_fee = 0,
@@ -3068,18 +3122,38 @@ module.exports = function buildBillsExtrasRouter(ctx) {
                 WHERE id = $1 AND deleted_at IS NULL`,
               [id, amountCheck.principal]
             );
+            let carriedChargeId = null;
+            if (lateFeePolicy.action === 'carry') {
+              carriedChargeId = await billPayments.carryLateFeeToNextBill(client, {
+                tenantId: pres.rows[0].tenant_id,
+                roomId: bill.rows[0].room_id,
+                amount: billLateFee,
+                fromPeriod: bill.rows[0].period,
+                createdBy: verifier,
+              });
+              if (!carriedChargeId) {
+                await client.query('ROLLBACK');
+                return res.status(409).json({
+                  error: 'ไม่สามารถสร้างรายการเก็บค่าปรับรอบหน้าได้ กรุณาตรวจข้อมูลผู้เช่า/ห้อง หรือเลือกยกค่าปรับแทน',
+                  code: 'LATE_FEE_CARRY_FAILED',
+                });
+              }
+            }
+            const auditAction = lateFeePolicy.action === 'carry'
+              ? 'bill.late_fee_carried_forward_on_principal_payment'
+              : 'bill.late_fee_waived_on_principal_payment';
             await client.query(
               `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, detail)
                VALUES ($1, $2, $3, $4, $5::jsonb)`,
-              [verifier, 'bill.late_fee_waived_on_principal_payment', 'bill', String(id),
+              [verifier, auditAction, 'bill', String(id),
                JSON.stringify({
-                 waivedLateFee,
+                 lateFee: billLateFee,
+                 action: lateFeePolicy.action,
+                 carriedChargeId,
                  paymentId: pid,
                  paymentAmount,
                  principalAtVerify: amountCheck.principal,
-                 billTotalBeforeWaive: billTotal,
-                 adminWaive: true,
-                 reason: 'admin explicitly waived late fee on principal payment',
+                 billTotalBeforeSettle: billTotal,
               })]
             ).catch(() => { /* audit best-effort */ });
           }

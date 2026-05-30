@@ -129,7 +129,55 @@ async function notifyTenantOnPayment(ctx, payment, outcome, reason) {
   }
 }
 
+/**
+ * Carry an outstanding late fee onto next month's bill instead of forgiving it.
+ *
+ * Used when an admin settles a principal-only payment with action:'carry'. We
+ * mark the current bill paid at principal (the caller does that) and record the
+ * unpaid late fee as a one-off recurring charge scoped to the tenant. The next
+ * bill-gen (scheduler or manual) auto-includes one-off charges then deactivates
+ * them, so the fee is collected exactly once next cycle — no partial/top-up
+ * payment needed. Tenant-scoped so it follows the tenant and deactivates on
+ * checkout (it won't leak onto the next occupant of the room).
+ *
+ * MUST run inside the same transaction (pass the tx client) that settles the
+ * bill, so the carry-charge and the settle commit atomically.
+ *
+ * @param {import('pg').PoolClient} client - active transaction client
+ * @param {object} opts
+ * @param {number|string} opts.tenantId   - tenant the fee belongs to (required
+ *   unless roomId is given; the table CHECK needs at least one target)
+ * @param {string} [opts.roomId]          - room fallback target
+ * @param {number} opts.amount            - the late fee to carry (THB)
+ * @param {string} [opts.fromPeriod]      - the period it originated from (label)
+ * @param {string} [opts.createdBy]       - audit actor
+ * @returns {Promise<number|null>} the new recurring_charges id, or null if no-op
+ */
+async function carryLateFeeToNextBill(client, { tenantId, roomId, amount, fromPeriod, createdBy } = {}) {
+  const amt = Math.round(Number(amount) * 100) / 100;
+  if (!Number.isFinite(amt) || amt <= 0) return null;
+  // The table CHECK requires room_id OR tenant_id. Prefer tenant scoping.
+  if (tenantId == null && !roomId) return null;
+  const periodLabel = fromPeriod || '-';
+  const ins = await client.query(
+    `INSERT INTO recurring_charges
+       (room_id, tenant_id, label, amount, frequency, active, notes, created_by)
+     VALUES ($1, $2, $3, $4, 'one_off', TRUE, $5, $6)
+     RETURNING id`,
+    [
+      tenantId != null ? null : (roomId || null),  // tenant-scope when we can
+      tenantId != null ? tenantId : null,
+      `ค่าปรับล่าช้าค้างจากรอบ ${periodLabel}`,
+      amt,
+      `ยกค่าปรับล่าช้า ฿${amt.toLocaleString('th-TH')} จากบิลรอบ ${periodLabel} มาเก็บในบิลรอบถัดไป`,
+      createdBy || 'system',
+    ]
+  );
+  return ins.rows[0]?.id || null;
+}
+
 module.exports = {
   loadBuildingName,
   notifyTenantOnPayment,
+  carryLateFeeToNextBill,
 };

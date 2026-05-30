@@ -740,7 +740,7 @@ test('/api/payments/:id/verify refuses to verify against non-payable bills', () 
   const body = nextIdx > 0 ? tail.slice(0, 50 + nextIdx) : tail.slice(0, 5000);
   assert.match(body, /SELECT \* FROM payments WHERE id=\$1 AND status='pending' FOR UPDATE/,
     'admin verify must lock the pending payment row');
-  assert.match(body, /SELECT id, status, total, late_fee, subtotal, vat, deleted_at FROM bills WHERE id=\$1 FOR UPDATE/,
+  assert.match(body, /SELECT id, status, total, late_fee, subtotal, vat, deleted_at[\w, ]* FROM bills WHERE id=\$1 FOR UPDATE/,
     'admin verify must lock and inspect the target bill total and late fee');
   assert.match(body, /BILL_NOT_PAYABLE/,
     'admin verify must refuse paid, void, deleted, or missing bills');
@@ -776,6 +776,18 @@ test('/api/payments/:id/verify rejects amount mismatches before marking paid', (
     'verify path must require an explicit admin decision before waiving late_fee');
   assert.match(body, /waiveLateFee/,
     'verify path must read the explicit waiveLateFee choice from the request');
+  // Carry-forward flexibility: admin can settle at principal + bill the fee next
+  // month. Guarded by the recurring-charges feature so it can't silently vanish.
+  assert.match(body, /lateFeeAction/,
+    'verify path must read the lateFeeAction (waive|carry) choice');
+  assert.match(body, /carryLateFeeToNextBill/,
+    'verify path must support carrying the late fee onto next month\'s bill');
+  assert.match(body, /RECURRING_CHARGES_REQUIRED_FOR_CARRY/,
+    'verify path must block carry when the recurring-charges feature is off');
+  assert.match(body, /LATE_FEE_CARRY_FAILED/,
+    'verify path must fail closed if carry-forward cannot create a charge');
+  assert.match(body, /bill\.late_fee_carried_forward_on_principal_payment/,
+    'verify path must audit the carry-forward action distinctly from waive');
   assert.match(body, /PAYMENT_AMOUNT_MISMATCH/,
     'verify path must fail closed on amount mismatch');
 });
@@ -820,6 +832,14 @@ test('/api/bills/:id/verify-slip matches owner-manager payment verification poli
     'bill-id verify path must route the late-fee decision through the shared policy helper');
   assert.match(body, /LATE_FEE_DECISION_REQUIRED/,
     'bill-id verify path must require an explicit admin decision before waiving late_fee');
+  assert.match(body, /lateFeeAction/,
+    'bill-id verify path must read the lateFeeAction (waive|carry) choice');
+  assert.match(body, /carryLateFeeToNextBill/,
+    'bill-id verify path must support carrying the late fee onto next month\'s bill');
+  assert.match(body, /RECURRING_CHARGES_REQUIRED_FOR_CARRY/,
+    'bill-id verify path must block carry when the recurring-charges feature is off');
+  assert.match(body, /LATE_FEE_CARRY_FAILED/,
+    'bill-id verify path must fail closed if carry-forward cannot create a charge');
   assert.match(body, /SELECT id, amount, tenant_id FROM payments/,
     'bill-id verify path must retain tenant_id for post-payment access-card restore');
   assert.match(body, /RETURNING id, room_id/,
@@ -839,7 +859,7 @@ test('/api/bills/:id/pay records offline payments in the payment ledger', () => 
   const body = route.slice(idx, idx + 16000);
   assert.match(body, /requireRole\('owner', 'manager'\)/,
     'manual pay must be owner/manager only');
-  assert.match(body, /SELECT id, bill_no, period, total, late_fee, subtotal, vat, status, tenant_id[\s\S]*FOR UPDATE/,
+  assert.match(body, /SELECT id, bill_no, period, total, late_fee, subtotal, vat, status, tenant_id, room_id[\s\S]*FOR UPDATE/,
     'manual pay must lock the bill and read total plus late fee');
   assert.match(body, /INSERT INTO payments[\s\S]*'verified'/,
     'manual pay must create a verified payment row');
@@ -849,6 +869,16 @@ test('/api/bills/:id/pay records offline payments in the payment ledger', () => 
     'manual pay must mark the bill paid in the same handler');
   assert.match(body, /PAYMENT_AMOUNT_MISMATCH|BILL_ALREADY_PAID/,
     'manual pay must reject mismatches and duplicate verified payments');
+  assert.match(body, /lateFeeAction/,
+    'manual pay must accept an explicit late-fee action for principal-only payments');
+  assert.match(body, /carryLateFeeToNextBill/,
+    'manual pay must support carrying the late fee onto next month\'s bill');
+  assert.match(body, /RECURRING_CHARGES_REQUIRED_FOR_CARRY/,
+    'manual pay must block carry when recurring charges are disabled');
+  assert.match(body, /LATE_FEE_CARRY_FAILED/,
+    'manual pay must fail closed if carry-forward cannot create a charge');
+  assert.match(body, /carriedLateFee/,
+    'manual pay must distinguish carried fees from waived fees in audit/payment payloads');
   assert.match(body, /notifyManualPayment/,
     'manual pay must notify tenant after recording an offline payment');
   assert.match(body, /restoreAccessCardsAfterPayment\(pool, row\.tenant_id/,
@@ -2082,7 +2112,7 @@ test('payment verification uses canonical bill-before-payment lock order', () =>
   const body = server.slice(idx, server.indexOf('// Helper for both verify endpoints', idx));
   assert.match(body, /SELECT bill_id FROM payments WHERE id=\$1 AND status='pending'/,
     'verify flow must peek payment bill_id before taking locks');
-  assert.match(body, /SELECT id, status, total, late_fee, subtotal, vat, deleted_at FROM bills WHERE id=\$1 FOR UPDATE/,
+  assert.match(body, /SELECT id, status, total, late_fee, subtotal, vat, deleted_at[\w, ]* FROM bills WHERE id=\$1 FOR UPDATE/,
     'verify flow must lock the bill before locking the payment row');
   assert.match(body, /SELECT \* FROM payments WHERE id=\$1 AND status='pending' FOR UPDATE/,
     'verify flow must re-lock/re-check the payment after locking bill');
@@ -6957,6 +6987,12 @@ test('page-payments.jsx: surfaces tier-aware mismatch alert (R2-followup)', () =
     'admin payments UI must read amountTier from verify_payload');
   assert.match(src, /ผู้เช่าจ่ายค่าเช่าสุจริต/,
     'principal-tier alert must explain the good-faith waiver behaviour');
+  assert.match(src, /lateFeeChoice/,
+    'principal-tier approval must require an explicit waive/carry choice');
+  assert.match(src, /lateFeeAction/,
+    'admin payments UI must send the selected late-fee action to the backend');
+  assert.match(src, /RECURRING_CHARGES_REQUIRED_FOR_CARRY/,
+    'admin payments UI must explain why carry-forward is blocked when recurring charges are off');
 });
 
 test('maintenance.rate: phone-only match scoped to tenant_id IS NULL (IDOR fix)', () => {
@@ -7137,6 +7173,9 @@ test('hooks.jsx: ERROR_CODE_MAP handles new R2/R3/R7 error codes', () => {
     'OVERRIDE_REASON_REQUIRED', // R3
     'PAYMENT_AMOUNT_MISMATCH',  // R2-followup
     'AMOUNT_NOT_BILL_TOTAL',    // R2-followup
+    'LATE_FEE_DECISION_REQUIRED',
+    'RECURRING_CHARGES_REQUIRED_FOR_CARRY',
+    'LATE_FEE_CARRY_FAILED',
     'REMINDER_COOLDOWN',        // R7-followup
   ]) {
     assert.match(src, new RegExp(code + ':\\s*\\{'),
@@ -7156,7 +7195,7 @@ test('tenant slip auto-verify parks principal-only payments for admin late-fee d
     'tenant upload must consult the shared late-fee policy helper');
   assert.match(server, /autoWaiveOnPrincipal/,
     'tenant upload must honor the features.lateFee.autoWaiveOnPrincipal flag');
-  assert.match(server, /tenantLateFeePolicy\.applies && !tenantLateFeePolicy\.waive/,
+  assert.match(server, /tenantLateFeePolicy\.applies && !tenantLateFeePolicy\.settle/,
     'tenant upload must park principal-only payments instead of silently settling');
 });
 
@@ -7187,4 +7226,30 @@ test('features.lateFee exposes autoWaiveOnPrincipal defaulting to admin-decides 
     assert.match(src, /autoWaiveOnPrincipal:\s*false/,
       'late fee must default to admin-decides (autoWaiveOnPrincipal: false)');
   }
+});
+
+test("carryLateFeeToNextBill creates a tenant-scoped one-off recurring charge", async () => {
+  const billPayments = require("../services/billPayments");
+  const calls = [];
+  const fakeClient = { query: async (sql, params) => { calls.push({ sql, params }); return { rows: [{ id: 42 }] }; } };
+  const id = await billPayments.carryLateFeeToNextBill(fakeClient, {
+    tenantId: 7, roomId: "A101", amount: 90, fromPeriod: "2026-03", createdBy: "admin",
+  });
+  assert.equal(id, 42);
+  assert.equal(calls.length, 1, "exactly one INSERT");
+  assert.match(calls[0].sql, /INSERT INTO recurring_charges/);
+  assert.match(calls[0].sql, /.one_off./);
+  assert.equal(calls[0].params[0], null, "room_id null = tenant-scoped");
+  assert.equal(calls[0].params[1], 7, "tenant_id set");
+  assert.equal(calls[0].params[3], 90, "amount = late fee");
+  assert.match(String(calls[0].params[2]), /2026-03/, "label references the originating period");
+  assert.ok(String(calls[0].params[2]).length > 3, "label is a non-empty description");
+});
+
+test("carryLateFeeToNextBill is a no-op for non-positive amount or no target", async () => {
+  const billPayments = require("../services/billPayments");
+  const fakeClient = { query: async () => { throw new Error("should not insert"); } };
+  assert.equal(await billPayments.carryLateFeeToNextBill(fakeClient, { tenantId: 1, amount: 0 }), null);
+  assert.equal(await billPayments.carryLateFeeToNextBill(fakeClient, { tenantId: 1, amount: -5 }), null);
+  assert.equal(await billPayments.carryLateFeeToNextBill(fakeClient, { amount: 90 }), null);
 });

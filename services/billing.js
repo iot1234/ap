@@ -975,19 +975,38 @@ function validatePaidLedger({ paymentAmount, billTotal, tolerance } = {}) {
  * caller must NOT silently settle — admin paths return LATE_FEE_DECISION_REQUIRED
  * and the tenant auto-verify path parks the slip as 'pending' for admin review.
  *
+ * The admin has flexible ways to resolve a principal-only payment. Both
+ * explicit options settle THIS bill at principal (so the tenant's payment is
+ * recorded) and differ only in what happens to the outstanding late fee:
+ *   - 'waive' → forgive the fee outright.
+ *   - 'carry' → defer it onto NEXT month's bill as a one-off recurring charge,
+ *               so it's still collected without a partial/top-up payment and
+ *               without fighting the one-bill-per-(room,period,tenant) constraint.
+ *   - (none)  → no decision yet → caller must not settle (admin prompt / park).
+ *
+ * (An immediate standalone late-fee bill is intentionally NOT offered here: it
+ *  would collide with uq_bills_room_period_tenant_active for the same period.
+ *  Immediate collection is handled by the offline /pay counter path instead.)
+ *
  * @param {object} opts
  * @param {'exact'|'principal'|'none'} opts.tier  - from validatePaymentAmount
  * @param {number} opts.lateFee                   - bills.late_fee at verify time
- * @param {boolean} [opts.adminWaive]             - admin explicitly chose to waive
+ * @param {'waive'|'carry'} [opts.action]         - explicit admin decision
+ * @param {boolean} [opts.adminWaive]             - legacy alias for action:'waive'
  * @param {boolean} [opts.autoWaive]              - features.lateFee.autoWaiveOnPrincipal
- * @returns {{ applies:boolean, waive:boolean }}
+ * @returns {{ applies:boolean, settle:boolean, action:('waive'|'carry'|null) }}
  *   applies — this IS a principal-tier-with-outstanding-late-fee situation
- *   waive   — caller should zero the late fee and settle at principal
+ *   settle  — caller should zero the late fee on THIS bill + settle at principal
+ *   action  — the resolved decision ('waive' | 'carry' | null = undecided)
  */
-function resolvePrincipalLateFee({ tier, lateFee, adminWaive = false, autoWaive = false } = {}) {
+function resolvePrincipalLateFee({ tier, lateFee, action, adminWaive = false, autoWaive = false } = {}) {
   const applies = tier === 'principal' && Number(lateFee) > 0;
-  if (!applies) return { applies: false, waive: false };
-  return { applies: true, waive: adminWaive === true || autoWaive === true };
+  if (!applies) return { applies: false, settle: false, action: null };
+  const known = action === 'waive' || action === 'carry';
+  const resolved = known
+    ? action
+    : (adminWaive === true || autoWaive === true ? 'waive' : null);
+  return { applies: true, settle: resolved !== null, action: resolved };
 }
 
 /**

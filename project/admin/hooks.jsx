@@ -643,6 +643,23 @@
       title: 'ยอดสลิปไม่ตรงกับยอดบิล',
       description: (e) => e.error || 'โอนเงินตามยอดบิล แล้วลองอัปโหลดสลิปใหม่',
     },
+    LATE_FEE_DECISION_REQUIRED: {
+      title: 'ต้องเลือกวิธีจัดการค่าปรับ',
+      description: (e) => {
+        const lines = ['ผู้เช่าจ่ายเฉพาะยอดก่อนค่าปรับ ต้องเลือกยกค่าปรับ / เก็บรอบหน้า หรือปฏิเสธให้จ่ายเพิ่ม'];
+        if (e.billPrincipal != null) lines.push(`ยอดก่อนค่าปรับ: ฿${Number(e.billPrincipal).toLocaleString('th-TH', { minimumFractionDigits: 2 })}`);
+        if (e.billLateFee != null) lines.push(`ค่าปรับล่าช้า: ฿${Number(e.billLateFee).toLocaleString('th-TH', { minimumFractionDigits: 2 })}`);
+        return lines.join('\n');
+      },
+    },
+    RECURRING_CHARGES_REQUIRED_FOR_CARRY: {
+      title: 'ยังเก็บค่าปรับรอบหน้าไม่ได้',
+      description: 'เปิดฟีเจอร์ "ค่าใช้จ่ายประจำ" ก่อน หรือเลือกยกค่าปรับแทน',
+    },
+    LATE_FEE_CARRY_FAILED: {
+      title: 'สร้างรายการเก็บค่าปรับรอบหน้าไม่สำเร็จ',
+      description: (e) => e.error || 'ตรวจข้อมูลผู้เช่า/ห้อง แล้วลองใหม่ หรือเลือกยกค่าปรับแทน',
+    },
     // R7-followup — admin clicked "ส่งเตือน" too soon after the previous
     // send (manual or scheduler). UI should show "ส่งซ้ำตอนนี้?" prompt
     // and re-call with force:true.

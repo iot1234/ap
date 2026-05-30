@@ -873,36 +873,38 @@ test('parseDueDateLocal: string → local midnight; Date → passthrough; junk �
 
 // --- resolvePrincipalLateFee (admin-choice late-fee policy) ----------------
 test('resolvePrincipalLateFee: not a principal-with-late-fee situation → no-op', () => {
-  // exact tier never applies
-  assert.deepEqual(
-    billing.resolvePrincipalLateFee({ tier: 'exact', lateFee: 90 }),
-    { applies: false, waive: false });
-  // principal but no outstanding late fee
-  assert.deepEqual(
-    billing.resolvePrincipalLateFee({ tier: 'principal', lateFee: 0 }),
-    { applies: false, waive: false });
-  // none tier
-  assert.deepEqual(
-    billing.resolvePrincipalLateFee({ tier: 'none', lateFee: 90 }),
-    { applies: false, waive: false });
+  const noop = { applies: false, settle: false, action: null };
+  assert.deepEqual(billing.resolvePrincipalLateFee({ tier: 'exact', lateFee: 90 }), noop);
+  assert.deepEqual(billing.resolvePrincipalLateFee({ tier: 'principal', lateFee: 0 }), noop);
+  assert.deepEqual(billing.resolvePrincipalLateFee({ tier: 'none', lateFee: 90 }), noop);
 });
 
 test('resolvePrincipalLateFee: principal+lateFee requires an explicit decision', () => {
-  // Default: applies but does NOT waive (admin must choose / slip parks pending)
+  // Default: applies but does NOT settle (admin must choose / slip parks pending)
   assert.deepEqual(
     billing.resolvePrincipalLateFee({ tier: 'principal', lateFee: 90 }),
-    { applies: true, waive: false });
-  // Admin explicitly waives
+    { applies: true, settle: false, action: null });
+  // Each explicit admin action settles this bill at principal
+  for (const action of ['waive', 'carry']) {
+    assert.deepEqual(
+      billing.resolvePrincipalLateFee({ tier: 'principal', lateFee: 90, action }),
+      { applies: true, settle: true, action },
+      `action '${action}' must settle this bill`);
+  }
+  // Legacy adminWaive:true alias still waives
   assert.deepEqual(
     billing.resolvePrincipalLateFee({ tier: 'principal', lateFee: 90, adminWaive: true }),
-    { applies: true, waive: true });
-  // Operator opted into auto-waive (tenant auto-verify path)
+    { applies: true, settle: true, action: 'waive' });
+  // Operator opted into auto-waive (tenant auto-verify path) → waive
   assert.deepEqual(
     billing.resolvePrincipalLateFee({ tier: 'principal', lateFee: 90, autoWaive: true }),
-    { applies: true, waive: true });
-  // Only a strict boolean true waives — truthy strings must not
+    { applies: true, settle: true, action: 'waive' });
+  // Only a strict boolean true / known action settles — truthy strings / bogus must not
   assert.equal(
-    billing.resolvePrincipalLateFee({ tier: 'principal', lateFee: 90, adminWaive: 'yes' }).waive,
+    billing.resolvePrincipalLateFee({ tier: 'principal', lateFee: 90, adminWaive: 'yes' }).settle,
+    false);
+  assert.equal(
+    billing.resolvePrincipalLateFee({ tier: 'principal', lateFee: 90, action: 'bogus' }).settle,
     false);
 });
 

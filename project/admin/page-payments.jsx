@@ -268,15 +268,15 @@ function PagePayments({ setToast }) {
     }
   }
 
-  async function decide(id, accept, reason, waiveLateFee) {
+  async function decide(id, accept, reason, lateFeeAction) {
     setBusy(true);
     const apiFetch = window.requireApiFetch ? window.requireApiFetch() : window.apiFetch;
     try {
-      // waiveLateFee is only sent on the explicit "อนุมัติ + ยกค่าปรับ" action.
-      // Without it, a principal-only payment is refused server-side with
+      // lateFeeAction ('waive' | 'carry') is only sent when approving a
+      // principal-only payment. Without it the server refuses with
       // LATE_FEE_DECISION_REQUIRED so the admin can't silently forgive the fee.
       const body = { accept, reason };
-      if (waiveLateFee === true) body.waiveLateFee = true;
+      if (lateFeeAction) body.lateFeeAction = lateFeeAction;
       const r = await apiFetch(`/api/payments/${id}/verify`, {
         method: 'PUT',
         body: JSON.stringify(body),
@@ -284,11 +284,18 @@ function PagePayments({ setToast }) {
       const d = await r.json();
       if (!r.ok) {
         if (d.code === 'LATE_FEE_DECISION_REQUIRED') {
-          throw new Error(`ผู้เช่าจ่ายเฉพาะค่าเช่า ฿${Number(d.billPrincipal).toLocaleString('th-TH')} — ยังมีค่าปรับ ฿${Number(d.billLateFee).toLocaleString('th-TH')}. กด "อนุมัติ + ยกค่าปรับ" เพื่อยกเว้น หรือ "ปฏิเสธ" เพื่อให้ผู้เช่าจ่ายเพิ่ม`);
+          throw new Error(`ผู้เช่าจ่ายเฉพาะค่าเช่า ฿${Number(d.billPrincipal).toLocaleString('th-TH')} — ยังมีค่าปรับ ฿${Number(d.billLateFee).toLocaleString('th-TH')} เลือกวิธีจัดการค่าปรับก่อน (ยกค่าปรับ / เก็บรอบหน้า) หรือกดปฏิเสธ`);
+        }
+        if (d.code === 'RECURRING_CHARGES_REQUIRED_FOR_CARRY') {
+          throw new Error('ต้องเปิดฟีเจอร์ "ค่าใช้จ่ายประจำ" ที่หน้า Features ก่อน จึงจะเก็บค่าปรับรอบหน้าได้ — หรือเลือก "ยกค่าปรับ" แทน');
         }
         throw new Error(d.error);
       }
-      setToast && setToast({ kind: 'success', message:accept ? (waiveLateFee ? 'อนุมัติแล้ว (ยกค่าปรับ)' : 'อนุมัติแล้ว') : 'ปฏิเสธแล้ว' });
+      const okMsg = accept
+        ? (lateFeeAction === 'carry' ? 'อนุมัติแล้ว (ยกค่าปรับไปเก็บรอบหน้า)'
+           : lateFeeAction === 'waive' ? 'อนุมัติแล้ว (ยกค่าปรับ)' : 'อนุมัติแล้ว')
+        : 'ปฏิเสธแล้ว';
+      setToast && setToast({ kind: 'success', message: okMsg });
       setOpen(null); load();
     } catch (e) { setToast && setToast({ kind: 'error', message:e.message }); }
     finally { setBusy(false); }
@@ -422,6 +429,10 @@ function SlipModal({ payment, busy, onClose, onDecide }) {
   const C = window.ADMIN_C;
   const { Btn } = window;
   const [reason, setReason] = useState('');
+  // How to handle the outstanding late fee when approving a principal-only
+  // payment: 'waive' (forgive) or 'carry' (bill it next month). Only used when
+  // isPrincipalDecision is true below.
+  const [lateFeeChoice, setLateFeeChoice] = useState('waive');
   // Defense-in-depth: if a legacy slip_url somehow contains a base64 data URL
   // (pre-storage-service rows), don't pour it into <img src>/<a href> — that
   // would force the browser to decode tens of MB and can OOM the renderer.
@@ -558,9 +569,18 @@ function SlipModal({ payment, busy, onClose, onDecide }) {
               <div style={{ fontWeight: 600, marginBottom: 4 }}>📌 สิ่งที่จะเกิดขึ้น</div>
               {isPrincipalDecision ? (
                 <>
-                  <div>• ผู้เช่าจ่ายเฉพาะค่าเช่า ฿{fmtMoney(principalForDecision)} — ยังมี<b>ค่าปรับล่าช้า ฿{fmtMoney(lateFeeForDecision)}</b>ค้างอยู่</div>
-                  <div>• <b>อนุมัติ + ยกค่าปรับ</b> → ยกเว้นค่าปรับ ฿{fmtMoney(lateFeeForDecision)} แล้วตั้งบิลเป็น "ชำระแล้ว" + แจ้งผู้เช่า</div>
-                  <div>• <b>ปฏิเสธ</b> → บิลคงค่าปรับไว้ ผู้เช่าต้องจ่ายเพิ่ม ฿{fmtMoney(lateFeeForDecision)} แล้วส่งสลิปใหม่</div>
+                  <div>• ผู้เช่าจ่ายเฉพาะค่าเช่า ฿{fmtMoney(principalForDecision)} — ยังมี<b>ค่าปรับล่าช้า ฿{fmtMoney(lateFeeForDecision)}</b>ค้างอยู่ เลือกวิธีจัดการค่าปรับ:</div>
+                  <label style={{ display: 'block', marginTop: 6, cursor: 'pointer' }}>
+                    <input type="radio" name="lateFeeChoice" checked={lateFeeChoice === 'waive'}
+                      onChange={() => setLateFeeChoice('waive')} style={{ marginRight: 6 }} />
+                    <b>ยกค่าปรับ</b> — ยกเว้น ฿{fmtMoney(lateFeeForDecision)} ตั้งบิลเป็น "ชำระแล้ว"
+                  </label>
+                  <label style={{ display: 'block', marginTop: 4, cursor: 'pointer' }}>
+                    <input type="radio" name="lateFeeChoice" checked={lateFeeChoice === 'carry'}
+                      onChange={() => setLateFeeChoice('carry')} style={{ marginRight: 6 }} />
+                    <b>เก็บรอบหน้า</b> — บิลนี้ชำระแล้ว, ยก ฿{fmtMoney(lateFeeForDecision)} ไปเป็นบิลรอบถัดไป
+                  </label>
+                  <div style={{ marginTop: 6 }}>• <b>ปฏิเสธ</b> → ให้ผู้เช่าจ่ายเต็มรวมค่าปรับ ฿{fmtMoney(lateFeeForDecision)} แล้วส่งสลิปใหม่ (หรือรับเงินสดที่เคาน์เตอร์)</div>
                 </>
               ) : (
                 <>
@@ -577,24 +597,28 @@ function SlipModal({ payment, busy, onClose, onDecide }) {
                   // mismatched slip image (e.g. tenant uploaded the wrong
                   // month's slip).
                   const amt = fmtMoney(payment.amount);
-                  const waiveLine = isPrincipalDecision
-                    ? `\n📌 จะ "ยกค่าปรับล่าช้า ฿${fmtMoney(lateFeeForDecision)}" ให้ผู้เช่า (ตัดสินใจยกเว้น)`
+                  const feeLine = isPrincipalDecision
+                    ? (lateFeeChoice === 'carry'
+                        ? `\n📌 จะ "ยกค่าปรับล่าช้า ฿${fmtMoney(lateFeeForDecision)}" ไปเก็บในบิลรอบถัดไป`
+                        : `\n📌 จะ "ยกเว้นค่าปรับล่าช้า ฿${fmtMoney(lateFeeForDecision)}" ให้ผู้เช่า`)
                     : '';
                   const ok = window.confirm(
                     `อนุมัติสลิป — ตั้งบิลเป็น "ชำระแล้ว"?\n\n` +
                     `ผู้เช่า: ${payment.tenant_name || '-'}\n` +
                     `บิล: ${payment.bill_no || payment.bill_id}\n` +
-                    `จำนวน: ฿${amt}${waiveLine}\n\n` +
+                    `จำนวน: ฿${amt}${feeLine}\n\n` +
                     `📌 บิลจะถูก mark paid ทันที + ผู้เช่าจะได้แจ้งเตือนทาง LINE/อีเมล\n` +
                     `📌 ถ้าจำนวนเงินไม่ตรงกับสลิปจริง ให้ปฏิเสธก่อนแล้วขอสลิปใหม่`
                   );
-                  // On a principal-only payment, approving means explicitly
-                  // waiving the outstanding late fee → send waiveLateFee:true.
-                  if (ok) onDecide(payment.id, true, null, isPrincipalDecision === true);
+                  // On a principal-only payment, pass the chosen late-fee action
+                  // ('waive' | 'carry'); otherwise no action (normal full payment).
+                  if (ok) onDecide(payment.id, true, null, isPrincipalDecision ? lateFeeChoice : undefined);
                 }}
                 disabled={busy} variant="primary" style={{ flex: 1 }}>
                 {isPrincipalDecision
-                  ? `✓ อนุมัติ + ยกค่าปรับ ฿${fmtMoney(lateFeeForDecision)}`
+                  ? (lateFeeChoice === 'carry'
+                      ? `✓ อนุมัติ + เก็บค่าปรับรอบหน้า`
+                      : `✓ อนุมัติ + ยกค่าปรับ ฿${fmtMoney(lateFeeForDecision)}`)
                   : '✓ อนุมัติ + ตั้งเป็นชำระแล้ว'}</Btn>
               <Btn
                 onClick={() => {
