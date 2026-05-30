@@ -22,6 +22,7 @@ function PageTenants({ rooms, setRooms, config, addActivity, setToast }) {
   const [drawerTab, setDrawerTab] = useState('profile');
   const [addOpen, setAddOpen] = useState(false);
   const [initialAddRoomId, setInitialAddRoomId] = useState('');
+  const [routeBookingId, setRouteBookingId] = useState('');
   const [busy, setBusy] = useState(false);
   const [tenantRows, setTenantRows] = useState([]);
   const [tenantLoadError, setTenantLoadError] = useState(null);
@@ -138,6 +139,7 @@ function PageTenants({ rooms, setRooms, config, addActivity, setToast }) {
       if (parts[0] !== 'tenants') return;
 
       const params = new URLSearchParams(queryPart);
+      setRouteBookingId(String(params.get('booking') || '').slice(0, 64));
       const pathRef = parts[1] || '';
       const tenantRef = params.get('tenantId') || (!rooms[pathRef] ? pathRef : '');
       let roomId = params.get('room') || params.get('roomId') || (rooms[pathRef] ? pathRef : '');
@@ -382,7 +384,7 @@ function PageTenants({ rooms, setRooms, config, addActivity, setToast }) {
             />
             {drawerTab === 'profile'  && <TabProfile  t={active} />}
             {drawerTab === 'portal'   && <TabPortal   t={active} setToast={setToast} addActivity={addActivity} apiFetch={apiFetch} />}
-            {drawerTab === 'contract' && <TabContract t={active} setToast={setToast} addActivity={addActivity} setRooms={setRooms} onTenantChanged={refreshTenants} onClosed={() => setActiveId(null)} />}
+            {drawerTab === 'contract' && <TabContract t={active} routeBookingId={routeBookingId} setToast={setToast} addActivity={addActivity} setRooms={setRooms} onTenantChanged={refreshTenants} onClosed={() => setActiveId(null)} />}
             {drawerTab === 'bills'    && <TabBills    t={active} />}
             {drawerTab === 'history'  && <TabHistory  t={active} />}
             {drawerTab === 'notes'    && <TabNotes    t={active} setRooms={setRooms} setToast={setToast} addActivity={addActivity} />}
@@ -960,7 +962,7 @@ function TabPortal({ t, setToast, addActivity, apiFetch }) {
 // review / approve / sign — no jumping to /admin#contracts or
 // /admin#contract-invitations. Room + rent are auto-mapped from the tenant's
 // current room (`t.roomId`, `t.rent`) so admin doesn't re-pick the room.
-function TabContract({ t, setToast, addActivity, setRooms, onTenantChanged, onClosed }) {
+function TabContract({ t, routeBookingId = '', setToast, addActivity, setRooms, onTenantChanged, onClosed }) {
   const C = window.ADMIN_C;
   const { fmtCurrency } = window;
   const { Card, DefList, Btn, Pill } = window;
@@ -999,7 +1001,7 @@ function TabContract({ t, setToast, addActivity, setRooms, onTenantChanged, onCl
     setApproveError(null);
     setCancelling(false);
     setCancelReason('');
-  }, [t.phone]);
+  }, [t.phone, routeBookingId]);
 
   const reload = React.useCallback(async () => {
     setLoading(true);
@@ -1087,7 +1089,9 @@ function TabContract({ t, setToast, addActivity, setRooms, onTenantChanged, onCl
     setBusy(true);
     try {
       const reservedBy = t.room && t.room.reservedBy ? String(t.room.reservedBy) : '';
-      const bookingId = reservedBy && !reservedBy.startsWith('contract:') ? reservedBy : null;
+      const routedBookingId = String(routeBookingId || '').trim().slice(0, 64);
+      const bookingId = routedBookingId
+        || (reservedBy && !reservedBy.startsWith('contract:') ? reservedBy : null);
       const payload = {
         tenantName: t.name,
         tenantPhone: String(t.phone || '').replace(/[\s-]/g, ''),
