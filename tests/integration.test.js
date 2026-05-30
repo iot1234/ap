@@ -6605,7 +6605,9 @@ test('locked contracts use immutable terms snapshot for PDFs and edits are block
   const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   assert.match(src, /async function loadContractTermsSnapshot/,
     'server must define the terms snapshot builder');
-  assert.match(src, /snapshotVersion: 'contract-terms-snapshot-v1'/,
+  // v2 adds captured financials (dueDay + lateFeeRate) so a locked contract's
+  // PDF reflects the terms signed, not later config changes.
+  assert.match(src, /snapshotVersion: 'contract-terms-snapshot-v2'/,
     'snapshot should carry an explicit schema marker');
   const snapIdx = src.indexOf('async function loadContractTermsSnapshot');
   const snapBody = src.slice(snapIdx, src.indexOf('// --- Schema migration', snapIdx));
@@ -7513,4 +7515,15 @@ test("scheduler honors config.notify contract-expiry window + reminder days", ()
   // payment reminder folds in config.notify.reminder1 / reminder2
   assert.ok(sched.includes("cfgReminder1"), "reminder1 must feed the pre-due offsets");
   assert.ok(sched.includes("cfgReminder2On"), "reminder2>0 must enable overdue reminders");
+});
+
+test("locked contract PDF uses the signing snapshot financials, not live config", () => {
+  const fs = require("node:fs"); const path = require("node:path");
+  const server = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  // snapshot captures dueDay + lateFeeRate at lock time (v2)
+  assert.ok(server.includes("contract-terms-snapshot-v2"), "snapshot version must bump to v2 with financials");
+  assert.ok(server.includes("financials"), "snapshot must capture financial terms");
+  // PDF path prefers the snapshot for locked contracts
+  assert.ok(server.includes("terms_template_snapshot.financials"), "PDF must read the snapshot financials");
+  assert.ok(server.includes("contract.locked_at"), "snapshot preference gated on locked_at");
 });

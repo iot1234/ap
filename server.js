@@ -234,6 +234,25 @@ async function loadContractTermsSnapshot(db, contract = {}) {
 
   const contractPdf = require('./services/contractPdf');
   const clauses = contractPdf.resolveClauses(rawTemplate);
+
+  // Capture the financial terms (due day + late-fee rate) AS THEY ARE NOW so a
+  // locked/signed contract's PDF keeps printing the terms the tenant actually
+  // agreed to, even if the operator later changes config.notify.dueOnDay or
+  // features.lateFee.ratePctPerMonth. Without this the PDF read these LIVE and a
+  // routine policy change silently rewrote already-signed contracts.
+  let financials = { dueDay: 15, lateFeeRate: 1.5 };
+  try {
+    const cfgR = await db.query(`SELECT value FROM app_data WHERE key='baankarn_config_v1' LIMIT 1`);
+    const d = Number(cfgR.rows[0] && cfgR.rows[0].value
+      && cfgR.rows[0].value.notify && cfgR.rows[0].value.notify.dueOnDay);
+    if (Number.isFinite(d) && d >= 1 && d <= 28) financials.dueDay = Math.floor(d);
+  } catch { /* keep default 15 */ }
+  try {
+    const flags = await features.load(db);
+    const r = Number(flags && flags.lateFee && flags.lateFee.ratePctPerMonth);
+    if (Number.isFinite(r) && r >= 0) financials.lateFeeRate = r;
+  } catch { /* keep default 1.5 */ }
+
   return {
     templateId,
     snapshot: {
@@ -241,7 +260,8 @@ async function loadContractTermsSnapshot(db, contract = {}) {
       clauses,
       sections: rawTemplate && typeof rawTemplate.sections === 'object' ? rawTemplate.sections : {},
       variables: rawTemplate && typeof rawTemplate.variables === 'object' ? rawTemplate.variables : {},
-      snapshotVersion: 'contract-terms-snapshot-v1',
+      financials,
+      snapshotVersion: 'contract-terms-snapshot-v2',
     },
   };
 }
@@ -6028,6 +6048,18 @@ app.get('/api/tenant/contract/:id/pdf', requireTenant, async (req, res) => {
         dueDay = Number(cfg.notify.dueOnDay);
       }
     } catch { /* keep defaults */ }
+
+    // For a LOCKED (signed) contract, prefer the financial terms captured in the
+    // signing snapshot over the live config — the PDF must reflect what the
+    // tenant agreed to, not a later policy change. Older v1 snapshots have no
+    // financials and fall back to the live values above.
+    const snapFin = contract.locked_at
+      && contract.terms_template_snapshot
+      && contract.terms_template_snapshot.financials;
+    if (snapFin) {
+      if (Number.isFinite(Number(snapFin.dueDay))) dueDay = Number(snapFin.dueDay);
+      if (Number.isFinite(Number(snapFin.lateFeeRate))) lateFeeRate = Number(snapFin.lateFeeRate);
+    }
 
     const contractPdf = require('./services/contractPdf');
     const tenant = {
