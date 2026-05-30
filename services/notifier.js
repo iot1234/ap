@@ -106,8 +106,35 @@ async function logResult(pool, row) {
  * @param {object} msg - { subject, text, html?, line?: string }
  * @returns {Promise<{ channel: string, ok: boolean }>}
  */
+// Master per-channel gate from config.notify.channels (Settings → การแจ้งเตือน →
+// ช่องทางการแจ้งเตือน). These toggles used to be placebo: turning OFF อีเมล/LINE
+// in Settings did nothing because the dispatcher only consulted feature flags +
+// bindings. Now an explicit `false` hard-disables that channel here. Absent /
+// unset → allowed (true), so older configs and partial blobs keep working. The
+// caller can pass ctx.channels to skip the per-call DB read (e.g. the queue).
+async function loadNotifyChannelGate(ctx) {
+  if (ctx && ctx.channels && typeof ctx.channels === 'object') {
+    const c = ctx.channels;
+    return { line: c.line !== false, email: c.email !== false, sms: c.sms !== false };
+  }
+  try {
+    const { rows } = await ctx.pool.query(
+      `SELECT value FROM app_data WHERE key='baankarn_config_v1' LIMIT 1`
+    );
+    const ch = rows[0] && rows[0].value && rows[0].value.notify && rows[0].value.notify.channels;
+    return {
+      line: !(ch && ch.line === false),
+      email: !(ch && ch.email === false),
+      sms: !(ch && ch.sms === false),
+    };
+  } catch {
+    return { line: true, email: true, sms: true };
+  }
+}
+
 async function notifyOwner(ctx, msg) {
   const { pool, features } = ctx;
+  const chGate = await loadNotifyChannelGate(ctx);
   const text = msg.text || msg.subject || '';
   const subject = msg.subject || 'แจ้งเตือนระบบ';
 
@@ -142,7 +169,7 @@ async function notifyOwner(ctx, msg) {
   // retries on a broken channel. We branch the queue fallback on this.
   let lineTransientFail = false;
   let emailInlineTried = false;
-  if (oaForOwner && oaForOwner.channelAccessToken && lineOwner) {
+  if (chGate.line && oaForOwner && oaForOwner.channelAccessToken && lineOwner) {
     lineInlineTried = true;
     try {
       // pushTextStrict THROWS on failure with .status / .fatal attached, so we
@@ -173,7 +200,7 @@ async function notifyOwner(ctx, msg) {
   }
 
   // 2. Email (fallback)
-  if (email.isConfigured(features) && features.email && features.email.from) {
+  if (chGate.email && email.isConfigured(features) && features.email && features.email.from) {
     emailInlineTried = true;
     const to = secrets.get('OWNER_EMAIL') || features.email.from;
     const ok = await email.send(features, {
@@ -200,7 +227,7 @@ async function notifyOwner(ctx, msg) {
   // but duplicate-spam through a broken channel is worse for signal/noise.
   const queue = getQueue();
   if (queue) {
-    if (oaForOwner && oaForOwner.channelAccessToken && lineOwner && (!lineInlineTried || lineTransientFail)) {
+    if (chGate.line && oaForOwner && oaForOwner.channelAccessToken && lineOwner && (!lineInlineTried || lineTransientFail)) {
       try {
         await queue.enqueue(pool, {
           channel: 'line', recipient: lineOwner, subject, body: text,
@@ -216,7 +243,7 @@ async function notifyOwner(ctx, msg) {
         return { channel: 'queue', ok: false, queued: true };
       } catch { /* fall through */ }
     }
-    if (email.isConfigured(features) && features?.email?.from && !emailInlineTried) {
+    if (chGate.email && email.isConfigured(features) && features?.email?.from && !emailInlineTried) {
       const to = secrets.get('OWNER_EMAIL') || features.email.from;
       try {
         await queue.enqueue(pool, {
@@ -233,11 +260,15 @@ async function notifyOwner(ctx, msg) {
   }
 
   // 4. None worked → log skip
+  const allOwnerGatedOff = !chGate.line && !chGate.email;
   await logResult(pool, {
     channel: 'none', recipient: '', subject, body: text,
-    status: 'failed', error: 'no channel configured',
+    status: 'failed',
+    error: allOwnerGatedOff
+      ? 'ช่องทางแจ้งเตือนเจ้าของถูกปิดในตั้งค่า (Settings → ช่องทางการแจ้งเตือน)'
+      : 'no channel configured',
   });
-  return { channel: 'none', ok: false };
+  return { channel: 'none', ok: false, channelsDisabled: allOwnerGatedOff };
 }
 
 /**
@@ -247,6 +278,7 @@ async function notifyOwner(ctx, msg) {
 async function notifyTenant(ctx, tenant, msg) {
   const { pool, features } = ctx;
   if (!tenant) return { channel: 'none', ok: false };
+  const chGate = await loadNotifyChannelGate(ctx);
   const subject = msg.subject || 'แจ้งเตือน';
   const rawText = msg.text || subject;
   // Accept both DB shape (snake_case from `tenants` table) and the legacy
@@ -282,7 +314,7 @@ async function notifyTenant(ctx, tenant, msg) {
     return { channel: 'none', ok: false, skipped: true, reason: 'inactive', lineRecipientCount };
   }
 
-  if (lineRecipients.length) {
+  if (chGate.line && lineRecipients.length) {
     let sent = 0;
     let failed = 0;
     let firstOa = null;
@@ -318,7 +350,7 @@ async function notifyTenant(ctx, tenant, msg) {
     }
   }
 
-  if (mail && email.isConfigured(features)) {
+  if (chGate.email && mail && email.isConfigured(features)) {
     const ok = await email.send(features, {
       to: mail, subject, text, html: msg.html,
     });
@@ -332,7 +364,7 @@ async function notifyTenant(ctx, tenant, msg) {
   // SMS — final fallback. Skipped (with a clear log row) when no SMS
   // provider is configured, so a half-implemented stub doesn't make every
   // notification look failed. C1.
-  if (phone && sms.isConfigured(features)) {
+  if (chGate.sms && phone && sms.isConfigured(features)) {
     try {
       const ok = await sms.send(features, { to: phone, text });
       await logResult(pool, {
@@ -362,7 +394,7 @@ async function notifyTenant(ctx, tenant, msg) {
   if (queue) {
     let enqueued = false;
     let queuedRecipient = '';
-    if (lineRecipients.length) {
+    if (chGate.line && lineRecipients.length) {
       for (const recipient of lineRecipients) {
         try {
           await queue.enqueue(pool, {
@@ -374,7 +406,7 @@ async function notifyTenant(ctx, tenant, msg) {
         } catch { /* ignore — try next channel */ }
       }
     }
-    if (!enqueued && mail && email.isConfigured(features)) {
+    if (!enqueued && chGate.email && mail && email.isConfigured(features)) {
       try {
         await queue.enqueue(pool, {
           channel: 'email', recipient: mail, subject, body: text,
@@ -383,7 +415,7 @@ async function notifyTenant(ctx, tenant, msg) {
         enqueued = true;
       } catch { /* ignore */ }
     }
-    if (!enqueued && phone && sms.isConfigured(features)) {
+    if (!enqueued && chGate.sms && phone && sms.isConfigured(features)) {
       try {
         await queue.enqueue(pool, {
           channel: 'sms', recipient: phone, subject, body: text,
@@ -402,11 +434,15 @@ async function notifyTenant(ctx, tenant, msg) {
     }
   }
 
+  const allGatedOff = !chGate.line && !chGate.email && !chGate.sms;
   await logResult(pool, {
     channel: 'none', recipient: phone || '', subject, body: text,
-    status: 'failed', error: 'tenant has no reachable channel',
+    status: 'failed',
+    error: allGatedOff
+      ? 'ทุกช่องทางแจ้งเตือนถูกปิดในตั้งค่า (Settings → ช่องทางการแจ้งเตือน) — เปิดอย่างน้อย 1 ช่องทาง'
+      : 'tenant has no reachable channel',
   });
-  return { channel: 'none', ok: false, lineRecipientCount };
+  return { channel: 'none', ok: false, lineRecipientCount, channelsDisabled: allGatedOff };
 }
 
-module.exports = { notifyOwner, notifyTenant, getTenantLineRecipients };
+module.exports = { notifyOwner, notifyTenant, getTenantLineRecipients, loadNotifyChannelGate };
