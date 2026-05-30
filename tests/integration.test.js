@@ -7532,3 +7532,13 @@ test("locked contract PDF uses the signing snapshot financials, not live config"
     "snapshot due-day reads must keep the same 1..28 bounds as live config");
   assert.ok(server.includes("contract.locked_at"), "snapshot preference gated on locked_at");
 });
+
+
+test("admin health page surfaces the data-integrity anomaly scanner", () => {
+  const fs = require("node:fs"); const path = require("node:path");
+  const page = fs.readFileSync(path.join(__dirname, "..", "project", "admin", "page-health.jsx"), "utf8");
+  assert.ok(page.includes("/api/admin/anomalies"), "health page must fetch the anomalies endpoint (was orphaned)");
+  assert.ok(page.includes("setAnomalies"), "health page must hold anomalies state");
+  // balanced render guard: the panel maps items and offers a fix deep-link
+  assert.ok(page.includes("anomalies.items.map"), "must render each anomaly");
+});

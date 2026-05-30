@@ -26,6 +26,7 @@ function PageHealth({ setToast }) {
   const [busy, setBusy]     = useState(false);
   const [err, setErr]       = useState('');
   const [expanded, setExpanded] = useState({});
+  const [anomalies, setAnomalies] = useState(null);   // data-integrity scan
   const timerRef = useRef(null);
 
   async function load(force = false) {
@@ -42,6 +43,14 @@ function PageHealth({ setToast }) {
     } finally {
       setBusy(false);
     }
+    // Data-integrity anomalies (rent typos, zero utility rates, ghost-occupied
+    // rooms, stuck slips, …). Best-effort + separate try so a scan failure
+    // never blocks the health view.
+    try {
+      const ar = await apiFetch('/api/admin/anomalies');
+      const ad = await ar.json();
+      if (ar.ok) setAnomalies(ad);
+    } catch { /* ignore — panel just stays hidden */ }
   }
 
   useEffect(() => {
@@ -101,6 +110,66 @@ function PageHealth({ setToast }) {
           </div>
         </div>
       </Card>
+
+      {/* Data-integrity anomalies — surfaces the previously-orphaned
+          /api/admin/anomalies scanner so operators can SEE + fix bad data
+          (typo'd rent, zero utility rate, ghost-occupied room, stuck slip). */}
+      {anomalies && Array.isArray(anomalies.items) && anomalies.items.length ? (
+        <Card style={{ marginBottom: 16 }}>
+          <SectionHeading>🔎 ตรวจสุขภาพข้อมูล</SectionHeading>
+          <div style={{ color: C.muted, fontSize: 12.5, marginBottom: 8 }}>
+            ความผิดปกติของข้อมูลที่ควรแก้ — ค่าเช่า/เรตค่าน้ำไฟผิดปกติ, ห้องว่างแต่ยังผูกผู้เช่า, สลิปค้างตรวจ ฯลฯ
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column' }}>
+            {anomalies.items.map((a) => {
+              const meta = STATUS_META[a.severity === 'critical' ? 'error'
+                : a.severity === 'warn' ? 'warn' : 'ok'] || STATUS_META.warn;
+              const samples = Array.isArray(a.items) ? a.items : [];
+              return (
+                <div key={a.key} style={{
+                  borderBottom: '1px solid ' + C.border, padding: '12px 0',
+                  display: 'grid', gridTemplateColumns: '32px 1fr auto',
+                  alignItems: 'center', gap: 12,
+                }}>
+                  <div style={{
+                    width: 26, height: 26, borderRadius: 13,
+                    background: meta.bg, color: meta.color,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    fontWeight: 700, fontSize: 14,
+                  }}>{meta.icon}</div>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontWeight: 600, color: meta.color }}>
+                      {a.title}{a.count ? ` (${a.count})` : ''}
+                    </div>
+                    {samples.length ? (
+                      <div style={{ color: C.muted, fontSize: 12, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {samples.slice(0, 5).map((it) => it && it.label).filter(Boolean).join(' · ')}
+                        {samples.length > 5 ? ` … +${samples.length - 5}` : ''}
+                      </div>
+                    ) : null}
+                  </div>
+                  {a.fix ? (
+                    <a
+                      href={a.fix}
+                      onClick={(e) => {
+                        if (typeof a.fix === 'string' && a.fix.startsWith('/admin#')) {
+                          e.preventDefault();
+                          window.location.hash = a.fix.slice('/admin'.length);
+                        }
+                      }}
+                      style={{ fontSize: 12.5, color: C.accent || C.info, textDecoration: 'underline', whiteSpace: 'nowrap' }}
+                    >แก้ไข →</a>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        </Card>
+      ) : (anomalies && anomalies.ok ? (
+        <Card style={{ marginBottom: 16 }}>
+          <span style={{ color: C.success, fontSize: 13 }}>✅ ตรวจสุขภาพข้อมูล: ไม่พบความผิดปกติ</span>
+        </Card>
+      ) : null)}
 
       {/* Per-check rows */}
       <Card>
