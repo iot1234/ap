@@ -1914,14 +1914,24 @@ test('tenant API does not send tenants back to login on CSRF retryable 403', () 
     'tenant UI must not treat every 403 as session expiry');
 });
 
-test('csrf token endpoint overwrites stale anonymous token after tenant login', () => {
+test('csrf token endpoint reuses the cookie so concurrent client token caches stay valid', () => {
+  // Was: asserted generateCsrfToken(req, res, true) (overwrite=true). That
+  // rotated the single CSRF cookie on EVERY fetch, and we have two independent
+  // client token caches (api-client.js for /api/data/:key + hooks.jsx apiFetch
+  // for everything else) — so the second cache's fetch invalidated the first's
+  // token, producing "บันทึกข้อมูล ไม่สำเร็จ (HTTP 403)" after a notify send.
+  // The fix makes the endpoint idempotent: overwrite=false reuses the existing
+  // cookie (both caches agree), validateOnReuse=false still regenerates cleanly
+  // across the anonymous -> tenant/admin session transition instead of throwing.
   const fs = require('node:fs');
   const path = require('node:path');
   const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
-  const route = server.match(/app\.get\('\/api\/csrf-token'[\s\S]{0,650}?res\.json\(\{ csrfToken: token \}\);\s*\}\);/);
+  const route = server.match(/app\.get\('\/api\/csrf-token'[\s\S]{0,1400}?res\.json\(\{ csrfToken: token \}\);\s*\}\);/);
   assert.ok(route, 'csrf-token route must exist');
-  assert.match(route[0], /generateCsrfToken\(req,\s*res,\s*true\)/,
-    'csrf-token route must force overwrite stale cookies when session identity changes');
+  assert.match(route[0], /generateCsrfToken\(req,\s*res,\s*false,\s*false\)/,
+    'csrf-token route must reuse the existing cookie (overwrite=false) so the two client token caches do not invalidate each other');
+  assert.doesNotMatch(route[0], /generateCsrfToken\(req,\s*res,\s*true\)/,
+    'csrf-token route must NOT rotate the cookie on every fetch');
 });
 
 test('tenant payment readiness reports orphan bills with BILL_NOT_LINKED', () => {

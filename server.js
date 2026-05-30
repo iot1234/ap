@@ -681,12 +681,24 @@ const csrf = makeCsrf({
   secure: NODE_ENV === 'production',
 });
 app.get('/api/csrf-token', (req, res) => {
-  // Always issue a fresh cookie/token pair. A user can legitimately move from
-  // anonymous -> tenant/admin session in the same browser tab; the previous
-  // anonymous CSRF cookie is then invalid for the new session identifier. The
-  // csrf-csrf default validates an existing cookie before reusing it, which
-  // turns that normal login transition into "invalid csrf token".
-  const token = csrf.generateCsrfToken(req, res, true);
+  // Reuse the existing valid cookie/token pair instead of minting a new one on
+  // every call. We have TWO independent client-side token caches that both pull
+  // from this endpoint — api-client.js (PUT /api/data/:key) and hooks.jsx's
+  // apiFetch (everything else, e.g. /api/tenants/notify). With overwrite=true
+  // every fetch rotated the single CSRF cookie, so whichever cache fetched last
+  // owned the cookie and the other cache's token was instantly stale → 403
+  // "invalid CSRF token". Symptom: sending a LINE/notify succeeds (apiFetch
+  // refetched + rotated the cookie) but the follow-up activity-log save via
+  // api-client fails with HTTP 403 ("บันทึกข้อมูล ไม่สำเร็จ"). The client retry
+  // added in "Retry CSRF for admin background sync" masks it; this removes the
+  // root cause.
+  //
+  // overwrite=false makes repeated calls return the SAME stable token (reusing
+  // the cookie), so both caches agree. validateOnReuse=false preserves the
+  // anonymous -> tenant/admin transition: when the session identifier changes
+  // the old cookie no longer validates, and instead of throwing we silently
+  // regenerate a fresh pair bound to the new identifier.
+  const token = csrf.generateCsrfToken(req, res, false, false);
   res.json({ csrfToken: token });
 });
 // Wrap doubleCsrfProtection with our existing sameOrigin so the order is:
