@@ -5,7 +5,7 @@
 //
 // Different from /admin#health — that's "is the system currently working".
 // This is "is the system CONFIGURED for live operations":
-//   - Building info filled in (not still default 'บ้านกาญจน์ เรสซิเดนซ์')
+//   - Building info filled in (not still the generic default)
 //   - PromptPay target set (else bills have no QR)
 //   - At least one non-default-username owner
 //   - Critical secrets present (SESSION_SECRET, LINE creds)

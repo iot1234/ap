@@ -22,8 +22,8 @@ async function loadBuildingName(pool) {
     );
     const cfg = rows.length ? rows[0].value : {};
     return (cfg && cfg.building && cfg.building.name)
-      || 'บ้านกาญจน์ เรสซิเดนซ์';
-  } catch { return 'บ้านกาญจน์ เรสซิเดนซ์'; }
+      || 'ที่พักของคุณ';
+  } catch { return 'ที่พักของคุณ'; }
 }
 
 // Helper for both verify endpoints — pushes a notification to the tenant

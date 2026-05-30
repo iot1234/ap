@@ -21,6 +21,40 @@ const C = {
   accent: '#2f8a70', accentWarm: '#b98448', dark: '#14231d',
 };
 
+const DEFAULT_BUILDING_NAME = 'ที่พักของคุณ';
+
+function normalizeBuildingName(building) {
+  const name = String(building?.name || '').trim();
+  return name || DEFAULT_BUILDING_NAME;
+}
+
+function buildingInitials(name) {
+  const parts = String(name || '').trim().split(/\s+/).filter(Boolean);
+  const chars = parts.length >= 2
+    ? parts.slice(0, 2).map((p) => Array.from(p)[0] || '').join('')
+    : Array.from(parts[0] || DEFAULT_BUILDING_NAME).slice(0, 2).join('');
+  return (chars || 'ที').toUpperCase();
+}
+
+function readStoredConfig() {
+  try {
+    const raw = localStorage.getItem('baankarn_config_v1');
+    const parsed = raw ? JSON.parse(raw) : null;
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function extractConfig(payload) {
+  if (!payload || typeof payload !== 'object') return null;
+  if (payload.value && typeof payload.value === 'object') return payload.value;
+  if (payload.baankarn_config_v1 && typeof payload.baankarn_config_v1 === 'object') {
+    return payload.baankarn_config_v1;
+  }
+  return payload;
+}
+
 const STATUS = {
   vacant:    { th: 'ว่าง',       dot: '#2e9b6a', soft: '#e6f4ec', ink: '#0e3a25' },
   occupied:  { th: 'มีผู้เช่า',  dot: '#475569', soft: '#eef1f5', ink: '#1f2937' },
@@ -780,7 +814,9 @@ function DetailPanel({ room, onClose }) {
   );
 }
 
-function TopBar({ search, setSearch, isMobile, onMenu, roomCount, vacantCount }) {
+function TopBar({ search, setSearch, isMobile, onMenu, roomCount, vacantCount, building }) {
+  const buildingName = normalizeBuildingName(building);
+  const initials = buildingInitials(buildingName);
   return (
     <div style={{
       padding: isMobile ? '10px 14px' : '14px 24px',
@@ -795,17 +831,22 @@ function TopBar({ search, setSearch, isMobile, onMenu, roomCount, vacantCount })
           fontFamily: 'inherit', fontSize: 16, color: C.ink, flex: 'none',
         }}>≡</button>
       )}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 'none' }}>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 10,
+        flex: isMobile ? '1 1 auto' : '0 1 360px', minWidth: 0,
+      }}>
         <div style={{
           width: 34, height: 34, borderRadius: 8, background: C.dark,
           color: C.surfaceAlt, display: 'flex', alignItems: 'center', justifyContent: 'center',
           fontFamily: 'Sora', fontWeight: 700, fontSize: 14, letterSpacing: 0,
-        }}>บก</div>
+          flex: 'none',
+        }}>{initials}</div>
         <div style={{ minWidth: 0 }}>
           <div style={{
             fontFamily: 'Sora', fontSize: isMobile ? 14 : 15,
             color: C.ink, fontWeight: 600, letterSpacing: 0, lineHeight: 1.2,
-          }}>บ้านกาญจน์ เรสซิเดนซ์</div>
+            whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+          }} title={buildingName}>{buildingName}</div>
           {!isMobile && (
             <div style={{ fontSize: 11, color: C.muted, marginTop: 1 }}>
               ห้องพักอพาร์ตเมนต์ · {roomCount} ห้อง · ว่าง {vacantCount}
@@ -922,6 +963,28 @@ function App() {
   const [filter, setFilter] = useState('vacant');
   const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [config, setConfig] = useState(readStoredConfig);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/data/baankarn_config_v1', { credentials: 'same-origin' })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((payload) => {
+        const next = extractConfig(payload);
+        if (!cancelled && next) setConfig(next);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+
+  const building = config?.building || null;
+  const buildingName = normalizeBuildingName(building);
+
+  useEffect(() => {
+    if (typeof document !== 'undefined') {
+      document.title = `${buildingName} · ระบบจัดการห้องพัก`;
+    }
+  }, [buildingName]);
 
   // Self-heal: if the currently-viewed floor has no rooms (admin deleted
   // every room there, or rooms were hydrated from server with a different
@@ -1099,7 +1162,8 @@ function App() {
       <TopBar search={search} setSearch={setSearch} isMobile={isMobile}
         onMenu={() => setMobileMenuOpen(true)}
         roomCount={totals.all}
-        vacantCount={totals.vacant}/>
+        vacantCount={totals.vacant}
+        building={building}/>
 
       {isMobile ? (
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>

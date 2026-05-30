@@ -921,11 +921,11 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
           fix: '/admin#rooms → กำหนดผู้เช่าให้ห้องก่อน',
         });
       }
-      if (!config?.building?.name || config.building.name === 'บ้านกาญจน์ เรสซิเดนซ์') {
+      if (!config?.building?.name || config.building.name === 'ที่พักของคุณ') {
         issues.push({
           sev: 'low',
           code: 'DEFAULT_BUILDING_NAME',
-          msg: 'ชื่อตึกยังเป็น default — บิล PDF จะแสดง "บ้านกาญจน์ เรสซิเดนซ์"',
+          msg: 'ชื่อตึกยังเป็นค่าเริ่มต้น — บิล PDF จะแสดง "ที่พักของคุณ"',
           fix: '/admin#settings → ข้อมูลตึก',
         });
       }
@@ -1764,7 +1764,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
                 elecRate: b.elecRate,
                 elecPrevReading: b.elecPrevReading,
                 elecCurrentReading: b.elecCurrentReading,
-                building: (config && config.building) || { name: 'บ้านกาญจน์ เรสซิเดนซ์' },
+                building: (config && config.building) || { name: 'ที่พักของคุณ' },
               };
               const apiFetch = window.requireApiFetch ? window.requireApiFetch() : window.apiFetch;
               try {

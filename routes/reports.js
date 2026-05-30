@@ -251,7 +251,7 @@ module.exports = function buildReportsRouter(ctx) {
       const config = configRow.rows.length ? configRow.rows[0].value : {};
 
       const wb = new ExcelJS.Workbook();
-      wb.creator = config?.building?.name || 'บ้านกาญจน์ เรสซิเดนซ์';
+      wb.creator = config?.building?.name || 'ที่พักของคุณ';
       wb.created = new Date();
       const ws = wb.addWorksheet(`Bills ${period}`);
       ws.columns = [

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>บ้านกาญจน์ เรสซิเดนซ์ · ระบบจัดการหอพัก</title>
+<title>ระบบจัดการห้องพัก</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
 <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700&family=IBM+Plex+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"/>
@@ -36,8 +36,9 @@
   }
 </style>
 </head>
-<body>
+<body data-building-title-template="{building} · ระบบจัดการห้องพัก">
 <div id="root"></div>
+<script src="/building-branding.js"></script>
 <!-- API client: hydrates localStorage from server before React mounts -->
 <script src="/api-client.js"></script>
 <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" integrity="sha384-DGyLxAyjq0f9SPpVevD6IgztCFlnMF6oW/XQGmfe+IsZ8TqEiDrcHkMLKI6fiB/Z" crossorigin="anonymous"></script>

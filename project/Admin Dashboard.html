@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>Admin Console · บ้านกาญจน์ เรสซิเดนซ์</title>
+<title>Admin Console</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"/>
@@ -266,7 +266,7 @@
   }
 </style>
 </head>
-<body>
+<body data-building-title-template="Admin Console · {building}">
 <!-- Preload hints: the <script type="text/babel"> tags below execute
      sequentially (Babel needs them in order to register window.PageX
      before shell.jsx mounts React). But the BYTES can download in
@@ -289,6 +289,7 @@
 
 <div id="root"></div>
 
+<script src="/building-branding.js"></script>
 <!-- API client: hydrates localStorage from server before React mounts -->
 <script src="/api-client.js"></script>
 

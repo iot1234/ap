@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>จองห้องพัก · บ้านกาญจน์ เรสซิเดนซ์</title>
+<title>จองห้องพัก</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
 <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700&family=IBM+Plex+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"/>
@@ -487,12 +487,12 @@
   }
 </style>
 </head>
-<body class="tenant-public-page tenant-booking-page">
+<body class="tenant-public-page tenant-booking-page" data-building-title-template="จองห้องพัก · {building}">
 <div class="wrap">
   <div class="topbar">
     <div class="brand">
-      <div class="brand-logo">บ</div>
-      <span>บ้านกาญจน์ เรสซิเดนซ์</span>
+      <div class="brand-logo" data-building-initials>ที</div>
+      <span data-building-name>ที่พักของคุณ</span>
     </div>
     <a href="/">← กลับหน้าแรก</a>
   </div>
@@ -726,6 +726,7 @@
   </template>
 </div>
 
+<script src="/building-branding.js"></script>
 <script>
 (function() {
   const form = document.getElementById('bookingForm');

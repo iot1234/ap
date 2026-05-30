@@ -489,7 +489,7 @@ function PageLineOas({ setToast }) {
             <Input label="ชื่อ OA"
                    value={editing.name}
                    onChange={(v) => setEditing({ ...editing, name: v })}
-                   placeholder="บ้านกาญจน์ Main" />
+                   placeholder="ที่พัก Main" />
             <Input label="slug"
                    value={editing.slug}
                    onChange={(v) => setEditing({ ...editing, slug: v.toLowerCase().replace(/[^a-z0-9_-]+/g, '-') })}

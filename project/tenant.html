@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
-<title>พอร์ทัลผู้เช่า · บ้านกาญจน์ เรสซิเดนซ์</title>
+<title>พอร์ทัลผู้เช่า</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
 <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700&family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"/>
@@ -134,9 +134,10 @@
   }
 </style>
 </head>
-<body data-theme="light">
+<body data-theme="light" data-building-title-template="พอร์ทัลผู้เช่า · {building}">
 <div id="root" style="min-height:100vh;display:grid;place-items:center;color:var(--muted);font-family:var(--font-sans,system-ui)">กำลังโหลด…</div>
 
+<script src="/building-branding.js"></script>
 <script src="/api-client.js"></script>
 <!-- A5+B6: production React+ReactDOM with SRI. development.js was 20× the size and exposed dev panels. -->
 <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"

@@ -321,7 +321,7 @@ async function renderContractPdf(contract, tenant, room, building, options, stre
     bufferPages: true,
     info: {
       Title: `Contract ${contract.contractNo || ''}`,
-      Author: building?.name || 'บ้านกาญจน์ เรสซิเดนซ์',
+      Author: building?.name || 'ที่พักของคุณ',
       Subject: 'Tenancy contract',
     },
   });
@@ -418,7 +418,7 @@ async function renderContractPdf(contract, tenant, room, building, options, stre
   doc.roundedRect(MARGIN, headerY, CONTENT_W, headerBandH, 8).fill(C.bg);
   doc.rect(MARGIN, headerY, 6, headerBandH).fill(C.accent);
   doc.font(FONT_B).fontSize(15).fillColor(C.ink)
-    .text(truncateText(building?.name || 'บ้านกาญจน์ เรสซิเดนซ์', 72), headerLeftX, headerY + 12,
+    .text(truncateText(building?.name || 'ที่พักของคุณ', 72), headerLeftX, headerY + 12,
       { width: headerLeftW, height: 34, ellipsis: true });
   doc.font(FONT).fontSize(9.5).fillColor(C.ink2);
   let headerLineY = headerY + 50;

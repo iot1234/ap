@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>กรอกสัญญาเช่า · บ้านกาญจน์ เรสซิเดนซ์</title>
+<title>กรอกสัญญาเช่า</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
 <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700&family=IBM+Plex+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"/>
@@ -212,6 +212,11 @@ function App() {
       });
   }, []);
 
+  useEffect(() => {
+    const name = String(view?.building?.name || '').trim() || 'ที่พักของคุณ';
+    document.title = `กรอกสัญญาเช่า · ${name}`;
+  }, [view?.building?.name]);
+
   // When the auto-save discovers the link is dead, abort the form.
   const handleFatalAutoSave = (err) => {
     setError(friendlyErrorText(err));
@@ -335,7 +340,7 @@ function Header({ view, savedAt }) {
         <div className="tenant-public-eyebrow">Contract fill</div>
         <h1>📝 สัญญาเช่าห้องพัก</h1>
         <div className="tenant-public-lead">
-          {view.building?.name || 'หอพัก'} · ห้อง {view.contract.roomId || '—'}
+          {view.building?.name || 'ที่พักของคุณ'} · ห้อง {view.contract.roomId || '—'}
         </div>
         <div className="tenant-guide-list" aria-label="ขั้นตอนกรอกสัญญา">
           <span className="tenant-guide-chip">ตรวจข้อมูลสัญญา</span>

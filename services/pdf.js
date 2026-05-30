@@ -68,7 +68,7 @@ async function renderBillPdf(bill, stream) {
     bufferPages: true,
     info: {
       Title: `Bill ${bill.billNo || ''}`,
-      Author: bill.building?.name || 'บ้านกาญจน์ เรสซิเดนซ์',
+      Author: bill.building?.name || 'ที่พักของคุณ',
     },
   });
 
@@ -79,7 +79,7 @@ async function renderBillPdf(bill, stream) {
 
   doc.pipe(stream);
 
-  const buildingName = bill.building?.name || 'บ้านกาญจน์ เรสซิเดนซ์';
+  const buildingName = bill.building?.name || 'ที่พักของคุณ';
   const buildingAddr = bill.building?.address || '';
   const buildingPhone = bill.building?.phone || '';
   const isPaid = String(bill.status || '').toLowerCase() === 'paid';

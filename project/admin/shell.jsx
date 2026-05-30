@@ -196,7 +196,7 @@ function canonicalPageId(id) {
 // once doesn't have to re-collapse every reload.
 function Sidebar({ page, setPage, mobileOpen, setMobileOpen, isMobile, pendingBookings, overdueRooms, buildingName, currentUser, collapsed, setCollapsed }) {
   const C = window.ADMIN_C;
-  const shortName = (buildingName || 'บ้านกาญจน์').replace(/\s*(เรสซิเดนซ์|residence).*/i, '').trim();
+  const shortName = String(buildingName || '').trim() || 'ที่พักของคุณ';
   // Collapse only applies to non-mobile. Mobile drawer is always full width.
   const isCollapsed = !isMobile && collapsed;
   const railWidth = isCollapsed ? 64 : 260;
@@ -286,7 +286,7 @@ function Sidebar({ page, setPage, mobileOpen, setMobileOpen, isMobile, pendingBo
                 display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
                 color: '#fff', fontFamily: 'IBM Plex Sans Thai, sans-serif', fontWeight: 700, fontSize: 18,
                 flexShrink: 0,
-              }}>{(shortName[0] || 'บ').toUpperCase()}</div>
+              }}>{(shortName[0] || 'ท').toUpperCase()}</div>
             {!isCollapsed && (
               <div style={{ minWidth: 0, flex: 1 }}>
                 <div style={{ fontFamily: 'IBM Plex Sans Thai, sans-serif', fontWeight: 700, fontSize: 14.5, color: '#fff', lineHeight: 1.2,
@@ -891,6 +891,13 @@ function App() {
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
 
+  const buildingName = String(config?.building?.name || '').trim() || 'ที่พักของคุณ';
+  useEffect(() => {
+    if (typeof document !== 'undefined') {
+      document.title = `${PAGE_TITLES[page] || 'Admin Console'} · ${buildingName}`;
+    }
+  }, [page, buildingName]);
+
   // --- Viewport ---
   const [isMobile, setIsMobile] = useState(() => typeof window !== 'undefined' && window.innerWidth <= 900);
   useEffect(() => {
@@ -1176,7 +1183,7 @@ function App() {
         isMobile={isMobile}
         pendingBookings={pendingBookings}
         overdueRooms={overdueRoomCount}
-        buildingName={config.building?.name}
+        buildingName={buildingName}
         currentUser={currentUser}
         collapsed={collapsed}
         setCollapsed={setCollapsed}

@@ -16,7 +16,7 @@ const { validateBody } = require('../middleware/validate');
 // is here. Editing this object requires a deploy (intentional — these are
 // boundaries, not user data).
 const DEFAULT_SETTINGS = Object.freeze({
-  'building.name':       { value: 'บ้านกาญจน์ เรสซิเดนซ์', description: 'ชื่อตึก/โครงการ' },
+  'building.name':       { value: 'ที่พักของคุณ', description: 'ชื่อตึก/โครงการ' },
   'building.address':    { value: '', description: 'ที่อยู่ตึก' },
   'building.phone':      { value: '', description: 'เบอร์ติดต่อสำนักงาน' },
   'building.lineId':     { value: '', description: 'LINE ID ของสำนักงาน' },

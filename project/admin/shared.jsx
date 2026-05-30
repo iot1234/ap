@@ -143,7 +143,7 @@ const DEFAULT_CONFIG = {
     prorateFirstMonth: false,
   },
   building: {
-    name:    'บ้านกาญจน์ เรสซิเดนซ์',
+    name:    'ที่พักของคุณ',
     address: '',
     phone:   '',
     email:   '',

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>เข้าสู่ระบบ · บ้านกาญจน์ Admin</title>
+<title>เข้าสู่ระบบ Admin</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
 <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700&family=IBM+Plex+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"/>
@@ -145,11 +145,11 @@
   }
 </style>
 </head>
-<body>
+<body data-building-title-template="เข้าสู่ระบบ · {building} Admin">
   <form class="card" id="loginForm">
-    <div class="logo">บ</div>
+    <div class="logo" data-building-initials>ที</div>
     <h1>เข้าสู่ระบบผู้ดูแล</h1>
-    <div class="sub">บ้านกาญจน์ เรสซิเดนซ์ — Admin Console</div>
+    <div class="sub"><span data-building-name>ที่พักของคุณ</span> — Admin Console</div>
 
     <label for="username">ชื่อผู้ใช้</label>
     <input type="text" id="username" name="username" autocomplete="username" required autofocus/>
@@ -176,6 +176,7 @@
     </div>
   </form>
 
+  <script src="/building-branding.js"></script>
   <script>
     const form = document.getElementById('loginForm');
     const btn = document.getElementById('submitBtn');

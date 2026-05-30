@@ -354,6 +354,32 @@ function safeStorageSet(key, value) {
   try { localStorage.setItem(key, value); }
   catch { /* storage can be blocked in private/locked-down browsers */ }
 }
+const DEFAULT_BUILDING_NAME = 'ที่พักของคุณ';
+function buildingNameOf(building) {
+  const name = String(building?.name || '').trim();
+  return name || DEFAULT_BUILDING_NAME;
+}
+function buildingInitialsOf(name) {
+  const parts = String(name || '').trim().split(/\s+/).filter(Boolean);
+  const chars = parts.length >= 2
+    ? parts.slice(0, 2).map((p) => Array.from(p)[0] || '').join('')
+    : Array.from(parts[0] || DEFAULT_BUILDING_NAME).slice(0, 2).join('');
+  return (chars || 'ที').toUpperCase();
+}
+function storedPublicBuilding() {
+  try {
+    const raw = localStorage.getItem('baankarn_config_v1');
+    const cfg = raw ? JSON.parse(raw) : null;
+    return cfg && typeof cfg === 'object' && cfg.building ? cfg.building : null;
+  } catch {
+    return null;
+  }
+}
+function extractPublicBuilding(payload) {
+  if (!payload || typeof payload !== 'object') return null;
+  const cfg = payload.value || payload.baankarn_config_v1 || payload;
+  return cfg && typeof cfg === 'object' && cfg.building ? cfg.building : null;
+}
 function initialsOf(name) {
   const s = String(name || '').trim();
   if (!s) return '—';
@@ -784,7 +810,8 @@ function SectionHeader({ title, subtitle, action, style }) {
   );
 }
 
-function LogoMark({ size = 36, square = true }) {
+function LogoMark({ size = 36, square = true, label }) {
+  const mark = label ? buildingInitialsOf(label) : 'ที';
   return (
     <div style={{
       width: size, height: size, borderRadius: square ? 10 : 999,
@@ -793,7 +820,7 @@ function LogoMark({ size = 36, square = true }) {
       fontSize: size * 0.42, display: 'grid', placeItems: 'center',
       boxShadow: '0 6px 14px -8px rgba(196,106,62,0.7)',
       letterSpacing: '-.02em', flex: '0 0 auto',
-    }}>บก</div>
+    }}>{mark}</div>
   );
 }
 
@@ -1195,11 +1222,12 @@ function Input(props) {
 }
 
 // ============================================================= LoginView =
-function LoginView({ locale, setLocale, onLoggedIn, portalEnabled }) {
+function LoginView({ locale, setLocale, onLoggedIn, portalEnabled, building }) {
   const [phone, setPhone] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   const t = (k) => tr(locale, k);
+  const buildingName = buildingNameOf(building);
   async function submit(e) {
     e.preventDefault();
     setErr(''); setBusy(true);
@@ -1249,10 +1277,10 @@ function LoginView({ locale, setLocale, onLoggedIn, portalEnabled }) {
             backgroundImage: 'radial-gradient(circle at 20% 0%, #d97a4a 0%, transparent 40%), radial-gradient(circle at 100% 100%, #e0a374 0%, transparent 50%)',
           }} />
           <div style={{ position: 'relative', display: 'flex', alignItems: 'center', gap: 12 }}>
-            <LogoMark size={44} />
+            <LogoMark size={44} label={buildingName} />
             <div>
-              <div style={{ fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 16 }}>บ้านกาญจน์ เรสซิเดนซ์</div>
-              <div style={{ opacity: 0.65, fontSize: 12.5 }}>Baan Karn Residence</div>
+              <div style={{ fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 16 }}>{buildingName}</div>
+              <div style={{ opacity: 0.65, fontSize: 12.5 }}>Tenant Portal</div>
             </div>
           </div>
           <div style={{ position: 'relative' }}>
@@ -2733,7 +2761,7 @@ function ProfileView({ tenant, locale, setLocale, theme, setTheme, onLogout, fea
   const darkOn = features?.darkMode?.enabled !== false;
   // Contact details — prefer real building config; hide cards we don't have.
   const buildingPhone = building?.phone || null;
-  const buildingName = building?.name || 'บ้านกาญจน์ เรสซิเดนซ์';
+  const buildingName = buildingNameOf(building);
   const buildingAddress = building?.address || null;
   // Tenant tenure derived from the active contract's start date.
   const since = contract?.start_date || null;
@@ -2873,8 +2901,9 @@ const NAV = [
   { id: 'profile',     label: 'profile',     icon: 'profile' },
 ];
 
-function Sidebar({ page, setPage, locale, unpaidCount, tenant, onLogout }) {
+function Sidebar({ page, setPage, locale, unpaidCount, tenant, onLogout, building }) {
   const t = (k) => tr(locale, k);
+  const buildingName = buildingNameOf(building);
   return (
     <aside className="portal-sidebar" style={{
       width: 264, background: 'var(--surface)', borderRight: '1px solid var(--line)',
@@ -2887,9 +2916,12 @@ function Sidebar({ page, setPage, locale, unpaidCount, tenant, onLogout }) {
       height: '100%', overflowY: 'auto',
     }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '4px 8px 22px' }}>
-        <LogoMark size={40} />
+        <LogoMark size={40} label={buildingName} />
         <div style={{ minWidth: 0 }}>
-          <div style={{ fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 14.5, lineHeight: 1.1 }}>บ้านกาญจน์</div>
+          <div style={{
+            fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 14.5, lineHeight: 1.1,
+            whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+          }} title={buildingName}>{buildingName}</div>
           <div style={{ color: 'var(--muted)', fontSize: 11.5 }}>Tenant Portal · v3</div>
         </div>
       </div>
@@ -3030,7 +3062,7 @@ function BottomNav({ page, setPage, locale, unpaidCount }) {
   );
 }
 
-function DrawerNav({ open, onClose, page, setPage, locale, onLogout, unpaidCount }) {
+function DrawerNav({ open, onClose, page, setPage, locale, onLogout, unpaidCount, building }) {
   const t = (k) => tr(locale, k);
   const panelRef = useRef(null);
   const previouslyFocused = useRef(null);
@@ -3071,6 +3103,7 @@ function DrawerNav({ open, onClose, page, setPage, locale, onLogout, unpaidCount
     };
   }, [open, onClose]);
   if (!open) return null;
+  const buildingName = buildingNameOf(building);
   const ui = (
     <div onClick={onClose} style={{
       position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(28,18,8,0.42)',
@@ -3096,9 +3129,12 @@ function DrawerNav({ open, onClose, page, setPage, locale, onLogout, unpaidCount
           boxShadow: 'var(--shadow-lg)', outline: 'none',
         }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '6px 6px 18px', flex: '0 0 auto' }}>
-          <LogoMark size={36} />
+          <LogoMark size={36} label={buildingName} />
           <div style={{ minWidth: 0 }}>
-            <div style={{ fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 'var(--fs-base)' }}>บ้านกาญจน์</div>
+            <div style={{
+              fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 'var(--fs-base)',
+              whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+            }} title={buildingName}>{buildingName}</div>
             <div style={{ color: 'var(--muted)', fontSize: 'var(--fs-xs)' }}>Tenant Portal</div>
           </div>
           <button onClick={onClose} aria-label="ปิด" style={{
@@ -3166,6 +3202,7 @@ function App() {
   const [tickets, setTickets] = useState([]);
   const [contract, setContract] = useState(null);
   const [building, setBuilding] = useState(null);
+  const [publicBuilding, setPublicBuilding] = useState(storedPublicBuilding);
   const [syncErrors, setSyncErrors] = useState([]);
   const [syncing, setSyncing] = useState(false);
   const [openBillId, setOpenBillId] = useState(null);
@@ -3185,6 +3222,18 @@ function App() {
   };
 
   useEffect(() => { document.body.dataset.theme = theme; }, [theme]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/data/baankarn_config_v1', { credentials: 'same-origin' })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((payload) => {
+        const next = extractPublicBuilding(payload);
+        if (!cancelled && next) setPublicBuilding(next);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
 
   // Reset scroll to top when the tenant switches tabs. Without this, a
   // tenant who is scrolled halfway down a long list ("ประวัติชำระเงิน",
@@ -3280,6 +3329,18 @@ function App() {
     }
   }, [tenant, locale]);
   const triggerRefresh = useCallback(() => refresh(tenant), [refresh, tenant]);
+  const effectiveBuilding = {
+    ...(publicBuilding || {}),
+    ...(building || {}),
+    name: String(building?.name || '').trim() || String(publicBuilding?.name || '').trim() || undefined,
+  };
+  const effectiveBuildingName = buildingNameOf(effectiveBuilding);
+
+  useEffect(() => {
+    if (typeof document !== 'undefined') {
+      document.title = `${tr(locale, 'portal')} · ${effectiveBuildingName}`;
+    }
+  }, [locale, effectiveBuildingName]);
 
   async function onLoggedIn() {
     const me = await fetch('/api/tenant/me', { credentials: 'same-origin' }).then((r) => r.json());
@@ -3309,7 +3370,8 @@ function App() {
   }
   if (!tenant) {
     return <LoginView locale={locale} setLocale={setLocale} onLoggedIn={onLoggedIn}
-      portalEnabled={features?.tenantPortal?.enabled !== false} />;
+      portalEnabled={features?.tenantPortal?.enabled !== false}
+      building={effectiveBuilding} />;
   }
 
   const unpaidCount = bills.filter((b) => b.status === 'pending' || b.status === 'overdue').length;
@@ -3329,7 +3391,7 @@ function App() {
         height: '100vh', overflow: 'hidden', background: 'var(--bg)',
       }}>
         <Sidebar page={page} setPage={setPage} locale={locale} unpaidCount={unpaidCount}
-          tenant={tenant} onLogout={onLogout} />
+          tenant={tenant} onLogout={onLogout} building={effectiveBuilding} />
         <div style={{ minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
           <TopBar page={page} locale={locale} tenant={tenant} openMenu={() => setDrawer(true)}
             unpaidCount={unpaidCount} openTickets={openTickets}
@@ -3359,7 +3421,7 @@ function App() {
                 tickets={tickets} refresh={triggerRefresh} />}
               {page === 'profile'     && <ProfileView tenant={tenant} locale={locale} setLocale={setLocale}
                 theme={theme} setTheme={setTheme} onLogout={onLogout} features={features}
-                contract={contract} building={building} />}
+                contract={contract} building={effectiveBuilding} />}
             </main>
           </div>
         </div>
@@ -3367,6 +3429,7 @@ function App() {
       <BottomNav page={page} setPage={setPage} locale={locale} unpaidCount={unpaidCount} />
       <DrawerNav open={drawer} onClose={() => setDrawer(false)} page={page} setPage={setPage}
         locale={locale} unpaidCount={unpaidCount}
+        building={effectiveBuilding}
         onLogout={() => { setDrawer(false); onLogout(); }} />
       <style>{`
         /* Canonical breakpoints used across the whole portal:
