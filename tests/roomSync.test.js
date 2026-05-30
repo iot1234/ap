@@ -89,12 +89,19 @@ test('rowToBlobRoom emits the legacy shape expected by admin/public UI', () => {
   assert.equal(blob.type, 'studio');
   assert.equal(blob.rent, 6800);
   assert.equal(blob.deposit, 13600);
-  assert.equal(blob.tenant, null);
   assert.equal(blob.parking, true);
   assert.equal(blob.kitchen, true);
   // Override fields propagate back into the blob — admin UI reads them
   // without joining to rooms_v2.
   assert.equal(blob.rentOverride, null);
+  // Occupancy + meter + billing keys must NOT be emitted: the blob merge is
+  // `existing || blobRoom` (blobRoom wins), so emitting these would WIPE the
+  // live tenant name, move-in date, contract-end, and last meter units on every
+  // routine room edit. They're owned by checkin/checkout, meter entry, bill-gen.
+  for (const k of ['tenant', 'since', 'contractEnd', 'water', 'elec',
+    'waterUnits', 'elecUnits', 'billStatus', 'overdueDays', 'lastBillDate', 'lastCleaned']) {
+    assert.ok(!(k in blob), `rowToBlobRoom must NOT emit "${k}" (it would clobber the live blob)`);
+  }
 });
 
 test('rowToBlobRoom carries rent_override back into the blob shape', () => {

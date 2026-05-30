@@ -267,6 +267,16 @@ function rowToBlobRoom(row) {
   const rentOverride = overrideRaw == null || overrideRaw === ''
     ? null
     : (Number.isFinite(Number(overrideRaw)) && Number(overrideRaw) > 0 ? Number(overrideRaw) : null);
+  // IMPORTANT: emit ONLY the physical/relational attributes this endpoint owns.
+  // The blob is merged as `existing || blobRoom` (jsonb concat — right side
+  // wins), so any key we emit OVERWRITES the live blob. Previously this also
+  // emitted occupancy + meter + billing keys (tenant:null, waterUnits:0,
+  // billStatus:'none', …); a routine room edit (rent/notes/wifi) then WIPED the
+  // tenant name, move-in date, contract-end and last meter units that the admin
+  // billing page reads — silent data loss on every occupied-room edit. Those
+  // keys are owned by checkin/checkout, meter entry, and bill-gen respectively,
+  // so we no longer touch them here. A brand-new room simply has them absent and
+  // the reader defaults them (vacant / 0 units).
   return {
     id: row.room_code,
     floor: Number(row.floor),
@@ -279,23 +289,12 @@ function rowToBlobRoom(row) {
     rentOverrideAt: row.rent_override_at || null,
     rentOverrideBy: row.rent_override_by || null,
     deposit,
-    water: 0,
-    elec: 0,
-    waterUnits: 0,
-    elecUnits: 0,
     wifi: nonNegativeMoney(row.wifi_fee, 0),
-    tenant: null,
-    since: null,
-    contractEnd: null,
     notes: row.notes || '',
     view: row.view_type || '',
     balcony: !!row.has_balcony,
     parking: !!row.has_parking,
     kitchen: !!row.has_kitchen,
-    lastCleaned: null,
-    lastBillDate: null,
-    billStatus: 'none',
-    overdueDays: 0,
   };
 }
 
