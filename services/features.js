@@ -260,16 +260,35 @@ async function load(pool) {
  * an admin can read it back unchanged.
  */
 async function save(pool, partial, updatedBy) {
-  const current = await load(pool);
-  const next = deepMerge(current, partial || {});
-  await pool.query(
-    `INSERT INTO app_data (key, value, updated_by)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (key) DO UPDATE
-         SET value=EXCLUDED.value, updated_at=NOW(), updated_by=EXCLUDED.updated_by`,
-    [FEATURES_KEY, JSON.stringify(next), updatedBy || 'system']
-  );
-  return next;
+  // SELECT FOR UPDATE prevents lost-update: two concurrent admin saves would
+  // otherwise both read the same "current" row, merge independently, and the
+  // last writer silently discards the first's changes.
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const existing = await client.query(
+      `SELECT value FROM app_data WHERE key=$1 FOR UPDATE`,
+      [FEATURES_KEY]
+    );
+    const current = existing.rows.length
+      ? withDefaults(existing.rows[0].value || {})
+      : withDefaults({});
+    const next = deepMerge(current, partial || {});
+    await client.query(
+      `INSERT INTO app_data (key, value, updated_by)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (key) DO UPDATE
+           SET value=EXCLUDED.value, updated_at=NOW(), updated_by=EXCLUDED.updated_by`,
+      [FEATURES_KEY, JSON.stringify(next), updatedBy || 'system']
+    );
+    await client.query('COMMIT');
+    return next;
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 function disabledPayload(name, req) {

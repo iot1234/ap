@@ -96,7 +96,7 @@ test('public booking supports expiring room holds before deposit submission', ()
     'public hold and submit endpoints must block writes with the same disabled-booking response');
   assert.match(server, /function publicBookableRooms/,
     'public vacant-room feed must be centralized and testable');
-  assert.match(server, /relationalStatus && relationalStatus !== 'vacant'/,
+  assert.match(server, /relationalStatus && !isVacantStatus\(relationalStatus\)/,
     'public vacant-room feed must not publish rooms that rooms_v2 marks unavailable');
   assert.match(server, /reservationExpiresAt: expiresAt\.toISOString\(\)/,
     'hold must stamp an expiry on the room reservation');

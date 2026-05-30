@@ -927,9 +927,9 @@ function publicBookableRooms(roomsObj, config, v2Rows = []) {
   for (const [roomId, room] of byId.entries()) {
     const blobStatus = room.status || 'vacant';
     const relationalStatus = v2Status.get(roomId);
-    if (blobStatus !== 'vacant' || (relationalStatus && relationalStatus !== 'vacant')) continue;
+    if (!isVacantStatus(blobStatus) || (relationalStatus && !isVacantStatus(relationalStatus))) continue;
     const masked = maskRoomsPublic({ [roomId]: room }, config)?.[roomId];
-    if (!masked || masked.status !== 'vacant') continue;
+    if (!masked || !isVacantStatus(masked.status)) continue;
     out.push({
       id: String(masked.id || roomId),
       floor: masked.floor,
@@ -1239,16 +1239,46 @@ app.put('/api/data/:key', sameOrigin, csrfGuard, requireAuth, requireRole('owner
     configWarnings = warnings;
     serialised = JSON.stringify(value);
   }
+  // For room/config blobs: use a transaction with SELECT FOR UPDATE to prevent
+  // last-write-wins when two admins save simultaneously (admin A's save would
+  // silently overwrite admin B's room changes). Bookings blob has its own
+  // per-endpoint locking, so skip it here to avoid nested-lock contention.
+  const LOCK_KEYS = new Set(['baankarn_rooms_v1', 'baankarn_config_v1']);
   try {
-    await pool.query(
-      `INSERT INTO app_data (key, value, updated_by)
-       VALUES ($1, $2::jsonb, $3)
-       ON CONFLICT (key) DO UPDATE
-         SET value = EXCLUDED.value,
-             updated_at = NOW(),
-             updated_by = EXCLUDED.updated_by`,
-      [key, serialised, req.session.user.username]
-    );
+    if (LOCK_KEYS.has(key)) {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query(
+          `SELECT 1 FROM app_data WHERE key=$1 FOR UPDATE`, [key]
+        ).catch(() => {}); // row may not exist yet — that's fine
+        await client.query(
+          `INSERT INTO app_data (key, value, updated_by)
+           VALUES ($1, $2::jsonb, $3)
+           ON CONFLICT (key) DO UPDATE
+             SET value = EXCLUDED.value,
+                 updated_at = NOW(),
+                 updated_by = EXCLUDED.updated_by`,
+          [key, serialised, req.session.user.username]
+        );
+        await client.query('COMMIT');
+      } catch (err) {
+        await client.query('ROLLBACK').catch(() => {});
+        throw err;
+      } finally {
+        client.release();
+      }
+    } else {
+      await pool.query(
+        `INSERT INTO app_data (key, value, updated_by)
+         VALUES ($1, $2::jsonb, $3)
+         ON CONFLICT (key) DO UPDATE
+           SET value = EXCLUDED.value,
+               updated_at = NOW(),
+               updated_by = EXCLUDED.updated_by`,
+        [key, serialised, req.session.user.username]
+      );
+    }
     audit(req, 'data.put', 'app_data', key);
     let roomSyncResult = null;
     // Bridge: when admin saves the rooms blob, mirror tenant info into
@@ -1830,6 +1860,13 @@ function roomFromV2(row) {
   };
 }
 
+// JSONB blob can store 'available'/'empty'/'free' (legacy admin UI values).
+// rooms_v2 normalises these to 'vacant' on sync. All booking/hold/public-list
+// logic must accept both spellings so admin-created rooms are bookable.
+function isVacantStatus(s) {
+  return ['vacant', 'available', 'empty', 'free'].includes(String(s || '').toLowerCase());
+}
+
 function isPublicHoldRoom(room) {
   return !!(room && room.status === 'reserved'
     && typeof room.reservedBy === 'string'
@@ -2134,7 +2171,7 @@ app.post('/api/bookings/public/hold', sameOrigin, rateLimitBookingHold, async (r
       await client.query('ROLLBACK');
       return res.status(404).json({ error: 'ไม่พบห้องนี้', code: 'ROOM_NOT_FOUND' });
     }
-    if (room.status !== 'vacant' || (v2Room && v2Room.status !== 'vacant')) {
+    if (!isVacantStatus(room.status) || (v2Room && !isVacantStatus(v2Room.status))) {
       await client.query('ROLLBACK');
       const expiresAt = isPublicHoldRoom(room) ? (room.reservationExpiresAt || null) : null;
       return res.status(409).json({
@@ -2652,7 +2689,7 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBookingSubmit, validateBod
         && holdTokenHash
         && room.reservedBy === `hold:${holdTokenHash}`
         && !isExpiredHold(room);
-      const vacant = room.status === 'vacant' && (!v2Room || v2Room.status === 'vacant');
+      const vacant = isVacantStatus(room.status) && (!v2Room || isVacantStatus(v2Room.status));
       if (!sameHold && !vacant) {
         await client.query('ROLLBACK');
         await cleanupDepositSlip();
@@ -3718,6 +3755,26 @@ app.put('/api/admin/features', sameOrigin, csrfGuard, requireAuth, requireRole('
       code: 'INVALID_FEATURE_CONFIG',
       errors: cfgErrors,
     });
+  }
+  // Prevent disabling citizenIdEncryption when encrypted data already exists —
+  // turning it off would revert to plaintext storage but the existing encrypted
+  // rows can't be decrypted at display time (encryptString would be called on
+  // the ciphertext again), silently corrupting the citizen ID display.
+  if (partial.citizenIdEncryption && partial.citizenIdEncryption.enabled === false) {
+    try {
+      const check = await pool.query(
+        `SELECT 1 FROM tenants WHERE citizen_id_encrypted IS NOT NULL
+           AND citizen_id_encrypted NOT LIKE '1%'  -- length-13 plaintext starts with '1'
+           AND deleted_at IS NULL LIMIT 1`
+      );
+      if (check.rows.length) {
+        return res.status(409).json({
+          error: 'ไม่สามารถปิด citizenIdEncryption ได้ เนื่องจากมีข้อมูลบัตรประชาชนที่เข้ารหัสแล้วในระบบ — ปิดจะทำให้ข้อมูลแสดงผลผิดพลาด',
+          code: 'ENCRYPTION_DATA_EXISTS',
+          hint: 'ถ้าต้องการปิดจริงๆ ต้อง decrypt ข้อมูลทั้งหมดก่อน หรือล้างข้อมูลผู้เช่าที่เกี่ยวข้อง',
+        });
+      }
+    } catch (e) { console.warn('[features] encryption guard check skipped:', e.message); }
   }
   try {
     const next = await features.save(pool, partial, req.session.user.username);
@@ -8483,7 +8540,7 @@ app.post('/api/bookings/:id/approve-and-assign', sameOrigin, csrfGuard, requireA
     }
     const rawBlobCandidates = Object.entries(rooms || {})
       .map(([roomCode, room]) => ({ id: room?.id || roomCode, ...(room || {}) }))
-      .filter((r) => r && r.status === 'vacant' && want(r));
+      .filter((r) => r && isVacantStatus(r.status) && want(r));
 
     // Lock + read rooms_v2 vacant rows under the same transaction so a
     // concurrent admin can't grab the same v2 row mid-approval.
@@ -8536,7 +8593,7 @@ app.post('/api/bookings/:id/approve-and-assign', sameOrigin, csrfGuard, requireA
                  FOR UPDATE`,
               [roomId]
             );
-            if (v2State.rows.length && v2State.rows[0].status !== 'vacant') {
+            if (v2State.rows.length && !isVacantStatus(v2State.rows[0].status)) {
               continue;
             }
           } catch (err) {

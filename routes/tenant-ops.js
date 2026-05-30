@@ -2048,7 +2048,7 @@ module.exports = function buildTenantOpsRouter(ctx) {
               closed_reason = $3,
               closed_type = 'tenant_checkout',
               deposit_returned = $2,
-              deposit_returned_at = CASE WHEN $2 IS NOT NULL THEN NOW() ELSE NULL END,
+              deposit_returned_at = CASE WHEN $2::numeric IS NOT NULL THEN NOW() ELSE NULL END,
               deposit_return_reason = $3
              WHERE tenant_id=$1 AND status='active'
            RETURNING id, contract_no, room_id, start_date, monthly_rent, deposit, discount_pct`,

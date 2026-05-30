@@ -4564,7 +4564,7 @@ test('booking approval keeps JSONB and rooms_v2 room locks consistent', () => {
   const block = src.match(/app\.post\('\/api\/bookings\/:id\/approve-and-assign'[\s\S]+?app\.put\('\/api\/bookings\/:id'/)[0];
   assert.match(block, /SELECT status FROM rooms_v2[\s\S]{0,200}FOR UPDATE/,
     'blob candidates must check the matching rooms_v2 row under lock');
-  assert.match(block, /v2State\.rows\.length && v2State\.rows\[0\]\.status !== 'vacant'[\s\S]{0,80}continue/,
+  assert.match(block, /v2State\.rows\.length && !isVacantStatus\(v2State\.rows\[0\]\.status\)[\s\S]{0,80}continue/,
     'stale JSONB vacancies must be skipped when rooms_v2 is not vacant');
   assert.match(block,
     /UPDATE rooms_v2 SET status='reserved', updated_at=NOW\(\)[\s\S]{0,120}WHERE room_code=\$1 AND status='vacant'/,

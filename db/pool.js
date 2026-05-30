@@ -41,6 +41,17 @@ const pool = new Pool({
   lock_timeout: 5_000,
 });
 
+// Set timezone to Asia/Bangkok on every new connection so CURRENT_DATE,
+// NOW(), and date arithmetic in the scheduler (late-fee, reminders, billing)
+// all operate in ICT (UTC+7) — matching the JS side which runs in the same
+// timezone. Without this, SQL and JS disagree by 7h, causing late-fee /
+// reminder jobs to fire at midnight-ICT instead of midnight-ICT+7.
+pool.on('connect', (client) => {
+  client.query("SET timezone='Asia/Bangkok'").catch((err) => {
+    console.error('[pg] SET timezone failed:', err.message);
+  });
+});
+
 pool.on('error', (err) => console.error('[pg] pool error:', sanitizeError(err)));
 
 // === Circuit breaker ======================================================
