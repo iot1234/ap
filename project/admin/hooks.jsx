@@ -796,6 +796,14 @@
       title: 'สัญญานี้ปิดไปแล้ว',
       description: (e) => `สถานะปัจจุบัน: ${e.currentStatus || '-'} — รีเฟรชข้อมูลก่อนทำรายการต่อ`,
     },
+    CHECKOUT_FAILED: {
+      title: 'ยกเลิกสัญญาไม่สำเร็จ',
+      description: (e) => e.hint || [
+        'ระบบยกเลิกการบันทึกที่ไม่สมบูรณ์ให้แล้ว จึงไม่มีข้อมูลถูกเปลี่ยนครึ่งทาง',
+        'ให้รีเฟรชหน้าแล้วลองทำรายการอีกครั้ง',
+        'หากยังไม่สำเร็จ ให้เปิดเมนูสุขภาพระบบเพื่อตรวจฐานข้อมูล/ตาราง และแจ้งช่วงเวลาที่ทำรายการให้ผู้ดูแลระบบตรวจบันทึกระบบ',
+      ].join('\n'),
+    },
     CITIZEN_ID_DUPLICATE: {
       title: 'เลขบัตรประชาชนซ้ำกับผู้เช่ารายอื่น',
       description: (e) => e.hint || 'ค้นหาผู้เช่าเดิมก่อนตัดสินใจว่าเป็นคนเดียวกันหรือกรอกเลขผิด',
@@ -821,14 +829,96 @@
     },
   };
 
+  function humanizeAdminErrorText(text, opts = {}) {
+    if (text == null) return '';
+    let s = String(text).trim();
+    if (!s) return '';
+
+    const status = opts.status == null ? null : Number(opts.status);
+    if (/^HTTP\s+\d+/i.test(s) || (status && /^HTTP/i.test(s))) {
+      const code = status || Number((s.match(/\d+/) || [0])[0]);
+      if (code === 400) return 'ข้อมูลที่ส่งไปไม่ถูกต้อง กรุณาตรวจช่องที่กรอกแล้วลองใหม่';
+      if (code === 401) return 'หมดเวลาเข้าสู่ระบบ กรุณาเข้าสู่ระบบใหม่';
+      if (code === 403) return 'บัญชีนี้ไม่มีสิทธิ์ทำรายการนี้';
+      if (code === 404) return 'ไม่พบข้อมูล รายการอาจถูกลบหรือเปลี่ยนไปแล้ว กรุณารีเฟรชหน้า';
+      if (code === 409) return 'ข้อมูลถูกใช้งานหรือมีสถานะขัดกัน กรุณารีเฟรชแล้วตรวจรายการอีกครั้ง';
+      if (code === 429) return 'ส่งคำขอบ่อยเกินไป กรุณารอสักครู่แล้วลองใหม่';
+      if (code >= 500) return 'ระบบขัดข้องชั่วคราว กรุณาลองใหม่อีกครั้ง หากยังไม่สำเร็จให้แจ้งผู้ดูแลระบบ';
+      return `ทำรายการไม่สำเร็จ (รหัส ${code || '-'}) กรุณาลองใหม่อีกครั้ง`;
+    }
+
+    if (/checkout failed[\s\S]*rolled back/i.test(s)) {
+      return 'ยกเลิกสัญญา/ย้ายออกไม่สำเร็จ ระบบย้อนรายการทั้งหมดให้แล้ว จึงไม่มีข้อมูลถูกบันทึกแบบครึ่งทาง';
+    }
+    if (/restore failed[\s\S]*rolled back/i.test(s)) {
+      return 'กู้คืนข้อมูลไม่สำเร็จ ระบบย้อนกลับไปใช้ข้อมูลเดิมแล้ว';
+    }
+    if (/failed to fetch|networkerror|network error/i.test(s)) {
+      return navigator.onLine === false
+        ? 'อุปกรณ์ของคุณไม่ได้เชื่อมต่ออินเทอร์เน็ต กรุณาเชื่อมต่อแล้วลองใหม่'
+        : 'เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ กรุณาลองใหม่ในอีกสักครู่';
+    }
+    if (/aborterror|timeout/i.test(s)) return 'คำขอใช้เวลานานเกินกำหนด กรุณาลองใหม่อีกครั้ง';
+
+    const exact = [
+      [/^load failed$/i, 'โหลดข้อมูลไม่สำเร็จ กรุณารีเฟรชหน้าแล้วลองใหม่'],
+      [/^save failed$/i, 'บันทึกข้อมูลไม่สำเร็จ กรุณาตรวจข้อมูลแล้วลองใหม่'],
+      [/^create failed$/i, 'สร้างรายการไม่สำเร็จ กรุณาตรวจข้อมูลแล้วลองใหม่'],
+      [/^delete failed$/i, 'ลบรายการไม่สำเร็จ กรุณารีเฟรชแล้วลองใหม่'],
+      [/^retry failed$/i, 'ลองส่งซ้ำไม่สำเร็จ กรุณารอสักครู่แล้วลองใหม่'],
+      [/^failed$/i, 'ทำรายการไม่สำเร็จ กรุณาลองใหม่อีกครั้ง'],
+      [/^internal error$/i, 'ระบบขัดข้องภายใน กรุณาลองใหม่อีกครั้ง หากยังไม่สำเร็จให้แจ้งผู้ดูแลระบบ'],
+      [/^invalid id$/i, 'รหัสรายการไม่ถูกต้อง กรุณารีเฟรชหน้าแล้วเลือกข้อมูลใหม่'],
+      [/^not found$/i, 'ไม่พบข้อมูล รายการอาจถูกลบหรือเปลี่ยนไปแล้ว'],
+      [/^unknown error$/i, 'เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ กรุณาลองใหม่อีกครั้ง'],
+    ];
+    for (const [re, th] of exact) {
+      if (re.test(s)) return th;
+    }
+
+    s = s
+      .replace(/\bserver logs?\b/gi, 'บันทึกระบบสำหรับผู้ดูแล')
+      .replace(/\bhealth\/schema\b/gi, 'หน้าสุขภาพระบบ')
+      .replace(/\bschema\b/gi, 'โครงสร้างฐานข้อมูล')
+      .replace(/\brolled back\b/gi, 'ย้อนรายการกลับแล้ว')
+      .replace(/\brollback\b/gi, 'ย้อนรายการ')
+      .replace(/\binternal error\b/gi, 'ระบบขัดข้องภายใน')
+      .replace(/\binvalid id\b/gi, 'รหัสรายการไม่ถูกต้อง')
+      .replace(/\bnot found\b/gi, 'ไม่พบข้อมูล')
+      .replace(/\bload failed\b/gi, 'โหลดข้อมูลไม่สำเร็จ')
+      .replace(/\bsave failed\b/gi, 'บันทึกข้อมูลไม่สำเร็จ')
+      .replace(/\bcreate failed\b/gi, 'สร้างรายการไม่สำเร็จ')
+      .replace(/\bdelete failed\b/gi, 'ลบรายการไม่สำเร็จ')
+      .replace(/\bretry failed\b/gi, 'ลองส่งซ้ำไม่สำเร็จ')
+      .replace(/\bfailed\b/gi, 'ไม่สำเร็จ')
+      .replace(/\berror\b/gi, 'ข้อผิดพลาด');
+    return s;
+  }
+
+  function normalizeToastPayload(payload) {
+    if (!payload || typeof payload !== 'object') return payload;
+    const out = { ...payload };
+    const msg = out.message;
+    if (typeof msg === 'string') {
+      out.message = humanizeAdminErrorText(msg);
+    } else if (msg && typeof msg === 'object' && !React.isValidElement(msg)) {
+      out.message = {
+        ...msg,
+        title: msg.title ? humanizeAdminErrorText(msg.title) : msg.title,
+        description: msg.description ? humanizeAdminErrorText(msg.description) : msg.description,
+      };
+    }
+    return out;
+  }
+
   function extraGuidanceFromRaw(raw) {
     if (!raw || typeof raw !== 'object') return '';
     const parts = [];
-    if (raw.hint) parts.push(String(raw.hint));
+    if (raw.hint) parts.push(humanizeAdminErrorText(raw.hint));
     const actions = raw.nextActions && typeof raw.nextActions === 'object'
       ? raw.nextActions
       : null;
-    if (actions && actions.hint) parts.push(String(actions.hint));
+    if (actions && actions.hint) parts.push(humanizeAdminErrorText(actions.hint));
     if (raw.reconcileUrl) parts.push(`แก้ไขได้ที่ ${raw.reconcileUrl}`);
     if (actions) {
       const urls = Object.entries(actions)
@@ -888,7 +978,7 @@
         : tpl.description;
       const guidance = extraGuidanceFromRaw(raw);
       const finalDescription = Array.from(new Set([
-        description || (msg && msg !== tpl.title ? msg : null),
+        description ? humanizeAdminErrorText(description) : (msg && msg !== tpl.title ? humanizeAdminErrorText(msg) : null),
         guidance,
       ].filter(Boolean)))
         .join('\n');
@@ -902,9 +992,10 @@
     // Generic fallback — always prefix with the action verb so the user
     // knows WHAT failed, not just THAT something failed.
     const guidance = extraGuidanceFromRaw(raw);
+    const friendlyMsg = humanizeAdminErrorText(msg, { status, code, action });
     const t = { kind: 'danger', message: {
       title: `${action}ไม่สำเร็จ`,
-      description: [msg && msg.length > 200 ? msg.slice(0, 200) + '…' : msg, guidance]
+      description: [friendlyMsg && friendlyMsg.length > 260 ? friendlyMsg.slice(0, 260) + '…' : friendlyMsg, guidance]
         .filter(Boolean)
         .join('\n'),
     } };
@@ -928,6 +1019,8 @@
   window.AdminSkeleton = Skeleton;
   window.toastError = toastError;
   window.ERROR_CODE_MAP = ERROR_CODE_MAP;
+  window.humanizeAdminErrorText = humanizeAdminErrorText;
+  window.normalizeToastPayload = normalizeToastPayload;
   window.ApiError = ApiError;
   window.apiCall = apiCall;
 })();

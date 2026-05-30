@@ -2422,8 +2422,8 @@ test('healthCheck surfaces data integrity and failed notification backlog', () =
     'notification queue check must include a grouped recent-failure breakdown');
   assert.match(hc, /not configured\|not implemented\|host\\\/user\\\/pass/,
     'notification queue health must warn on provider configuration failures even when the count is small');
-  assert.match(hc, /Settings > API\/Keys/,
-    'notification queue health must tell admins exactly where to fix missing provider credentials');
+  assert.match(hc, /ตั้งค่า > API\/Keys/,
+    'notification queue health must tell admins exactly where to fix missing provider credentials in Thai');
   assert.match(hc, /id: 'data_integrity'/,
     'health checks must include core data integrity probe');
   assert.match(hc, /orphan_payable_bills/,
@@ -4352,8 +4352,8 @@ test('storage notifies owner when R2 upload fails', () => {
   const fs = require('node:fs');
   const path = require('node:path');
   const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'storage.js'), 'utf8');
-  assert.match(src, /R2\/S3 upload failed — file saved locally/,
-    'R2 fail must alert owner with explicit subject');
+  assert.match(src, /อัปโหลดไฟล์ขึ้น R2\/S3 ไม่สำเร็จ/,
+    'R2 fail must alert owner with explicit Thai subject');
 });
 
 test('health checks guard upload storage and contract legal file references', () => {
@@ -7541,6 +7541,31 @@ test("admin health page surfaces the data-integrity anomaly scanner", () => {
   assert.ok(page.includes("setAnomalies"), "health page must hold anomalies state");
   // balanced render guard: the panel maps items and offers a fix deep-link
   assert.ok(page.includes("anomalies.items.map"), "must render each anomaly");
+});
+
+test("admin notifications translate technical failures into clear Thai copy", () => {
+  const fs = require("node:fs"); const path = require("node:path");
+  const tenantOps = fs.readFileSync(path.join(__dirname, "..", "routes", "tenant-ops.js"), "utf8");
+  const hooks = fs.readFileSync(path.join(__dirname, "..", "project", "admin", "hooks.jsx"), "utf8");
+  const shell = fs.readFileSync(path.join(__dirname, "..", "project", "admin", "shell.jsx"), "utf8");
+  const health = fs.readFileSync(path.join(__dirname, "..", "services", "healthCheck.js"), "utf8");
+
+  assert.ok(tenantOps.includes("code: 'CHECKOUT_FAILED'"), "checkout failures need a stable error code");
+  assert.doesNotMatch(tenantOps, /checkout failed; contract, tenant, room, cards, recurring charges and closing bill were rolled back/,
+    "checkout API must not send programmer-facing rollback text to users");
+  assert.doesNotMatch(tenantOps, /health\/schema|server log/,
+    "checkout API hint must use Thai operator wording, not internal jargon");
+  assert.match(tenantOps, /ระบบย้อนรายการทั้งหมดให้แล้ว/,
+    "checkout API should explain that partial data was not left behind");
+
+  assert.ok(hooks.includes("CHECKOUT_FAILED"), "toast map must handle checkout failure explicitly");
+  assert.ok(hooks.includes("humanizeAdminErrorText"), "generic errors must pass through a Thai normalizer");
+  assert.ok(hooks.includes("normalizeToastPayload"), "direct setToast calls must be normalized centrally");
+  assert.ok(shell.includes("normalizeToastPayload"), "admin shell must normalize every toast payload before display");
+  assert.ok(shell.includes("window.toast = setToast"), "global toast helper must use the normalized setter");
+
+  assert.doesNotMatch(health, /failed notifications need provider configuration|notifications failed in the last hour|Queue healthy/,
+    "health/notification messages shown to admins must not remain English");
 });
 
 test("public contract-fill shows the configured due day + late-fee rate (not hardcoded 15)", () => {

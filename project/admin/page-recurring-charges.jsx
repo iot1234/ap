@@ -37,7 +37,8 @@ function PageRecurringCharges({ setToast }) {
 
   function errorText(e, fallback) {
     if (e && e.code === 'TIMEOUT') return 'คำขอใช้เวลานานเกินกำหนด กรุณาลองใหม่';
-    return (e && (e.error || e.message)) || fallback;
+    const raw = (e && (e.error || e.message)) || fallback;
+    return window.humanizeAdminErrorText ? window.humanizeAdminErrorText(raw, e || {}) : raw;
   }
 
   async function load() {

@@ -3,7 +3,7 @@
 // ใช้ window globals จากไฟล์อื่นทั้งหมด
 // ===========================================================================
 
-const { useState, useEffect, useMemo, useRef } = React;
+const { useState, useEffect, useMemo, useRef, useCallback } = React;
 
 // ---------- PageBoundary --------------------------------------------------
 // Stable wrapper that delegates to window.ErrorBoundary if available, else
@@ -921,7 +921,19 @@ function App() {
   };
 
   // --- Toast ---
-  const [toast, setToast] = useState(null);
+  const [toast, setToastState] = useState(null);
+  const setToast = useCallback((next) => {
+    setToastState((prev) => {
+      const value = typeof next === 'function' ? next(prev) : next;
+      return window.normalizeToastPayload ? window.normalizeToastPayload(value) : value;
+    });
+  }, []);
+  useEffect(() => {
+    window.toast = setToast;
+    return () => {
+      if (window.toast === setToast) delete window.toast;
+    };
+  }, [setToast]);
   useEffect(() => {
     const onSyncError = (ev) => {
       const d = ev && ev.detail ? ev.detail : {};
@@ -935,7 +947,9 @@ function App() {
         kind: 'danger',
         message: {
           title: `${label} ไม่สำเร็จ`,
-          description: `${d.error || 'ระบบบันทึกข้อมูลไม่ได้'}${d.status ? ` (HTTP ${d.status})` : ''}`,
+          description: window.humanizeAdminErrorText
+            ? window.humanizeAdminErrorText(d.error || `HTTP ${d.status || 500}`, { status: d.status })
+            : `${d.error || 'ระบบบันทึกข้อมูลไม่ได้'}${d.status ? ` (HTTP ${d.status})` : ''}`,
         },
       });
     };

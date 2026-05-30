@@ -213,11 +213,11 @@ async function saveBase64({
         const features = require('./features');
         const flags = await features.load(pool).catch(() => ({}));
         notifier.notifyOwner({ pool, features: flags }, {
-          subject: '⚠️ R2/S3 upload failed — file saved locally (will be lost on redeploy)',
-          text: `R2 upload failed for ${safeCategory}/${filename}\n\n`
-            + `Error: ${s3FailureMsg}\n\n`
-            + `ไฟล์อยู่บน local disk ของ container — เมื่อ Railway redeploy จะหาย. ` +
-              `กรุณาตรวจสอบ R2 credentials ใน /admin#secrets`,
+          subject: 'อัปโหลดไฟล์ขึ้น R2/S3 ไม่สำเร็จ — ระบบบันทึกไว้ในเครื่องชั่วคราว',
+          text: `ไฟล์ ${safeCategory}/${filename} ยังส่งขึ้นพื้นที่เก็บไฟล์ถาวรไม่ได้\n\n`
+            + `สาเหตุจากระบบ: ${s3FailureMsg}\n\n`
+            + `ตอนนี้ไฟล์อยู่บนพื้นที่ชั่วคราวของเครื่องเซิร์ฟเวอร์ หากมีการ redeploy ไฟล์อาจหายได้ ` +
+              `กรุณาตรวจสอบข้อมูล R2/S3 ใน /admin#secrets`,
         }).catch(() => {});
       } catch { /* ignore */ }
     }

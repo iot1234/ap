@@ -83,7 +83,7 @@ function diagnoseFailure(row) {
   return {
     code: 'DELIVERY_FAILED',
     title: 'ส่งแจ้งเตือนไม่สำเร็จ',
-    hint: 'ตรวจ provider configuration และ server logs แก้สาเหตุหลัก แล้วค่อย Retry',
+    hint: 'ตรวจการตั้งค่าช่องทางแจ้งเตือนและบันทึกระบบของช่วงเวลาที่ส่ง แก้สาเหตุหลักแล้วค่อยกดส่งซ้ำ',
     retryAfterFix: true,
   };
 }

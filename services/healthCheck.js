@@ -415,10 +415,10 @@ async function checkNotificationQueue(pool) {
     if (configFailures.length > 0) {
       return {
         status: 'warn',
-        message: `${configFailures.reduce((sum, x) => sum + x.count, 0)} failed notifications need provider configuration`,
+        message: `มีการแจ้งเตือนส่งไม่สำเร็จ ${configFailures.reduce((sum, x) => sum + x.count, 0)} รายการ เพราะยังตั้งค่าช่องทางส่งไม่ครบ`,
         detail: {
           ...detail,
-          nextAction: 'Open Settings > API/Keys, complete the missing LINE/SMTP/SMS credentials, then retry failed rows from the notification queue.',
+          nextAction: 'เปิดเมนูตั้งค่า > API/Keys กรอกข้อมูล LINE/SMTP/SMS ให้ครบ แล้วกลับไปกดส่งซ้ำในคิวแจ้งเตือน',
         },
       };
     }
@@ -430,17 +430,17 @@ async function checkNotificationQueue(pool) {
     if (recipientFailures.length > 0) {
       return {
         status: 'warn',
-        message: `${recipientFailures.reduce((sum, x) => sum + x.count, 0)} notifications undeliverable — recipients have no valid LINE binding`,
+        message: `มีการแจ้งเตือนส่งไม่ถึงผู้รับ ${recipientFailures.reduce((sum, x) => sum + x.count, 0)} รายการ เพราะผู้รับยังไม่ได้ผูก LINE หรือข้อมูล LINE ไม่ถูกต้อง`,
         detail: {
           ...detail,
-          nextAction: 'These recipients have not linked LINE (or stored an invalid userId). Ask them to re-link via the tenant portal / scan the OA QR — provider configuration will not fix these.',
+          nextAction: 'ให้ผู้เช่าผูก LINE ใหม่ผ่านพอร์ทัลผู้เช่าหรือสแกน QR ของ LINE OA แล้วค่อยส่งซ้ำ การแก้ API key อย่างเดียวไม่ช่วยกรณีนี้',
         },
       };
     }
-    if (stuck > 5)  return { status: 'error', message: `${stuck} notifications stuck > 15min — queue worker may be wedged`, detail };
-    if (failed > 20) return { status: 'warn', message: `${failed} notifications failed in the last hour`, detail };
-    if (failedTotal > 50) return { status: 'warn', message: `${failedTotal} failed notifications in backlog — review provider/secrets before relying on alerts`, detail };
-    return { status: 'ok', message: `Queue healthy (${pending} pending)`, detail };
+    if (stuck > 5)  return { status: 'error', message: `มีการแจ้งเตือนค้างเกิน 15 นาที ${stuck} รายการ ควรตรวจคิวส่งแจ้งเตือน`, detail };
+    if (failed > 20) return { status: 'warn', message: `มีการแจ้งเตือนส่งไม่สำเร็จในชั่วโมงล่าสุด ${failed} รายการ`, detail };
+    if (failedTotal > 50) return { status: 'warn', message: `มีการแจ้งเตือนล้มเหลวค้างในระบบ ${failedTotal} รายการ ควรตรวจ provider/secrets ก่อนพึ่งพาการแจ้งเตือน`, detail };
+    return { status: 'ok', message: `คิวแจ้งเตือนปกติ (รอส่ง ${pending} รายการ)`, detail };
   } catch (err) {
     return { status: 'error', message: err.message };
   }

@@ -2356,9 +2356,9 @@ module.exports = function buildTenantOpsRouter(ctx) {
         await client.query('ROLLBACK').catch(() => {});
         console.error('checkout error:', err);
         res.status(500).json({
-          error: 'checkout failed; contract, tenant, room, cards, recurring charges and closing bill were rolled back',
+          error: 'ยกเลิกสัญญา/ย้ายออกไม่สำเร็จ ระบบย้อนรายการทั้งหมดให้แล้ว จึงยังไม่มีข้อมูลถูกบันทึกแบบครึ่งทาง',
           code: 'CHECKOUT_FAILED',
-          hint: 'ลองรีเฟรชแล้วทำรายการอีกครั้ง หากยังไม่สำเร็จให้ตรวจ health/schema และดู server log ตามเวลาที่ทำรายการ',
+          hint: 'รีเฟรชหน้าแล้วลองทำรายการอีกครั้ง หากยังไม่สำเร็จ ให้เปิดหน้าสุขภาพระบบเพื่อตรวจฐานข้อมูล/ตาราง และแจ้งเวลาที่ทำรายการให้ผู้ดูแลระบบตรวจบันทึกระบบ',
         });
       } finally {
         client.release();

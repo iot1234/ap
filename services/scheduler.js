@@ -70,7 +70,7 @@ async function notifySchedulerFailure(pool, flags, state, job, err) {
   const impact = SCHEDULER_JOB_IMPACT[job] || 'งานเบื้องหลังบางส่วนอาจไม่ทำงานครบถ้วน';
   try {
     await notifier.notifyOwner({ pool, features: flags || {} }, {
-      subject: `🚨 Scheduler job failed: ${job}`,
+      subject: `งานอัตโนมัติทำงานไม่สำเร็จ: ${job}`,
       text: [
         'ระบบงานอัตโนมัติทำงานไม่สำเร็จ',
         '',
@@ -81,7 +81,7 @@ async function notifySchedulerFailure(pool, flags, state, job, err) {
         'สิ่งที่ต้องทำ:',
         '1. เปิด /admin#health เพื่อตรวจสถานะรวม',
         '2. เปิด /admin#notifications เพื่อตรวจคิวแจ้งเตือน',
-        '3. ถ้าเกิดซ้ำ ให้ตรวจ server logs และแก้ config/DB ตาม error ด้านบน',
+        '3. หากเกิดซ้ำ ให้แจ้งช่วงเวลาที่เกิดปัญหาให้ผู้ดูแลระบบตรวจบันทึกระบบและแก้การตั้งค่า/ฐานข้อมูลตามข้อผิดพลาดด้านบน',
       ].join('\n'),
     });
   } catch (notifyErr) {

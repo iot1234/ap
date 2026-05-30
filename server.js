@@ -14271,7 +14271,7 @@ app.post('/api/admin/restore', restoreBodyParser, sameOrigin, csrfGuard, require
       await client.query('ROLLBACK').catch(() => {});
       console.error('restore error:', err);
       res.status(500).json({
-        error: 'restore failed — database rolled back to previous state',
+        error: 'กู้คืนข้อมูลไม่สำเร็จ ระบบย้อนกลับไปใช้ข้อมูลเดิมแล้ว',
         detail: String(err.message || '').slice(0, 300),
         code: 'RESTORE_FAILED',
       });
