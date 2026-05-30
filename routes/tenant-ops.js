@@ -27,6 +27,7 @@ const express = require('express');
 const { schemas } = require('../schemas');
 const { validateBody } = require('../middleware/validate');
 const billing = require('../services/billing');
+const billPayments = require('../services/billPayments');
 const features = require('../services/features');
 const pricing = require('../services/pricing');
 const notifier = require('../services/notifier');
@@ -39,6 +40,10 @@ const storage = require('../services/storage');
 // VALID_TENANT_STATUS + maskTenantOut were defined in server.js but used
 // only by tenant endpoints — moved here so the file is self-contained.
 const VALID_TENANT_STATUS = new Set(['active', 'moved_out', 'blacklist']);
+const CARRIED_LATE_FEE_LABEL_PREFIX = billPayments._carriedLateFeeLabelPrefix
+  || 'ค่าปรับล่าช้าค้างจากรอบ ';
+const CARRIED_LATE_FEE_NOTE_MARKER = billPayments._carriedLateFeeNoteMarker
+  || '[system:late_fee_carry]';
 
 function maskTenantOut(t) {
   if (!t) return t;
@@ -2154,11 +2159,17 @@ module.exports = function buildTenantOpsRouter(ctx) {
         // closing bill below so the tenant still pays what they owe. Capture
         // them first, then EXCLUDE them from the bulk auto-deactivation so they
         // survive to be folded in (or stay collectible if no closing bill runs).
+        const carriedLateFeeLabelLike = `${CARRIED_LATE_FEE_LABEL_PREFIX}%`;
+        const carriedLateFeeMarkerLike = `%${CARRIED_LATE_FEE_NOTE_MARKER}%`;
         const carriedLF = await client.query(
           `SELECT id, amount FROM recurring_charges
             WHERE tenant_id=$1 AND active=TRUE AND frequency='one_off'
-              AND label LIKE 'ค่าปรับล่าช้า%'`,
-          [id]
+              AND label LIKE $2
+              AND (
+                notes LIKE $3
+                OR notes LIKE 'ยกค่าปรับล่าช้า%จากบิลรอบ%'
+              )`,
+          [id, carriedLateFeeLabelLike, carriedLateFeeMarkerLike]
         ).catch((err) => { if (err.code === '42P01') return { rows: [] }; throw err; });
         const carriedLateFeeRows = carriedLF.rows || [];
         const carriedLateFeeTotal = Math.round(
@@ -2170,9 +2181,16 @@ module.exports = function buildTenantOpsRouter(ctx) {
               SET active=FALSE, updated_at=NOW(),
                   notes = COALESCE(notes,'') || E'\n[auto] deactivated on checkout at ' || NOW()::text
             WHERE tenant_id=$1 AND active=TRUE
-              AND NOT (frequency='one_off' AND label LIKE 'ค่าปรับล่าช้า%')
+              AND NOT (
+                frequency='one_off'
+                AND label LIKE $2
+                AND (
+                  notes LIKE $3
+                  OR notes LIKE 'ยกค่าปรับล่าช้า%จากบิลรอบ%'
+                )
+              )
             RETURNING id, label, frequency`,
-          [id]
+          [id, carriedLateFeeLabelLike, carriedLateFeeMarkerLike]
         ).catch((err) => {
           if (err.code === '42P01') return { rowCount: 0, rows: [] };
           throw err;

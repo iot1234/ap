@@ -11773,10 +11773,12 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
           });
         }
         return res.status(409).json({
-          error: 'room already has an active contract draft or lease',
+          error: `สร้างสัญญาใหม่ไม่ได้: ห้อง ${roomId} มีสัญญาหรือร่างสัญญาอยู่แล้ว` +
+                 `${conflict.tenant_name ? ` ของ ${conflict.tenant_name}` : ''}` +
+                 `${conflict.contract_no ? ` (${conflict.contract_no})` : ''}`,
           code: 'ROOM_CONTRACT_EXISTS',
           conflict,
-          hint: 'ใช้สัญญาเดิม หรือปิด/ยกเลิกสัญญาเดิมก่อนสร้างสัญญาใหม่',
+          hint: 'ให้ใช้สัญญาเดิมที่มีอยู่ หรือปิด/ยกเลิกสัญญาเดิมก่อนสร้างสัญญาใหม่ เพื่อป้องกันห้องเดียวมีหลายสัญญา',
         });
       }
 

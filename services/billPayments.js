@@ -10,6 +10,9 @@
 const features = require('./features');
 const notifier = require('./notifier');
 
+const CARRIED_LATE_FEE_LABEL_PREFIX = 'ค่าปรับล่าช้าค้างจากรอบ ';
+const CARRIED_LATE_FEE_NOTE_MARKER = '[system:late_fee_carry]';
+
 // Small cached helper — building name shows up in every tenant-facing
 // notification so they know who's writing. Lookup the building config
 // once per call (rooms + config blob); for high-volume notification
@@ -139,6 +142,10 @@ function nextPeriodStartDate(period) {
   return next.toISOString().slice(0, 10);
 }
 
+function carriedLateFeeLabel(period) {
+  return `${CARRIED_LATE_FEE_LABEL_PREFIX}${period || '-'}`;
+}
+
 /**
  * Carry an outstanding late fee onto next month's bill instead of forgiving it.
  *
@@ -179,10 +186,10 @@ async function carryLateFeeToNextBill(client, { tenantId, roomId, amount, fromPe
     [
       tenantId != null ? null : (roomId || null),  // tenant-scope when we can
       tenantId != null ? tenantId : null,
-      `ค่าปรับล่าช้าค้างจากรอบ ${periodLabel}`,
+      carriedLateFeeLabel(periodLabel),
       amt,
       startAt,
-      `ยกค่าปรับล่าช้า ฿${amt.toLocaleString('th-TH')} จากบิลรอบ ${periodLabel} มาเก็บในบิลรอบถัดไป`,
+      `${CARRIED_LATE_FEE_NOTE_MARKER} ยกค่าปรับล่าช้า ฿${amt.toLocaleString('th-TH')} จากบิลรอบ ${periodLabel} มาเก็บในบิลรอบถัดไป`,
       createdBy || 'system',
     ]
   );
@@ -227,5 +234,8 @@ module.exports = {
   notifyTenantOnPayment,
   carryLateFeeToNextBill,
   deactivateCarriedLateFees,
+  _carriedLateFeeLabelPrefix: CARRIED_LATE_FEE_LABEL_PREFIX,
+  _carriedLateFeeNoteMarker: CARRIED_LATE_FEE_NOTE_MARKER,
+  _carriedLateFeeLabel: carriedLateFeeLabel,
   _nextPeriodStartDate: nextPeriodStartDate,
 };

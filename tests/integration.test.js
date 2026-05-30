@@ -4995,6 +4995,12 @@ test('quick-invite locks the requested room before creating a draft contract', (
     'must lock/check active occupant by room before drafting');
   assert.match(block, /ROOM_CONTRACT_EXISTS/,
     'must block a second active contract or draft on the same room');
+  assert.doesNotMatch(block, /room already has an active contract draft or lease/,
+    'ROOM_CONTRACT_EXISTS must not surface programmer-facing English copy');
+  assert.match(block, /สร้างสัญญาใหม่ไม่ได้/,
+    'ROOM_CONTRACT_EXISTS must explain the problem in plain admin-facing Thai');
+  assert.match(block, /เพื่อป้องกันห้องเดียวมีหลายสัญญา/,
+    'ROOM_CONTRACT_EXISTS hint must explain why the action is blocked');
   assert.match(block, /TENANT_ROOM_CONTRACT_EXISTS/,
     'must block creating a new invite on top of the same tenant-room locked contract');
   assert.match(block, /ROOM_RESERVED/,
@@ -7339,6 +7345,10 @@ test("carryLateFeeToNextBill creates a tenant-scoped one-off recurring charge", 
   assert.equal(calls[0].params[4], "2026-04-01", "carry starts on the next billing month");
   assert.match(String(calls[0].params[2]), /2026-03/, "label references the originating period");
   assert.ok(String(calls[0].params[2]).length > 3, "label is a non-empty description");
+  assert.equal(calls[0].params[2], billPayments._carriedLateFeeLabel("2026-03"),
+    "label uses the shared carried-late-fee format");
+  assert.match(String(calls[0].params[5]), /\[system:late_fee_carry\]/,
+    "notes include a system marker so checkout can identify only carried late fees");
 });
 
 test("carryLateFeeToNextBill computes next-period start dates safely", () => {
@@ -7472,11 +7482,26 @@ test("checkout folds carried late fees into the closing bill instead of dropping
   const fs = require("node:fs"); const path = require("node:path");
   const src = fs.readFileSync(path.join(__dirname, "..", "routes", "tenant-ops.js"), "utf8");
   // Carried one_off late fees must be excluded from the bulk auto-deactivation
-  assert.ok(src.includes("AND NOT (frequency="), "bulk deactivation must exclude carried late-fee one_offs");
+  assert.match(src, /AND NOT \(\s*frequency='one_off'/,
+    "bulk deactivation must exclude carried late-fee one_offs");
   assert.ok(src.includes("carriedLateFeeTotal"), "checkout must total the carried late fees");
+  assert.ok(src.includes("CARRIED_LATE_FEE_NOTE_MARKER"), "checkout must use the carry marker, not only a label prefix");
+  assert.ok(src.includes("label LIKE $2"), "carried late-fee lookup must use the shared label prefix parameter");
+  assert.ok(src.includes("notes LIKE $3"), "carried late-fee lookup must require the marker parameter");
+  assert.doesNotMatch(src, /label LIKE 'ค่าปรับล่าช้า%'/,
+    "checkout must not fold arbitrary admin one_off charges just because the label starts with late-fee text");
   // and folded onto the closing bill as its late_fee
   assert.ok(src.includes("closingLateFee"), "closing bill must carry the folded late fee");
   assert.ok(src.includes("folded into closing bill"), "folded carries must be deactivated with an audit note");
+});
+
+test("admin error copy for room contract conflicts is non-technical", () => {
+  const fs = require("node:fs"); const path = require("node:path");
+  const hooks = fs.readFileSync(path.join(__dirname, "..", "project", "admin", "hooks.jsx"), "utf8");
+  const block = hooks.match(/ROOM_CONTRACT_EXISTS:[\s\S]{0,500}?ROOM_STRANDED_CONTRACT:/)[0];
+  assert.match(block, /สร้างสัญญาใหม่ไม่ได้/);
+  assert.match(block, /ห้องนี้มีสัญญาหรือร่างสัญญาอยู่แล้ว/);
+  assert.match(block, /ใช้สัญญาเดิม/);
 });
 
 test("scheduler honors config.notify contract-expiry window + reminder days", () => {
