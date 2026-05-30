@@ -13,6 +13,8 @@
 const express = require('express');
 const QRCode = require('qrcode');
 const lineBinding = require('../services/lineBinding');
+const lineOa = require('../services/lineOa');
+const lineSvc = require('../services/line');
 
 function lineBindingIssueErrorPayload(err) {
   const code = err && err.code ? String(err.code) : 'LINE_BINDING_ISSUE_FAILED';
@@ -39,6 +41,94 @@ function lineBindingIssueErrorPayload(err) {
 module.exports = function buildAdminLineBindingsRouter(ctx) {
   const { pool, requireAuth, requireRole, sameOrigin, csrfGuard, audit } = ctx;
   const r = express.Router();
+
+  async function logLineBindingNotice(row) {
+    try {
+      await pool.query(
+        `INSERT INTO notifications_log (channel, recipient, subject, body, status, error)
+         VALUES ('line-binding-admin', $1, $2, $3, $4, $5)`,
+        [
+          String(row.recipient || '').slice(0, 200),
+          String(row.subject || '').slice(0, 300),
+          String(row.body || '').slice(0, 4000),
+          row.status || 'sent',
+          row.error ? String(row.error).slice(0, 1000) : null,
+        ]
+      );
+    } catch (err) {
+      console.warn('[admin line-binding notice] log failed:', err.message);
+    }
+  }
+
+  async function notifyLineBindingAccounts(accounts, text, subject) {
+    const rows = Array.isArray(accounts) ? accounts : [];
+    const seen = new Set();
+    let sent = 0;
+    let failed = 0;
+    let skipped = 0;
+    for (const account of rows) {
+      const lineUserId = String(account?.line_user_id || '').trim();
+      const oaId = account?.oa_id == null ? null : account.oa_id;
+      const key = `${oaId == null ? 0 : oaId}:${lineUserId}`;
+      if (!lineUserId || seen.has(key)) continue;
+      seen.add(key);
+      if (!lineSvc.isLikelyUserId(lineUserId)) {
+        skipped++;
+        await logLineBindingNotice({
+          recipient: lineUserId,
+          subject,
+          body: text,
+          status: 'skipped',
+          error: 'invalid LINE userId shape',
+        });
+        continue;
+      }
+      try {
+        const oa = await lineOa.resolveForTenant(pool, oaId, { withSecrets: true });
+        if (!oa || oa.enabled === false || !oa.channelAccessToken) {
+          failed++;
+          await logLineBindingNotice({
+            recipient: lineUserId,
+            subject,
+            body: text,
+            status: 'failed',
+            error: 'LINE OA not configured or disabled',
+          });
+          continue;
+        }
+        const ok = await lineSvc.pushText(oa, lineUserId, text);
+        if (ok) sent++;
+        else failed++;
+        await logLineBindingNotice({
+          recipient: lineUserId,
+          subject,
+          body: `[oa:${oa.slug || oa.id || 'env'}] ${text}`,
+          status: ok ? 'sent' : 'failed',
+          error: ok ? null : 'LINE push failed',
+        });
+      } catch (err) {
+        failed++;
+        await logLineBindingNotice({
+          recipient: lineUserId,
+          subject,
+          body: text,
+          status: 'failed',
+          error: err.message,
+        });
+      }
+    }
+    return { sent, failed, skipped, total: sent + failed + skipped };
+  }
+
+  function roomLabel(status) {
+    const room = status?.tenant?.current_room_id;
+    return room ? `ห้อง ${room}` : 'ห้องนี้';
+  }
+
+  function boundAccountFromStatus(status, bindingId) {
+    const bid = Number(bindingId);
+    return (status?.boundAccounts || []).find((account) => Number(account.id) === bid) || null;
+  }
 
   r.get('/', requireAuth, requireRole('owner', 'manager'), async (_req, res) => {
     try {
@@ -112,9 +202,21 @@ module.exports = function buildAdminLineBindingsRouter(ctx) {
       const id = Number(req.params.id);
       if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
       try {
+        const before = await lineBinding.getStatus(pool, id).catch((err) => {
+          console.warn('[admin line-binding revoke] pre-status failed:', err.message);
+          return null;
+        });
         await lineBinding.revoke(pool, { tenantId: id, by: req.session.user.username });
-        audit(req, 'line_binding.revoke', 'tenant', String(id));
-        res.json({ ok: true });
+        const notified = await notifyLineBindingAccounts(
+          before?.boundAccounts || [],
+          `แอดมินยกเลิกการผูก LINE ของ${roomLabel(before)} แล้ว\n\nบัญชีนี้จะไม่ได้รับแจ้งเตือนบิล สลิป หรือประกาศของห้องนี้ผ่าน LINE จนกว่าจะผูกใหม่ด้วยคีย์ BIND จากแอดมิน`,
+          'ยกเลิกการผูก LINE ของห้อง'
+        );
+        audit(req, 'line_binding.revoke', 'tenant', String(id), {
+          notified,
+          revokedAccounts: before?.boundAccounts?.length || 0,
+        });
+        res.json({ ok: true, notified });
       } catch (err) {
         console.error('admin line-binding revoke error:', err);
         res.status(500).json({ error: 'internal error' });
@@ -172,17 +274,28 @@ module.exports = function buildAdminLineBindingsRouter(ctx) {
         return res.status(400).json({ error: 'invalid id' });
       }
       try {
+        const before = await lineBinding.getStatus(pool, id).catch((err) => {
+          console.warn('[admin line-binding account revoke] pre-status failed:', err.message);
+          return null;
+        });
+        const account = boundAccountFromStatus(before, bindingId);
         const result = await lineBinding.revokeAccount(pool, {
           tenantId: id,
           bindingId,
           by: req.session.user.username,
         });
         if (!result.ok) return res.status(404).json({ error: 'binding not found', code: 'NOT_FOUND' });
+        const notified = await notifyLineBindingAccounts(
+          account ? [account] : [],
+          `แอดมินยกเลิกการผูก LINE บัญชีนี้ออกจาก${roomLabel(before)} แล้ว\n\nหากต้องการรับแจ้งเตือนบิล สลิป หรือประกาศของห้องนี้อีกครั้ง กรุณาขอคีย์ BIND ใหม่จากแอดมิน`,
+          'ยกเลิกบัญชี LINE ที่ผูกกับห้อง'
+        );
         audit(req, 'line_binding.revoke_account', 'tenant', String(id), {
           bindingId,
           remainingBoundCount: result.remainingBoundCount,
+          notified,
         });
-        res.json(result);
+        res.json({ ...result, notified });
       } catch (err) {
         console.error('admin line-binding account revoke error:', err);
         res.status(500).json({ error: 'internal error' });
@@ -196,9 +309,23 @@ module.exports = function buildAdminLineBindingsRouter(ctx) {
       if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
       const reason = String(req.body?.reason || '').slice(0, 500);
       try {
+        const before = await lineBinding.getStatus(pool, id).catch((err) => {
+          console.warn('[admin line-binding block] pre-status failed:', err.message);
+          return null;
+        });
         await lineBinding.block(pool, { tenantId: id, reason, by: req.session.user.username });
-        audit(req, 'line_binding.block', 'tenant', String(id), { reason });
-        res.json({ ok: true });
+        const reasonLine = reason ? `\nเหตุผล: ${reason}` : '';
+        const notified = await notifyLineBindingAccounts(
+          before?.boundAccounts || [],
+          `แอดมินปิดการผูก LINE ของ${roomLabel(before)} แล้ว${reasonLine}\n\nบัญชี LINE ที่เคยผูกไว้ถูกถอดออก และจะยังผูกใหม่ไม่ได้จนกว่าแอดมินจะปลดบล็อก`,
+          'ปิดการผูก LINE ของห้อง'
+        );
+        audit(req, 'line_binding.block', 'tenant', String(id), {
+          reason,
+          notified,
+          revokedAccounts: before?.boundAccounts?.length || 0,
+        });
+        res.json({ ok: true, notified });
       } catch (err) {
         console.error('admin line-binding block error:', err);
         res.status(500).json({ error: 'internal error' });
