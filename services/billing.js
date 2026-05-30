@@ -963,6 +963,56 @@ function validatePaidLedger({ paymentAmount, billTotal, tolerance } = {}) {
   };
 }
 
+/**
+ * Single source of truth for "tenant paid the principal (pre-late-fee) amount
+ * on a bill that has since accrued a late fee — do we waive the fee?".
+ *
+ * Previously every payment path auto-waived unconditionally, so the late fee
+ * was unenforceable whenever the tenant paid the original QR amount late. Policy
+ * now: the late fee is only waived when EITHER an admin explicitly chose to
+ * (adminWaive — they clicked "อนุมัติ + ยกค่าปรับ"), OR the operator opted into
+ * always-auto-waiving via features.lateFee.autoWaiveOnPrincipal. Otherwise the
+ * caller must NOT silently settle — admin paths return LATE_FEE_DECISION_REQUIRED
+ * and the tenant auto-verify path parks the slip as 'pending' for admin review.
+ *
+ * @param {object} opts
+ * @param {'exact'|'principal'|'none'} opts.tier  - from validatePaymentAmount
+ * @param {number} opts.lateFee                   - bills.late_fee at verify time
+ * @param {boolean} [opts.adminWaive]             - admin explicitly chose to waive
+ * @param {boolean} [opts.autoWaive]              - features.lateFee.autoWaiveOnPrincipal
+ * @returns {{ applies:boolean, waive:boolean }}
+ *   applies — this IS a principal-tier-with-outstanding-late-fee situation
+ *   waive   — caller should zero the late fee and settle at principal
+ */
+function resolvePrincipalLateFee({ tier, lateFee, adminWaive = false, autoWaive = false } = {}) {
+  const applies = tier === 'principal' && Number(lateFee) > 0;
+  if (!applies) return { applies: false, waive: false };
+  return { applies: true, waive: adminWaive === true || autoWaive === true };
+}
+
+/**
+ * Proration fraction for a mid-month MOVE-IN's first-month rent. Mirrors the
+ * move-out (closing bill) proration so the two ends of a tenancy are symmetric.
+ * Gated by config.billing.prorateFirstMonth (default off → fraction 1 = full
+ * month, preserving the historical "full first month" behavior).
+ *
+ * @param {object} opts
+ * @param {number} opts.moveInDay    - day-of-month the tenant moved in (1..31)
+ * @param {number} opts.daysInMonth  - number of days in the move-in month
+ * @param {boolean} [opts.prorate]   - config.billing.prorateFirstMonth
+ * @returns {number} fraction in [0,1]; 1 when proration is off or inputs invalid
+ */
+function firstMonthProrationFraction({ moveInDay, daysInMonth, prorate = false } = {}) {
+  if (!prorate) return 1;
+  const d = Number(daysInMonth);
+  const m = Number(moveInDay);
+  if (!Number.isFinite(d) || d <= 0 || !Number.isFinite(m)) return 1;
+  // Count the move-in day itself as a charged day (inclusive), mirroring the
+  // closing bill which counts the checkout day as lived (daysLived = td).
+  const daysCharged = Math.max(0, Math.min(d, d - m + 1));
+  return daysCharged / d;
+}
+
 module.exports = {
   buildBill, buildPaymentBlock, statusOf, makeBillNo,
   formatPeriodNow, formatDueDate, formatYMD, parseDueDateLocal, round2,
@@ -973,5 +1023,7 @@ module.exports = {
   computeRestoredBillAmounts,
   validatePaymentAmount,
   validatePaidLedger,
+  resolvePrincipalLateFee,
+  firstMonthProrationFraction,
   PAYMENT_TOLERANCE_THB,
 };

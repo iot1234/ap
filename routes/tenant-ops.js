@@ -1862,6 +1862,17 @@ module.exports = function buildTenantOpsRouter(ctx) {
           const combinedPct = Math.min(50,
             100 * (1 - (1 - contractPct / 100) * (1 - firstMonthPct / 100)));
           welcomeRent = Math.round(welcomeRent * (1 - combinedPct / 100) * 100) / 100;
+          // config.billing.prorateFirstMonth — charge only the days lived in the
+          // move-in month (move-in day → month end), symmetric with the closing
+          // bill. Off by default → full first month (historical behavior).
+          if (cfgR[0]?.value?.billing?.prorateFirstMonth === true && moveInMatch) {
+            const y = Number(moveInMatch[1]);
+            const mo = Number(moveInMatch[2]);
+            const day = Number(moveInMatch[3]);
+            const daysInMonth = new Date(Date.UTC(y, mo, 0)).getUTCDate();
+            const frac = billing.firstMonthProrationFraction({ moveInDay: day, daysInMonth, prorate: true });
+            welcomeRent = Math.round(welcomeRent * frac * 100) / 100;
+          }
         } catch { /* config blob missing — fall back to full monthlyRent */ }
         await client.query(
           `INSERT INTO bills

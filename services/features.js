@@ -81,6 +81,13 @@ const DEFAULTS = Object.freeze({
     enabled: true,
     ratePctPerMonth: 1.5,
     gracePeriodDays: 7,
+    // When a tenant pays the pre-late-fee (principal) amount on a bill that has
+    // since accrued a late fee, should the fee be waived automatically?
+    //   false (default) → admin decides per-payment at verify time. Auto-verified
+    //     tenant slips that only cover principal are parked as 'pending' for
+    //     review; admin verify endpoints require an explicit waiveLateFee choice.
+    //   true            → legacy "good-faith" behavior: waive automatically.
+    autoWaiveOnPrincipal: false,
   },
   vat: {
     enabled: false,

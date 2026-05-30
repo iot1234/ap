@@ -870,3 +870,60 @@ test('parseDueDateLocal: string → local midnight; Date → passthrough; junk �
   assert.equal(billing.parseDueDateLocal(''), null);
   assert.equal(billing.parseDueDateLocal(null), null);
 });
+
+// --- resolvePrincipalLateFee (admin-choice late-fee policy) ----------------
+test('resolvePrincipalLateFee: not a principal-with-late-fee situation → no-op', () => {
+  // exact tier never applies
+  assert.deepEqual(
+    billing.resolvePrincipalLateFee({ tier: 'exact', lateFee: 90 }),
+    { applies: false, waive: false });
+  // principal but no outstanding late fee
+  assert.deepEqual(
+    billing.resolvePrincipalLateFee({ tier: 'principal', lateFee: 0 }),
+    { applies: false, waive: false });
+  // none tier
+  assert.deepEqual(
+    billing.resolvePrincipalLateFee({ tier: 'none', lateFee: 90 }),
+    { applies: false, waive: false });
+});
+
+test('resolvePrincipalLateFee: principal+lateFee requires an explicit decision', () => {
+  // Default: applies but does NOT waive (admin must choose / slip parks pending)
+  assert.deepEqual(
+    billing.resolvePrincipalLateFee({ tier: 'principal', lateFee: 90 }),
+    { applies: true, waive: false });
+  // Admin explicitly waives
+  assert.deepEqual(
+    billing.resolvePrincipalLateFee({ tier: 'principal', lateFee: 90, adminWaive: true }),
+    { applies: true, waive: true });
+  // Operator opted into auto-waive (tenant auto-verify path)
+  assert.deepEqual(
+    billing.resolvePrincipalLateFee({ tier: 'principal', lateFee: 90, autoWaive: true }),
+    { applies: true, waive: true });
+  // Only a strict boolean true waives — truthy strings must not
+  assert.equal(
+    billing.resolvePrincipalLateFee({ tier: 'principal', lateFee: 90, adminWaive: 'yes' }).waive,
+    false);
+});
+
+// --- firstMonthProrationFraction (symmetric move-in proration) -------------
+test('firstMonthProrationFraction: off (default) always charges the full month', () => {
+  assert.equal(billing.firstMonthProrationFraction({ moveInDay: 20, daysInMonth: 30 }), 1);
+  assert.equal(billing.firstMonthProrationFraction({ moveInDay: 1, daysInMonth: 31, prorate: false }), 1);
+});
+
+test('firstMonthProrationFraction: on → days lived (inclusive of move-in day)', () => {
+  // Move in on the 1st → full month
+  assert.equal(billing.firstMonthProrationFraction({ moveInDay: 1, daysInMonth: 30, prorate: true }), 1);
+  // Move in on the 20th of a 30-day month → 11 days lived (20..30 inclusive)
+  assert.equal(billing.firstMonthProrationFraction({ moveInDay: 20, daysInMonth: 30, prorate: true }), 11 / 30);
+  // Last day of a 31-day month → 1/31
+  assert.equal(billing.firstMonthProrationFraction({ moveInDay: 31, daysInMonth: 31, prorate: true }), 1 / 31);
+});
+
+test('firstMonthProrationFraction: invalid inputs fall back to full month', () => {
+  assert.equal(billing.firstMonthProrationFraction({ moveInDay: NaN, daysInMonth: 30, prorate: true }), 1);
+  assert.equal(billing.firstMonthProrationFraction({ moveInDay: 10, daysInMonth: 0, prorate: true }), 1);
+  // Day beyond the month is clamped to 0 charged days (never negative)
+  assert.equal(billing.firstMonthProrationFraction({ moveInDay: 40, daysInMonth: 30, prorate: true }), 0);
+});

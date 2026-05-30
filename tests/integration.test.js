@@ -766,7 +766,16 @@ test('/api/payments/:id/verify rejects amount mismatches before marking paid', (
   assert.match(body, /billing\.validatePaymentAmount\(\{[\s\S]{0,140}amount: paymentAmount,[\s\S]{0,140}lateFee: billLateFee/,
     'verify path must use the shared two-tier payment amount validator');
   assert.match(body, /bill\.late_fee_waived_on_principal_payment/,
-    'verify path must waive late_fee when the payment matches principal');
+    'verify path must waive late_fee when the admin chooses to on a principal payment');
+  // Late-fee policy: the waiver is no longer automatic. The admin must pass
+  // waiveLateFee:true; otherwise the path returns LATE_FEE_DECISION_REQUIRED so
+  // a principal-only payment can't silently forgive the fee.
+  assert.match(body, /resolvePrincipalLateFee/,
+    'verify path must route the late-fee decision through the shared policy helper');
+  assert.match(body, /LATE_FEE_DECISION_REQUIRED/,
+    'verify path must require an explicit admin decision before waiving late_fee');
+  assert.match(body, /waiveLateFee/,
+    'verify path must read the explicit waiveLateFee choice from the request');
   assert.match(body, /PAYMENT_AMOUNT_MISMATCH/,
     'verify path must fail closed on amount mismatch');
 });
@@ -806,7 +815,11 @@ test('/api/bills/:id/verify-slip matches owner-manager payment verification poli
   assert.match(body, /billing\.validatePaymentAmount\(\{[\s\S]{0,160}lateFee: billLateFee/,
     'bill-id verify path must use the shared two-tier amount validator');
   assert.match(body, /bill\.late_fee_waived_on_principal_payment/,
-    'bill-id verify path must waive late_fee when the slip matches principal');
+    'bill-id verify path must waive late_fee when the admin chooses to on a principal slip');
+  assert.match(body, /resolvePrincipalLateFee/,
+    'bill-id verify path must route the late-fee decision through the shared policy helper');
+  assert.match(body, /LATE_FEE_DECISION_REQUIRED/,
+    'bill-id verify path must require an explicit admin decision before waiving late_fee');
   assert.match(body, /SELECT id, amount, tenant_id FROM payments/,
     'bill-id verify path must retain tenant_id for post-payment access-card restore');
   assert.match(body, /RETURNING id, room_id/,
@@ -7128,5 +7141,50 @@ test('hooks.jsx: ERROR_CODE_MAP handles new R2/R3/R7 error codes', () => {
   ]) {
     assert.match(src, new RegExp(code + ':\\s*\\{'),
       `ERROR_CODE_MAP must define ${code} with title + description`);
+  }
+});
+
+test('tenant slip auto-verify parks principal-only payments for admin late-fee decision', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  // The tenant upload path must NOT auto-waive an outstanding late fee. When a
+  // slip auto-verifies but only covers principal and autoWaiveOnPrincipal is
+  // off, it routes the decision through resolvePrincipalLateFee and downgrades
+  // the row to 'pending' so an admin decides.
+  assert.match(server, /resolvePrincipalLateFee/,
+    'tenant upload must consult the shared late-fee policy helper');
+  assert.match(server, /autoWaiveOnPrincipal/,
+    'tenant upload must honor the features.lateFee.autoWaiveOnPrincipal flag');
+  assert.match(server, /tenantLateFeePolicy\.applies && !tenantLateFeePolicy\.waive/,
+    'tenant upload must park principal-only payments instead of silently settling');
+});
+
+test('mid-month move-in proration is gated by config.billing.prorateFirstMonth on both onboarding paths', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const tenantOps = fs.readFileSync(path.join(__dirname, '..', 'routes', 'tenant-ops.js'), 'utf8');
+  for (const [name, src] of [['server.js (invitation approve)', server], ['tenant-ops.js (checkin)', tenantOps]]) {
+    assert.match(src, /billing\.firstMonthProrationFraction/,
+      `${name} welcome bill must use the shared proration helper`);
+    assert.match(src, /prorateFirstMonth === true/,
+      `${name} welcome bill must gate proration on config.billing.prorateFirstMonth`);
+  }
+});
+
+test('features.lateFee exposes autoWaiveOnPrincipal defaulting to admin-decides (false)', () => {
+  const features = require('../services/features');
+  const defs = features.DEFAULTS || features.defaults || null;
+  // Fall back to a source check if DEFAULTS isn't exported.
+  if (defs && defs.lateFee) {
+    assert.equal(defs.lateFee.autoWaiveOnPrincipal, false,
+      'late fee must default to admin-decides, not auto-waive');
+  } else {
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'features.js'), 'utf8');
+    assert.match(src, /autoWaiveOnPrincipal:\s*false/,
+      'late fee must default to admin-decides (autoWaiveOnPrincipal: false)');
   }
 });

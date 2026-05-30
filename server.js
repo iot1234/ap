@@ -6845,6 +6845,21 @@ async function tenantPaymentUploadHandler(req, res) {
           submittedAmount: amount,
         });
       }
+      // Late-fee policy gate (services/billing.js#resolvePrincipalLateFee).
+      // The slip may have auto-verified as authentic, but if it only covers the
+      // principal while a late fee is outstanding AND the operator has not opted
+      // into auto-waiving, we must NOT silently settle and forgive the fee.
+      // Downgrade the row to 'pending' so it lands in the admin slip queue, where
+      // the admin explicitly chooses to waive the fee or have the tenant pay it.
+      const tenantLateFeePolicy = billing.resolvePrincipalLateFee({
+        tier: finalAmountCheck.tier,
+        lateFee: finalAmountCheck.lateFee,
+        autoWaive: !!(req.features && req.features.lateFee && req.features.lateFee.autoWaiveOnPrincipal),
+      });
+      if (initialStatus === 'verified' && tenantLateFeePolicy.applies && !tenantLateFeePolicy.waive) {
+        initialStatus = 'pending';
+        initialReason = `ผู้เช่าชำระยอดก่อนค่าปรับ (฿${finalAmountCheck.principal.toLocaleString('th-TH')}) — ค่าปรับ ฿${finalAmountCheck.lateFee.toLocaleString('th-TH')} รอแอดมินตัดสินใจ (ยกเว้น หรือ เก็บเพิ่ม)`;
+      }
 
       try {
         // INSERT now carries transaction_ref + verify_provider + raw payload
@@ -7643,13 +7658,28 @@ app.put('/api/payments/:id/verify', sameOrigin, csrfGuard, requireAuth, requireR
           paymentAmount,
         });
       }
-      // R2-followup — when the tenant matched the principal tier (paid
-      // before scheduler.tickLateFee added a penalty), waive the late_fee
-      // in good faith. The system added the charge AFTER the tenant had
-      // already committed to pay; punishing them for the scheduler's
-      // timing is unfair. Audit-logged so admin can review/reverse.
+      // Late-fee policy (services/billing.js#resolvePrincipalLateFee). When the
+      // tenant only covered the principal while a late fee is outstanding, the
+      // admin must explicitly DECIDE — we no longer silently forgive it. The
+      // "อนุมัติ + ยกค่าปรับ" action sends waiveLateFee:true to waive; a plain
+      // approve gets LATE_FEE_DECISION_REQUIRED so the UI prompts for the choice.
+      const adminWaive = req.body && req.body.waiveLateFee === true;
+      const lateFeePolicy = billing.resolvePrincipalLateFee({
+        tier: amountCheck.tier, lateFee: billLateFee, adminWaive,
+      });
+      if (lateFeePolicy.applies && !lateFeePolicy.waive) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'ผู้เช่าชำระเฉพาะยอดก่อนค่าปรับ — เลือก "อนุมัติ + ยกค่าปรับ" หรือปฏิเสธให้จ่ายค่าปรับเพิ่ม',
+          code: 'LATE_FEE_DECISION_REQUIRED',
+          billTotal,
+          billPrincipal: amountCheck.principal,
+          billLateFee,
+          paymentAmount,
+        });
+      }
       let waivedLateFee = 0;
-      if (amountCheck.tier === 'principal' && billLateFee > 0) {
+      if (lateFeePolicy.applies && lateFeePolicy.waive) {
         waivedLateFee = billLateFee;
         await client.query(
           `UPDATE bills
@@ -7670,7 +7700,8 @@ app.put('/api/payments/:id/verify', sameOrigin, csrfGuard, requireAuth, requireR
              paymentAmount,
              principalAtVerify: amountCheck.principal,
              billTotalBeforeWaive: billTotal,
-             reason: 'tenant paid principal before scheduler.tickLateFee added penalty',
+             adminWaive: true,
+             reason: 'admin explicitly waived late fee on principal payment',
            })]
         ).catch(() => { /* audit best-effort */ });
       }
@@ -12654,6 +12685,16 @@ app.post('/api/admin/contract-invitations/:id/approve',
           const combinedPct = Math.min(50,
             100 * (1 - (1 - contractPct / 100) * (1 - firstMonthPct / 100)));
           welcomeRent = Math.round(welcomeRent * (1 - combinedPct / 100) * 100) / 100;
+          // config.billing.prorateFirstMonth — mirror the checkin path: charge
+          // only the days lived in the move-in month. Off by default (full month).
+          if (cfgR[0]?.value?.billing?.prorateFirstMonth === true && moveInMatch) {
+            const y = Number(moveInMatch[1]);
+            const mo = Number(moveInMatch[2]);
+            const day = Number(moveInMatch[3]);
+            const daysInMonth = new Date(Date.UTC(y, mo, 0)).getUTCDate();
+            const frac = billing.firstMonthProrationFraction({ moveInDay: day, daysInMonth, prorate: true });
+            welcomeRent = Math.round(welcomeRent * frac * 100) / 100;
+          }
           const billNo = billing.makeBillNo(contract.room_id, period);
           const billIns = await client.query(
             `INSERT INTO bills

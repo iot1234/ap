@@ -135,6 +135,13 @@ const DEFAULT_CONFIG = {
     sixMonth: 5, twelveMonth: 10, twentyFourMonth: 15,
     firstMonth: 0,
   },
+  billing: {
+    // When true, a mid-month move-in's first-month rent is prorated by the
+    // number of days actually lived (move-in day → end of month), matching the
+    // move-out closing bill which already prorates. When false (default), the
+    // first month is charged in full, preserving the historical behavior.
+    prorateFirstMonth: false,
+  },
   building: {
     name:    'บ้านกาญจน์ เรสซิเดนซ์',
     address: '',

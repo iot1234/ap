@@ -2782,7 +2782,25 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         }
         let waivedLateFee = 0;
         let effectiveTotal = billTotal;
-        if (amountCheck.tier === 'principal' && billLateFee > 0) {
+        // Late-fee policy (services/billing.js#resolvePrincipalLateFee): recording
+        // an offline payment that only covers the principal requires an explicit
+        // admin choice. waiveLateFee:true waives; otherwise we refuse and ask.
+        const adminWaive = req.body && req.body.waiveLateFee === true;
+        const lateFeePolicy = billing.resolvePrincipalLateFee({
+          tier: amountCheck.tier, lateFee: billLateFee, adminWaive,
+        });
+        if (lateFeePolicy.applies && !lateFeePolicy.waive) {
+          await rollbackManualPay();
+          return res.status(409).json({
+            error: 'ยอดที่บันทึกเท่ากับยอดก่อนค่าปรับ — เลือก "บันทึก + ยกค่าปรับ" หรือเก็บค่าปรับเพิ่ม',
+            code: 'LATE_FEE_DECISION_REQUIRED',
+            billTotal,
+            billPrincipal: amountCheck.principal,
+            billLateFee,
+            paymentAmount: requestedAmount,
+          });
+        }
+        if (lateFeePolicy.applies && lateFeePolicy.waive) {
           waivedLateFee = billLateFee;
           effectiveTotal = amountCheck.principal;
           await client.query(
@@ -2802,7 +2820,8 @@ module.exports = function buildBillsExtrasRouter(ctx) {
                principalAtVerify: amountCheck.principal,
                billTotalBeforeWaive: billTotal,
                method,
-               reason: 'admin recorded manual payment matching principal — late_fee waived in good faith',
+               adminWaive: true,
+               reason: 'admin explicitly waived late fee on offline principal payment',
              })]
           ).catch(() => { /* audit best-effort */ });
         }
@@ -3022,7 +3041,25 @@ module.exports = function buildBillsExtrasRouter(ctx) {
               paymentAmount,
             });
           }
-          if (amountCheck.tier === 'principal' && billLateFee > 0) {
+          // Late-fee policy (services/billing.js#resolvePrincipalLateFee): admin
+          // must explicitly choose on a principal-only payment. waiveLateFee:true
+          // waives; otherwise return LATE_FEE_DECISION_REQUIRED for the UI prompt.
+          const adminWaive = req.body && req.body.waiveLateFee === true;
+          const lateFeePolicy = billing.resolvePrincipalLateFee({
+            tier: amountCheck.tier, lateFee: billLateFee, adminWaive,
+          });
+          if (lateFeePolicy.applies && !lateFeePolicy.waive) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({
+              error: 'ผู้เช่าชำระเฉพาะยอดก่อนค่าปรับ — เลือก "อนุมัติ + ยกค่าปรับ" หรือปฏิเสธให้จ่ายค่าปรับเพิ่ม',
+              code: 'LATE_FEE_DECISION_REQUIRED',
+              billTotal,
+              billPrincipal: amountCheck.principal,
+              billLateFee,
+              paymentAmount,
+            });
+          }
+          if (lateFeePolicy.applies && lateFeePolicy.waive) {
             waivedLateFee = billLateFee;
             await client.query(
               `UPDATE bills
@@ -3041,7 +3078,8 @@ module.exports = function buildBillsExtrasRouter(ctx) {
                  paymentAmount,
                  principalAtVerify: amountCheck.principal,
                  billTotalBeforeWaive: billTotal,
-                 reason: 'tenant slip matched principal — late_fee waived in good faith',
+                 adminWaive: true,
+                 reason: 'admin explicitly waived late fee on principal payment',
               })]
             ).catch(() => { /* audit best-effort */ });
           }
