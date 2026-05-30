@@ -7242,8 +7242,17 @@ test("carryLateFeeToNextBill creates a tenant-scoped one-off recurring charge", 
   assert.equal(calls[0].params[0], null, "room_id null = tenant-scoped");
   assert.equal(calls[0].params[1], 7, "tenant_id set");
   assert.equal(calls[0].params[3], 90, "amount = late fee");
+  assert.equal(calls[0].params[4], "2026-04-01", "carry starts on the next billing month");
   assert.match(String(calls[0].params[2]), /2026-03/, "label references the originating period");
   assert.ok(String(calls[0].params[2]).length > 3, "label is a non-empty description");
+});
+
+test("carryLateFeeToNextBill computes next-period start dates safely", () => {
+  const billPayments = require("../services/billPayments");
+  assert.equal(billPayments._nextPeriodStartDate("2026-03"), "2026-04-01");
+  assert.equal(billPayments._nextPeriodStartDate("2026-12"), "2027-01-01");
+  assert.equal(billPayments._nextPeriodStartDate("2026-13"), null);
+  assert.equal(billPayments._nextPeriodStartDate("bad"), null);
 });
 
 test("carryLateFeeToNextBill is a no-op for non-positive amount or no target", async () => {
@@ -7252,4 +7261,5 @@ test("carryLateFeeToNextBill is a no-op for non-positive amount or no target", a
   assert.equal(await billPayments.carryLateFeeToNextBill(fakeClient, { tenantId: 1, amount: 0 }), null);
   assert.equal(await billPayments.carryLateFeeToNextBill(fakeClient, { tenantId: 1, amount: -5 }), null);
   assert.equal(await billPayments.carryLateFeeToNextBill(fakeClient, { amount: 90 }), null);
+  assert.equal(await billPayments.carryLateFeeToNextBill(fakeClient, { tenantId: 1, amount: 90, fromPeriod: "bad" }), null);
 });

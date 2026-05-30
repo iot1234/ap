@@ -129,6 +129,16 @@ async function notifyTenantOnPayment(ctx, payment, outcome, reason) {
   }
 }
 
+function nextPeriodStartDate(period) {
+  const m = String(period || '').match(/^(\d{4})-(\d{2})$/);
+  if (!m) return null;
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  if (!Number.isInteger(year) || !Number.isInteger(month) || month < 1 || month > 12) return null;
+  const next = new Date(Date.UTC(year, month, 1));
+  return next.toISOString().slice(0, 10);
+}
+
 /**
  * Carry an outstanding late fee onto next month's bill instead of forgiving it.
  *
@@ -159,16 +169,19 @@ async function carryLateFeeToNextBill(client, { tenantId, roomId, amount, fromPe
   // The table CHECK requires room_id OR tenant_id. Prefer tenant scoping.
   if (tenantId == null && !roomId) return null;
   const periodLabel = fromPeriod || '-';
+  const startAt = nextPeriodStartDate(fromPeriod);
+  if (!startAt) return null;
   const ins = await client.query(
     `INSERT INTO recurring_charges
-       (room_id, tenant_id, label, amount, frequency, active, notes, created_by)
-     VALUES ($1, $2, $3, $4, 'one_off', TRUE, $5, $6)
+       (room_id, tenant_id, label, amount, frequency, active, start_at, notes, created_by)
+     VALUES ($1, $2, $3, $4, 'one_off', TRUE, $5::date, $6, $7)
      RETURNING id`,
     [
       tenantId != null ? null : (roomId || null),  // tenant-scope when we can
       tenantId != null ? tenantId : null,
       `ค่าปรับล่าช้าค้างจากรอบ ${periodLabel}`,
       amt,
+      startAt,
       `ยกค่าปรับล่าช้า ฿${amt.toLocaleString('th-TH')} จากบิลรอบ ${periodLabel} มาเก็บในบิลรอบถัดไป`,
       createdBy || 'system',
     ]
@@ -180,4 +193,5 @@ module.exports = {
   loadBuildingName,
   notifyTenantOnPayment,
   carryLateFeeToNextBill,
+  _nextPeriodStartDate: nextPeriodStartDate,
 };
