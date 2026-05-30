@@ -190,8 +190,9 @@ Auto-created in `migrate()` on boot:
 
 - **Auth:** bcrypt 10 rounds, session cookies (httpOnly + Secure +
   SameSite=lax), 7-day expiry.
-- **Rate limit:** login 10/15min/IP, public booking 5/min/IP, maintenance
-  submit 5/min/IP.
+- **Rate limit:** login 5/15min/IP, public booking 5/min/IP, maintenance
+  submit 5/min/IP. Per-account lockout (middleware/lockout.js) adds a second
+  layer that survives IP rotation.
 - **CSRF defense:** `sameOrigin` middleware rejects cross-origin
   Origin/Referer on state-changing endpoints, then privileged writes also
   require a double-submit CSRF cookie/header from `/api/csrf-token`.

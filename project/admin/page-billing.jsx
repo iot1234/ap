@@ -2044,7 +2044,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
                 ห้อง {markPaidPrompt.bill.roomId}
               </div>
               <div style={{ color: C.muted, fontSize: 12.5 }}>
-                ผู้เช่า: {markPaidPrompt.bill.tenant || '-'} · ยอด ฿{fmtCurrency(markPaidPrompt.bill.total)}
+                ผู้เช่า: {markPaidPrompt.bill.tenant || '-'} · ยอด {fmtCurrency(markPaidPrompt.bill.total)}
               </div>
             </div>
             {markPaidPrompt.readinessIssues ? (
@@ -2495,7 +2495,7 @@ function SendReminderConfirmBody({ confirm, C, fmtCurrency, justSentAck, setJust
             </div>
           </div>
           <div style={{ fontFamily: 'IBM Plex Sans Thai', fontWeight: 700, fontSize: 18 }}>
-            ฿{fmtCurrency(bill.total)}
+            {fmtCurrency(bill.total)}
           </div>
         </div>
       </div>

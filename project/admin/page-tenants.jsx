@@ -258,7 +258,7 @@ function PageTenants({ rooms, setRooms, config, addActivity, setToast }) {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start' }}>
           <StatusBadge status={t.tenantStatus} size="sm" />
           {t.outstandingTotal > 0 ? (
-            <span style={{ fontSize: 11, color: C.danger }}>ค้าง ฿{fmtCurrency(t.outstandingTotal)}</span>
+            <span style={{ fontSize: 11, color: C.danger }}>ค้าง {fmtCurrency(t.outstandingTotal)}</span>
           ) : null}
         </div>
       ),
@@ -1500,10 +1500,10 @@ function TabContract({ t, routeBookingId = '', setToast, addActivity, setRooms, 
             { label: 'ระยะเวลาสัญญา', value: contract.term_months ? `${contract.term_months} เดือน` : 'เปิด-ไม่จำกัด' },
             { label: 'วันที่เริ่มต้น', value: fmtDate(contract.start_date) },
             { label: 'วันที่สิ้นสุด',  value: fmtDate(contract.end_date) },
-            { label: 'ค่าเช่า/เดือน', value: '฿' + fmtCurrency(contract.monthly_rent), bold: true },
+            { label: 'ค่าเช่า/เดือน', value: fmtCurrency(contract.monthly_rent), bold: true },
             { label: 'ส่วนลด',        value: Number(contract.discount_pct) > 0
                                               ? `${Number(contract.discount_pct).toFixed(1)}%` : 'ไม่มี' },
-            { label: 'เงินมัดจำ',     value: '฿' + fmtCurrency(contract.deposit) },
+            { label: 'เงินมัดจำ',     value: fmtCurrency(contract.deposit) },
           ]}
         />
         <div style={{ marginTop: 14, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
@@ -1598,8 +1598,8 @@ function CancelContractModal({ contract, tenant, reason, setReason, busy, onClos
         color: C.muted, marginBottom: 12, lineHeight: 1.5,
       }}>
         ห้อง: <b style={{ color: C.ink }}>{contract.room_id}</b> ·
-        ค่าเช่า: <b style={{ color: C.ink }}>฿{fmtCurrency(contract.monthly_rent)}/เดือน</b> ·
-        มัดจำ: <b style={{ color: C.ink }}>฿{fmtCurrency(contract.deposit)}</b>
+        ค่าเช่า: <b style={{ color: C.ink }}>{fmtCurrency(contract.monthly_rent)}/เดือน</b> ·
+        มัดจำ: <b style={{ color: C.ink }}>{fmtCurrency(contract.deposit)}</b>
       </div>
 
       <label style={{ display: 'block', fontSize: 12, marginBottom: 4, color: '#5b4f40', fontWeight: 500 }}>
@@ -1686,12 +1686,12 @@ function ContractPreFlightSummary({ t, C, fmtCurrency }) {
       ) : null}
       <Row icon="💰" label="ค่าเช่า/เดือน">
         <b style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 14 }}>
-          ฿{fmtCurrency(rent)}
+          {fmtCurrency(rent)}
         </b>
       </Row>
       <Row icon="🏦" label="เงินมัดจำ">
         <span style={{ fontFamily: 'JetBrains Mono, monospace' }}>
-          ฿{fmtCurrency(deposit)}
+          {fmtCurrency(deposit)}
         </span>
         <span style={{ color: C.muted, marginLeft: 6, fontSize: 11, fontWeight: 400 }}>
           (ค่าเช่า × 2)

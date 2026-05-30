@@ -42,6 +42,13 @@ function getTransport(config) {
     port: cfg.port,
     secure: cfg.port === 465,
     auth: { user: cfg.user, pass: cfg.pass },
+    // Bound the worst case. notifier.notifyTenant/notifyOwner call send()
+    // INLINE from request handlers (check-in, payment verify, maintenance), so
+    // a dead/slow SMTP host must fail fast instead of hanging the request (and
+    // its DB connection) for the OS-level minutes-long TCP default.
+    connectionTimeout: 10_000, // ms to establish the TCP connection
+    greetingTimeout: 10_000,   // ms to wait for the SMTP greeting
+    socketTimeout: 20_000,     // ms of socket inactivity before giving up
   });
   _transportKey = key;
   return _transport;

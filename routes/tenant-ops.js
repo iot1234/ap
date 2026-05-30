@@ -2249,34 +2249,42 @@ module.exports = function buildTenantOpsRouter(ctx) {
             if (closingLateFee > 0) {
               otherLines.push({ label: 'ค่าปรับล่าช้าค้างยกมา', amount: closingLateFee });
             }
-            try {
-              const ins = await client.query(
-                `INSERT INTO bills
-                   (bill_no, tenant_id, room_id, period, rent, subtotal, late_fee, total, due_date, status,
-                    other)
-                 VALUES ($1,$2,$3,$4,$5,$5,$8,$9,$6,'pending',$7::jsonb)
-                 ON CONFLICT (bill_no) DO NOTHING
-                 RETURNING id, bill_no, total, due_date`,
-                [billNo, id, billingRoom, period, proRatedRent, dueDate,
-                 JSON.stringify(otherLines), closingLateFee, closingTotal]
-              );
-              closingBill = ins.rows[0] || null;
-              // Only deactivate the carried charges once they are safely folded
-              // into a created closing bill (don't lose them on an ON CONFLICT
-              // skip). If no closing bill was created, they stay active so admin
-              // can still collect them.
-              if (closingBill && closingLateFee > 0 && carriedLateFeeRows.length) {
-                await client.query(
-                  `UPDATE recurring_charges
-                      SET active=FALSE, updated_at=NOW(),
-                          notes = COALESCE(notes,'') || E'\n[auto] folded into closing bill ' || $2
-                    WHERE id = ANY($1::bigint[]) AND active=TRUE`,
-                  [carriedLateFeeRows.map((r) => Number(r.id)), String(closingBill.bill_no || closingBill.id)]
-                ).catch(() => { /* best-effort — leave active if this fails */ });
+            // A 100% discount (or a rent×fraction that rounds to ฿0.00) with no
+            // carried late fee makes closingTotal=0, which violates the bills
+            // `total > 0` CHECK constraint. The INSERT would throw 23514 and —
+            // since the catch below only swallows 23505 — abort the ENTIRE
+            // checkout transaction, leaving the tenant un-checkout-able. There
+            // is nothing to charge, so skip the bill and let checkout proceed.
+            if (closingTotal > 0) {
+              try {
+                const ins = await client.query(
+                  `INSERT INTO bills
+                     (bill_no, tenant_id, room_id, period, rent, subtotal, late_fee, total, due_date, status,
+                      other)
+                   VALUES ($1,$2,$3,$4,$5,$5,$8,$9,$6,'pending',$7::jsonb)
+                   ON CONFLICT (bill_no) DO NOTHING
+                   RETURNING id, bill_no, total, due_date`,
+                  [billNo, id, billingRoom, period, proRatedRent, dueDate,
+                   JSON.stringify(otherLines), closingLateFee, closingTotal]
+                );
+                closingBill = ins.rows[0] || null;
+                // Only deactivate the carried charges once they are safely folded
+                // into a created closing bill (don't lose them on an ON CONFLICT
+                // skip). If no closing bill was created, they stay active so admin
+                // can still collect them.
+                if (closingBill && closingLateFee > 0 && carriedLateFeeRows.length) {
+                  await client.query(
+                    `UPDATE recurring_charges
+                        SET active=FALSE, updated_at=NOW(),
+                            notes = COALESCE(notes,'') || E'\n[auto] folded into closing bill ' || $2
+                      WHERE id = ANY($1::bigint[]) AND active=TRUE`,
+                    [carriedLateFeeRows.map((r) => Number(r.id)), String(closingBill.bill_no || closingBill.id)]
+                  ).catch(() => { /* best-effort — leave active if this fails */ });
+                }
+              } catch (err) {
+                if (err.code !== '23505') throw err;
+                // Race against partial-unique — fine, just skip.
               }
-            } catch (err) {
-              if (err.code !== '23505') throw err;
-              // Race against partial-unique — fine, just skip.
             }
           }
         }

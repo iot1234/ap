@@ -10,14 +10,18 @@ function PageNotifications() {
   const { Card, Pill, StatusBadge, PageContainer, PageHeader, EmptyState } = window;
   const [list, setList] = useState([]);
   const [filter, setFilter] = useState('');
+  const [loadErr, setLoadErr] = useState('');
 
   useEffect(() => {
     (async () => {
       try {
         const r = await fetch('/api/notifications/log?limit=200', { credentials: 'same-origin' });
-        const d = await r.json();
-        if (r.ok) setList(d.logs || []);
-      } catch {}
+        const d = await r.json().catch(() => ({}));
+        if (r.ok) { setList(d.logs || []); setLoadErr(''); }
+        else setLoadErr(d.error || ('โหลดไม่สำเร็จ (HTTP ' + r.status + ')'));
+      } catch {
+        setLoadErr('เชื่อมต่อเซิร์ฟเวอร์ไม่ได้');
+      }
     })();
   }, []);
 
@@ -38,7 +42,11 @@ function PageNotifications() {
           </select>
         } />
       <Card>
-        {shown.length === 0 ? <EmptyState title="ยังไม่มีบันทึก" /> : (
+        {shown.length === 0 ? (
+          <EmptyState icon={loadErr ? '⚠️' : '📭'}
+            title={loadErr ? 'โหลดบันทึกไม่สำเร็จ' : 'ยังไม่มีบันทึก'}
+            description={loadErr || undefined} />
+        ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 1, background: C.border, maxHeight: 600, overflow: 'auto' }}>
             {shown.map((x) => (
               <div key={x.id} className="notif-row" style={{

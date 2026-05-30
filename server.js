@@ -13535,7 +13535,7 @@ app.get('/api/admin/contract-terms', requireAuth, requireRole('owner', 'manager'
     const contractPdf = require('./services/contractPdf');
     // Prefer contract_templates default row; fall back to legacy system_settings.
     const dr = await pool.query(
-      `SELECT mode, clauses, sections, variables, updated_by, updated_at
+      `SELECT mode, clauses, sections, variables, created_by, updated_at
          FROM contract_templates
         WHERE is_default=TRUE AND deleted_at IS NULL LIMIT 1`
     );
@@ -13545,7 +13545,8 @@ app.get('/api/admin/contract-terms', requireAuth, requireRole('owner', 'manager'
         template: dr.rows[0],
         defaults: contractPdf.DEFAULT_CLAUSES,
         resolved: contractPdf.resolveClauses(dr.rows[0]),
-        updatedBy: dr.rows[0].updated_by,
+        // contract_templates tracks created_by + updated_at (no updated_by column).
+        updatedBy: dr.rows[0].created_by,
         updatedAt: dr.rows[0].updated_at,
         source: 'contract_templates',
       });
