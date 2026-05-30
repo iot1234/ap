@@ -8166,6 +8166,52 @@ function normaliseBookingPhone(phone) {
   return String(phone || '').replace(/[\s-]/g, '').slice(0, 32);
 }
 
+async function ensureApprovedBookingTenant(client, { booking, roomId }) {
+  const fullName = String(booking?.name || booking?.tenantName || '').slice(0, 200).trim();
+  const phone = normaliseBookingPhone(booking?.phone);
+  const email = booking?.email ? String(booking.email).slice(0, 200).trim() : null;
+  const currentRoomId = String(roomId || '').slice(0, 32).trim();
+  if (!fullName || !phone || !currentRoomId) return null;
+
+  const existing = await client.query(
+    `SELECT id, status FROM tenants
+       WHERE phone=$1 AND lower(full_name)=lower($2)
+         AND deleted_at IS NULL
+       LIMIT 1
+       FOR UPDATE`,
+    [phone, fullName]
+  );
+  if (existing.rows.length) {
+    if (existing.rows[0].status === 'blacklist') {
+      const err = new Error('ผู้จองรายนี้อยู่ใน blacklist ไม่สามารถอนุมัติและสร้าง tenant อัตโนมัติได้');
+      err.httpStatus = 409;
+      err.publicCode = 'TENANT_BLACKLISTED';
+      err.hint = 'ตรวจสอบประวัติผู้เช่าก่อนอนุมัติ booking หรือปลด blacklist อย่างตั้งใจก่อนดำเนินการต่อ';
+      throw err;
+    }
+    const upd = await client.query(
+      `UPDATE tenants
+          SET full_name=$1,
+              email=COALESCE($2, email),
+              current_room_id=$3,
+              status='active',
+              updated_at=NOW()
+        WHERE id=$4
+        RETURNING id`,
+      [fullName, email, currentRoomId, existing.rows[0].id]
+    );
+    return upd.rows[0]?.id || existing.rows[0].id;
+  }
+
+  const ins = await client.query(
+    `INSERT INTO tenants (full_name, phone, email, current_room_id, status, locale)
+     VALUES ($1, $2, $3, $4, 'active', 'th')
+     RETURNING id`,
+    [fullName, phone, email, currentRoomId]
+  );
+  return ins.rows[0]?.id || null;
+}
+
 function summariseBookingApplicantNotify(result, tenantInfo) {
   const out = result || {};
   const fallbackLineCount = (tenantInfo.lineRecipients && tenantInfo.lineRecipients.length)
@@ -8312,6 +8358,7 @@ app.post('/api/bookings/:id/approve-and-assign', sameOrigin, csrfGuard, requireA
   const adminNotes = req.body?.adminNotes !== undefined ? String(req.body.adminNotes).slice(0, 1000) : undefined;
   const client = await pool.connect();
   let tenantNotify = null;
+  let preContractTenantId = null;
   try {
     await client.query('BEGIN');
 
@@ -8524,10 +8571,17 @@ app.post('/api/bookings/:id/approve-and-assign', sameOrigin, csrfGuard, requireA
     }
 
     // Update the booking entry.
+    if (assignedRoomId) {
+      preContractTenantId = await ensureApprovedBookingTenant(client, {
+        booking,
+        roomId: assignedRoomId,
+      });
+    }
     bookings[bIdx] = {
       ...booking,
       status: 'approved',
       roomId: assignedRoomId || booking.roomId || null,
+      tenantId: preContractTenantId || booking.tenantId || null,
       adminNotes: adminNotes !== undefined ? adminNotes : booking.adminNotes,
       assignedRoomId,
       approvedAt: new Date().toISOString(),
@@ -8565,9 +8619,12 @@ app.post('/api/bookings/:id/approve-and-assign', sameOrigin, csrfGuard, requireA
 
     audit(req, 'booking.approve', 'booking', id, {
       assignedRoomId, wantType: booking.wantType, wantFloor: booking.wantFloor,
+      preContractTenantId,
     });
-    // Bridge tenant row out-of-tx (mirror function does its own writes;
-    // we don't want to block the response on it).
+    // Full bridge remains a best-effort cleanup for legacy room edits, but
+    // approve-and-assign already wrote the selected applicant's tenant row
+    // inside the transaction above so the next contract page can open
+    // immediately without racing this async mirror.
     if (assignedRoomId) {
       mirrorRoomsToTenants(rooms, req.session.user.username).catch(async (err) => {
         console.error('[bridge] rooms→tenants mirror failed after approve:', err.message);
@@ -8637,12 +8694,20 @@ app.post('/api/bookings/:id/approve-and-assign', sameOrigin, csrfGuard, requireA
       ok: true,
       booking: bookings[bIdx],
       assignedRoomId,
+      preContractTenantId,
       room: assignedRoomId ? rooms[assignedRoomId] : null,
       noVacantRoomMatch: !assignedRoomId,
       tenantNotify,
     });
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
+    if (err && err.httpStatus && err.publicCode) {
+      return res.status(err.httpStatus).json({
+        error: err.message,
+        code: err.publicCode,
+        hint: err.hint || null,
+      });
+    }
     console.error('booking approve-and-assign error:', err);
     res.status(500).json({ error: 'internal error', code: 'DB_ERROR' });
   } finally {
@@ -9555,6 +9620,29 @@ app.put('/api/admin/users/:id', sameOrigin, csrfGuard, requireAuth, requireRole(
     );
     if (!upd.rows.length) return res.status(404).json({ error: 'not found' });
 
+    // Security: a password reset or role change must invalidate the target's
+    // EXISTING server sessions, otherwise a hijacked/old session cookie outlives
+    // the credential/permission change (requireAuth only re-reads role + that
+    // the user still exists, not a password epoch). Keep the actor's own current
+    // session when they reset their OWN password so they aren't logged out.
+    if (password || (role && role !== before.role)) {
+      try {
+        if (isSelf && req.sessionID) {
+          await pool.query(
+            `DELETE FROM user_sessions WHERE (sess::jsonb->'user'->>'id')::int = $1 AND sid <> $2`,
+            [id, req.sessionID]
+          );
+        } else {
+          await pool.query(
+            `DELETE FROM user_sessions WHERE (sess::jsonb->'user'->>'id')::int = $1`,
+            [id]
+          );
+        }
+      } catch (e) {
+        console.warn('[admin/users update] session purge failed:', e.message);
+      }
+    }
+
     // Detailed audit so forensics can reconstruct exactly what changed.
     // For role changes we explicitly capture old → new because field-list
     // alone makes "owner→staff" indistinguishable from "manager→staff".
@@ -9601,6 +9689,12 @@ app.delete('/api/admin/users/:id', sameOrigin, csrfGuard, requireAuth, requireRo
     }
     const t = target.rows[0];
     await pool.query('DELETE FROM auth_users WHERE id=$1', [id]);
+    // Security: kill any live sessions for the deleted account so an open
+    // browser/cookie can't keep acting as a user that no longer exists.
+    await pool.query(
+      `DELETE FROM user_sessions WHERE (sess::jsonb->'user'->>'id')::int = $1`,
+      [id]
+    ).catch((e) => console.warn('[admin/users delete] session purge failed:', e.message));
     audit(req, 'user.delete', 'user', String(id),
       { username: t.username, role: t.role, by: req.session.user.username });
     notifyOtherOwners(req, {

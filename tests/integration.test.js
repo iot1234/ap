@@ -3200,8 +3200,16 @@ test('admin booking-to-contract handoff preserves booking reservation context', 
     'approved booking create-contract button must preserve booking context');
   assert.match(shell, /raw\.split\('\?'\)\[0\]\.split\('\/'\)\[0\]/,
     'hash router must preserve query params such as room/tab/booking');
-  assert.match(tenants, /const bookingId = reservedBy && !reservedBy\.startsWith\('contract:'\) \? reservedBy : null/,
+  assert.match(tenants, /const \[routeBookingId, setRouteBookingId\] = useState\(''\)/,
+    'tenant page must keep the booking query param while opening the contract drawer');
+  assert.match(tenants, /setRouteBookingId\(String\(params\.get\('booking'\) \|\| ''\)\.slice\(0, 64\)\)/,
+    'tenant route parser must read booking from #tenants?...&booking=...');
+  assert.match(tenants, /<TabContract[\s\S]{0,180}routeBookingId=\{routeBookingId\}/,
+    'contract tab must receive the booking id from the deep link');
+  assert.match(tenants, /reservedBy && !reservedBy\.startsWith\('contract:'\) \? reservedBy : null/,
     'tenant contract flow must infer bookingId from room.reservedBy');
+  assert.match(tenants, /const bookingId = routedBookingId[\s\S]{0,160}reservedBy && !reservedBy\.startsWith\('contract:'\)/,
+    'tenant contract flow must fall back to the route booking id when room state is stale');
   assert.match(tenants, /if \(bookingId\) payload\.bookingId = bookingId/,
     'quick-invite payload must pass bookingId so reserved booking rooms can become contracts');
   assert.match(rooms, /#tenants\?add=1&room=\$\{encodeURIComponent\(room\.id\)\}/,
@@ -4556,6 +4564,27 @@ test('booking approval keeps JSONB and rooms_v2 room locks consistent', () => {
   assert.match(block,
     /UPDATE rooms_v2 SET status='reserved', updated_at=NOW\(\)[\s\S]{0,120}WHERE room_code=\$1 AND status='vacant'/,
     'rooms_v2 must be reserved even when the selected candidate came from JSONB');
+});
+
+test('booking approval creates the pre-contract tenant row before handoff', () => {
+  // The booking → contract CTA opens /admin#tenants immediately after
+  // approve-and-assign returns. If tenant mirroring happens only in a
+  // fire-and-forget task, the contract drawer can open before the tenant row
+  // exists and the admin cannot press "create contract / send link".
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const block = src.match(/app\.post\('\/api\/bookings\/:id\/approve-and-assign'[\s\S]+?app\.put\('\/api\/bookings\/:id'/)[0];
+  assert.match(src, /async function ensureApprovedBookingTenant/,
+    'server must have a transaction-scoped booking applicant tenant upsert');
+  assert.match(block, /preContractTenantId = await ensureApprovedBookingTenant\(client,[\s\S]{0,140}roomId: assignedRoomId/,
+    'approve-and-assign must create/update the tenant row before committing the booking approval');
+  assert.match(block, /tenantId: preContractTenantId \|\| booking\.tenantId \|\| null/,
+    'approved booking blob must link to the pre-contract tenant row');
+  assert.match(block, /preContractTenantId,/,
+    'approve response/audit must surface the tenant row used for the contract handoff');
+  assert.match(src, /TENANT_BLACKLISTED/,
+    'approval must not silently reactivate blacklisted applicants');
 });
 
 test('booking cancellation releases only its own reserved room', () => {
@@ -7414,4 +7443,22 @@ test("bill void + unmark-paid reverse the carried late fee", () => {
   const src = fs.readFileSync(path.join(__dirname, "..", "routes", "bills-extras.js"), "utf8");
   const calls = src.split("billPayments.deactivateCarriedLateFees(client, id)").length - 1;
   assert.ok(calls >= 2, "both void and unmark-paid must reverse carried late fees (got " + calls + ")");
+});
+
+test("admin password reset / role change / delete invalidates the targets sessions", () => {
+  const fs = require("node:fs"); const path = require("node:path");
+  const server = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  const putIdx = server.indexOf("app.put('/api/admin/users/:id'");
+  const putBody = server.slice(putIdx, server.indexOf("app.delete("+JSON.stringify("/api/admin/users/:id")));
+  assert.ok(putBody.includes("DELETE FROM user_sessions WHERE"), "PUT must purge target sessions on credential/role change");
+  assert.ok(putBody.includes("AND sid <> $2"), "self password reset must keep the actors own current session");
+  const delIdx = server.indexOf("app.delete('/api/admin/users/:id'");
+  const delBody = server.slice(delIdx, delIdx + 2000);
+  assert.ok(delBody.includes("DELETE FROM user_sessions WHERE"), "DELETE must purge the deleted users sessions");
+});
+
+test("full citizen-ID reveal is audited", () => {
+  const fs = require("node:fs"); const path = require("node:path");
+  const src = fs.readFileSync(path.join(__dirname, "..", "routes", "tenant-ops.js"), "utf8");
+  assert.ok(src.includes("tenant.citizen_reveal"), "a successful full citizen-ID decrypt must write an audit row");
 });

@@ -359,8 +359,14 @@ module.exports = function buildTenantOpsRouter(ctx) {
         }
         if (flags.citizenIdEncryption && flags.citizenIdEncryption.enabled
             && rows[0].citizen_id_encrypted) {
-          try { out.citizen_id = cryptoSvc.decryptString(rows[0].citizen_id_encrypted); }
-          catch (_e) { out.citizen_id = null; }
+          try {
+            out.citizen_id = cryptoSvc.decryptString(rows[0].citizen_id_encrypted);
+            // Audit every full-citizen-ID reveal — pulling a tenant's cleartext
+            // national ID (PII) must leave a forensic trail, mirroring the
+            // weaker tail-only lookup audit (tenant.citizen_lookup).
+            audit(req, 'tenant.citizen_reveal', 'tenant', String(rows[0].id),
+              { by: req.session?.user?.username });
+          } catch (_e) { out.citizen_id = null; }
         }
       }
       res.json({ ok: true, tenant: out });
