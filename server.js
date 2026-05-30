@@ -4298,10 +4298,10 @@ app.get('/api/admin/billing-readiness',
         });
       }
 
-      if (!cfg?.building?.name || cfg.building.name === 'บ้านกาญจน์ เรสซิเดนซ์') {
+      if (!cfg?.building?.name || cfg.building.name === 'ที่พักของคุณ') {
         issues.push({
           sev: 'low', code: 'DEFAULT_BUILDING_NAME', area: ['issue'],
-          msg: 'ชื่อตึกยังเป็น default — บิล PDF จะแสดง "บ้านกาญจน์ เรสซิเดนซ์"',
+          msg: 'ชื่อตึกยังเป็นค่าเริ่มต้น — บิล PDF จะแสดง "ที่พักของคุณ"',
           fix: '/admin#settings → ข้อมูลตึก',
         });
       }
@@ -5912,7 +5912,7 @@ app.get('/api/tenant/contract/:id/pdf', requireTenant, async (req, res) => {
     }
 
     // Building info
-    let building = { name: 'บ้านกาญจน์ เรสซิเดนซ์' };
+    let building = { name: 'ที่พักของคุณ' };
     try {
       const cfgQ = await pool.query(
         `SELECT value FROM app_data WHERE key='baankarn_config_v1' LIMIT 1`
@@ -12989,7 +12989,7 @@ app.get('/api/contract-fill/:token', rateLimitContractFill, async (req, res) => 
         code: 'TOKEN_INVALID',
       });
     }
-    let building = { name: 'บ้านกาญจน์ เรสซิเดนซ์' };
+    let building = { name: 'ที่พักของคุณ' };
     try {
       const cfgQ = await pool.query(
         `SELECT value FROM app_data WHERE key='baankarn_config_v1' LIMIT 1`
@@ -13525,7 +13525,7 @@ app.get('/api/contracts/:id/pdf', requireAuth, requireRole('owner', 'manager'),
 
       // ============== 2. Building info ==============
       // Same source as bill PDF — single config blob in app_data.
-      let building = { name: 'บ้านกาญจน์ เรสซิเดนซ์' };
+      let building = { name: 'ที่พักของคุณ' };
       try {
         const cfgQ = await pool.query(
           `SELECT value FROM app_data WHERE key='baankarn_config_v1' LIMIT 1`
@@ -14119,7 +14119,7 @@ app.get('/api/admin/production-readiness', requireAuth, requireRole('owner'), as
     const cfg = cfgRow.rows.length ? cfgRow.rows[0].value : {};
     const b = (cfg && cfg.building) || {};
     const missing = [];
-    if (!b.name || b.name === 'บ้านกาญจน์ เรสซิเดนซ์') missing.push('building.name (ยังเป็น default)');
+    if (!b.name || b.name === 'ที่พักของคุณ') missing.push('building.name (ยังเป็นค่าเริ่มต้น)');
     if (!b.address) missing.push('building.address');
     if (!b.phone)   missing.push('building.phone');
     if (missing.length) {

@@ -3199,7 +3199,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
               ? amt.toLocaleString('th-TH', { minimumFractionDigits: 2 }) : '-';
             // Cheap building-name lookup — config blob is one row, hot in
             // pg cache. Fallback to default if the blob isn't initialised.
-            let buildingName = 'บ้านกาญจน์ เรสซิเดนซ์';
+            let buildingName = 'ที่พักของคุณ';
             try {
               const cfgQ = await pool.query(
                 `SELECT value FROM app_data WHERE key='baankarn_config_v1' LIMIT 1`

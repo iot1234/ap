@@ -63,6 +63,8 @@ test('contract-fill title follows the invitation building payload', () => {
 
 test('backend-generated artifacts fall back to generic building name only', () => {
   for (const parts of [
+    ['server.js'],
+    ['routes', 'bills-extras.js'],
     ['project', 'admin', 'shared.jsx'],
     ['project', 'admin', 'page-billing.jsx'],
     ['project', 'admin', 'page-line-oas.jsx'],
