@@ -99,6 +99,28 @@ test('issue: revokes prior pending then creates new', async () => {
   assert.match(tenantSelect, /FOR UPDATE/, 'issuing tenant codes must lock the tenant row');
 });
 
+test('issue: retries code collision without aborting the transaction', async () => {
+  let inserts = 0;
+  const pool = buildFakePool({
+    'SELECT id, full_name': () => ({
+      rows: [{ id: 1, full_name: 'X', line_binding_blocked: false, status: 'active', current_room_id: '101' }],
+    }),
+    'INSERT INTO line_bindings': () => {
+      inserts++;
+      if (inserts === 1) return { rows: [], rowCount: 0 };
+      return { rows: [{ id: 44, code: 'BIND-CCCCCCCC', expires_at: new Date(), created_at: new Date() }], rowCount: 1 };
+    },
+  });
+  const out = await lb.issue(pool, { tenantId: 1, ttlDays: 7, createdBy: 'admin' });
+  assert.equal(out.id, 44);
+  assert.equal(inserts, 2, 'a code conflict should retry with a new code');
+  const insertCalls = pool._calls.filter((c) => c.sql.startsWith('INSERT INTO line_bindings'));
+  assert.ok(insertCalls.every((c) => c.sql.includes('ON CONFLICT (code) DO NOTHING')),
+    'code collisions must not poison the PostgreSQL transaction');
+  assert.equal(pool._calls.some((c) => c.sql === 'ROLLBACK'), false);
+  assert.equal(pool._calls.some((c) => c.sql === 'COMMIT'), true);
+});
+
 test('issue: can create an additional pending code for another LINE account', async () => {
   const pool = buildFakePool({
     'SELECT id, full_name': () => ({
@@ -278,6 +300,27 @@ test('issueBooking: creates a booking-scoped code without a tenant row', async (
   const bookingSelect = pool._calls.find((c) => c.sql.includes('FROM bookings'));
   assert.match(bookingSelect.sql, /FOR UPDATE/,
     'issuing booking-stage codes must lock the booking row under concurrent submits');
+});
+
+test('issueBooking: retries code collision without swallowing other unique errors', async () => {
+  let inserts = 0;
+  const pool = buildFakePool({
+    'SELECT external_id, status': () => ({
+      rows: [{ external_id: 'BK-1', status: 'pending', phone: '0811111111', name: 'Booker' }],
+    }),
+    'INSERT INTO line_bindings': () => {
+      inserts++;
+      if (inserts === 1) return { rows: [], rowCount: 0 };
+      return { rows: [{ id: 78, code: 'BIND-BBBB2222', expires_at: new Date(), target_oa_id: null }], rowCount: 1 };
+    },
+  });
+  const out = await lb.issueBooking(pool, { bookingId: 'BK-1', ttlDays: 7, createdBy: 'public-booking' });
+  assert.equal(out.id, 78);
+  assert.equal(inserts, 2);
+  const insertCalls = pool._calls.filter((c) => c.sql.startsWith('INSERT INTO line_bindings'));
+  assert.ok(insertCalls.every((c) => c.sql.includes('ON CONFLICT (code) DO NOTHING')));
+  assert.equal(pool._calls.some((c) => c.sql === 'ROLLBACK'), false);
+  assert.equal(pool._calls.some((c) => c.sql === 'COMMIT'), true);
 });
 
 test('tryBind: concurrent code consumption returns already_bound cleanly', async () => {

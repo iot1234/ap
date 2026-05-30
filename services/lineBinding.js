@@ -142,9 +142,14 @@ async function issue(pool, { tenantId, ttlDays, createdBy, targetOaId, replacePe
         const ins = await client.query(
           `INSERT INTO line_bindings (tenant_id, code, status, expires_at, created_by, target_oa_id)
            VALUES ($1, $2, 'pending', NOW() + ($3::int || ' days')::interval, $4, $5)
+           ON CONFLICT (code) DO NOTHING
            RETURNING id, code, expires_at, target_oa_id, created_at`,
           [tid, code, ttl, createdBy || null, target]
         );
+        if (!ins.rows.length) {
+          attempt++;
+          continue;
+        }
         await client.query('COMMIT');
         return {
           id: ins.rows[0].id, code, expiresAt: ins.rows[0].expires_at,
@@ -152,10 +157,6 @@ async function issue(pool, { tenantId, ttlDays, createdBy, targetOaId, replacePe
           tenantId: tid, targetOaId: ins.rows[0].target_oa_id,
         };
       } catch (err) {
-        if (err.code === '23505' && (!err.constraint || err.constraint === 'uq_line_bindings_code')) {
-          attempt++;
-          continue;
-        }
         if (err.code === '23505' && err.constraint === 'uq_line_bindings_pending_per_tenant') {
           throw lineBindingError(
             'database migration required: multiple pending LINE codes per room are still blocked',
@@ -418,9 +419,14 @@ async function issueBooking(pool, { bookingId, ttlDays, createdBy, targetOaId } 
         const ins = await client.query(
           `INSERT INTO line_bindings (tenant_id, booking_id, code, status, expires_at, created_by, target_oa_id)
            VALUES (NULL, $1, $2, 'pending', NOW() + ($3::int || ' days')::interval, $4, $5)
+           ON CONFLICT (code) DO NOTHING
            RETURNING id, code, expires_at, target_oa_id, created_at`,
           [id, code, ttl, createdBy || 'public-booking', target]
         );
+        if (!ins.rows.length) {
+          attempt++;
+          continue;
+        }
         await client.query('COMMIT');
         return {
           id: ins.rows[0].id,
@@ -431,7 +437,6 @@ async function issueBooking(pool, { bookingId, ttlDays, createdBy, targetOaId } 
           targetOaId: ins.rows[0].target_oa_id,
         };
       } catch (err) {
-        if (err.code === '23505') { attempt++; continue; }
         throw err;
       }
     }

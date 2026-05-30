@@ -80,7 +80,7 @@ function estimateContractMonths(startYmd, endYmd, maxMonths = 60) {
 }
 
 module.exports = function buildTenantOpsRouter(ctx) {
-  const { pool, requireAuth, requireRole, sameOrigin, csrfGuard, audit } = ctx;
+  const { pool, requireAuth, requireRole, sameOrigin, csrfGuard, audit, signBillPayToken } = ctx;
   const r = express.Router();
 
   // === POST /api/tenants/notify ===========================================
@@ -1843,21 +1843,31 @@ module.exports = function buildTenantOpsRouter(ctx) {
           ? `${moveInMatch[1]}-${moveInMatch[2]}`
           : `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
         const billNo = billing.makeBillNo(roomId, period);
-        // Build dueDate from the period (not wallclock) using the same
-        // formatYMD path scheduler/bulk-generate use, so back-dated check-ins
-        // produce a due date in the move-in month rather than the current
-        // calendar month.
-        const dueDay = 15;
-        const dueDate = moveInMatch
-          ? billing.formatYMD(Number(moveInMatch[1]), Number(moveInMatch[2]), dueDay)
-          : billing.formatDueDate(dueDay);
-        let welcomeRent = Number(monthlyRent) || 0;
+        // Load config once — due day, first-month discount, and proration all
+        // come from it. A missing blob degrades to defaults (full rent, day 15).
+        let cfgVal = null;
         try {
           const { rows: cfgR } = await client.query(
             `SELECT value FROM app_data WHERE key='baankarn_config_v1' LIMIT 1`
           );
+          cfgVal = cfgR[0]?.value || null;
+        } catch { /* config blob missing — use defaults below */ }
+        // Due day from config.notify.dueOnDay (clamped 1-28, default 15) so the
+        // move-in bill agrees with recurring bills + the signed contract PDF —
+        // previously hardcoded to 15, contradicting an operator's configured day.
+        const rawDueDay = Number(cfgVal?.notify?.dueOnDay);
+        const dueDay = Number.isFinite(rawDueDay) ? Math.max(1, Math.min(28, rawDueDay)) : 15;
+        // Build dueDate from the period (not wallclock) using the same
+        // formatYMD path scheduler/bulk-generate use, so back-dated check-ins
+        // produce a due date in the move-in month rather than the current
+        // calendar month.
+        const dueDate = moveInMatch
+          ? billing.formatYMD(Number(moveInMatch[1]), Number(moveInMatch[2]), dueDay)
+          : billing.formatDueDate(dueDay);
+        let welcomeRent = Number(monthlyRent) || 0;
+        {
           const firstMonthPct = Math.max(0, Math.min(50,
-            Number(cfgR[0]?.value?.discounts?.firstMonth) || 0));
+            Number(cfgVal?.discounts?.firstMonth) || 0));
           const contractPct = Math.max(0, Math.min(50, resolvedDiscountPct));
           const combinedPct = Math.min(50,
             100 * (1 - (1 - contractPct / 100) * (1 - firstMonthPct / 100)));
@@ -1865,7 +1875,7 @@ module.exports = function buildTenantOpsRouter(ctx) {
           // config.billing.prorateFirstMonth — charge only the days lived in the
           // move-in month (move-in day → month end), symmetric with the closing
           // bill. Off by default → full first month (historical behavior).
-          if (cfgR[0]?.value?.billing?.prorateFirstMonth === true && moveInMatch) {
+          if (cfgVal?.billing?.prorateFirstMonth === true && moveInMatch) {
             const y = Number(moveInMatch[1]);
             const mo = Number(moveInMatch[2]);
             const day = Number(moveInMatch[3]);
@@ -1873,7 +1883,7 @@ module.exports = function buildTenantOpsRouter(ctx) {
             const frac = billing.firstMonthProrationFraction({ moveInDay: day, daysInMonth, prorate: true });
             welcomeRent = Math.round(welcomeRent * frac * 100) / 100;
           }
-        } catch { /* config blob missing — fall back to full monthlyRent */ }
+        }
         await client.query(
           `INSERT INTO bills
              (bill_no, tenant_id, room_id, period, rent, subtotal, total, due_date, status)
@@ -2162,12 +2172,15 @@ module.exports = function buildTenantOpsRouter(ctx) {
           const tm = bkk.getUTCMonth() + 1;
           const td = bkk.getUTCDate();
           const period = `${ty}-${String(tm).padStart(2, '0')}`;
-          // Skip if a bill already exists for this room+period (active).
+          // Skip only if this tenant already has a closing bill for the
+          // room+period. Another tenant can legitimately have a bill for the
+          // same room+period after a mid-month move.
           const dup = await client.query(
             `SELECT id FROM bills
-               WHERE room_id=$1 AND period=$2 AND deleted_at IS NULL AND status<>'void'
+               WHERE room_id=$1 AND period=$2 AND tenant_id=$3
+                 AND deleted_at IS NULL AND status<>'void'
                LIMIT 1`,
-            [billingRoom, period]
+            [billingRoom, period, id]
           );
           if (!dup.rows.length) {
             // daysInMonth: day 0 of next month is the last day of this month.
@@ -2181,7 +2194,7 @@ module.exports = function buildTenantOpsRouter(ctx) {
             const proRatedRent = Math.round(
               baseRent * fraction * (1 - discount / 100) * 100
             ) / 100;
-            const billNo = billing.makeBillNo(billingRoom, period) + '-X';
+            const billNo = billing.makeBillNo(`${billingRoom}-X`, period, { tenantId: id });
             const dueDate = billing.formatYMD(ty, tm, Math.min(daysInMonth, daysLived + 7));
             try {
               const ins = await client.query(
@@ -2224,6 +2237,15 @@ module.exports = function buildTenantOpsRouter(ctx) {
         // revoked + the closing bill (if any) is waiting.
         try {
           const flags = await features.load(pool);
+          const publicUrl = (process.env.PUBLIC_URL
+            || (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : '')
+            || '').replace(/\/+$/, '');
+          const closingPayToken = closingBill && publicUrl && typeof signBillPayToken === 'function'
+            ? signBillPayToken(closingBill.id)
+            : null;
+          const closingBillPayUrl = closingBill && publicUrl && closingPayToken
+            ? `${publicUrl}/pay/${encodeURIComponent(closingBill.id)}?t=${encodeURIComponent(closingPayToken)}`
+            : null;
           const lines = [
             `เรียน คุณ${tenant.full_name}`,
             ``,
@@ -2237,6 +2259,9 @@ module.exports = function buildTenantOpsRouter(ctx) {
             lines.push(`คืนเงินมัดจำ: ฿${Number(refund).toLocaleString('th-TH', { minimumFractionDigits: 2 })}`);
           }
           if (closingBill) {
+            if (closingBillPayUrl) {
+              lines.push(`ลิงก์ชำระเงิน: ${closingBillPayUrl}`);
+            }
             lines.push(``);
             lines.push(`📋 บิลปิดบัญชี: ${closingBill.bill_no}`);
             lines.push(`ยอด: ฿${Number(closingBill.total).toLocaleString('th-TH', { minimumFractionDigits: 2 })}`);

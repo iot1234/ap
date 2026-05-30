@@ -5051,6 +5051,10 @@ async function loadBillPaymentAttemptSummary(db, billId, tenantId) {
   };
 }
 
+function publicBillPayTenantStatusAllowed(status) {
+  return status === 'active' || status === 'moved_out';
+}
+
 function publicSlipBlockReason({ flags, payable, paid, attempts }) {
   if (paid) return { code: 'PAID', message: 'บิลนี้ชำระเรียบร้อยแล้ว ไม่ต้องส่งสลิปเพิ่ม' };
   if (!flags.slipUpload || !flags.slipUpload.enabled) {
@@ -5449,7 +5453,7 @@ app.get('/api/public/bills/:billId/payment', rateLimitPublicPaymentView, async (
     );
     if (!rows.length) return res.status(404).json({ error: 'ไม่พบบิลนี้ กรุณาติดต่อแอดมิน' });
     const bill = rows[0];
-    if (!bill.tenant_id || bill.tenant_deleted_at || bill.tenant_status !== 'active') {
+    if (!bill.tenant_id || bill.tenant_deleted_at || !publicBillPayTenantStatusAllowed(bill.tenant_status)) {
       return res.status(409).json({
         error: 'บิลนี้ยังไม่ได้ผูกกับผู้เช่าที่ใช้งานอยู่ กรุณาติดต่อแอดมิน',
         code: 'BILL_NOT_LINKED_TO_ACTIVE_TENANT',
@@ -5561,7 +5565,8 @@ app.post('/api/public/bills/:billId/payments', rateLimitPublicPaymentUpload, sam
     );
     if (!rows.length) return res.status(404).json({ error: 'ไม่พบบิลนี้ กรุณาติดต่อแอดมิน' });
     const row = rows[0];
-    if (row.tenant_status !== 'active' || !row.current_room_id) {
+    if (!publicBillPayTenantStatusAllowed(row.tenant_status)
+        || (row.tenant_status === 'active' && !row.current_room_id)) {
       return res.status(403).json({
         error: 'บิลนี้ไม่ได้อยู่กับผู้เช่าที่ใช้งานอยู่ กรุณาติดต่อแอดมิน',
         code: 'TENANT_NOT_ACTIVE',
@@ -7315,6 +7320,7 @@ async function tenantPaymentUploadHandler(req, res) {
         };
       }
 
+      if (req.publicPayment) tenantNotice.force = true;
       const flags = req.features || (await features.load(pool));
       // Use the tenant data from the request session — req.tenant carries
       // line_user_id + line_oa_id from tenantSessionLookup, so the notifier
@@ -12703,7 +12709,13 @@ app.post('/api/admin/contract-invitations/:id/approve',
           const period = moveInMatch
             ? `${moveInMatch[1]}-${moveInMatch[2]}`
             : billing.formatPeriodNow();
-          const dueDay = 15;
+          // Due day from config.notify.dueOnDay (clamped 1-28, default 15) so the
+          // move-in bill agrees with recurring bills + the signed contract PDF.
+          const dueCfg = await client.query(
+            `SELECT value FROM app_data WHERE key='baankarn_config_v1' LIMIT 1`
+          ).then((r) => r.rows[0]?.value || null).catch(() => null);
+          const rawDueDay = Number(dueCfg?.notify?.dueOnDay);
+          const dueDay = Number.isFinite(rawDueDay) ? Math.max(1, Math.min(28, rawDueDay)) : 15;
           const dueDate = moveInMatch
             ? billing.formatYMD(Number(moveInMatch[1]), Number(moveInMatch[2]), dueDay)
             : billing.formatDueDate(dueDay);

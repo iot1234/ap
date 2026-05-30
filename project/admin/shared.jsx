@@ -128,7 +128,10 @@ const DEFAULT_CONFIG = {
   featurePremium: { balcony: 300, ac: 400, parking: 500, kitchen: 600 },
   utilities: {
     waterRate: 18, elecRate: 8, wifi: 250,
-    waterMin: 0, elecMin: 0,
+    // Minimum billable units (ขั้นต่ำหน่วย): when metered usage is below this,
+    // the bill charges the minimum. 0 = no minimum. applyMinUnits master-gates
+    // the floor (default on) so it can be disabled without clearing the numbers.
+    waterMin: 0, elecMin: 0, applyMinUnits: true,
     commonFee: 200,
   },
   discounts: {

@@ -125,8 +125,22 @@ function buildBill({ room, contract = null, config, features, recurring = [], pe
   );
   const waterUsage = resolveUtilityUsage(room, 'water');
   const elecUsage = resolveUtilityUsage(room, 'elec');
-  const waterUnits = waterModeInfo.mode === 'flat' ? 0 : waterUsage.units;
-  const elecUnits  = elecModeInfo.mode  === 'flat' ? 0 : elecUsage.units;
+  // Minimum billable units (ขั้นต่ำหน่วย) — a common Thai-dorm base charge: when
+  // metered usage is below config.utilities.waterMin/elecMin, bill the minimum
+  // instead of the (lower) actual. The pricing UI already exposes these fields
+  // but the engine previously ignored them (silent under-collection). Default 0
+  // = no minimum (current behavior); applyMinUnits (default true) lets an
+  // operator disable the floor without clearing the configured numbers. Floor
+  // applies to METERED mode only — flat (เหมา) rooms bill a fixed amount.
+  const applyMinUnits = u.applyMinUnits !== false;
+  const waterMinUnits = applyMinUnits ? Math.max(0, Number(u.waterMin) || 0) : 0;
+  const elecMinUnits  = applyMinUnits ? Math.max(0, Number(u.elecMin)  || 0) : 0;
+  const waterActualUnits = waterModeInfo.mode === 'flat' ? 0 : waterUsage.units;
+  const elecActualUnits  = elecModeInfo.mode  === 'flat' ? 0 : elecUsage.units;
+  const waterUnits = waterModeInfo.mode === 'flat' ? 0 : Math.max(waterActualUnits, waterMinUnits);
+  const elecUnits  = elecModeInfo.mode  === 'flat' ? 0 : Math.max(elecActualUnits,  elecMinUnits);
+  const waterMinApplied = waterUnits > waterActualUnits;
+  const elecMinApplied  = elecUnits  > elecActualUnits;
   const waterAmount = waterModeInfo.mode === 'flat'
     ? round2(waterModeInfo.flat)
     : round2(waterUnits * waterRate);
@@ -174,14 +188,26 @@ function buildBill({ room, contract = null, config, features, recurring = [], pe
     amount,
     detail: 'ค่าเหมารายเดือน — ไม่นับตามเลขมิเตอร์',
   });
+  // Metered line items use the BILLED units (floored to the minimum) so
+  // "units × rate = amount" stays consistent, while still surfacing the actual
+  // meter readings + a note when the minimum was applied so the tenant
+  // understands why N units were charged for fewer used.
+  const waterItem = waterModeInfo.mode === 'flat'
+    ? flatItem('ค่าน้ำ', waterAmount)
+    : buildUtilityItem('ค่าน้ำ', { ...waterUsage, units: waterUnits }, waterRate, waterAmount);
+  if (waterMinApplied) {
+    waterItem.detail = `คิดขั้นต่ำ ${fmtQty(waterMinUnits)} หน่วย (ใช้จริง ${fmtQty(waterActualUnits)} หน่วย)`;
+  }
+  const elecItem = elecModeInfo.mode === 'flat'
+    ? flatItem('ค่าไฟฟ้า', elecAmount)
+    : buildUtilityItem('ค่าไฟฟ้า', { ...elecUsage, units: elecUnits }, elecRate, elecAmount);
+  if (elecMinApplied) {
+    elecItem.detail = `คิดขั้นต่ำ ${fmtQty(elecMinUnits)} หน่วย (ใช้จริง ${fmtQty(elecActualUnits)} หน่วย)`;
+  }
   const items = [
     { label: 'ค่าเช่าห้องพัก', qty: '1 เดือน', amount: rentBase },
-    waterModeInfo.mode === 'flat'
-      ? flatItem('ค่าน้ำ', waterAmount)
-      : buildUtilityItem('ค่าน้ำ', waterUsage, waterRate, waterAmount),
-    elecModeInfo.mode === 'flat'
-      ? flatItem('ค่าไฟฟ้า', elecAmount)
-      : buildUtilityItem('ค่าไฟฟ้า', elecUsage, elecRate, elecAmount),
+    waterItem,
+    elecItem,
   ];
   if (wifiFee > 0) items.push({ label: 'ค่าอินเทอร์เน็ต', qty: '1 เดือน', amount: wifiFee });
   // Common-area fee — flat monthly, ungated (NOT behind recurringCharges; it's
@@ -255,12 +281,14 @@ function buildBill({ room, contract = null, config, features, recurring = [], pe
     waterRateSource,    // 'override' | 'global' — admin can audit which
     waterMode: waterModeInfo.mode,      // 'flat' | 'metered'
     waterFlatFellBack: !!waterModeInfo.fellBack,
+    waterMinApplied, waterMinUnits, waterActualUnits,
     waterPrevReading: waterModeInfo.mode === 'flat' ? null : waterUsage.prevReading,
     waterCurrentReading: waterModeInfo.mode === 'flat' ? null : waterUsage.currentReading,
     elecUnits, elecRate: effectiveElecRate, elecAmount,
     elecRateSource,
     elecMode: elecModeInfo.mode,
     elecFlatFellBack: !!elecModeInfo.fellBack,
+    elecMinApplied, elecMinUnits, elecActualUnits,
     elecPrevReading: elecModeInfo.mode === 'flat' ? null : elecUsage.prevReading,
     elecCurrentReading: elecModeInfo.mode === 'flat' ? null : elecUsage.currentReading,
     wifi: wifiFee,

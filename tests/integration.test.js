@@ -1241,6 +1241,28 @@ test('public bill payment link is tokenized and does not require tenant login', 
     'public token page must not leak the full token URL as cross-origin referer');
 });
 
+test('moved-out tenant debt remains payable through tokenized bill links', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const billsExtras = fs.readFileSync(path.join(__dirname, '..', 'routes', 'bills-extras.js'), 'utf8');
+
+  assert.match(server, /function publicBillPayTenantStatusAllowed\(status\) \{[\s\S]{0,90}status === 'active' \|\| status === 'moved_out'/,
+    'public payment links must allow active tenants and moved-out tenants paying old debt');
+  assert.match(server, /!publicBillPayTenantStatusAllowed\(bill\.tenant_status\)/,
+    'public payment detail must use the moved-out-aware status guard');
+  assert.match(server, /!publicBillPayTenantStatusAllowed\(row\.tenant_status\)[\s\S]{0,120}row\.tenant_status === 'active' && !row\.current_room_id/,
+    'public slip upload must allow moved_out tenants without restoring current_room_id');
+  assert.match(server, /if \(req\.publicPayment\) tenantNotice\.force = true/,
+    'public slip acknowledgements must still reach moved-out tenants');
+  assert.match(billsExtras, /function billTenantCanReceiveDebtNotice\(status\) \{[\s\S]{0,90}status === 'active' \|\| status === 'moved_out'/,
+    'admin bill send/readiness must allow moved-out tenant debt notices');
+  assert.match(billsExtras, /EX_TENANT_BILL/,
+    'readiness must surface moved-out debt as a warning, not a blocking error');
+  assert.match(billsExtras, /function billTenantRoomStillMatches\(b\)[\s\S]{0,140}tenant_status === 'moved_out'/,
+    'room mismatch guard must not block old-room bills after checkout clears current_room_id');
+});
+
 test('public bill payment page shows itemized online bill details', () => {
   const fs = require('node:fs');
   const path = require('node:path');
@@ -4353,6 +4375,12 @@ test('checkout revokes access cards + records refund + pro-rates closing bill', 
     'checkout must guard against clearing a room that now belongs to another tenant');
   assert.match(src, /UPDATE contract_invitations[\s\S]{0,260}status='revoked'/,
     'checkout must revoke pending/submitted contract invitations for closed contracts');
+  assert.ok(src.includes('WHERE room_id=$1 AND period=$2 AND tenant_id=$3'),
+    'checkout closing-bill duplicate check must be tenant-scoped');
+  assert.ok(src.includes('billing.makeBillNo(`${billingRoom}-X`, period, { tenantId: id })'),
+    'checkout closing-bill number must be tenant-aware for room re-use in the same period');
+  assert.match(src, /signBillPayToken\(closingBill\.id\)/,
+    'checkout notification should include a tokenized payment link for the closing bill');
 });
 
 test('contracts gain deposit_returned columns in migration', () => {
@@ -7262,4 +7290,26 @@ test("carryLateFeeToNextBill is a no-op for non-positive amount or no target", a
   assert.equal(await billPayments.carryLateFeeToNextBill(fakeClient, { tenantId: 1, amount: -5 }), null);
   assert.equal(await billPayments.carryLateFeeToNextBill(fakeClient, { amount: 90 }), null);
   assert.equal(await billPayments.carryLateFeeToNextBill(fakeClient, { tenantId: 1, amount: 90, fromPeriod: "bad" }), null);
+});
+
+
+test("welcome/move-in bill honors config.notify.dueOnDay (not hardcoded 15)", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const server = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  const tenantOps = fs.readFileSync(path.join(__dirname, "..", "routes", "tenant-ops.js"), "utf8");
+  for (const [name, src] of [["server.js invitation approve", server], ["tenant-ops.js checkin", tenantOps]]) {
+    assert.match(src, /notify?.dueOnDay/, name + " welcome bill must read config.notify.dueOnDay");
+    assert.doesNotMatch(src, /const dueDay = 15;/, name + " must NOT hardcode dueDay = 15");
+  }
+});
+
+test("buildBill wires the minimum-units floor (utilities.waterMin/elecMin)", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const billingSrc = fs.readFileSync(path.join(__dirname, "..", "services", "billing.js"), "utf8");
+  assert.match(billingSrc, /waterMinUnits/, "buildBill must compute a water minimum-units floor");
+  assert.match(billingSrc, /elecMinUnits/, "buildBill must compute an elec minimum-units floor");
+  assert.match(billingSrc, /applyMinUnits/, "buildBill must honor the applyMinUnits master gate");
+  assert.match(billingSrc, /waterMinApplied/, "bill must surface whether the minimum was applied");
 });

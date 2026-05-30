@@ -173,6 +173,16 @@ async function loadRecurringFor(pool, { tenantId, roomId }) {
   return rows;
 }
 
+function billTenantCanReceiveDebtNotice(status) {
+  return status === 'active' || status === 'moved_out';
+}
+
+function billTenantRoomStillMatches(b) {
+  if (!b || !b.tenant_current_room) return true;
+  if (b.tenant_status === 'moved_out') return true;
+  return String(b.tenant_current_room) === String(b.room_id);
+}
+
 module.exports = function buildBillsExtrasRouter(ctx) {
   const {
     pool, requireAuth, requireRole, sameOrigin, csrfGuard, audit,
@@ -1952,7 +1962,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         hint: 'void บิลนี้ แล้วออกบิลใหม่ให้ผู้เช่าปัจจุบัน',
       };
     }
-    if (b.tenant_status && b.tenant_status !== 'active') {
+    if (!billTenantCanReceiveDebtNotice(b.tenant_status)) {
       return {
         ok: false,
         error: `ผู้เช่าสถานะ "${b.tenant_status}" — ไม่ใช่ผู้เช่าปัจจุบันของห้อง`,
@@ -1961,7 +1971,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         hint: 'ส่งบิลให้ผู้เช่าปัจจุบันแทน หรือติดต่อผู้เช่าเก่าโดยตรง',
       };
     }
-    if (b.tenant_current_room && String(b.tenant_current_room) !== String(b.room_id)) {
+    if (!billTenantRoomStillMatches(b)) {
       // The tenant the bill points at has since moved to a different room
       // (admin re-assigned them mid-period). Sending the bill notification
       // would reach the right person but reference the wrong room, which
@@ -1997,10 +2007,15 @@ module.exports = function buildBillsExtrasRouter(ctx) {
     const qrVersion = `${billId}-${String(b.status || 'pending')}-${Date.now()}`;
     const billLink = (publicUrl && payToken)
       ? `${publicUrl}/pay/${encodeURIComponent(billId)}?t=${encodeURIComponent(payToken)}`
-      : `${publicUrl}/tenant?bill=${encodeURIComponent(billId)}`;
+      : (b.tenant_status === 'moved_out'
+          ? 'ติดต่อแอดมินเพื่อขอลิงก์ชำระเงินใหม่'
+          : `${publicUrl}/tenant?bill=${encodeURIComponent(billId)}`);
     const dueDateStr = b.due_date
       ? new Date(b.due_date).toLocaleDateString('th-TH', { year: 'numeric', month: 'long', day: 'numeric' })
       : '-';
+    const fallbackHelp = b.tenant_status === 'moved_out'
+      ? `หากลิงก์ชำระเงินเปิดไม่ได้ กรุณาติดต่อแอดมินและแจ้งบิล ${b.bill_no || `#${billId}`}`
+      : null;
     const lineRecipients = await notifier.getTenantLineRecipients(pool, {
       id: b.tenant_row_id,
       line_user_id: b.line_user_id,
@@ -2034,6 +2049,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       `👉 ดูบิล + ส่งสลิป:`,
       billLink,
       ``,
+      fallbackHelp ||
       `(หากกดลิงก์ไม่ได้ ให้เข้า ${publicUrl || 'พอร์ทัล'}/tenant แล้วเลือกบิล ${b.bill_no || `#${billId}`})`,
     ].join('\n');
     const enqueued = [];
@@ -2231,10 +2247,10 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           } else if (!b.tenant_row_id) {
             blockCode = 'TENANT_DELETED';
             blockMsg = 'ผู้เช่าถูกลบไปแล้ว';
-          } else if (b.tenant_status !== 'active') {
+          } else if (!billTenantCanReceiveDebtNotice(b.tenant_status)) {
             blockCode = 'TENANT_NOT_ACTIVE';
             blockMsg = `ผู้เช่าสถานะ "${b.tenant_status}"`;
-          } else if (b.tenant_current_room && String(b.tenant_current_room) !== String(b.room_id)) {
+          } else if (!billTenantRoomStillMatches(b)) {
             blockCode = 'TENANT_MOVED_ROOM';
             blockMsg = `ย้ายไปห้อง ${b.tenant_current_room}`;
           } else {
@@ -2267,7 +2283,9 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             blockMsg,
             channels,
             tenantName: b.tenant_name || null,
-            warnCode: !blockCode && !channels.line && channels.email ? 'EMAIL_ONLY' : null,
+            warnCode: !blockCode && b.tenant_status === 'moved_out'
+              ? 'EX_TENANT_BILL'
+              : (!blockCode && !channels.line && channels.email ? 'EMAIL_ONLY' : null),
             reminderCount,
             lastRemindedAt: b.last_reminded_at,
             minutesAgo,
@@ -2344,19 +2362,23 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           issues.push({ sev: 'high', code: 'TENANT_DELETED',
             msg: 'ผู้เช่าที่ผูกกับบิลถูกลบ (soft-deleted) ไปแล้ว',
             fix: 'void บิลแล้วออกใหม่ให้ผู้เช่าปัจจุบัน' });
-        } else if (b.tenant_status !== 'active') {
+        } else if (b.tenant_status === 'moved_out') {
+          issues.push({ sev: 'med', code: 'EX_TENANT_BILL',
+            msg: `บิลค้างของผู้เช่าที่ย้ายออก "${b.tenant_name}"`,
+            fix: 'ส่งลิงก์ชำระเงินแบบมี token ให้ผู้เช่าเก่า โดยไม่เปิดสิทธิ์พอร์ทัลผู้เช่ากลับ' });
+        } else if (!billTenantCanReceiveDebtNotice(b.tenant_status)) {
           issues.push({ sev: 'high', code: 'TENANT_NOT_ACTIVE',
             msg: `ผู้เช่า "${b.tenant_name}" สถานะ "${b.tenant_status}" — ไม่ใช่ผู้เช่าปัจจุบัน`,
             fix: 'ผู้เช่าออกไปแล้ว — ติดต่อโดยตรง หรือออกบิลให้ผู้เช่าใหม่' });
-        } else if (b.tenant_current_room && String(b.tenant_current_room) !== String(b.room_id)) {
+        } else if (!billTenantRoomStillMatches(b)) {
           issues.push({ sev: 'high', code: 'TENANT_MOVED_ROOM',
             msg: `ผู้เช่าย้ายห้องไปแล้ว — ปัจจุบันอยู่ห้อง ${b.tenant_current_room} แต่บิลเป็นของห้อง ${b.room_id}`,
             fix: 'ผู้เช่าใหม่ของห้อง ' + b.room_id + ' ควรเป็นคนรับบิลนี้' });
         }
 
         // Channel availability — only when tenant is otherwise valid
-        if (b.tenant_row_id && b.tenant_status === 'active'
-            && (!b.tenant_current_room || String(b.tenant_current_room) === String(b.room_id))) {
+        if (b.tenant_row_id && billTenantCanReceiveDebtNotice(b.tenant_status)
+            && billTenantRoomStillMatches(b)) {
           const lineRecipients = await notifier.getTenantLineRecipients(pool, {
             id: b.tenant_row_id,
             line_user_id: b.line_user_id,

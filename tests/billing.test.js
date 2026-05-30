@@ -32,6 +32,52 @@ test('buildBill: basic line items + total', () => {
   assert.ok(bill.billNo.startsWith('INV-'));
 });
 
+test('buildBill: minimum billable units floor (utilities.waterMin / elecMin)', () => {
+  const flags = { lateFee: { enabled: false }, vat: { enabled: false } };
+  // Tenant used only 1 water unit + 3 elec units; operator set minimums 5 / 50.
+  const lowUseRoom = { ...baseRoom, waterUnits: 1, elecUnits: 3 };
+  const cfgMin = { ...baseConfig, utilities: { ...baseConfig.utilities, waterMin: 5, elecMin: 50 } };
+  const bill = billing.buildBill({ room: lowUseRoom, config: cfgMin, features: flags });
+  // Billed at the minimum, not the (lower) actual usage.
+  assert.equal(bill.waterUnits, 5, 'water billed units floored to the minimum');
+  assert.equal(bill.waterAmount, 90, '5 × 18 = 90 (min applied)');
+  assert.equal(bill.elecUnits, 50, 'elec billed units floored to the minimum');
+  assert.equal(bill.elecAmount, 400, '50 × 8 = 400 (min applied)');
+  // Actual usage + applied flags surfaced for the UI note.
+  assert.equal(bill.waterActualUnits, 1);
+  assert.equal(bill.waterMinApplied, true);
+  assert.equal(bill.elecActualUnits, 3);
+  assert.equal(bill.elecMinApplied, true);
+  // The line item explains the minimum to the tenant.
+  assert.ok(bill.items.some((it) => /ค่าน้ำ/.test(it.label) && /ขั้นต่ำ 5/.test(it.detail || '')),
+    'water line must note the applied minimum');
+
+  // Usage ABOVE the minimum bills actual; flags stay false.
+  const highUse = billing.buildBill({ room: { ...baseRoom, waterUnits: 9 }, config: cfgMin, features: flags });
+  assert.equal(highUse.waterUnits, 9, 'actual usage above minimum bills actual');
+  assert.equal(highUse.waterMinApplied, false);
+
+  // Default config (waterMin/elecMin = 0) → no floor, unchanged behavior.
+  const noMin = billing.buildBill({ room: lowUseRoom, config: baseConfig, features: flags });
+  assert.equal(noMin.waterUnits, 1);
+  assert.equal(noMin.waterMinApplied, false);
+
+  // applyMinUnits:false disables the floor even when minimums are set.
+  const disabled = billing.buildBill({
+    room: lowUseRoom,
+    config: { ...baseConfig, utilities: { ...baseConfig.utilities, waterMin: 5, elecMin: 50, applyMinUnits: false } },
+    features: flags,
+  });
+  assert.equal(disabled.waterUnits, 1, 'applyMinUnits:false → actual usage');
+  assert.equal(disabled.waterMinApplied, false);
+
+  // Flat-mode rooms ignore the minimum (fixed monthly amount).
+  const flatRoom = { ...baseRoom, waterMode: 'flat', waterFlatAmount: 120, waterUnits: 1 };
+  const flatBill = billing.buildBill({ room: flatRoom, config: cfgMin, features: flags });
+  assert.equal(flatBill.waterAmount, 120, 'flat amount unaffected by minimum');
+  assert.equal(flatBill.waterMinApplied, false);
+});
+
 test('buildBill: common-area fee billed as a flat monthly item (ungated by recurringCharges)', () => {
   const cfg = { ...baseConfig, utilities: { ...baseConfig.utilities, commonFee: 200 } };
   const flags = { lateFee: { enabled: false }, vat: { enabled: false }, recurringCharges: { enabled: false } };
