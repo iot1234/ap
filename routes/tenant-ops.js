@@ -35,6 +35,7 @@ const cryptoSvc = require('../services/crypto');
 const lineNotify = require('../services/line');
 const lineBinding = require('../services/lineBinding');
 const storage = require('../services/storage');
+const { isVacantStatus } = require('../services/roomSync');
 
 // === Internal helpers =====================================================
 // VALID_TENANT_STATUS + maskTenantOut were defined in server.js but used
@@ -800,9 +801,12 @@ module.exports = function buildTenantOpsRouter(ctx) {
         throw httpErr(404, 'ROOM_NOT_FOUND',
           `ไม่พบห้อง ${roomId} ในระบบ`, { roomId });
       }
+      // Use isVacantStatus (not a bare `!== 'vacant'`) so a legacy blob room
+      // stored as 'available'/'empty'/'free' is still recognised as bookable —
+      // otherwise admin can't move a tenant into a genuinely-free room.
       const blockingStatus = [blobRoom?.status, roomV2?.status]
         .filter(Boolean)
-        .find((s) => s !== 'vacant');
+        .find((s) => !isVacantStatus(s));
       if (blockingStatus) {
         throw httpErr(409,
           blockingStatus === 'occupied' ? 'ROOM_OCCUPIED' : 'ROOM_UNAVAILABLE',
@@ -2020,7 +2024,8 @@ module.exports = function buildTenantOpsRouter(ctx) {
         await client.query('BEGIN');
         const tres = await client.query(
           `SELECT id, full_name, current_room_id, line_user_id, line_oa_id, email, phone, status
-             FROM tenants WHERE id=$1 AND deleted_at IS NULL`,
+             FROM tenants WHERE id=$1 AND deleted_at IS NULL
+             FOR UPDATE`,
           [id]
         );
         if (!tres.rows.length) {
@@ -2041,21 +2046,31 @@ module.exports = function buildTenantOpsRouter(ctx) {
 
         // Close active contract + persist refund amount on the row so it
         // appears in reports / aged-receivable views without joining audit_logs.
+        // deposit_returned is CLAMPED to the contract's own deposit (LEAST) so a
+        // typo'd over-refund (finalDepositReturn > deposit) can't push the
+        // "deposit retained = deposit − returned" reconciliation negative.
         const contractRes = await client.query(
           `UPDATE contracts SET status='ended', end_date=CURRENT_DATE,
               closed_at = COALESCE(closed_at, NOW()),
               closed_by = $4,
               closed_reason = $3,
               closed_type = 'tenant_checkout',
-              deposit_returned = $2,
+              deposit_returned = CASE WHEN $2::numeric IS NOT NULL THEN LEAST($2::numeric, deposit) ELSE NULL END,
               deposit_returned_at = CASE WHEN $2::numeric IS NOT NULL THEN NOW() ELSE NULL END,
               deposit_return_reason = $3
              WHERE tenant_id=$1 AND status='active'
-           RETURNING id, contract_no, room_id, start_date, monthly_rent, deposit, discount_pct`,
+           RETURNING id, contract_no, room_id, start_date, monthly_rent, deposit, deposit_returned, discount_pct`,
           [id, refund, reason, req.session.user.username]
         );
         const closedContracts = contractRes.rows || [];
         const closedContract = closedContracts[0] || null;
+        // Report the refund that was ACTUALLY persisted (clamped, and only when
+        // a contract was really closed this call) — not the raw request body. A
+        // double-submitted checkout closes 0 contracts the second time, so it
+        // must not re-report a phantom refund in the response / audit / message.
+        const effectiveRefund = closedContract && closedContract.deposit_returned != null
+          ? Number(closedContract.deposit_returned)
+          : null;
         const closedContractIds = closedContracts
           .map((c) => Number(c.id))
           .filter((n) => Number.isInteger(n) && n > 0);
@@ -2300,7 +2315,7 @@ module.exports = function buildTenantOpsRouter(ctx) {
             .catch((err) => console.warn(`[checkout] room sync failed:`, err.message));
         }
         audit(req, 'tenant.checkout', 'tenant', String(id),
-          { oldRoom, releaseRoomIds, roomRelease, reason, refund,
+          { oldRoom, releaseRoomIds, roomRelease, reason, refund: effectiveRefund,
             closedContracts: closedContracts.map((c) => c.contract_no || c.id),
             invitationsRevoked: revokedInvitations.rowCount || 0,
             cardsRevoked: revokedCards.rows.map((c) => c.card_id),
@@ -2329,8 +2344,8 @@ module.exports = function buildTenantOpsRouter(ctx) {
           if (revokedCards.rowCount > 0) {
             lines.push(`บัตรเข้า-ออกถูกเพิกถอน (${revokedCards.rowCount} ใบ)`);
           }
-          if (refund != null && Number.isFinite(refund)) {
-            lines.push(`คืนเงินมัดจำ: ฿${Number(refund).toLocaleString('th-TH', { minimumFractionDigits: 2 })}`);
+          if (effectiveRefund != null && Number.isFinite(effectiveRefund)) {
+            lines.push(`คืนเงินมัดจำ: ฿${Number(effectiveRefund).toLocaleString('th-TH', { minimumFractionDigits: 2 })}`);
           }
           if (closingBill) {
             if (closingBillPayUrl) {
@@ -2353,7 +2368,7 @@ module.exports = function buildTenantOpsRouter(ctx) {
         } catch { /* notify failures don't fail request */ }
 
         res.json({
-          ok: true, tenantId: id, oldRoom, refund,
+          ok: true, tenantId: id, oldRoom, refund: effectiveRefund,
           releasedRooms: roomRelease.released,
           skippedRooms: roomRelease.skipped,
           invitationsRevoked: revokedInvitations.rowCount || 0,

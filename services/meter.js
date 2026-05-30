@@ -182,11 +182,14 @@ async function attachLatestBillingReadings(pool, room) {
     const prev = pair[1] || null;
     if (!current) continue;
     const prefix = meterType === 'elec' ? 'elec' : 'water';
+    // Set ALL three fields from the authoritative meter_readings table so a
+    // stale `*Units`/`*PrevReading` left in the room blob (e.g. a legacy
+    // manual entry on a room that just switched to metered) can't leak into
+    // the bill. A first-ever reading has no baseline → 0 units this period;
+    // the current reading becomes next period's baseline.
     next[`${prefix}CurrentReading`] = Number(current.reading);
-    if (prev) {
-      next[`${prefix}PrevReading`] = Number(prev.reading);
-      next[`${prefix}Units`] = consumption(prev, current);
-    }
+    next[`${prefix}PrevReading`] = prev ? Number(prev.reading) : null;
+    next[`${prefix}Units`] = prev ? consumption(prev, current) : 0;
   }
   return next;
 }
@@ -208,11 +211,11 @@ async function attachBillingReadingsForPeriod(pool, room, period) {
       const { current, prev } = await readingPairForPeriod(pool, safeRoom, meterType, safePeriod);
       if (!current) continue;
       const prefix = meterType === 'elec' ? 'elec' : 'water';
+      // Authoritative table values override any stale blob `*Units`/`*PrevReading`
+      // (see attachLatestBillingReadings). No baseline → 0 units this period.
       next[`${prefix}CurrentReading`] = Number(current.reading);
-      if (prev) {
-        next[`${prefix}PrevReading`] = Number(prev.reading);
-        next[`${prefix}Units`] = consumption(prev, current);
-      }
+      next[`${prefix}PrevReading`] = prev ? Number(prev.reading) : null;
+      next[`${prefix}Units`] = prev ? consumption(prev, current) : 0;
     }
   } catch (err) {
     if (err.code !== '42P01' && err.code !== '42703') throw err;

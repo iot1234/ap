@@ -19,8 +19,35 @@ const features = require('../services/features');
 const storage = require('../services/storage');
 
 module.exports = function buildWebhooksRouter(ctx) {
-  const { pool, processTenantSlipUpload, signBillPayToken } = ctx;
+  const { pool, processTenantSlipUpload, signBillPayToken, makeIpLimiter } = ctx;
   const r = express.Router();
+
+  // Per-IP rate limit on the whole webhook surface. Genuine LINE delivery from
+  // a 40-room dorm is a trickle; 600/min/IP is far above real traffic yet caps
+  // an unauthenticated flood (the failure-log + unknown-slug DB lookups below
+  // each touch the DB, so an unthrottled POST loop is a log-amplification /
+  // DB-load DoS, and also the only thing bounding online brute-force of an
+  // 8-hex bind code). LINE retries non-2xx, so a rare 429 still gets redelivered.
+  if (typeof makeIpLimiter === 'function') {
+    r.use(makeIpLimiter({ windowMs: 60_000, max: 600, code: 'WEBHOOK_RATE_LIMIT' }));
+  }
+
+  // Throttle the failure-logging itself: even within the rate limit we must not
+  // write one notifications_log row per bad request. Keep an in-memory
+  // last-logged time per (ip, kind) and skip the DB write inside a short
+  // cooldown — diagnostics still surface (first hit logs), volume stays bounded.
+  const FAIL_LOG_COOLDOWN_MS = 60_000;
+  const FAIL_LOG_MAX_KEYS = 5_000;     // hard cap so IP rotation can't grow it unbounded
+  const _failLogSeen = new Map();      // `${ip}:${kind}` -> last logged ms
+  function shouldLogFailure(ip, kind) {
+    const k = `${ip}:${kind}`;
+    const now = Date.now();
+    const last = _failLogSeen.get(k);
+    if (last && now - last < FAIL_LOG_COOLDOWN_MS) return false;
+    if (_failLogSeen.size >= FAIL_LOG_MAX_KEYS) _failLogSeen.clear(); // cheap bound
+    _failLogSeen.set(k, now);
+    return true;
+  }
 
   // ---- handler factory ---------------------------------------------------
   // Returns an Express handler bound to a specific OA-resolution strategy.
@@ -37,6 +64,9 @@ module.exports = function buildWebhooksRouter(ctx) {
       const sigHead = String(req.headers['x-line-signature'] || '').slice(0, 16);
       const ua = String(req.headers['user-agent'] || '').slice(0, 100);
       const ip = req.ip || req.headers['x-forwarded-for'] || '';
+      // Drop repeats from the same source within the cooldown so a flood of
+      // unsigned/unknown-slug POSTs can't amplify into unbounded DB rows.
+      if (!shouldLogFailure(String(ip).slice(0, 64), kind)) return;
       await pool.query(
         `INSERT INTO notifications_log (channel, recipient, subject, body, status)
          VALUES ('line-webhook-fail', $1, $2, $3, 'failed')`,

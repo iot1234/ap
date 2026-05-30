@@ -24,6 +24,24 @@ const meter = require('./meter');
 const TICK_MS = 60 * 60 * 1000;          // hourly
 const SCHEDULER_FAILURE_RE_ALERT_MIN = 60;
 
+// === Local (ICT) date keys ================================================
+// The process runs with TZ=Asia/Bangkok and db/pool.js sets the SQL session to
+// the same zone, so every SQL CURRENT_DATE/NOW() evaluates in ICT. The daily
+// "ran today" latches and advisory-lock suffixes MUST use the same ICT
+// calendar day — `now.toISOString()` is UTC and would roll the day boundary
+// over at 07:00 ICT instead of midnight, drifting the latch out of step with
+// the ICT CURRENT_DATE the jobs' SQL compares against. These helpers read the
+// LOCAL (ICT) wall-clock so JS latch day == SQL business day.
+function localDateKey(now) {
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, '0');
+  const d = String(now.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;                // YYYY-MM-DD (ICT)
+}
+function localHourKey(now) {
+  return `${localDateKey(now)}T${String(now.getHours()).padStart(2, '0')}`; // YYYY-MM-DDTHH (ICT)
+}
+
 const SCHEDULER_JOB_IMPACT = Object.freeze({
   'features-load': 'โหลด feature flags ไม่ได้ งานอัตโนมัติรอบนี้ถูกข้ามทั้งหมด',
   'late-fee': 'บิลเลยกำหนดอาจยังไม่ถูกเปลี่ยนเป็น overdue และค่าปรับอาจยังไม่ถูกคำนวณ',
@@ -191,7 +209,7 @@ function writeState(s) {
 
 async function tickAutoBackup(pool, flags, now, state) {
   if (!flags.autoBackup || !flags.autoBackup.enabled) return;
-  const todayKey = now.toISOString().slice(0, 10);
+  const todayKey = localDateKey(now);
   if (state.lastBackup === todayKey) return;
   if (now.getUTCHours() !== Number(flags.autoBackup.hourUtc || 19)) return;
   try {
@@ -216,7 +234,7 @@ async function tickAutoBackup(pool, flags, now, state) {
 }
 
 async function tickLateFee(pool, flags, now, state) {
-  const todayKey = now.toISOString().slice(0, 10);
+  const todayKey = localDateKey(now);
   if (state.lastLateFeeMark === todayKey) return;
   try {
     // R2 — Two-phase late fee handling, in order:
@@ -558,7 +576,7 @@ async function tickLateFee(pool, flags, now, state) {
 // cascade). The targeted per-event syncRoom calls keep latency low; this
 // tick is the eventual-consistency layer.
 async function tickRoomStatusSync(pool, _flags, now, state) {
-  const todayKey = now.toISOString().slice(0, 10);
+  const todayKey = localDateKey(now);
   if (state.lastRoomStatusSyncAt === todayKey) return;
   try {
     const roomStatus = require('./roomStatus');
@@ -1008,7 +1026,7 @@ async function tickMeterSimulator(pool, flags, now, state) {
   }
   // Reset the warning latch when we leave production so the next tick logs again.
   state.simulatorBlockedLogged = false;
-  const hourKey = `${now.toISOString().slice(0, 13)}`;  // YYYY-MM-DDTHH
+  const hourKey = localHourKey(now);  // YYYY-MM-DDTHH (ICT)
   if (state.lastSimHour === hourKey) return;
   try {
     const { rows: roomsRow } = await pool.query(
@@ -1138,7 +1156,7 @@ async function restoreAccessCardsForTenantIfClear(pool, tenantId, { threshold = 
 async function tickAccessControlSync(pool, flags, now, state) {
   if (!flags.accessControl || !flags.accessControl.enabled) return;
   if (!flags.accessControl.requirePaymentForCard) return;
-  const todayKey = now.toISOString().slice(0, 10);
+  const todayKey = localDateKey(now);
   if (state.lastAccessSync === todayKey) return;
   // Revoke active cards belonging to tenants whose oldest unpaid bill is
   // at least `accessControl.overdueDaysThreshold` days past due. Bound
@@ -1351,7 +1369,7 @@ async function tickAccessControlSync(pool, flags, now, state) {
 // Daily cadence — trigger once per day via the existing state latch.
 // Notification deduplicated via state.lastContractExpiryAt = todayKey.
 async function tickContractExpiry(pool, _flags, now, state) {
-  const todayKey = now.toISOString().slice(0, 10);
+  const todayKey = localDateKey(now);
   if (state.lastContractExpiryAt === todayKey) return;
   try {
     // (1) auto-expire — single statement, idempotent. RETURNING the tenant
@@ -1435,13 +1453,18 @@ async function tickContractExpiry(pool, _flags, now, state) {
     if (!state.lastContractTenantNotify || typeof state.lastContractTenantNotify !== 'object') {
       state.lastContractTenantNotify = {};
     }
+    // Dedup is keyed by contract_no (globally unique), NOT tenant_id: a tenant
+    // with two contracts in the result set (a renewal where the old contract
+    // just expired AND the new one is approaching its threshold, or a tenant in
+    // two rooms) would otherwise overwrite each other's slot under a single
+    // tenant_id key and ping-pong repeat notifications every tick.
 
     // Recently-expired: one final "ended" message per contract.
     for (const c of expired.rows) {
       if (!c.tenant_id) continue;
       if (c.tenant_status !== 'active' || c.deleted_at) continue;
       const key = `expired:${c.contract_no}`;
-      if (state.lastContractTenantNotify[c.tenant_id] === key) continue;
+      if (state.lastContractTenantNotify[c.contract_no] === key) continue;
       try {
         await notifier.notifyTenant({ pool, features: _flags || {} }, {
           id: c.tenant_id, full_name: c.full_name, phone: c.phone, email: c.email,
@@ -1452,7 +1475,7 @@ async function tickContractExpiry(pool, _flags, now, state) {
             + `สัญญาเช่า ${c.contract_no} (ห้อง ${c.room_id || '-'}) สิ้นสุดเมื่อ ${c.end_date}\n\n`
             + `กรุณาติดต่อสำนักงานเพื่อต่อสัญญาหรือคืนห้อง`,
         });
-        state.lastContractTenantNotify[c.tenant_id] = key;
+        state.lastContractTenantNotify[c.contract_no] = key;
       } catch (err) {
         console.warn('[scheduler] contract tenant ended-notify failed:', err.message);
       }
@@ -1469,7 +1492,7 @@ async function tickContractExpiry(pool, _flags, now, state) {
       const matched = THRESHOLDS.filter((t) => days <= t).sort((a, b) => a - b)[0];
       if (matched == null) continue;
       const key = `upcoming:${c.contract_no}:${matched}`;
-      if (state.lastContractTenantNotify[c.tenant_id] === key) continue;
+      if (state.lastContractTenantNotify[c.contract_no] === key) continue;
       try {
         await notifier.notifyTenant({ pool, features: _flags || {} }, {
           id: c.tenant_id, full_name: c.full_name, phone: c.phone, email: c.email,
@@ -1481,7 +1504,7 @@ async function tickContractExpiry(pool, _flags, now, state) {
             + `จะสิ้นสุดวันที่ ${c.end_date} (เหลือ ${days} วัน)\n\n`
             + `หากต้องการต่อสัญญา กรุณาติดต่อสำนักงานก่อนวันสิ้นสุด`,
         });
-        state.lastContractTenantNotify[c.tenant_id] = key;
+        state.lastContractTenantNotify[c.contract_no] = key;
       } catch (err) {
         console.warn('[scheduler] contract tenant upcoming-notify failed:', err.message);
       }
@@ -1519,7 +1542,7 @@ async function tickContractExpiry(pool, _flags, now, state) {
 // the "all clear" message proves the digest fired (avoid "did the cron run
 // today?" anxiety). Skipped on weekend? No — late-rent doesn't take weekends.
 async function tickOverdueDigest(pool, flags, now, state) {
-  const todayKey = now.toISOString().slice(0, 10);
+  const todayKey = localDateKey(now);
   if (state.lastOverdueDigestAt === todayKey) return;
   try {
     // Pull all overdue bills + owner-relevant fields. days_late computed in SQL
@@ -1627,7 +1650,7 @@ async function tickOverdueDigest(pool, flags, now, state) {
 }
 
 async function tickAutoReconcileRooms(pool, flags, now, state) {
-  const todayKey = now.toISOString().slice(0, 10);
+  const todayKey = localDateKey(now);
   if (state.lastAutoReconcileAt === todayKey) return;
   try {
     // Stage 1: detect — query is the same shape as healthCheck's
@@ -1846,7 +1869,7 @@ async function _withAdvisoryLock(pool, name, fn) {
 //                     don't want a third channel pinging tenants daily.
 async function tickPaymentReminder(pool, flags, now, state) {
   if (!flags.paymentReminder || !flags.paymentReminder.enabled) return;
-  const todayKey = now.toISOString().slice(0, 10);
+  const todayKey = localDateKey(now);
   if (state.lastPaymentReminderAt === todayKey) return;
 
   // Front-back reconciliation for the Settings → การแจ้งเตือน fields, which
@@ -2001,7 +2024,14 @@ async function tickPaymentReminder(pool, flags, now, state) {
         `📋 ชำระผ่าน QR PromptPay หรือโอนเงินตามที่ระบุในบิล แล้วอัปโหลดสลิปที่พอร์ทัล /tenant`,
       ].filter(Boolean).join('\n');
 
+      const reminderTier = isOverdueRow ? 'overdue' : (isToday ? 'today' : 'pre-due');
       try {
+        // Count enqueues that actually landed. The bill is only stamped
+        // last_reminded_at when at least one did — otherwise a transient
+        // queue/DB failure would silently mark the bill "reminded today" and
+        // the next tick's `last_reminded_at < CURRENT_DATE` filter would skip
+        // it for the rest of the day, dropping the reminder entirely.
+        let enqueuedOk = 0;
         if (hasLine) {
           // Fan out to every LINE binding the tenant has (single-OA
           // tenants get 1 push, multi-OA tenants get 1 per OA so the
@@ -2009,28 +2039,37 @@ async function tickPaymentReminder(pool, flags, now, state) {
           // gracefully when getTenantLineRecipients isn't yet wired
           // for a legacy deploy (we still have b.line_user_id).
           for (const r of recipients) {
-            await notifQueue.enqueue(pool, {
-              channel: 'line', recipient: r.line_user_id, subject, body,
-              payload: { oaId: r.line_oa_id || null, billId: b.id, reminderTier: isOverdueRow ? 'overdue' : (isToday ? 'today' : 'pre-due') },
-            }).catch(() => {});
+            try {
+              await notifQueue.enqueue(pool, {
+                channel: 'line', recipient: r.line_user_id, subject, body,
+                payload: { oaId: r.line_oa_id || null, billId: b.id, reminderTier },
+              });
+              enqueuedOk++;
+            } catch (e) { /* keep going; only successes count toward the stamp */ }
           }
         }
         if (hasEmail) {
-          await notifQueue.enqueue(pool, {
-            channel: 'email', recipient: b.email, subject, body,
-            payload: { billId: b.id, reminderTier: isOverdueRow ? 'overdue' : (isToday ? 'today' : 'pre-due') },
-          }).catch(() => {});
+          try {
+            await notifQueue.enqueue(pool, {
+              channel: 'email', recipient: b.email, subject, body,
+              payload: { billId: b.id, reminderTier },
+            });
+            enqueuedOk++;
+          } catch (e) { /* ignore — stamp guarded by enqueuedOk below */ }
         }
-        // Stamp last_reminded_at on success so admin's send-history UI
-        // and the next tick's filter both see this bill as handled.
-        await pool.query(
-          `UPDATE bills
-              SET last_reminded_at = NOW(),
-                  reminder_count   = COALESCE(reminder_count, 0) + 1
-            WHERE id = $1 AND deleted_at IS NULL`,
-          [b.id]
-        ).catch((err) => console.warn('[scheduler] reminder stamp failed:', err.message));
-        reminded++;
+        // Stamp last_reminded_at only when something was actually queued, so
+        // admin's send-history UI and the next tick's filter both see this
+        // bill as handled — and a fully-failed round is retried next tick.
+        if (enqueuedOk > 0) {
+          await pool.query(
+            `UPDATE bills
+                SET last_reminded_at = NOW(),
+                    reminder_count   = COALESCE(reminder_count, 0) + 1
+              WHERE id = $1 AND deleted_at IS NULL`,
+            [b.id]
+          ).catch((err) => console.warn('[scheduler] reminder stamp failed:', err.message));
+          reminded++;
+        }
       } catch (err) {
         console.warn(`[scheduler] reminder for bill ${b.id} failed:`, err.message);
       }
@@ -2054,7 +2093,7 @@ async function tickPaymentReminder(pool, flags, now, state) {
 // makes the table slow to scan. We keep failed rows 30 days for forensics
 // (admin can see "why didn't the message go through?") then prune.
 async function tickPruneFailedNotifications(pool, _flags, now, state) {
-  const todayKey = now.toISOString().slice(0, 10);
+  const todayKey = localDateKey(now);
   if (state.lastNotifQueuePruneAt === todayKey) return;
   try {
     const r = await pool.query(`
@@ -2086,7 +2125,7 @@ async function tickPruneFailedNotifications(pool, _flags, now, state) {
 // row. Conservative: only prune slip-category uploads older than 24h with
 // no referencing payment or booking-deposit slip.
 async function tickPruneOrphanSlips(pool, _flags, now, state) {
-  const todayKey = now.toISOString().slice(0, 10);
+  const todayKey = localDateKey(now);
   if (state.lastOrphanSlipPruneAt === todayKey) return;
   try {
     // Look up orphan file_uploads rows first so we can call storage.remove
@@ -2161,6 +2200,8 @@ async function _runTick(pool) {
     return;
   }
   const now = new Date();
+  // ICT calendar day, shared by every daily latch + advisory-lock suffix below.
+  const todayKey = localDateKey(now);
 
   // Late-fee MUST run before bill-gen so any bills going overdue today get
   // their late_fee applied IN-PLACE before bill-gen reads the same table.
@@ -2169,8 +2210,16 @@ async function _runTick(pool) {
   // still matters because access-control sync + room-status cascade read
   // bills.status, so the overdue flip must complete before downstream
   // jobs see the table.
+  //
+  // Wrapped in the SAME per-day advisory lock as the other ticks: tickLateFee
+  // sends per-tenant "บิลเลยกำหนด" notifications and writes audit rows that are
+  // NOT idempotent across replicas, so on a 2x deploy both instances would
+  // otherwise double-notify / double-audit the same overdue bills. Lock held
+  // only for this job; the state-file latch still blocks repeats in-process.
   try {
-    const lateFeeResult = await tickLateFee(pool, flags, now, state);
+    const lateFeeResult = await _withAdvisoryLock(
+      pool, `lateFee-${todayKey}`, () => tickLateFee(pool, flags, now, state)
+    );
     if (lateFeeResult && lateFeeResult.error) {
       await notifySchedulerFailure(pool, flags, state, 'late-fee', lateFeeResult);
     }
@@ -2187,7 +2236,7 @@ async function _runTick(pool) {
   //
   // The advisory lock is held only for the duration of one tick cycle; the
   // state-file latch still blocks repeats within the same instance.
-  const todayKey = now.toISOString().slice(0, 10);
+  // (todayKey computed above, shared with the late-fee lock.)
   // Access sync feeds today's revoke/restore counts into state.todaysAccessSync,
   // and the overdue digest prints that summary for the owner. Keep access sync
   // before the parallel daily batch so the digest cannot race ahead with a
@@ -2205,7 +2254,7 @@ async function _runTick(pool) {
   const jobs = [
     { job: 'auto-backup', promise: _withAdvisoryLock(pool, `autoBackup-${todayKey}`, () => tickAutoBackup(pool, flags, now, state)) },
     { job: 'bill-gen', promise: _withAdvisoryLock(pool, `billGen-${todayKey}`, () => tickBillGen(pool, flags, now, state)) },
-    { job: 'meter-sim', promise: _withAdvisoryLock(pool, `meterSim-${now.toISOString().slice(0,13)}`, () => tickMeterSimulator(pool, flags, now, state)) },
+    { job: 'meter-sim', promise: _withAdvisoryLock(pool, `meterSim-${localHourKey(now)}`, () => tickMeterSimulator(pool, flags, now, state)) },
     { job: 'contract-expiry', promise: _withAdvisoryLock(pool, `contractExpiry-${todayKey}`, () => tickContractExpiry(pool, flags, now, state)) },
     { job: 'overdue-digest', promise: _withAdvisoryLock(pool, `overdueDigest-${todayKey}`, () => tickOverdueDigest(pool, flags, now, state)) },
     { job: 'auto-reconcile', promise: _withAdvisoryLock(pool, `autoReconcile-${todayKey}`, () => tickAutoReconcileRooms(pool, flags, now, state)) },

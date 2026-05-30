@@ -1146,6 +1146,44 @@ app.put('/api/data/:key', sameOrigin, csrfGuard, requireAuth, requireRole('owner
   // target.
   let configWarnings = [];
   if (key === 'baankarn_config_v1') {
+    // === Payment-receiver protection (AuthZ) ================================
+    // value.payment.{promptpay,bankAcc,truemoneyPhone,…} decides WHERE every
+    // tenant's bill payment actually goes (billing.buildEffectivePaymentBlock
+    // reads it as the first-priority receiver). PUT /api/data is open to the
+    // 'staff' role, but the receiver is an owner/manager concern — it is
+    // owner-gated on the secrets surface and owner/manager-gated on
+    // system-settings. Without this guard a staff account could repoint every
+    // bill's PromptPay/bank/TrueMoney target to their own and silently harvest
+    // rent. So: for a non-owner/manager actor we force the STORED payment block
+    // to survive unchanged — their edits to other config (rooms pricing,
+    // building info) still apply, but payment.* is preserved (or dropped on a
+    // first-ever save). Preserve rather than reject so a legitimate non-payment
+    // settings save by staff isn't blocked by JSON key-ordering noise.
+    const actorRole = req.session.user && req.session.user.role;
+    const privileged = actorRole === 'owner' || actorRole === 'manager';
+    if (!privileged) {
+      let storedPayment;
+      try {
+        const cur = await pool.query(
+          `SELECT value->'payment' AS payment FROM app_data WHERE key=$1`, [key]
+        );
+        storedPayment = cur.rows.length ? cur.rows[0].payment : undefined;
+      } catch { storedPayment = undefined; }
+      const submitted = JSON.stringify(value.payment ?? null);
+      const preserved = JSON.stringify(storedPayment ?? null);
+      if (submitted !== preserved) {
+        // Surface the attempt: a staff account trying to change the receiver is
+        // worth an audit trail even though we silently ignore the change.
+        audit(req, 'data.put.payment_preserved', 'app_data', key, {
+          role: actorRole, attempted: true,
+        });
+      }
+      if (storedPayment === undefined || storedPayment === null) {
+        delete value.payment;
+      } else {
+        value.payment = storedPayment;
+      }
+    }
     const MIN_SENSIBLE_RENT = 100;
     const MIN_SENSIBLE_DEPOSIT = 100;
     const MIN_SENSIBLE_UTILITY = 1;

@@ -3847,12 +3847,17 @@ test('scheduler runs late-fee before bill-gen (sequential)', () => {
   const fs = require('node:fs');
   const path = require('node:path');
   const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'scheduler.js'), 'utf8');
-  // Late-fee call must precede the Promise.allSettled([...]) array.
-  const lateFeeIdx = src.indexOf('await tickLateFee(');
+  // Late-fee call must precede the Promise.allSettled([...]) array. It is now
+  // wrapped in the same per-day advisory lock as the other jobs (multi-replica
+  // dedup of its per-tenant notifications + audit writes) but still runs
+  // sequentially BEFORE the parallel block.
+  const lateFeeIdx = src.indexOf('() => tickLateFee(');
   const allSettledIdx = src.indexOf('Promise.allSettled(jobs.map');
-  assert.ok(lateFeeIdx > 0, 'tickLateFee must be awaited explicitly');
+  assert.ok(lateFeeIdx > 0, 'tickLateFee must be called explicitly (before the parallel jobs)');
   assert.ok(allSettledIdx > lateFeeIdx,
     'Promise.allSettled (the parallel block) must come AFTER late-fee');
+  assert.match(src, /_withAdvisoryLock\(\s*\n?\s*pool, `lateFee-\$\{todayKey\}`/,
+    'late-fee must run under a per-day advisory lock so multi-replica deploys do not double-notify/double-audit');
 });
 
 test('scheduler failures notify owner with throttled actionable alerts', () => {
@@ -4396,8 +4401,8 @@ test('checkout revokes access cards + records refund + pro-rates closing bill', 
   const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'tenant-ops.js'), 'utf8');
   assert.match(src, /UPDATE access_cards[\s\S]{0,200}status='revoked'[\s\S]{0,200}auto:checkout/,
     'must auto-revoke active cards on checkout');
-  assert.match(src, /deposit_returned = \$2/,
-    'refund must persist on contracts row, not just audit_logs');
+  assert.match(src, /deposit_returned = CASE WHEN \$2::numeric IS NOT NULL THEN LEAST\(\$2::numeric, deposit\)/,
+    'refund must persist on contracts row (clamped to the contract deposit), not just audit_logs');
   assert.match(src, /pro-rate/i,
     'closing-bill pro-rate path must exist');
   assert.match(src, /generateClosingBill !== false/,

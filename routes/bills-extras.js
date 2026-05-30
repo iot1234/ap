@@ -723,8 +723,10 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         console.warn('[bill] tenant lookup failed:', err.message);
       }
     }
+    const billClient = await pool.connect();
     try {
-      const { rows } = await pool.query(
+      await billClient.query('BEGIN');
+      const { rows } = await billClient.query(
         `INSERT INTO bills
          (bill_no, tenant_id, room_id, period, rent,
           water_prev_reading, water_current_reading, water_units, water_rate, water_amount,
@@ -766,7 +768,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         ]
       );
       if (!rows.length) {
-        const locked = await pool.query(
+        const locked = await billClient.query(
           `SELECT b.id, b.status,
                   EXISTS (
                     SELECT 1 FROM payments p
@@ -778,6 +780,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             LIMIT 1`,
           [computed.billNo]
         );
+        await billClient.query('ROLLBACK');
         const current = locked.rows[0] || {};
         return res.status(409).json({
           error: 'existing bill is locked because it is paid, void, deleted, or has a verified payment',
@@ -787,6 +790,20 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           hasVerifiedPayment: !!current.has_verified_payment,
         });
       }
+      // B1 — mark consumed one_off recurring charges inactive so they don't
+      // appear on next month's bill. This MUST commit atomically with the bill
+      // insert: previously it ran as a separate autocommit query AFTER the bill
+      // was already committed, so a crash / connection drop in between left the
+      // one_off `active=TRUE` and it was billed AGAIN next cycle — a silent
+      // double-charge to the tenant. Inside the transaction, a failure here
+      // rolls the bill back too, so admin simply retries and stays consistent.
+      if (usedOneOffIds.length) {
+        await billClient.query(
+          `UPDATE recurring_charges SET active=FALSE, updated_at=NOW() WHERE id = ANY($1::bigint[])`,
+          [usedOneOffIds]
+        );
+      }
+      await billClient.query('COMMIT');
       audit(req, 'bill.create', 'bill', String(rows[0].id), {
         tenantId,
         autoLinked: !b.tenantId && tenantId,
@@ -796,21 +813,9 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         // explain why its total disagrees with the resolver.
         manualOverride: driftReport ? { reason: driftReport.reason, drifts: driftReport.drifts } : null,
       });
-      // B1 — mark consumed one_off recurring charges inactive so they don't
-      // appear on next month's bill. Best-effort; failure here doesn't unwind
-      // the bill insert (the charges line items are already in `other`).
-      if (usedOneOffIds.length) {
-        try {
-          await pool.query(
-            `UPDATE recurring_charges SET active=FALSE, updated_at=NOW() WHERE id = ANY($1::bigint[])`,
-            [usedOneOffIds]
-          );
-        } catch (err) {
-          console.warn('[bill] one_off deactivate failed:', err.message);
-        }
-      }
       res.json({ ok: true, bill: rows[0], computed });
     } catch (err) {
+      await billClient.query('ROLLBACK').catch(() => {});
       // A7 — translate the partial-unique constraint into a clear 409 so
       // the admin UI can show "already generated" instead of a generic 500.
       // Match the `uq_bills_room_period` PREFIX, not the full legacy name:
@@ -826,6 +831,8 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       }
       console.error('bill create error:', err);
       res.status(500).json({ error: 'internal error' });
+    } finally {
+      billClient.release();
     }
   });
 

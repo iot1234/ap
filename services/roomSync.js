@@ -59,6 +59,17 @@ function normaliseStatus(v) {
   return 'vacant';
 }
 
+// Vacant-family check for guards that compare a RAW status against 'vacant'.
+// The JSONB blob legitimately stores legacy 'available'/'empty'/'free' for an
+// empty room (old admin UI vocabulary), so a bare `=== 'vacant'` comparison
+// wrongly rejects a genuinely-free room. Mirrors the helper in server.js so
+// booking / hold / check-in / claim guards all agree. Unknown statuses are
+// intentionally NOT treated as vacant (fail safe → block, let admin review).
+const VACANT_STATUS_WORDS = new Set(['vacant', 'available', 'empty', 'free']);
+function isVacantStatus(s) {
+  return VACANT_STATUS_WORDS.has(String(s || '').trim().toLowerCase());
+}
+
 function deriveFloorRoomNo(code) {
   const s = String(code || '').trim();
   if (!/^\d{3,4}$/.test(s)) return {};
@@ -364,6 +375,8 @@ async function roomDeleteRefs(pool, roomCode) {
 }
 
 module.exports = {
+  normaliseStatus,
+  isVacantStatus,
   normaliseRoomForV2,
   normaliseRoomsObject,
   upsertRoomsV2FromJsonb,
