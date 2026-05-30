@@ -739,7 +739,7 @@ function isChargeApplicableForPeriod(charge, period) {
  *          lateFee already round2'd. daysOver/monthsOver returned for
  *          the audit-log entry ("billed X฿ because 53 days overdue").
  */
-function computeLateFee({ base, dueDate, ratePctPerMonth = 0, gracePeriodDays = 0, now } = {}) {
+function computeLateFee({ base, dueDate, ratePctPerMonth = 0, gracePeriodDays = 0, maxPctOfPrincipal = 0, maxBaht = 0, now } = {}) {
   const safeBase = Number(base);
   const ratePct = Number(ratePctPerMonth);
   const grace = Number(gracePeriodDays);
@@ -747,22 +747,36 @@ function computeLateFee({ base, dueDate, ratePctPerMonth = 0, gracePeriodDays = 
   // bills.late_fee column and breaks downstream chk_bills_amounts_nonnegative.
   if (!Number.isFinite(safeBase) || safeBase <= 0
       || !Number.isFinite(ratePct) || ratePct <= 0) {
-    return { lateFee: 0, daysOver: 0, monthsOver: 0, base: Number.isFinite(safeBase) ? safeBase : 0 };
+    return { lateFee: 0, daysOver: 0, monthsOver: 0, base: Number.isFinite(safeBase) ? safeBase : 0, capped: false };
   }
   const due = parseDueDateLocal(dueDate);
   if (!due || !Number.isFinite(due.getTime())) {
-    return { lateFee: 0, daysOver: 0, monthsOver: 0, base: safeBase };
+    return { lateFee: 0, daysOver: 0, monthsOver: 0, base: safeBase, capped: false };
   }
   const reference = now instanceof Date && Number.isFinite(now.getTime()) ? now : new Date();
   const safeGrace = Number.isFinite(grace) ? Math.max(0, grace) : 0;
   const rawDays = Math.floor((reference.getTime() - due.getTime()) / 86_400_000);
   const daysOver = Math.max(0, rawDays - safeGrace);
   if (daysOver <= 0) {
-    return { lateFee: 0, daysOver: 0, monthsOver: 0, base: safeBase };
+    return { lateFee: 0, daysOver: 0, monthsOver: 0, base: safeBase, capped: false };
   }
   const monthsOver = daysOver / 30;
-  const lateFee = round2(safeBase * (ratePct / 100) * monthsOver);
-  return { lateFee, daysOver, monthsOver, base: safeBase };
+  const uncapped = round2(safeBase * (ratePct / 100) * monthsOver);
+  // Optional caps — prevention against runaway accrual on long-overdue bills.
+  // Both default 0 = no cap (current behavior). When both are set the lower
+  // ceiling wins. maxPctOfPrincipal caps relative to the bill; maxBaht is an
+  // absolute ceiling. A capped fee never exceeds the principal it's based on
+  // implicitly through these, but operators set the real policy.
+  let lateFee = uncapped;
+  const capPct = Number(maxPctOfPrincipal);
+  if (Number.isFinite(capPct) && capPct > 0) {
+    lateFee = Math.min(lateFee, round2(safeBase * (capPct / 100)));
+  }
+  const capBaht = Number(maxBaht);
+  if (Number.isFinite(capBaht) && capBaht > 0) {
+    lateFee = Math.min(lateFee, round2(capBaht));
+  }
+  return { lateFee, daysOver, monthsOver, base: safeBase, capped: lateFee < uncapped };
 }
 
 /**

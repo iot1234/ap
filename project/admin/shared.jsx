@@ -144,6 +144,9 @@ const DEFAULT_CONFIG = {
     // move-out closing bill which already prorates. When false (default), the
     // first month is charged in full, preserving the historical behavior.
     prorateFirstMonth: false,
+    // Rooms (by room id) that never accrue a late fee even when the late-fee
+    // feature is on — "เก็บ/ไม่เก็บค่าล่าช้า" per room. Empty = all rooms accrue.
+    lateFeeExemptRooms: [],
   },
   building: {
     name:    'ที่พักของคุณ',

@@ -7345,3 +7345,18 @@ test("buildBill wires the minimum-units floor (utilities.waterMin/elecMin)", () 
   assert.match(billingSrc, /applyMinUnits/, "buildBill must honor the applyMinUnits master gate");
   assert.match(billingSrc, /waterMinApplied/, "bill must surface whether the minimum was applied");
 });
+
+test("scheduler tickLateFee honors late-fee caps + per-room exemption", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const sched = fs.readFileSync(path.join(__dirname, "..", "services", "scheduler.js"), "utf8");
+  assert.match(sched, /maxPctOfPrincipal/, "scheduler must read the % cap");
+  assert.match(sched, /maxLateFeeBaht/, "scheduler must read the baht cap");
+  assert.match(sched, /lateFeeExemptRooms/, "scheduler must load per-room exemptions");
+  // Both phases A + B must skip exempt rooms.
+  const skips = sched.split("lateFeeExemptRooms.has(String(b.room_id))").length - 1;
+  assert.ok(skips >= 2, "both late-fee phases must skip exempt rooms (got " + skips + ")");
+  // computeLateFee gets the caps passed through.
+  const passes = sched.split("maxBaht: maxLateFeeBaht").length - 1;
+  assert.ok(passes >= 2, "both phases must pass the caps to computeLateFee");
+});

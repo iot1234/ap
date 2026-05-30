@@ -88,6 +88,11 @@ const DEFAULTS = Object.freeze({
     //     review; admin verify endpoints require an explicit waiveLateFee choice.
     //   true            → legacy "good-faith" behavior: waive automatically.
     autoWaiveOnPrincipal: false,
+    // Optional ceilings on the accrued late fee (prevention against runaway
+    // accrual on long-overdue bills). 0 = no cap (current behavior). The lower
+    // of the two wins when both are set.
+    maxPctOfPrincipal: 0,   // cap at X% of the bill principal (subtotal+vat)
+    maxLateFeeBaht: 0,      // absolute ฿ ceiling
   },
   vat: {
     enabled: false,

@@ -244,6 +244,23 @@ async function tickLateFee(pool, flags, now, state) {
     const lateFeeEnabled = !!(flags && flags.lateFee && flags.lateFee.enabled);
     const ratePctMonth = lateFeeEnabled ? Number(flags.lateFee.ratePctPerMonth || 0) : 0;
     const gracePeriodDays = lateFeeEnabled ? Number(flags.lateFee.gracePeriodDays || 0) : 0;
+    // Optional accrual ceilings (prevention against runaway late fees on
+    // long-overdue bills). 0 = no cap (current behavior).
+    const maxPctOfPrincipal = lateFeeEnabled ? Number(flags.lateFee.maxPctOfPrincipal || 0) : 0;
+    const maxLateFeeBaht = lateFeeEnabled ? Number(flags.lateFee.maxLateFeeBaht || 0) : 0;
+    // Per-room late-fee exemption (config.billing.lateFeeExemptRooms: string[]) —
+    // run "เก็บ/ไม่เก็บค่าล่าช้า" per room without disabling the feature globally.
+    let lateFeeExemptRooms = new Set();
+    if (lateFeeEnabled) {
+      try {
+        const { rows: cfgRows } = await pool.query(
+          `SELECT value FROM app_data WHERE key='baankarn_config_v1' LIMIT 1`
+        );
+        const arr = cfgRows[0] && cfgRows[0].value && cfgRows[0].value.billing
+          && cfgRows[0].value.billing.lateFeeExemptRooms;
+        if (Array.isArray(arr)) lateFeeExemptRooms = new Set(arr.map((x) => String(x)));
+      } catch { /* config blob missing — no exemptions */ }
+    }
 
     // PostgreSQL doesn't allow DISTINCT inside RETURNING — the old query
     // raised "syntax error at or near DISTINCT" every tick, so bills past
@@ -307,12 +324,16 @@ async function tickLateFee(pool, flags, now, state) {
             && (b.deleted_at != null || (b.tenant_status || 'active') !== 'active')) {
           continue;
         }
+        // Per-room exemption — this room is configured "ไม่เก็บค่าล่าช้า".
+        if (lateFeeExemptRooms.has(String(b.room_id))) continue;
         const base = (Number(b.total) || 0) - (Number(b.late_fee) || 0);
         const calc = billing.computeLateFee({
           base,
           dueDate: b.due_date,
           ratePctPerMonth: ratePctMonth,
           gracePeriodDays,
+          maxPctOfPrincipal,
+          maxBaht: maxLateFeeBaht,
           now,
         });
         if (calc.lateFee > 0 && calc.lateFee !== Number(b.late_fee)) {
@@ -363,7 +384,7 @@ async function tickLateFee(pool, flags, now, state) {
           // Phase B grew penalties on ex-tenants' bills forever while the
           // digest hid them, so the two views disagreed and the fee ballooned
           // unmonitored. Those bills should be reconciled, not auto-penalised.
-          `SELECT b.id, b.total, b.late_fee, b.due_date
+          `SELECT b.id, b.room_id, b.total, b.late_fee, b.due_date
              FROM bills b
              LEFT JOIN tenants t ON t.id = b.tenant_id
             WHERE b.status = 'overdue'
@@ -380,12 +401,15 @@ async function tickLateFee(pool, flags, now, state) {
         );
         for (const b of stillOverdue) {
           if (flippedIds.has(Number(b.id))) continue;   // already done in Phase A
+          if (lateFeeExemptRooms.has(String(b.room_id))) continue;   // room exempt
           const base = (Number(b.total) || 0) - (Number(b.late_fee) || 0);
           const calc = billing.computeLateFee({
             base,
             dueDate: b.due_date,
             ratePctPerMonth: ratePctMonth,
             gracePeriodDays,
+            maxPctOfPrincipal,
+            maxBaht: maxLateFeeBaht,
             now,
           });
           if (calc.lateFee > 0 && calc.lateFee !== Number(b.late_fee)) {

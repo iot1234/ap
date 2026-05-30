@@ -975,3 +975,30 @@ test('firstMonthProrationFraction: invalid inputs fall back to full month', () =
   // Day beyond the month is clamped to 0 charged days (never negative)
   assert.equal(billing.firstMonthProrationFraction({ moveInDay: 40, daysInMonth: 30, prorate: true }), 0);
 });
+
+test("computeLateFee: caps (maxPctOfPrincipal / maxBaht) bound runaway accrual", () => {
+  // 10,000 principal, 1.5%/mo, no grace, 300 days overdue → ~10 months → ~1,500.
+  const opts = { base: 10000, dueDate: "2026-01-01", ratePctPerMonth: 1.5, gracePeriodDays: 0, now: new Date("2026-10-28T00:00:00Z") };
+  const uncapped = billing.computeLateFee(opts);
+  assert.ok(uncapped.lateFee > 1400, "uncapped fee accrues with time");
+  assert.equal(uncapped.capped, false);
+  // Cap at 5% of principal = 500.
+  const cappedPct = billing.computeLateFee({ ...opts, maxPctOfPrincipal: 5 });
+  assert.equal(cappedPct.lateFee, 500, "capped at 5% of principal");
+  assert.equal(cappedPct.capped, true);
+  // Absolute ฿300 cap wins when lower.
+  const cappedBaht = billing.computeLateFee({ ...opts, maxBaht: 300 });
+  assert.equal(cappedBaht.lateFee, 300, "capped at the absolute ฿ ceiling");
+  assert.equal(cappedBaht.capped, true);
+  // Both set → lower ceiling wins (5% = 500 vs ฿300 → 300).
+  const both = billing.computeLateFee({ ...opts, maxPctOfPrincipal: 5, maxBaht: 300 });
+  assert.equal(both.lateFee, 300);
+  // Caps of 0 = no cap (default behavior preserved).
+  const noCap = billing.computeLateFee({ ...opts, maxPctOfPrincipal: 0, maxBaht: 0 });
+  assert.equal(noCap.lateFee, uncapped.lateFee);
+  assert.equal(noCap.capped, false);
+  // A cap higher than the accrued fee does not reduce it.
+  const highCap = billing.computeLateFee({ ...opts, maxBaht: 999999 });
+  assert.equal(highCap.lateFee, uncapped.lateFee);
+  assert.equal(highCap.capped, false);
+});
