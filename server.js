@@ -13203,14 +13203,25 @@ app.get('/api/contract-fill/:token', rateLimitContractFill, async (req, res) => 
       });
     }
     let building = { name: 'ที่พักของคุณ' };
+    // Resolve the payment terms the tenant is about to agree to from the LIVE
+    // config (pending invitation = current terms; they lock into the snapshot
+    // at approval). Previously the contract-fill page hardcoded "วันที่ 15".
+    const financials = { dueDay: 15, lateFeeRate: 1.5 };
     try {
       const cfgQ = await pool.query(
         `SELECT value FROM app_data WHERE key='baankarn_config_v1' LIMIT 1`
       );
       const cfg = cfgQ.rows[0]?.value || {};
       if (cfg.building) building = { ...building, ...cfg.building };
+      const d = Number(cfg?.notify?.dueOnDay);
+      if (Number.isFinite(d) && d >= 1 && d <= 28) financials.dueDay = Math.floor(d);
     } catch { /* keep default */ }
-    res.json({ ok: true, view: contractInvitation.buildPublicView(inv, building) });
+    try {
+      const flags = await features.load(pool);
+      const r = Number(flags?.lateFee?.ratePctPerMonth);
+      if (Number.isFinite(r) && r >= 0) financials.lateFeeRate = r;
+    } catch { /* keep default */ }
+    res.json({ ok: true, view: contractInvitation.buildPublicView(inv, building, financials) });
   } catch (err) {
     console.error('contract-fill GET error:', err);
     res.status(500).json({ error: 'internal error' });

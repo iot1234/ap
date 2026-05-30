@@ -7542,3 +7542,14 @@ test("admin health page surfaces the data-integrity anomaly scanner", () => {
   // balanced render guard: the panel maps items and offers a fix deep-link
   assert.ok(page.includes("anomalies.items.map"), "must render each anomaly");
 });
+
+test("public contract-fill shows the configured due day + late-fee rate (not hardcoded 15)", () => {
+  const fs = require("node:fs"); const path = require("node:path");
+  const ci = fs.readFileSync(path.join(__dirname, "..", "services", "contractInvitation.js"), "utf8");
+  const html = fs.readFileSync(path.join(__dirname, "..", "project", "contract-fill.html"), "utf8");
+  const server = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.ok(ci.includes("dueDay,") && ci.includes("lateFeeRate,"), "public view must expose dueDay + lateFeeRate");
+  assert.ok(server.includes("buildPublicView(inv, building, financials)"), "endpoint must pass resolved financials");
+  assert.ok(html.includes("view.contract.dueDay"), "fill page must render the configured due day");
+  assert.ok(!html.includes("วันที่ 15 ของทุกเดือน"), "fill page must not hardcode the due day");
+});

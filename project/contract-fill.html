@@ -656,7 +656,7 @@ function Step4Sign({ draft, setField, token, view, busy, onBack, onSubmit, onErr
         <div className="terms-box">
           1. ผู้เช่าตกลงเช่าห้องพักตามรายละเอียดในสัญญาฉบับนี้<br/>
           2. ค่าเช่ารายเดือน {fmtTHB(view.contract.monthlyRent)} บาท
-             ชำระภายในวันที่ 15 ของทุกเดือน หากชำระล่าช้าจะคิดค่าปรับตามอัตราที่กำหนด<br/>
+             ชำระภายในวันที่ {view.contract.dueDay || 15} ของทุกเดือน หากชำระล่าช้าจะคิดค่าปรับ {view.contract.lateFeeRate != null ? view.contract.lateFeeRate : 1.5}% ต่อเดือนของยอดค้างชำระ<br/>
           3. ผู้เช่าวางเงินมัดจำ {fmtTHB(view.contract.deposit)} บาท<br/>
           4. ผู้เช่าใช้ห้องพักเพื่ออยู่อาศัย ห้ามใช้ประกอบกิจการผิดกฎหมาย
              ห้ามดัดแปลงโครงสร้าง ห้ามสูบบุหรี่ในห้อง<br/>

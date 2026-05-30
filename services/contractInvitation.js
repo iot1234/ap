@@ -234,7 +234,9 @@ function sanitiseDraft(input) {
  * Excludes anything sensitive (no full citizen ID even if already stored on
  * the tenant row from a prior submission).
  */
-function buildPublicView(invitation, building) {
+function buildPublicView(invitation, building, financials = {}) {
+  const dueDay = Number.isFinite(Number(financials.dueDay)) ? Number(financials.dueDay) : 15;
+  const lateFeeRate = Number.isFinite(Number(financials.lateFeeRate)) ? Number(financials.lateFeeRate) : 1.5;
   return {
     invitationId: invitation.id,
     status: invitation.status,
@@ -249,6 +251,10 @@ function buildPublicView(invitation, building) {
       deposit: invitation.deposit,
       termMonths: invitation.term_months,
       discountPct: invitation.discount_pct,
+      // Payment terms shown on the fill/agree page so they match the bills +
+      // the signed PDF instead of a hardcoded "วันที่ 15".
+      dueDay,
+      lateFeeRate,
     },
     tenant: invitation.tenant_id ? {
       fullName: invitation.tenant_name,
