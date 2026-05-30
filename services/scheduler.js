@@ -2131,7 +2131,26 @@ async function tickPruneOrphanSlips(pool, _flags, now, state) {
   }
 }
 
+let _ticking = false;
 async function tick(pool) {
+  // Re-entrancy guard. setInterval fires hourly, but a heavy cycle (large
+  // bill-gen + slow LINE/SMTP fan-out) could exceed TICK_MS. Overlapping ticks
+  // in the SAME process would double-run the un-locked tickLateFee and race
+  // writeState(). Advisory locks cover the cross-replica case; this covers
+  // same-process overlap. Skips (not queues) — the next hourly tick catches up.
+  if (_ticking) {
+    console.warn('[scheduler] previous tick still running — skipping this cycle');
+    return;
+  }
+  _ticking = true;
+  try {
+    await _runTick(pool);
+  } finally {
+    _ticking = false;
+  }
+}
+
+async function _runTick(pool) {
   const state = readState();
   let flags;
   try {

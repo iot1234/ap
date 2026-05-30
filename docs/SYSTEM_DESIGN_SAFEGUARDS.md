@@ -149,13 +149,13 @@ sameOrigin → csrfGuard → requireAuth → requireRole(...) → validateBody(z
 
 ### 2.17 ตัวจับเวลางานเบื้องหลัง (Scheduler)
 - **ถูกต้อง:** ⚠️ **M4 timezone split** — JS ใช้ ICT แต่ Postgres `NOW()/CURRENT_DATE` ใช้ UTC → late-fee/reminder เลื่อน ~7 ชม. → **เสนอ (P1):** `SET timezone='Asia/Bangkok'` ตอน connect (pool) ให้ JS กับ SQL ตรงกัน
-- **ป้องกัน:** ✅ advisory lock กันรันซ้ำข้าม replica (ยกเว้น tickLateFee — ดู §2.8) · ⚠️ **M1:** `tick()` ไม่มี re-entrancy guard → ถ้า tick ก่อนยังไม่จบ tick ใหม่ทับ → **เสนอ:** `if(_ticking) return; ... finally{_ticking=false}`
-- **แจ้งเตือน:** ⚠️ ทุกงานคืน `{error}` แต่ไม่ใช่ทุกงานแจ้ง owner → **เสนอมาตรฐาน:** งานล้ม → `notifyOwner` แบบ dedup + ขึ้นหน้า Health
+- **ป้องกัน:** ✅ advisory lock กันรันซ้ำข้าม replica (ยกเว้น tickLateFee — ดู §2.8) · 🔧 **M1 re-entrancy guard เพิ่มแล้ว** (`_ticking` flag — tick ใหม่ข้ามถ้าตัวเก่ายังไม่จบ กัน double-run tickLateFee/writeState ในโปรเซสเดียว)
+- **แจ้งเตือน:** ✅ **ครบกว่าที่คาด** — `tick()` เรียก `notifySchedulerFailure` ทุกงานที่ล้ม (rejected หรือคืน `{error}`) ทั้ง backup/bill-gen/late-fee/reminder ฯลฯ (`scheduler.js:2207-2222`)
 
 ### 2.18 สำรอง/กู้คืนข้อมูล (Backup/Restore)
 - **ถูกต้อง:** dump JSON + integrity hash + verify, optional R2/S3 ✅
 - **ป้องกัน:** ✅ restore ต้อง owner + CSRF · ⚠️ R2 endpoint ใช้ sync SSRF check (`storage.js:28`) ไม่ resolve DNS → เสนอใช้ resolved variant
-- **แจ้งเตือน:** ✅ backup สำเร็จ → log. ❌ **ควรเพิ่ม (P1):** backup **ล้มเหลว** → แจ้ง owner ทันที (สำคัญมาก — backup เงียบหายคือหายนะ); backup ไม่รันเกิน 48 ชม. → เตือน
+- **แจ้งเตือน:** ✅ backup สำเร็จ → log · ✅ backup **ล้มเหลว** → แจ้ง owner แล้ว (ผ่าน `notifySchedulerFailure`) · ❌ **ช่องว่างจริง (P1):** ไม่มี watchdog "backup **ไม่รัน**เกิน 48 ชม." (เคสที่ tick ไม่ยิงเลย/flag ถูกปิด — เงียบสนิท) → **เสนอ:** เก็บ `state.lastBackup` แล้วเช็คอายุทุก tick, เกินเกณฑ์ → แจ้ง owner
 
 ### 2.19 Feature Flags + Settings
 - **ถูกต้อง:** server เป็น source of truth, flag ปิด → endpoint 503, UI ซ่อนตาม `/api/features` ✅ · ⚠️ **M2 (data):** `features.save` read-modify-write ไม่มี lock → 2 admin toggle พร้อมกันหายอัปเดต → เสนอ `FOR UPDATE` หรือ jsonb merge ใน SQL
@@ -175,8 +175,9 @@ sameOrigin → csrfGuard → requireAuth → requireRole(...) → validateBody(z
 |---|---|---|---|---|---|
 | login admin จากอุปกรณ์/IP ใหม่ | medium | LINE+Email | owner | ต่ออุปกรณ์ | ❌ เพิ่ม |
 | lockout/probe/token ผิดซ้ำ | high | LINE | owner | 10m/30m | ✅ |
-| backup ล้มเหลว / ไม่รัน >48ชม. | **high** | LINE+Email | owner | 1/วัน | ❌ **เพิ่ม (P1)** |
-| scheduler job ล้ม | medium | LINE | owner | ต่อ job/วัน | ⚠️ บางงาน |
+| backup ล้มเหลว | **high** | LINE+Email | owner | 1/วัน | ✅ |
+| backup **ไม่รัน** >48ชม. (watchdog) | **high** | LINE+Email | owner | 1/วัน | ❌ **เพิ่ม (P1)** |
+| scheduler job ล้ม (ทุกงาน) | medium | LINE | owner | ต่อ job | ✅ |
 | blob↔relational drift | medium | LINE | owner | 1/ชม. | ⚠️ |
 | slip pending ค้าง >X ชม. | low | in-app | admin | — | ❌ เพิ่ม |
 | ticket open ค้าง >N วัน | low | LINE | owner | 1/วัน | ❌ เพิ่ม |
@@ -196,7 +197,7 @@ sameOrigin → csrfGuard → requireAuth → requireRole(...) → validateBody(z
 3. ❌ **§2.4 PII** — บังคับเข้ารหัสเลขบัตรเสมอ (ห้ามปิด flag เมื่อมีข้อมูล)
 
 ### P1 — เสถียรภาพ/การเงิน/แจ้งเตือนสำคัญ
-4. ❌ **§2.18 backup-fail alert** + **§2.17 scheduler timezone** (`SET timezone`) + re-entrancy guard
+4. ✅🔧 **§2.17 re-entrancy guard — ทำแล้ว** · ❌ เหลือ **§2.18 backup-didn't-run watchdog** + **§2.17 scheduler timezone** (`SET timezone='Asia/Bangkok'` ตอน connect)
 5. ⚠️ **§2.8 F3** late-fee ใช้เรตสัญญา · **§2.7 F4** นโยบายค่าน้ำ/ไฟเดือนแรก (รอ owner ตัดสิน)
 6. ❌ **§3** แยก `services/alerting.js` + เติมกฎที่ขาด
 
@@ -213,4 +214,5 @@ sameOrigin → csrfGuard → requireAuth → requireRole(...) → validateBody(z
 - checkout ข้ามบิลยอด 0 (เคยทำ checkout ทั้งรายการพัง)
 - email มี timeout (กัน request ค้าง)
 - `฿฿` → `฿` 10 จุด · toast หลายบรรทัด · หน้า notifications โชว์ error · README แก้เลข rate-limit
+- **scheduler re-entrancy guard** (กัน tick ซ้อนในโปรเซสเดียว — §2.17)
 - ผ่านเทสต์ 822/822 · สแกน endpoint ทั้งระบบ → ไม่เหลือ 500
