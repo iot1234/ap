@@ -88,10 +88,13 @@
 ---
 
 ### 🟡 Admin reports show wrong numbers
-**Cause:** the older parts of `page-reports.jsx` use Math.sin-based mock projections (not all numbers come from the DB yet).
+**Cause:** stale or incomplete data snapshots can still make projections look
+unexpected. The old Math.sin mock projection has been removed.
 
 **Fix:**
-The KPI cards and current-period numbers come from real data. Multi-month trend charts are still partly mocked because we don't store historical snapshots yet. Live numbers are accurate.
+KPI cards and current-period numbers come from real data. Cashflow projection
+uses the recent 90-day paid revenue sum divided by 3; if it looks low, first
+check whether the deployment is young or paid bill history is sparse.
 
 ---
 

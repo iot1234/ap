@@ -252,20 +252,25 @@ Auto-created in `migrate()` on boot:
 
 ## Known limitations / Roadmap
 
-### Not yet implemented (intentionally deferred)
-- **Tenant portal login** — tenants identify via room_id+phone for lookup; no
-  password-based tenant accounts.
-- **S3-compatible photo storage** — photos stored as base64 in localStorage;
-  doesn't scale beyond ~5MB per room.
-- **Automated daily backups** — pg_dump documented but not automated.
+### Implemented with operational prerequisites
+- **Tenant portal login** — `/tenant` is implemented and uses phone/current-room
+  lookup sessions, not password-based tenant accounts.
+- **S3-compatible storage** — uploads can use local disk or R2/S3-compatible
+  storage. Production should configure R2/S3 because local/container disk is
+  ephemeral on redeploy.
+- **Automated daily backups** — scheduler support exists, but durable cloud
+  retention requires `R2_*` credentials; otherwise backups stay local.
+- **i18n** — tenant portal supports Thai/English when the `i18n` flag is on.
+
+### Not yet implemented or intentionally limited
 - **Vite + TypeScript build** — current stack adds ~2s Babel transpile time
   on first page load.
-- **IoT meter integration** — utility readings are entered manually.
+- **IoT meter integration** — manual readings work; MQTT subscriber is not
+  implemented and `meterIot.mode=mqtt` is rejected.
 - **Full-text search** — admin search is in-memory client-side.
-- **i18n** — Thai-only.
 
 ### Operational TODO
-- Automated backups to S3-compatible storage.
+- Configure R2/S3-compatible storage and backup retention in production.
 - Sentry / error monitoring.
 - Lighthouse CI for perf regressions.
 
