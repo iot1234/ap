@@ -189,9 +189,43 @@ async function carryLateFeeToNextBill(client, { tenantId, roomId, amount, fromPe
   return ins.rows[0]?.id || null;
 }
 
+/**
+ * Reverse a carried-forward late fee when its source bill is voided or
+ * unmark-paid before next month bill-gen consumes it. Every carry path
+ * audit-logs action=bill.late_fee_carried_forward_on_principal_payment with
+ * carriedChargeId in detail; we look those up and deactivate any STILL-ACTIVE
+ * one_off (already-consumed carries are active=false, left untouched).
+ * MUST run inside the reversal transaction (pass the tx client).
+ */
+async function deactivateCarriedLateFees(client, billId) {
+  const audit = await client.query(
+    `SELECT DISTINCT (detail->>'carriedChargeId') AS cid
+       FROM audit_logs
+      WHERE entity_type='bill'
+        AND entity_id=$1
+        AND action='bill.late_fee_carried_forward_on_principal_payment'
+        AND detail ? 'carriedChargeId'
+        AND detail->>'carriedChargeId' IS NOT NULL`,
+    [String(billId)]
+  );
+  const ids = audit.rows.map((r) => Number(r.cid)).filter((n) => Number.isInteger(n) && n > 0);
+  if (!ids.length) return [];
+  const upd = await client.query(
+    `UPDATE recurring_charges
+        SET active=FALSE, updated_at=NOW()
+      WHERE id = ANY($1::bigint[])
+        AND frequency='one_off'
+        AND active=TRUE
+    RETURNING id`,
+    [ids]
+  );
+  return upd.rows.map((r) => Number(r.id));
+}
+
 module.exports = {
   loadBuildingName,
   notifyTenantOnPayment,
   carryLateFeeToNextBill,
+  deactivateCarriedLateFees,
   _nextPeriodStartDate: nextPeriodStartDate,
 };

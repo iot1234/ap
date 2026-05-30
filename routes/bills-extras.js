@@ -1117,8 +1117,12 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         await client.query('ROLLBACK');
         return res.status(404).json({ error: 'not found' });
       }
+      // Reverse any carried-forward late fee: a one_off recurring charge created
+      // when this bill's payment was settled with action='carry' must not bill
+      // the tenant next month for a now-voided bill.
+      const deactivatedCarries = await billPayments.deactivateCarriedLateFees(client, id);
       await client.query('COMMIT');
-      result = { bill: voided.rows[0], reversedPayments };
+      result = { bill: voided.rows[0], reversedPayments, deactivatedCarries };
     } catch (err) {
       await client.query('ROLLBACK').catch(() => {});
       console.error('bill void error:', err);
@@ -1286,10 +1290,16 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           RETURNING *`,
           [id, restoredStatus, restoredLateFee, restoredTotal]
         );
+        // Reverse any carried-forward late fee from the original 'carry'
+        // settlement. The restored bill re-accrues its own late fee (above), so
+        // leaving the carried one_off active would double-charge the tenant next
+        // month. Deactivate only still-active carries (already-billed ones stay).
+        const deactivatedCarries = await billPayments.deactivateCarriedLateFees(client, id);
         await client.query('COMMIT');
         audit(req, 'bill.unmark_paid', 'bill', String(id), {
           reason,
           restoredStatus,
+          deactivatedCarries,
           reversedPayments: reversed.rows.map((p) => ({
             id: p.id, amount: Number(p.amount), method: p.method, ref: p.ref,
           })),

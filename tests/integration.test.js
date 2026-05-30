@@ -7389,3 +7389,29 @@ test("tenant slip upload rejects a slip already used as a booking deposit", () =
   assert.ok(server.includes("SELECT external_id FROM bookings WHERE deposit_slip_hash=$1"), "bill-pay dedup must cross-check booking deposit slips");
   assert.match(server, /มัดจำการจองไปแล้ว/, "must give a clear booking-reuse rejection message");
 });
+
+test("deactivateCarriedLateFees deactivates still-active carried one_offs for a reversed bill", async () => {
+  const billPayments = require("../services/billPayments");
+  const calls = [];
+  const fakeClient = { query: async (sql, params) => {
+    calls.push({ sql, params });
+    if (/FROM audit_logs/.test(sql)) return { rows: [{ cid: "42" }, { cid: "43" }, { cid: null }] };
+    if (/UPDATE recurring_charges/.test(sql)) return { rows: [{ id: 42 }] };
+    return { rows: [] };
+  } };
+  const out = await billPayments.deactivateCarriedLateFees(fakeClient, 99);
+  assert.deepEqual(out, [42], "returns the ids actually deactivated");
+  const upd = calls.find((c) => /UPDATE recurring_charges/.test(c.sql));
+  assert.ok(upd, "runs the deactivation UPDATE");
+  assert.match(upd.sql, /active=TRUE/, "only touches still-active carries");
+  assert.match(upd.sql, /frequency=.one_off./, "only one_off carries");
+  assert.deepEqual(upd.params[0], [42, 43], "passes the parsed carriedChargeIds (null filtered out)");
+});
+
+test("bill void + unmark-paid reverse the carried late fee", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const src = fs.readFileSync(path.join(__dirname, "..", "routes", "bills-extras.js"), "utf8");
+  const calls = src.split("billPayments.deactivateCarriedLateFees(client, id)").length - 1;
+  assert.ok(calls >= 2, "both void and unmark-paid must reverse carried late fees (got " + calls + ")");
+});
