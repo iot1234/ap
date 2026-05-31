@@ -31,6 +31,32 @@ function parseBillOther(raw) {
   }
 }
 
+const PAYABLE_UI_STATUSES = new Set(['unpaid', 'pending', 'overdue']);
+
+function billUiStatus(row) {
+  const raw = String(row?.dbStatus || row?.status || '').toLowerCase();
+  if (raw === 'paid') return 'paid';
+  if (raw === 'void') return 'void';
+  if (raw === 'overdue') return 'overdue';
+  if (raw === 'pending' || raw === 'unpaid') return 'unpaid';
+  return raw || 'unpaid';
+}
+
+function isBillPayableUi(row) {
+  return PAYABLE_UI_STATUSES.has(billUiStatus(row)) && row?.dbStatus !== 'void';
+}
+
+function billStatusMeta(row) {
+  const status = billUiStatus(row);
+  if (status === 'paid') return { label: 'ชำระแล้ว', color: 'success' };
+  if (status === 'void') return { label: 'ยกเลิก', color: 'neutral' };
+  if (status === 'overdue') {
+    const days = Math.max(0, Number(row?.overdueDays) || 0);
+    return { label: `ค้าง ${days} วัน`, color: 'danger' };
+  }
+  return { label: 'รอชำระ', color: 'warning' };
+}
+
 function fmtQty(n) {
   const value = Number(n) || 0;
   return Number.isInteger(value) ? String(value) : value.toFixed(2);
@@ -532,7 +558,10 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         total: Number(real.total) || est.total || 0,
         dueDate: real.due_date || est.dueDate || dueIso,
         dueDateDisplay: real.due_date || est.dueDateDisplay || `${dueDay} ${periodLabelFor(period)}`,
-        status: real.status === 'paid' ? 'paid' : 'unpaid',
+        status: real.status === 'paid' ? 'paid'
+          : real.status === 'void' ? 'void'
+          : real.status === 'overdue' ? 'overdue'
+          : 'unpaid',
         dbStatus: real.status,
         overdueDays: real.status === 'overdue' ? overdueDaysFor(real) : (est.overdueDays || 0),
         _source: 'db',
@@ -565,7 +594,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
 
   const filtered = useMemo(() => {
     if (tab === 'current') return bills;
-    if (tab === 'unpaid')  return bills.filter(b => b.status === 'unpaid');
+    if (tab === 'unpaid')  return bills.filter(isBillPayableUi);
     if (tab === 'paid')    return bills.filter(b => b.status === 'paid');
     if (tab === 'review')  return bills.filter(b => (b.pendingSlipCount || 0) > 0);
     return bills;
@@ -579,9 +608,9 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
   const stats = useMemo(() => {
     const issued = bills.length;
     const paidCount = bills.filter(b => b.status === 'paid').length;
-    const unpaidCount = issued - paidCount;
+    const unpaidCount = bills.filter(isBillPayableUi).length;
     const totalRevenue = bills.filter(b => b.status === 'paid').reduce((s, b) => s + b.total, 0);
-    const overdueAmt = bills.filter(b => b.status === 'unpaid').reduce((s, b) => s + b.total, 0);
+    const overdueAmt = bills.filter(isBillPayableUi).reduce((s, b) => s + b.total, 0);
     return { issued, paidCount, unpaidCount, totalRevenue, overdueAmt };
   }, [bills]);
 
@@ -1171,15 +1200,11 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
   // db view) and pull `dbBillId` from each row when present.
   const handleBulkSendSelected = async () => {
     const ids = [...selected];
-    // UI status is normalized to 'paid' / 'unpaid' (see the bills useMemo
-    // — 'overdue' from the DB collapses to 'unpaid'). We use the UI value
-    // here, not the raw DB status, since `bills` is the UI-shaped array.
-    // Also drop voided bills (`dbStatus === 'void'`) which the server
-    // would reject anyway, so admin doesn't get a confusing "failed N"
-    // toast for rows they didn't expect to skip.
+    // Use the same payable classifier as the table, so overdue bills are
+    // included and voided/paid bills are skipped before hitting the API.
     const targets = bills.filter(
       (b) => ids.includes(b.id) && b._source === 'db' && b.dbBillId
-             && b.status === 'unpaid' && b.dbStatus !== 'void');
+             && isBillPayableUi(b));
     if (targets.length === 0) {
       setToast && setToast({
         kind: 'info',
@@ -1307,6 +1332,12 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
           <div style={{ fontSize: 13.5, fontWeight: 600, color: C.ink, fontFamily: 'IBM Plex Sans Thai, sans-serif' }}>
             {fmtCurrency(b.total)}
           </div>
+          {Number(b.chargesTotal) > 0 && (
+            <div style={{ fontSize: 11, color: C.muted }}>ค่าอื่น {fmtCurrency(b.chargesTotal)}</div>
+          )}
+          {Number(b.vat) > 0 && (
+            <div style={{ fontSize: 11, color: C.muted }}>VAT {fmtCurrency(b.vat)}</div>
+          )}
           {b.penalty > 0 && (
             <div style={{ fontSize: 11, color: C.danger }}>+ ปรับ {fmtCurrency(b.penalty)}</div>
           )}
@@ -1315,22 +1346,23 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
     },
     {
       key: 'status', label: 'สถานะ', minWidth: 120,
-      render: b => (
-        <div style={{ display: 'inline-flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start' }}>
-          {b.status === 'paid'
-            ? <Pill color="success" size="sm">ชำระแล้ว</Pill>
-            : <Pill color="danger" size="sm">ค้าง {b.overdueDays} วัน</Pill>}
-          <span title={b._source === 'db' ? `บิล #${b.dbBillNo || b.dbBillId}` : 'ยังไม่ได้บันทึกเข้าระบบ'}
-                style={{
-                  fontSize: 10, padding: '1px 6px', borderRadius: 4,
-                  background: b._source === 'db' ? (C.successSoft || '#e3f3e8') : (C.warningSoft || '#fef6e0'),
-                  color: b._source === 'db' ? (C.successInk || '#1d4a2c') : (C.warningInk || C.warningInk),
-                  fontWeight: 600, letterSpacing: '0.02em',
-                }}>
-            {b._source === 'db' ? 'ออกแล้ว' : 'ประมาณการ'}
-          </span>
-        </div>
-      ),
+      render: b => {
+        const statusMeta = billStatusMeta(b);
+        return (
+          <div style={{ display: 'inline-flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start' }}>
+            <Pill color={statusMeta.color} size="sm">{statusMeta.label}</Pill>
+            <span title={b._source === 'db' ? `บิล #${b.dbBillNo || b.dbBillId}` : 'ยังไม่ได้บันทึกเข้าระบบ'}
+                  style={{
+                    fontSize: 10, padding: '1px 6px', borderRadius: 4,
+                    background: b._source === 'db' ? (C.successSoft || '#e3f3e8') : (C.warningSoft || '#fef6e0'),
+                    color: b._source === 'db' ? (C.successInk || '#1d4a2c') : (C.warningInk || C.warningInk),
+                    fontWeight: 600, letterSpacing: '0.02em',
+                  }}>
+              {b._source === 'db' ? 'ออกแล้ว' : 'ประมาณการ'}
+            </span>
+          </div>
+        );
+      },
     },
     {
       // Slip status — at a glance shows whether a tenant has submitted a
@@ -1421,8 +1453,9 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         if (b._source !== 'db' || !b.dbBillId) {
           return <span style={{ fontSize: 11, color: C.muted }}>—</span>;
         }
-        if (b.status !== 'unpaid' && b.status !== 'overdue') {
-          return <span style={{ fontSize: 11, color: C.muted }}>{b.status === 'paid' ? 'ชำระแล้ว' : '—'}</span>;
+        if (!isBillPayableUi(b)) {
+          const statusMeta = billStatusMeta(b);
+          return <span style={{ fontSize: 11, color: C.muted }}>{statusMeta.label}</span>;
         }
         const r = batchReadiness && batchReadiness.bills && batchReadiness.bills[b.dbBillId];
         if (!r) return <span style={{ fontSize: 11, color: C.muted }}>…</span>;
@@ -1494,7 +1527,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         return (
           <div style={{ display: 'inline-flex', gap: 5, flexWrap: 'nowrap', justifyContent: 'flex-end', whiteSpace: 'nowrap' }} onClick={(e) => e.stopPropagation()}>
             <Btn size="sm" variant="ghost" style={compactBtn} onClick={() => setPreviewBill(b)}>ดู</Btn>
-            {b.status === 'unpaid' && b._source === 'db' && (
+            {isBillPayableUi(b) && b._source === 'db' && (
               <>
                 <Btn size="sm" variant="ghost" style={compactBtn} onClick={() => handleSendReminder(b.id)}>เตือน</Btn>
                 <Btn size="sm" variant="ghost" style={compactBtn} onClick={() => handleMarkPaid(b.id)}>ชำระ</Btn>
@@ -1678,7 +1711,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
               const ids = [...selected];
               for (const id of ids) {
                 const bill = bills.find(b => b.id === id);
-                if (bill && bill.status === 'unpaid' && bill._source === 'db') {
+                if (bill && isBillPayableUi(bill) && bill._source === 'db') {
                   await handleMarkPaid(id, { confirm: false, refresh: false });
                 }
               }
@@ -2562,6 +2595,7 @@ function BillPreview({ b }) {
   const C = window.ADMIN_C;
   const { fmtCurrency } = window;
   const { Pill } = window;
+  const statusMeta = billStatusMeta(b);
 
   const rows = [
     { label: 'ค่าเช่ารายเดือน', value: b.rent },
@@ -2578,7 +2612,23 @@ function BillPreview({ b }) {
     { label: 'ค่า Wi-Fi', value: b.wifi },
   ];
   if (Number(b.commonFee) > 0) rows.push({ label: 'ค่าส่วนกลาง', value: b.commonFee });
-  if (b.penalty > 0) rows.push({ label: `ค่าปรับชำระล่าช้า (${b.overdueDays} วัน)`, value: b.penalty, danger: true });
+  const otherCharges = Array.isArray(b.charges)
+    ? b.charges.filter((c) => {
+        const amount = Number(c && c.amount) || 0;
+        if (amount <= 0) return false;
+        const label = String((c && c.label) || '');
+        return !(Number(b.commonFee) > 0 && /ส่วนกลาง|common/i.test(label));
+      })
+    : [];
+  otherCharges.forEach((c) => rows.push({
+    label: String(c.label || 'ค่าอื่น ๆ'),
+    detail: c.frequency ? `รอบ ${c.frequency}` : '',
+    value: Number(c.amount) || 0,
+  }));
+  if (Number(b.vat) > 0) rows.push({ label: 'ภาษีมูลค่าเพิ่ม (VAT)', value: Number(b.vat) || 0 });
+  if (Number(b.penalty) > 0) {
+    rows.push({ label: `ค่าปรับชำระล่าช้า (${Number(b.overdueDays) || 0} วัน)`, value: b.penalty, danger: true });
+  }
 
   return (
     <div>
@@ -2592,7 +2642,7 @@ function BillPreview({ b }) {
           <div style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 14, fontWeight: 600, color: C.ink }}>{b.id}</div>
           <div style={{ fontSize: 12.5, color: C.muted, marginTop: 6 }}>{b.tenant} · ห้อง {b.roomId}</div>
         </div>
-        {b.status === 'paid' ? <Pill color="success">ชำระแล้ว</Pill> : <Pill color="danger">ค้างชำระ</Pill>}
+        <Pill color={statusMeta.color}>{statusMeta.label}</Pill>
       </div>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 12 }}>

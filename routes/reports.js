@@ -15,6 +15,11 @@ function neutraliseFormula(s) {
   return FORMULA_INJECTION_RE.test(s) ? `'${s}` : s;
 }
 
+function safeSpreadsheetText(v) {
+  if (v == null) return '';
+  return neutraliseFormula(String(v));
+}
+
 function rowsToCsv(rows) {
   if (!rows.length) return '';
   const header = Object.keys(rows[0]);
@@ -289,11 +294,11 @@ module.exports = function buildReportsRouter(ctx) {
           .map((x) => `${String(x.label || 'Other')}: ${Number(x.amount || 0).toFixed(2)}`)
           .join(', ');
         ws.addRow({
-          billNo: bill.bill_no,
-          period: bill.period,
-          room: bill.room_id,
-          tenant: bill.tenant_name || '',
-          status: bill.status,
+          billNo: safeSpreadsheetText(bill.bill_no),
+          period: safeSpreadsheetText(bill.period),
+          room: safeSpreadsheetText(bill.room_id),
+          tenant: safeSpreadsheetText(bill.tenant_name || ''),
+          status: safeSpreadsheetText(bill.status),
           dueDate: bill.due_date,
           rent: Number(bill.rent) || 0,
           waterPrev: bill.water_prev_reading == null ? null : Number(bill.water_prev_reading),
@@ -307,7 +312,7 @@ module.exports = function buildReportsRouter(ctx) {
           elecRate: Number(bill.elec_rate) || 0,
           elecAmount: Number(bill.elec_amount) || 0,
           wifi: Number(bill.wifi) || 0,
-          other: otherText,
+          other: safeSpreadsheetText(otherText),
           subtotal: Number(bill.subtotal) || 0,
           vat: Number(bill.vat) || 0,
           lateFee: Number(bill.late_fee) || 0,

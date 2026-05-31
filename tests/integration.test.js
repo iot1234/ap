@@ -2287,6 +2287,10 @@ test('financial reports do not price utilities from room meter snapshots', () =>
     'bill workbook must be scoped to the selected billing period');
   assert.doesNotMatch(xlsxRoute, /baankarn_rooms_v1|rm\.waterUnits|rm\.elecUnits|waterRate\s*=|elecRate\s*=/,
     'bill workbook must not rebuild utility charges from room snapshots');
+  assert.match(xlsxRoute, /safeSpreadsheetText\(bill\.tenant_name/,
+    'bill workbook must neutralise formula-leading tenant names');
+  assert.match(xlsxRoute, /safeSpreadsheetText\(otherText\)/,
+    'bill workbook must neutralise formula-leading custom line items');
 
   assert.match(overviewPage, /\/api\/bills\?period=\$\{encodeURIComponent\(currentPeriod\)\}&limit=500/,
     'overview top rooms must load issued bills for the current period');
@@ -3515,14 +3519,19 @@ test('static frontend assets use compression and cacheable JSX revalidation', ()
   assert.doesNotMatch(server, /Cache-Control', 'no-cache, no-store, must-revalidate'/);
 });
 
-test('/health reports disabled scheduler explicitly in diagnostic mode', () => {
-  // DISABLE_BACKGROUND_JOBS is used for safe production diagnostics. /health
-  // must not read stale .scheduler-state.json errors from a previous run and
-  // present them as current failures.
+test('/health is a minimal public readiness probe', () => {
+  // /health is unauthenticated and hit by load balancers. Detailed queue,
+  // scheduler, config, storage, and secret diagnostics must stay behind
+  // /api/admin/health so public probes do not leak operational internals.
   const fs = require('node:fs');
   const path = require('node:path');
   const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
-  assert.match(server, /if \(DISABLE_BACKGROUND_JOBS\) \{\s*out\.scheduler = \{ disabled: true, reason: 'DISABLE_BACKGROUND_JOBS=1' \};/);
+  const idx = server.indexOf("app.get('/health'");
+  assert.ok(idx > 0, 'public health endpoint must exist');
+  const block = server.slice(idx, server.indexOf('// /health/live', idx));
+  assert.match(block, /SELECT 1/, 'public health should probe only DB readiness');
+  assert.doesNotMatch(block, /out\.scheduler|out\.queue|out\.secrets|memory_mb|SCHEDULER_STATE_FILE|notifications_queue|COUNT\(\*\).*secrets/s,
+    'public health must not expose scheduler, queue, memory, or secrets details');
 });
 
 test('checkin notifies the tenant about the welcome bill', () => {
@@ -3731,6 +3740,18 @@ test('auto billing guards against demo PromptPay target', () => {
     'bulk-generate must return a precondition issue for demo PromptPay');
   assert.match(server, /isDemoTarget\(ppDb \|\| ppEnv\)/,
     'production-readiness must fail demo PromptPay');
+});
+
+test('production-readiness catches go-live booking and health blockers', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(server, /booking_deposit_amount[\s\S]{0,220}looks like a test value/,
+    'readiness must fail suspiciously low public booking deposits');
+  assert.match(server, /function looksSuspiciousPublicLineUrl/,
+    'readiness must detect placeholder or malformed LINE contact URLs');
+  assert.match(server, /admin_health_errors[\s\S]{0,220}Open \/admin#health/,
+    'readiness must fail when authenticated health checks have current errors');
 });
 
 test('encryption module round-trips with versioned prefix', () => {
@@ -4750,16 +4771,20 @@ test('anomaly detector partial-recovery does not say "ระบบกลับ�
     'partial-recovery subject must NOT claim full recovery');
 });
 
-test('/health admin endpoint walks the full scheduler-state candidate list', () => {
+test('/api/admin/health walks the full scheduler-state candidate list', () => {
+  // Public /health is intentionally minimal. The authenticated admin health
+  // probe walks SCHEDULER_STATE_FILE → UPLOAD_DIR → app dir → tmpdir so admins
+  // can diagnose volume mount changes without exposing the path publicly.
+  //
   // /health used to hard-code ./.scheduler-state.json while admin/health
   // walked SCHEDULER_STATE_FILE → UPLOAD_DIR → app dir → tmpdir. The two
   // would diverge after a Railway volume mount change.
   const fs = require('node:fs');
   const path = require('node:path');
-  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'healthCheck.js'), 'utf8');
   assert.match(src,
     /process\.env\.SCHEDULER_STATE_FILE,[\s\S]{0,200}process\.env\.UPLOAD_DIR && path\.join\(process\.env\.UPLOAD_DIR/,
-    'admin /health must consider env-configured paths');
+    'admin health must consider env-configured paths');
   assert.match(src, /baankarn-scheduler-state\.json/,
     'and the tmpdir fallback');
 });
@@ -7577,4 +7602,43 @@ test("public contract-fill shows the configured due day + late-fee rate (not har
   assert.ok(server.includes("buildPublicView(inv, building, financials)"), "endpoint must pass resolved financials");
   assert.ok(html.includes("view.contract.dueDay"), "fill page must render the configured due day");
   assert.ok(!html.includes("วันที่ 15 ของทุกเดือน"), "fill page must not hardcode the due day");
+});
+
+test("admin billing page preserves ledger statuses and shows full bill breakdown", () => {
+  const fs = require("node:fs"); const path = require("node:path");
+  const src = fs.readFileSync(path.join(__dirname, "..", "project", "admin", "page-billing.jsx"), "utf8");
+  assert.match(src, /function billUiStatus\(row\)/,
+    "billing page needs one status normalizer shared by filters, actions, and preview");
+  assert.match(src, /const PAYABLE_UI_STATUSES = new Set\(\['unpaid', 'pending', 'overdue'\]\)/,
+    "pending and overdue bills must remain payable while void bills do not");
+  assert.match(src, /real\.status === 'void' \? 'void'/,
+    "DB void status must not collapse into unpaid");
+  assert.match(src, /bills\.filter\(isBillPayableUi\)/,
+    "unpaid tab and stats must use the payable classifier");
+  assert.match(src, /isBillPayableUi\(b\) && b\._source === 'db'/,
+    "row actions must only show payable actions for payable DB bills");
+  assert.match(src, /Number\(b\.chargesTotal\) > 0/,
+    "total column must surface other charges under the total");
+  assert.match(src, /const statusMeta = billStatusMeta\(b\)/,
+    "preview and status cells must render the normalized status label");
+  assert.match(src, /otherCharges\.forEach/,
+    "bill preview must list recurring/other charges, not only base utilities");
+  assert.match(src, /Number\(b\.vat\) > 0/,
+    "bill preview and table must surface VAT when present");
+});
+
+test("production readiness checks late-fee policy configuration", () => {
+  const fs = require("node:fs"); const path = require("node:path");
+  const server = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  const idx = server.indexOf("app.get('/api/admin/production-readiness'");
+  assert.ok(idx > 0, "production readiness endpoint must exist");
+  const block = server.slice(idx, server.indexOf("// 7. Real data signal", idx));
+  assert.match(block, /lateFeeFlag\.enabled/,
+    "readiness must inspect whether late fee is enabled");
+  assert.match(block, /late_fee_rate/,
+    "readiness must fail when late fee is enabled with a zero or invalid rate");
+  assert.match(block, /late_fee_cap/,
+    "readiness must warn when late fee has no cap");
+  assert.match(block, /late_fee_disabled/,
+    "readiness must warn when late fee is disabled");
 });

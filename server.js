@@ -1972,6 +1972,24 @@ function resolvePublicLineContactLinks(config) {
   };
 }
 
+function looksSuspiciousPublicLineUrl(url) {
+  const raw = String(url || '').trim();
+  if (!raw) return false;
+  const lower = raw.toLowerCase();
+  if (/(example|dummy|placeholder|test|sdfsfsdf)/.test(lower)) return true;
+  try {
+    const u = new URL(raw);
+    const host = u.hostname.toLowerCase();
+    if (host === 'line.me' || host.endsWith('.line.me')) {
+      const p = u.pathname.toLowerCase();
+      return !(/\/ti\/p\/|\/r\/ti\/p\/|\/oa\//.test(p));
+    }
+  } catch {
+    return true;
+  }
+  return false;
+}
+
 async function loadPublicLineContactLinks() {
   try {
     const { rows } = await pool.query(
@@ -14324,13 +14342,9 @@ app.post('/api/admin/notifications/:id/retry', sameOrigin, csrfGuard, requireAut
 });
 
 // --- Health ---------------------------------------------------------------
-// /health → liveness + dependency probe.
-//   db          : SELECT 1 latency in ms (or 'down')
-//   scheduler   : last fired key from .scheduler-state.json (or disabled)
-//   queue       : count of pending notifications (visibility on backlog)
-//   secrets     : 'configured' / 'partial' / 'none' (no values, just shape)
-//   uptime      : process uptime in seconds
-//   memory_mb   : RSS in MB
+// /health → public readiness probe. Keep this intentionally small: it is
+// unauthenticated and used by load balancers, so detailed queue/scheduler/
+// storage/config/secrets diagnostics belong behind /api/admin/health.
 // Production-readiness checklist. Different from /api/admin/health (which
 // is "is it currently working") — this is "is it CONFIGURED for real use."
 // Catches the common gotchas that turn a demo into a half-broken production:
@@ -14344,6 +14358,7 @@ app.get('/api/admin/production-readiness', requireAuth, requireRole('owner'), as
   const ok    = (id, label, msg)        => checks.push({ id, label, status: 'ok',   message: msg });
   const warn  = (id, label, msg, hint)  => checks.push({ id, label, status: 'warn', message: msg, hint });
   const fail  = (id, label, msg, hint)  => checks.push({ id, label, status: 'fail', message: msg, hint });
+  let cfgForReadiness = null;
 
   // 1. NODE_ENV
   if (NODE_ENV === 'production') {
@@ -14357,6 +14372,7 @@ app.get('/api/admin/production-readiness', requireAuth, requireRole('owner'), as
   try {
     const cfgRow = await pool.query(`SELECT value FROM app_data WHERE key='baankarn_config_v1'`);
     const cfg = cfgRow.rows.length ? cfgRow.rows[0].value : {};
+    cfgForReadiness = cfg;
     const b = (cfg && cfg.building) || {};
     const missing = [];
     if (!b.name || b.name === 'ที่พักของคุณ') missing.push('building.name (ยังเป็นค่าเริ่มต้น)');
@@ -14434,6 +14450,55 @@ app.get('/api/admin/production-readiness', requireAuth, requireRole('owner'), as
   // 6. Feature flags appropriate for production
   let flags = {};
   try { flags = await features.load(pool); } catch { /* keep going */ }
+  const bookingSettingsForReadiness = roomBookingSettings(flags);
+  if (bookingSettingsForReadiness.enabled && bookingSettingsForReadiness.requireDeposit) {
+    if (bookingSettingsForReadiness.depositAmount > 0 && bookingSettingsForReadiness.depositAmount < 100) {
+      fail('booking_deposit_amount', 'Booking deposit',
+        `Booking deposit is only ฿${bookingSettingsForReadiness.depositAmount} — this looks like a test value`,
+        'Open Booking deposit settings and set the real booking fee/deposit amount before accepting public bookings');
+    } else {
+      ok('booking_deposit_amount', 'Booking deposit',
+        `Booking deposit ฿${bookingSettingsForReadiness.depositAmount}`);
+    }
+  } else if (bookingSettingsForReadiness.enabled) {
+    warn('booking_deposit_amount', 'Booking deposit',
+      'Online booking is open without a required deposit',
+      'Keep this only if staff intentionally reviews bookings without a paid hold');
+  } else {
+    ok('booking_deposit_amount', 'Booking deposit', 'Online booking is closed');
+  }
+  const publicLine = resolvePublicLineContactLinks(cfgForReadiness);
+  if (bookingSettingsForReadiness.enabled && !publicLine.configured) {
+    warn('booking_line_contact', 'Booking LINE contact',
+      'Online booking is open but no public LINE contact link is configured',
+      'Set a real LINE add-friend URL in Settings so applicants can follow up after booking');
+  } else if (publicLine.configured && looksSuspiciousPublicLineUrl(publicLine.addFriendUrl)) {
+    warn('booking_line_contact', 'Booking LINE contact',
+      `LINE contact URL looks like a placeholder: ${publicLine.addFriendUrl}`,
+      'Replace it with the real LINE Official Account add-friend URL before go-live');
+  } else if (publicLine.configured) {
+    ok('booking_line_contact', 'Booking LINE contact', 'Public LINE contact link is configured');
+  }
+  const lateFeeFlag = flags && flags.lateFee ? flags.lateFee : {};
+  if (lateFeeFlag.enabled) {
+    const rate = Number(lateFeeFlag.ratePctPerMonth);
+    if (!Number.isFinite(rate) || rate <= 0) {
+      fail('late_fee_rate', 'Late fee policy',
+        'เปิดค่าปรับชำระล่าช้าแล้ว แต่อัตราเป็น 0%/เดือน — บิล overdue จะไม่เกิดค่าปรับ',
+        'ไปที่ Features → ค่าปรับชำระล่าช้า แล้วตั้งอัตรา %/เดือนให้ตรงนโยบายหอ');
+    } else if (Number(lateFeeFlag.maxPctOfPrincipal || 0) <= 0 && Number(lateFeeFlag.maxLateFeeBaht || 0) <= 0) {
+      warn('late_fee_cap', 'Late fee policy',
+        'ค่าปรับชำระล่าช้าไม่มีเพดานสูงสุด',
+        'ถ้านโยบายหอต้องจำกัดยอด ให้ตั้งเพดานเป็น % ของเงินต้นหรือจำนวนบาทที่หน้า Features');
+    } else {
+      ok('late_fee_policy', 'Late fee policy',
+        `rate=${rate}%/month, grace=${Number(lateFeeFlag.gracePeriodDays) || 0} days`);
+    }
+  } else {
+    warn('late_fee_disabled', 'Late fee policy',
+      'ปิดค่าปรับชำระล่าช้าอยู่ — บิล overdue จะไม่เพิ่มค่าปรับ',
+      'เปิดที่หน้า Features ถ้านโยบายหอต้องเก็บค่าปรับ');
+  }
   if (flags.meterIot?.mode === 'simulator') {
     fail('simulator', 'Meter simulator',
       'meterIot.mode = "simulator" — กำลังสร้างค่าเทียมทับมิเตอร์จริง',
@@ -14595,6 +14660,30 @@ app.get('/api/admin/production-readiness', requireAuth, requireRole('owner'), as
     warn('data_integrity_read', 'Data integrity', err.message);
   }
 
+  // 9. Current subsystem health must be clean before go-live. Keep the
+  // detailed report in /api/admin/health, but make readiness fail loudly when
+  // any health check is currently in error.
+  try {
+    const healthCheck = require('./services/healthCheck');
+    const report = await healthCheck.runChecks(pool);
+    const healthChecks = Array.isArray(report.checks) ? report.checks : [];
+    const errors = healthChecks.filter((c) => c.status === 'error');
+    const warnings = healthChecks.filter((c) => c.status === 'warn');
+    if (errors.length) {
+      fail('admin_health_errors', 'Current health',
+        `${errors.length} health check(s) are currently error: ${errors.slice(0, 4).map((c) => c.id).join(', ')}`,
+        'Open /admin#health and resolve error checks before production launch');
+    } else if (warnings.length) {
+      warn('admin_health_warnings', 'Current health',
+        `${warnings.length} health check warning(s): ${warnings.slice(0, 4).map((c) => c.id).join(', ')}`,
+        'Review /admin#health; warnings may be acceptable only with an explicit operating decision');
+    } else {
+      ok('admin_health', 'Current health', 'All health checks are ok');
+    }
+  } catch (err) {
+    warn('admin_health_read', 'Current health', `Health check failed: ${err.message}`);
+  }
+
   // Summarise — count fail / warn for badge
   const summary = {
     fail: checks.filter((c) => c.status === 'fail').length,
@@ -14653,13 +14742,12 @@ app.get('/api/admin/anomalies', requireAuth, requireRole('owner', 'manager'), as
 });
 
 // Returns 200 when db is reachable, 503 when degraded so Railway/upstream
-// LBs can route around bad replicas.
+// LBs can route around bad replicas. It must not leak operational internals.
 app.get('/health', async (_req, res) => {
   const out = {
     status: 'ok',
     time: new Date().toISOString(),
     uptime: Math.floor(process.uptime()),
-    memory_mb: Math.round(process.memoryUsage().rss / 1024 / 1024),
   };
   // DB probe with timing
   const t0 = Date.now();
@@ -14670,50 +14758,6 @@ app.get('/health', async (_req, res) => {
     out.status = 'degraded';
     out.db = { status: 'down', error: sanitizeError(err) };
   }
-  // Notification queue depth — large pending = something stuck
-  try {
-    const q = await pool.query(`SELECT
-      COUNT(*) FILTER (WHERE status='pending')::int AS pending,
-      COUNT(*) FILTER (WHERE status='failed')::int AS failed
-      FROM notifications_queue WHERE created_at > NOW() - INTERVAL '24 hours'`);
-    out.queue = q.rows[0];
-  } catch { out.queue = null; }
-  // Scheduler heartbeat — last-fired keys from state file. In diagnostic
-  // mode, background jobs are intentionally disabled; do not surface stale
-  // scheduler errors from a prior production run as current health.
-  if (DISABLE_BACKGROUND_JOBS) {
-    out.scheduler = { disabled: true, reason: 'DISABLE_BACKGROUND_JOBS=1' };
-  } else {
-    // Match the candidate list services/healthCheck.js uses so /health and
-    // /api/admin/health agree on which file the scheduler is writing to.
-    // Previously /health hard-coded ./.scheduler-state.json while admin UI
-    // and the healthCheck probe walked SCHEDULER_STATE_FILE → UPLOAD_DIR →
-    // app dir → tmpdir, producing diverging "scheduler last seen" reports.
-    try {
-      const fs = require('fs');
-      const path = require('path');
-      const candidates = [
-        process.env.SCHEDULER_STATE_FILE,
-        process.env.UPLOAD_DIR && path.join(process.env.UPLOAD_DIR, 'scheduler-state.json'),
-        path.join(__dirname, '.scheduler-state.json'),
-        path.join(require('os').tmpdir(), 'baankarn-scheduler-state.json'),
-      ].filter(Boolean);
-      for (const sf of candidates) {
-        try {
-          if (fs.existsSync(sf)) {
-            out.scheduler = JSON.parse(fs.readFileSync(sf, 'utf8'));
-            out.scheduler._statePath = sf;  // surface which file we read
-            break;
-          }
-        } catch { /* try next candidate */ }
-      }
-    } catch { /* ignore */ }
-  }
-  // Secrets status — count, no values
-  try {
-    const c = await pool.query('SELECT COUNT(*)::int AS n FROM secrets');
-    out.secrets = { in_db: c.rows[0].n };
-  } catch { out.secrets = null; }
 
   res.status(out.status === 'ok' ? 200 : 503).json(out);
 });
