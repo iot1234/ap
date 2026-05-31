@@ -1928,6 +1928,8 @@ function CheckInModal({ tenantId, tenant, onClose, onDone, onError }) {
     termMonths: '12',
     endDate: addContractMonths(initialStartDate, 12),
     discountPct: '',  // empty → resolved from termMonths + config.discounts
+    waterStartReading: '',  // เลขมิเตอร์น้ำตั้งต้นของห้องตอนย้ายเข้า
+    elecStartReading: '',   // เลขมิเตอร์ไฟตั้งต้นของห้องตอนย้ายเข้า
   });
   const [busy, setBusy] = React.useState(false);
   const termNumber = Number(form.termMonths);
@@ -1992,6 +1994,13 @@ function CheckInModal({ tenantId, tenant, onClose, onDone, onError }) {
       if (form.termMonths) payload.termMonths = Number(form.termMonths);
       if (form.endDate) payload.endDate = form.endDate;
       if (form.discountPct !== '') payload.discountPct = Number(form.discountPct);
+      // Starting meter readings — the room's current meter value at move-in so
+      // the first real bill measures THIS tenant's consumption from their own
+      // baseline (not the previous tenant's reading or 0). Sent only when
+      // filled; server policy (tenancyContract.meterStartPolicy) decides if
+      // required for metered rooms.
+      if (form.waterStartReading !== '') payload.waterStartReading = Number(form.waterStartReading);
+      if (form.elecStartReading !== '') payload.elecStartReading = Number(form.elecStartReading);
       await apiCall(`/api/tenants/${tenantId}/checkin`, {
         method: 'POST',
         body: JSON.stringify(payload),
@@ -2055,6 +2064,20 @@ function CheckInModal({ tenantId, tenant, onClose, onDone, onError }) {
           <input type="number" step="0.1" min="0" max="50" value={form.discountPct}
             onChange={(e) => setForm({ ...form, discountPct: e.target.value })}
             placeholder="ปล่อยว่าง = auto" style={inInp} />
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+          <div>
+            <label style={inLbl}>เลขมิเตอร์น้ำตั้งต้น</label>
+            <input type="number" step="0.01" min="0" value={form.waterStartReading}
+              onChange={(e) => setForm({ ...form, waterStartReading: e.target.value })}
+              placeholder="เลขที่อ่านจากหน้ามิเตอร์ตอนนี้" style={inInp} />
+          </div>
+          <div>
+            <label style={inLbl}>เลขมิเตอร์ไฟตั้งต้น</label>
+            <input type="number" step="0.01" min="0" value={form.elecStartReading}
+              onChange={(e) => setForm({ ...form, elecStartReading: e.target.value })}
+              placeholder="เลขที่อ่านจากหน้ามิเตอร์ตอนนี้" style={inInp} />
+          </div>
         </div>
         <div style={{
           padding: 10,
