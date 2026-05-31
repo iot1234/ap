@@ -792,6 +792,7 @@ async function tickBillGen(pool, flags, now, state) {
       //     changing /admin#pricing mid-contract doesn't break existing
       //     tenants)
       let activeContract = null;
+      let expiredContract = null;
       try {
         const cq = await pool.query(
           `SELECT id, monthly_rent, discount_pct, status
@@ -803,6 +804,27 @@ async function tickBillGen(pool, flags, now, state) {
         if (cq.rows[0]) {
           activeContract = cq.rows[0];
           discountPct = Number(cq.rows[0].discount_pct) || 0;
+        } else {
+          // No active contract, but tickBillGen still bills this room because
+          // the blob says occupied + has a tenant. A tenant who stayed past a
+          // fixed term (no renewal signed) must keep their SIGNED rate, not
+          // jump to the current pricing formula. Pull the most-recent expired
+          // contract for the resident tenant and let resolveBillingRent honor
+          // its locked rate (tier 1.5). discount_pct continues too. Scoped to
+          // the tenant currently in the room so a previous tenant's old
+          // contract can't leak into a new (un-contracted) occupant's bill.
+          const eq = await pool.query(
+            `SELECT id, monthly_rent, discount_pct, status
+               FROM contracts
+               WHERE room_id=$1 AND status='expired' AND deleted_at IS NULL
+                 AND ($2::bigint IS NULL OR tenant_id=$2)
+               ORDER BY end_date DESC NULLS LAST, start_date DESC LIMIT 1`,
+            [room.id, tenantId || null]
+          );
+          if (eq.rows[0] && Number(eq.rows[0].monthly_rent) > 0) {
+            expiredContract = eq.rows[0];
+            discountPct = Number(eq.rows[0].discount_pct) || 0;
+          }
         }
       } catch { /* legacy deploys without contracts table */ }
       // Transactional bill insert + one_off deactivation. Reading
@@ -841,7 +863,7 @@ async function tickBillGen(pool, flags, now, state) {
           }
         }
         const roomForBilling = await meter.attachBillingReadingsForPeriod(billClient, room, period);
-        const bill = billing.buildBill({ room: roomForBilling, contract: activeContract, config, features: flags, recurring, period, dueDate, discountPct });
+        const bill = billing.buildBill({ room: roomForBilling, contract: activeContract, expiredContract, config, features: flags, recurring, period, dueDate, discountPct });
 
         // R5 — surface flat-mode silent fallbacks. Recorded per room; the
         // owner alert below fires once at the end of the run with the full

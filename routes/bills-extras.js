@@ -479,18 +479,22 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       if (Array.isArray(b.recurring) && !Array.isArray(b.other)) {
         otherForStorage = recurringList;
       }
+      // Resident tenant for this room — resolved once and reused for both the
+      // recurring-charge lookup and the expired-contract rate fallback below.
+      // Hoisted to this scope (was previously local to the recurringCharges
+      // block) so the expired-contract lookup can scope to the right tenant.
+      let tid = b.tenantId || null;
+      if (!tid) {
+        try {
+          const tq = await pool.query(
+            `SELECT id FROM tenants WHERE current_room_id=$1 AND status='active' AND deleted_at IS NULL
+               ORDER BY updated_at DESC LIMIT 1`,
+            [b.roomId]
+          );
+          if (tq.rows.length) tid = tq.rows[0].id;
+        } catch { /* ignore */ }
+      }
       if (flags.recurringCharges?.enabled && flags.recurringCharges?.autoIncludeOnBillGen !== false && !b.recurring) {
-        let tid = b.tenantId || null;
-        if (!tid) {
-          try {
-            const tq = await pool.query(
-              `SELECT id FROM tenants WHERE current_room_id=$1 AND status='active' AND deleted_at IS NULL
-                 ORDER BY updated_at DESC LIMIT 1`,
-              [b.roomId]
-            );
-            if (tq.rows.length) tid = tq.rows[0].id;
-          } catch { /* ignore */ }
-        }
         const dbRecurring = await loadRecurringFor(pool, { tenantId: tid, roomId: b.roomId });
         // Honor `frequency` so quarterly charges only land on bills for the
         // appropriate quarter (every 3 months from start_at) — previously
@@ -509,6 +513,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       // changing /admin#pricing mid-contract doesn't break existing tenants).
       let discountPct = 0;
       let activeContract = null;
+      let expiredContract = null;
       try {
         const cq = await pool.query(
           `SELECT id, monthly_rent, discount_pct, status
@@ -520,11 +525,28 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         if (cq.rows[0]) {
           activeContract = cq.rows[0];
           discountPct = Number(cq.rows[0].discount_pct) || 0;
+        } else {
+          // Mirror the scheduler: a tenant who stayed past a fixed term keeps
+          // their SIGNED rate (month-to-month continuation), not the current
+          // formula. Scoped to the resident tenant so a prior tenant's expired
+          // contract can't leak into a new occupant's preview/bill.
+          const eq = await pool.query(
+            `SELECT id, monthly_rent, discount_pct, status
+               FROM contracts
+               WHERE room_id=$1 AND status='expired' AND deleted_at IS NULL
+                 AND ($2::bigint IS NULL OR tenant_id=$2)
+               ORDER BY end_date DESC NULLS LAST, start_date DESC LIMIT 1`,
+            [b.roomId, tid || null]
+          );
+          if (eq.rows[0] && Number(eq.rows[0].monthly_rent) > 0) {
+            expiredContract = eq.rows[0];
+            discountPct = Number(eq.rows[0].discount_pct) || 0;
+          }
         }
       } catch { /* contracts may be empty on legacy deploys */ }
       const roomForBilling = await meter.attachBillingReadingsForPeriod(pool, room, b.period);
       computed = billing.buildBill({
-        room: roomForBilling, contract: activeContract, config, features: flags,
+        room: roomForBilling, contract: activeContract, expiredContract, config, features: flags,
         recurring: recurringList,
         period: b.period, dueDate: b.dueDate,
         discountPct,

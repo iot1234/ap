@@ -7629,3 +7629,42 @@ test("public contract-fill shows the configured due day + late-fee rate (not har
   assert.ok(html.includes("view.contract.dueDay"), "fill page must render the configured due day");
   assert.ok(!html.includes("วันที่ 15 ของทุกเดือน"), "fill page must not hardcode the due day");
 });
+
+test("billing rate: a tenant who stays past an expired contract keeps the SIGNED rate, not the formula", () => {
+  // A fixed term ending doesn't evict the tenant — by Thai convention they
+  // continue month-to-month at the rate they signed. Before this fix, the day
+  // a contract expired the bill silently jumped to the current /admin#pricing
+  // formula rate. resolveBillingRent now honors an expired contract's locked
+  // rent (tier 1.5) when the caller passes it for a still-resident tenant.
+  const pricing = require("../services/pricing");
+  const room = { type: "standard", rent: 9999 };
+  const config = { rates: { standard: { rent: 8000 } } };
+
+  // expired contract → its locked rate wins over formula
+  const cont = pricing.resolveBillingRent({
+    room, contract: null, expiredContract: { id: 7, monthly_rent: 4000, status: "expired" }, config,
+  });
+  assert.equal(cont.rent, 4000, "expired-contract continuation must bill the signed rate");
+  assert.equal(cont.source, "contract_expired_continuation", "source must mark the continuation");
+
+  // an active contract still outranks an expired one
+  const act = pricing.resolveBillingRent({
+    room, contract: { id: 9, monthly_rent: 5000, status: "active" },
+    expiredContract: { id: 7, monthly_rent: 4000 }, config,
+  });
+  assert.equal(act.rent, 5000, "active contract must win over expired");
+  assert.equal(act.source, "contract");
+
+  // with no contract at all, behavior is unchanged (formula)
+  const none = pricing.resolveBillingRent({ room, contract: null, expiredContract: null, config });
+  assert.notEqual(none.source, "contract_expired_continuation", "no-contract path must not claim continuation");
+  assert.equal(none.rent, 8000, "no-contract path still uses the formula rate");
+
+  // the scheduler + bulk-gen must look up the expired contract for the resident
+  const fs = require("node:fs"); const path = require("node:path");
+  const sched = fs.readFileSync(path.join(__dirname, "..", "services", "scheduler.js"), "utf8");
+  const extras = fs.readFileSync(path.join(__dirname, "..", "routes", "bills-extras.js"), "utf8");
+  assert.match(sched, /status='expired'[\s\S]{0,200}tenant_id=\$2/, "scheduler must pull the expired contract scoped to the resident tenant");
+  assert.match(sched, /expiredContract,/, "scheduler must pass expiredContract into buildBill");
+  assert.match(extras, /status='expired'[\s\S]{0,200}tenant_id=\$2/, "bulk-gen must pull the expired contract scoped to the resident tenant");
+});

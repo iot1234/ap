@@ -131,7 +131,7 @@ function computeFromFormula(room, config) {
  * @param {object} [opts.config]   - app_data['baankarn_config_v1']
  * @returns {{ rent: number, source: 'contract'|'override'|'formula'|'legacy', contractId?: number, reason?: string }}
  */
-function resolveBillingRent({ room, contract, config }) {
+function resolveBillingRent({ room, contract, config, expiredContract = null }) {
   // 1. Contract lock — highest priority. A signed contract's rent is
   //    immutable; even if admin "fixes" the rate in /admin#pricing,
   //    existing tenants keep paying the rate they signed for.
@@ -140,6 +140,22 @@ function resolveBillingRent({ room, contract, config }) {
       rent: Number(contract.monthly_rent),
       source: 'contract',
       contractId: contract.id,
+    };
+  }
+
+  // 1.5 Expired-contract continuation — a tenant who stays past a fixed term
+  //     (no renewal signed yet) is, by Thai rental convention, on an implied
+  //     month-to-month continuation at the SAME rent they signed, NOT the
+  //     current /admin#pricing formula. Without this, the day a contract
+  //     expires the bill silently jumps to the formula rate while the tenant
+  //     is still living there — breaking the locked-rate guarantee. Only the
+  //     caller (scheduler/bulk-gen) decides this applies, by passing the most-
+  //     recent expired contract for a room whose tenant is still resident.
+  if (expiredContract && Number(expiredContract.monthly_rent) > 0) {
+    return {
+      rent: Number(expiredContract.monthly_rent),
+      source: 'contract_expired_continuation',
+      contractId: expiredContract.id,
     };
   }
 
