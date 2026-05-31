@@ -195,7 +195,7 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
                       ) : null}
                     </td>
                     <td style={{ ...td, textAlign: 'right', fontFamily: 'monospace' }}>
-                      {fmtCurrency(c.monthly_rent)}
+                      ฿{fmtCurrency(c.monthly_rent)}
                     </td>
                     <td style={{ ...td, textAlign: 'right' }}>
                       {Number(c.discount_pct) > 0 ? (
