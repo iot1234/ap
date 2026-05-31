@@ -258,7 +258,7 @@ function PageTenants({ rooms, setRooms, config, addActivity, setToast }) {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start' }}>
           <StatusBadge status={t.tenantStatus} size="sm" />
           {t.outstandingTotal > 0 ? (
-            <span style={{ fontSize: 11, color: C.danger }}>ค้าง ฿{fmtCurrency(t.outstandingTotal)}</span>
+            <span style={{ fontSize: 11, color: C.danger }}>ค้าง {fmtCurrency(t.outstandingTotal)}</span>
           ) : null}
         </div>
       ),
@@ -439,9 +439,21 @@ function AddTenantModal({ open, onClose, rooms, setRooms, busy, setBusy, initial
       setToast && setToast({ kind: 'error', message: 'เบอร์โทรไม่ถูกต้อง (ขึ้นต้น 0 ตามด้วย 9-10 หลัก)' });
       return;
     }
-    if (form.citizenId && !/^\d{13}$/.test(form.citizenId.replace(/[\s-]/g, ''))) {
+    const cidDigits = form.citizenId ? form.citizenId.replace(/[\s-]/g, '') : '';
+    if (cidDigits && !/^\d{13}$/.test(cidDigits)) {
       setToast && setToast({ kind: 'error', message: 'เลขบัตรประชาชนต้อง 13 หลัก' });
       return;
+    }
+    if (cidDigits && /^\d{13}$/.test(cidDigits)) {
+      // Thai national-ID mod-11 check digit: Σ(digit[i] × (13−i)) for i=0..11,
+      // then (11 − sum%11) % 10 must equal digit[12]. Catches transposed/typo'd
+      // IDs before the round-trip (the server enforces the same mod-11 check).
+      let sum = 0;
+      for (let i = 0; i < 12; i++) sum += Number(cidDigits[i]) * (13 - i);
+      if ((11 - (sum % 11)) % 10 !== Number(cidDigits[12])) {
+        setToast && setToast({ kind: 'error', message: 'เลขบัตรประชาชนไม่ถูกต้อง (เลขตรวจสอบ mod-11 ไม่ผ่าน)' });
+        return;
+      }
     }
     // Pre-flight duplicate check: hit /api/tenants?q=<phone> to see if the
     // phone is already on a tenant row. The server's mirrorRoomsToTenants
@@ -1500,10 +1512,10 @@ function TabContract({ t, routeBookingId = '', setToast, addActivity, setRooms, 
             { label: 'ระยะเวลาสัญญา', value: contract.term_months ? `${contract.term_months} เดือน` : 'เปิด-ไม่จำกัด' },
             { label: 'วันที่เริ่มต้น', value: fmtDate(contract.start_date) },
             { label: 'วันที่สิ้นสุด',  value: fmtDate(contract.end_date) },
-            { label: 'ค่าเช่า/เดือน', value: '฿' + fmtCurrency(contract.monthly_rent), bold: true },
+            { label: 'ค่าเช่า/เดือน', value: fmtCurrency(contract.monthly_rent), bold: true },
             { label: 'ส่วนลด',        value: Number(contract.discount_pct) > 0
                                               ? `${Number(contract.discount_pct).toFixed(1)}%` : 'ไม่มี' },
-            { label: 'เงินมัดจำ',     value: '฿' + fmtCurrency(contract.deposit) },
+            { label: 'เงินมัดจำ',     value: fmtCurrency(contract.deposit) },
           ]}
         />
         <div style={{ marginTop: 14, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
@@ -1598,8 +1610,8 @@ function CancelContractModal({ contract, tenant, reason, setReason, busy, onClos
         color: C.muted, marginBottom: 12, lineHeight: 1.5,
       }}>
         ห้อง: <b style={{ color: C.ink }}>{contract.room_id}</b> ·
-        ค่าเช่า: <b style={{ color: C.ink }}>฿{fmtCurrency(contract.monthly_rent)}/เดือน</b> ·
-        มัดจำ: <b style={{ color: C.ink }}>฿{fmtCurrency(contract.deposit)}</b>
+        ค่าเช่า: <b style={{ color: C.ink }}>{fmtCurrency(contract.monthly_rent)}/เดือน</b> ·
+        มัดจำ: <b style={{ color: C.ink }}>{fmtCurrency(contract.deposit)}</b>
       </div>
 
       <label style={{ display: 'block', fontSize: 12, marginBottom: 4, color: '#5b4f40', fontWeight: 500 }}>
@@ -1686,12 +1698,12 @@ function ContractPreFlightSummary({ t, C, fmtCurrency }) {
       ) : null}
       <Row icon="💰" label="ค่าเช่า/เดือน">
         <b style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 14 }}>
-          ฿{fmtCurrency(rent)}
+          {fmtCurrency(rent)}
         </b>
       </Row>
       <Row icon="🏦" label="เงินมัดจำ">
         <span style={{ fontFamily: 'JetBrains Mono, monospace' }}>
-          ฿{fmtCurrency(deposit)}
+          {fmtCurrency(deposit)}
         </span>
         <span style={{ color: C.muted, marginLeft: 6, fontSize: 11, fontWeight: 400 }}>
           (ค่าเช่า × 2)
@@ -1916,6 +1928,8 @@ function CheckInModal({ tenantId, tenant, onClose, onDone, onError }) {
     termMonths: '12',
     endDate: addContractMonths(initialStartDate, 12),
     discountPct: '',  // empty → resolved from termMonths + config.discounts
+    waterStartReading: '',  // เลขมิเตอร์น้ำตั้งต้นของห้องตอนย้ายเข้า
+    elecStartReading: '',   // เลขมิเตอร์ไฟตั้งต้นของห้องตอนย้ายเข้า
   });
   const [busy, setBusy] = React.useState(false);
   const termNumber = Number(form.termMonths);
@@ -1980,6 +1994,13 @@ function CheckInModal({ tenantId, tenant, onClose, onDone, onError }) {
       if (form.termMonths) payload.termMonths = Number(form.termMonths);
       if (form.endDate) payload.endDate = form.endDate;
       if (form.discountPct !== '') payload.discountPct = Number(form.discountPct);
+      // Starting meter readings — the room's current meter value at move-in so
+      // the first real bill measures THIS tenant's consumption from their own
+      // baseline (not the previous tenant's reading or 0). Sent only when
+      // filled; server policy (tenancyContract.meterStartPolicy) decides if
+      // required for metered rooms.
+      if (form.waterStartReading !== '') payload.waterStartReading = Number(form.waterStartReading);
+      if (form.elecStartReading !== '') payload.elecStartReading = Number(form.elecStartReading);
       await apiCall(`/api/tenants/${tenantId}/checkin`, {
         method: 'POST',
         body: JSON.stringify(payload),
@@ -2043,6 +2064,20 @@ function CheckInModal({ tenantId, tenant, onClose, onDone, onError }) {
           <input type="number" step="0.1" min="0" max="50" value={form.discountPct}
             onChange={(e) => setForm({ ...form, discountPct: e.target.value })}
             placeholder="ปล่อยว่าง = auto" style={inInp} />
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+          <div>
+            <label style={inLbl}>เลขมิเตอร์น้ำตั้งต้น</label>
+            <input type="number" step="0.01" min="0" value={form.waterStartReading}
+              onChange={(e) => setForm({ ...form, waterStartReading: e.target.value })}
+              placeholder="เลขที่อ่านจากหน้ามิเตอร์ตอนนี้" style={inInp} />
+          </div>
+          <div>
+            <label style={inLbl}>เลขมิเตอร์ไฟตั้งต้น</label>
+            <input type="number" step="0.01" min="0" value={form.elecStartReading}
+              onChange={(e) => setForm({ ...form, elecStartReading: e.target.value })}
+              placeholder="เลขที่อ่านจากหน้ามิเตอร์ตอนนี้" style={inInp} />
+          </div>
         </div>
         <div style={{
           padding: 10,

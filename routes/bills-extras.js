@@ -479,18 +479,22 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       if (Array.isArray(b.recurring) && !Array.isArray(b.other)) {
         otherForStorage = recurringList;
       }
+      // Resident tenant for this room — resolved once and reused for both the
+      // recurring-charge lookup and the expired-contract rate fallback below.
+      // Hoisted to this scope (was previously local to the recurringCharges
+      // block) so the expired-contract lookup can scope to the right tenant.
+      let tid = b.tenantId || null;
+      if (!tid) {
+        try {
+          const tq = await pool.query(
+            `SELECT id FROM tenants WHERE current_room_id=$1 AND status='active' AND deleted_at IS NULL
+               ORDER BY updated_at DESC LIMIT 1`,
+            [b.roomId]
+          );
+          if (tq.rows.length) tid = tq.rows[0].id;
+        } catch { /* ignore */ }
+      }
       if (flags.recurringCharges?.enabled && flags.recurringCharges?.autoIncludeOnBillGen !== false && !b.recurring) {
-        let tid = b.tenantId || null;
-        if (!tid) {
-          try {
-            const tq = await pool.query(
-              `SELECT id FROM tenants WHERE current_room_id=$1 AND status='active' AND deleted_at IS NULL
-                 ORDER BY updated_at DESC LIMIT 1`,
-              [b.roomId]
-            );
-            if (tq.rows.length) tid = tq.rows[0].id;
-          } catch { /* ignore */ }
-        }
         const dbRecurring = await loadRecurringFor(pool, { tenantId: tid, roomId: b.roomId });
         // Honor `frequency` so quarterly charges only land on bills for the
         // appropriate quarter (every 3 months from start_at) — previously
@@ -509,6 +513,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       // changing /admin#pricing mid-contract doesn't break existing tenants).
       let discountPct = 0;
       let activeContract = null;
+      let expiredContract = null;
       try {
         const cq = await pool.query(
           `SELECT id, monthly_rent, discount_pct, status
@@ -520,11 +525,28 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         if (cq.rows[0]) {
           activeContract = cq.rows[0];
           discountPct = Number(cq.rows[0].discount_pct) || 0;
+        } else {
+          // Mirror the scheduler: a tenant who stayed past a fixed term keeps
+          // their SIGNED rate (month-to-month continuation), not the current
+          // formula. Scoped to the resident tenant so a prior tenant's expired
+          // contract can't leak into a new occupant's preview/bill.
+          const eq = await pool.query(
+            `SELECT id, monthly_rent, discount_pct, status
+               FROM contracts
+               WHERE room_id=$1 AND status='expired' AND deleted_at IS NULL
+                 AND ($2::bigint IS NULL OR tenant_id=$2)
+               ORDER BY end_date DESC NULLS LAST, start_date DESC LIMIT 1`,
+            [b.roomId, tid || null]
+          );
+          if (eq.rows[0] && Number(eq.rows[0].monthly_rent) > 0) {
+            expiredContract = eq.rows[0];
+            discountPct = Number(eq.rows[0].discount_pct) || 0;
+          }
         }
       } catch { /* contracts may be empty on legacy deploys */ }
       const roomForBilling = await meter.attachBillingReadingsForPeriod(pool, room, b.period);
       computed = billing.buildBill({
-        room: roomForBilling, contract: activeContract, config, features: flags,
+        room: roomForBilling, contract: activeContract, expiredContract, config, features: flags,
         recurring: recurringList,
         period: b.period, dueDate: b.dueDate,
         discountPct,
@@ -723,8 +745,10 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         console.warn('[bill] tenant lookup failed:', err.message);
       }
     }
+    const billClient = await pool.connect();
     try {
-      const { rows } = await pool.query(
+      await billClient.query('BEGIN');
+      const { rows } = await billClient.query(
         `INSERT INTO bills
          (bill_no, tenant_id, room_id, period, rent,
           water_prev_reading, water_current_reading, water_units, water_rate, water_amount,
@@ -766,7 +790,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         ]
       );
       if (!rows.length) {
-        const locked = await pool.query(
+        const locked = await billClient.query(
           `SELECT b.id, b.status,
                   EXISTS (
                     SELECT 1 FROM payments p
@@ -778,6 +802,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             LIMIT 1`,
           [computed.billNo]
         );
+        await billClient.query('ROLLBACK');
         const current = locked.rows[0] || {};
         return res.status(409).json({
           error: 'existing bill is locked because it is paid, void, deleted, or has a verified payment',
@@ -787,6 +812,20 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           hasVerifiedPayment: !!current.has_verified_payment,
         });
       }
+      // B1 — mark consumed one_off recurring charges inactive so they don't
+      // appear on next month's bill. This MUST commit atomically with the bill
+      // insert: previously it ran as a separate autocommit query AFTER the bill
+      // was already committed, so a crash / connection drop in between left the
+      // one_off `active=TRUE` and it was billed AGAIN next cycle — a silent
+      // double-charge to the tenant. Inside the transaction, a failure here
+      // rolls the bill back too, so admin simply retries and stays consistent.
+      if (usedOneOffIds.length) {
+        await billClient.query(
+          `UPDATE recurring_charges SET active=FALSE, updated_at=NOW() WHERE id = ANY($1::bigint[])`,
+          [usedOneOffIds]
+        );
+      }
+      await billClient.query('COMMIT');
       audit(req, 'bill.create', 'bill', String(rows[0].id), {
         tenantId,
         autoLinked: !b.tenantId && tenantId,
@@ -796,21 +835,9 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         // explain why its total disagrees with the resolver.
         manualOverride: driftReport ? { reason: driftReport.reason, drifts: driftReport.drifts } : null,
       });
-      // B1 — mark consumed one_off recurring charges inactive so they don't
-      // appear on next month's bill. Best-effort; failure here doesn't unwind
-      // the bill insert (the charges line items are already in `other`).
-      if (usedOneOffIds.length) {
-        try {
-          await pool.query(
-            `UPDATE recurring_charges SET active=FALSE, updated_at=NOW() WHERE id = ANY($1::bigint[])`,
-            [usedOneOffIds]
-          );
-        } catch (err) {
-          console.warn('[bill] one_off deactivate failed:', err.message);
-        }
-      }
       res.json({ ok: true, bill: rows[0], computed });
     } catch (err) {
+      await billClient.query('ROLLBACK').catch(() => {});
       // A7 — translate the partial-unique constraint into a clear 409 so
       // the admin UI can show "already generated" instead of a generic 500.
       // Match the `uq_bills_room_period` PREFIX, not the full legacy name:
@@ -826,6 +853,8 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       }
       console.error('bill create error:', err);
       res.status(500).json({ error: 'internal error' });
+    } finally {
+      billClient.release();
     }
   });
 

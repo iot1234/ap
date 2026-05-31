@@ -1101,6 +1101,9 @@ function Toast({ open, kind = 'success', children, onClose, duration }) {
             marginTop: 4,
             fontSize: 12.5, fontWeight: 400, opacity: 0.85,
             wordBreak: 'break-word',
+            // Error formatters build \n-separated multi-line bodies (validation
+            // field lists, bill-total drift, payment breakdown) — keep the breaks.
+            whiteSpace: 'pre-line',
           }}>{description}</div>
         )}
       </div>

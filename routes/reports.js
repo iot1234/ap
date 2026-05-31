@@ -427,7 +427,7 @@ module.exports = function buildReportsRouter(ctx) {
         const period = `${year}-${String(month).padStart(2, '0')}`;
         const q = await pool.query(
           `SELECT period, ${breakdownExpr}
-             FROM bills WHERE deleted_at IS NULL AND period=$1 GROUP BY period`,
+             FROM bills WHERE deleted_at IS NULL AND status <> 'void' AND period=$1 GROUP BY period`,
           [period]
         );
         rows = q.rows;
@@ -436,7 +436,7 @@ module.exports = function buildReportsRouter(ctx) {
         for (let m = 1; m <= 12; m++) periods.push(`${year}-${String(m).padStart(2, '0')}`);
         const q = await pool.query(
           `SELECT period, ${breakdownExpr}
-             FROM bills WHERE deleted_at IS NULL AND period = ANY($1)
+             FROM bills WHERE deleted_at IS NULL AND status <> 'void' AND period = ANY($1)
              GROUP BY period ORDER BY period ASC`,
           [periods]
         );
@@ -464,22 +464,21 @@ module.exports = function buildReportsRouter(ctx) {
   r.get('/occupancy', requireAuth, managerOrOwner, async (req, res) => {
     const year = Number(req.query.year) || new Date().getFullYear();
     try {
-      const totalRoomsRow = await pool.query(
-        `SELECT COALESCE(jsonb_object_keys_count(value), 0)::int AS n
-           FROM (SELECT value FROM app_data WHERE key='baankarn_rooms_v1') s`
-      ).catch(async () => {
-        // Fallback if the helper function doesn't exist
-        const r = await pool.query(`SELECT value FROM app_data WHERE key='baankarn_rooms_v1'`);
-        const n = r.rows.length ? Object.keys(r.rows[0].value || {}).length : 0;
-        return { rows: [{ n }] };
-      });
-      const totalRooms = totalRoomsRow.rows[0]?.n || 0;
+      // Count rooms from the JSONB rooms blob in Node. (A previous version
+      // called a non-existent jsonb_object_keys_count() SQL function and relied
+      // on it throwing into a fallback every request — removed.)
+      const roomsBlob = await pool.query(
+        `SELECT value FROM app_data WHERE key='baankarn_rooms_v1'`
+      );
+      const totalRooms = roomsBlob.rows.length
+        ? Object.keys(roomsBlob.rows[0].value || {}).length
+        : 0;
 
       const periods = [];
       for (let m = 1; m <= 12; m++) periods.push(`${year}-${String(m).padStart(2, '0')}`);
       const q = await pool.query(
         `SELECT period, COUNT(DISTINCT room_id)::int AS occupied
-           FROM bills WHERE deleted_at IS NULL AND period = ANY($1)
+           FROM bills WHERE deleted_at IS NULL AND status <> 'void' AND period = ANY($1)
            GROUP BY period`,
         [periods]
       );

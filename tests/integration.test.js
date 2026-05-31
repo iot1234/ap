@@ -2222,8 +2222,29 @@ test('feature-gated modules fail closed with structured errors', () => {
     'tenant portal session routes must return FEATURE_DISABLED when the flag is off');
   assert.match(server, /app\.get\('\/api\/meters\/:roomId\/readings', requireAuth, features\.requireFeature\('meterIot'\)/,
     'meter read API must be gated, not only meter write API');
-  assert.match(server, /app\.get\('\/api\/access\/logs', requireAuth, features\.requireFeature\('accessControl'\)/,
-    'access log read API must be gated with the accessControl flag');
+  assert.match(server, /app\.get\('\/api\/access\/logs', requireAuth, requireRole\('owner', 'manager'\), features\.requireFeature\('accessControl'\)/,
+    'access log read API must be gated with the accessControl flag AND restricted to owner/manager (movement data is sensitive)');
+});
+
+test('access log POST is card-driven: revoked card denied, identity from card not body', () => {
+  // A device-token holder must not be able to forge access events. The card
+  // ROW is the source of truth for tenant/room, and a revoked card is always
+  // denied — this is the software enforcement point for revoke-on-overdue.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  // Resolve the presented card against access_cards.
+  assert.match(server, /SELECT card_id, tenant_id, room_id, status FROM access_cards WHERE card_id=\$1/,
+    'access log must look up the presented card');
+  // Revoked card forces denied regardless of the caller-supplied result.
+  assert.match(server, /card\.status === 'revoked'[\s\S]{0,120}result = 'denied'/,
+    'a revoked card must be recorded as denied even if the caller claims granted');
+  // Identity comes from the card row, not the request body (anti-forgery).
+  assert.match(server, /tenantId = card\.tenant_id;\s*\n\s*roomId = card\.room_id/,
+    'tenant/room must be taken from the card, not the request body');
+  // Unknown card → denied, no tenant attribution.
+  assert.match(server, /result = 'denied';\s*\n\s*reason = reason \|\| 'unknown_card';\s*\n\s*tenantId = null;/,
+    'an unknown card must be denied and not attributed to any tenant');
 });
 
 test('monthly meter readings drive billing period instead of room edit units', () => {
@@ -3868,12 +3889,17 @@ test('scheduler runs late-fee before bill-gen (sequential)', () => {
   const fs = require('node:fs');
   const path = require('node:path');
   const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'scheduler.js'), 'utf8');
-  // Late-fee call must precede the Promise.allSettled([...]) array.
-  const lateFeeIdx = src.indexOf('await tickLateFee(');
+  // Late-fee call must precede the Promise.allSettled([...]) array. It is now
+  // wrapped in the same per-day advisory lock as the other jobs (multi-replica
+  // dedup of its per-tenant notifications + audit writes) but still runs
+  // sequentially BEFORE the parallel block.
+  const lateFeeIdx = src.indexOf('() => tickLateFee(');
   const allSettledIdx = src.indexOf('Promise.allSettled(jobs.map');
-  assert.ok(lateFeeIdx > 0, 'tickLateFee must be awaited explicitly');
+  assert.ok(lateFeeIdx > 0, 'tickLateFee must be called explicitly (before the parallel jobs)');
   assert.ok(allSettledIdx > lateFeeIdx,
     'Promise.allSettled (the parallel block) must come AFTER late-fee');
+  assert.match(src, /_withAdvisoryLock\(\s*\n?\s*pool, `lateFee-\$\{todayKey\}`/,
+    'late-fee must run under a per-day advisory lock so multi-replica deploys do not double-notify/double-audit');
 });
 
 test('scheduler failures notify owner with throttled actionable alerts', () => {
@@ -4417,8 +4443,8 @@ test('checkout revokes access cards + records refund + pro-rates closing bill', 
   const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'tenant-ops.js'), 'utf8');
   assert.match(src, /UPDATE access_cards[\s\S]{0,200}status='revoked'[\s\S]{0,200}auto:checkout/,
     'must auto-revoke active cards on checkout');
-  assert.match(src, /deposit_returned = \$2/,
-    'refund must persist on contracts row, not just audit_logs');
+  assert.match(src, /deposit_returned = CASE WHEN \$2::numeric IS NOT NULL THEN LEAST\(\$2::numeric, deposit\)/,
+    'refund must persist on contracts row (clamped to the contract deposit), not just audit_logs');
   assert.match(src, /pro-rate/i,
     'closing-bill pro-rate path must exist');
   assert.match(src, /generateClosingBill !== false/,
@@ -4476,6 +4502,31 @@ test('tenant checkin uses moveInDate not wallclock for welcome-bill period', () 
     'must parse moveInDate as YYYY-MM-DD components');
   assert.match(src, /period = moveInMatch\s*\? `\$\{moveInMatch\[1\]\}-\$\{moveInMatch\[2\]\}`/,
     'welcome bill period must derive from moveInDate');
+});
+
+test('check-in captures starting meter readings + prorated first-month flat charges', () => {
+  // A tenant moving into a reused room must start metering from the room's
+  // CURRENT meter value (their own baseline), not the previous tenant's reading
+  // or 0. And the first-month bill prorates flat charges (wifi/common/flat
+  // utilities) by days lived, with metered water/elec deferred to next cycle.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const ops = fs.readFileSync(path.join(__dirname, '..', 'routes', 'tenant-ops.js'), 'utf8');
+  const feat = fs.readFileSync(path.join(__dirname, '..', 'services', 'features.js'), 'utf8');
+
+  assert.match(feat, /meterStartPolicy: 'optional'/,
+    'features must default meterStartPolicy to optional');
+  assert.match(ops, /waterStartReading/, 'check-in must accept waterStartReading');
+  assert.match(ops, /elecStartReading/, 'check-in must accept elecStartReading');
+  assert.match(ops, /METER_START_BACKWARD/,
+    'check-in must refuse a start reading below the room last reading');
+  assert.match(ops, /METER_START_REQUIRED/,
+    'check-in must refuse when policy=required and a metered utility has no start');
+  assert.match(ops, /meter\.record\(client,/,
+    'check-in must persist the start reading via meter.record inside the transaction');
+  assert.match(ops, /const wifiAmt = r2\(/, 'welcome bill must include prorated wifi');
+  assert.match(ops, /water_amount, elec_amount, wifi, other/,
+    'welcome bill INSERT must carry flat charge columns');
 });
 
 test('tenant checkin endDate respects month-rollover (Jan31 + 1mo → Feb28/29)', () => {
@@ -4585,7 +4636,7 @@ test('booking approval keeps JSONB and rooms_v2 room locks consistent', () => {
   const block = src.match(/app\.post\('\/api\/bookings\/:id\/approve-and-assign'[\s\S]+?app\.put\('\/api\/bookings\/:id'/)[0];
   assert.match(block, /SELECT status FROM rooms_v2[\s\S]{0,200}FOR UPDATE/,
     'blob candidates must check the matching rooms_v2 row under lock');
-  assert.match(block, /v2State\.rows\.length && v2State\.rows\[0\]\.status !== 'vacant'[\s\S]{0,80}continue/,
+  assert.match(block, /v2State\.rows\.length && !isVacantStatus\(v2State\.rows\[0\]\.status\)[\s\S]{0,80}continue/,
     'stale JSONB vacancies must be skipped when rooms_v2 is not vacant');
   assert.match(block,
     /UPDATE rooms_v2 SET status='reserved', updated_at=NOW\(\)[\s\S]{0,120}WHERE room_code=\$1 AND status='vacant'/,
@@ -7641,4 +7692,59 @@ test("production readiness checks late-fee policy configuration", () => {
     "readiness must warn when late fee has no cap");
   assert.match(block, /late_fee_disabled/,
     "readiness must warn when late fee is disabled");
+});
+
+test("billing rate: a tenant who stays past an expired contract keeps the SIGNED rate, not the formula", () => {
+  // A fixed term ending doesn't evict the tenant — by Thai convention they
+  // continue month-to-month at the rate they signed. Before this fix, the day
+  // a contract expired the bill silently jumped to the current /admin#pricing
+  // formula rate. resolveBillingRent now honors an expired contract's locked
+  // rent (tier 1.5) when the caller passes it for a still-resident tenant.
+  const pricing = require("../services/pricing");
+  const room = { type: "standard", rent: 9999 };
+  const config = { rates: { standard: { rent: 8000 } } };
+
+  // expired contract → its locked rate wins over formula
+  const cont = pricing.resolveBillingRent({
+    room, contract: null, expiredContract: { id: 7, monthly_rent: 4000, status: "expired" }, config,
+  });
+  assert.equal(cont.rent, 4000, "expired-contract continuation must bill the signed rate");
+  assert.equal(cont.source, "contract_expired_continuation", "source must mark the continuation");
+
+  // an active contract still outranks an expired one
+  const act = pricing.resolveBillingRent({
+    room, contract: { id: 9, monthly_rent: 5000, status: "active" },
+    expiredContract: { id: 7, monthly_rent: 4000 }, config,
+  });
+  assert.equal(act.rent, 5000, "active contract must win over expired");
+  assert.equal(act.source, "contract");
+
+  // with no contract at all, behavior is unchanged (formula)
+  const none = pricing.resolveBillingRent({ room, contract: null, expiredContract: null, config });
+  assert.notEqual(none.source, "contract_expired_continuation", "no-contract path must not claim continuation");
+  assert.equal(none.rent, 8000, "no-contract path still uses the formula rate");
+
+  // the scheduler + bulk-gen must look up the expired contract for the resident
+  const fs = require("node:fs"); const path = require("node:path");
+  const sched = fs.readFileSync(path.join(__dirname, "..", "services", "scheduler.js"), "utf8");
+  const extras = fs.readFileSync(path.join(__dirname, "..", "routes", "bills-extras.js"), "utf8");
+  assert.match(sched, /status='expired'[\s\S]{0,200}tenant_id=\$2/, "scheduler must pull the expired contract scoped to the resident tenant");
+  assert.match(sched, /expiredContract,/, "scheduler must pass expiredContract into buildBill");
+  assert.match(extras, /status='expired'[\s\S]{0,200}tenant_id=\$2/, "bulk-gen must pull the expired contract scoped to the resident tenant");
+});
+
+test("access card create recycles a revoked physical tag but never steals an active one", () => {
+  // card_id is globally UNIQUE; a physical tag whose previous holder checked
+  // out (row left 'revoked') must be re-registerable to the next tenant,
+  // otherwise revoke-on-overdue is unusable for recycled cards. An 'active'
+  // row stays a clean 409 (no silent reassignment of a live card).
+  const fs = require("node:fs"); const path = require("node:path");
+  const server = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  // On unique-violation, reactivate ONLY a revoked row.
+  assert.match(server, /UPDATE access_cards[\s\S]{0,160}status='active'[\s\S]{0,160}WHERE card_id=\$1 AND status='revoked'/,
+    "card create must reactivate a revoked card_id (recycle), scoped to status='revoked'");
+  // If nothing was revoked to recycle, it's still in use → 409.
+  assert.match(server, /if \(!recycled\.rows\.length\)[\s\S]{0,320}DUPLICATE_CARD_ID/,
+    "an active card_id must still return DUPLICATE_CARD_ID (no steal)");
+  assert.match(server, /access_card\.recycle/, "recycling must be audit-logged distinctly from create");
 });

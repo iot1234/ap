@@ -147,7 +147,12 @@ async function checkSmtp(features) {
       auth: { user, pass },
       connectionTimeout: 6000,
     });
-    await withTimeout(t.verify(), 6000, 'smtp');
+    // withTimeout NEVER rejects — it resolves to {timedOut} / {thrown} on
+    // failure. Must inspect the result (like checkDatabase) or a dead/wrong-
+    // credential SMTP host would report green while email silently fails.
+    const r = await withTimeout(t.verify(), 6000, 'smtp');
+    if (r?.timedOut) return { status: 'error', message: 'SMTP verify timed out (6s)' };
+    if (r?.thrown)   return { status: 'error', message: `SMTP verify failed: ${r.message}` };
     return { status: 'ok', message: `SMTP ${host} OK` };
   } catch (err) {
     return { status: 'error', message: `SMTP verify failed: ${err.message}` };
@@ -172,7 +177,11 @@ async function checkR2() {
       credentials: { accessKeyId: id, secretAccessKey: sec },
       requestHandler: { connectionTimeout: 4000, requestTimeout: 6000 },
     });
-    await withTimeout(client.send(new lib.HeadBucketCommand({ Bucket: bucket })), 6000, 'r2');
+    // Same as checkSmtp: inspect the withTimeout result or a 403/wrong-bucket/
+    // DNS failure on HeadBucket would report green while uploads silently fail.
+    const r = await withTimeout(client.send(new lib.HeadBucketCommand({ Bucket: bucket })), 6000, 'r2');
+    if (r?.timedOut) return { status: 'error', message: 'R2 HeadBucket timed out (6s)' };
+    if (r?.thrown)   return { status: 'error', message: `R2 unreachable: ${r.message}` };
     return { status: 'ok', message: `R2 bucket "${bucket}" reachable` };
   } catch (err) {
     return { status: 'error', message: `R2 unreachable: ${err.message}` };

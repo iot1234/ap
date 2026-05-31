@@ -1928,7 +1928,7 @@ function RoomEditForm({ room, originalRoom, onUpdate, onServerPatch, config, set
                           </span>
                         ) : null}
                       </span>
-                      <strong>฿{fmtCurrency(b.total)}</strong>
+                      <strong>{fmtCurrency(b.total)}</strong>
                     </div>
                   ))}
                 </div>

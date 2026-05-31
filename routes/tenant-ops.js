@@ -35,6 +35,8 @@ const cryptoSvc = require('../services/crypto');
 const lineNotify = require('../services/line');
 const lineBinding = require('../services/lineBinding');
 const storage = require('../services/storage');
+const { isVacantStatus } = require('../services/roomSync');
+const meter = require('../services/meter');
 
 // === Internal helpers =====================================================
 // VALID_TENANT_STATUS + maskTenantOut were defined in server.js but used
@@ -800,9 +802,12 @@ module.exports = function buildTenantOpsRouter(ctx) {
         throw httpErr(404, 'ROOM_NOT_FOUND',
           `ไม่พบห้อง ${roomId} ในระบบ`, { roomId });
       }
+      // Use isVacantStatus (not a bare `!== 'vacant'`) so a legacy blob room
+      // stored as 'available'/'empty'/'free' is still recognised as bookable —
+      // otherwise admin can't move a tenant into a genuinely-free room.
       const blockingStatus = [blobRoom?.status, roomV2?.status]
         .filter(Boolean)
-        .find((s) => s !== 'vacant');
+        .find((s) => !isVacantStatus(s));
       if (blockingStatus) {
         throw httpErr(409,
           blockingStatus === 'occupied' ? 'ROOM_OCCUPIED' : 'ROOM_UNAVAILABLE',
@@ -1176,8 +1181,51 @@ module.exports = function buildTenantOpsRouter(ctx) {
   r.delete('/:id', sameOrigin, csrfGuard, requireAuth, requireRole('owner'), async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+    const force = !!(req.body && req.body.force === true);
     try {
       const flags = await features.load(pool);
+      // Guard (mirrors the PUT→moved_out precheck): refuse to delete a tenant
+      // that still has live links. A bare delete — soft OR hard — does NOT
+      // cascade, so it would orphan the active contract (the room stays
+      // "occupied" via uq_contracts_active_room, blocking re-rental and 500'ing
+      // the next check-in on that room), leave access cards valid, and keep
+      // recurring charges billing a ghost. Route admin through checkout first;
+      // force:true keeps a migration / cleanup escape hatch (audit-logged).
+      if (!force) {
+        try {
+          const cur = await pool.query(
+            `SELECT t.status AS tenant_status, t.current_room_id,
+                    (SELECT COUNT(*)::int FROM contracts
+                       WHERE tenant_id=t.id AND status='active' AND deleted_at IS NULL) AS active_contracts,
+                    (SELECT COUNT(*)::int FROM access_cards
+                       WHERE tenant_id=t.id AND status='active') AS active_cards
+               FROM tenants t
+              WHERE t.id=$1 AND t.deleted_at IS NULL`,
+            [id]
+          );
+          const row = cur.rows[0];
+          if (row && row.tenant_status === 'active'
+              && (row.current_room_id || row.active_contracts > 0 || row.active_cards > 0)) {
+            return res.status(409).json({
+              error: 'ลบไม่ได้ — ผู้เช่ายัง active อยู่ (ห้อง/สัญญา/บัตร) ใช้ POST /api/tenants/:id/checkout เพื่อปิดสัญญา + คืนห้อง + เพิกถอนบัตรก่อน',
+              code: 'USE_CHECKOUT_ENDPOINT',
+              checkoutUrl: `/api/tenants/${id}/checkout`,
+              detail: {
+                currentRoom: row.current_room_id,
+                activeContracts: row.active_contracts,
+                activeCards: row.active_cards,
+              },
+              hint: 'ถ้าต้องการลบเฉพาะข้อมูล (migrate / cleanup ghost) ส่ง { force: true } พร้อม audit log',
+            });
+          }
+        } catch (err) {
+          console.error('[tenant.delete] live-link precheck failed:', err.message);
+          return res.status(500).json({
+            error: 'ตรวจสถานะปัจจุบันไม่สำเร็จ — ลองใหม่หรือใช้ /checkout endpoint',
+            code: 'DELETE_PRECHECK_FAILED',
+          });
+        }
+      }
       if (flags.softDelete && flags.softDelete.enabled) {
         await pool.query(`UPDATE tenants SET deleted_at=NOW() WHERE id=$1`, [id]);
       } else {
@@ -1199,7 +1247,7 @@ module.exports = function buildTenantOpsRouter(ctx) {
           throw err;
         }
       }
-      audit(req, 'tenant.delete', 'tenant', String(id));
+      audit(req, 'tenant.delete', 'tenant', String(id), { force });
       res.json({ ok: true });
     } catch (err) {
       console.error('tenant delete error:', err);
@@ -1527,6 +1575,30 @@ module.exports = function buildTenantOpsRouter(ctx) {
           monthlyRent, depositAmount, maxDeposit, depositMaxMonths,
           hint: 'ตรวจค่าอีกครั้งหรือส่ง { force: true } ถ้าเป็น deposit พิเศษ',
         });
+      }
+
+      // (2.5) Starting meter readings — capture the room's CURRENT meter value
+      // at move-in so the first real bill measures THIS tenant's consumption
+      // from their own baseline (not the previous tenant's reading or 0). Each
+      // room differs → entered per check-in. Basic shape validation here (fail
+      // fast); the backward-reading + policy checks run under the txn lock below
+      // once we can read the room's last reading. tenancyContract.meterStartPolicy
+      // controls strictness: 'optional' (default) | 'required' | 'off'.
+      const meterStartPolicy = ['optional', 'required', 'off'].includes(tenancy.meterStartPolicy)
+        ? tenancy.meterStartPolicy : 'optional';
+      const parseMeterStart = (v) => (v == null || v === '' ? null : Number(v));
+      const waterStart = meterStartPolicy === 'off' ? null : parseMeterStart(req.body.waterStartReading);
+      const elecStart  = meterStartPolicy === 'off' ? null : parseMeterStart(req.body.elecStartReading);
+      const METER_START_MAX = 9_999_999;
+      for (const [label, val] of [['waterStartReading', waterStart], ['elecStartReading', elecStart]]) {
+        if (val == null) continue;
+        if (!Number.isFinite(val) || val < 0 || val > METER_START_MAX) {
+          return res.status(400).json({
+            error: `${label} ต้องเป็นเลขมิเตอร์ 0–${METER_START_MAX.toLocaleString('th-TH')} (เลขที่อ่านได้จากหน้ามิเตอร์ของห้องตอนนี้)`,
+            code: 'INVALID_METER_START',
+            hint: 'กรอกเลขมิเตอร์ปัจจุบันของห้อง (น้ำ/ไฟ) เพื่อใช้เป็นเลขตั้งต้นของผู้เช่ารายนี้',
+          });
+        }
       }
 
       // Resolve discount % from term length when admin didn't pass an
@@ -1879,7 +1951,85 @@ module.exports = function buildTenantOpsRouter(ctx) {
         const dueDate = moveInMatch
           ? billing.formatYMD(Number(moveInMatch[1]), Number(moveInMatch[2]), dueDay)
           : billing.formatDueDate(dueDay);
+
+        // === Capture starting meter readings for THIS tenancy ================
+        // A room reused from a previous tenant already shows a meter value. By
+        // storing the move-in reading as the baseline (period = move-in period),
+        // the next bill measures THIS tenant's consumption (nextReading −
+        // startReading), never the previous tenant's. Stored inside the same
+        // transaction as the check-in so it commits atomically. Flat-mode
+        // utilities skip this (they aren't metered). Robust guards:
+        //   • backward reading (start < room's last reading) → refuse unless force
+        //   • policy 'required' + metered utility with no start → refuse unless force
+        const billRoomObj = (roomsForRent && typeof roomsForRent === 'object' && roomsForRent[roomId])
+          ? roomsForRent[roomId] : {};
+        const meterStartResult = { water: null, elec: null };
+        for (const mt of ['water', 'elec']) {
+          const label = mt === 'water' ? 'น้ำ' : 'ไฟ';
+          if (billing.isFlatUtilityConfigured(billRoomObj, mt)) {
+            meterStartResult[mt] = { skipped: 'flat_mode' };  // เหมาจ่าย — ไม่ต้องใช้เลขมิเตอร์
+            continue;
+          }
+          const startVal = mt === 'water' ? waterStart : elecStart;
+          let prevReading = null;
+          try { prevReading = await meter.latestBeforePeriod(client, roomId, mt, period); }
+          catch (err) { if (err.code !== '42P01') throw err; }
+          if (startVal == null) {
+            if (meterStartPolicy === 'required' && !isForced) {
+              await client.query('ROLLBACK');
+              return res.status(400).json({
+                error: `ต้องระบุเลขมิเตอร์${label}ตั้งต้นของห้อง ${roomId} (นโยบายตั้งค่าเป็น "บังคับ")`,
+                code: 'METER_START_REQUIRED',
+                meterType: mt,
+                hint: 'กรอกเลขมิเตอร์ปัจจุบันที่อ่านจากหน้าห้อง หรือส่ง force=true ถ้าต้องการข้าม',
+              });
+            }
+            meterStartResult[mt] = { skipped: 'not_provided' };
+            continue;
+          }
+          if (prevReading && Number(prevReading.reading) > startVal && !isForced) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({
+              error: `เลขมิเตอร์${label}ตั้งต้น (${startVal}) น้อยกว่าเลขล่าสุดของห้อง (${prevReading.reading}) — มิเตอร์ไม่ควรถอยหลัง`,
+              code: 'METER_START_BACKWARD',
+              meterType: mt,
+              lastReading: Number(prevReading.reading),
+              hint: 'ตรวจเลขที่กรอกอีกครั้ง — ถ้ามิเตอร์ถูกเปลี่ยน/รีเซ็ตจริง ส่ง force=true',
+            });
+          }
+          try {
+            await meter.record(client, {
+              roomId, meterType: mt, reading: startVal,
+              period, source: 'checkin', createdBy: req.session.user.username,
+            });
+            meterStartResult[mt] = {
+              reading: startVal, stored: true,
+              prev: prevReading ? Number(prevReading.reading) : null,
+            };
+          } catch (err) {
+            await client.query('ROLLBACK');
+            console.error(`[checkin] meter start (${mt}) failed:`, err.message);
+            return res.status(500).json({
+              error: `บันทึกเลขมิเตอร์${label}ตั้งต้นไม่สำเร็จ — ลองใหม่`,
+              code: 'METER_START_STORE_FAILED',
+            });
+          }
+        }
+
         let welcomeRent = Number(monthlyRent) || 0;
+        // Days-lived fraction for the move-in month. Flat charges (wifi / common
+        // fee / flat-mode utilities) are prorated by occupancy so a mid-month
+        // move-in pays only for the days lived (operator-chosen policy). Rent
+        // proration stays opt-in via config.billing.prorateFirstMonth. Metered
+        // water/elec are NOT on the welcome bill — their first consumption is
+        // measured next cycle from the baseline captured above.
+        let flatFrac = 1;
+        if (moveInMatch) {
+          const _dim = new Date(Date.UTC(Number(moveInMatch[1]), Number(moveInMatch[2]), 0)).getUTCDate();
+          flatFrac = billing.firstMonthProrationFraction({
+            moveInDay: Number(moveInMatch[3]), daysInMonth: _dim, prorate: true,
+          });
+        }
         {
           const firstMonthPct = Math.max(0, Math.min(50,
             Number(cfgVal?.discounts?.firstMonth) || 0));
@@ -1887,25 +2037,45 @@ module.exports = function buildTenantOpsRouter(ctx) {
           const combinedPct = Math.min(50,
             100 * (1 - (1 - contractPct / 100) * (1 - firstMonthPct / 100)));
           welcomeRent = Math.round(welcomeRent * (1 - combinedPct / 100) * 100) / 100;
-          // config.billing.prorateFirstMonth — charge only the days lived in the
-          // move-in month (move-in day → month end), symmetric with the closing
-          // bill. Off by default → full first month (historical behavior).
           if (cfgVal?.billing?.prorateFirstMonth === true && moveInMatch) {
-            const y = Number(moveInMatch[1]);
-            const mo = Number(moveInMatch[2]);
-            const day = Number(moveInMatch[3]);
-            const daysInMonth = new Date(Date.UTC(y, mo, 0)).getUTCDate();
-            const frac = billing.firstMonthProrationFraction({ moveInDay: day, daysInMonth, prorate: true });
-            welcomeRent = Math.round(welcomeRent * frac * 100) / 100;
+            welcomeRent = Math.round(welcomeRent * flatFrac * 100) / 100;
           }
         }
-        await client.query(
-          `INSERT INTO bills
-             (bill_no, tenant_id, room_id, period, rent, subtotal, total, due_date, status)
-           VALUES ($1, $2, $3, $4, $5, $5, $5, $6, 'pending')
-           ON CONFLICT (bill_no) DO NOTHING`,
-          [billNo, id, roomId, period, welcomeRent, dueDate]
-        );
+        // Resolve the room's flat (non-metered) charges, mirroring buildBill's
+        // override→global precedence, then prorate by days lived.
+        const _util = (cfgVal && typeof cfgVal.utilities === 'object') ? cfgVal.utilities : {};
+        const _pickNum = (...vals) => {
+          for (const v of vals) {
+            if (v != null && v !== '' && Number.isFinite(Number(v))) return Math.max(0, Number(v));
+          }
+          return 0;
+        };
+        const r2 = (n) => Math.round(n * 100) / 100;
+        const wifiAmt = r2(_pickNum(billRoomObj.wifiOverride, billRoomObj.wifi_override, billRoomObj.wifi, _util.wifi) * flatFrac);
+        const commonAmt = r2(_pickNum(billRoomObj.commonFeeOverride, billRoomObj.common_fee_override, billRoomObj.commonFee, billRoomObj.common_fee, _util.commonFee) * flatFrac);
+        const waterAmt = r2((billing.isFlatUtilityConfigured(billRoomObj, 'water')
+          ? _pickNum(billRoomObj.waterFlatAmount, billRoomObj.water_flat_amount) : 0) * flatFrac);
+        const elecAmt = r2((billing.isFlatUtilityConfigured(billRoomObj, 'elec')
+          ? _pickNum(billRoomObj.elecFlatAmount, billRoomObj.elec_flat_amount) : 0) * flatFrac);
+        const welcomeOther = commonAmt > 0
+          ? [{ label: `ค่าส่วนกลาง${flatFrac < 1 ? ' (ตามวันที่อยู่)' : ''}`, amount: commonAmt }]
+          : [];
+        const welcomeSubtotal = r2(welcomeRent + wifiAmt + waterAmt + elecAmt + commonAmt);
+        // Skip a zero-total welcome bill (e.g. free first month) — the bills
+        // CHECK requires total > 0, and there's nothing to collect anyway.
+        if (welcomeSubtotal > 0) {
+          await client.query(
+            `INSERT INTO bills
+               (bill_no, tenant_id, room_id, period, rent,
+                water_amount, elec_amount, wifi, other,
+                subtotal, vat, late_fee, total, due_date, status)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, 0, 0, $10, $11, 'pending')
+             ON CONFLICT (bill_no) DO NOTHING`,
+            [billNo, id, roomId, period, welcomeRent,
+             waterAmt, elecAmt, wifiAmt, JSON.stringify(welcomeOther),
+             welcomeSubtotal, dueDate]
+          );
+        }
 
         await client.query('COMMIT');
         // Cascade room status post-commit. The blob + rooms_v2 updates above
@@ -2020,7 +2190,8 @@ module.exports = function buildTenantOpsRouter(ctx) {
         await client.query('BEGIN');
         const tres = await client.query(
           `SELECT id, full_name, current_room_id, line_user_id, line_oa_id, email, phone, status
-             FROM tenants WHERE id=$1 AND deleted_at IS NULL`,
+             FROM tenants WHERE id=$1 AND deleted_at IS NULL
+             FOR UPDATE`,
           [id]
         );
         if (!tres.rows.length) {
@@ -2041,21 +2212,31 @@ module.exports = function buildTenantOpsRouter(ctx) {
 
         // Close active contract + persist refund amount on the row so it
         // appears in reports / aged-receivable views without joining audit_logs.
+        // deposit_returned is CLAMPED to the contract's own deposit (LEAST) so a
+        // typo'd over-refund (finalDepositReturn > deposit) can't push the
+        // "deposit retained = deposit − returned" reconciliation negative.
         const contractRes = await client.query(
           `UPDATE contracts SET status='ended', end_date=CURRENT_DATE,
               closed_at = COALESCE(closed_at, NOW()),
               closed_by = $4,
               closed_reason = $3,
               closed_type = 'tenant_checkout',
-              deposit_returned = $2,
-              deposit_returned_at = CASE WHEN $2 IS NOT NULL THEN NOW() ELSE NULL END,
+              deposit_returned = CASE WHEN $2::numeric IS NOT NULL THEN LEAST($2::numeric, deposit) ELSE NULL END,
+              deposit_returned_at = CASE WHEN $2::numeric IS NOT NULL THEN NOW() ELSE NULL END,
               deposit_return_reason = $3
              WHERE tenant_id=$1 AND status='active'
-           RETURNING id, contract_no, room_id, start_date, monthly_rent, deposit, discount_pct`,
+           RETURNING id, contract_no, room_id, start_date, monthly_rent, deposit, deposit_returned, discount_pct`,
           [id, refund, reason, req.session.user.username]
         );
         const closedContracts = contractRes.rows || [];
         const closedContract = closedContracts[0] || null;
+        // Report the refund that was ACTUALLY persisted (clamped, and only when
+        // a contract was really closed this call) — not the raw request body. A
+        // double-submitted checkout closes 0 contracts the second time, so it
+        // must not re-report a phantom refund in the response / audit / message.
+        const effectiveRefund = closedContract && closedContract.deposit_returned != null
+          ? Number(closedContract.deposit_returned)
+          : null;
         const closedContractIds = closedContracts
           .map((c) => Number(c.id))
           .filter((n) => Number.isInteger(n) && n > 0);
@@ -2249,34 +2430,42 @@ module.exports = function buildTenantOpsRouter(ctx) {
             if (closingLateFee > 0) {
               otherLines.push({ label: 'ค่าปรับล่าช้าค้างยกมา', amount: closingLateFee });
             }
-            try {
-              const ins = await client.query(
-                `INSERT INTO bills
-                   (bill_no, tenant_id, room_id, period, rent, subtotal, late_fee, total, due_date, status,
-                    other)
-                 VALUES ($1,$2,$3,$4,$5,$5,$8,$9,$6,'pending',$7::jsonb)
-                 ON CONFLICT (bill_no) DO NOTHING
-                 RETURNING id, bill_no, total, due_date`,
-                [billNo, id, billingRoom, period, proRatedRent, dueDate,
-                 JSON.stringify(otherLines), closingLateFee, closingTotal]
-              );
-              closingBill = ins.rows[0] || null;
-              // Only deactivate the carried charges once they are safely folded
-              // into a created closing bill (don't lose them on an ON CONFLICT
-              // skip). If no closing bill was created, they stay active so admin
-              // can still collect them.
-              if (closingBill && closingLateFee > 0 && carriedLateFeeRows.length) {
-                await client.query(
-                  `UPDATE recurring_charges
-                      SET active=FALSE, updated_at=NOW(),
-                          notes = COALESCE(notes,'') || E'\n[auto] folded into closing bill ' || $2
-                    WHERE id = ANY($1::bigint[]) AND active=TRUE`,
-                  [carriedLateFeeRows.map((r) => Number(r.id)), String(closingBill.bill_no || closingBill.id)]
-                ).catch(() => { /* best-effort — leave active if this fails */ });
+            // A 100% discount (or a rent×fraction that rounds to ฿0.00) with no
+            // carried late fee makes closingTotal=0, which violates the bills
+            // `total > 0` CHECK constraint. The INSERT would throw 23514 and —
+            // since the catch below only swallows 23505 — abort the ENTIRE
+            // checkout transaction, leaving the tenant un-checkout-able. There
+            // is nothing to charge, so skip the bill and let checkout proceed.
+            if (closingTotal > 0) {
+              try {
+                const ins = await client.query(
+                  `INSERT INTO bills
+                     (bill_no, tenant_id, room_id, period, rent, subtotal, late_fee, total, due_date, status,
+                      other)
+                   VALUES ($1,$2,$3,$4,$5,$5,$8,$9,$6,'pending',$7::jsonb)
+                   ON CONFLICT (bill_no) DO NOTHING
+                   RETURNING id, bill_no, total, due_date`,
+                  [billNo, id, billingRoom, period, proRatedRent, dueDate,
+                   JSON.stringify(otherLines), closingLateFee, closingTotal]
+                );
+                closingBill = ins.rows[0] || null;
+                // Only deactivate the carried charges once they are safely folded
+                // into a created closing bill (don't lose them on an ON CONFLICT
+                // skip). If no closing bill was created, they stay active so admin
+                // can still collect them.
+                if (closingBill && closingLateFee > 0 && carriedLateFeeRows.length) {
+                  await client.query(
+                    `UPDATE recurring_charges
+                        SET active=FALSE, updated_at=NOW(),
+                            notes = COALESCE(notes,'') || E'\n[auto] folded into closing bill ' || $2
+                      WHERE id = ANY($1::bigint[]) AND active=TRUE`,
+                    [carriedLateFeeRows.map((r) => Number(r.id)), String(closingBill.bill_no || closingBill.id)]
+                  ).catch(() => { /* best-effort — leave active if this fails */ });
+                }
+              } catch (err) {
+                if (err.code !== '23505') throw err;
+                // Race against partial-unique — fine, just skip.
               }
-            } catch (err) {
-              if (err.code !== '23505') throw err;
-              // Race against partial-unique — fine, just skip.
             }
           }
         }
@@ -2292,7 +2481,7 @@ module.exports = function buildTenantOpsRouter(ctx) {
             .catch((err) => console.warn(`[checkout] room sync failed:`, err.message));
         }
         audit(req, 'tenant.checkout', 'tenant', String(id),
-          { oldRoom, releaseRoomIds, roomRelease, reason, refund,
+          { oldRoom, releaseRoomIds, roomRelease, reason, refund: effectiveRefund,
             closedContracts: closedContracts.map((c) => c.contract_no || c.id),
             invitationsRevoked: revokedInvitations.rowCount || 0,
             cardsRevoked: revokedCards.rows.map((c) => c.card_id),
@@ -2321,8 +2510,8 @@ module.exports = function buildTenantOpsRouter(ctx) {
           if (revokedCards.rowCount > 0) {
             lines.push(`บัตรเข้า-ออกถูกเพิกถอน (${revokedCards.rowCount} ใบ)`);
           }
-          if (refund != null && Number.isFinite(refund)) {
-            lines.push(`คืนเงินมัดจำ: ฿${Number(refund).toLocaleString('th-TH', { minimumFractionDigits: 2 })}`);
+          if (effectiveRefund != null && Number.isFinite(effectiveRefund)) {
+            lines.push(`คืนเงินมัดจำ: ฿${Number(effectiveRefund).toLocaleString('th-TH', { minimumFractionDigits: 2 })}`);
           }
           if (closingBill) {
             if (closingBillPayUrl) {
@@ -2345,7 +2534,7 @@ module.exports = function buildTenantOpsRouter(ctx) {
         } catch { /* notify failures don't fail request */ }
 
         res.json({
-          ok: true, tenantId: id, oldRoom, refund,
+          ok: true, tenantId: id, oldRoom, refund: effectiveRefund,
           releasedRooms: roomRelease.released,
           skippedRooms: roomRelease.skipped,
           invitationsRevoked: revokedInvitations.rowCount || 0,

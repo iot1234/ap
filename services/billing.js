@@ -44,7 +44,7 @@ const pricing = require('./pricing');
  *                   Always returns lateFee: 0 — the previous overdue's fee
  *                   lives on the previous bill, not on this new one.
  */
-function buildBill({ room, contract = null, config, features, recurring = [], period, dueDate, discountPct = 0, isFirstBill = false }) {
+function buildBill({ room, contract = null, expiredContract = null, config, features, recurring = [], period, dueDate, discountPct = 0, isFirstBill = false }) {
   const u = (config && config.utilities) || {};
   // Rate resolution: each utility prefers a per-room override (room blob
   // accepts both camelCase + snake_case to match rooms_v2 columns) then
@@ -93,7 +93,7 @@ function buildBill({ room, contract = null, config, features, recurring = [], pe
 
   // Resolver picks the right rent source. See services/pricing.js for
   // priority + rationale.
-  const resolved = pricing.resolveBillingRent({ room, contract, config });
+  const resolved = pricing.resolveBillingRent({ room, contract, expiredContract, config });
   const rentBase = Number(resolved.rent) || 0;
   // Billing mode resolution per utility — admin can pick 'flat' (เหมา)
   // for rooms that don't have a real meter (older units, single-tenant

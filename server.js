@@ -927,9 +927,9 @@ function publicBookableRooms(roomsObj, config, v2Rows = []) {
   for (const [roomId, room] of byId.entries()) {
     const blobStatus = room.status || 'vacant';
     const relationalStatus = v2Status.get(roomId);
-    if (blobStatus !== 'vacant' || (relationalStatus && relationalStatus !== 'vacant')) continue;
+    if (!isVacantStatus(blobStatus) || (relationalStatus && !isVacantStatus(relationalStatus))) continue;
     const masked = maskRoomsPublic({ [roomId]: room }, config)?.[roomId];
-    if (!masked || masked.status !== 'vacant') continue;
+    if (!masked || !isVacantStatus(masked.status)) continue;
     out.push({
       id: String(masked.id || roomId),
       floor: masked.floor,
@@ -1146,6 +1146,44 @@ app.put('/api/data/:key', sameOrigin, csrfGuard, requireAuth, requireRole('owner
   // target.
   let configWarnings = [];
   if (key === 'baankarn_config_v1') {
+    // === Payment-receiver protection (AuthZ) ================================
+    // value.payment.{promptpay,bankAcc,truemoneyPhone,…} decides WHERE every
+    // tenant's bill payment actually goes (billing.buildEffectivePaymentBlock
+    // reads it as the first-priority receiver). PUT /api/data is open to the
+    // 'staff' role, but the receiver is an owner/manager concern — it is
+    // owner-gated on the secrets surface and owner/manager-gated on
+    // system-settings. Without this guard a staff account could repoint every
+    // bill's PromptPay/bank/TrueMoney target to their own and silently harvest
+    // rent. So: for a non-owner/manager actor we force the STORED payment block
+    // to survive unchanged — their edits to other config (rooms pricing,
+    // building info) still apply, but payment.* is preserved (or dropped on a
+    // first-ever save). Preserve rather than reject so a legitimate non-payment
+    // settings save by staff isn't blocked by JSON key-ordering noise.
+    const actorRole = req.session.user && req.session.user.role;
+    const privileged = actorRole === 'owner' || actorRole === 'manager';
+    if (!privileged) {
+      let storedPayment;
+      try {
+        const cur = await pool.query(
+          `SELECT value->'payment' AS payment FROM app_data WHERE key=$1`, [key]
+        );
+        storedPayment = cur.rows.length ? cur.rows[0].payment : undefined;
+      } catch { storedPayment = undefined; }
+      const submitted = JSON.stringify(value.payment ?? null);
+      const preserved = JSON.stringify(storedPayment ?? null);
+      if (submitted !== preserved) {
+        // Surface the attempt: a staff account trying to change the receiver is
+        // worth an audit trail even though we silently ignore the change.
+        audit(req, 'data.put.payment_preserved', 'app_data', key, {
+          role: actorRole, attempted: true,
+        });
+      }
+      if (storedPayment === undefined || storedPayment === null) {
+        delete value.payment;
+      } else {
+        value.payment = storedPayment;
+      }
+    }
     const MIN_SENSIBLE_RENT = 100;
     const MIN_SENSIBLE_DEPOSIT = 100;
     const MIN_SENSIBLE_UTILITY = 1;
@@ -1239,16 +1277,46 @@ app.put('/api/data/:key', sameOrigin, csrfGuard, requireAuth, requireRole('owner
     configWarnings = warnings;
     serialised = JSON.stringify(value);
   }
+  // For room/config blobs: use a transaction with SELECT FOR UPDATE to prevent
+  // last-write-wins when two admins save simultaneously (admin A's save would
+  // silently overwrite admin B's room changes). Bookings blob has its own
+  // per-endpoint locking, so skip it here to avoid nested-lock contention.
+  const LOCK_KEYS = new Set(['baankarn_rooms_v1', 'baankarn_config_v1']);
   try {
-    await pool.query(
-      `INSERT INTO app_data (key, value, updated_by)
-       VALUES ($1, $2::jsonb, $3)
-       ON CONFLICT (key) DO UPDATE
-         SET value = EXCLUDED.value,
-             updated_at = NOW(),
-             updated_by = EXCLUDED.updated_by`,
-      [key, serialised, req.session.user.username]
-    );
+    if (LOCK_KEYS.has(key)) {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query(
+          `SELECT 1 FROM app_data WHERE key=$1 FOR UPDATE`, [key]
+        ).catch(() => {}); // row may not exist yet — that's fine
+        await client.query(
+          `INSERT INTO app_data (key, value, updated_by)
+           VALUES ($1, $2::jsonb, $3)
+           ON CONFLICT (key) DO UPDATE
+             SET value = EXCLUDED.value,
+                 updated_at = NOW(),
+                 updated_by = EXCLUDED.updated_by`,
+          [key, serialised, req.session.user.username]
+        );
+        await client.query('COMMIT');
+      } catch (err) {
+        await client.query('ROLLBACK').catch(() => {});
+        throw err;
+      } finally {
+        client.release();
+      }
+    } else {
+      await pool.query(
+        `INSERT INTO app_data (key, value, updated_by)
+         VALUES ($1, $2::jsonb, $3)
+         ON CONFLICT (key) DO UPDATE
+           SET value = EXCLUDED.value,
+               updated_at = NOW(),
+               updated_by = EXCLUDED.updated_by`,
+        [key, serialised, req.session.user.username]
+      );
+    }
     audit(req, 'data.put', 'app_data', key);
     let roomSyncResult = null;
     // Bridge: when admin saves the rooms blob, mirror tenant info into
@@ -1830,6 +1898,13 @@ function roomFromV2(row) {
   };
 }
 
+// JSONB blob can store 'available'/'empty'/'free' (legacy admin UI values).
+// rooms_v2 normalises these to 'vacant' on sync. All booking/hold/public-list
+// logic must accept both spellings so admin-created rooms are bookable.
+function isVacantStatus(s) {
+  return ['vacant', 'available', 'empty', 'free'].includes(String(s || '').toLowerCase());
+}
+
 function isPublicHoldRoom(room) {
   return !!(room && room.status === 'reserved'
     && typeof room.reservedBy === 'string'
@@ -2152,7 +2227,7 @@ app.post('/api/bookings/public/hold', sameOrigin, rateLimitBookingHold, async (r
       await client.query('ROLLBACK');
       return res.status(404).json({ error: 'ไม่พบห้องนี้', code: 'ROOM_NOT_FOUND' });
     }
-    if (room.status !== 'vacant' || (v2Room && v2Room.status !== 'vacant')) {
+    if (!isVacantStatus(room.status) || (v2Room && !isVacantStatus(v2Room.status))) {
       await client.query('ROLLBACK');
       const expiresAt = isPublicHoldRoom(room) ? (room.reservationExpiresAt || null) : null;
       return res.status(409).json({
@@ -2670,7 +2745,7 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBookingSubmit, validateBod
         && holdTokenHash
         && room.reservedBy === `hold:${holdTokenHash}`
         && !isExpiredHold(room);
-      const vacant = room.status === 'vacant' && (!v2Room || v2Room.status === 'vacant');
+      const vacant = isVacantStatus(room.status) && (!v2Room || isVacantStatus(v2Room.status));
       if (!sameHold && !vacant) {
         await client.query('ROLLBACK');
         await cleanupDepositSlip();
@@ -2895,7 +2970,7 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBookingSubmit, validateBod
       const flags = await features.load(pool);
       notifier.notifyOwner({ pool, features: flags }, {
         subject: '📋 ผู้เช่าใหม่ขอจอง',
-        text: `ชื่อ: ${cleaned.tenantName}\nโทร: ${cleaned.phone || '-'}\nห้อง: ${cleaned.roomId || '-'}\nวันเข้าพัก: ${cleaned.checkInDate || '-'}\nค่าจอง: ${newBooking.bookingFee ? `฿${Number(newBooking.bookingFee).toLocaleString('th-TH')}` : '-'} (${newBooking.depositStatus || 'not_required'})\nผลตรวจสลิป: ${newBooking.depositVerification?.title || newBooking.depositVerifyCode || '-'}\nนโยบาย: ${newBooking.bookingFeeAppliesToDeposit ? 'นำค่าจองไปหัก/นับรวมกับเงินมัดจำ' : 'ค่าจองแยกจากเงินมัดจำ'}\nมัดจำคงเหลือโดยประมาณ: ${newBooking.depositBalanceDue != null ? `฿${Number(newBooking.depositBalanceDue).toLocaleString('th-TH')}` : '-'}${newBooking.lineBinding?.error ? `\n⚠️ LINE: สร้างรหัสผูก LINE ไม่สำเร็จ (${newBooking.lineBinding.error})\nขั้นต่อไป: ${newBooking.lineBinding.nextAction}` : ''}${newBooking.applicantRisk ? `\n⚠️ ข้อควรตรวจ: ${newBooking.applicantRisk.message}\nขั้นต่อไป: ${newBooking.applicantRisk.nextAction}` : ''}\nรหัสการจอง: ${newBooking.id}`,
+        text: `ชื่อ: ${cleaned.tenantName}\nโทร: ${cleaned.phone || '-'}\nห้อง: ${cleaned.roomId || '-'}\nวันเข้าพัก: ${cleaned.checkInDate || '-'}\nค่าจอง: ${newBooking.bookingFee ? `฿${Number(newBooking.bookingFee).toLocaleString('th-TH')}` : '-'} (${newBooking.depositStatus || 'not_required'})\nผลตรวจสลิป: ${newBooking.depositVerification?.title || newBooking.depositVerifyCode || '-'}\nนโยบาย: ${newBooking.bookingFeeAppliesToDeposit ? 'นำค่าจองไปหัก/นับรวมกับเงินมัดจำ' : 'ค่าจองแยกจากเงินมัดจำ'}\nมัดจำคงเหลือโดยประมาณ: ${newBooking.depositBalanceDue != null ? `฿${Number(newBooking.depositBalanceDue).toLocaleString('th-TH')}` : '-'}${newBooking.lineBinding?.error ? `\n⚠️ LINE: สร้างรหัสผูก LINE ไม่สำเร็จ (${newBooking.lineBinding.error})\nขั้นต่อไป: ${newBooking.lineBinding.nextAction}` : ''}${newBooking.applicantRisk ? `\n⚠️ ข้อควรตรวจ: ${newBooking.applicantRisk.message}\nขั้นต่อไป: ${newBooking.applicantRisk.nextAction}` : ''}\nรหัสการจอง: ${newBooking.id}\n— ขั้นต่อไป: เปิด /admin#bookings เพื่อตรวจสอบและกดอนุมัติการจองนี้`,
       }).catch(() => {});
     } catch { /* ignore */ }
 
@@ -3736,6 +3811,26 @@ app.put('/api/admin/features', sameOrigin, csrfGuard, requireAuth, requireRole('
       code: 'INVALID_FEATURE_CONFIG',
       errors: cfgErrors,
     });
+  }
+  // Prevent disabling citizenIdEncryption when encrypted data already exists —
+  // turning it off would revert to plaintext storage but the existing encrypted
+  // rows can't be decrypted at display time (encryptString would be called on
+  // the ciphertext again), silently corrupting the citizen ID display.
+  if (partial.citizenIdEncryption && partial.citizenIdEncryption.enabled === false) {
+    try {
+      const check = await pool.query(
+        `SELECT 1 FROM tenants WHERE citizen_id_encrypted IS NOT NULL
+           AND citizen_id_encrypted NOT LIKE '1%'  -- length-13 plaintext starts with '1'
+           AND deleted_at IS NULL LIMIT 1`
+      );
+      if (check.rows.length) {
+        return res.status(409).json({
+          error: 'ไม่สามารถปิด citizenIdEncryption ได้ เนื่องจากมีข้อมูลบัตรประชาชนที่เข้ารหัสแล้วในระบบ — ปิดจะทำให้ข้อมูลแสดงผลผิดพลาด',
+          code: 'ENCRYPTION_DATA_EXISTS',
+          hint: 'ถ้าต้องการปิดจริงๆ ต้อง decrypt ข้อมูลทั้งหมดก่อน หรือล้างข้อมูลผู้เช่าที่เกี่ยวข้อง',
+        });
+      }
+    } catch (e) { console.warn('[features] encryption guard check skipped:', e.message); }
   }
   try {
     const next = await features.save(pool, partial, req.session.user.username);
@@ -8495,13 +8590,22 @@ app.post('/api/bookings/:id/approve-and-assign', sameOrigin, csrfGuard, requireA
         && candidateRoom.status === 'reserved'
         && String(candidateRoom.reservedBy || '') === id;
       const v2Compatible = !v2Preclaimed || ['reserved', 'vacant'].includes(v2Preclaimed.status);
-      if (ownedByThisBooking && v2Compatible && want(candidateRoom)) {
+      // Do NOT re-apply the want(type/floor) filter to a room this booking
+      // already reserved. wantType/wantFloor are a PREFERENCE used to AUTO-pick
+      // a room when the applicant didn't choose one — but here the applicant
+      // explicitly selected and locked this exact room (often paying a deposit
+      // hold on it). Re-filtering it spuriously rejected rooms whose blob entry
+      // lacks type/floor metadata (e.g. wantType defaulted to 'standard' while
+      // the reserved room carries no type), then assigned a DIFFERENT room and
+      // left the originally-reserved room stuck 'reserved' (orphaned). The
+      // applicant's explicit reservation wins.
+      if (ownedByThisBooking && v2Compatible) {
         preclaimedCandidate = { ...candidateRoom, _source: 'preclaimed' };
       }
     }
     const rawBlobCandidates = Object.entries(rooms || {})
       .map(([roomCode, room]) => ({ id: room?.id || roomCode, ...(room || {}) }))
-      .filter((r) => r && r.status === 'vacant' && want(r));
+      .filter((r) => r && isVacantStatus(r.status) && want(r));
 
     // Lock + read rooms_v2 vacant rows under the same transaction so a
     // concurrent admin can't grab the same v2 row mid-approval.
@@ -8554,7 +8658,7 @@ app.post('/api/bookings/:id/approve-and-assign', sameOrigin, csrfGuard, requireA
                  FOR UPDATE`,
               [roomId]
             );
-            if (v2State.rows.length && v2State.rows[0].status !== 'vacant') {
+            if (v2State.rows.length && !isVacantStatus(v2State.rows[0].status)) {
               continue;
             }
           } catch (err) {
@@ -8721,9 +8825,10 @@ app.post('/api/bookings/:id/approve-and-assign', sameOrigin, csrfGuard, requireA
         booking,
         roomId: assignedRoomId || booking.assignedRoomId || booking.roomId || null,
         subject: 'การจองห้องได้รับการอนุมัติแล้ว',
-        text: `✅ การจองห้องของคุณได้รับการอนุมัติ\n` +
+        text: `✅ การจองห้องของคุณได้รับการอนุมัติแล้ว\n` +
               (assignedRoomId ? `ห้อง: ${assignedRoomId}\n` : '') +
-              `กรุณาติดต่อสำนักงานเพื่อเซ็นสัญญา`,
+              `ขั้นต่อไป: เจ้าหน้าที่จะติดต่อคุณเพื่อนัดเซ็นสัญญาและชำระเงินมัดจำส่วนที่เหลือ (ถ้ามี)\n` +
+              `กรุณาเตรียมบัตรประชาชนตัวจริงในวันเซ็นสัญญา`,
       });
       notifier.notifyOwner({ pool, features: flags }, {
         subject: `✅ อนุมัติการจอง ${id}${assignedRoomId ? ` → ห้อง ${assignedRoomId}` : ''}`,
@@ -8731,6 +8836,9 @@ app.post('/api/bookings/:id/approve-and-assign', sameOrigin, csrfGuard, requireA
           `${booking.name || '-'} (${booking.phone || '-'})`,
           assignedRoomId ? `จัดให้ห้อง ${assignedRoomId}` : 'ยังไม่ได้กำหนดห้อง — ไม่มีห้องว่างตรงเงื่อนไข',
           bookingNotifyOwnerLine(tenantNotify),
+          assignedRoomId
+            ? '— ขั้นต่อไป: สร้างสัญญา + ส่งลิงก์เซ็นให้ผู้เช่า (ปุ่ม "สร้างสัญญา" ที่หน้า booking)'
+            : '— ขั้นต่อไป: เลือกห้องว่างให้ผู้เช่าด้วยตนเอง แล้วจึงสร้างสัญญา',
         ].filter(Boolean).join('\n'),
       }).catch(() => {});
     } catch (err) {
@@ -9071,11 +9179,21 @@ app.put('/api/bookings/:id', sameOrigin, csrfGuard, requireAuth, requireRole('ow
     if (b.status && b.status !== before.status) {
       try {
         const flags = await features.load(pool);
+        // Clear, next-step guidance in Thai so the applicant always knows
+        // (1) what just happened and (2) what comes next — the booking flow
+        // stays easy to follow end to end. 'approved' is intentionally NOT here:
+        // it's unreachable via PUT (blocked above) and is sent by
+        // approve-and-assign with its own room-assignment message.
+        const roomLabel = (updated.assignedRoomId || updated.roomId)
+          ? ` ห้อง ${updated.assignedRoomId || updated.roomId}` : '';
         const tenantText = ({
-          approved: `✅ การจองห้องได้รับการอนุมัติแล้ว\nกรุณาติดต่อสำนักงานเพื่อเซ็นสัญญา`,
-          rejected: `❌ ขออภัย — การจองห้องไม่ได้รับการอนุมัติ\n${updated.adminNotes ? 'หมายเหตุ: ' + updated.adminNotes : ''}`,
-          reviewing: `🔍 การจองของคุณกำลังถูกตรวจสอบ`,
-          cancelled: `🚫 การจองถูกยกเลิก`,
+          reviewing: `🔍 การจองห้อง${roomLabel}ของคุณกำลังถูกตรวจสอบโดยเจ้าหน้าที่\n`
+            + `ขั้นต่อไป: เราจะแจ้งผลให้คุณทราบทาง LINE นี้เมื่อตรวจสอบเสร็จ — ยังไม่ต้องดำเนินการใดเพิ่ม`,
+          rejected: `❌ ขออภัย การจองห้อง${roomLabel}ไม่ได้รับการอนุมัติ\n`
+            + (updated.adminNotes ? `เหตุผล: ${updated.adminNotes}\n` : '')
+            + `หากมีข้อสงสัย หรือต้องการเลือกห้องอื่น กรุณาติดต่อสำนักงาน`,
+          cancelled: `🚫 การจองห้อง${roomLabel}ถูกยกเลิกแล้ว\n`
+            + `หากต้องการจองใหม่ สามารถทำรายการได้ที่หน้าจองห้องอีกครั้ง`,
         })[updated.status];
         if (tenantText) {
           tenantNotify = await notifyBookingApplicantStatus({
@@ -9392,34 +9510,66 @@ app.post('/api/access/log', deviceOrSameOrigin, requireDeviceOrAdmin, features.r
   const b = req.body || {};
   const device = String(b.device || '').slice(0, 64);
   const method = String(b.method || 'manual').slice(0, 16);
-  const result = String(b.result || 'granted').slice(0, 16);
+  const requestedResult = ['granted', 'denied'].includes(String(b.result || 'granted'))
+    ? String(b.result) : 'granted';
+  const cardId = b.cardId ? String(b.cardId).slice(0, 64) : null;
   if (!device) return res.status(400).json({ error: 'device required' });
   try {
+    // Card-driven access decision. When a physical card is presented, the
+    // card ROW — not the request body — is the source of truth for which
+    // tenant/room the event belongs to, and a revoked card is ALWAYS denied.
+    //
+    // This is the software enforcement point for the revoke-on-overdue
+    // feature: tickAccessControlSync flips access_cards.status='revoked', and
+    // here we honor it so a revoked card can never be recorded as 'granted'.
+    // Without this, `result` was whatever the caller sent and tenant_id/card_id
+    // could be forged for any tenant by anyone holding a device token —
+    // fabricating "tenant X entered room Y" in the system-of-record log.
+    let roomId = b.roomId ? String(b.roomId).slice(0, 32) : null;
+    let tenantId = Number.isInteger(Number(b.tenantId)) ? Number(b.tenantId) : null;
+    let result = requestedResult;
+    let reason = b.reason ? String(b.reason).slice(0, 200) : null;
+    if (cardId) {
+      const { rows: cardRows } = await pool.query(
+        `SELECT card_id, tenant_id, room_id, status FROM access_cards WHERE card_id=$1 LIMIT 1`,
+        [cardId]
+      );
+      if (!cardRows.length) {
+        // Unknown card → never grant; record honestly as denied even if the
+        // caller claimed 'granted'. Don't attribute to any tenant.
+        result = 'denied';
+        reason = reason || 'unknown_card';
+        tenantId = null;
+      } else {
+        const card = cardRows[0];
+        // Authoritative identity from the card, not the body (anti-forgery).
+        tenantId = card.tenant_id;
+        roomId = card.room_id || roomId;
+        if (card.status === 'revoked') {
+          result = 'denied';
+          reason = reason || 'card_revoked';
+        }
+      }
+    }
     const { rows } = await pool.query(
       `INSERT INTO access_logs (room_id, tenant_id, device, method, card_id, result, reason)
        VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
-      [
-        b.roomId ? String(b.roomId).slice(0, 32) : null,
-        Number.isInteger(Number(b.tenantId)) ? Number(b.tenantId) : null,
-        device, method,
-        b.cardId ? String(b.cardId).slice(0, 64) : null,
-        ['granted', 'denied'].includes(result) ? result : 'granted',
-        b.reason ? String(b.reason).slice(0, 200) : null,
-      ]
+      [roomId, tenantId, device, method, cardId, result, reason]
     );
     audit(req, 'access.log', 'access', String(rows[0].id));
-    res.json({ ok: true, log: rows[0] });
+    res.json({ ok: true, log: rows[0], decision: result });
   } catch (err) {
     console.error('access log error:', err);
     res.status(500).json({ error: 'internal error' });
   }
 });
 
-app.get('/api/access/logs', requireAuth, features.requireFeature('accessControl'), async (req, res) => {
+app.get('/api/access/logs', requireAuth, requireRole('owner', 'manager'), features.requireFeature('accessControl'), async (req, res) => {
   const limit = Math.min(Math.max(Number(req.query.limit) || 100, 1), 500);
   try {
     const { rows } = await pool.query(
-      `SELECT * FROM access_logs ORDER BY occurred_at DESC LIMIT $1`,
+      `SELECT id, room_id, tenant_id, device, method, card_id, result, reason, occurred_at
+         FROM access_logs ORDER BY occurred_at DESC LIMIT $1`,
       [limit]
     );
     res.json({ ok: true, logs: rows });
@@ -9483,19 +9633,43 @@ app.post('/api/access/cards', sameOrigin, csrfGuard, requireAuth, requireRole('o
         );
         if (!t.rows.length) return res.status(404).json({ error: 'tenant not found' });
       }
-      const { rows } = await pool.query(
-        `INSERT INTO access_cards (card_id, tenant_id, room_id, status)
-         VALUES ($1,$2,$3,'active')
-         RETURNING id, card_id, tenant_id, room_id, status, issued_at`,
-        [cardId, tenantId, roomId]
-      );
+      // Recycle a physical card. card_id is globally UNIQUE, so a tag whose
+      // previous holder checked out (row left 'revoked') could never be
+      // re-registered to the next tenant — a 409 forever, despite the physical
+      // card being free. Re-issue ONLY when the existing row is 'revoked':
+      // reassign it to the new tenant/room and reactivate. An 'active' row is
+      // genuinely in use → still a clean 409 (no silent steal of a live card).
+      let rows;
+      try {
+        ({ rows } = await pool.query(
+          `INSERT INTO access_cards (card_id, tenant_id, room_id, status)
+           VALUES ($1,$2,$3,'active')
+           RETURNING id, card_id, tenant_id, room_id, status, issued_at`,
+          [cardId, tenantId, roomId]
+        ));
+      } catch (err) {
+        if (err.code !== '23505') throw err;
+        const recycled = await pool.query(
+          `UPDATE access_cards
+              SET tenant_id=$2, room_id=$3, status='active',
+                  issued_at=NOW(), revoked_at=NULL, revoke_reason=NULL
+            WHERE card_id=$1 AND status='revoked'
+          RETURNING id, card_id, tenant_id, room_id, status, issued_at`,
+          [cardId, tenantId, roomId]
+        );
+        if (!recycled.rows.length) {
+          // Row exists and is still active → genuinely in use.
+          return res.status(409).json({ error: 'card_id ซ้ำ — บัตรนี้ยังใช้งานอยู่ ใช้รหัสอื่นหรือเพิกถอนบัตรเดิมก่อน', code: 'DUPLICATE_CARD_ID' });
+        }
+        rows = recycled.rows;
+        audit(req, 'access_card.recycle', 'card', String(rows[0].id),
+          { cardId, tenantId, roomId, note: 'reissued previously-revoked physical card' });
+        return res.json({ ok: true, card: rows[0], recycled: true });
+      }
       audit(req, 'access_card.create', 'card', String(rows[0].id),
         { cardId, tenantId, roomId });
       res.json({ ok: true, card: rows[0] });
     } catch (err) {
-      if (err.code === '23505') {
-        return res.status(409).json({ error: 'card_id ซ้ำ — ใช้รหัสอื่น', code: 'DUPLICATE_CARD_ID' });
-      }
       console.error('access card create error:', err);
       res.status(500).json({ error: 'internal error' });
     }
@@ -13553,7 +13727,7 @@ app.get('/api/admin/contract-terms', requireAuth, requireRole('owner', 'manager'
     const contractPdf = require('./services/contractPdf');
     // Prefer contract_templates default row; fall back to legacy system_settings.
     const dr = await pool.query(
-      `SELECT mode, clauses, sections, variables, updated_by, updated_at
+      `SELECT mode, clauses, sections, variables, created_by, updated_at
          FROM contract_templates
         WHERE is_default=TRUE AND deleted_at IS NULL LIMIT 1`
     );
@@ -13563,7 +13737,8 @@ app.get('/api/admin/contract-terms', requireAuth, requireRole('owner', 'manager'
         template: dr.rows[0],
         defaults: contractPdf.DEFAULT_CLAUSES,
         resolved: contractPdf.resolveClauses(dr.rows[0]),
-        updatedBy: dr.rows[0].updated_by,
+        // contract_templates tracks created_by + updated_at (no updated_by column).
+        updatedBy: dr.rows[0].created_by,
         updatedAt: dr.rows[0].updated_at,
         source: 'contract_templates',
       });
@@ -14429,7 +14604,13 @@ app.get('/api/admin/production-readiness', requireAuth, requireRole('owner'), as
     { key: 'SESSION_SECRET',    label: 'SESSION_SECRET',     fatal: true,
       val: SESSION_SECRET, fromEnv: true },
     { key: 'CITIZEN_ID_KEY',    label: 'CITIZEN_ID_KEY',     fatal: false,
-      val: process.env.CITIZEN_ID_KEY || process.env.ENCRYPTION_KEY_V1,
+      // crypto.js (citizen-ID PII) reads ONLY CITIZEN_ID_KEY, else derives from
+      // SESSION_SECRET via HKDF — it never reads ENCRYPTION_KEY_V1 (that feeds
+      // the separate secrets/OA-token store in encryption.js). Treating
+      // ENCRYPTION_KEY_V1 as covering citizen IDs is a false green: the
+      // operator thinks PII is rotation-safe while it's still bound to
+      // SESSION_SECRET, so rotating it silently destroys every stored ID.
+      val: process.env.CITIZEN_ID_KEY,
       hint: 'ป้องกัน citizen-id ถ้าหมุน SESSION_SECRET — ถ้าไม่ตั้ง ข้อมูลที่เข้ารหัสไว้จะถอดไม่ได้หลังหมุน' },
     { key: 'LINE_CHANNEL_ACCESS_TOKEN', label: 'LINE Channel Access Token', fatal: false,
       val: sec.get('LINE_CHANNEL_ACCESS_TOKEN'),
