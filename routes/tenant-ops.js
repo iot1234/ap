@@ -364,16 +364,33 @@ module.exports = function buildTenantOpsRouter(ctx) {
             code: 'FORBIDDEN_CITIZEN_ID',
           });
         }
-        if (flags.citizenIdEncryption && flags.citizenIdEncryption.enabled
-            && rows[0].citizen_id_encrypted) {
-          try {
-            out.citizen_id = cryptoSvc.decryptString(rows[0].citizen_id_encrypted);
-            // Audit every full-citizen-ID reveal — pulling a tenant's cleartext
-            // national ID (PII) must leave a forensic trail, mirroring the
-            // weaker tail-only lookup audit (tenant.citizen_lookup).
+        if (rows[0].citizen_id_encrypted) {
+          const encOn = !!(flags.citizenIdEncryption && flags.citizenIdEncryption.enabled);
+          const raw = String(rows[0].citizen_id_encrypted);
+          if (encOn) {
+            try {
+              out.citizen_id = cryptoSvc.decryptString(raw);
+            } catch (_e) {
+              // Not valid ciphertext under the current key — most commonly a row
+              // written while encryption was OFF (plaintext), or a key change.
+              // Show it only if it is actually a 13-digit ID; never echo raw
+              // ciphertext as the "citizen id".
+              out.citizen_id = /^\d{13}$/.test(raw) ? raw : null;
+            }
+          } else {
+            // Encryption disabled → the column stores plaintext. Return it when
+            // it is a real 13-digit ID (don't echo leftover ciphertext from a
+            // prior encrypted-mode row). Previously this whole branch was missing,
+            // so reveal silently returned nothing whenever encryption was off.
+            out.citizen_id = /^\d{13}$/.test(raw) ? raw : null;
+          }
+          // Audit every successful full-citizen-ID reveal regardless of storage
+          // mode — pulling cleartext national-ID PII must leave a forensic trail,
+          // mirroring the weaker tail-only lookup audit (tenant.citizen_lookup).
+          if (out.citizen_id != null) {
             audit(req, 'tenant.citizen_reveal', 'tenant', String(rows[0].id),
               { by: req.session?.user?.username });
-          } catch (_e) { out.citizen_id = null; }
+          }
         }
       }
       res.json({ ok: true, tenant: out });
@@ -1888,30 +1905,57 @@ module.exports = function buildTenantOpsRouter(ctx) {
         // Create a contract row. Stamp the terms-version + agreed_at so
         // we have a legal trail for which T&C wording the tenant accepted.
         // Falls back gracefully on older deploys without those columns.
-        const contractNo = `C-${new Date().getFullYear()}-${String(id).padStart(4, '0')}`;
+        // Disambiguate contract_no per tenancy. A tenant who moved out and
+        // re-checks in the SAME calendar year would otherwise collide on
+        // `C-<year>-<id>`, and the ON CONFLICT DO NOTHING below silently created
+        // NO contract — leaving the tenant active + room occupied + a welcome
+        // bill but with no active contract row, so a later checkout closes 0 rows
+        // (no closing bill, deposit refund never recorded). Suffix with the count
+        // of this tenant's prior contracts so each tenancy gets a distinct number.
+        const _cyear = new Date().getFullYear();
+        const _priorContracts = await client.query(
+          `SELECT COUNT(*)::int AS n FROM contracts WHERE tenant_id=$1`, [id]
+        );
+        const _cseq = (_priorContracts.rows[0]?.n || 0) + 1;
+        const contractNo = _cseq > 1
+          ? `C-${_cyear}-${String(id).padStart(4, '0')}-${_cseq}`
+          : `C-${_cyear}-${String(id).padStart(4, '0')}`;
         const termsVersion = agreedTermsVersion || tenancy.termsVersion || null;
+        let contractIns;
         try {
-          await client.query(
+          contractIns = await client.query(
             `INSERT INTO contracts (contract_no, tenant_id, room_id, start_date, end_date,
                                     monthly_rent, deposit, status, term_months, discount_pct,
                                     agreed_terms_at, agreed_terms_version)
              VALUES ($1, $2, $3, $4::date, $5::date, $6, $7, 'active', $8, $9,
                      CASE WHEN $10::text IS NOT NULL THEN NOW() ELSE NULL END, $10)
-             ON CONFLICT (contract_no) DO NOTHING`,
+             ON CONFLICT (contract_no) DO NOTHING
+             RETURNING id`,
             [contractNo, id, roomId, moveInDate, endDate,
              monthlyRent, depositAmount, effectiveTermMonths || null, resolvedDiscountPct,
              termsVersion]
           );
         } catch (err) {
           if (err.code !== '42703') throw err;  // pre-migration deploy
-          await client.query(
+          contractIns = await client.query(
             `INSERT INTO contracts (contract_no, tenant_id, room_id, start_date, end_date,
                                     monthly_rent, deposit, status, term_months, discount_pct)
              VALUES ($1, $2, $3, $4::date, $5::date, $6, $7, 'active', $8, $9)
-             ON CONFLICT (contract_no) DO NOTHING`,
+             ON CONFLICT (contract_no) DO NOTHING
+             RETURNING id`,
             [contractNo, id, roomId, moveInDate, endDate,
              monthlyRent, depositAmount, effectiveTermMonths || null, resolvedDiscountPct]
           );
+        }
+        if (!contractIns.rows.length) {
+          // The per-tenancy suffix should make this impossible, but never proceed
+          // with a contract-less "active" tenancy — fail loudly instead of the
+          // old silent no-op.
+          await client.query('ROLLBACK');
+          return res.status(409).json({
+            error: 'ไม่สามารถสร้างสัญญา (เลขที่สัญญาซ้ำ) — กรุณาลองใหม่',
+            code: 'CONTRACT_NO_CONFLICT',
+          });
         }
 
         // Create welcome bill draft for the move-in period (NOT wallclock).
@@ -2422,13 +2466,22 @@ module.exports = function buildTenantOpsRouter(ctx) {
             ) / 100;
             const billNo = billing.makeBillNo(`${billingRoom}-X`, period, { tenantId: id });
             const dueDate = billing.formatYMD(ty, tm, Math.min(daysInMonth, daysLived + 7));
-            // Fold any carried late fees onto the closing bill (as the bill's
-            // late_fee) so the moving-out tenant still settles them.
+            // Carried late fees are folded onto the closing bill as PRINCIPAL
+            // (inside subtotal), NOT into the late_fee column. tickLateFee
+            // derives its recomputable penalty from `base = total - late_fee`,
+            // so a carried fee parked in late_fee gets silently overwritten (and
+            // lost) the first time the closing bill flips overdue. Keeping it in
+            // subtotal preserves it, and late_fee=0 still lets the closing bill
+            // accrue its own late fee later if it goes unpaid.
             const closingLateFee = carriedLateFeeTotal > 0 ? carriedLateFeeTotal : 0;
-            const closingTotal = Math.round((proRatedRent + closingLateFee) * 100) / 100;
-            const otherLines = [{ label: 'pro-rate', amount: proRatedRent, daysLived, daysInMonth }];
+            const closingSubtotal = Math.round((proRatedRent + closingLateFee) * 100) / 100;
+            const closingTotal = closingSubtotal;
+            // The prorated rent already lives in the rent column, so we do NOT
+            // add a duplicate 'pro-rate' line (it double-counted rent in the
+            // itemised PDF). Only the carried fee gets its own display line.
+            const otherLines = [];
             if (closingLateFee > 0) {
-              otherLines.push({ label: 'ค่าปรับล่าช้าค้างยกมา', amount: closingLateFee });
+              otherLines.push({ label: 'ค่าปรับล่าช้าค้างยกมา', amount: closingLateFee, daysLived, daysInMonth });
             }
             // A 100% discount (or a rent×fraction that rounds to ฿0.00) with no
             // carried late fee makes closingTotal=0, which violates the bills
@@ -2442,11 +2495,11 @@ module.exports = function buildTenantOpsRouter(ctx) {
                   `INSERT INTO bills
                      (bill_no, tenant_id, room_id, period, rent, subtotal, late_fee, total, due_date, status,
                       other)
-                   VALUES ($1,$2,$3,$4,$5,$5,$8,$9,$6,'pending',$7::jsonb)
+                   VALUES ($1,$2,$3,$4,$5,$8,$9,$10,$6,'pending',$7::jsonb)
                    ON CONFLICT (bill_no) DO NOTHING
                    RETURNING id, bill_no, total, due_date`,
                   [billNo, id, billingRoom, period, proRatedRent, dueDate,
-                   JSON.stringify(otherLines), closingLateFee, closingTotal]
+                   JSON.stringify(otherLines), closingSubtotal, 0, closingTotal]
                 );
                 closingBill = ins.rows[0] || null;
                 // Only deactivate the carried charges once they are safely folded

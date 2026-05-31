@@ -406,7 +406,7 @@ app.use(
 // modules). Wired here so every consumer shares the same constants and DB
 // lookups — previously this file had a copy-pasted duplicate that drifted.
 const { makeAuth } = require('./middleware/auth');
-const { requireAuth, requireRole, requireDeviceOrAdmin } = makeAuth(pool);
+const { requireAuth, requireRole, requireDeviceOrAdmin, ROLE_RANK } = makeAuth(pool);
 
 // --- Audit log helper (Phase B1) ------------------------------------------
 // Fire-and-forget insert. Never throws back to caller — audit failures must
@@ -1392,6 +1392,14 @@ async function mirrorRoomsToTenants(roomsObj, updatedBy) {
     if (!room || typeof room !== 'object') continue;
     const t = room.tenant;
     if (!t || !t.name || t.masked) continue;
+    // Only mirror rooms that represent a CONFIRMED occupancy. A 'reserved' room
+    // (e.g. a pending public booking) carries an applicant snapshot but has no
+    // contract/approval yet — mirroring it would create a phantom 'active'
+    // tenant and flip the room to 'occupied' the next time an admin saves ANY
+    // room. An empty/legacy status (older blobs that never set one) still
+    // mirrors, so confirmed-occupied legacy rooms keep working.
+    const rstatus = String(room.status || '').toLowerCase();
+    if (rstatus && rstatus !== 'occupied' && rstatus !== 'overdue') continue;
     const phone = String(t.phone || '').replace(/[\s-]/g, '').slice(0, 32);
     const fullName = String(t.name).slice(0, 200).trim();
     if (!fullName) continue;
@@ -6827,6 +6835,33 @@ async function tenantPaymentUploadHandler(req, res) {
       }
     }
 
+    // Cross-flow replay guard (txref): a bank transaction already recorded as a
+    // BOOKING deposit must not be reused to pay a bill. The slip_hash check
+    // above only catches the SAME image; a re-screenshot has a different hash
+    // but the SAME bank transaction_ref. uq_payments_tx_ref dedups within
+    // payments, but booking deposits live in bookings.deposit_transaction_ref —
+    // so check there too (mirror of the booking-submit guard at /bookings).
+    if (verifyResult && verifyResult.transRef) {
+      try {
+        const dupBookingRef = await pool.query(
+          `SELECT external_id FROM bookings WHERE deposit_transaction_ref=$1 LIMIT 1`,
+          [verifyResult.transRef]
+        );
+        if (dupBookingRef.rows.length) {
+          if (slip && slip.id) {
+            require('./services/storage').remove(pool, slip.id).catch(() => {});
+          }
+          return res.status(409).json({
+            error: 'รายการโอนนี้ถูกใช้เป็นมัดจำการจองไปแล้ว — ไม่สามารถนำมาชำระบิลซ้ำ',
+            code: 'DUPLICATE_TRANSACTION',
+            bookingId: dupBookingRef.rows[0].external_id,
+          });
+        }
+      } catch (err) {
+        if (err.code !== '42703') throw err; // pre-migration: column absent
+      }
+    }
+
     // Decide the payment row's initial status. The matrix is:
     //
     //   autoVerify | verify result        | requireVerification | → status
@@ -9514,6 +9549,13 @@ app.post('/api/access/log', deviceOrSameOrigin, requireDeviceOrAdmin, features.r
     ? String(b.result) : 'granted';
   const cardId = b.cardId ? String(b.cardId).slice(0, 64) : null;
   if (!device) return res.status(400).json({ error: 'device required' });
+  // A leaked/compromised device token must not forge access events straight from
+  // the body. Without a presented card, tenant_id/room_id/result below are fully
+  // caller-controlled — require a real card for device-authenticated callers (the
+  // card row is the only trusted identity). Admin UI test posts are exempt.
+  if (req.device && !cardId) {
+    return res.status(400).json({ error: 'cardId required for device access events', code: 'CARD_REQUIRED' });
+  }
   try {
     // Card-driven access decision. When a physical card is presented, the
     // card ROW — not the request body — is the source of truth for which
@@ -9551,6 +9593,22 @@ app.post('/api/access/log', deviceOrSameOrigin, requireDeviceOrAdmin, features.r
         }
       }
     }
+    // Even a valid, non-revoked card is denied when the cardholder is no longer an
+    // active tenant (moved out / blacklisted / soft-deleted). Card ISSUE now also
+    // requires an active tenant, but a tenant can go inactive AFTER a card was
+    // issued (e.g. force move-out that didn't collect the physical tag), so the
+    // status is re-checked here at decision time.
+    if (result === 'granted' && tenantId != null) {
+      const { rows: tRows } = await pool.query(
+        `SELECT status, deleted_at FROM tenants WHERE id=$1 LIMIT 1`,
+        [tenantId]
+      );
+      const holder = tRows[0];
+      if (!holder || holder.deleted_at || holder.status !== 'active') {
+        result = 'denied';
+        reason = reason || 'tenant_inactive';
+      }
+    }
     const { rows } = await pool.query(
       `INSERT INTO access_logs (room_id, tenant_id, device, method, card_id, result, reason)
        VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
@@ -9585,7 +9643,7 @@ app.get('/api/access/logs', requireAuth, requireRole('owner', 'manager'), featur
 // services/scheduler.tickAccessControlSync), but until now there was no
 // way for admin to actually CREATE the cards being revoked — the table
 // was effectively dead. These endpoints close that loop.
-app.get('/api/access/cards', requireAuth, features.requireFeature('accessControl'), async (req, res) => {
+app.get('/api/access/cards', requireAuth, requireRole('owner', 'manager'), features.requireFeature('accessControl'), async (req, res) => {
   try {
     const params = [];
     const where = [];
@@ -9628,10 +9686,10 @@ app.post('/api/access/cards', sameOrigin, csrfGuard, requireAuth, requireRole('o
       // would yell with an unhelpful 23503 instead of a clean 404.
       if (tenantId) {
         const t = await pool.query(
-          `SELECT 1 FROM tenants WHERE id=$1 AND deleted_at IS NULL LIMIT 1`,
+          `SELECT 1 FROM tenants WHERE id=$1 AND deleted_at IS NULL AND status='active' LIMIT 1`,
           [tenantId]
         );
-        if (!t.rows.length) return res.status(404).json({ error: 'tenant not found' });
+        if (!t.rows.length) return res.status(404).json({ error: 'tenant not found or not active', code: 'TENANT_NOT_ACTIVE' });
       }
       // Recycle a physical card. card_id is globally UNIQUE, so a tag whose
       // previous holder checked out (row left 'revoked') could never be
@@ -13152,16 +13210,84 @@ app.post('/api/admin/contract-invitations/:id/approve',
             const frac = billing.firstMonthProrationFraction({ moveInDay: day, daysInMonth, prorate: true });
             welcomeRent = Math.round(welcomeRent * frac * 100) / 100;
           }
-          const billNo = billing.makeBillNo(contract.room_id, period);
-          const billIns = await client.query(
-            `INSERT INTO bills
-               (bill_no, tenant_id, room_id, period, rent, subtotal, total, due_date, status)
-             VALUES ($1, $2, $3, $4, $5, $5, $5, $6, 'pending')
-             ON CONFLICT DO NOTHING
-             RETURNING id, bill_no, period, total, due_date`,
-            [billNo, inv.tenant_id, contract.room_id, period, welcomeRent, dueDate]
+          // Resolve the room's flat (non-metered) charges, mirroring the
+          // /checkin welcome bill (routes/tenant-ops.js) so BOTH onboarding paths
+          // bill the same first-month line items — previously this path billed
+          // rent ONLY and silently dropped wifi / common fee / flat utilities
+          // (an undercharge on every invitation-approved tenant). Metered
+          // water/elec are NOT on the welcome bill (their first consumption is
+          // measured next cycle from the baseline captured below).
+          const cfgValForBill = cfgR[0]?.value || {};
+          const roomBlobQ = await client.query(
+            `SELECT value->$1 AS room FROM app_data WHERE key='baankarn_rooms_v1' LIMIT 1`,
+            [contract.room_id]
           );
-          if (billIns.rows.length) welcomeBillCreated = billIns.rows[0];
+          const billRoomObj = (roomBlobQ.rows[0] && roomBlobQ.rows[0].room) || {};
+          let flatFrac = 1;
+          if (moveInMatch) {
+            const _dim = new Date(Date.UTC(Number(moveInMatch[1]), Number(moveInMatch[2]), 0)).getUTCDate();
+            flatFrac = billing.firstMonthProrationFraction({
+              moveInDay: Number(moveInMatch[3]), daysInMonth: _dim, prorate: true,
+            });
+          }
+          const _util = (cfgValForBill && typeof cfgValForBill.utilities === 'object') ? cfgValForBill.utilities : {};
+          const _pickNum = (...vals) => {
+            for (const v of vals) {
+              if (v != null && v !== '' && Number.isFinite(Number(v))) return Math.max(0, Number(v));
+            }
+            return 0;
+          };
+          const r2 = (n) => Math.round(n * 100) / 100;
+          const wifiAmt = r2(_pickNum(billRoomObj.wifiOverride, billRoomObj.wifi_override, billRoomObj.wifi, _util.wifi) * flatFrac);
+          const commonAmt = r2(_pickNum(billRoomObj.commonFeeOverride, billRoomObj.common_fee_override, billRoomObj.commonFee, billRoomObj.common_fee, _util.commonFee) * flatFrac);
+          const waterAmt = r2((billing.isFlatUtilityConfigured(billRoomObj, 'water')
+            ? _pickNum(billRoomObj.waterFlatAmount, billRoomObj.water_flat_amount) : 0) * flatFrac);
+          const elecAmt = r2((billing.isFlatUtilityConfigured(billRoomObj, 'elec')
+            ? _pickNum(billRoomObj.elecFlatAmount, billRoomObj.elec_flat_amount) : 0) * flatFrac);
+          const welcomeOther = commonAmt > 0
+            ? [{ label: `ค่าส่วนกลาง${flatFrac < 1 ? ' (ตามวันที่อยู่)' : ''}`, amount: commonAmt }]
+            : [];
+          const welcomeSubtotal = r2(welcomeRent + wifiAmt + waterAmt + elecAmt + commonAmt);
+          const billNo = billing.makeBillNo(contract.room_id, period);
+          if (welcomeSubtotal > 0) {
+            const billIns = await client.query(
+              `INSERT INTO bills
+                 (bill_no, tenant_id, room_id, period, rent,
+                  water_amount, elec_amount, wifi, other,
+                  subtotal, vat, late_fee, total, due_date, status)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, 0, 0, $10, $11, 'pending')
+               ON CONFLICT DO NOTHING
+               RETURNING id, bill_no, period, total, due_date`,
+              [billNo, inv.tenant_id, contract.room_id, period, welcomeRent,
+               waterAmt, elecAmt, wifiAmt, JSON.stringify(welcomeOther),
+               welcomeSubtotal, dueDate]
+            );
+            if (billIns.rows.length) welcomeBillCreated = billIns.rows[0];
+          }
+          // TL-2: establish a move-in meter baseline so the FIRST metered bill
+          // measures only THIS tenant's usage, not the previous occupant's. The
+          // invitation flow has no operator-entered reading, so we anchor the
+          // baseline at the room's latest known reading (the handover point) for
+          // each METERED utility — but only when the move-in period has no
+          // reading yet, so we never overwrite an existing period reading.
+          for (const mt of ['water', 'elec']) {
+            if (billing.isFlatUtilityConfigured(billRoomObj, mt)) continue; // flat → no meter
+            try {
+              const existsQ = await client.query(
+                `SELECT 1 FROM meter_readings WHERE room_id=$1 AND meter_type=$2 AND period=$3 LIMIT 1`,
+                [contract.room_id, mt, period]
+              );
+              if (existsQ.rows.length) continue;
+              const last = await meter.latest(client, contract.room_id, mt);
+              if (!last) continue; // no prior reading → next bill gets 0 units (safe)
+              await meter.record(client, {
+                roomId: contract.room_id, meterType: mt, reading: Number(last.reading),
+                period, source: 'invitation-approve', createdBy: req.session.user.username,
+              });
+            } catch (mErr) {
+              console.warn(`[approve] meter baseline (${mt}) skipped:`, mErr.message);
+            }
+          }
           await client.query('RELEASE SAVEPOINT welcome_bill');
         } catch (err) {
           // Welcome bill is best-effort — admin can manually create one
@@ -15061,9 +15187,19 @@ app.get('/files/:id', rateLimitFileAccess, async (req, res) => {
       return sendSecurityText(res, 404);
     }
     const f = rows[0];
+    // PII files (citizen-ID scans, payment slips, contract signatures) must NOT
+    // be readable by every admin session — only owner/manager (or the tenant who
+    // owns the file). A readonly/staff admin may browse tenants but must not pull
+    // the raw ID-card images / slips. File IDs are sequential & enumerable, so
+    // this role gate is the only thing between a low-privilege admin and bulk PII
+    // download. Non-sensitive files (room photos) stay broadly readable.
+    const SENSITIVE_CATEGORIES = new Set(['slip', 'citizen_id_image', 'contract_signature']);
+    const sensitive = SENSITIVE_CATEGORIES.has(f.category);
     const isPublicRoomPhoto = f.category === 'room_photo';
+    const sessionRole = req.session && req.session.user && req.session.user.role;
     const isAdmin = !!(req.session && req.session.user);
-    let allowed = isPublicRoomPhoto || isAdmin;
+    const isManagerPlus = (ROLE_RANK[sessionRole] || 0) >= ROLE_RANK.manager;
+    let allowed = isPublicRoomPhoto || (isAdmin && (!sensitive || isManagerPlus));
     let tSession = null;
     if (!allowed) {
       // Tenant: allow only own uploads (uploaded_by === 'tenant:<id>')
@@ -15085,8 +15221,7 @@ app.get('/files/:id', rateLimitFileAccess, async (req, res) => {
     // no-store keeps slips and citizen-ID images out of the browser cache so
     // they're not recoverable after logout. room_photo is non-sensitive and
     // can keep a short private cache for SPA performance.
-    const SENSITIVE_CATEGORIES = new Set(['slip', 'citizen_id_image', 'contract_signature']);
-    if (SENSITIVE_CATEGORIES.has(f.category)) {
+    if (sensitive) {
       res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
       res.setHeader('Pragma', 'no-cache');
       // Force download for sensitive files so a forged mime-type can't be

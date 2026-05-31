@@ -1713,10 +1713,16 @@ async function runChecks(pool) {
     } catch (err) {
       res = { status: 'error', message: err.message };
     }
+    if (!res || typeof res !== 'object') res = { status: 'warn', message: 'check returned no result' };
+    // Fail safe: an unknown/missing status must NOT be scored green. Defaulting
+    // a statusless result to 'ok' silently false-greens the badge and suppresses
+    // alerting precisely when a probe is misbehaving. Only the three known rungs
+    // pass through; anything else degrades to 'warn'.
+    const status = ['ok', 'warn', 'error'].includes(res.status) ? res.status : 'warn';
     return {
       id: c.id,
       label: c.label,
-      status: res.status || 'ok',
+      status,
       message: res.message || '',
       detail: res.detail || null,
       durationMs: Date.now() - start,

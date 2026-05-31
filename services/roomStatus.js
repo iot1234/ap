@@ -101,7 +101,12 @@ async function syncRoom(dbOrClient, roomId, opts = {}) {
     const before = facts.currentStatus;
     const after = computeRoomStatus(facts);
     const activeTenantForBlob = buildBlobTenant(facts.activeTenant);
-    const cleanupStaleTenant = facts.hasBlobTenant && !activeTenantForBlob;
+    // Keep the applicant snapshot on a room that is legitimately RESERVED by a
+    // still-live booking/draft: it has a blob tenant snapshot but no active
+    // tenant row yet, and stripping it would wipe "reserved by <name>" from the
+    // admin drawer. Stale-tenant cleanup still fires once the reservation is
+    // gone (expired → hasActiveReservation false) or for a moved-out occupant.
+    const cleanupStaleTenant = facts.hasBlobTenant && !activeTenantForBlob && !facts.hasActiveReservation;
     const refreshBlobTenant = !!activeTenantForBlob
       && !blobTenantMatchesActive(facts.blobTenant, activeTenantForBlob);
     const cleanupStaleReservation = !!facts.reservedBy

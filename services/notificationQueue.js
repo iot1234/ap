@@ -296,12 +296,41 @@ async function enqueue(pool, msg) {
   return rows[0].id;
 }
 
+// Master per-channel gate from config.notify.channels (Settings → ช่องทาง
+// การแจ้งเตือน). Mirrors notifier.loadNotifyChannelGate but kept self-contained
+// here to avoid a notifier↔queue require cycle. An explicit `false` hard-disables
+// the channel; absent/unset → allowed. Loaded once per tick and threaded into
+// dispatch so directly-enqueued rows (bill-gen / reminders / manual "ส่ง" — which
+// bypass notifier's own gate) still honor the toggle.
+async function loadChannelGate(pool) {
+  try {
+    const { rows } = await pool.query(
+      `SELECT value FROM app_data WHERE key='baankarn_config_v1' LIMIT 1`
+    );
+    const ch = rows[0] && rows[0].value && rows[0].value.notify && rows[0].value.notify.channels;
+    return {
+      line: !(ch && ch.line === false),
+      email: !(ch && ch.email === false),
+      sms: !(ch && ch.sms === false),
+    };
+  } catch {
+    return { line: true, email: true, sms: true };
+  }
+}
+
 /**
  * Try to dispatch one row. Caller passes the loaded features map (so we
- * don't query the DB twice per row).
+ * don't query the DB twice per row) and the per-channel gate.
  */
-async function dispatch(pool, features, row) {
+async function dispatch(pool, features, row, gate) {
   const channel = row.channel;
+  // Honor the master per-channel gate. When a channel is switched OFF in
+  // Settings, suppress delivery even for rows enqueued directly (those skip
+  // notifier's gate). Park as fatal (no retry) with a clear reason — same
+  // treatment as a disabled OA; admin can re-enable + retry from the queue UI.
+  if (gate && gate[channel] === false) {
+    throw fatalDispatchError(`channel '${channel}' disabled in settings (ช่องทางการแจ้งเตือนถูกปิดในตั้งค่า)`);
+  }
   if (channel === 'line') {
     if (!row.recipient) throw fatalDispatchError('LINE recipient missing');
     if (!lineNotify.isLikelyUserId(row.recipient)) throw fatalDispatchError('invalid LINE recipient');
@@ -378,10 +407,10 @@ async function dispatch(pool, features, row) {
   throw fatalDispatchError(`unknown channel: ${channel}`);
 }
 
-async function processOne(pool, features, row) {
+async function processOne(pool, features, row, gate) {
   try {
     await withTimeout(
-      dispatch(pool, features, row),
+      dispatch(pool, features, row, gate),
       DISPATCH_TIMEOUT_MS,
       `dispatch ${row.channel} #${row.id}`
     );
@@ -562,7 +591,8 @@ async function tick(pool, features, batchSize = 25) {
   } finally {
     client.release();
   }
-  for (const row of rows) await processOne(pool, features, row);
+  const gate = await loadChannelGate(pool);
+  for (const row of rows) await processOne(pool, features, row, gate);
   return rows.length;
 }
 
@@ -612,4 +642,6 @@ module.exports = {
   _retryKeyForRowId: retryKeyForRowId,
   _sanitizePaidBillLineMessages: sanitizePaidBillLineMessages,
   _guardBillNotificationPayload: guardBillNotificationPayload,
+  _dispatch: dispatch,
+  _loadChannelGate: loadChannelGate,
 };

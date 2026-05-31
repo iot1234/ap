@@ -8,6 +8,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const notifier = require('../services/notifier');
+const notifQueue = require('../services/notificationQueue');
 
 function fakePool(configValue) {
   return {
@@ -66,4 +67,76 @@ test('notifier source: both dispatchers honor the channel gate', () => {
   assert.match(src, /chGate\.email &&/, 'email sends must be gated');
   assert.match(src, /chGate\.sms &&/, 'SMS sends must be gated');
   assert.match(src, /loadNotifyChannelGate\(ctx\)/, 'both dispatchers must load the gate');
+});
+
+// === F1: the channel gate must also cover the QUEUE path =====================
+// bill-gen / payment reminders / the manual "ส่ง" button enqueue notifications
+// DIRECTLY (bypassing notifier), so the gate has to be enforced in the queue
+// dispatcher too — otherwise a disabled channel still goes out.
+
+test('queue loadChannelGate: explicit false disables that channel (queue path)', async () => {
+  const gate = await notifQueue._loadChannelGate(fakePool({ notify: { channels: { email: false } } }));
+  assert.equal(gate.email, false);
+  assert.equal(gate.line, true);
+  assert.equal(gate.sms, true);
+});
+
+test('queue loadChannelGate: absent config / DB error → all allowed (backward compatible)', async () => {
+  assert.deepEqual(await notifQueue._loadChannelGate(fakePool(undefined)), { line: true, email: true, sms: true });
+  const boom = { query: async () => { throw new Error('db down'); } };
+  assert.deepEqual(await notifQueue._loadChannelGate(boom), { line: true, email: true, sms: true });
+});
+
+test('queue dispatch: a gated-off channel is suppressed before any send (fatal)', async () => {
+  await assert.rejects(
+    () => notifQueue._dispatch({}, {}, { channel: 'email', recipient: 'a@b.com' }, { line: true, email: false, sms: true }),
+    /disabled in settings/,
+    'email must be suppressed when config.notify.channels.email=false, even for a directly-enqueued row',
+  );
+  await assert.rejects(
+    () => notifQueue._dispatch({}, {}, { channel: 'line', recipient: 'U0123456789' }, { line: false }),
+    /disabled in settings/,
+    'line must be suppressed when gated off',
+  );
+});
+
+test('queue dispatch: allowed/absent gate does NOT block (falls through to normal config check)', async () => {
+  // gate email:true → passes the gate, then hits the real "not configured"
+  // check (features empty) — proving the gate itself did not block.
+  await assert.rejects(
+    () => notifQueue._dispatch({ query: async () => ({ rows: [] }) }, {}, { channel: 'email', recipient: 'a@b.com' }, { email: true }),
+    /email not configured/,
+    'an allowed channel must proceed past the gate to the normal config check',
+  );
+  // No gate object at all → must stay backward compatible (no gating).
+  await assert.rejects(
+    () => notifQueue._dispatch({ query: async () => ({ rows: [] }) }, {}, { channel: 'sms', recipient: '0810000000' }, undefined),
+    /SMS provider not configured/,
+    'absent gate must not block',
+  );
+});
+
+test('queue source: tick loads the channel gate and threads it into dispatch', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'notificationQueue.js'), 'utf8');
+  assert.match(src, /const gate = await loadChannelGate\(pool\)/, 'tick must load the gate once');
+  assert.match(src, /processOne\(pool, features, row, gate\)/, 'tick must pass the gate to processOne');
+  assert.match(src, /dispatch\(pool, features, row, gate\)/, 'processOne must pass the gate to dispatch');
+  assert.match(src, /if \(gate && gate\[channel\] === false\)/, 'dispatch must enforce the gate');
+});
+
+// === F4: owner email recipient must fall back to SMTP_FROM ====================
+test('notifier source: owner email falls back to SMTP_FROM (not gated on features.email.from)', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'notifier.js'), 'utf8');
+  assert.match(src, /const ownerEmailTo = secrets\.get\('OWNER_EMAIL'\)[\s\S]{0,200}secrets\.get\('SMTP_FROM'\)/,
+    'owner email recipient must resolve OWNER_EMAIL → features.email.from → SMTP_FROM');
+  assert.match(src, /email\.isConfigured\(features\) && ownerEmailTo/,
+    'owner email must be gated on a resolved recipient, not features.email.from');
+  assert.doesNotMatch(src, /email\.isConfigured\(features\) && features\.email && features\.email\.from/,
+    'inline owner email must no longer require features.email.from');
+  assert.doesNotMatch(src, /email\.isConfigured\(features\) && features\?\.email\?\.from/,
+    'queued owner email must no longer require features.email.from');
 });
