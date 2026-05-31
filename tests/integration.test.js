@@ -7668,3 +7668,19 @@ test("billing rate: a tenant who stays past an expired contract keeps the SIGNED
   assert.match(sched, /expiredContract,/, "scheduler must pass expiredContract into buildBill");
   assert.match(extras, /status='expired'[\s\S]{0,200}tenant_id=\$2/, "bulk-gen must pull the expired contract scoped to the resident tenant");
 });
+
+test("access card create recycles a revoked physical tag but never steals an active one", () => {
+  // card_id is globally UNIQUE; a physical tag whose previous holder checked
+  // out (row left 'revoked') must be re-registerable to the next tenant,
+  // otherwise revoke-on-overdue is unusable for recycled cards. An 'active'
+  // row stays a clean 409 (no silent reassignment of a live card).
+  const fs = require("node:fs"); const path = require("node:path");
+  const server = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  // On unique-violation, reactivate ONLY a revoked row.
+  assert.match(server, /UPDATE access_cards[\s\S]{0,160}status='active'[\s\S]{0,160}WHERE card_id=\$1 AND status='revoked'/,
+    "card create must reactivate a revoked card_id (recycle), scoped to status='revoked'");
+  // If nothing was revoked to recycle, it's still in use → 409.
+  assert.match(server, /if \(!recycled\.rows\.length\)[\s\S]{0,320}DUPLICATE_CARD_ID/,
+    "an active card_id must still return DUPLICATE_CARD_ID (no steal)");
+  assert.match(server, /access_card\.recycle/, "recycling must be audit-logged distinctly from create");
+});

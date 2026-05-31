@@ -9615,19 +9615,43 @@ app.post('/api/access/cards', sameOrigin, csrfGuard, requireAuth, requireRole('o
         );
         if (!t.rows.length) return res.status(404).json({ error: 'tenant not found' });
       }
-      const { rows } = await pool.query(
-        `INSERT INTO access_cards (card_id, tenant_id, room_id, status)
-         VALUES ($1,$2,$3,'active')
-         RETURNING id, card_id, tenant_id, room_id, status, issued_at`,
-        [cardId, tenantId, roomId]
-      );
+      // Recycle a physical card. card_id is globally UNIQUE, so a tag whose
+      // previous holder checked out (row left 'revoked') could never be
+      // re-registered to the next tenant — a 409 forever, despite the physical
+      // card being free. Re-issue ONLY when the existing row is 'revoked':
+      // reassign it to the new tenant/room and reactivate. An 'active' row is
+      // genuinely in use → still a clean 409 (no silent steal of a live card).
+      let rows;
+      try {
+        ({ rows } = await pool.query(
+          `INSERT INTO access_cards (card_id, tenant_id, room_id, status)
+           VALUES ($1,$2,$3,'active')
+           RETURNING id, card_id, tenant_id, room_id, status, issued_at`,
+          [cardId, tenantId, roomId]
+        ));
+      } catch (err) {
+        if (err.code !== '23505') throw err;
+        const recycled = await pool.query(
+          `UPDATE access_cards
+              SET tenant_id=$2, room_id=$3, status='active',
+                  issued_at=NOW(), revoked_at=NULL, revoke_reason=NULL
+            WHERE card_id=$1 AND status='revoked'
+          RETURNING id, card_id, tenant_id, room_id, status, issued_at`,
+          [cardId, tenantId, roomId]
+        );
+        if (!recycled.rows.length) {
+          // Row exists and is still active → genuinely in use.
+          return res.status(409).json({ error: 'card_id ซ้ำ — บัตรนี้ยังใช้งานอยู่ ใช้รหัสอื่นหรือเพิกถอนบัตรเดิมก่อน', code: 'DUPLICATE_CARD_ID' });
+        }
+        rows = recycled.rows;
+        audit(req, 'access_card.recycle', 'card', String(rows[0].id),
+          { cardId, tenantId, roomId, note: 'reissued previously-revoked physical card' });
+        return res.json({ ok: true, card: rows[0], recycled: true });
+      }
       audit(req, 'access_card.create', 'card', String(rows[0].id),
         { cardId, tenantId, roomId });
       res.json({ ok: true, card: rows[0] });
     } catch (err) {
-      if (err.code === '23505') {
-        return res.status(409).json({ error: 'card_id ซ้ำ — ใช้รหัสอื่น', code: 'DUPLICATE_CARD_ID' });
-      }
       console.error('access card create error:', err);
       res.status(500).json({ error: 'internal error' });
     }
