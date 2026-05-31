@@ -427,7 +427,7 @@ test('bulk bill generation warns when flat utility mode falls back to metered', 
     'billing-readiness must surface flat-mode misconfiguration before bill generation');
   assert.match(extras, /detail: \{ period, count: flatMisconfigured\.length, rooms: flatMisconfigured\.slice\(0, 20\) \}/,
     'bulk-generate flat fallback warning must include affected rooms');
-  assert.match(extras, /res\.json\(\{ ok: true, period, made, skipped, flatFellBack,\s*warnings: issues\.filter/,
+  assert.match(extras, /res\.json\(\{ ok: true, period, made, updated, skipped, flatFellBack,\s*warnings: issues\.filter/,
     'bulk-generate response must expose flat fallback details to the UI');
   assert.match(billingPage, /Array\.isArray\(d\.flatFellBack\)/,
     'billing UI must read flat fallback details');
@@ -906,6 +906,29 @@ test('/api/bills create validates input and refuses to mutate paid/verified ledg
     'locked ledger rows should return a machine-readable conflict');
   assert.match(body, /JSON\.stringify\(otherForStorage/,
     'computed recurring line items must be persisted in bills.other');
+});
+
+test('/api/bills bulk-generate updates an existing unpaid same-slot bill instead of hiding it as skipped', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const route = fs.readFileSync(path.join(__dirname, '..', 'routes', 'bills-extras.js'), 'utf8');
+  const idx = route.indexOf("r.post('/bulk-generate'");
+  assert.ok(idx > 0, 'should find bulk-generate handler');
+  const body = route.slice(idx, route.indexOf('  // Internal helper used by both /:id/send', idx));
+  assert.match(body, /let made = 0, updated = 0, skipped = 0/,
+    'bulk-generate must track updated bills separately from created and skipped');
+  assert.match(body, /COALESCE\(b\.tenant_id, 0\)=COALESCE\(\$3::bigint, 0\)/,
+    'same-slot detection must include tenant_id so room turnover does not overwrite another tenant');
+  assert.match(body, /EXISTS \(\s*SELECT 1 FROM payments p[\s\S]{0,120}p\.status='verified'/,
+    'bulk-generate must lock out bills that already have verified payments');
+  assert.match(body, /const payableStatus = existing\.status === 'pending' \|\| existing\.status === 'overdue'/,
+    'only unpaid ledger rows may be refreshed in place');
+  assert.match(body, /UPDATE bills SET[\s\S]{0,800}subtotal=\$16, vat=\$17, late_fee=\$18, total=\$19, due_date=\$20/,
+    'changed unpaid bills must get their canonical bill fields updated');
+  assert.match(body, /updated\+\+/,
+    'successful in-place refresh must increment updated count');
+  assert.match(body, /audit\(req, 'bill\.bulk_generate'[\s\S]{0,120}\{ made, updated, skipped \}/,
+    'audit log must include updated count');
 });
 
 test('GET /api/bills can be scoped by tenantId so old room bills do not bleed into a new tenant', () => {
@@ -7373,6 +7396,13 @@ test('hooks.jsx: ERROR_CODE_MAP handles new R2/R3/R7 error codes', () => {
     'RECURRING_CHARGES_REQUIRED_FOR_CARRY',
     'LATE_FEE_CARRY_FAILED',
     'REMINDER_COOLDOWN',        // R7-followup
+    'PRECONDITION_FAILED',
+    'BILL_NOT_PAYABLE',
+    'BILL_ALREADY_PAID',
+    'AMOUNT_REQUIRED',
+    'INVALID_BILL_TOTAL',
+    'PAID_LEDGER_INCONSISTENT',
+    'BILL_LOCKED_FOR_LEDGER',
   ]) {
     assert.match(src, new RegExp(code + ':\\s*\\{'),
       `ERROR_CODE_MAP must define ${code} with title + description`);

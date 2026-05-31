@@ -1070,7 +1070,10 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         method: 'POST',
         body: JSON.stringify({ period, dueDay, force: issues.length > 0 }),
       });
-      addActivity && addActivity({ icon: 'บิล', text: `ออกบิลรอบ ${period}: ${d.made} ใบ (ข้าม ${d.skipped})`, type: 'billing' });
+      const madeCount = Number(d.made) || 0;
+      const updatedCount = Number(d.updated) || 0;
+      const changedCount = madeCount + updatedCount;
+      addActivity && addActivity({ icon: 'บิล', text: `ออกบิลรอบ ${period}: สร้าง ${madeCount} ใบ, อัปเดต ${updatedCount} ใบ (ข้าม ${d.skipped})`, type: 'billing' });
       // Surface rooms that silently fell back from flat → metered so admin
       // can fix the flat amount before the next cycle. Without this the
       // billing UI just says "ออกบิล N ใบ" and the wrong-mode bills go
@@ -1084,9 +1087,9 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         ? ` · warning ${warnings.length} รายการ (${warnings.slice(0, 3).map((w) => w.code || w.msg || 'WARN').join(', ')}${warnings.length > 3 ? '…' : ''})`
         : '';
       setToast && setToast({
-        kind: (fellBack.length || warnings.length) ? 'warning' : (d.made > 0 ? 'success' : 'info'),
-        message: (d.made > 0
-          ? `ออกบิล ${d.made} ใบสำเร็จ${d.skipped ? ` (ข้าม ${d.skipped} ใบที่มีอยู่แล้ว)` : ''}`
+        kind: (fellBack.length || warnings.length) ? 'warning' : (changedCount > 0 ? 'success' : 'info'),
+        message: (changedCount > 0
+          ? `ออก/อัปเดตบิล ${changedCount} ใบสำเร็จ${d.skipped ? ` (ข้าม ${d.skipped} ใบที่มีอยู่แล้วหรือล็อกอยู่)` : ''}`
           : `ทุกห้องมีบิลรอบ ${period} อยู่แล้ว — ไม่ได้สร้างเพิ่ม`)
           + fellBackMsg
           + warningMsg,

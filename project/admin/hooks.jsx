@@ -643,6 +643,36 @@
       title: 'ยอดสลิปไม่ตรงกับยอดบิล',
       description: (e) => e.error || 'โอนเงินตามยอดบิล แล้วลองอัปโหลดสลิปใหม่',
     },
+    PRECONDITION_FAILED: {
+      title: 'ยังออกบิลไม่ได้',
+      description: (e) => Array.isArray(e.issues) && e.issues.length
+        ? e.issues.map((i) => `• ${i.code || 'ISSUE'}: ${i.msg || i.fix || ''}`).slice(0, 5).join('\n')
+        : 'แก้ข้อมูลที่ระบบแจ้งเตือนก่อน แล้วลองออกบิลอีกครั้ง',
+    },
+    BILL_NOT_PAYABLE: {
+      title: 'บิลนี้ชำระไม่ได้',
+      description: (e) => `สถานะปัจจุบัน: ${e.billStatus || e.status || '-'} — รับชำระได้เฉพาะบิลรอชำระ/ค้างชำระ`,
+    },
+    BILL_ALREADY_PAID: {
+      title: 'บิลนี้ชำระแล้ว',
+      description: 'มี payment ที่ยืนยันแล้วอยู่ใน ledger จึงไม่บันทึกซ้ำ',
+    },
+    AMOUNT_REQUIRED: {
+      title: 'ต้องระบุยอดชำระ',
+      description: 'ส่ง amount มาพร้อมคำขอรับชำระ เพื่อให้ระบบเทียบกับยอดบิลก่อนบันทึก',
+    },
+    INVALID_BILL_TOTAL: {
+      title: 'ยอดบิลไม่ถูกต้อง',
+      description: 'ยอดรวมบิลต้องมากกว่า 0 ก่อนรับชำระ',
+    },
+    PAID_LEDGER_INCONSISTENT: {
+      title: 'ledger หลังชำระไม่สมดุล',
+      description: (e) => `ยอดชำระ ${e.paymentAmount ?? '-'} ไม่ตรงกับยอดบิล ${e.billTotal ?? '-'} (ต่าง ${e.diff ?? '-'})`,
+    },
+    BILL_LOCKED_FOR_LEDGER: {
+      title: 'บิลนี้ถูกล็อกเพื่อรักษา ledger',
+      description: 'บิลที่ชำระแล้ว/ยกเลิกแล้ว/มี payment verified แล้ว จะไม่ถูกเขียนทับจากการออกบิลซ้ำ',
+    },
     LATE_FEE_DECISION_REQUIRED: {
       title: 'ต้องเลือกวิธีจัดการค่าปรับ',
       description: (e) => {

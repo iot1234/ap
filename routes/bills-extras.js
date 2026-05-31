@@ -1704,7 +1704,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         // shift the day back via toISOString(). periodYear/Month validated
         // at the top of this handler.
         const dueDate = billing.formatYMD(periodYear, periodMonth, dueDay);
-        let made = 0, skipped = 0;
+        let made = 0, updated = 0, skipped = 0;
         // Track rooms that asked for flat (เหมา) mode but didn't have a
         // valid amount — services/billing.js#resolveFlatMode silently falls
         // back to metered in this case, which can issue a wrong bill if
@@ -1822,6 +1822,104 @@ module.exports = function buildBillsExtrasRouter(ctx) {
               otherItems.push({ label: 'ค่าส่วนกลาง', amount: Number(bill.commonFee) });
             }
             const otherJson = JSON.stringify(otherItems);
+            const moneyDiffers = (left, right) =>
+              Math.abs((Number(left) || 0) - (Number(right) || 0)) > billing.PAYMENT_TOLERANCE_THB;
+            const nullableNumberDiffers = (left, right) => {
+              const l = numOrNull(left);
+              const r = numOrNull(right);
+              if (l == null || r == null) return l !== r;
+              return Math.abs(l - r) > billing.PAYMENT_TOLERANCE_THB;
+            };
+            const ymd = (value) => {
+              if (!value) return '';
+              if (value instanceof Date) return value.toISOString().slice(0, 10);
+              return String(value).slice(0, 10);
+            };
+            const stableOtherJson = (value) => {
+              if (value == null) return '[]';
+              if (typeof value === 'string') {
+                try { return JSON.stringify(JSON.parse(value)); } catch { return value; }
+              }
+              return JSON.stringify(value);
+            };
+            const existingSlot = await billClient.query(
+              `SELECT b.id, b.bill_no, b.status, b.rent,
+                      b.water_prev_reading, b.water_current_reading, b.water_units, b.water_rate, b.water_amount,
+                      b.elec_prev_reading, b.elec_current_reading, b.elec_units, b.elec_rate, b.elec_amount,
+                      b.wifi, b.other, b.subtotal, b.vat, b.late_fee, b.total, b.due_date,
+                      EXISTS (
+                        SELECT 1 FROM payments p
+                         WHERE p.bill_id=b.id AND p.status='verified'
+                      ) AS has_verified_payment
+                 FROM bills b
+                WHERE b.room_id=$1 AND b.period=$2
+                  AND COALESCE(b.tenant_id, 0)=COALESCE($3::bigint, 0)
+                  AND b.deleted_at IS NULL AND b.status <> 'void'
+                ORDER BY b.created_at DESC
+                LIMIT 1
+                FOR UPDATE`,
+              [bill.roomId, period, tenantIdForRoom]
+            );
+            if (existingSlot.rows[0]) {
+              const existing = existingSlot.rows[0];
+              const payableStatus = existing.status === 'pending' || existing.status === 'overdue';
+              const changed =
+                moneyDiffers(existing.rent, bill.rent) ||
+                nullableNumberDiffers(existing.water_prev_reading, bill.waterPrevReading) ||
+                nullableNumberDiffers(existing.water_current_reading, bill.waterCurrentReading) ||
+                moneyDiffers(existing.water_units, bill.waterUnits) ||
+                moneyDiffers(existing.water_rate, bill.waterRate) ||
+                moneyDiffers(existing.water_amount, bill.waterAmount) ||
+                nullableNumberDiffers(existing.elec_prev_reading, bill.elecPrevReading) ||
+                nullableNumberDiffers(existing.elec_current_reading, bill.elecCurrentReading) ||
+                moneyDiffers(existing.elec_units, bill.elecUnits) ||
+                moneyDiffers(existing.elec_rate, bill.elecRate) ||
+                moneyDiffers(existing.elec_amount, bill.elecAmount) ||
+                moneyDiffers(existing.wifi, bill.wifi) ||
+                stableOtherJson(existing.other) !== otherJson ||
+                moneyDiffers(existing.subtotal, bill.subtotal) ||
+                moneyDiffers(existing.vat, bill.vat) ||
+                moneyDiffers(existing.late_fee, bill.lateFee) ||
+                moneyDiffers(existing.total, bill.total) ||
+                ymd(existing.due_date) !== ymd(bill.dueDate);
+              if (!payableStatus || existing.has_verified_payment || !changed) {
+                await billClient.query('COMMIT');
+                skipped++;
+                continue;
+              }
+              await billClient.query(
+                `UPDATE bills SET
+                    tenant_id=$2,
+                    rent=$3,
+                    water_prev_reading=$4, water_current_reading=$5,
+                    water_units=$6, water_rate=$7, water_amount=$8,
+                    elec_prev_reading=$9, elec_current_reading=$10,
+                    elec_units=$11, elec_rate=$12, elec_amount=$13,
+                    wifi=$14, other=$15::jsonb,
+                    subtotal=$16, vat=$17, late_fee=$18, total=$19, due_date=$20
+                  WHERE id=$1`,
+                [
+                  existing.id, tenantIdForRoom, bill.rent,
+                  bill.waterPrevReading, bill.waterCurrentReading,
+                  bill.waterUnits, bill.waterRate, bill.waterAmount,
+                  bill.elecPrevReading, bill.elecCurrentReading,
+                  bill.elecUnits, bill.elecRate, bill.elecAmount,
+                  bill.wifi, otherJson,
+                  bill.subtotal, bill.vat, bill.lateFee, bill.total,
+                  bill.dueDate,
+                ]
+              );
+              if (usedOneOffIds.length) {
+                await billClient.query(
+                  `UPDATE recurring_charges SET active=FALSE, updated_at=NOW()
+                     WHERE id = ANY($1::bigint[])`,
+                  [usedOneOffIds]
+                );
+              }
+              await billClient.query('COMMIT');
+              updated++;
+              continue;
+            }
             // R4 — try the default bill_no first; on collision retry once
             // with the `-T${tenantId}` suffix (only when there's actually
             // a different tenant taking up the room+period slot). Keeps the
@@ -1889,8 +1987,8 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             billClient.release();
           }
         }
-        audit(req, 'bill.bulk_generate', 'period', period, { made, skipped });
-        res.json({ ok: true, period, made, skipped, flatFellBack,
+        audit(req, 'bill.bulk_generate', 'period', period, { made, updated, skipped });
+        res.json({ ok: true, period, made, updated, skipped, flatFellBack,
           warnings: issues.filter((i) => i.sev !== 'high') });
       } catch (err) {
         console.error('bulk-generate error:', err);
