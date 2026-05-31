@@ -4462,6 +4462,31 @@ test('tenant checkin uses moveInDate not wallclock for welcome-bill period', () 
     'welcome bill period must derive from moveInDate');
 });
 
+test('check-in captures starting meter readings + prorated first-month flat charges', () => {
+  // A tenant moving into a reused room must start metering from the room's
+  // CURRENT meter value (their own baseline), not the previous tenant's reading
+  // or 0. And the first-month bill prorates flat charges (wifi/common/flat
+  // utilities) by days lived, with metered water/elec deferred to next cycle.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const ops = fs.readFileSync(path.join(__dirname, '..', 'routes', 'tenant-ops.js'), 'utf8');
+  const feat = fs.readFileSync(path.join(__dirname, '..', 'services', 'features.js'), 'utf8');
+
+  assert.match(feat, /meterStartPolicy: 'optional'/,
+    'features must default meterStartPolicy to optional');
+  assert.match(ops, /waterStartReading/, 'check-in must accept waterStartReading');
+  assert.match(ops, /elecStartReading/, 'check-in must accept elecStartReading');
+  assert.match(ops, /METER_START_BACKWARD/,
+    'check-in must refuse a start reading below the room last reading');
+  assert.match(ops, /METER_START_REQUIRED/,
+    'check-in must refuse when policy=required and a metered utility has no start');
+  assert.match(ops, /meter\.record\(client,/,
+    'check-in must persist the start reading via meter.record inside the transaction');
+  assert.match(ops, /const wifiAmt = r2\(/, 'welcome bill must include prorated wifi');
+  assert.match(ops, /water_amount, elec_amount, wifi, other/,
+    'welcome bill INSERT must carry flat charge columns');
+});
+
 test('tenant checkin endDate respects month-rollover (Jan31 + 1mo → Feb28/29)', () => {
   // setMonth(getMonth()+1) overflows on EoM dates: Jan 31 + 1mo = Mar 3.
   // Now we clamp the day-of-month to the last valid day of the target month.

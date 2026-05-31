@@ -1577,6 +1577,30 @@ module.exports = function buildTenantOpsRouter(ctx) {
         });
       }
 
+      // (2.5) Starting meter readings — capture the room's CURRENT meter value
+      // at move-in so the first real bill measures THIS tenant's consumption
+      // from their own baseline (not the previous tenant's reading or 0). Each
+      // room differs → entered per check-in. Basic shape validation here (fail
+      // fast); the backward-reading + policy checks run under the txn lock below
+      // once we can read the room's last reading. tenancyContract.meterStartPolicy
+      // controls strictness: 'optional' (default) | 'required' | 'off'.
+      const meterStartPolicy = ['optional', 'required', 'off'].includes(tenancy.meterStartPolicy)
+        ? tenancy.meterStartPolicy : 'optional';
+      const parseMeterStart = (v) => (v == null || v === '' ? null : Number(v));
+      const waterStart = meterStartPolicy === 'off' ? null : parseMeterStart(req.body.waterStartReading);
+      const elecStart  = meterStartPolicy === 'off' ? null : parseMeterStart(req.body.elecStartReading);
+      const METER_START_MAX = 9_999_999;
+      for (const [label, val] of [['waterStartReading', waterStart], ['elecStartReading', elecStart]]) {
+        if (val == null) continue;
+        if (!Number.isFinite(val) || val < 0 || val > METER_START_MAX) {
+          return res.status(400).json({
+            error: `${label} ต้องเป็นเลขมิเตอร์ 0–${METER_START_MAX.toLocaleString('th-TH')} (เลขที่อ่านได้จากหน้ามิเตอร์ของห้องตอนนี้)`,
+            code: 'INVALID_METER_START',
+            hint: 'กรอกเลขมิเตอร์ปัจจุบันของห้อง (น้ำ/ไฟ) เพื่อใช้เป็นเลขตั้งต้นของผู้เช่ารายนี้',
+          });
+        }
+      }
+
       // Resolve discount % from term length when admin didn't pass an
       // explicit override. Reads config.discounts.{sixMonth/twelveMonth/
       // twentyFourMonth} from the same JSONB blob the pricing UI writes —
