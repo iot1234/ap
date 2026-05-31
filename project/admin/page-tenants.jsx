@@ -1076,7 +1076,11 @@ function TabContract({ t, routeBookingId = '', setToast, addActivity, setRooms, 
       reload();
       if (onTenantChanged) onTenantChanged();
     } catch (err) {
-      setToast && setToast({ kind: 'danger', message: 'สร้างลิงก์ล้มเหลว: ' + err.message });
+      if (window.toastError && setToast) {
+        window.toastError(setToast, err, { action: 'สร้าง/ส่งลิงก์สัญญา' });
+      } else {
+        setToast && setToast({ kind: 'danger', message: 'สร้างลิงก์ล้มเหลว: ' + err.message });
+      }
     } finally { setBusy(false); }
   };
 
@@ -1132,6 +1136,10 @@ function TabContract({ t, routeBookingId = '', setToast, addActivity, setRooms, 
         type: 'contract' });
       reload();
     } catch (err) {
+      if (window.toastError && setToast) {
+        window.toastError(setToast, err, { action: 'สร้างสัญญา/ส่งลิงก์' });
+        return;
+      }
       const body = err && (err.raw || err.body) ? (err.raw || err.body) : {};
       setToast && setToast({
         kind: 'danger',

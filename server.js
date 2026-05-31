@@ -11724,6 +11724,55 @@ const rateLimitContractFill = makeIpLimiter({
   message: 'too many requests to the contract fill endpoint',
 });
 
+function quickInviteDuplicateConflictBody(err, context = {}) {
+  const constraint = String((err && (err.constraint || err.detail)) || '');
+  const roomId = String(context.roomId || '').trim();
+  const contractsUrl = roomId
+    ? `/admin#contracts?room=${encodeURIComponent(roomId)}`
+    : '/admin#contracts';
+  const roomUrl = roomId
+    ? `/admin#rooms?room=${encodeURIComponent(roomId)}`
+    : '/admin#rooms';
+
+  if (/uq_contracts_active_room/.test(constraint)) {
+    return {
+      error: roomId
+        ? `สร้างสัญญาใหม่ไม่ได้: ห้อง ${roomId} มีสัญญา active อยู่แล้ว`
+        : 'สร้างสัญญาใหม่ไม่ได้: ห้องนี้มีสัญญา active อยู่แล้ว',
+      code: 'ROOM_CONTRACT_EXISTS',
+      hint: 'รีเฟรชข้อมูล แล้วเปิดสัญญาเดิมของห้องนี้ หรือปิด/ยกเลิกสัญญาเดิมก่อนสร้างฉบับใหม่ เพื่อป้องกันห้องเดียวมีหลายสัญญา',
+      nextActions: {
+        contractsUrl,
+        roomUrl,
+        hint: 'เปิดหน้าสัญญาหรือหน้าห้องพักเพื่อตรวจรายการเดิมก่อนทำซ้ำ',
+      },
+    };
+  }
+
+  if (/uq_contract_invitations_active_per_contract/.test(constraint)) {
+    return {
+      error: 'สัญญานี้มีลิงก์ให้ผู้เช่ากรอกที่ยังใช้งานอยู่แล้ว',
+      code: 'DRAFT_CONTRACT_EXISTS',
+      hint: 'เปิดสัญญาเดิมแล้วกดส่งลิงก์ใหม่ หรือยกเลิกลิงก์เดิมก่อนสร้างใหม่',
+      nextActions: {
+        contractsUrl,
+        hint: 'ใช้สัญญาเดิมเป็นต้นทาง เพื่อไม่ให้มีลิงก์หลายชุดสำหรับสัญญาเดียวกัน',
+      },
+    };
+  }
+
+  return {
+    error: 'สร้างสัญญาไม่สำเร็จ เพราะมีข้อมูลสัญญาหรือผู้เช่าซ้ำกับรายการที่มีอยู่แล้ว',
+    code: 'DUPLICATE_QUICK_INVITE',
+    hint: 'รีเฟรชข้อมูล แล้วตรวจห้อง ผู้เช่า และสัญญาเดิมก่อนสร้างซ้ำ หากเป็นการกดพร้อมกัน ให้ใช้รายการที่สร้างสำเร็จล่าสุด',
+    nextActions: {
+      contractsUrl,
+      roomUrl,
+      hint: 'ตรวจรายการเดิมก่อนเริ่มสร้างสัญญาใหม่',
+    },
+  };
+}
+
 // POST /api/contracts/:id/invite-tenant
 // Admin clicks "📨 ส่งให้ผู้เช่ากรอก" → backend generates a fresh token,
 // revokes any prior active invitation for the same contract (so admin
@@ -12461,7 +12510,10 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
       console.error('quick-invite error:', err);
       // Friendlier 409 on common race / constraint errors.
       if (err.code === '23505') {
-        return res.status(409).json({ error: 'duplicate constraint', code: 'DUPLICATE' });
+        return res.status(409).json(quickInviteDuplicateConflictBody(err, {
+          roomId,
+          tenantPhone,
+        }));
       }
       res.status(500).json({ error: 'internal error', code: 'DB_ERROR' });
     } finally {

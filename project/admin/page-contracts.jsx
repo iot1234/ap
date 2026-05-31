@@ -365,11 +365,23 @@ function inviteDeliverySummary(delivery) {
 
 function inviteErrorMessage(prefix, err) {
   const raw = err && err.raw ? err.raw : {};
-  const parts = [`${prefix}: ${err && err.message ? err.message : 'unknown'}`];
-  if (err && err.code) parts.push(`รหัส ${err.code}`);
+  const humanize = window.humanizeAdminErrorText || ((text) => String(text || ''));
+  const parts = [];
+  const main = raw.error || (err && err.message) || '';
+  if (main) parts.push(humanize(main));
   if (raw.hint) parts.push(raw.hint);
   if (raw.reconcileUrl) parts.push(`แก้ไขได้ที่ ${raw.reconcileUrl}`);
-  return parts.join(' · ');
+  if (raw.nextActions && typeof raw.nextActions === 'object') {
+    if (raw.nextActions.hint) parts.push(raw.nextActions.hint);
+    Object.entries(raw.nextActions)
+      .filter(([key, value]) => /Url$/.test(key) && typeof value === 'string' && value)
+      .slice(0, 3)
+      .forEach(([key, value]) => parts.push(`${key}: ${value}`));
+  }
+  return {
+    title: prefix,
+    description: Array.from(new Set(parts.filter(Boolean))).join('\n') || 'กรุณารีเฟรชข้อมูลแล้วลองใหม่อีกครั้ง',
+  };
 }
 
 function InviteTenantModal({ contract, onClose, onSaved, onError }) {

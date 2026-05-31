@@ -5100,6 +5100,14 @@ test('quick-invite locks the requested room before creating a draft contract', (
   assert.doesNotMatch(block,
     /LEFT JOIN tenants t ON t\.id = c\.tenant_id[\s\S]{0,180}FOR UPDATE\s*(?:`|,)/,
     'quick-invite must not use plain FOR UPDATE after LEFT JOIN tenants');
+  assert.match(src, /function quickInviteDuplicateConflictBody/,
+    'quick-invite must translate database duplicate races into admin-facing copy');
+  assert.match(src, /DUPLICATE_QUICK_INVITE/,
+    'unexpected quick-invite uniqueness failures need a stable friendly code');
+  assert.doesNotMatch(block, /duplicate constraint/,
+    'quick-invite must not leak PostgreSQL constraint wording to admins');
+  assert.doesNotMatch(block, /code:\s*'DUPLICATE'/,
+    'quick-invite must not return a generic programmer-facing duplicate code');
 });
 
 test('quick-invite converts same-tenant preclaimed rooms into draft reservations', () => {
@@ -5226,7 +5234,11 @@ test('admin toastError explains booking-to-contract guard codes with next action
     'BOOKING_TENANT_MISMATCH',
     'ROOM_RESERVED',
     'ROOM_OCCUPIED',
+    'ROOM_CONTRACT_EXISTS',
     'ROOM_STRANDED_CONTRACT',
+    'DRAFT_CONTRACT_EXISTS',
+    'TENANT_ROOM_CONTRACT_EXISTS',
+    'DUPLICATE_QUICK_INVITE',
     'CONTRACT_APPROVAL_PRECHECK_FAILED',
     'CONTRACT_APPROVAL_TARGET_INVALID',
     'CITIZEN_ID_DUPLICATE',
@@ -5688,6 +5700,12 @@ test('contracts page has "+ สร้างสัญญา" entry button + Quick
     'quick-invite result must show whether the link was sent automatically');
   assert.match(src, /inviteErrorMessage\('สร้างสัญญา\/ส่งลิงก์ล้มเหลว'/,
     'quick-invite errors should include structured hints/codes');
+  assert.match(src, /function inviteErrorMessage[\s\S]{0,900}raw\.nextActions/,
+    'quick-invite errors must surface backend next-action guidance');
+  assert.match(src, /window\.humanizeAdminErrorText/,
+    'quick-invite errors should pass through the Thai admin error normalizer');
+  assert.doesNotMatch(src, /if \(err && err\.code\) parts\.push/,
+    'quick-invite modal should not show technical error codes as primary user copy');
   assert.match(src, /navigator\.clipboard\.writeText/);
 });
 
