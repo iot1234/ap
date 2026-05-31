@@ -2222,8 +2222,29 @@ test('feature-gated modules fail closed with structured errors', () => {
     'tenant portal session routes must return FEATURE_DISABLED when the flag is off');
   assert.match(server, /app\.get\('\/api\/meters\/:roomId\/readings', requireAuth, features\.requireFeature\('meterIot'\)/,
     'meter read API must be gated, not only meter write API');
-  assert.match(server, /app\.get\('\/api\/access\/logs', requireAuth, features\.requireFeature\('accessControl'\)/,
-    'access log read API must be gated with the accessControl flag');
+  assert.match(server, /app\.get\('\/api\/access\/logs', requireAuth, requireRole\('owner', 'manager'\), features\.requireFeature\('accessControl'\)/,
+    'access log read API must be gated with the accessControl flag AND restricted to owner/manager (movement data is sensitive)');
+});
+
+test('access log POST is card-driven: revoked card denied, identity from card not body', () => {
+  // A device-token holder must not be able to forge access events. The card
+  // ROW is the source of truth for tenant/room, and a revoked card is always
+  // denied — this is the software enforcement point for revoke-on-overdue.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  // Resolve the presented card against access_cards.
+  assert.match(server, /SELECT card_id, tenant_id, room_id, status FROM access_cards WHERE card_id=\$1/,
+    'access log must look up the presented card');
+  // Revoked card forces denied regardless of the caller-supplied result.
+  assert.match(server, /card\.status === 'revoked'[\s\S]{0,120}result = 'denied'/,
+    'a revoked card must be recorded as denied even if the caller claims granted');
+  // Identity comes from the card row, not the request body (anti-forgery).
+  assert.match(server, /tenantId = card\.tenant_id;\s*\n\s*roomId = card\.room_id/,
+    'tenant/room must be taken from the card, not the request body');
+  // Unknown card → denied, no tenant attribution.
+  assert.match(server, /result = 'denied';\s*\n\s*reason = reason \|\| 'unknown_card';\s*\n\s*tenantId = null;/,
+    'an unknown card must be denied and not attributed to any tenant');
 });
 
 test('monthly meter readings drive billing period instead of room edit units', () => {

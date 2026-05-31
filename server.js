@@ -9492,34 +9492,66 @@ app.post('/api/access/log', deviceOrSameOrigin, requireDeviceOrAdmin, features.r
   const b = req.body || {};
   const device = String(b.device || '').slice(0, 64);
   const method = String(b.method || 'manual').slice(0, 16);
-  const result = String(b.result || 'granted').slice(0, 16);
+  const requestedResult = ['granted', 'denied'].includes(String(b.result || 'granted'))
+    ? String(b.result) : 'granted';
+  const cardId = b.cardId ? String(b.cardId).slice(0, 64) : null;
   if (!device) return res.status(400).json({ error: 'device required' });
   try {
+    // Card-driven access decision. When a physical card is presented, the
+    // card ROW — not the request body — is the source of truth for which
+    // tenant/room the event belongs to, and a revoked card is ALWAYS denied.
+    //
+    // This is the software enforcement point for the revoke-on-overdue
+    // feature: tickAccessControlSync flips access_cards.status='revoked', and
+    // here we honor it so a revoked card can never be recorded as 'granted'.
+    // Without this, `result` was whatever the caller sent and tenant_id/card_id
+    // could be forged for any tenant by anyone holding a device token —
+    // fabricating "tenant X entered room Y" in the system-of-record log.
+    let roomId = b.roomId ? String(b.roomId).slice(0, 32) : null;
+    let tenantId = Number.isInteger(Number(b.tenantId)) ? Number(b.tenantId) : null;
+    let result = requestedResult;
+    let reason = b.reason ? String(b.reason).slice(0, 200) : null;
+    if (cardId) {
+      const { rows: cardRows } = await pool.query(
+        `SELECT card_id, tenant_id, room_id, status FROM access_cards WHERE card_id=$1 LIMIT 1`,
+        [cardId]
+      );
+      if (!cardRows.length) {
+        // Unknown card → never grant; record honestly as denied even if the
+        // caller claimed 'granted'. Don't attribute to any tenant.
+        result = 'denied';
+        reason = reason || 'unknown_card';
+        tenantId = null;
+      } else {
+        const card = cardRows[0];
+        // Authoritative identity from the card, not the body (anti-forgery).
+        tenantId = card.tenant_id;
+        roomId = card.room_id || roomId;
+        if (card.status === 'revoked') {
+          result = 'denied';
+          reason = reason || 'card_revoked';
+        }
+      }
+    }
     const { rows } = await pool.query(
       `INSERT INTO access_logs (room_id, tenant_id, device, method, card_id, result, reason)
        VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
-      [
-        b.roomId ? String(b.roomId).slice(0, 32) : null,
-        Number.isInteger(Number(b.tenantId)) ? Number(b.tenantId) : null,
-        device, method,
-        b.cardId ? String(b.cardId).slice(0, 64) : null,
-        ['granted', 'denied'].includes(result) ? result : 'granted',
-        b.reason ? String(b.reason).slice(0, 200) : null,
-      ]
+      [roomId, tenantId, device, method, cardId, result, reason]
     );
     audit(req, 'access.log', 'access', String(rows[0].id));
-    res.json({ ok: true, log: rows[0] });
+    res.json({ ok: true, log: rows[0], decision: result });
   } catch (err) {
     console.error('access log error:', err);
     res.status(500).json({ error: 'internal error' });
   }
 });
 
-app.get('/api/access/logs', requireAuth, features.requireFeature('accessControl'), async (req, res) => {
+app.get('/api/access/logs', requireAuth, requireRole('owner', 'manager'), features.requireFeature('accessControl'), async (req, res) => {
   const limit = Math.min(Math.max(Number(req.query.limit) || 100, 1), 500);
   try {
     const { rows } = await pool.query(
-      `SELECT * FROM access_logs ORDER BY occurred_at DESC LIMIT $1`,
+      `SELECT id, room_id, tenant_id, device, method, card_id, result, reason, occurred_at
+         FROM access_logs ORDER BY occurred_at DESC LIMIT $1`,
       [limit]
     );
     res.json({ ok: true, logs: rows });
