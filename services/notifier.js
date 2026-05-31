@@ -137,6 +137,14 @@ async function notifyOwner(ctx, msg) {
   const chGate = await loadNotifyChannelGate(ctx);
   const text = msg.text || msg.subject || '';
   const subject = msg.subject || 'แจ้งเตือนระบบ';
+  // Owner email recipient: prefer an explicit OWNER_EMAIL secret, then the
+  // configured From address, then the SMTP_FROM secret. We must NOT gate the
+  // attempt on features.email.from — email.send() resolves its own From
+  // (SMTP_FROM/smtpUser), so an SMTP setup done entirely via secrets (with no
+  // features.email.from) was silently dropping every owner alert.
+  const ownerEmailTo = secrets.get('OWNER_EMAIL')
+    || (features && features.email && features.email.from)
+    || secrets.get('SMTP_FROM');
 
   // 1. LINE — try the default OA's owner first, then fall back to env owner.
   // Each OA can have its own ownerUserId so a multi-building deployment can
@@ -200,9 +208,9 @@ async function notifyOwner(ctx, msg) {
   }
 
   // 2. Email (fallback)
-  if (chGate.email && email.isConfigured(features) && features.email && features.email.from) {
+  if (chGate.email && email.isConfigured(features) && ownerEmailTo) {
     emailInlineTried = true;
-    const to = secrets.get('OWNER_EMAIL') || features.email.from;
+    const to = ownerEmailTo;
     const ok = await email.send(features, {
       to, subject,
       text,
@@ -243,8 +251,8 @@ async function notifyOwner(ctx, msg) {
         return { channel: 'queue', ok: false, queued: true };
       } catch { /* fall through */ }
     }
-    if (chGate.email && email.isConfigured(features) && features?.email?.from && !emailInlineTried) {
-      const to = secrets.get('OWNER_EMAIL') || features.email.from;
+    if (chGate.email && email.isConfigured(features) && ownerEmailTo && !emailInlineTried) {
+      const to = ownerEmailTo;
       try {
         await queue.enqueue(pool, {
           channel: 'email', recipient: to, subject, body: text,

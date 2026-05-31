@@ -83,7 +83,7 @@ test('features.deepMerge guards against prototype pollution', () => {
 test('notification queue bounds each dispatch with a timeout', () => {
   const q = read('services', 'notificationQueue.js');
   assert.match(q, /DISPATCH_TIMEOUT_MS/, 'must define a per-dispatch timeout');
-  assert.match(q, /withTimeout\(\s*[\s\S]{0,40}dispatch\(pool, features, row\)/,
+  assert.match(q, /withTimeout\(\s*[\s\S]{0,40}dispatch\(pool, features, row, gate\)/,
     'processOne must wrap dispatch in the timeout');
 });
 

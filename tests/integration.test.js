@@ -2198,8 +2198,8 @@ test('access_cards CRUD endpoints exist', () => {
   // off cleanly disables the whole module.
   assert.match(server, /\/api\/access\/cards'[\s\S]{0,400}requireFeature\('accessControl'\)/,
     'issue must be gated by accessControl');
-  assert.match(server, /app\.get\('\/api\/access\/cards', requireAuth, features\.requireFeature\('accessControl'\)/,
-    'list must be gated by accessControl');
+  assert.match(server, /app\.get\('\/api\/access\/cards', requireAuth, requireRole\('owner', 'manager'\), features\.requireFeature\('accessControl'\)/,
+    'list must be gated by accessControl AND restricted to owner/manager (card↔tenant mapping is sensitive)');
   assert.match(server, /app\.put\('\/api\/access\/cards\/:id\/revoke'[\s\S]{0,180}features\.requireFeature\('accessControl'\)/,
     'revoke must be gated by accessControl');
   assert.match(server, /app\.put\('\/api\/access\/cards\/:id\/restore'[\s\S]{0,180}features\.requireFeature\('accessControl'\)/,
@@ -2245,6 +2245,105 @@ test('access log POST is card-driven: revoked card denied, identity from card no
   // Unknown card → denied, no tenant attribution.
   assert.match(server, /result = 'denied';\s*\n\s*reason = reason \|\| 'unknown_card';\s*\n\s*tenantId = null;/,
     'an unknown card must be denied and not attributed to any tenant');
+});
+
+test('access cards/log are hardened: role gate, device card-required, inactive-tenant deny', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  // SEC-F2: the card LIST leaks card_id↔tenant↔room mapping → owner/manager only.
+  assert.match(server, /app\.get\('\/api\/access\/cards', requireAuth, requireRole\('owner', 'manager'\), features\.requireFeature\('accessControl'\)/,
+    'GET /api/access/cards must be restricted to owner/manager');
+  // SEC-F3: a device token without a presented card cannot forge events from the body.
+  assert.match(server, /if \(req\.device && !cardId\)[\s\S]{0,200}CARD_REQUIRED/,
+    'device-authenticated access events must require a real cardId');
+  // TL-3: deny when the cardholder tenant is no longer active.
+  assert.match(server, /SELECT status, deleted_at FROM tenants WHERE id=\$1[\s\S]{0,320}tenant_inactive/,
+    'access decision must deny cards whose tenant is not active');
+  // TL-3: card issue must target an active tenant.
+  assert.match(server, /SELECT 1 FROM tenants WHERE id=\$1 AND deleted_at IS NULL AND status='active'/,
+    'card issue must require an active tenant');
+});
+
+test('GET /files/:id restricts sensitive PII categories to owner/manager', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  // SEC-F1: sensitive files gated by manager rank, not merely any admin session.
+  assert.match(server, /const sensitive = SENSITIVE_CATEGORIES\.has\(f\.category\)/,
+    'files proxy must classify sensitive categories up front');
+  assert.match(server, /isAdmin && \(!sensitive \|\| isManagerPlus\)/,
+    'sensitive files must require owner/manager (isManagerPlus), not any admin');
+  assert.match(server, /ROLE_RANK\[sessionRole\] \|\| 0\) >= ROLE_RANK\.manager/,
+    'manager-rank gate must use the role hierarchy');
+});
+
+test('phase-3 hardening: health fail-safe, room-mirror occupancy guard, reserved snapshot preserved', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const p = (...a) => path.join(__dirname, '..', ...a);
+  const server = fs.readFileSync(p('server.js'), 'utf8');
+  const health = fs.readFileSync(p('services', 'healthCheck.js'), 'utf8');
+  const roomStatus = fs.readFileSync(p('services', 'roomStatus.js'), 'utf8');
+  // SEC-F6: a statusless/unknown health probe must degrade to warn, never green.
+  assert.match(health, /\['ok', 'warn', 'error'\]\.includes\(res\.status\) \? res\.status : 'warn'/,
+    'unknown health status must fail safe to warn');
+  assert.doesNotMatch(health, /status: res\.status \|\| 'ok'/,
+    'health must not default a missing status to ok (false-green)');
+  // BK-F1: room→tenant mirror must skip non-occupancy snapshots (reserved/hold).
+  assert.match(server, /rstatus !== 'occupied' && rstatus !== 'overdue'\) continue/,
+    'mirrorRoomsToTenants must not promote reserved/pending rooms to active tenants');
+  // BK-F4: the room sweep must keep the applicant snapshot on a live reservation.
+  assert.match(roomStatus, /cleanupStaleTenant = facts\.hasBlobTenant && !activeTenantForBlob && !facts\.hasActiveReservation/,
+    'reserved rooms with a live booking must keep their tenant snapshot');
+});
+
+test('phase-4 billing/onboarding fixes (closing bill, invitation welcome bill, re-checkin contract, citizen reveal, txref replay)', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const p = (...a) => path.join(__dirname, '..', ...a);
+  const server = fs.readFileSync(p('server.js'), 'utf8');
+  const ops = fs.readFileSync(p('routes', 'tenant-ops.js'), 'utf8');
+
+  // BILL-1: carried late fee folded as PRINCIPAL (subtotal), late_fee column 0,
+  // so tickLateFee's `base = total - late_fee` can't cannibalize it.
+  assert.match(ops, /closingSubtotal = Math\.round\(\(proRatedRent \+ closingLateFee\)/,
+    'closing bill must fold the carried fee into subtotal, not late_fee');
+  assert.match(ops, /VALUES \(\$1,\$2,\$3,\$4,\$5,\$8,\$9,\$10,\$6,'pending',\$7::jsonb\)/,
+    'closing bill INSERT must place subtotal/late_fee(0)/total in distinct params');
+  assert.match(ops, /closingSubtotal, 0, closingTotal\]/,
+    'closing bill must insert late_fee=0 (carried fee lives in subtotal)');
+  // BILL-3: no duplicate 'pro-rate' other-line that double-counts the rent column.
+  assert.doesNotMatch(ops, /label: 'pro-rate', amount: proRatedRent/,
+    'closing bill must not add a pro-rate line duplicating the rent column');
+
+  // BILL-2 / TL-4: invitation-approve welcome bill bills the same flat charges
+  // as /checkin (wifi / common / flat utilities), not rent only.
+  assert.match(server, /const wifiAmt = r2\(_pickNum\(billRoomObj\.wifiOverride/,
+    'invitation welcome bill must compute wifi/common/flat charges');
+  assert.match(server, /const welcomeSubtotal = r2\(welcomeRent \+ wifiAmt \+ waterAmt \+ elecAmt \+ commonAmt\)/,
+    'invitation welcome bill subtotal must include the flat charges');
+  // TL-2: invitation-approve sets a move-in meter baseline.
+  assert.match(server, /TL-2: establish a move-in meter baseline/,
+    'invitation-approve must set a move-in meter baseline');
+  assert.match(server, /source: 'invitation-approve'/,
+    'meter baseline must be recorded with the invitation-approve source');
+
+  // TL-1: re-checkin must not silently no-op the contract on contract_no clash.
+  assert.match(ops, /C-\$\{_cyear\}-\$\{String\(id\)\.padStart\(4, '0'\)\}-\$\{_cseq\}/,
+    'contract_no must be disambiguated per tenancy');
+  assert.match(ops, /if \(!contractIns\.rows\.length\)[\s\S]{0,500}CONTRACT_NO_CONFLICT/,
+    'a failed contract insert must abort checkin, not silently proceed');
+
+  // TL-5: citizen reveal works when encryption is disabled (plaintext stored).
+  assert.match(ops, /Encryption disabled → the column stores plaintext/,
+    'citizen reveal must handle the encryption-disabled (plaintext) case');
+  assert.match(ops, /if \(out\.citizen_id != null\) \{\s*\n\s*audit\(req, 'tenant\.citizen_reveal'/,
+    'reveal audit must fire on any successful reveal regardless of storage mode');
+
+  // BK-F3: bill-pay rejects a txref already used as a booking deposit.
+  assert.match(server, /SELECT external_id FROM bookings WHERE deposit_transaction_ref=\$1[\s\S]{0,400}ไม่สามารถนำมาชำระบิลซ้ำ/,
+    'bill-pay must reject a transaction_ref already used as a booking deposit');
 });
 
 test('monthly meter readings drive billing period instead of room edit units', () => {
@@ -2623,8 +2722,8 @@ test('admin room photos use storage URLs and public feeds expose only safe room-
     'public rooms blob must include sanitized room photos');
   assert.match(server, /const isPublicRoomPhoto = f\.category === 'room_photo'/,
     'file proxy must treat room photos differently from sensitive uploads');
-  assert.match(server, /let allowed = isPublicRoomPhoto \|\| isAdmin/,
-    'public room photos must be renderable without an admin session');
+  assert.match(server, /let allowed = isPublicRoomPhoto \|\| \(isAdmin && \(!sensitive \|\| isManagerPlus\)\)/,
+    'public room photos must be renderable without an admin session; sensitive PII files require owner/manager');
   assert.match(server, /function classifyUploadError\(err\)/,
     'server must classify upload failures into clear error codes');
   assert.match(server, /UPLOAD_TOO_LARGE/,
