@@ -2952,7 +2952,7 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBookingSubmit, validateBod
       const flags = await features.load(pool);
       notifier.notifyOwner({ pool, features: flags }, {
         subject: '📋 ผู้เช่าใหม่ขอจอง',
-        text: `ชื่อ: ${cleaned.tenantName}\nโทร: ${cleaned.phone || '-'}\nห้อง: ${cleaned.roomId || '-'}\nวันเข้าพัก: ${cleaned.checkInDate || '-'}\nค่าจอง: ${newBooking.bookingFee ? `฿${Number(newBooking.bookingFee).toLocaleString('th-TH')}` : '-'} (${newBooking.depositStatus || 'not_required'})\nผลตรวจสลิป: ${newBooking.depositVerification?.title || newBooking.depositVerifyCode || '-'}\nนโยบาย: ${newBooking.bookingFeeAppliesToDeposit ? 'นำค่าจองไปหัก/นับรวมกับเงินมัดจำ' : 'ค่าจองแยกจากเงินมัดจำ'}\nมัดจำคงเหลือโดยประมาณ: ${newBooking.depositBalanceDue != null ? `฿${Number(newBooking.depositBalanceDue).toLocaleString('th-TH')}` : '-'}${newBooking.lineBinding?.error ? `\n⚠️ LINE: สร้างรหัสผูก LINE ไม่สำเร็จ (${newBooking.lineBinding.error})\nขั้นต่อไป: ${newBooking.lineBinding.nextAction}` : ''}${newBooking.applicantRisk ? `\n⚠️ ข้อควรตรวจ: ${newBooking.applicantRisk.message}\nขั้นต่อไป: ${newBooking.applicantRisk.nextAction}` : ''}\nรหัสการจอง: ${newBooking.id}`,
+        text: `ชื่อ: ${cleaned.tenantName}\nโทร: ${cleaned.phone || '-'}\nห้อง: ${cleaned.roomId || '-'}\nวันเข้าพัก: ${cleaned.checkInDate || '-'}\nค่าจอง: ${newBooking.bookingFee ? `฿${Number(newBooking.bookingFee).toLocaleString('th-TH')}` : '-'} (${newBooking.depositStatus || 'not_required'})\nผลตรวจสลิป: ${newBooking.depositVerification?.title || newBooking.depositVerifyCode || '-'}\nนโยบาย: ${newBooking.bookingFeeAppliesToDeposit ? 'นำค่าจองไปหัก/นับรวมกับเงินมัดจำ' : 'ค่าจองแยกจากเงินมัดจำ'}\nมัดจำคงเหลือโดยประมาณ: ${newBooking.depositBalanceDue != null ? `฿${Number(newBooking.depositBalanceDue).toLocaleString('th-TH')}` : '-'}${newBooking.lineBinding?.error ? `\n⚠️ LINE: สร้างรหัสผูก LINE ไม่สำเร็จ (${newBooking.lineBinding.error})\nขั้นต่อไป: ${newBooking.lineBinding.nextAction}` : ''}${newBooking.applicantRisk ? `\n⚠️ ข้อควรตรวจ: ${newBooking.applicantRisk.message}\nขั้นต่อไป: ${newBooking.applicantRisk.nextAction}` : ''}\nรหัสการจอง: ${newBooking.id}\n— ขั้นต่อไป: เปิด /admin#bookings เพื่อตรวจสอบและกดอนุมัติการจองนี้`,
       }).catch(() => {});
     } catch { /* ignore */ }
 
@@ -8572,7 +8572,16 @@ app.post('/api/bookings/:id/approve-and-assign', sameOrigin, csrfGuard, requireA
         && candidateRoom.status === 'reserved'
         && String(candidateRoom.reservedBy || '') === id;
       const v2Compatible = !v2Preclaimed || ['reserved', 'vacant'].includes(v2Preclaimed.status);
-      if (ownedByThisBooking && v2Compatible && want(candidateRoom)) {
+      // Do NOT re-apply the want(type/floor) filter to a room this booking
+      // already reserved. wantType/wantFloor are a PREFERENCE used to AUTO-pick
+      // a room when the applicant didn't choose one — but here the applicant
+      // explicitly selected and locked this exact room (often paying a deposit
+      // hold on it). Re-filtering it spuriously rejected rooms whose blob entry
+      // lacks type/floor metadata (e.g. wantType defaulted to 'standard' while
+      // the reserved room carries no type), then assigned a DIFFERENT room and
+      // left the originally-reserved room stuck 'reserved' (orphaned). The
+      // applicant's explicit reservation wins.
+      if (ownedByThisBooking && v2Compatible) {
         preclaimedCandidate = { ...candidateRoom, _source: 'preclaimed' };
       }
     }
@@ -8798,9 +8807,10 @@ app.post('/api/bookings/:id/approve-and-assign', sameOrigin, csrfGuard, requireA
         booking,
         roomId: assignedRoomId || booking.assignedRoomId || booking.roomId || null,
         subject: 'การจองห้องได้รับการอนุมัติแล้ว',
-        text: `✅ การจองห้องของคุณได้รับการอนุมัติ\n` +
+        text: `✅ การจองห้องของคุณได้รับการอนุมัติแล้ว\n` +
               (assignedRoomId ? `ห้อง: ${assignedRoomId}\n` : '') +
-              `กรุณาติดต่อสำนักงานเพื่อเซ็นสัญญา`,
+              `ขั้นต่อไป: เจ้าหน้าที่จะติดต่อคุณเพื่อนัดเซ็นสัญญาและชำระเงินมัดจำส่วนที่เหลือ (ถ้ามี)\n` +
+              `กรุณาเตรียมบัตรประชาชนตัวจริงในวันเซ็นสัญญา`,
       });
       notifier.notifyOwner({ pool, features: flags }, {
         subject: `✅ อนุมัติการจอง ${id}${assignedRoomId ? ` → ห้อง ${assignedRoomId}` : ''}`,
@@ -8808,6 +8818,9 @@ app.post('/api/bookings/:id/approve-and-assign', sameOrigin, csrfGuard, requireA
           `${booking.name || '-'} (${booking.phone || '-'})`,
           assignedRoomId ? `จัดให้ห้อง ${assignedRoomId}` : 'ยังไม่ได้กำหนดห้อง — ไม่มีห้องว่างตรงเงื่อนไข',
           bookingNotifyOwnerLine(tenantNotify),
+          assignedRoomId
+            ? '— ขั้นต่อไป: สร้างสัญญา + ส่งลิงก์เซ็นให้ผู้เช่า (ปุ่ม "สร้างสัญญา" ที่หน้า booking)'
+            : '— ขั้นต่อไป: เลือกห้องว่างให้ผู้เช่าด้วยตนเอง แล้วจึงสร้างสัญญา',
         ].filter(Boolean).join('\n'),
       }).catch(() => {});
     } catch (err) {
@@ -9148,11 +9161,21 @@ app.put('/api/bookings/:id', sameOrigin, csrfGuard, requireAuth, requireRole('ow
     if (b.status && b.status !== before.status) {
       try {
         const flags = await features.load(pool);
+        // Clear, next-step guidance in Thai so the applicant always knows
+        // (1) what just happened and (2) what comes next — the booking flow
+        // stays easy to follow end to end. 'approved' is intentionally NOT here:
+        // it's unreachable via PUT (blocked above) and is sent by
+        // approve-and-assign with its own room-assignment message.
+        const roomLabel = (updated.assignedRoomId || updated.roomId)
+          ? ` ห้อง ${updated.assignedRoomId || updated.roomId}` : '';
         const tenantText = ({
-          approved: `✅ การจองห้องได้รับการอนุมัติแล้ว\nกรุณาติดต่อสำนักงานเพื่อเซ็นสัญญา`,
-          rejected: `❌ ขออภัย — การจองห้องไม่ได้รับการอนุมัติ\n${updated.adminNotes ? 'หมายเหตุ: ' + updated.adminNotes : ''}`,
-          reviewing: `🔍 การจองของคุณกำลังถูกตรวจสอบ`,
-          cancelled: `🚫 การจองถูกยกเลิก`,
+          reviewing: `🔍 การจองห้อง${roomLabel}ของคุณกำลังถูกตรวจสอบโดยเจ้าหน้าที่\n`
+            + `ขั้นต่อไป: เราจะแจ้งผลให้คุณทราบทาง LINE นี้เมื่อตรวจสอบเสร็จ — ยังไม่ต้องดำเนินการใดเพิ่ม`,
+          rejected: `❌ ขออภัย การจองห้อง${roomLabel}ไม่ได้รับการอนุมัติ\n`
+            + (updated.adminNotes ? `เหตุผล: ${updated.adminNotes}\n` : '')
+            + `หากมีข้อสงสัย หรือต้องการเลือกห้องอื่น กรุณาติดต่อสำนักงาน`,
+          cancelled: `🚫 การจองห้อง${roomLabel}ถูกยกเลิกแล้ว\n`
+            + `หากต้องการจองใหม่ สามารถทำรายการได้ที่หน้าจองห้องอีกครั้ง`,
         })[updated.status];
         if (tenantText) {
           tenantNotify = await notifyBookingApplicantStatus({
