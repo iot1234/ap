@@ -36,6 +36,7 @@ const lineNotify = require('../services/line');
 const lineBinding = require('../services/lineBinding');
 const storage = require('../services/storage');
 const { isVacantStatus } = require('../services/roomSync');
+const meter = require('../services/meter');
 
 // === Internal helpers =====================================================
 // VALID_TENANT_STATUS + maskTenantOut were defined in server.js but used
@@ -1926,7 +1927,85 @@ module.exports = function buildTenantOpsRouter(ctx) {
         const dueDate = moveInMatch
           ? billing.formatYMD(Number(moveInMatch[1]), Number(moveInMatch[2]), dueDay)
           : billing.formatDueDate(dueDay);
+
+        // === Capture starting meter readings for THIS tenancy ================
+        // A room reused from a previous tenant already shows a meter value. By
+        // storing the move-in reading as the baseline (period = move-in period),
+        // the next bill measures THIS tenant's consumption (nextReading −
+        // startReading), never the previous tenant's. Stored inside the same
+        // transaction as the check-in so it commits atomically. Flat-mode
+        // utilities skip this (they aren't metered). Robust guards:
+        //   • backward reading (start < room's last reading) → refuse unless force
+        //   • policy 'required' + metered utility with no start → refuse unless force
+        const billRoomObj = (roomsForRent && typeof roomsForRent === 'object' && roomsForRent[roomId])
+          ? roomsForRent[roomId] : {};
+        const meterStartResult = { water: null, elec: null };
+        for (const mt of ['water', 'elec']) {
+          const label = mt === 'water' ? 'น้ำ' : 'ไฟ';
+          if (billing.isFlatUtilityConfigured(billRoomObj, mt)) {
+            meterStartResult[mt] = { skipped: 'flat_mode' };  // เหมาจ่าย — ไม่ต้องใช้เลขมิเตอร์
+            continue;
+          }
+          const startVal = mt === 'water' ? waterStart : elecStart;
+          let prevReading = null;
+          try { prevReading = await meter.latestBeforePeriod(client, roomId, mt, period); }
+          catch (err) { if (err.code !== '42P01') throw err; }
+          if (startVal == null) {
+            if (meterStartPolicy === 'required' && !isForced) {
+              await client.query('ROLLBACK');
+              return res.status(400).json({
+                error: `ต้องระบุเลขมิเตอร์${label}ตั้งต้นของห้อง ${roomId} (นโยบายตั้งค่าเป็น "บังคับ")`,
+                code: 'METER_START_REQUIRED',
+                meterType: mt,
+                hint: 'กรอกเลขมิเตอร์ปัจจุบันที่อ่านจากหน้าห้อง หรือส่ง force=true ถ้าต้องการข้าม',
+              });
+            }
+            meterStartResult[mt] = { skipped: 'not_provided' };
+            continue;
+          }
+          if (prevReading && Number(prevReading.reading) > startVal && !isForced) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({
+              error: `เลขมิเตอร์${label}ตั้งต้น (${startVal}) น้อยกว่าเลขล่าสุดของห้อง (${prevReading.reading}) — มิเตอร์ไม่ควรถอยหลัง`,
+              code: 'METER_START_BACKWARD',
+              meterType: mt,
+              lastReading: Number(prevReading.reading),
+              hint: 'ตรวจเลขที่กรอกอีกครั้ง — ถ้ามิเตอร์ถูกเปลี่ยน/รีเซ็ตจริง ส่ง force=true',
+            });
+          }
+          try {
+            await meter.record(client, {
+              roomId, meterType: mt, reading: startVal,
+              period, source: 'checkin', createdBy: req.session.user.username,
+            });
+            meterStartResult[mt] = {
+              reading: startVal, stored: true,
+              prev: prevReading ? Number(prevReading.reading) : null,
+            };
+          } catch (err) {
+            await client.query('ROLLBACK');
+            console.error(`[checkin] meter start (${mt}) failed:`, err.message);
+            return res.status(500).json({
+              error: `บันทึกเลขมิเตอร์${label}ตั้งต้นไม่สำเร็จ — ลองใหม่`,
+              code: 'METER_START_STORE_FAILED',
+            });
+          }
+        }
+
         let welcomeRent = Number(monthlyRent) || 0;
+        // Days-lived fraction for the move-in month. Flat charges (wifi / common
+        // fee / flat-mode utilities) are prorated by occupancy so a mid-month
+        // move-in pays only for the days lived (operator-chosen policy). Rent
+        // proration stays opt-in via config.billing.prorateFirstMonth. Metered
+        // water/elec are NOT on the welcome bill — their first consumption is
+        // measured next cycle from the baseline captured above.
+        let flatFrac = 1;
+        if (moveInMatch) {
+          const _dim = new Date(Date.UTC(Number(moveInMatch[1]), Number(moveInMatch[2]), 0)).getUTCDate();
+          flatFrac = billing.firstMonthProrationFraction({
+            moveInDay: Number(moveInMatch[3]), daysInMonth: _dim, prorate: true,
+          });
+        }
         {
           const firstMonthPct = Math.max(0, Math.min(50,
             Number(cfgVal?.discounts?.firstMonth) || 0));
@@ -1934,25 +2013,45 @@ module.exports = function buildTenantOpsRouter(ctx) {
           const combinedPct = Math.min(50,
             100 * (1 - (1 - contractPct / 100) * (1 - firstMonthPct / 100)));
           welcomeRent = Math.round(welcomeRent * (1 - combinedPct / 100) * 100) / 100;
-          // config.billing.prorateFirstMonth — charge only the days lived in the
-          // move-in month (move-in day → month end), symmetric with the closing
-          // bill. Off by default → full first month (historical behavior).
           if (cfgVal?.billing?.prorateFirstMonth === true && moveInMatch) {
-            const y = Number(moveInMatch[1]);
-            const mo = Number(moveInMatch[2]);
-            const day = Number(moveInMatch[3]);
-            const daysInMonth = new Date(Date.UTC(y, mo, 0)).getUTCDate();
-            const frac = billing.firstMonthProrationFraction({ moveInDay: day, daysInMonth, prorate: true });
-            welcomeRent = Math.round(welcomeRent * frac * 100) / 100;
+            welcomeRent = Math.round(welcomeRent * flatFrac * 100) / 100;
           }
         }
-        await client.query(
-          `INSERT INTO bills
-             (bill_no, tenant_id, room_id, period, rent, subtotal, total, due_date, status)
-           VALUES ($1, $2, $3, $4, $5, $5, $5, $6, 'pending')
-           ON CONFLICT (bill_no) DO NOTHING`,
-          [billNo, id, roomId, period, welcomeRent, dueDate]
-        );
+        // Resolve the room's flat (non-metered) charges, mirroring buildBill's
+        // override→global precedence, then prorate by days lived.
+        const _util = (cfgVal && typeof cfgVal.utilities === 'object') ? cfgVal.utilities : {};
+        const _pickNum = (...vals) => {
+          for (const v of vals) {
+            if (v != null && v !== '' && Number.isFinite(Number(v))) return Math.max(0, Number(v));
+          }
+          return 0;
+        };
+        const r2 = (n) => Math.round(n * 100) / 100;
+        const wifiAmt = r2(_pickNum(billRoomObj.wifiOverride, billRoomObj.wifi_override, billRoomObj.wifi, _util.wifi) * flatFrac);
+        const commonAmt = r2(_pickNum(billRoomObj.commonFeeOverride, billRoomObj.common_fee_override, billRoomObj.commonFee, billRoomObj.common_fee, _util.commonFee) * flatFrac);
+        const waterAmt = r2((billing.isFlatUtilityConfigured(billRoomObj, 'water')
+          ? _pickNum(billRoomObj.waterFlatAmount, billRoomObj.water_flat_amount) : 0) * flatFrac);
+        const elecAmt = r2((billing.isFlatUtilityConfigured(billRoomObj, 'elec')
+          ? _pickNum(billRoomObj.elecFlatAmount, billRoomObj.elec_flat_amount) : 0) * flatFrac);
+        const welcomeOther = commonAmt > 0
+          ? [{ label: `ค่าส่วนกลาง${flatFrac < 1 ? ' (ตามวันที่อยู่)' : ''}`, amount: commonAmt }]
+          : [];
+        const welcomeSubtotal = r2(welcomeRent + wifiAmt + waterAmt + elecAmt + commonAmt);
+        // Skip a zero-total welcome bill (e.g. free first month) — the bills
+        // CHECK requires total > 0, and there's nothing to collect anyway.
+        if (welcomeSubtotal > 0) {
+          await client.query(
+            `INSERT INTO bills
+               (bill_no, tenant_id, room_id, period, rent,
+                water_amount, elec_amount, wifi, other,
+                subtotal, vat, late_fee, total, due_date, status)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, 0, 0, $10, $11, 'pending')
+             ON CONFLICT (bill_no) DO NOTHING`,
+            [billNo, id, roomId, period, welcomeRent,
+             waterAmt, elecAmt, wifiAmt, JSON.stringify(welcomeOther),
+             welcomeSubtotal, dueDate]
+          );
+        }
 
         await client.query('COMMIT');
         // Cascade room status post-commit. The blob + rooms_v2 updates above

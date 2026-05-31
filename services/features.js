@@ -205,6 +205,20 @@ const DEFAULTS = Object.freeze({
     // Deposit must be ≤ depositMaxMonths × monthlyRent. Default = 3 months
     // (typical Thai practice: 1-2 months deposit). admin.force bypasses.
     depositMaxMonths: 3,
+    // Starting meter reading at check-in. When a tenant moves into a room that
+    // a previous tenant used, the meter already shows a value — capturing it at
+    // check-in makes the FIRST real bill measure THIS tenant's consumption from
+    // their own baseline, not the previous tenant's reading or 0. Each room's
+    // meter differs, so the value is entered per check-in (body.waterStartReading
+    // / body.elecStartReading), not configured globally. This flag only chooses
+    // how strict check-in is about it:
+    //   'optional' (default) → store the reading if provided, skip if not
+    //   'required'           → metered-mode utilities MUST have a start reading
+    //                          (check-in refused without it unless force=true)
+    //   'off'                → ignore start readings entirely
+    // Backward readings (start < the room's last reading) are always refused
+    // unless force=true (meter reset/replacement), regardless of this policy.
+    meterStartPolicy: 'optional',
     // Current terms-and-conditions version string. Stamped on tenants /
     // contracts at the moment of checkin so a future T&C revision doesn't
     // retroactively bind existing tenants. Operator updates this string
