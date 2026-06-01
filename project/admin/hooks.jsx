@@ -783,6 +783,10 @@
       title: 'ตรวจสถานะผู้เช่าไม่สำเร็จ',
       description: 'ระบบยังไม่อัปเดตข้อมูล เพื่อป้องกันสถานะผิด ลองใหม่อีกครั้ง',
     },
+    TENANT_STATUS_FORCE_REASON_REQUIRED: {
+      title: 'ต้องระบุเหตุผลก่อนใช้ force',
+      description: (e) => e.hint || 'การเปลี่ยนสถานะ/ห้องด้วย force ต้องมีเหตุผลอย่างน้อย 8 ตัวอักษร เพื่อป้องกันการกดผิดและให้ตรวจย้อนหลังได้',
+    },
     USE_CHECKOUT_ENDPOINT: {
       title: 'ต้องใช้ขั้นตอน checkout',
       description: (e) => e.hint || 'ผู้เช่ายังมีห้อง/สัญญา/บัตร active ต้อง checkout เพื่อปิดทุกอย่างพร้อมกัน',
@@ -970,6 +974,21 @@
     if (!raw || typeof raw !== 'object') return '';
     const parts = [];
     if (raw.hint) parts.push(humanizeAdminErrorText(raw.hint));
+    if (raw.impact) parts.push(humanizeAdminErrorText(raw.impact));
+    const issueSummary = Array.isArray(raw.issueSummary) ? raw.issueSummary : [];
+    if (issueSummary.length) {
+      const lines = issueSummary.slice(0, 4).map((it) => {
+        if (!it) return null;
+        if (typeof it === 'string') return `• ${humanizeAdminErrorText(it)}`;
+        const label = it.label || it.field || it.code || 'รายการที่ต้องตรวจ';
+        const value = it.value !== undefined && it.value !== null && it.value !== ''
+          ? `: ${it.value}`
+          : '';
+        const fix = it.fix || it.action || it.consequence || '';
+        return humanizeAdminErrorText(`• ${label}${value}${fix ? ` - ${fix}` : ''}`);
+      }).filter(Boolean);
+      if (lines.length) parts.push(lines.join('\n'));
+    }
     const actions = raw.nextActions && typeof raw.nextActions === 'object'
       ? raw.nextActions
       : null;

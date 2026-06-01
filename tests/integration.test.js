@@ -4928,6 +4928,8 @@ test('tenant status updates are guarded and sync room state', () => {
     'tenant update must normalize the requested status before writing');
   assert.match(ops, /requestedStatus !== undefined \|\| requestedRoomId !== undefined/,
     'tenant update must preflight status and room changes together');
+  assert.match(ops, /const statusTouched = requestedStatus !== undefined \|\| requestedRoomId !== undefined/,
+    'tenant update must track status/room changes through one shared guard flag');
   assert.match(ops, /TENANT_STATUS_INVALID/,
     'invalid tenant status must return a stable code');
   assert.match(ops, /TENANT_ACTIVE_ROOM_REQUIRED/,
@@ -4936,6 +4938,16 @@ test('tenant status updates are guarded and sync room state', () => {
     'moved_out/blacklist tenants must not keep a current_room_id');
   assert.match(ops, /finalStatus === 'moved_out' \|\| finalStatus === 'blacklist'/,
     'non-active status guard must cover blacklist as well as moved_out');
+  assert.match(ops, /TENANT_STATUS_FORCE_REASON_REQUIRED/,
+    'forced status/room updates must require a clear reason');
+  assert.match(ops, /statusForceReason\.length < 8/,
+    'forced status/room updates must reject vague or missing reasons');
+  assert.match(ops, /USE_CHECKOUT_ENDPOINT/,
+    'direct moved_out updates must send admins to checkout when live links exist');
+  assert.match(ops, /issueSummary/,
+    'checkout-required errors must include a short issue summary for the admin UI');
+  assert.match(ops, /impact: 'ถ้าเปลี่ยนสถานะตรง ๆ/,
+    'checkout-required errors must explain why a direct status change is dangerous');
   assert.match(ops, /set\('current_room_id', null\)/,
     'saving a non-active status must clear current_room_id');
   assert.match(ops, /syncRoom\(pool, roomId, \{ reason: 'tenant-update-status' \}\)/,
@@ -4944,6 +4956,8 @@ test('tenant status updates are guarded and sync room state', () => {
     'room sync failures must be returned as warnings instead of hidden');
   assert.match(ops, /statusUpdate:/,
     'tenant update response/audit must include a status transition summary');
+  assert.match(ops, /forcedStatusUpdate:[\s\S]{0,160}reason: statusForceReason/,
+    'forced status changes must write the operator reason into the audit payload');
 });
 
 test('tenant login is wired through schemas.tenantLogin', () => {
@@ -5442,6 +5456,7 @@ test('admin toastError explains booking-to-contract guard codes with next action
     'TENANT_ACTIVE_ROOM_REQUIRED',
     'TENANT_NONACTIVE_ROOM_FORBIDDEN',
     'TENANT_STATUS_PRECHECK_FAILED',
+    'TENANT_STATUS_FORCE_REASON_REQUIRED',
     'USE_CHECKOUT_ENDPOINT',
     'DRAFT_CONTRACT_EXISTS',
     'TENANT_ROOM_CONTRACT_EXISTS',
@@ -5457,6 +5472,12 @@ test('admin toastError explains booking-to-contract guard codes with next action
     'toastError must have a generic hint/nextActions formatter');
   assert.match(hooks, /raw\.nextActions/,
     'generic fallback must surface backend nextActions instead of hiding them');
+  assert.match(hooks, /raw\.impact/,
+    'generic fallback must surface backend impact text instead of hiding it');
+  assert.match(hooks, /raw\.issueSummary/,
+    'generic fallback must surface backend issue summaries instead of hiding them');
+  assert.match(hooks, /fix \|\| it\.action \|\| it\.consequence/,
+    'issue summary guidance must include the suggested fix/action when present');
   assert.match(hooks, /this\.body = payload\.raw/,
     'ApiError must keep the full backend body for page-level inline errors');
   assert.match(hooks, /this\.issueSummary = payload\.issueSummary/,

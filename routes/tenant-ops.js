@@ -996,6 +996,13 @@ module.exports = function buildTenantOpsRouter(ctx) {
     const requestedRoomId = b.roomId !== undefined
       ? (b.roomId ? String(b.roomId).slice(0, 32).trim() : null)
       : undefined;
+    const statusTouched = requestedStatus !== undefined || requestedRoomId !== undefined;
+    const rawStatusForceReason = b.forceReason !== undefined
+      ? b.forceReason
+      : (b.statusReason !== undefined ? b.statusReason : b.reason);
+    const statusForceReason = rawStatusForceReason == null
+      ? ''
+      : String(rawStatusForceReason).trim().slice(0, 500);
     let statusContext = null;
     const loadStatusContext = async () => {
       if (statusContext) return statusContext;
@@ -1037,7 +1044,7 @@ module.exports = function buildTenantOpsRouter(ctx) {
         allowed: Array.from(VALID_TENANT_STATUS),
       });
     }
-    if (requestedStatus !== undefined || requestedRoomId !== undefined) {
+    if (statusTouched) {
       let row;
       try {
         row = await loadStatusContext();
@@ -1051,6 +1058,26 @@ module.exports = function buildTenantOpsRouter(ctx) {
       if (!row) return res.status(404).json({ error: 'not found', code: 'NOT_FOUND' });
       const finalStatus = requestedStatus !== undefined ? requestedStatus : row.tenant_status;
       const finalRoomId = requestedRoomId !== undefined ? requestedRoomId : row.current_room_id;
+      if (b.force === true && statusForceReason.length < 8) {
+        return res.status(400).json({
+          error: 'ใช้ force เพื่อเปลี่ยนสถานะ/ห้องไม่ได้ เพราะยังไม่ได้ระบุเหตุผลที่ชัดเจน',
+          code: 'TENANT_STATUS_FORCE_REASON_REQUIRED',
+          detail: {
+            currentStatus: row.tenant_status,
+            currentRoom: row.current_room_id,
+            requestedStatus: finalStatus,
+            requestedRoom: finalRoomId,
+            reasonLength: statusForceReason.length,
+          },
+          hint: 'กรอก forceReason หรือ statusReason อย่างน้อย 8 ตัวอักษร เช่น cleanup ghost row หลัง checkout สำเร็จแล้ว',
+          impact: 'ระบบยังไม่บันทึกการเปลี่ยนแปลง เพื่อป้องกันการย้ายสถานะ/ห้องผิดคนและให้ audit log ตรวจย้อนหลังได้',
+          nextActions: {
+            hint: finalStatus === 'moved_out' || finalStatus === 'blacklist'
+              ? 'ถ้าเป็นการย้ายออกจริง ให้ใช้ checkout แทน force; ถ้าเป็นงาน cleanup/migrate ให้ใส่เหตุผลว่าตรวจอะไรแล้วจึงต้อง force'
+              : 'ตรวจว่าผู้เช่า ห้อง และสถานะถูกต้องก่อน แล้วใส่เหตุผลว่าทำไมต้อง force',
+          },
+        });
+      }
       if (finalStatus === 'active') {
         if (!finalRoomId) {
           return res.status(409).json({
@@ -1104,11 +1131,30 @@ module.exports = function buildTenantOpsRouter(ctx) {
         if (row.tenant_status === 'active'
             && (row.current_room_id || row.active_contracts > 0 || row.active_cards > 0)
             && b.force !== true) {
+          const issueSummary = [
+            row.current_room_id ? {
+              label: 'ยังผูกห้องอยู่',
+              value: row.current_room_id,
+              fix: 'ใช้ checkout เพื่อคืนห้องและซิงก์สถานะห้อง',
+            } : null,
+            row.active_contracts > 0 ? {
+              label: 'ยังมีสัญญา active',
+              value: row.active_contracts,
+              fix: 'checkout จะปิดสัญญาให้ครบก่อนเปลี่ยนสถานะ',
+            } : null,
+            row.active_cards > 0 ? {
+              label: 'ยังมีบัตร active',
+              value: row.active_cards,
+              fix: 'checkout จะเพิกถอนบัตรและล้าง session ผู้เช่า',
+            } : null,
+          ].filter(Boolean);
           return res.status(409).json({
             error: `ผู้เช่ายัง active อยู่ (ห้อง/สัญญา/บัตร) — ใช้ POST /api/tenants/:id/checkout เพื่ออัปเดตสถานะครบชุดก่อนเปลี่ยนเป็น ${finalStatus}`,
             code: 'USE_CHECKOUT_ENDPOINT',
             checkoutUrl: `/api/tenants/${id}/checkout`,
             adminUrl: `/admin#tenants/${id}?tab=contract`,
+            issueSummary,
+            impact: 'ถ้าเปลี่ยนสถานะตรง ๆ ห้อง/สัญญา/บัตรอาจไม่ตรงกัน ทำให้บิลหรือสิทธิ์ผู้เช่าผิดคนได้',
             detail: {
               currentStatus: row.tenant_status,
               requestedStatus: finalStatus,
@@ -1245,7 +1291,6 @@ module.exports = function buildTenantOpsRouter(ctx) {
           console.warn('[tenant.update] session cleanup failed:', err.message);
         });
       }
-      const statusTouched = requestedStatus !== undefined || requestedRoomId !== undefined;
       const previousStatus = statusContext?.tenant_status || null;
       const previousRoomId = statusContext?.current_room_id || null;
       const finalStatus = requestedStatus !== undefined ? requestedStatus : previousStatus;
@@ -1287,7 +1332,10 @@ module.exports = function buildTenantOpsRouter(ctx) {
           previousRoomId,
           roomId: finalRoomId,
         } : undefined,
-        forcedStatusUpdate: requestedStatus && b.force === true ? requestedStatus : undefined,
+        forcedStatusUpdate: statusTouched && b.force === true ? {
+          to: finalStatus,
+          reason: statusForceReason,
+        } : undefined,
       });
       res.json({
         ok: true,
