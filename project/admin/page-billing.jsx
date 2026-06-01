@@ -57,6 +57,77 @@ function billStatusMeta(row) {
   return { label: 'รอชำระ', color: 'warning' };
 }
 
+function billDbStatusToUi(status) {
+  const raw = String(status || '').toLowerCase();
+  if (raw === 'paid') return 'paid';
+  if (raw === 'void') return 'void';
+  if (raw === 'overdue') return 'overdue';
+  return 'unpaid';
+}
+
+function dbBillMatchesUiBill(real, bill) {
+  if (!real || !bill) return false;
+  const realRoom = String(real.room_id || '');
+  const billRoom = String(bill.roomId || bill.room_id || '');
+  if (!realRoom || realRoom !== billRoom) return false;
+
+  const realTenantId = ownerTenantId(real);
+  const billTenantId = ownerTenantId(bill);
+  if (realTenantId && billTenantId) return realTenantId === billTenantId;
+
+  const realBillNo = String(real.bill_no || '');
+  const billNo = String(bill.dbBillNo || bill.billNo || bill.id || '');
+  if (realBillNo && billNo && realBillNo === billNo) return true;
+
+  return !realTenantId && !billTenantId;
+}
+
+function billRowFromDbFallback(real, est = {}) {
+  const tenantId = ownerTenantId(real) || ownerTenantId(est);
+  return {
+    ...est,
+    id: real.bill_no || (real.id ? `DB-${real.id}` : est.id),
+    roomId: real.room_id || est.roomId,
+    tenantId,
+    tenant: real.bill_tenant_name || est.tenant || (tenantId ? `tenant_id ${tenantId}` : 'ไม่ผูกผู้เช่า'),
+    phone: real.bill_tenant_phone || est.phone || '',
+    tenantStatus: real.bill_tenant_status || est.tenantStatus || null,
+    tenantCurrentRoomId: real.bill_tenant_current_room_id || est.tenantCurrentRoomId || null,
+    tenantDeletedAt: real.bill_tenant_deleted_at || est.tenantDeletedAt || null,
+    period: real.period || est.period || '',
+    rent: numOrNull(real.rent) ?? est.rent ?? 0,
+    water: numOrNull(real.water_amount) ?? est.water ?? 0,
+    waterUnits: numOrNull(real.water_units) ?? est.waterUnits ?? 0,
+    waterRate: numOrNull(real.water_rate) ?? est.waterRate ?? 0,
+    waterPrevReading: numOrNull(real.water_prev_reading),
+    waterCurrentReading: numOrNull(real.water_current_reading),
+    elec: numOrNull(real.elec_amount) ?? est.elec ?? 0,
+    elecUnits: numOrNull(real.elec_units) ?? est.elecUnits ?? 0,
+    elecRate: numOrNull(real.elec_rate) ?? est.elecRate ?? 0,
+    elecPrevReading: numOrNull(real.elec_prev_reading),
+    elecCurrentReading: numOrNull(real.elec_current_reading),
+    wifi: numOrNull(real.wifi) ?? est.wifi ?? 0,
+    subtotal: numOrNull(real.subtotal) ?? est.subtotal ?? 0,
+    penalty: numOrNull(real.late_fee) ?? est.penalty ?? 0,
+    lateFee: numOrNull(real.late_fee) ?? est.lateFee ?? 0,
+    vat: numOrNull(real.vat) ?? est.vat ?? 0,
+    total: Number(real.total) || est.total || 0,
+    dueDate: real.due_date || est.dueDate || '',
+    dueDateDisplay: real.due_date || est.dueDateDisplay || '',
+    status: billDbStatusToUi(real.status),
+    dbStatus: real.status,
+    _source: 'db',
+    dbBillId: real.id,
+    dbBillNo: real.bill_no,
+    pendingSlipCount: Number(real.pending_slip_count) || 0,
+    verifiedSlipCount: Number(real.verified_slip_count) || 0,
+    rejectedSlipCount: Number(real.rejected_slip_count) || 0,
+    latestPaidBy: real.latest_paid_by || null,
+    latestPaidProvider: real.latest_paid_provider || null,
+    latestPaidAt: real.latest_paid_at || null,
+  };
+}
+
 function fmtQty(n) {
   const value = Number(n) || 0;
   return Number.isInteger(value) ? String(value) : value.toFixed(2);
@@ -191,23 +262,44 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
   }, [currentPeriod]);
   const [dbBills, setDbBills] = React.useState(null);   // null = loading
   const [dbBillsErr, setDbBillsErr] = React.useState(null);
-  const fetchDbBills = React.useCallback(() => {
-    let cancel = false;
-    setDbBills(null);
+  const [dbBillsLoading, setDbBillsLoading] = React.useState(false);
+  const fetchDbBills = React.useCallback((opts = {}) => {
+    const clear = opts.clear !== false;
+    const controller = new AbortController();
+    if (clear) setDbBills(null);
+    setDbBillsLoading(true);
     setDbBillsErr(null);
-    fetch(`/api/bills?period=${encodeURIComponent(currentPeriod)}&limit=500&withPayments=1`, {
+    const request = fetch(`/api/bills?period=${encodeURIComponent(currentPeriod)}&limit=500&withPayments=1`, {
       credentials: 'same-origin',
+      signal: controller.signal,
     })
       .then(async (r) => {
         const d = await r.json().catch(() => ({}));
-        if (cancel) return;
-        if (!r.ok) { setDbBillsErr(d.error || `HTTP ${r.status}`); setDbBills([]); return; }
-        setDbBills(Array.isArray(d.bills) ? d.bills : []);
+        if (!r.ok) {
+          setDbBillsErr(d.error || `HTTP ${r.status}`);
+          setDbBills([]);
+          return [];
+        }
+        const rows = Array.isArray(d.bills) ? d.bills : [];
+        setDbBills(rows);
+        return rows;
       })
-      .catch((e) => { if (!cancel) { setDbBillsErr(e.message || 'network error'); setDbBills([]); } });
-    return () => { cancel = true; };
+      .catch((e) => {
+        if (e && e.name === 'AbortError') return null;
+        setDbBillsErr(e.message || 'network error');
+        setDbBills([]);
+        return [];
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setDbBillsLoading(false);
+      });
+    request.cancel = () => controller.abort();
+    return request;
   }, [currentPeriod]);
-  React.useEffect(() => fetchDbBills(), [fetchDbBills]);
+  React.useEffect(() => {
+    const request = fetchDbBills({ clear: true });
+    return () => { if (request && request.cancel) request.cancel(); };
+  }, [fetchDbBills]);
 
   // Cross-link consumer: when /admin#payments → "ดูบิลในหน้าบิล" hops over
   // to /admin#billing?billId=42 we auto-open the matching bill's preview
@@ -594,25 +686,72 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
 
   const filtered = useMemo(() => {
     if (tab === 'current') return bills;
-    if (tab === 'unpaid')  return bills.filter(isBillPayableUi);
-    if (tab === 'paid')    return bills.filter(b => b.status === 'paid');
+    if (tab === 'unpaid')  return bills.filter(isBillPayableUi).filter(b => b._source === 'db');
+    if (tab === 'paid')    return bills.filter(b => b._source === 'db' && b.status === 'paid');
     if (tab === 'review')  return bills.filter(b => (b.pendingSlipCount || 0) > 0);
     return bills;
   }, [bills, tab]);
 
   const pendingReviewCount = useMemo(
-    () => bills.filter((b) => (b.pendingSlipCount || 0) > 0).length,
+    () => bills.filter((b) => b._source === 'db' && (b.pendingSlipCount || 0) > 0).length,
     [bills]
   );
 
   const stats = useMemo(() => {
-    const issued = bills.length;
-    const paidCount = bills.filter(b => b.status === 'paid').length;
-    const unpaidCount = bills.filter(isBillPayableUi).length;
-    const totalRevenue = bills.filter(b => b.status === 'paid').reduce((s, b) => s + b.total, 0);
-    const overdueAmt = bills.filter(isBillPayableUi).reduce((s, b) => s + b.total, 0);
-    return { issued, paidCount, unpaidCount, totalRevenue, overdueAmt };
+    const issuedRows = bills.filter((b) => b._source === 'db');
+    const issued = issuedRows.length;
+    const estimateCount = bills.length - issued;
+    const paidCount = issuedRows.filter(b => b.status === 'paid').length;
+    const payableRows = bills.filter(isBillPayableUi).filter((b) => b._source === 'db');
+    const unpaidCount = payableRows.length;
+    const totalRevenue = issuedRows.filter(b => b.status === 'paid').reduce((s, b) => s + b.total, 0);
+    const overdueAmt = payableRows.reduce((s, b) => s + b.total, 0);
+    return { issued, estimateCount, paidCount, unpaidCount, totalRevenue, overdueAmt };
   }, [bills]);
+
+  const payableDbBills = useMemo(
+    () => bills.filter(isBillPayableUi).filter((b) => b._source === 'db' && b.dbBillId),
+    [bills]
+  );
+
+  const readinessStats = useMemo(() => {
+    const bmap = batchReadiness?.bills || {};
+    let ready = 0;
+    let blocked = 0;
+    let unknown = 0;
+    let sent = 0;
+    let unsent = 0;
+    for (const bill of payableDbBills) {
+      const r = bmap[bill.dbBillId];
+      if (!r) {
+        unknown++;
+      } else if (r.canSend === false) {
+        blocked++;
+      } else {
+        ready++;
+      }
+      if (r && Number(r.reminderCount) > 0) sent++;
+      else unsent++;
+    }
+    return {
+      ready,
+      blocked,
+      unknown,
+      sent,
+      unsent,
+      payable: payableDbBills.length,
+      loading: dbBillsLoading || (payableDbBills.length > 0 && !batchReadiness),
+    };
+  }, [batchReadiness, dbBillsLoading, payableDbBills]);
+
+  const selectedRows = useMemo(
+    () => bills.filter((b) => selected.has(b.id)),
+    [bills, selected]
+  );
+  const selectedPayableRows = useMemo(
+    () => selectedRows.filter((b) => b._source === 'db' && b.dbBillId && isBillPayableUi(b)),
+    [selectedRows]
+  );
 
   const toggleSelect = (id) => {
     setSelected(prev => {
@@ -835,7 +974,12 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
   // /:id/send; client-estimate "bills" that aren't persisted yet use the
   // legacy /api/notify/bill (no readiness path because there's no row).
   const doSendReminder = async (id) => {
-    const b = bills.find((x) => x.id === id);
+    const b = (sendConfirm
+      && (sendConfirm.billId === id
+        || sendConfirm.bill?.id === id
+        || String(sendConfirm.bill?.dbBillId || '') === String(id || '')))
+      ? sendConfirm.bill
+      : bills.find((x) => x.id === id);
     if (!b) return;
     setSendingNow(true);
     const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
@@ -863,23 +1007,49 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
     } finally { setSendingNow(false); }
   };
 
+  const openSendReadiness = async (b, id) => {
+    try {
+      const r = await fetch(`/api/bills/${b.dbBillId}/send-readiness`, { credentials: 'same-origin' });
+      const d = await r.json();
+      if (!r.ok) {
+        setToast && setToast({ kind: 'error', message: d.error || 'ตรวจสอบความพร้อมไม่สำเร็จ' });
+        return;
+      }
+      setJustSentAck(false);
+      setSendConfirm({ bill: b, billId: id || b.id, readiness: d });
+    } catch (err) {
+      window.toastError ? window.toastError(setToast, err, { action: 'ตรวจสอบความพร้อมส่ง' })
+        : setToast && setToast({ kind: 'error', message: err.message || 'network error' });
+    }
+  };
+
   const handleSendReminder = async (id) => {
-    const b = bills.find((x) => x.id === id);
+    let b = bills.find((x) => x.id === id);
     if (!b) return;
     // For client-estimate bills (no DB row yet), there's no readiness
     // endpoint to consult — show a minimal confirm modal explaining
-    // this and let admin proceed at their own risk.
+    // this. If the admin just generated bills, first force a DB refresh;
+    // otherwise a stale preview object can incorrectly say "not saved"
+    // while the persisted bill already exists.
     if (b._source !== 'db' || !b.dbBillId) {
+      const freshRows = await fetchDbBills({ clear: false });
+      const rows = Array.isArray(freshRows) ? freshRows : (Array.isArray(dbBills) ? dbBills : []);
+      const real = rows.find((row) => dbBillMatchesUiBill(row, b));
+      if (real) {
+        b = billRowFromDbFallback(real, b);
+        await openSendReadiness(b, b.id);
+        return;
+      }
       setJustSentAck(false);
       setSendConfirm({
         bill: b, billId: id,
         readiness: {
-          summary: { canSend: true, blocked: false, issueCount: 1 },
+          summary: { canSend: false, blocked: true, highCount: 1, issueCount: 1 },
           tenant: null,
           issues: [{
-            sev: 'low', code: 'ESTIMATE_NOT_PERSISTED',
-            msg: 'บิลนี้ยังไม่ได้บันทึกลง DB — เป็น estimate จาก rooms blob',
-            fix: 'ออกบิลจริงก่อนเพื่อให้ระบบเก็บ tenant_id และ track สถานะส่งได้',
+            sev: 'high', code: 'ESTIMATE_NOT_PERSISTED',
+            msg: 'แถวนี้ยังเป็นประมาณการบนหน้าจอ ไม่พบแถวบิลจริงใน DB สำหรับห้อง/ผู้เช่ารอบนี้',
+            fix: 'ถ้าเพิ่งกดออกบิล ให้รอป้ายเปลี่ยนเป็น "ออกแล้ว" หรือกดออกบิล/รีเฟรชอีกครั้ง; ถ้ายังไม่เปลี่ยน แปลว่ารายการนี้ถูกข้ามและยังส่งไม่ได้',
           }],
         },
       });
@@ -889,19 +1059,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
     // can render them as cards instead of cramming everything into a single
     // window.confirm() string. Opens the modal even on ok:true so admin
     // sees what's about to happen + which channels will fire.
-    try {
-      const r = await fetch(`/api/bills/${b.dbBillId}/send-readiness`, { credentials: 'same-origin' });
-      const d = await r.json();
-      if (!r.ok) {
-        setToast && setToast({ kind: 'error', message: d.error || 'ตรวจสอบความพร้อมไม่สำเร็จ' });
-        return;
-      }
-      setJustSentAck(false);
-      setSendConfirm({ bill: b, billId: id, readiness: d });
-    } catch (err) {
-      window.toastError ? window.toastError(setToast, err, { action: 'ตรวจสอบความพร้อมส่ง' })
-        : setToast && setToast({ kind: 'error', message: err.message || 'network error' });
-    }
+    await openSendReadiness(b, id);
   };
 
   const handleGenerate = async () => {
@@ -1045,14 +1203,19 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         const detail = formatIssueDetail(i);
         return `${idx + 1}. [${severity}]${code} ${i.msg}${detail}${fix}`;
       }).join('\n\n');
-      const ok = window.confirm(
+      const warningText =
         `พบ ${issues.length} ปัญหา${high > 0 ? ` (${high} ข้อสำคัญ)` : ''} ก่อนออกบิล:\n\n` +
         lines +
         `\n\nออกบิลเดี๋ยวนี้ทั้งที่ปัญหาข้างบนยังไม่แก้?\n` +
         (high > 0 ? `   บิลที่ออกอาจมี QR หาย / ยอดน้ำ-ไฟผิด ผู้เช่าอาจจ่ายไม่ได้หรือทักท้วงสูง\n` : '') +
-        `\n   • กดยกเลิก → แก้ปัญหาก่อนแล้วค่อยมาออกบิล (แนะนำ)\n` +
-        `   • กดตกลง → ออกบิลตามค่าปัจจุบัน (รับผิดชอบเอง)`
-      );
+        `\n   • ยกเลิก → แก้ปัญหาก่อนแล้วค่อยมาออกบิล (แนะนำ)\n` +
+        `   • ยืนยัน → ออกบิลตามค่าปัจจุบัน (รับผิดชอบเอง)`;
+      const ok = high > 0
+        ? String(window.prompt(
+            warningText +
+            `\n\nถ้าต้องการออกบิลทั้งที่มีปัญหาสำคัญ ให้พิมพ์: ยืนยันออกบิล`
+          ) || '').trim() === 'ยืนยันออกบิล'
+        : window.confirm(warningText);
       if (!ok) return;
     }
 
@@ -1086,17 +1249,21 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
       const warningMsg = warnings.length
         ? ` · warning ${warnings.length} รายการ (${warnings.slice(0, 3).map((w) => w.code || w.msg || 'WARN').join(', ')}${warnings.length > 3 ? '…' : ''})`
         : '';
+      const sendHint = changedCount > 0
+        ? ' — ขั้นตอนนี้ยังไม่ได้ส่งให้ผู้เช่า ต้องกด "ส่งบิลค้างชำระ" หรือส่งรายบิลต่อ'
+        : '';
       setToast && setToast({
         kind: (fellBack.length || warnings.length) ? 'warning' : (changedCount > 0 ? 'success' : 'info'),
         message: (changedCount > 0
-          ? `ออก/อัปเดตบิล ${changedCount} ใบสำเร็จ${d.skipped ? ` (ข้าม ${d.skipped} ใบที่มีอยู่แล้วหรือล็อกอยู่)` : ''}`
-          : `ทุกห้องมีบิลรอบ ${period} อยู่แล้ว — ไม่ได้สร้างเพิ่ม`)
+          ? `ออก/อัปเดตบิล ${changedCount} ใบสำเร็จ${d.skipped ? ` (ข้าม ${d.skipped} ใบที่มีอยู่แล้วหรือล็อกอยู่)` : ''}${sendHint}`
+          : `ไม่มีบิลใหม่สำหรับรอบ ${period} — บิลจริงมีอยู่แล้วหรือรายการถูกข้าม`)
           + fellBackMsg
           + warningMsg,
       });
       // Refresh the DB-bills overlay so the banner + per-row badge flip
       // from "ประมาณการ" to "ออกแล้ว" without needing a manual reload.
-      fetchDbBills();
+      await fetchDbBills({ clear: false });
+      fetchBatchReadiness();
     } catch (e) {
       window.toastError(setToast, e, { action: 'ออกบิล' });
     }
@@ -1107,6 +1274,13 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
   // firing. Replaces the old window.confirm() blob with a richer preview
   // the admin can actually read.
   const handleBulkSend = async () => {
+    if (dbBills === null || dbBillsLoading) {
+      setToast && setToast({
+        kind: 'info',
+        message: 'กำลังโหลดบิลจริงจาก DB — รอให้โหลดเสร็จก่อนส่งให้ผู้เช่า',
+      });
+      return;
+    }
     const pending = (dbBills || []).filter((b) => b.status === 'pending' || b.status === 'overdue');
     if (pending.length === 0) {
       setToast && setToast({
@@ -1138,6 +1312,11 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
   };
 
   const doBulkSendNow = async () => {
+    const ready = bulkSendPreview?.readiness?.summary?.canSend ?? bulkSendPreview?.pending?.length ?? 0;
+    if (!bulkSendPreview || ready <= 0) {
+      setToast && setToast({ kind: 'warning', message: 'ไม่มีบิลที่พร้อมส่ง — แก้ปัญหาในคอลัมน์ "พร้อมส่ง" ก่อน' });
+      return;
+    }
     setBulkSendingNow(true);
     const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
     const apiFetch = window.requireApiFetch ? window.requireApiFetch() : window.apiFetch;
@@ -1276,6 +1455,9 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
           checked={selected.has(b.id)}
           onChange={(e) => { e.stopPropagation(); toggleSelect(b.id); }}
           onClick={(e) => e.stopPropagation()}
+          title={b._source === 'db'
+            ? 'เลือกบิลจริงเพื่อส่ง/ส่งออก'
+            : 'แถวประมาณการเลือกได้เฉพาะส่งออก CSV ยังส่งหรือบันทึกชำระไม่ได้'}
           style={{ cursor: 'pointer', accentColor: C.accent }}
         />
       ),
@@ -1469,6 +1651,11 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
             <span title="ไม่ผูก LINE — จะส่งทางอีเมล (อาจไปกล่อง spam)"
                   style={{ fontSize: 13, color: C.warning, whiteSpace: 'nowrap' }}>ส่งทางอีเมล</span>
           );
+        } else if (r.canSend && r.warnCode === 'EMAIL_DISABLED') {
+          mainEl = (
+            <span title="มีอีเมล แต่ SMTP ยังไม่พร้อม — รอบนี้จะส่งทาง LINE เท่านั้น"
+                  style={{ fontSize: 13, color: C.warning, whiteSpace: 'nowrap' }}>ส่งทาง LINE</span>
+          );
         } else if (r.canSend) {
           mainEl = (
             <span title="LINE + (อีเมลถ้ามี) พร้อม — กดส่งได้เลย"
@@ -1479,6 +1666,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
             <span title={r.blockMsg || r.blockCode || 'block'}
                   style={{ fontSize: 12, color: C.danger, fontWeight: 600, whiteSpace: 'nowrap' }}>
               ส่งไม่ได้: {r.blockCode === 'NO_TENANT_CHANNEL' ? 'ไม่มีช่องทาง'
+                : r.blockCode === 'EMAIL_NOT_CONFIGURED' ? 'อีเมลไม่พร้อม'
                 : r.blockCode === 'TENANT_MOVED_ROOM' ? 'ย้ายห้อง'
                 : r.blockCode === 'TENANT_NOT_ACTIVE' ? 'ออกแล้ว'
                 : r.blockCode === 'TENANT_DELETED' ? 'ลบแล้ว'
@@ -1532,7 +1720,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
             <Btn size="sm" variant="ghost" style={compactBtn} onClick={() => setPreviewBill(b)}>ดู</Btn>
             {isBillPayableUi(b) && b._source === 'db' && (
               <>
-                <Btn size="sm" variant="ghost" style={compactBtn} onClick={() => handleSendReminder(b.id)}>เตือน</Btn>
+                <Btn size="sm" variant="ghost" style={compactBtn} onClick={() => handleSendReminder(b.id)}>ส่ง</Btn>
                 <Btn size="sm" variant="ghost" style={compactBtn} onClick={() => handleMarkPaid(b.id)}>ชำระ</Btn>
               </>
             )}
@@ -1612,13 +1800,30 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
               }
             }}>ส่งออก CSV</Btn>
             <Btn variant="primary" tone="finance" onClick={() => setConfirmGenerate(true)}>
-              ออกบิลรายเดือน
+              {stats.estimateCount > 0 ? 'ออกบิลส่วนที่เหลือ' : 'ตรวจ/อัปเดตบิล'}
             </Btn>
-            <Btn variant="soft" tone="finance" onClick={handleBulkSend}>
-              ส่งเตือนทั้งหมด
+            <Btn
+              variant="soft"
+              tone="finance"
+              onClick={handleBulkSend}
+              disabled={dbBills === null || dbBillsLoading || readinessStats.payable === 0}
+              title={dbBills === null || dbBillsLoading
+                ? 'รอโหลดบิลจริงจาก DB ก่อน'
+                : readinessStats.payable === 0
+                  ? 'ไม่มีบิลจริงที่ยังค้างชำระ'
+                  : 'ส่งเฉพาะบิลจริงใน DB ที่ยังค้างชำระ'}>
+              ส่งบิลค้างชำระ
             </Btn>
           </>
         }
+      />
+
+      <BillingWorkflowStrip
+        C={C}
+        fmt={fmt}
+        stats={stats}
+        readinessStats={readinessStats}
+        dbBillsLoading={dbBillsLoading}
       />
 
       {/* Real-vs-estimate banner. Tells admin at a glance whether what
@@ -1629,7 +1834,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
       {dbBills != null && (() => {
         const Alert = window.Alert;
         const dbCount = dbBills.length;
-        const estCount = bills.filter((b) => b._source === 'estimate').length;
+        const estCount = bills.filter((b) => b._source !== 'db').length;
         if (!Alert) return null;
         if (dbCount === 0 && estCount > 0) {
           return (
@@ -1663,6 +1868,13 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         }
         return null;
       })()}
+      {dbBillsLoading && dbBills != null && window.Alert && (
+        <div style={{ marginBottom: 14 }}>
+          <window.Alert kind="info" title="กำลังซิงก์บิลจริงจาก DB">
+            ถ้าเพิ่งกดออกบิล ให้รอให้ป้ายในตารางเปลี่ยนเป็น "ออกแล้ว" ก่อนส่งให้ผู้เช่า
+          </window.Alert>
+        </div>
+      )}
       {dbBillsErr && window.Alert && (
         <div style={{ marginBottom: 14 }}>
           <window.Alert kind="danger"
@@ -1674,7 +1886,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
       )}
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 14, marginBottom: 20 }}>
-        <KpiCard label="บิลที่ออก"     value={fmt(stats.issued)}     sub="ใบประจำเดือน" />
+        <KpiCard label="บิลที่ออก"     value={fmt(stats.issued)}     sub={stats.estimateCount ? `มีประมาณการ ${fmt(stats.estimateCount)} แถว` : 'ใบจริงใน DB'} />
         <KpiCard label="ชำระแล้ว"       value={fmt(stats.paidCount)} sub={fmtCurrency(stats.totalRevenue)} color="success" />
         <KpiCard label="ค้างชำระ"        value={fmt(stats.unpaidCount)} sub={fmtCurrency(stats.overdueAmt)} color="danger" />
         <KpiCard label="อัตราการชำระ" value={stats.issued ? Math.round(stats.paidCount/stats.issued*100) + '%' : '-'} color="info" />
@@ -1700,27 +1912,30 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
           display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
         }}>
           <span style={{ color: '#fff', fontSize: 13, fontWeight: 500 }}>
-            เลือกแล้ว {selected.size} รายการ
+            เลือกแล้ว {selected.size} รายการ · ส่ง/ชำระได้ {selectedPayableRows.length} บิลจริง
           </span>
           <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
-            <Btn variant="soft" size="sm" onClick={handleBulkSendSelected}>ส่งเตือนทั้งหมด</Btn>
+            <Btn
+              variant="soft"
+              size="sm"
+              onClick={handleBulkSendSelected}
+              disabled={selectedPayableRows.length === 0}
+              title={selectedPayableRows.length === 0 ? 'รายการที่เลือกยังไม่มีบิลจริงค้างชำระ' : ''}>
+              ส่งบิลที่เลือก
+            </Btn>
             <Btn variant="soft" size="sm" onClick={() => {
-              const selectedBills = bills.filter(b => selected.has(b.id));
+              const selectedBills = selectedRows;
               if (window.exportBillsCSV(selectedBills)) {
                 setToast && setToast({ kind: 'success', message: `ดาวน์โหลด ${selectedBills.length} บิลเรียบร้อย` });
               }
             }}>ดาวน์โหลด CSV</Btn>
-            <Btn variant="soft" size="sm" onClick={async () => {
-              const ids = [...selected];
-              for (const id of ids) {
-                const bill = bills.find(b => b.id === id);
-                if (bill && isBillPayableUi(bill) && bill._source === 'db') {
-                  await handleMarkPaid(id, { confirm: false, refresh: false });
-                }
-              }
-              fetchDbBills();
-              setSelected(new Set());
-            }}>บันทึกชำระทั้งหมด</Btn>
+            <Btn
+              variant="soft"
+              size="sm"
+              disabled
+              title="ป้องกันการกดชำระผิด: บันทึกชำระต้องทำทีละบิลเพื่อเลือกวิธีและแนบหลักฐาน">
+              ชำระทีละบิล
+            </Btn>
             <Btn variant="ghost" size="sm" onClick={() => setSelected(new Set())} style={{ color: '#fff' }}>ยกเลิกเลือก</Btn>
           </div>
         </Card>
@@ -1811,20 +2026,28 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         footer={
           <>
             <Btn variant="ghost" onClick={() => setConfirmGenerate(false)}>ยกเลิก</Btn>
-            <Btn variant="primary" onClick={handleGenerate}>ออกบิล {bills.length} ใบ</Btn>
+            <Btn variant="primary" onClick={handleGenerate} disabled={dbBillsLoading}>
+              {dbBillsLoading
+                ? 'กำลังซิงก์ DB…'
+                : stats.estimateCount > 0
+                  ? `ออกบิลส่วนที่เหลือ ${stats.estimateCount} แถว`
+                  : 'ตรวจ/อัปเดตบิลจริง'}
+            </Btn>
           </>
         }
       >
         <div style={{ fontSize: 14, color: C.ink2, lineHeight: 1.6, marginBottom: 12 }}>
-          ระบบจะออกบิลสำหรับห้องที่มีผู้เช่าทั้งหมด <b style={{ color: C.ink }}>{bills.length} ห้อง</b>
+          ระบบจะตรวจรอบ <b style={{ color: C.ink }}>{currentPeriod}</b> และบันทึกเฉพาะบิลจริงลง DB
         </div>
         <div style={{
           padding: 12, background: C.surfaceAlt, borderRadius: 8,
           fontSize: 12.5, color: C.ink2,
         }}>
+          <div>บิลจริงใน DB ตอนนี้: <b>{fmt(stats.issued)} ใบ</b></div>
+          <div>แถวที่ยังเป็นประมาณการ: <b>{fmt(stats.estimateCount)} แถว</b></div>
           <div>ครบกำหนดชำระ: <b>วันที่ {config.notify?.dueOnDay ?? 7} ของเดือน</b></div>
           <div>ยอดรวมโดยประมาณ: <b>{fmtCurrency(bills.reduce((s,b) => s+b.total, 0))}</b></div>
-          <div>ช่องทางส่ง: LINE, Email</div>
+          <div>หลังออกบิล: <b>ยังไม่ส่งผู้เช่าอัตโนมัติ</b> — ต้องกดส่งบิลค้างชำระหรือส่งรายบิล</div>
         </div>
       </Modal>
 
@@ -1933,7 +2156,9 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
                 setToast && setToast({ kind: 'error', message: 'ดาวน์โหลดบิลไม่สำเร็จ' });
               }
             }}>ดาวน์โหลด PDF</Btn>
-            <Btn variant="primary" onClick={() => {
+            <Btn variant="primary"
+              disabled={dbBillsLoading && previewBill._source !== 'db'}
+              onClick={() => {
               // Route through the same readiness modal as the row "ส่งเตือน"
               // button so admin sees send history + monthCount + friction
               // before firing. Previously this button bypassed the popup
@@ -1941,7 +2166,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
               const b = previewBill;
               setPreviewBill(null);
               handleSendReminder(b.id);
-            }}>ส่งให้ผู้เช่า</Btn>
+            }}>{dbBillsLoading && previewBill._source !== 'db' ? 'กำลังโหลดบิลจริง…' : 'ส่งให้ผู้เช่า'}</Btn>
           </>
         )}
       >
@@ -1956,7 +2181,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
       <Modal
         open={!!sendConfirm}
         onClose={() => !sendingNow && setSendConfirm(null)}
-        title={sendConfirm ? `ส่งเตือนบิล ${sendConfirm.bill.dbBillNo || sendConfirm.billId}` : ''}
+        title={sendConfirm ? `ส่งบิล ${sendConfirm.bill.dbBillNo || sendConfirm.billId}` : ''}
         width={520}
         footer={sendConfirm && (() => {
           const sh = sendConfirm.readiness?.summary?.sendHistory;
@@ -2007,8 +2232,8 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         open={!!bulkSendPreview}
         onClose={() => !bulkSendingNow && setBulkSendPreview(null)}
         title={bulkSendPreview?.selectedIds
-          ? `ส่งเตือนบิลที่เลือก (${bulkSendPreview.selectedIds.length} ใบ)`
-          : 'ส่งเตือนทุกบิลที่ค้าง'}
+          ? `ส่งบิลที่เลือก (${bulkSendPreview.selectedIds.length} ใบ)`
+          : 'ส่งบิลค้างชำระ'}
         width={560}
         footer={bulkSendPreview && (() => {
           // When scoped to a selection, count only the selected bills
@@ -2230,6 +2455,86 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
   );
 }
 
+function BillingWorkflowStrip({ C, fmt, stats, readinessStats, dbBillsLoading }) {
+  const stepBase = {
+    minWidth: 0,
+    padding: '10px 12px',
+    borderRadius: 8,
+    border: `1px solid ${C.borderSoft || C.border}`,
+    background: C.surface,
+    display: 'flex',
+    alignItems: 'flex-start',
+    gap: 10,
+  };
+  const numStyle = (bg, color) => ({
+    width: 24,
+    height: 24,
+    borderRadius: 999,
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flex: '0 0 24px',
+    background: bg,
+    color,
+    fontSize: 12,
+    fontWeight: 700,
+    fontFamily: 'JetBrains Mono, monospace',
+  });
+  const titleStyle = { fontSize: 12.5, color: C.ink, fontWeight: 700, marginBottom: 2 };
+  const descStyle = { fontSize: 11.5, color: C.muted, lineHeight: 1.45 };
+  const readyText = readinessStats.loading
+    ? 'กำลังตรวจช่องทางส่ง'
+    : readinessStats.payable === 0
+      ? 'ไม่มีบิลค้างส่ง'
+      : `พร้อม ${fmt(readinessStats.ready)} · ติดปัญหา ${fmt(readinessStats.blocked)}`
+        + (readinessStats.unknown ? ` · รอตรวจ ${fmt(readinessStats.unknown)}` : '');
+  return (
+    <div style={{
+      display: 'grid',
+      gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))',
+      gap: 10,
+      marginBottom: 14,
+    }}>
+      <div style={stepBase}>
+        <span style={numStyle(stats.estimateCount ? C.warningSoft : C.successSoft, stats.estimateCount ? C.warningInk : C.success)}>
+          1
+        </span>
+        <div style={{ minWidth: 0 }}>
+          <div style={titleStyle}>ออกบิลจริง</div>
+          <div style={descStyle}>
+            {fmt(stats.issued)} ใบใน DB
+            {stats.estimateCount ? ` · ยังเป็นประมาณการ ${fmt(stats.estimateCount)} แถว` : ' · ครบตามรายการที่แสดง'}
+          </div>
+        </div>
+      </div>
+      <div style={stepBase}>
+        <span style={numStyle(
+          readinessStats.blocked ? C.dangerSoft : (readinessStats.ready ? C.successSoft : C.surfaceAlt),
+          readinessStats.blocked ? C.dangerInk : (readinessStats.ready ? C.success : C.muted)
+        )}>
+          2
+        </span>
+        <div style={{ minWidth: 0 }}>
+          <div style={titleStyle}>ตรวจพร้อมส่ง</div>
+          <div style={descStyle}>{readyText}</div>
+        </div>
+      </div>
+      <div style={stepBase}>
+        <span style={numStyle(readinessStats.unsent ? C.warningSoft : C.successSoft, readinessStats.unsent ? C.warningInk : C.success)}>
+          3
+        </span>
+        <div style={{ minWidth: 0 }}>
+          <div style={titleStyle}>ส่งผู้เช่า</div>
+          <div style={descStyle}>
+            ส่งแล้ว {fmt(readinessStats.sent)} · ยังไม่ส่ง {fmt(readinessStats.unsent)}
+            {dbBillsLoading ? ' · กำลังซิงก์' : ''}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // BulkSendPreviewBody — renders the breakdown of which bills will/won't
 // send, grouped by block code, so the admin sees the picture before
 // firing the pipeline.
@@ -2244,6 +2549,7 @@ function BulkSendPreviewBody({ preview, C, fmtCurrency }) {
     TENANT_NOT_ACTIVE: 'ผู้เช่าออกแล้ว (moved_out)',
     TENANT_MOVED_ROOM: 'ผู้เช่าย้ายห้อง',
     NO_TENANT_CHANNEL: 'ไม่ผูก LINE + ไม่มีอีเมล',
+    EMAIL_NOT_CONFIGURED: 'มีอีเมล แต่ระบบ SMTP ยังไม่พร้อม',
   };
   const codes = Object.entries(summary.issueCounts || {}).sort((a, b) => b[1] - a[1]);
   const fmt = (n) => Number(n).toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -2381,6 +2687,16 @@ function SendReminderConfirmBody({ confirm, C, fmtCurrency, justSentAck, setJust
   const channels = summary.channels || {};
   const blocked = summary.blocked === true;
   const issues = Array.isArray(r.issues) ? r.issues : [];
+  const emailHasAddress = !!channels.emailAddress;
+  const emailConfigured = channels.emailConfigured !== false;
+  const emailReady = !!channels.email;
+  const emailLabel = emailReady
+    ? 'Email พร้อม'
+    : emailHasAddress && !emailConfigured
+      ? 'มี Email แต่ SMTP ไม่พร้อม'
+      : emailHasAddress
+        ? 'Email ไม่พร้อม'
+        : 'ไม่มี Email';
 
   const sevPalette = {
     high: { bg: C.dangerSoft, border: C.danger, accent: C.danger, label: 'ปัญหาสำคัญ' },
@@ -2557,10 +2873,10 @@ function SendReminderConfirmBody({ confirm, C, fmtCurrency, justSentAck, setJust
             </span>
             <span style={{
               fontSize: 11.5, padding: '3px 9px', borderRadius: 999,
-              background: channels.email ? C.successSoft : '#fbeae7',
-              color: channels.email ? C.success : C.dangerInk,
+              background: emailReady ? C.successSoft : (emailHasAddress ? C.warningSoft : '#fbeae7'),
+              color: emailReady ? C.success : (emailHasAddress ? C.warningInk : C.dangerInk),
             }}>
-              {channels.email ? 'มี Email' : 'ไม่มี Email'}
+              {emailLabel}
             </span>
           </div>
         </div>

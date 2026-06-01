@@ -32,6 +32,7 @@ const billing = require('../services/billing');
 const features = require('../services/features');
 const meter = require('../services/meter');
 const notifier = require('../services/notifier');
+const email = require('../services/email');
 const notifQueue = require('../services/notificationQueue');
 const promptpay = require('../services/promptpay');
 const { MAX_AMOUNT } = promptpay;
@@ -44,6 +45,19 @@ const { renderBillPdf } = require('../services/pdf');
 const { schemas } = require('../schemas');
 const { validateBody } = require('../middleware/validate');
 const billPayments = require('../services/billPayments');
+
+function billEmailReady(flags) {
+  return email.isConfigured(flags || {});
+}
+
+function billEmailConfigIssue(tenantName) {
+  return {
+    sev: 'high',
+    code: 'EMAIL_NOT_CONFIGURED',
+    msg: `ผู้เช่า "${tenantName || '-'}" มีอีเมล แต่ระบบอีเมลยังไม่พร้อมใช้งาน`,
+    fix: 'เปิด email.enabled และตั้งค่า SMTP_HOST / SMTP_USER / SMTP_PASS / SMTP_FROM ให้ครบก่อนส่งทางอีเมล หรือผูก LINE ให้ผู้เช่า',
+  };
+}
 
 // ---- Small helpers that only POST /render + GET /:id (PDF rebuild) use --
 function numOrNull(value) {
@@ -2109,6 +2123,8 @@ module.exports = function buildBillsExtrasRouter(ctx) {
     // (tenant called saying they didn't see the first message) works
     // without forcing admin to wait 60 min.
     const b = billQ.rows[0];
+    const flags = await features.load(pool).catch(() => ({}));
+    const emailReady = billEmailReady(flags);
     const configRow = await pool.query(
       `SELECT value FROM app_data WHERE key='baankarn_config_v1' LIMIT 1`
     );
@@ -2239,22 +2255,29 @@ module.exports = function buildBillsExtrasRouter(ctx) {
     ].join('\n');
     const enqueued = [];
     const hasLine = lineRecipients.length > 0;
-    if (!hasLine && !b.email) {
-      const flags = await features.load(pool);
+    const canEmailTenant = !!b.email && emailReady;
+    if (!hasLine && !canEmailTenant) {
       const owner = await notifier.notifyOwner({ pool, features: flags }, {
-        subject: 'Bill send skipped: no tenant channel',
+        subject: b.email
+          ? 'Bill send skipped: email not configured'
+          : 'Bill send skipped: no tenant channel',
         text: [
-          `Bill was not sent because the tenant has no LINE or email.`,
+          b.email
+            ? `Bill was not sent because SMTP/email is not configured.`
+            : `Bill was not sent because the tenant has no LINE or email.`,
           `Bill: ${b.bill_no || b.id}`,
           `Room: ${b.room_id}`,
           b.tenant_name ? `Tenant: ${b.tenant_name}` : null,
+          b.email ? `Email: ${b.email}` : null,
           `Amount: THB ${Number(b.total).toLocaleString('th-TH', { minimumFractionDigits: 2 })}`,
         ].filter(Boolean).join('\n'),
       });
       return {
         ok: false,
-        error: 'tenant has no reachable channel',
-        code: 'NO_TENANT_CHANNEL',
+        error: b.email
+          ? 'tenant has email but SMTP/email is not configured'
+          : 'tenant has no reachable channel',
+        code: b.email ? 'EMAIL_NOT_CONFIGURED' : 'NO_TENANT_CHANNEL',
         enqueued,
         lineCount: lineBindingCount,
         ownerNotified: !!(owner.ok || owner.queued),
@@ -2293,7 +2316,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         });
         enqueued.push({ channel: 'line', id: qid, recipient: recipient.line_user_id });
       }
-    } else if (!b.email) {
+    } else if (!canEmailTenant) {
       const lineOwner = require('../services/secrets').get('LINE_OWNER_USER_ID');
       if (lineNotify.isLikelyUserId(lineOwner)) {
         // Owner channel — falls back to default OA via getDefault().
@@ -2304,7 +2327,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         enqueued.push({ channel: 'line', id: qid });
       }
     }
-    if (b.email) {
+    if (canEmailTenant) {
       const qid = await notifQueue.enqueue(pool, {
         channel: 'email', recipient: b.email, subject, body,
         payload: { billId },
@@ -2420,6 +2443,8 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         const billsMap = {};
         const issueCounts = {};      // code → count for summary
         let canSendCount = 0, blockedCount = 0;
+        const flags = await features.load(pool).catch(() => ({}));
+        const emailReady = billEmailReady(flags);
         for (const b of rows) {
           // Compute one "block" code per bill so the UI shows the most
           // urgent reason. Order mirrors enqueueBillNotifications' early-
@@ -2449,13 +2474,18 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             if (!hasLine && !b.email) {
               blockCode = 'NO_TENANT_CHANNEL';
               blockMsg = 'ไม่ผูก LINE + ไม่มีอีเมล';
+            } else if (!hasLine && b.email && !emailReady) {
+              blockCode = 'EMAIL_NOT_CONFIGURED';
+              blockMsg = 'มีอีเมล แต่ระบบ SMTP ยังไม่พร้อม';
             }
           }
           const lineRecipients = Array.isArray(b._lineRecipients) ? b._lineRecipients : [];
           const channels = {
             line: lineRecipients.length > 0,
             lineCount: lineRecipients.length,
-            email: !!b.email,
+            email: !!b.email && emailReady,
+            emailAddress: b.email || null,
+            emailConfigured: emailReady,
           };
           const reminderCount = Number(b.reminder_count) || 0;
           const minutesAgo = b.last_reminded_at
@@ -2470,7 +2500,8 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             tenantName: b.tenant_name || null,
             warnCode: !blockCode && b.tenant_status === 'moved_out'
               ? 'EX_TENANT_BILL'
-              : (!blockCode && !channels.line && channels.email ? 'EMAIL_ONLY' : null),
+              : (!blockCode && !channels.line && channels.email ? 'EMAIL_ONLY'
+                  : (!blockCode && channels.line && channels.emailAddress && !channels.email ? 'EMAIL_DISABLED' : null)),
             reminderCount,
             lastRemindedAt: b.last_reminded_at,
             minutesAgo,
@@ -2524,8 +2555,17 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         );
         if (!billQ.rows.length) return res.status(404).json({ error: 'bill not found' });
         const b = billQ.rows[0];
+        const flags = await features.load(pool).catch(() => ({}));
+        const emailReady = billEmailReady(flags);
         const issues = [];
-        const channels = { line: false, lineCount: 0, email: false, lineOa: null };
+        const channels = {
+          line: false,
+          lineCount: 0,
+          email: false,
+          emailAddress: b.email || null,
+          emailConfigured: emailReady,
+          lineOa: null,
+        };
 
         // Bill state
         if (b.status === 'void') {
@@ -2572,16 +2612,22 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           const hasLine = lineRecipients.length > 0;
           channels.line = !!hasLine;
           channels.lineCount = lineRecipients.length;
-          channels.email = !!b.email;
+          channels.email = !!b.email && emailReady;
           channels.lineOa = lineRecipients[0]?.line_oa_id || b.line_oa_id || null;
           if (!hasLine && !b.email) {
             issues.push({ sev: 'high', code: 'NO_TENANT_CHANNEL',
               msg: `ผู้เช่า "${b.tenant_name}" ยังไม่ผูก LINE และไม่ใส่อีเมล`,
               fix: '/admin#tenants → tab "Portal Access" ผูก LINE หรือใส่อีเมล' });
+          } else if (!hasLine && b.email && !emailReady) {
+            issues.push(billEmailConfigIssue(b.tenant_name));
           } else if (!hasLine && b.email) {
             issues.push({ sev: 'med', code: 'EMAIL_ONLY',
               msg: 'ผู้เช่าไม่ผูก LINE — จะส่งทางอีเมลอย่างเดียว (อาจไปกล่อง spam)',
               fix: 'แนะนำผูก LINE ที่ /admin#tenants → Portal Access' });
+          } else if (hasLine && b.email && !emailReady) {
+            issues.push({ sev: 'med', code: 'EMAIL_DISABLED',
+              msg: 'ผู้เช่ามีอีเมล แต่ระบบอีเมลยังไม่พร้อม — รอบนี้จะส่งทาง LINE เท่านั้น',
+              fix: 'ตั้งค่า SMTP หากต้องการส่งอีเมลสำรองด้วย' });
           }
         }
 
@@ -2743,6 +2789,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           // Map cooldown to 429 (rate-limit-like) so the admin UI can show
           // a "ส่งซ้ำตอนนี้?" prompt instead of a generic error.
           const status = out.code === 'REMINDER_COOLDOWN' ? 429
+            : out.code === 'EMAIL_NOT_CONFIGURED' ? 409
             : out.code === 'NO_TENANT_CHANNEL' ? 409
             : 404;
           return res.status(status).json({

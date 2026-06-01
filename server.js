@@ -3177,6 +3177,7 @@ function buildLateFeeCalculation(b, policy = {}) {
     minLateFeeBaht,
     maxPctOfPrincipal,
     maxLateFeeBaht,
+    maxBaht: maxLateFeeBaht,
   });
   const daysOver = Number(calc.daysOver) || 0;
   const monthsOver = Number(calc.monthsOver) || 0;

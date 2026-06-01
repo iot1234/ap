@@ -20,6 +20,7 @@ const billing = require('./billing');
 const promptpay = require('./promptpay');
 const notifier = require('./notifier');
 const meter = require('./meter');
+const email = require('./email');
 
 const TICK_MS = 60 * 60 * 1000;          // hourly
 const SCHEDULER_FAILURE_RE_ALERT_MIN = 60;
@@ -375,6 +376,7 @@ async function tickLateFee(pool, flags, now, state) {
           minLateFeeBaht,
           maxPctOfPrincipal,
           maxLateFeeBaht,
+          maxBaht: maxLateFeeBaht,
           now,
         });
         if (calc.lateFee > 0 && calc.lateFee !== Number(b.late_fee)) {
@@ -462,6 +464,7 @@ async function tickLateFee(pool, flags, now, state) {
             minLateFeeBaht,
             maxPctOfPrincipal,
             maxLateFeeBaht,
+            maxBaht: maxLateFeeBaht,
             now,
           });
           if (calc.lateFee > 0 && calc.lateFee !== Number(b.late_fee)) {
@@ -1004,6 +1007,7 @@ async function tickBillGen(pool, flags, now, state) {
       // automatically.
       try {
         const notifQueue = require('./notificationQueue');
+        const emailReady = email.isConfigured(flags);
         for (const b of billsCreated) {
           if (!b.tenantId) continue;  // orphan bills: nobody to notify
           const tQ = await pool.query(
@@ -1037,7 +1041,7 @@ async function tickBillGen(pool, flags, now, state) {
               payload: { oaId: recipient.line_oa_id || null, billId: b.id },
             }).catch(() => {});
           }
-          if (t.email) {
+          if (t.email && emailReady) {
             await notifQueue.enqueue(pool, {
               channel: 'email', recipient: t.email, subject, body,
               payload: { billId: b.id },
