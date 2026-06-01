@@ -429,8 +429,12 @@ test('bulk bill generation warns when flat utility mode falls back to metered', 
     'bulk-generate flat fallback warning must include affected rooms');
   assert.match(extras, /res\.json\(\{ ok: true, period, made, updated, skipped, flatFellBack,[\s\S]{0,160}warnings: issues\.filter/,
     'bulk-generate response must expose flat fallback details to the UI');
+  assert.match(extras, /skipSummary/,
+    'bulk-generate response must explain why bills were skipped');
   assert.match(billingPage, /Array\.isArray\(d\.flatFellBack\)/,
     'billing UI must read flat fallback details');
+  assert.match(billingPage, /skipLabels/,
+    'billing UI must translate skipped reasons into readable Thai labels');
   assert.match(billingPage, /formatIssueDetail\(i\)/,
     'billing UI must include structured issue details in confirmation text');
   assert.match(billingPage, /detail\.rooms\.map\(formatIssueRoom\)/,
@@ -933,8 +937,18 @@ test('/api/bills bulk-generate updates an existing unpaid same-slot bill instead
     'changed unpaid bills must get their canonical bill fields updated');
   assert.match(body, /updated\+\+/,
     'successful in-place refresh must increment updated count');
+  assert.match(body, /const skipReasons = \{/,
+    'bulk-generate must count skipped reasons instead of returning an ambiguous skipped total');
+  assert.match(body, /bumpSkip\('locked'\)/,
+    'locked or paid bill slots must be reported as locked skips');
+  assert.match(body, /bumpSkip\('unchanged'\)/,
+    'unchanged existing bills must be reported separately from locked skips');
+  assert.match(body, /bumpSkip\(e\.code === '23505' \? 'duplicate' : 'error'\)/,
+    'duplicate and error skips must be separated for operator diagnostics');
   assert.match(body, /audit\(req, 'bill\.bulk_generate'[\s\S]{0,220}made, updated, skipped/,
     'audit log must include updated count');
+  assert.match(body, /skipSummary/,
+    'audit and response must include skipped reason summary');
 });
 
 test('GET /api/bills can be scoped by tenantId so old room bills do not bleed into a new tenant', () => {
@@ -1794,6 +1808,10 @@ test('admin billing selected period drives estimates and bulk generation', () =>
   const generateBlock = src.slice(genIdx, src.indexOf('// Bulk-send all pending', genIdx));
   assert.match(generateBlock, /const period = currentPeriod;/,
     'bulk-generate payload must use the selected period');
+  assert.match(generateBlock, /forceReason/,
+    'forced bulk-generation must carry the operator reason to the server');
+  assert.match(generateBlock, /ต้องใส่เหตุผลหลังคำว่า "ยืนยันออกบิล"/,
+    'high-risk force generation must explain why a reason is required');
   assert.doesNotMatch(generateBlock, /const now = new Date\(\)[\s\S]{0,120}const period =/,
     'bulk generation must not silently switch back to wall-clock month');
 });
@@ -7664,6 +7682,7 @@ test('hooks.jsx: ERROR_CODE_MAP handles new R2/R3/R7 error codes', () => {
     'LATE_FEE_CARRY_FAILED',
     'REMINDER_COOLDOWN',        // R7-followup
     'PRECONDITION_FAILED',
+    'BILL_FORCE_REASON_REQUIRED',
     'BILL_NOT_PAYABLE',
     'BILL_ALREADY_PAID',
     'AMOUNT_REQUIRED',

@@ -1682,6 +1682,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       const dueDay = Number.isFinite(rawDueDay) && rawDueDay >= 1 && rawDueDay <= 28
         ? rawDueDay : 15;
       const force = req.body?.force === true;
+      const forceReason = String(req.body?.forceReason || req.body?.overrideReason || '').trim().slice(0, 500);
       try {
         const flags = await features.load(pool);
         const [roomsRow, configRow] = await Promise.all([
@@ -1802,11 +1803,24 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             hint: 'แก้ปัญหาด้านบนแล้วลองใหม่ — หรือส่ง { force: true } เพื่อออกบิลทั้งที่ค่ายังไม่ครบ (audit-logged)',
           });
         }
+        if (force && hardIssues.length > 0 && forceReason.length < 8) {
+          return res.status(400).json({
+            error: 'ต้องระบุเหตุผลก่อน force ออกบิลทั้งที่มีปัญหาสำคัญ',
+            code: 'BILL_FORCE_REASON_REQUIRED',
+            issues: hardIssues,
+            hint: 'ส่ง forceReason อย่างน้อย 8 ตัวอักษร เช่น "ออกบิลด้วยยอดปัจจุบันหลังตรวจเลขมิเตอร์แล้ว"',
+            impact: 'ระบบยังไม่ออกบิล เพื่อป้องกันบิลที่ QR/ยอดน้ำไฟ/เลขมิเตอร์ผิดถูกส่งให้ผู้เช่าโดยไม่มีเหตุผลใน audit log',
+            nextActions: {
+              hint: 'แนะนำแก้รายการ sev=high ก่อน ถ้าจำเป็นต้องออกบิลทันทีให้ใส่เหตุผลที่ตรวจย้อนหลังได้',
+            },
+          });
+        }
         if (force && hardIssues.length > 0) {
           // Audit the override so we can track operators who routinely
           // bypass — useful when a tenant disputes a malformed bill later.
           audit(req, 'bill.bulk_generate.forced', 'period', period, {
             issues: hardIssues.map((i) => i.code),
+            reason: forceReason,
             forcedBy: req.session.user.username,
           });
         }
@@ -1819,6 +1833,19 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         // at the top of this handler.
         const dueDate = billing.formatYMD(periodYear, periodMonth, dueDay);
         let made = 0, updated = 0, skipped = 0;
+        const skipReasons = {
+          noTenant: 0,
+          notBillableStatus: 0,
+          firstMonth: 0,
+          unchanged: 0,
+          locked: 0,
+          duplicate: 0,
+          error: 0,
+        };
+        const bumpSkip = (key) => {
+          skipped++;
+          skipReasons[key] = (skipReasons[key] || 0) + 1;
+        };
         // Track rooms that asked for flat (เหมา) mode but didn't have a
         // valid amount — services/billing.js#resolveFlatMode silently falls
         // back to metered in this case, which can issue a wrong bill if
@@ -1828,8 +1855,8 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         const flatFellBack = [];
         const firstMonthSkipped = [];
         for (const room of rooms) {
-          if (!room || !room.tenant) { skipped++; continue; }
-          if (room.status !== 'occupied' && room.status !== 'overdue') { skipped++; continue; }
+          if (!room || !room.tenant) { bumpSkip('noTenant'); continue; }
+          if (room.status !== 'occupied' && room.status !== 'overdue') { bumpSkip('notBillableStatus'); continue; }
           // R2 — previous overdue bill lookup is GONE. Late fees are owned by
           // scheduler.tickLateFee and live on the old bill (updated in-place
           // when it flips pending → overdue). New bills always start with
@@ -1878,7 +1905,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
               tenantId: tenantIdForRoom || null,
               contractId: activeContract.id || null,
             });
-            skipped++;
+            bumpSkip('firstMonth');
             continue;
           }
           // Single transaction per room: lock+read recurring_charges,
@@ -2006,9 +2033,14 @@ module.exports = function buildBillsExtrasRouter(ctx) {
                 moneyDiffers(existing.late_fee, bill.lateFee) ||
                 moneyDiffers(existing.total, bill.total) ||
                 ymd(existing.due_date) !== ymd(bill.dueDate);
-              if (!payableStatus || existing.has_verified_payment || !changed) {
+              if (!payableStatus || existing.has_verified_payment) {
                 await billClient.query('COMMIT');
-                skipped++;
+                bumpSkip('locked');
+                continue;
+              }
+              if (!changed) {
+                await billClient.query('COMMIT');
+                bumpSkip('unchanged');
                 continue;
               }
               await billClient.query(
@@ -2099,23 +2131,28 @@ module.exports = function buildBillsExtrasRouter(ctx) {
               // collided — the bill wasn't created this run, so we
               // mustn't mark one_offs inactive. COMMIT (no-op) and skip.
               await billClient.query('COMMIT');
-              skipped++;
+              bumpSkip('duplicate');
             }
           } catch (e) {
             await billClient.query('ROLLBACK').catch(() => {});
             // A7 — partial unique on (room_id, period) also blocks duplicates
             // when the two paths produce different bill_nos for same period.
             if (e.code !== '23505') console.error('[bulk-generate] insert failed:', e.message);
-            skipped++;
+            bumpSkip(e.code === '23505' ? 'duplicate' : 'error');
           } finally {
             billClient.release();
           }
         }
+        const skipSummary = Object.fromEntries(
+          Object.entries(skipReasons).filter(([, count]) => count > 0)
+        );
         audit(req, 'bill.bulk_generate', 'period', period, {
           made, updated, skipped,
           firstMonthSkipped: firstMonthSkipped.length,
+          skipSummary,
         });
         res.json({ ok: true, period, made, updated, skipped, flatFellBack,
+          skipSummary,
           firstMonthSkipped,
           warnings: issues.filter((i) => i.sev !== 'high') });
       } catch (err) {

@@ -1219,6 +1219,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
       }
     }
 
+    let forceReason = '';
     if (issues.length > 0) {
       const high = issues.filter((i) => i.sev === 'high').length;
       const lines = issues.map((i, idx) => {
@@ -1236,10 +1237,27 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         `\n   • ยกเลิก → แก้ปัญหาก่อนแล้วค่อยมาออกบิล (แนะนำ)\n` +
         `   • ยืนยัน → ออกบิลตามค่าปัจจุบัน (รับผิดชอบเอง)`;
       const ok = high > 0
-        ? String(window.prompt(
-            warningText +
-            `\n\nถ้าต้องการออกบิลทั้งที่มีปัญหาสำคัญ ให้พิมพ์: ยืนยันออกบิล`
-          ) || '').trim() === 'ยืนยันออกบิล'
+        ? (() => {
+            const typed = String(window.prompt(
+              warningText +
+              `\n\nถ้าต้องการออกบิลทั้งที่มีปัญหาสำคัญ ให้พิมพ์: ยืนยันออกบิล แล้วตามด้วยเหตุผลอย่างน้อย 8 ตัวอักษร\n` +
+              `ตัวอย่าง: ยืนยันออกบิล ตรวจเลขมิเตอร์แล้วและต้องส่งวันนี้`
+            ) || '').trim();
+            const prefix = 'ยืนยันออกบิล';
+            if (!typed.startsWith(prefix)) return false;
+            forceReason = typed.slice(prefix.length).trim();
+            if (forceReason.length < 8) {
+              setToast && setToast({
+                kind: 'warning',
+                message: {
+                  title: 'ยังไม่ออกบิล',
+                  description: 'ต้องใส่เหตุผลหลังคำว่า "ยืนยันออกบิล" อย่างน้อย 8 ตัวอักษร เพื่อป้องกันการกดผิดและให้ audit ตรวจย้อนหลังได้',
+                },
+              });
+              return false;
+            }
+            return true;
+          })()
         : window.confirm(warningText);
       if (!ok) return;
     }
@@ -1256,7 +1274,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
       // clicked OK — that's the signal to set force.
       const d = await apiCall('/api/bills/bulk-generate', {
         method: 'POST',
-        body: JSON.stringify({ period, dueDay, force: issues.length > 0 }),
+        body: JSON.stringify({ period, dueDay, force: issues.length > 0, forceReason }),
       });
       const madeCount = Number(d.made) || 0;
       const updatedCount = Number(d.updated) || 0;
@@ -1269,6 +1287,19 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
       const fellBack = Array.isArray(d.flatFellBack) ? d.flatFellBack : [];
       const firstMonthSkipped = Array.isArray(d.firstMonthSkipped) ? d.firstMonthSkipped : [];
       const warnings = Array.isArray(d.warnings) ? d.warnings : [];
+      const skipSummary = d.skipSummary && typeof d.skipSummary === 'object' ? d.skipSummary : {};
+      const skipLabels = {
+        noTenant: 'ไม่มีผู้เช่าในห้อง',
+        notBillableStatus: 'สถานะห้องยังไม่ใช่ occupied/overdue',
+        firstMonth: 'เดือนแรกมีบิลย้ายเข้าแล้ว',
+        unchanged: 'มีบิลเดิมที่ตัวเลขตรงกัน',
+        locked: 'บิลถูกล็อกแล้ว เช่น ชำระแล้ว/มีสลิป verified',
+        duplicate: 'เลขบิลหรือรอบซ้ำ',
+        error: 'ระบบข้ามเพราะเกิดข้อผิดพลาดเฉพาะห้อง',
+      };
+      const skipMsg = Object.entries(skipSummary).length
+        ? ` · ข้าม: ${Object.entries(skipSummary).map(([k, v]) => `${skipLabels[k] || k} ${v}`).join(', ')}`
+        : '';
       const fellBackMsg = fellBack.length
         ? ` · เตือน: ${fellBack.length} ห้อง (${fellBack.slice(0, 3).map((x) => x.roomId).join(', ')}${fellBack.length > 3 ? '…' : ''}) ตั้งโหมดเหมาไว้แต่ยังไม่กรอกจำนวน — บิลถูกออกตามมิเตอร์แทน`
         : '';
@@ -1286,6 +1317,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         message: (changedCount > 0
           ? `ออก/อัปเดตบิล ${changedCount} ใบสำเร็จ${d.skipped ? ` (ข้าม ${d.skipped} ใบที่มีอยู่แล้วหรือล็อกอยู่)` : ''}${sendHint}`
           : `ไม่มีบิลใหม่สำหรับรอบ ${period} — บิลจริงมีอยู่แล้วหรือรายการถูกข้าม`)
+          + skipMsg
           + fellBackMsg
           + firstMonthMsg
           + warningMsg,
