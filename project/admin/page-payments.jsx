@@ -37,10 +37,76 @@ function paymentFilterLabel(status) {
   return status === FILTER_ALL ? FILTER_ALL_LABEL : paymentStatusLabel(status);
 }
 
-function paymentStatusTone(C, status) {
-  if (status === 'verified') return { color: C.success, soft: C.successSoft, ink: C.successInk };
-  if (status === 'rejected') return { color: C.danger, soft: C.dangerSoft, ink: C.dangerInk };
-  return { color: C.warning, soft: C.warningSoft, ink: C.warningInk };
+function paymentStatusMeta(C, status) {
+  if (status === 'verified') {
+    return {
+      label: PAYMENT_STATUS_LABEL.verified,
+      title: 'สลิปผ่านแล้ว',
+      help: 'ระบบบันทึกการชำระแล้ว และบิลควรเป็นสถานะชำระแล้ว',
+      next: 'ไม่ต้องดำเนินการต่อ เว้นแต่ต้องย้อนรายการ',
+      color: C.success,
+      soft: C.successSoft,
+      ink: C.successInk,
+    };
+  }
+  if (status === 'rejected') {
+    return {
+      label: PAYMENT_STATUS_LABEL.rejected,
+      title: 'สลิปไม่ผ่าน',
+      help: 'สลิปถูกปฏิเสธแล้ว ผู้เช่าต้องส่งหลักฐานใหม่หรือแก้ยอดชำระ',
+      next: 'ตรวจเหตุผลปฏิเสธก่อนติดต่อผู้เช่า',
+      color: C.danger,
+      soft: C.dangerSoft,
+      ink: C.dangerInk,
+    };
+  }
+  return {
+    label: PAYMENT_STATUS_LABEL.pending,
+    title: 'ต้องตรวจสลิป',
+    help: 'ยังไม่เปลี่ยนบิลเป็นชำระแล้ว ต้องเปิดสลิปเพื่อตรวจยอดก่อน',
+    next: 'เปิดรายการ แล้วเลือกอนุมัติหรือปฏิเสธพร้อมเหตุผล',
+    color: C.warning,
+    soft: C.warningSoft,
+    ink: C.warningInk,
+  };
+}
+
+function billStatusMeta(C, status) {
+  const raw = String(status || '').toLowerCase();
+  if (raw === 'paid') {
+    return {
+      label: BILL_STATUS_LABEL.paid,
+      help: 'บิลถูกปิดยอดแล้ว',
+      color: C.success,
+      soft: C.successSoft,
+      ink: C.successInk,
+    };
+  }
+  if (raw === 'overdue') {
+    return {
+      label: BILL_STATUS_LABEL.overdue,
+      help: 'เลยกำหนดชำระ ควรเร่งตรวจสลิปหรือทวงชำระ',
+      color: C.danger,
+      soft: C.dangerSoft,
+      ink: C.dangerInk,
+    };
+  }
+  if (raw === 'void') {
+    return {
+      label: BILL_STATUS_LABEL.void,
+      help: 'บิลถูกยกเลิก ไม่ควรรับชำระเพิ่ม',
+      color: C.neutral || C.muted,
+      soft: C.neutralSoft || C.bgSoft,
+      ink: C.neutralInk || C.ink,
+    };
+  }
+  return {
+    label: BILL_STATUS_LABEL.pending,
+    help: 'บิลยังรอชำระ',
+    color: C.warning,
+    soft: C.warningSoft,
+    ink: C.warningInk,
+  };
 }
 
 function paymentTimestamp(payment) {
@@ -69,6 +135,8 @@ function paymentSearchHaystack(payment) {
     payment.bill_status,
     paymentStatusLabel(payment.status),
     billStatusLabel(payment.bill_status),
+    PAYMENT_STATUS_LABEL[payment.status],
+    BILL_STATUS_LABEL[payment.bill_status],
   ].map((v) => String(v ?? '').toLowerCase()).join(' ');
 }
 
@@ -88,6 +156,53 @@ function partySummary(party) {
 function formatVerifyAttempt(attempt) {
   if (!attempt) return '-';
   return `${attempt.provider || 'provider'}:${attempt.ok ? 'ผ่าน' : (attempt.code || 'ไม่ผ่าน')}`;
+}
+
+function StatusBadge({ meta, prefix }) {
+  return (
+    <span style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 6,
+      padding: '4px 9px',
+      borderRadius: 999,
+      border: `1px solid ${meta.color}`,
+      background: meta.soft,
+      color: meta.ink,
+      fontSize: 12,
+      fontWeight: 700,
+      whiteSpace: 'nowrap',
+    }}>
+      <span style={{
+        width: 7,
+        height: 7,
+        borderRadius: 999,
+        background: meta.color,
+        flex: '0 0 auto',
+      }} />
+      {prefix ? `${prefix}: ` : ''}{meta.label}
+    </span>
+  );
+}
+
+function StatusInfoPanel({ title, meta, detail }) {
+  return (
+    <div style={{
+      border: `1px solid ${meta.color}`,
+      background: meta.soft,
+      color: meta.ink,
+      borderRadius: 8,
+      padding: '10px 12px',
+      minWidth: 0,
+    }}>
+      <div style={{ fontSize: 11, fontWeight: 700, opacity: 0.85, marginBottom: 4 }}>{title}</div>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+        <div style={{ fontSize: 14, fontWeight: 800 }}>{meta.label}</div>
+        <span style={{ width: 9, height: 9, borderRadius: 999, background: meta.color, flex: '0 0 auto' }} />
+      </div>
+      <div style={{ marginTop: 4, fontSize: 12, lineHeight: 1.45 }}>{detail || meta.help}</div>
+    </div>
+  );
 }
 
 // "auto:slipok" / "auto:easyslip" / "auto:slip2go" → friendly Thai label
@@ -124,15 +239,13 @@ function PagePayments({ setToast }) {
   // stub instead so the user can refresh, mirroring page-meters.jsx.
   const C = window.ADMIN_C;
   const Card = window.Card;
-  const SectionHeading = window.SectionHeading;
   const Btn = window.Btn;
-  const Pill = window.Pill;
   const PageContainer = window.PageContainer;
   const PageHeader = window.PageHeader;
   const EmptyState = window.EmptyState;
-  if (!C || !Card || !Btn || !Pill || !PageContainer || !PageHeader || !EmptyState) {
+  if (!C || !Card || !Btn || !PageContainer || !PageHeader || !EmptyState) {
     const missing = [
-      !C && 'ADMIN_C', !Card && 'Card', !Btn && 'Btn', !Pill && 'Pill',
+      !C && 'ADMIN_C', !Card && 'Card', !Btn && 'Btn',
       !PageContainer && 'PageContainer', !PageHeader && 'PageHeader', !EmptyState && 'EmptyState',
     ].filter(Boolean).join(', ');
     console.warn('[PagePayments] missing window globals:', missing);
@@ -301,7 +414,6 @@ function PagePayments({ setToast }) {
     finally { setBusy(false); }
   }
 
-  const stColor = { pending: C.warning, verified: C.success, rejected: C.danger };
   const searchTerm = search.trim().toLowerCase();
   const visibleList = useMemo(() => {
     const sorted = sortPaymentsNewestFirst(list);
@@ -313,40 +425,46 @@ function PagePayments({ setToast }) {
   const amountFor = (status) => amountRawFor(status)
     .toLocaleString('th-TH', { minimumFractionDigits: 2 });
   const activeFilterLabel = paymentFilterLabel(filter);
+  const totalSummaryCount = PAYMENT_STATUS_ORDER.reduce((s, status) => s + countFor(status), 0);
+  const totalSummaryAmount = PAYMENT_STATUS_ORDER.reduce((s, status) => s + amountRawFor(status), 0);
 
   return (
     <PageContainer>
       <PageHeader title="สลิปชำระเงิน"
         subtitle="ตรวจสอบและอนุมัติสลิปจากผู้เช่า — ต้องเปิดฟีเจอร์ slipUpload"
         actions={
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-            <input
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder={'\u0e04\u0e49\u0e19\u0e2b\u0e32\u0e2b\u0e49\u0e2d\u0e07 / \u0e1a\u0e34\u0e25 / \u0e1c\u0e39\u0e49\u0e40\u0e0a\u0e48\u0e32'}
-              style={{ width: 220, maxWidth: '100%', padding: '6px 10px', borderRadius: 6, border: '1px solid ' + C.border, background: C.bg, color: C.ink }}
-            />
-            <select value={filter} onChange={(e) => setFilter(e.target.value)}
-              style={{ padding: '6px 10px', borderRadius: 6, border: '1px solid ' + C.border, background: C.bg, color: C.ink }}>
-              <option value={FILTER_ALL}>{FILTER_ALL_LABEL}</option>
-              <option value="pending">รอตรวจสอบ</option>
-              <option value="verified">อนุมัติแล้ว</option>
-              <option value="rejected">ปฏิเสธ</option>
-            </select>
-          </div>
+          <Btn variant="secondary" onClick={load} disabled={loading}>
+            {loading ? 'กำลังโหลด...' : 'รีเฟรช'}
+          </Btn>
         } />
       {summary ? (
         <div style={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit,minmax(150px,1fr))',
+          gridTemplateColumns: 'repeat(auto-fit,minmax(175px,1fr))',
           gap: 10,
           marginBottom: 12,
         }}>
+          <button type="button" onClick={() => setFilter(FILTER_ALL)} style={{
+            appearance: 'none',
+            textAlign: 'left',
+            fontFamily: 'inherit',
+            cursor: 'pointer',
+            padding: '12px 14px',
+            border: '1px solid ' + (filter === FILTER_ALL ? C.info : (C.borderSoft || C.border)),
+            borderRadius: 8,
+            background: filter === FILTER_ALL ? C.infoSoft : C.surface,
+            color: C.ink,
+          }}>
+            <div style={{ color: C.info, fontWeight: 800, fontSize: 22 }}>{totalSummaryCount}</div>
+            <div style={{ fontSize: 12.5, color: C.ink, fontWeight: 700 }}>ทั้งหมด</div>
+            <div style={{ fontSize: 12, color: C.muted }}>รวม ฿{totalSummaryAmount.toLocaleString('th-TH', { minimumFractionDigits: 2 })}</div>
+          </button>
           {[
-            ['pending', 'รอตรวจสอบ', C.warning],
-            ['verified', 'อนุมัติแล้ว', C.success],
-            ['rejected', 'ปฏิเสธ', C.danger],
-          ].map(([status, label, color]) => {
+            ['pending'],
+            ['verified'],
+            ['rejected'],
+          ].map(([status]) => {
+            const meta = paymentStatusMeta(C, status);
             const selected = filter === status;
             return (
               <button key={status} type="button" onClick={() => setFilter(status)} style={{
@@ -354,19 +472,82 @@ function PagePayments({ setToast }) {
                 textAlign: 'left',
                 fontFamily: 'inherit',
                 cursor: 'pointer',
-                padding: '10px 12px',
-                border: '1px solid ' + (selected ? color : (C.borderSoft || C.border)),
+                padding: '12px 14px',
+                border: '1px solid ' + (selected ? meta.color : (C.borderSoft || C.border)),
                 borderRadius: 8,
-                background: C.bgSoft || C.bg,
+                background: selected ? meta.soft : C.surface,
                 color: C.ink,
               }}>
-                <div style={{ color, fontWeight: 700, fontSize: 18 }}>{countFor(status)}</div>
-                <div style={{ fontSize: 12.5, color: C.muted }}>{label} · ฿{amountFor(status)}</div>
+                <div style={{ color: meta.color, fontWeight: 800, fontSize: 22 }}>{countFor(status)}</div>
+                <div style={{ fontSize: 12.5, color: C.ink, fontWeight: 700 }}>{meta.label}</div>
+                <div style={{ fontSize: 12, color: C.muted }}>฿{amountFor(status)}</div>
+                <div style={{ marginTop: 6, fontSize: 11.5, color: meta.ink, lineHeight: 1.35 }}>
+                  {meta.next}
+                </div>
               </button>
             );
           })}
         </div>
       ) : null}
+      <div style={{
+        marginBottom: 12,
+        padding: 12,
+        border: '1px solid ' + (C.borderSoft || C.border),
+        borderRadius: 8,
+        background: C.surface,
+        display: 'flex',
+        gap: 10,
+        alignItems: 'center',
+        flexWrap: 'wrap',
+      }}>
+        <label style={{ flex: '1 1 300px', minWidth: 220, display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontSize: 12, fontWeight: 700, color: C.muted, whiteSpace: 'nowrap' }}>ค้นหา</span>
+          <input
+            type="search"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            aria-label="ค้นหาสลิปชำระเงิน"
+            placeholder="เลขบิล ห้อง ผู้เช่า เบอร์ ยอด หรือสถานะ"
+            style={{
+              flex: 1,
+              minWidth: 0,
+              height: 36,
+              padding: '0 12px',
+              borderRadius: 8,
+              border: '1px solid ' + C.border,
+              background: C.bg,
+              color: C.ink,
+              fontFamily: 'inherit',
+              fontSize: 13,
+            }}
+          />
+        </label>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontSize: 12, fontWeight: 700, color: C.muted, whiteSpace: 'nowrap' }}>สถานะ</span>
+          <select value={filter} onChange={(e) => setFilter(e.target.value)}
+            aria-label="กรองสถานะสลิป"
+            style={{
+              height: 36,
+              padding: '0 10px',
+              borderRadius: 8,
+              border: '1px solid ' + C.border,
+              background: C.bg,
+              color: C.ink,
+              fontFamily: 'inherit',
+            }}>
+            <option value={FILTER_ALL}>{FILTER_ALL_LABEL}</option>
+            <option value="pending">รอตรวจสอบ</option>
+            <option value="verified">อนุมัติแล้ว</option>
+            <option value="rejected">ปฏิเสธ</option>
+          </select>
+        </label>
+        {searchTerm && (
+          <Btn variant="ghost" size="sm" onClick={() => setSearch('')}>ล้างค้นหา</Btn>
+        )}
+        <div style={{ fontSize: 12, color: C.muted, marginLeft: 'auto' }}>
+          แสดง {visibleList.length} จาก {list.length} รายการในมุมมอง {activeFilterLabel}
+        </div>
+      </div>
       <Card>
         <div style={{
           padding: '10px 16px',
@@ -379,8 +560,8 @@ function PagePayments({ setToast }) {
           flexWrap: 'wrap',
           fontSize: 12.5,
         }}>
-          <span>{activeFilterLabel} · {visibleList.length}/{list.length} {'\u0e23\u0e32\u0e22\u0e01\u0e32\u0e23'}</span>
-          <span>{'\u0e40\u0e23\u0e35\u0e22\u0e07\u0e25\u0e48\u0e32\u0e2a\u0e38\u0e14\u0e2d\u0e22\u0e39\u0e48\u0e14\u0e49\u0e32\u0e19\u0e1a\u0e19'}</span>
+          <span style={{ fontWeight: 700, color: C.ink }}>รายการสลิป</span>
+          <span>เรียงล่าสุดอยู่ด้านบน · คลิกแถวเพื่อดูสลิปและรายละเอียดบิล</span>
         </div>
         {loading ? (
           <div style={{ padding: 32, textAlign: 'center', color: C.muted, fontSize: 13.5 }}>
@@ -392,31 +573,56 @@ function PagePayments({ setToast }) {
             <div style={{ marginBottom: 12 }}>{loadError}</div>
             <Btn onClick={load}>ลองใหม่</Btn>
           </div>
-        ) : visibleList.length === 0 ? <EmptyState title="ไม่มีรายการ" /> : (
+        ) : visibleList.length === 0 ? (
+          <EmptyState
+            title={searchTerm ? 'ไม่พบรายการที่ค้นหา' : 'ไม่มีรายการในสถานะนี้'}
+            description={searchTerm
+              ? 'ลองค้นด้วยเลขบิล ห้อง ชื่อผู้เช่า เบอร์โทร ยอดเงิน หรือสถานะ'
+              : 'เลือกสถานะอื่นหรือรีเฟรชเพื่อดูรายการล่าสุด'}
+          />
+        ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 1, background: C.border }}>
-            {visibleList.map((p) => (
-              <div key={p.id} style={{
-                background: C.bg, padding: '14px 16px', display: 'grid',
-                borderLeft: `4px solid ${paymentStatusTone(C, p.status).color || C.border}`,
-                gridTemplateColumns: '1fr auto auto', gap: 16, alignItems: 'center', cursor: 'pointer',
-              }} onClick={() => openPayment(p)}>
-                <div>
-                  <div style={{ fontWeight: 600 }}>
-                    {p.tenant_name || '—'} · ห้อง {p.room_id || '-'} · บิล {p.bill_no || p.bill_id}
+            {visibleList.map((p) => {
+              const slipMeta = paymentStatusMeta(C, p.status);
+              const billMeta = billStatusMeta(C, p.bill_status);
+              return (
+                <div key={p.id} style={{
+                  background: C.bg,
+                  padding: '14px 16px',
+                  display: 'grid',
+                  borderLeft: `5px solid ${slipMeta.color || C.border}`,
+                  gridTemplateColumns: 'minmax(0,1.35fr) minmax(170px,.65fr) minmax(230px,.9fr)',
+                  gap: 16,
+                  alignItems: 'center',
+                  cursor: 'pointer',
+                }} onClick={() => openPayment(p)}>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontWeight: 700, overflowWrap: 'anywhere' }}>
+                      {p.tenant_name || 'ไม่ระบุผู้เช่า'} · ห้อง {p.room_id || '-'}
+                    </div>
+                    <div style={{ color: C.muted, fontSize: 12.5, marginTop: 2 }}>
+                      บิล {p.bill_no || p.bill_id || '-'} · {p.tenant_phone || 'ไม่มีเบอร์'} · {new Date(p.created_at).toLocaleString('th-TH')}
+                    </div>
+                    <div style={{ marginTop: 6, color: slipMeta.ink, fontSize: 12, lineHeight: 1.45 }}>
+                      {slipMeta.next}
+                    </div>
                   </div>
-                  <div style={{ color: C.muted, fontSize: 12.5 }}>
-                    {p.tenant_phone || ''} · {new Date(p.created_at).toLocaleString('th-TH')}
+                  <div style={{ textAlign: 'right', minWidth: 0 }}>
+                    <div style={{ fontFamily: 'IBM Plex Sans Thai', fontWeight: 800, fontSize: 17 }}>฿{fmtMoney(p.amount)}</div>
+                    <div style={{ color: C.muted, fontSize: 11.5, marginTop: 3 }}>
+                      อัปโหลด {p.upload_attempts || 1}/3 ครั้ง
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-start' }}>
+                    <StatusBadge meta={slipMeta} prefix="สลิป" />
+                    <StatusBadge meta={billMeta} prefix="บิล" />
+                    <div style={{ color: C.muted, fontSize: 11.5, lineHeight: 1.35 }}>
+                      {billMeta.help}
+                    </div>
                   </div>
                 </div>
-                <div style={{ fontFamily: 'IBM Plex Sans Thai', fontWeight: 600 }}>฿{fmtMoney(p.amount)}</div>
-                <div style={{ textAlign: 'right' }}>
-                  <Pill color={stColor[p.status]}>{paymentStatusLabel(p.status)}</Pill>
-                  <div style={{ marginTop: 4, color: p.status === 'rejected' ? C.danger : C.muted, fontSize: 11.5 }}>
-                    สถานะบิล {billStatusLabel(p.bill_status)} · อัปโหลด {p.upload_attempts || 1}/3
-                  </div>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </Card>
@@ -456,6 +662,8 @@ function SlipModal({ payment, busy, onClose, onDecide }) {
     && Number.isFinite(billTotalForDecision)
     && Math.abs(paidAmtForDecision - principalForDecision) <= 1
     && Math.abs(paidAmtForDecision - billTotalForDecision) > 1;
+  const slipMeta = paymentStatusMeta(C, payment.status);
+  const billMeta = billStatusMeta(C, payment.bill_status);
   return (
     <div style={{
       position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
@@ -469,6 +677,15 @@ function SlipModal({ payment, busy, onClose, onDecide }) {
         <p style={{ color: C.muted, fontSize: 13 }}>
           {payment.tenant_name || ''} · {payment.tenant_phone || ''} · ห้อง {payment.room_id || '-'} · บิล {payment.bill_no || payment.bill_id}
         </p>
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))',
+          gap: 10,
+          margin: '12px 0',
+        }}>
+          <StatusInfoPanel title="สถานะสลิป" meta={slipMeta} detail={slipMeta.help} />
+          <StatusInfoPanel title="สถานะบิล" meta={billMeta} detail={billMeta.help} />
+        </div>
         {payment._slipLoading ? (
           <div style={{ color: C.muted, padding: '12px 0' }}>กำลังโหลดสลิป...</div>
         ) : slipUrl ? (
@@ -480,7 +697,6 @@ function SlipModal({ payment, busy, onClose, onDecide }) {
         <div style={{ marginTop: 12 }}>
           <div>จำนวนเงินที่ผู้เช่าระบุ: <strong>฿{fmtMoney(payment.amount)}</strong></div>
           <div>วันที่: {new Date(payment.created_at).toLocaleString('th-TH')}</div>
-          <div>สถานะสลิป: {paymentStatusLabel(payment.status)}</div>
         </div>
         {/* R2-followup — visual mismatch alert. Admin scanning the slip
             queue needs to see at a glance when amount ≠ bill_total so they
