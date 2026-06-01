@@ -6434,6 +6434,30 @@ test('public contract-fill submit sends the just-uploaded signature id', () => {
     'submit override must carry a durable terms version');
   assert.match(html, /\(!hasInk && !draft\.signatureFileId\)/,
     'existing saved signatures must allow submit after page reload');
+  assert.match(html, /const \[submitting, setSubmitting\] = useState\(false\)/,
+    'signature submit must use a local in-flight lock');
+  assert.match(html, /if \(busy \|\| submitting\) return/,
+    'double taps must not start a second signature upload/submit');
+  assert.match(html, /await onSubmit\(/,
+    'signature step must wait for the final submit before unlocking');
+  assert.match(html, /disabled=\{busy \|\| submitting \|\| \(!hasInk && !draft\.signatureFileId\) \|\| !agreed\}/,
+    'submit button must stay disabled while signature submit is in flight');
+  assert.match(html, /friendlyErrorText\(err\), err\.code \|\| null/,
+    'upload errors must preserve API error codes for submitted/locked-state handling');
+});
+
+test('public contract-fill keeps submitted state ahead of stale edit errors', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const html = fs.readFileSync(path.join(__dirname, '..', 'project', 'contract-fill.html'), 'utf8');
+  const submittedFirst = html.indexOf("view.status === 'submitted' || submitted || errorCode === 'NOT_EDITABLE'");
+  const fatalErrorBlock = html.indexOf("if (error && (!view || fatalErrorCodes.has(errorCode)))");
+  assert.ok(submittedFirst !== -1 && fatalErrorBlock > submittedFirst,
+    'submitted/NOT_EDITABLE state must render SubmittedView before the invalid-link error card');
+  assert.match(html, /fatalErrorCodes = new Set\(\['TOKEN_INVALID', 'REVOKED', 'EXPIRED', 'ALREADY_APPROVED'\]\)/,
+    'NOT_EDITABLE must not be classified as a dead-link fatal code');
+  assert.match(html, /if \(code === 'NOT_EDITABLE'\) setSubmitted\(true\)/,
+    'upload/signature NOT_EDITABLE responses must switch the UI to the submitted view');
 });
 
 test('checkOut schema declares generateClosingBill (zod must not strip the opt-out)', () => {

@@ -228,7 +228,12 @@ function App() {
     () => setSavedAt(new Date()),
     handleFatalAutoSave);
 
-  if (error) {
+  const fatalErrorCodes = new Set(['TOKEN_INVALID', 'REVOKED', 'EXPIRED', 'ALREADY_APPROVED']);
+  if (view && (view.status === 'submitted' || submitted || errorCode === 'NOT_EDITABLE')) {
+    return <SubmittedView view={view} />;
+  }
+
+  if (error && (!view || fatalErrorCodes.has(errorCode))) {
     // Tailor the alert text by error code — generic "หมดอายุ/ถูกอนุมัติ/
     // ถูกยกเลิก" was the original bug that hid which one actually happened.
     const alertText = (() => {
@@ -269,6 +274,11 @@ function App() {
   const setField = (k, v) => setDraft((d) => ({ ...d, [k]: v }));
   const goNext = () => setStep((s) => Math.min(4, s + 1));
   const goBack = () => setStep((s) => Math.max(1, s - 1));
+  const showFormError = (message, code = null) => {
+    setError(message);
+    setErrorCode(code || null);
+    if (code === 'NOT_EDITABLE') setSubmitted(true);
+  };
 
   const submit = async (draftOverride = null) => {
     setBusy(true);
@@ -289,6 +299,8 @@ function App() {
       // tailored copy above.
       if (err.code === 'INCOMPLETE' && err.body && err.body.missing) {
         setError(err.message + ` (ขาด: ${err.body.missing.join(', ')})`);
+      } else if (err.code === 'NOT_EDITABLE') {
+        setSubmitted(true);
       } else {
         setError(friendlyErrorText(err));
         setErrorCode(err.code || null);
@@ -318,7 +330,7 @@ function App() {
       {step === 3 ? (
         <Step3Identity draft={draft} setField={setField}
           token={tokenFromUrl} onBack={goBack} onNext={goNext}
-          onError={setError} />
+          onError={showFormError} />
       ) : null}
       {step === 4 ? (
         <Step4Sign draft={draft} setField={setField}
@@ -327,7 +339,7 @@ function App() {
           busy={busy}
           onBack={goBack}
           onSubmit={submit}
-          onError={setError} />
+          onError={showFormError} />
       ) : null}
     </>
   );
@@ -470,7 +482,7 @@ function Step3Identity({ draft, setField, token, onBack, onNext, onError }) {
           out.file.id
         );
       } catch (err) {
-        onError('อัปโหลดล้มเหลว: ' + err.message);
+        onError('อัปโหลดล้มเหลว: ' + friendlyErrorText(err), err.code || null);
       }
     };
     reader.readAsDataURL(file);
@@ -543,6 +555,7 @@ function Step4Sign({ draft, setField, token, view, busy, onBack, onSubmit, onErr
   const canvasRef = useRef(null);
   const [hasInk, setHasInk] = useState(false);
   const [agreed, setAgreed] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
 
   // Canvas drawing setup
   useEffect(() => {
@@ -612,30 +625,36 @@ function Step4Sign({ draft, setField, token, view, busy, onBack, onSubmit, onErr
       setField('signatureFileId', out.file.id);
       return out.file.id;
     } catch (err) {
-      onError('บันทึกลายเซ็นล้มเหลว: ' + err.message);
+      onError('บันทึกลายเซ็นล้มเหลว: ' + friendlyErrorText(err), err.code || null);
       return null;
     }
   };
 
   const submitWithSignature = async () => {
-    let sigId = draft.signatureFileId;
-    if (hasInk) {
-      sigId = await saveSignature();
-      if (!sigId) return;
-    }
+    if (busy || submitting) return;
     if (!agreed) {
       onError('กรุณาติ๊กยืนยันการอ่านสัญญาก่อน');
       return;
     }
-    if (!sigId) {
+    if (!hasInk && !draft.signatureFileId) {
       onError('กรุณาเซ็นชื่อก่อน');
       return;
     }
-    onSubmit({
-      ...draft,
-      signatureFileId: sigId,
-      agreedTermsVersion: draft.agreedTermsVersion || 'tenant-fill-v1',
-    });
+    setSubmitting(true);
+    try {
+      let sigId = draft.signatureFileId;
+      if (hasInk) {
+        sigId = await saveSignature();
+        if (!sigId) return;
+      }
+      await onSubmit({
+        ...draft,
+        signatureFileId: sigId,
+        agreedTermsVersion: draft.agreedTermsVersion || 'tenant-fill-v1',
+      });
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   return (
@@ -673,11 +692,11 @@ function Step4Sign({ draft, setField, token, view, busy, onBack, onSubmit, onErr
       </div>
 
       <div style={{ display: 'flex', gap: 8, marginTop: 20 }}>
-        <button className="btn btn-ghost" onClick={onBack} disabled={busy}>← ย้อนกลับ</button>
+        <button className="btn btn-ghost" onClick={onBack} disabled={busy || submitting}>← ย้อนกลับ</button>
         <button className="btn btn-primary" style={{ flex: 1 }}
-          disabled={busy || (!hasInk && !draft.signatureFileId) || !agreed}
+          disabled={busy || submitting || (!hasInk && !draft.signatureFileId) || !agreed}
           onClick={submitWithSignature}>
-          {busy ? 'กำลังส่ง...' : 'ส่งให้ตรวจสอบ ✓'}
+          {busy || submitting ? 'กำลังส่ง...' : 'ส่งให้ตรวจสอบ ✓'}
         </button>
       </div>
     </div>
