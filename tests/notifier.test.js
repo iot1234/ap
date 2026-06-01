@@ -191,6 +191,71 @@ test('notifyTenant sends provided LINE rich messages instead of flattening to te
   }
 });
 
+test('email.isConfigured requires SMTP user as well as host/pass', () => {
+  const email = require('../services/email');
+  const savedHost = process.env.SMTP_HOST;
+  const savedUser = process.env.SMTP_USER;
+  const savedPass = process.env.SMTP_PASS;
+  process.env.SMTP_HOST = 'smtp.example.test';
+  delete process.env.SMTP_USER;
+  process.env.SMTP_PASS = 'secret';
+  try {
+    assert.equal(email.isConfigured({ email: { enabled: true } }), false);
+    assert.equal(email.isConfigured({ email: { enabled: true, smtpUser: 'mailer@example.test' } }), true);
+  } finally {
+    if (savedHost === undefined) delete process.env.SMTP_HOST; else process.env.SMTP_HOST = savedHost;
+    if (savedUser === undefined) delete process.env.SMTP_USER; else process.env.SMTP_USER = savedUser;
+    if (savedPass === undefined) delete process.env.SMTP_PASS; else process.env.SMTP_PASS = savedPass;
+  }
+});
+
+test('email.send uses SMTP_USER as the From fallback when SMTP_FROM is unset', async () => {
+  const Module = require('node:module');
+  const originalLoad = Module._load;
+  const emailPath = require.resolve('../services/email');
+  delete require.cache[emailPath];
+
+  const savedHost = process.env.SMTP_HOST;
+  const savedUser = process.env.SMTP_USER;
+  const savedPass = process.env.SMTP_PASS;
+  const savedFrom = process.env.SMTP_FROM;
+  process.env.SMTP_HOST = 'smtp.example.test';
+  process.env.SMTP_USER = 'mailer@example.test';
+  process.env.SMTP_PASS = 'secret';
+  delete process.env.SMTP_FROM;
+
+  let sent = null;
+  Module._load = function patchedLoad(request, parent, isMain) {
+    if (request === 'nodemailer') {
+      return {
+        createTransport: (cfg) => ({
+          sendMail: async (msg) => { sent = { cfg, msg }; },
+        }),
+      };
+    }
+    return originalLoad.call(this, request, parent, isMain);
+  };
+
+  try {
+    const email = require('../services/email');
+    const ok = await email.send({ email: { enabled: true } }, {
+      to: 'tenant@example.test',
+      subject: 'Bill',
+      text: 'Body',
+    });
+    assert.equal(ok, true);
+    assert.equal(sent.msg.from, 'mailer@example.test');
+    assert.equal(sent.cfg.auth.user, 'mailer@example.test');
+  } finally {
+    Module._load = originalLoad;
+    delete require.cache[emailPath];
+    if (savedHost === undefined) delete process.env.SMTP_HOST; else process.env.SMTP_HOST = savedHost;
+    if (savedUser === undefined) delete process.env.SMTP_USER; else process.env.SMTP_USER = savedUser;
+    if (savedPass === undefined) delete process.env.SMTP_PASS; else process.env.SMTP_PASS = savedPass;
+    if (savedFrom === undefined) delete process.env.SMTP_FROM; else process.env.SMTP_FROM = savedFrom;
+  }
+});
+
 // === F4: owner email recipient must fall back to SMTP_FROM ====================
 test('notifier source: owner email falls back to SMTP_FROM (not gated on features.email.from)', () => {
   const fs = require('node:fs');

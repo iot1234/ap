@@ -17,6 +17,9 @@ const path = require('node:path');
 const features = require('../services/features');
 const hc = require('../services/healthCheck');
 const read = (...p) => fs.readFileSync(path.join(__dirname, '..', ...p), 'utf8');
+const configPool = (value) => ({
+  query: async () => ({ rows: [{ value }] }),
+});
 
 // ---- features.validateConfig ------------------------------------------------
 test('validateConfig: a plain toggle and the full DEFAULTS object validate clean', () => {
@@ -91,6 +94,93 @@ test('checkFeatureDependencies: citizenIdEncryption w/o dedicated key is CRITICA
   } finally {
     if (savedKey !== undefined) process.env.CITIZEN_ID_KEY = savedKey;
     if (savedV1 !== undefined) process.env.ENCRYPTION_KEY_V1 = savedV1;
+  }
+});
+
+test('checkFeatureDependencies: email warns when SMTP user is missing', async () => {
+  const savedHost = process.env.SMTP_HOST;
+  const savedUser = process.env.SMTP_USER;
+  const savedPass = process.env.SMTP_PASS;
+  process.env.SMTP_HOST = 'smtp.example.test';
+  delete process.env.SMTP_USER;
+  process.env.SMTP_PASS = 'secret';
+  try {
+    const d = await hc.checkFeatureDependencies({ email: { enabled: true } });
+    const w = d.detail.warnings.find((x) => x.flag === 'email');
+    assert.ok(w, 'email dependency must require SMTP_USER too');
+    assert.match(w.issue, /SMTP_USER/);
+  } finally {
+    if (savedHost === undefined) delete process.env.SMTP_HOST; else process.env.SMTP_HOST = savedHost;
+    if (savedUser === undefined) delete process.env.SMTP_USER; else process.env.SMTP_USER = savedUser;
+    if (savedPass === undefined) delete process.env.SMTP_PASS; else process.env.SMTP_PASS = savedPass;
+  }
+});
+
+test('health SMTP check accepts DB-stored host/user plus secret password', () => {
+  const health = read('services', 'healthCheck.js');
+  const smtpIdx = health.indexOf('async function checkSmtp');
+  const smtpBlock = health.slice(smtpIdx, health.indexOf('async function checkR2', smtpIdx));
+  assert.match(smtpBlock, /secrets\.get\('SMTP_HOST'\) \|\| features\.email\.smtpHost/,
+    'SMTP health check must honor feature-stored host');
+  assert.match(smtpBlock, /secrets\.get\('SMTP_USER'\) \|\| features\.email\.smtpUser/,
+    'SMTP health check must honor feature-stored user');
+  assert.match(smtpBlock, /secrets\.get\('SMTP_PORT'\) \|\| features\.email\.smtpPort/,
+    'SMTP health check must honor feature-stored port');
+});
+
+test('checkFeatureDependencies: booking deposit with required slip needs a payment receiver', async () => {
+  const savedPromptpay = process.env.PROMPTPAY_TARGET;
+  delete process.env.PROMPTPAY_TARGET;
+  try {
+    const d = await hc.checkFeatureDependencies({
+      roomBooking: {
+        enabled: true,
+        requireDeposit: true,
+        requireSlip: true,
+        depositAmount: 500,
+        minimumAmount: 0,
+      },
+    }, configPool({ payment: {} }));
+    const w = d.detail.warnings.find((x) => x.flag === 'roomBooking.requireDeposit');
+    assert.ok(w && w.severity === 'critical', 'slip-required deposit booking must be critical without a receiver');
+  } finally {
+    if (savedPromptpay === undefined) delete process.env.PROMPTPAY_TARGET;
+    else process.env.PROMPTPAY_TARGET = savedPromptpay;
+  }
+});
+
+test('checkFeatureDependencies: zero booking deposit amount is critical', async () => {
+  const d = await hc.checkFeatureDependencies({
+    roomBooking: {
+      enabled: true,
+      requireDeposit: true,
+      requireSlip: false,
+      depositAmount: 0,
+      minimumAmount: 0,
+    },
+  }, configPool({ payment: { bank: 'KBank', bankAcc: '111-2-22222-2' } }));
+  const w = d.detail.warnings.find((x) => x.flag === 'roomBooking.depositAmount');
+  assert.ok(w && w.severity === 'critical', 'zero deposit amount must be critical');
+});
+
+test('checkFeatureDependencies: paymentReminder warns when no delivery channel can work', async () => {
+  const savedHost = process.env.SMTP_HOST;
+  const savedUser = process.env.SMTP_USER;
+  const savedPass = process.env.SMTP_PASS;
+  delete process.env.SMTP_HOST;
+  delete process.env.SMTP_USER;
+  delete process.env.SMTP_PASS;
+  try {
+    const d = await hc.checkFeatureDependencies({
+      paymentReminder: { enabled: true },
+      email: { enabled: false },
+    }, configPool({ notify: { channels: { line: false, email: true } } }));
+    const w = d.detail.warnings.find((x) => x.flag === 'paymentReminder');
+    assert.ok(w && w.severity === 'critical', 'reminder must be critical when LINE is off and email cannot send');
+  } finally {
+    if (savedHost === undefined) delete process.env.SMTP_HOST; else process.env.SMTP_HOST = savedHost;
+    if (savedUser === undefined) delete process.env.SMTP_USER; else process.env.SMTP_USER = savedUser;
+    if (savedPass === undefined) delete process.env.SMTP_PASS; else process.env.SMTP_PASS = savedPass;
   }
 });
 

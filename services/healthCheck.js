@@ -131,8 +131,8 @@ async function checkLineOa(pool) {
 
 async function checkSmtp(features) {
   if (!features?.email?.enabled) return { status: 'ok', message: 'Email channel disabled (skipped)' };
-  const host = secrets.get('SMTP_HOST');
-  const user = secrets.get('SMTP_USER');
+  const host = secrets.get('SMTP_HOST') || features.email.smtpHost;
+  const user = secrets.get('SMTP_USER') || features.email.smtpUser;
   const pass = secrets.get('SMTP_PASS');
   if (!host || !user || !pass) {
     return { status: 'warn', message: 'Email enabled but SMTP host/user/pass not fully set' };
@@ -142,8 +142,8 @@ async function checkSmtp(features) {
   catch { return { status: 'warn', message: 'nodemailer not installed' }; }
   try {
     const t = nm.createTransport({
-      host, port: Number(secrets.get('SMTP_PORT') || 587),
-      secure: Number(secrets.get('SMTP_PORT')) === 465,
+      host, port: Number(secrets.get('SMTP_PORT') || features.email.smtpPort || 587),
+      secure: Number(secrets.get('SMTP_PORT') || features.email.smtpPort) === 465,
       auth: { user, pass },
       connectionTimeout: 6000,
     });
@@ -556,6 +556,22 @@ async function checkBootConfig() {
 // notifications never arrive / cards never revoke / slips can't upload.
 async function checkFeatureDependencies(features, pool) {
   const warnings = [];
+  let appConfigLoaded = false;
+  let appConfig = {};
+  const loadAppConfig = async () => {
+    if (appConfigLoaded) return appConfig;
+    appConfigLoaded = true;
+    if (!pool) return appConfig;
+    try {
+      const cfgQ = await pool.query(
+        `SELECT value FROM app_data WHERE key='baankarn_config_v1' LIMIT 1`
+      );
+      appConfig = cfgQ.rows[0]?.value || {};
+    } catch {
+      appConfig = {};
+    }
+    return appConfig;
+  };
 
   // slipUpload requires tenantPortal — tenants must have a session to upload.
   // Without tenantPortal, /api/tenant/payments returns 401 even though the
@@ -599,12 +615,13 @@ async function checkFeatureDependencies(features, pool) {
   // email channel: flag on but SMTP_PASS missing. Email never sends, but
   // notifier's fallback chain would be expected by admin to work.
   if (features?.email?.enabled) {
-    const host = secrets.get('SMTP_HOST');
+    const host = secrets.get('SMTP_HOST') || features.email.smtpHost;
+    const user = secrets.get('SMTP_USER') || features.email.smtpUser;
     const pass = secrets.get('SMTP_PASS');
-    if (!host || !pass) {
+    if (!host || !user || !pass) {
       warnings.push({
         flag: 'email',
-        issue: 'email เปิด แต่ SMTP_HOST/SMTP_PASS ยังไม่ครบ — ส่งอีเมล fallback ไม่ได้',
+        issue: 'email เปิด แต่ SMTP_HOST/SMTP_USER/SMTP_PASS ยังไม่ครบ — ส่งอีเมล fallback ไม่ได้',
         fix: 'ตั้งค่าใน Settings → Secrets',
       });
     }
@@ -678,6 +695,83 @@ async function checkFeatureDependencies(features, pool) {
       issue: 'recurringCharges เปิด แต่ billAutoGenerate ปิด — ต้องสร้างบิลด้วยมือทุกเดือนถึงจะรวม recurring',
       fix: 'เปิด billAutoGenerate ถ้าต้องการ schedule อัตโนมัติ',
     });
+  }
+
+  // Public booking deposits are a cross-feature flow: roomBooking controls the
+  // hold/slip requirement, while Settings -> payment supplies the receiver the
+  // public page shows. If deposit+slip is on with no receiver, the hold/submit
+  // endpoints intentionally block with BOOKING_DEPOSIT_PAYMENT_NOT_CONFIGURED.
+  // Surface that before applicants hit the public page.
+  if (features?.roomBooking?.enabled !== false && features?.roomBooking?.requireDeposit === true) {
+    const rawAmount = Number(features.roomBooking.depositAmount);
+    const rawMinimum = Number(features.roomBooking.minimumAmount);
+    const depositAmount = Number.isFinite(rawAmount) && rawAmount >= 0 ? rawAmount : 500;
+    const minimumAmount = Number.isFinite(rawMinimum) && rawMinimum > 0 ? rawMinimum : 0;
+    const effectiveAmount = minimumAmount > 0 ? Math.max(depositAmount, minimumAmount) : depositAmount;
+    if (!(effectiveAmount > 0)) {
+      warnings.push({
+        flag: 'roomBooking.depositAmount',
+        issue: 'roomBooking.requireDeposit เปิด แต่ยอดค่าจองที่ใช้จริงเป็น 0 — ผู้จองจะล็อกห้อง/ชำระค่าจองไม่ได้ถูกต้อง',
+        fix: 'ตั้ง depositAmount หรือ minimumAmount ให้มากกว่า 0 ในหน้าตั้งค่าจอง/มัดจำ',
+      });
+    } else if (features.roomBooking.requireSlip !== false) {
+      let paymentReady = false;
+      try {
+        const billing = require('./billing');
+        const promptpay = require('./promptpay');
+        const cfg = await loadAppConfig();
+        const block = billing.buildPaymentBlock(cfg || {});
+        if (!block.promptpayTarget) {
+          const envPp = secrets.get('PROMPTPAY_TARGET');
+          if (envPp) block.promptpayTarget = envPp;
+        }
+        let promptpayReady = false;
+        if (block.promptpayTarget) {
+          try {
+            const target = promptpay.normaliseTarget(block.promptpayTarget);
+            promptpayReady = !promptpay.isDemoTarget(target);
+          } catch {
+            promptpayReady = false;
+          }
+        }
+        paymentReady = !!(
+          promptpayReady
+          || (block.bankInfo && block.bankInfo.account)
+          || (block.walletInfo && block.walletInfo.phone)
+        );
+      } catch {
+        paymentReady = false;
+      }
+      if (!paymentReady) {
+        warnings.push({
+          flag: 'roomBooking.requireDeposit',
+          issue: 'roomBooking.requireDeposit + requireSlip เปิด แต่ยังไม่มี PromptPay/บัญชีธนาคาร/TrueMoney ที่พร้อมรับเงิน — หน้า booking จะบล็อกการล็อกห้องและส่งคำขอ',
+          fix: 'ตั้งค่าช่องทางรับเงินใน Settings → การชำระเงิน หรือปิด requireSlip เพื่อรับจองแบบ manual review',
+        });
+      }
+    }
+  }
+
+  // The payment-reminder scheduler currently delivers only LINE and email.
+  // If LINE is explicitly disabled and email is either disabled or not
+  // configured, enabling paymentReminder creates a daily job that can never
+  // reach tenants.
+  if (features?.paymentReminder?.enabled) {
+    const cfg = await loadAppConfig();
+    const channels = cfg?.notify?.channels || {};
+    const lineAllowed = channels.line !== false;
+    const emailAllowed = channels.email !== false;
+    const emailReady = !!(features?.email?.enabled
+      && (secrets.get('SMTP_HOST') || features.email.smtpHost)
+      && (secrets.get('SMTP_USER') || features.email.smtpUser)
+      && secrets.get('SMTP_PASS'));
+    if (!lineAllowed && (!emailAllowed || !emailReady)) {
+      warnings.push({
+        flag: 'paymentReminder',
+        issue: 'paymentReminder เปิด แต่ LINE ถูกปิด และอีเมลไม่พร้อมใช้งาน — reminder ก่อนครบกำหนดจะไม่ถึงผู้เช่า',
+        fix: 'เปิด notify.channels.line หรือเปิด/ตั้งค่า email SMTP ให้ครบก่อนใช้ paymentReminder',
+      });
+    }
   }
 
   // slipUpload.autoVerify ON but no provider key → silently never auto-
@@ -758,10 +852,7 @@ async function checkFeatureDependencies(features, pool) {
     addReceiverDigits(secrets.get('PROMPTPAY_TARGET'));
     if (pool) {
       try {
-        const cfgQ = await pool.query(
-          `SELECT value FROM app_data WHERE key='baankarn_config_v1' LIMIT 1`
-        );
-        const cfg = cfgQ.rows[0]?.value || {};
+        const cfg = await loadAppConfig();
         addReceiverDigits(cfg?.payment?.promptpay || cfg?.payment?.promptpayTarget || null);
         addReceiverDigits(cfg?.payment?.bankAcc || null);
         if (cfg?.payment?.truemoney === true) {
@@ -839,6 +930,9 @@ async function checkFeatureDependencies(features, pool) {
   const CRITICAL_FLAGS = new Set([
     'slipUpload',                            // tenants literally can't upload (no portal)
     'slipUpload.allowUnverifiedAutoApprove', // bills paid with zero verification
+    'roomBooking.depositAmount',             // deposit flow cannot collect a valid amount
+    'roomBooking.requireDeposit',            // public booking deposits block at payment setup
+    'paymentReminder',                       // configured channels cannot deliver reminders
     'citizenIdEncryption',                   // SESSION_SECRET rotation => unrecoverable PII
     'tenancyContract',                       // checkin blocked
   ]);

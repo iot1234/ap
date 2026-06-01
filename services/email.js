@@ -64,7 +64,7 @@ async function send(flags, msg) {
   const ec = flags && flags.email;
   if (!ec || !ec.enabled) return false;
   if (!msg || !msg.to || !msg.subject) return false;
-  const from = secrets.get('SMTP_FROM') || ec.from || ec.smtpUser;
+  const from = secrets.get('SMTP_FROM') || ec.from || secrets.get('SMTP_USER') || ec.smtpUser;
   if (!from) return false;
   try {
     const t = getTransport(ec);
@@ -85,6 +85,7 @@ async function send(flags, msg) {
 function isConfigured(flags) {
   return !!(flags && flags.email && flags.email.enabled
     && (secrets.get('SMTP_HOST') || flags.email.smtpHost)
+    && (secrets.get('SMTP_USER') || flags.email.smtpUser)
     && secrets.get('SMTP_PASS'));
 }
 
