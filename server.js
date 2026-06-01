@@ -15509,6 +15509,9 @@ migrate()
         } else if (isDemoTarget(ppTarget)) {
           issues.push('🔴 PROMPTPAY_TARGET ยังเป็นค่า demo — ห้ามใช้รับเงินจริง');
         }
+        if (!process.env.PUBLIC_URL && !process.env.RAILWAY_PUBLIC_DOMAIN) {
+          issues.push('🔴 PUBLIC_URL/RAILWAY_PUBLIC_DOMAIN ยังไม่ตั้ง — บิลแจ้งเตือน LINE จะไม่มี QR/ปุ่มจ่าย (ตกเป็นข้อความล้วน)');
+        }
         const ownersQ = await pool.query(`SELECT COUNT(*)::int n, MIN(username) u FROM auth_users WHERE role='owner'`);
         const oc = ownersQ.rows[0];
         if (oc.n === 0) issues.push('🔴 ไม่มี owner — ระบบล็อกตัวเอง');

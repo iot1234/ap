@@ -296,15 +296,27 @@ async function buildQueuedBillLineMessages(pool, row, payload = {}) {
   const billId = Number(payload.billId);
   if (!Number.isInteger(billId) || billId < 1) return null;
   const publicUrl = publicUrlFromEnv();
-  if (!publicUrl) return null;
+  if (!publicUrl) {
+    console.warn(`[bill-qr] bill #${billId}: PUBLIC_URL/RAILWAY_PUBLIC_DOMAIN not set — LINE bill goes out as plain text without QR/pay link`);
+    return null;
+  }
   const bill = await loadBillForLineMessage(pool, billId);
-  if (!bill) return null;
+  if (!bill) {
+    console.warn(`[bill-qr] bill #${billId}: bill not found or deleted — plain text fallback`);
+    return null;
+  }
   const { paymentBlock } = await loadEffectivePaymentBlock(pool);
   const bankInfo = paymentBlock.bankInfo && paymentBlock.bankInfo.account
     ? paymentBlock.bankInfo
     : null;
   const canEmbedPromptPayQr = promptPayQrUsable(paymentBlock, bill.total);
-  if (!canEmbedPromptPayQr && !bankInfo) return null;
+  if (!canEmbedPromptPayQr && !bankInfo) {
+    console.warn(`[bill-qr] bill #${billId}: no usable PromptPay target and no bank account configured — plain text without QR (Settings → การชำระเงิน → PromptPay must be a real 10-digit phone or 13-digit ID, not empty/demo)`);
+    return null;
+  }
+  if (!canEmbedPromptPayQr && bankInfo) {
+    console.warn(`[bill-qr] bill #${billId}: PromptPay QR unavailable (target unset/demo/invalid or amount outside 0–${promptpay.MAX_AMOUNT}) — sending Flex with bank transfer only, no QR`);
+  }
   const payToken = billTokens.signBillPayToken(billId);
   const qrToken = canEmbedPromptPayQr ? billTokens.signBillQrToken(billId) : null;
   const qrVersion = `${billId}-${String(bill.status || 'pending')}-${Date.now()}`;
