@@ -1668,7 +1668,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
               ส่งไม่ได้: {r.blockCode === 'NO_TENANT_CHANNEL' ? 'ไม่มีช่องทาง'
                 : r.blockCode === 'EMAIL_NOT_CONFIGURED' ? 'อีเมลไม่พร้อม'
                 : r.blockCode === 'TENANT_MOVED_ROOM' ? 'ย้ายห้อง'
-                : r.blockCode === 'TENANT_NOT_ACTIVE' ? 'ออกแล้ว'
+                : r.blockCode === 'TENANT_NOT_ACTIVE' ? 'ผู้เช่าออกแล้ว'
                 : r.blockCode === 'TENANT_DELETED' ? 'ลบแล้ว'
                 : r.blockCode === 'BILL_NOT_LINKED' ? 'ไม่ผูก'
                 : 'ติดปัญหา'}

@@ -7949,6 +7949,10 @@ test("admin billing page preserves ledger statuses and shows full bill breakdown
     "estimate previews must clearly say they are not persisted DB bills");
   assert.match(src, /ส่งไม่ได้เพราะแถวนี้ยังเป็นประมาณการ/,
     "estimate-send blocker must explain why the bill cannot be sent");
+  assert.match(src, /r\.blockCode === 'TENANT_NOT_ACTIVE' \? 'ผู้เช่าออกแล้ว'/,
+    "send readiness must not confuse tenant moved-out state with issued-bill state");
+  assert.doesNotMatch(src, /r\.blockCode === 'TENANT_NOT_ACTIVE' \? 'ออกแล้ว'/,
+    "tenant-not-active readiness label must not reuse the issued-bill wording");
 });
 
 test("production readiness checks late-fee policy configuration", () => {
