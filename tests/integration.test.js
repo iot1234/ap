@@ -900,6 +900,12 @@ test('/api/bills create validates input and refuses to mutate paid/verified ledg
     'bill create must use request schema validation');
   assert.match(body, /WHERE bills\.status IN \('pending','overdue'\)/,
     'bill update-on-conflict must only edit pending/overdue bills');
+  assert.match(body, /SELECT tenant_id FROM bills[\s\S]{0,120}WHERE bill_no=\$1[\s\S]{0,80}FOR UPDATE/,
+    'bill create must inspect an existing bill_no before deciding whether it can update in place');
+  assert.match(body, /billing\.makeBillNo\(computed\.roomId, computed\.period, \{ tenantId \}\)/,
+    'bill create must move a different tenant in the same room+period onto a tenant-suffixed bill number');
+  assert.match(body, /EXCLUDED\.tenant_id IS NOT NULL AND \(bills\.tenant_id IS NULL OR bills\.tenant_id = EXCLUDED\.tenant_id\)/,
+    'bill update-on-conflict must not overwrite a bill that belongs to another tenant');
   assert.match(body, /NOT EXISTS[\s\S]*payments p[\s\S]*p\.status='verified'/,
     'bill update-on-conflict must refuse bills with verified payments');
   assert.match(body, /BILL_LOCKED_FOR_LEDGER/,

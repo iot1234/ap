@@ -748,6 +748,21 @@ module.exports = function buildBillsExtrasRouter(ctx) {
     const billClient = await pool.connect();
     try {
       await billClient.query('BEGIN');
+      let billNoForInsert = computed.billNo;
+      if (tenantId && computed.billNo) {
+        const existingBillNo = await billClient.query(
+          `SELECT tenant_id FROM bills
+            WHERE bill_no=$1 AND deleted_at IS NULL
+            LIMIT 1
+            FOR UPDATE`,
+          [computed.billNo]
+        );
+        const existingTenantId = existingBillNo.rows[0]?.tenant_id;
+        if (existingTenantId != null && Number(existingTenantId) !== Number(tenantId)) {
+          billNoForInsert = billing.makeBillNo(computed.roomId, computed.period, { tenantId });
+          computed.billNo = billNoForInsert;
+        }
+      }
       const { rows } = await billClient.query(
         `INSERT INTO bills
          (bill_no, tenant_id, room_id, period, rent,
@@ -771,13 +786,17 @@ module.exports = function buildBillsExtrasRouter(ctx) {
            total=EXCLUDED.total, due_date=EXCLUDED.due_date
          WHERE bills.status IN ('pending','overdue')
            AND bills.deleted_at IS NULL
+           AND (
+             (EXCLUDED.tenant_id IS NULL AND bills.tenant_id IS NULL)
+             OR (EXCLUDED.tenant_id IS NOT NULL AND (bills.tenant_id IS NULL OR bills.tenant_id = EXCLUDED.tenant_id))
+           )
            AND NOT EXISTS (
              SELECT 1 FROM payments p
               WHERE p.bill_id=bills.id AND p.status='verified'
            )
          RETURNING *`,
         [
-          computed.billNo, tenantId, computed.roomId, computed.period,
+          billNoForInsert, tenantId, computed.roomId, computed.period,
           computed.rent || 0,
           computed.waterPrevReading, computed.waterCurrentReading,
           computed.waterUnits || 0, computed.waterRate || 0, computed.waterAmount || 0,
