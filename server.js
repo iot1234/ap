@@ -8575,7 +8575,14 @@ app.post('/api/bookings/:id/approve-and-assign', sameOrigin, csrfGuard, requireA
     const bIdx = bookings.findIndex((x) => x && x.id === id);
     if (bIdx < 0) {
       await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'booking not found', code: 'NOT_FOUND' });
+      return res.status(404).json({
+        error: `ไม่พบ booking ${id}`,
+        code: 'BOOKING_NOT_FOUND',
+        hint: 'กลับไปหน้า booking แล้วเปิดรายการล่าสุดอีกครั้ง ข้อมูลบนหน้าจออาจเก่าแล้ว',
+        nextActions: {
+          bookingsUrl: '/admin#bookings',
+        },
+      });
     }
     const booking = bookings[bIdx];
     // Transition guard — match the BOOKING_TRANSITIONS rules.
@@ -8585,7 +8592,13 @@ app.post('/api/bookings/:id/approve-and-assign', sameOrigin, csrfGuard, requireA
       return res.status(400).json({
         error: `cannot approve from status "${booking.status}"`,
         code: 'BAD_TRANSITION',
+        currentStatus: booking.status || 'pending',
+        requestedStatus: 'approved',
         allowed: ['pending', 'reviewing'],
+        hint: 'รายการนี้ไม่ได้อยู่ในขั้นตอนที่อนุมัติได้แล้ว ให้รีเฟรชหน้า booking แล้วใช้รายการสถานะล่าสุด',
+        nextActions: {
+          bookingsUrl: '/admin#bookings',
+        },
       });
     }
     if (booking.depositRequired && ['awaiting_slip', 'rejected'].includes(booking.depositStatus)) {
@@ -8596,6 +8609,9 @@ app.post('/api/bookings/:id/approve-and-assign', sameOrigin, csrfGuard, requireA
           : 'ยังไม่มีสลิปค่าจอง ไม่สามารถอนุมัติการจองได้',
         code: 'BOOKING_DEPOSIT_NOT_READY',
         hint: 'ให้ผู้จองส่งสลิปใหม่ หรือเปลี่ยนสถานะเป็นตรวจสอบหลังแอดมินตรวจยอดด้วยมือแล้ว',
+        nextActions: {
+          bookingsUrl: `/admin#bookings?booking=${encodeURIComponent(id)}`,
+        },
       });
     }
 
@@ -8733,6 +8749,10 @@ app.post('/api/bookings/:id/approve-and-assign', sameOrigin, csrfGuard, requireA
         code: 'NO_VACANT_ROOM_MATCH',
         hint: 'รอห้องว่าง หรือเปิด /admin#rooms มอบหมายห้องด้วยตนเอง '
             + 'หรือใช้ปุ่ม "ปรับสถานะ" ที่หน้า booking',
+        nextActions: {
+          roomsUrl: '/admin#rooms',
+          bookingsUrl: `/admin#bookings?booking=${encodeURIComponent(id)}`,
+        },
       });
     }
     {
@@ -8930,7 +8950,16 @@ app.put('/api/bookings/:id', sameOrigin, csrfGuard, requireAuth, requireRole('ow
   const id = String(req.params.id).slice(0, 64);
   const b = req.body || {};
   if (b.status && !BOOKING_STATUSES.has(String(b.status))) {
-    return res.status(400).json({ error: 'invalid status' });
+    return res.status(400).json({
+      error: `สถานะ booking ไม่ถูกต้อง: ${b.status}`,
+      code: 'INVALID_BOOKING_STATUS',
+      requestedStatus: String(b.status),
+      allowed: Array.from(BOOKING_STATUSES),
+      hint: 'เลือกสถานะจากปุ่มบนหน้า booking เท่านั้น เพื่อให้ระบบล็อก/ปล่อยห้องตามขั้นตอน',
+      nextActions: {
+        bookingsUrl: '/admin#bookings',
+      },
+    });
   }
   const client = await pool.connect();
   let txCommitted = false;
@@ -8941,7 +8970,14 @@ app.put('/api/bookings/:id', sameOrigin, csrfGuard, requireAuth, requireRole('ow
     const idx = list.findIndex((x) => x && x.id === id);
     if (idx < 0) {
       await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'booking not found' });
+      return res.status(404).json({
+        error: `ไม่พบ booking ${id}`,
+        code: 'BOOKING_NOT_FOUND',
+        hint: 'กลับไปหน้า booking แล้วเปิดรายการล่าสุดอีกครั้ง ข้อมูลบนหน้าจออาจเก่าแล้ว',
+        nextActions: {
+          bookingsUrl: '/admin#bookings',
+        },
+      });
     }
     const before = list[idx];
     if (b.status && b.status !== before.status) {
@@ -8951,6 +8987,9 @@ app.put('/api/bookings/:id', sameOrigin, csrfGuard, requireAuth, requireRole('ow
           error: 'การอนุมัติ booking ต้องทำผ่านปุ่มอนุมัติที่จองห้องพร้อมกันเท่านั้น',
           code: 'APPROVAL_REQUIRES_ASSIGNMENT_FLOW',
           hint: 'ใช้ POST /api/bookings/:id/approve-and-assign เพื่อให้สถานะ booking และสถานะห้องถูกล็อกพร้อมกัน',
+          nextActions: {
+            bookingsUrl: `/admin#bookings?booking=${encodeURIComponent(id)}`,
+          },
         });
       }
       const allowed = BOOKING_TRANSITIONS[before.status || 'pending'] || [];
@@ -8958,7 +8997,14 @@ app.put('/api/bookings/:id', sameOrigin, csrfGuard, requireAuth, requireRole('ow
         await client.query('ROLLBACK');
         return res.status(400).json({
           error: `cannot transition ${before.status} → ${b.status}`,
+          code: 'BAD_TRANSITION',
+          currentStatus: before.status || 'pending',
+          requestedStatus: String(b.status),
           allowed,
+          hint: 'สถานะรายการไม่ตรงขั้นตอน ให้รีเฟรชหน้า booking แล้วเลือก action ที่ระบบแสดงให้ในสถานะล่าสุด',
+          nextActions: {
+            bookingsUrl: `/admin#bookings?booking=${encodeURIComponent(id)}`,
+          },
         });
       }
       // Reverse transition rejected → reviewing is a legitimate admin

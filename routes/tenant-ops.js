@@ -1858,6 +1858,15 @@ module.exports = function buildTenantOpsRouter(ctx) {
             hint: 'ทำการ check-out จากห้องเก่าก่อน หรือส่ง { force: true } ถ้าเป็นการ migrate ข้อมูล',
           });
         }
+        if (!isForced && existing.status === 'active' && existing.current_room_id === roomId) {
+          await client.query('ROLLBACK');
+          return res.status(409).json({
+            error: `ผู้เช่ารายนี้ย้ายเข้าห้อง ${roomId} อยู่แล้ว`,
+            code: 'TENANT_ALREADY_CHECKED_IN',
+            currentRoom: existing.current_room_id,
+            hint: 'ใช้สัญญาเดิม/หน้าสัญญาเดิมต่อ หรือ check-out ก่อนหากต้องการเริ่มสัญญาใหม่',
+          });
+        }
 
         // (4) Room must not be currently occupied by a DIFFERENT tenant.
         // Two layers of protection against the parallel-checkin race:
@@ -1949,6 +1958,60 @@ module.exports = function buildTenantOpsRouter(ctx) {
             error: `ไม่พบห้อง ${roomId} ในระบบ — ตรวจเลขห้องก่อน check-in`,
             code: 'ROOM_NOT_FOUND',
             requestedRoom: roomId,
+          });
+        }
+        let activeRoomContract = null;
+        try {
+          const cQ = await client.query(
+            `SELECT id, contract_no, tenant_id, locked_at
+               FROM contracts
+              WHERE room_id=$1 AND status='active' AND deleted_at IS NULL
+              ORDER BY locked_at DESC NULLS LAST, created_at DESC
+              LIMIT 1
+              FOR UPDATE`,
+            [roomId]
+          );
+          activeRoomContract = cQ.rows[0] || null;
+        } catch (err) {
+          if (err.code !== '42P01') throw err;
+        }
+        if (activeRoomContract) {
+          await client.query('ROLLBACK');
+          return res.status(409).json({
+            error: `ห้อง ${roomId} มีสัญญา active อยู่แล้ว (${activeRoomContract.contract_no || activeRoomContract.id})`,
+            code: 'ROOM_CONTRACT_EXISTS',
+            conflict: activeRoomContract,
+            hint: 'ใช้สัญญาเดิม ปิด/ยกเลิกสัญญาเดิม หรือ reconcile ห้องก่อน check-in เพื่อป้องกันห้องเดียวมีหลายสัญญา',
+            nextActions: {
+              contractsUrl: `/admin#contracts?room=${encodeURIComponent(roomId)}&contract=${encodeURIComponent(activeRoomContract.id)}`,
+              roomUrl: `/admin#rooms?room=${encodeURIComponent(roomId)}`,
+            },
+          });
+        }
+        const checkinRoomStatuses = [blobRoomForRent?.status, roomV2ForRent?.status]
+          .filter(Boolean)
+          .map((s) => String(s));
+        const blockingRoomStatus = checkinRoomStatuses.find((s) => !isVacantStatus(s));
+        if (!isForced && blockingRoomStatus) {
+          const reservedBy = blobRoomForRent?.reservedBy ? String(blobRoomForRent.reservedBy) : null;
+          await client.query('ROLLBACK');
+          return res.status(409).json({
+            error: blockingRoomStatus === 'reserved'
+              ? `ห้อง ${roomId} ถูกล็อก/จองไว้แล้ว`
+              : `ห้อง ${roomId} ไม่พร้อมย้ายเข้า (${blockingRoomStatus})`,
+            code: blockingRoomStatus === 'reserved'
+              ? 'ROOM_RESERVED'
+              : (blockingRoomStatus === 'occupied' ? 'ROOM_OCCUPIED' : 'ROOM_UNAVAILABLE'),
+            currentStatus: blockingRoomStatus,
+            reservedBy,
+            hint: reservedBy
+              ? 'เปิดรายการจองหรือสัญญาที่ล็อกห้องนี้ไว้ แล้วอนุมัติ/ยกเลิก/ปิดรายการเดิมก่อน check-in'
+              : 'ตรวจสถานะห้องให้ว่างก่อน check-in หรือใช้ force=true เฉพาะงานแก้ข้อมูลย้อนหลังที่ตรวจสอบแล้ว',
+            nextActions: {
+              roomUrl: `/admin#rooms?room=${encodeURIComponent(roomId)}`,
+              bookingsUrl: `/admin#bookings?room=${encodeURIComponent(roomId)}`,
+              contractsUrl: `/admin#contracts?room=${encodeURIComponent(roomId)}`,
+            },
           });
         }
         const rentAssessment = pricing.assessContractRent({

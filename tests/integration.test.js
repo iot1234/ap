@@ -5172,7 +5172,13 @@ test('checkin enforces moveInDate window + deposit cap + double-occupancy', () =
   assert.match(src, /MOVE_IN_OUT_OF_WINDOW/, 'past/future window guard must exist');
   assert.match(src, /DEPOSIT_TOO_LARGE/, 'deposit-too-large guard must exist');
   assert.match(src, /TENANT_ALREADY_ACTIVE/, 'tenant-already-active-elsewhere guard must exist');
+  assert.match(src, /TENANT_ALREADY_CHECKED_IN/, 'same-tenant duplicate checkin must be blocked cleanly');
   assert.match(src, /ROOM_OCCUPIED/, 'room-occupied-by-other-tenant guard must exist');
+  assert.match(src, /ROOM_CONTRACT_EXISTS/, 'checkin must refuse rooms that already have an active contract');
+  assert.match(src, /checkinRoomStatuses/, 'checkin must inspect room blob + rooms_v2 status before occupying');
+  assert.match(src, /ROOM_RESERVED/, 'checkin must not overwrite a room locked by a booking or draft contract');
+  assert.match(src, /bookingsUrl:[\s\S]{0,180}contractsUrl:/,
+    'reserved-room checkin conflict must include next actions for booking/contract recovery');
   assert.match(src, /pricing\.assessContractRent/, 'rent sanity guard must use the shared pricing helper');
   assert.match(src, /CONTRACT_RENT_TOO_LOW/, 'positive-but-too-low rent must be rejected');
   assert.match(src, /IDENTITY_INCOMPLETE/, 'identity-completeness guard must exist');
@@ -5447,6 +5453,14 @@ test('booking status machine forces approve-and-assign before contract handoff',
     'reviewing → approved must not be a direct PUT transition');
   assert.match(src, /APPROVAL_REQUIRES_ASSIGNMENT_FLOW/,
     'direct approval attempts must return an actionable error code');
+  assert.match(src, /INVALID_BOOKING_STATUS/,
+    'invalid booking status payloads must return an actionable error code');
+  assert.match(src, /BAD_TRANSITION/,
+    'stale or out-of-order booking actions must return an actionable error code');
+  assert.match(src, /BOOKING_NOT_FOUND/,
+    'missing booking records must return a booking-specific error code');
+  assert.match(src, /NO_VACANT_ROOM_MATCH[\s\S]{0,500}nextActions:\s*\{/,
+    'no-room approval failures must return next actions for room assignment');
   // Transitions after the locked approval step: approved → completed is
   // allowed only from quick-invite; completed → cancelled remains open for
   // tenant backs-out cases where no active contract remains.
@@ -5461,7 +5475,12 @@ test('admin toastError explains booking-to-contract guard codes with next action
   const path = require('node:path');
   const hooks = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'hooks.jsx'), 'utf8');
   for (const code of [
+    'INVALID_BOOKING_STATUS',
+    'BAD_TRANSITION',
     'APPROVAL_REQUIRES_ASSIGNMENT_FLOW',
+    'NO_VACANT_ROOM_MATCH',
+    'BOOKING_DEPOSIT_NOT_READY',
+    'BOOKING_HAS_ACTIVE_CONTRACT',
     'BOOKING_NOT_APPROVED',
     'BOOKING_ROOM_MISMATCH',
     'BOOKING_ROOM_NOT_RESERVED',
@@ -5470,6 +5489,7 @@ test('admin toastError explains booking-to-contract guard codes with next action
     'ROOM_OCCUPIED',
     'ROOM_CONTRACT_EXISTS',
     'ROOM_STRANDED_CONTRACT',
+    'TENANT_ALREADY_CHECKED_IN',
     'TENANT_STATUS_INVALID',
     'TENANT_ACTIVE_ROOM_REQUIRED',
     'TENANT_NONACTIVE_ROOM_FORBIDDEN',

@@ -706,6 +706,21 @@
       description: 'ผู้เช่ายังมีบิล/สัญญา/บัตรเข้า-ออกเชื่อมโยง — เปิด softDelete หรือลบข้อมูลที่อ้างถึงก่อน',
     },
     // === Booking → contract flow ======================================
+    INVALID_BOOKING_STATUS: {
+      title: 'สถานะ booking ไม่ถูกต้อง',
+      description: (e) => e.hint || 'เลือกสถานะจากปุ่มบนหน้า booking เท่านั้น เพื่อให้ระบบล็อกหรือปล่อยห้องตามขั้นตอน',
+    },
+    BAD_TRANSITION: {
+      title: 'สถานะรายการไม่ตรงขั้นตอน',
+      description: (e) => {
+        const cur = e.currentStatus || '-';
+        const next = e.requestedStatus || '-';
+        const allowed = Array.isArray(e.allowed) && e.allowed.length
+          ? ` สถานะที่ไปต่อได้: ${e.allowed.join(', ')}`
+          : '';
+        return e.hint || `รายการนี้อยู่สถานะ ${cur} จึงเปลี่ยนเป็น ${next} ไม่ได้.${allowed} รีเฟรชข้อมูลแล้วทำตามปุ่มที่ระบบแสดง`;
+      },
+    },
     APPROVAL_REQUIRES_ASSIGNMENT_FLOW: {
       title: 'อนุมัติการจองผิดช่องทาง',
       description: (e) => e.hint || 'ต้องใช้ปุ่มอนุมัติที่จองห้องพร้อมกัน เพื่อกัน booking approved แต่ห้องไม่ถูก reserve',
@@ -770,6 +785,10 @@
     TENANT_ALREADY_ACTIVE: {
       title: 'ผู้เช่ายัง active อยู่ห้องอื่น',
       description: (e) => e.hint || `checkout ห้อง ${e.currentRoom || 'เดิม'} ก่อน หรือใช้ force เฉพาะงาน migrate`,
+    },
+    TENANT_ALREADY_CHECKED_IN: {
+      title: 'ผู้เช่าย้ายเข้าห้องนี้อยู่แล้ว',
+      description: (e) => e.hint || `ใช้ข้อมูลห้อง ${e.currentRoom || 'ปัจจุบัน'} ต่อ หรือ check-out ก่อนเริ่มสัญญาใหม่`,
     },
     TENANT_STATUS_INVALID: {
       title: 'สถานะผู้เช่าไม่ถูกต้อง',
