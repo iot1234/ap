@@ -7945,6 +7945,10 @@ test("admin billing page preserves ledger statuses and shows full bill breakdown
     "bill preview must list recurring/other charges, not only base utilities");
   assert.match(src, /Number\(b\.vat\) > 0/,
     "bill preview and table must surface VAT when present");
+  assert.match(src, /บิลนี้ยังเป็นประมาณการ/,
+    "estimate previews must clearly say they are not persisted DB bills");
+  assert.match(src, /ส่งไม่ได้เพราะแถวนี้ยังเป็นประมาณการ/,
+    "estimate-send blocker must explain why the bill cannot be sent");
 });
 
 test("production readiness checks late-fee policy configuration", () => {
@@ -7961,6 +7965,10 @@ test("production readiness checks late-fee policy configuration", () => {
     "readiness must warn when late fee has no cap");
   assert.match(block, /late_fee_disabled/,
     "readiness must warn when late fee is disabled");
+  assert.match(block, /MQTT ยังไม่รองรับใน build นี้/,
+    "readiness must not recommend MQTT while the integration is unavailable");
+  assert.doesNotMatch(block, /เปลี่ยนเป็น "manual" หรือ "mqtt"/,
+    "readiness must not point operators to the unsupported MQTT mode");
 });
 
 test("billing rate: a tenant who stays past an expired contract keeps the SIGNED rate, not the formula", () => {

@@ -130,5 +130,7 @@ test('Features page prefers server warnings and renders severity', () => {
   assert.match(page, /setServerWarnings\(Array\.isArray\(d\.warnings\)/, 'load + save capture server warnings');
   assert.match(page, /if \(Array\.isArray\(serverWarnings\)\)/, 'server warnings take precedence over the client mirror');
   assert.match(page, /criticalWarnCount/, 'banner counts critical warnings');
-  assert.match(page, /w\.severity === 'critical' \? '🔴' : '🟡'/, 'each warning shows a severity marker');
+  assert.match(page, /มีฟีเจอร์ที่เปิดอยู่แต่ flow ยังไม่พร้อม/, 'banner explains the feature-flow impact');
+  assert.match(page, /ต้องแก้ก่อนใช้ flow/, 'critical warnings use explicit operator wording');
+  assert.match(page, /<b style=\{\{ color: C\.ink \}\}>ปัญหา:<\/b>/, 'each warning separates problem from fix');
 });

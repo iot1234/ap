@@ -14851,7 +14851,7 @@ app.get('/api/admin/production-readiness', requireAuth, requireRole('owner'), as
   if (flags.meterIot?.mode === 'simulator') {
     fail('simulator', 'Meter simulator',
       'meterIot.mode = "simulator" — กำลังสร้างค่าเทียมทับมิเตอร์จริง',
-      'เปลี่ยนเป็น "manual" หรือ "mqtt" ที่หน้า Features');
+      'เปลี่ยนเป็น "manual" ที่หน้า Features — MQTT ยังไม่รองรับใน build นี้');
   } else {
     ok('simulator', 'Meter simulator', `mode=${flags.meterIot?.mode || 'manual'}`);
   }

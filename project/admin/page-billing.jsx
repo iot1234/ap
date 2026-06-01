@@ -1048,8 +1048,8 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
           tenant: null,
           issues: [{
             sev: 'high', code: 'ESTIMATE_NOT_PERSISTED',
-            msg: 'แถวนี้ยังเป็นประมาณการบนหน้าจอ ไม่พบแถวบิลจริงใน DB สำหรับห้อง/ผู้เช่ารอบนี้',
-            fix: 'ถ้าเพิ่งกดออกบิล ให้รอป้ายเปลี่ยนเป็น "ออกแล้ว" หรือกดออกบิล/รีเฟรชอีกครั้ง; ถ้ายังไม่เปลี่ยน แปลว่ารายการนี้ถูกข้ามและยังส่งไม่ได้',
+            msg: 'ส่งไม่ได้เพราะแถวนี้ยังเป็นประมาณการบนหน้าจอ ไม่ใช่บิลจริงใน DB สำหรับห้อง/ผู้เช่ารอบนี้',
+            fix: 'กดออกบิลจริงก่อน แล้วรอป้ายในตารางเปลี่ยนเป็น "ออกแล้ว"; ถ้ายังเป็นประมาณการ แปลว่ารายการนี้ถูกข้ามหรือข้อมูลผู้เช่า/ห้องยังไม่พร้อม',
           }],
         },
       });
@@ -2915,6 +2915,7 @@ function BillPreview({ b }) {
   const { fmtCurrency } = window;
   const { Pill } = window;
   const statusMeta = billStatusMeta(b);
+  const isPersistedBill = b._source === 'db' && b.dbBillId;
 
   const rows = [
     { label: 'ค่าเช่ารายเดือน', value: b.rent },
@@ -2951,6 +2952,36 @@ function BillPreview({ b }) {
 
   return (
     <div>
+      {!isPersistedBill ? (
+        <div style={{
+          padding: 12,
+          borderRadius: 8,
+          background: C.warningSoft || '#fbf1de',
+          borderLeft: `4px solid ${C.warning || '#c98a2b'}`,
+          color: C.warningInk || '#7A5A0F',
+          fontSize: 12.5,
+          lineHeight: 1.6,
+          marginBottom: 12,
+        }}>
+          <div style={{ fontWeight: 700, marginBottom: 2 }}>บิลนี้ยังเป็นประมาณการ</div>
+          <div>ยังไม่มีแถวบิลจริงใน DB จึงส่งให้ผู้เช่า บันทึกชำระ หรือ track สถานะส่งไม่ได้</div>
+          <div style={{ marginTop: 3 }}>
+            ขั้นตอนถัดไป: กดออกบิลจริงก่อน แล้วรอป้ายในตารางเปลี่ยนเป็น "ออกแล้ว"
+          </div>
+        </div>
+      ) : (
+        <div style={{
+          padding: 10,
+          borderRadius: 8,
+          background: C.successSoft || '#e3f3e8',
+          color: C.successInk || '#1d4a2c',
+          fontSize: 12,
+          lineHeight: 1.5,
+          marginBottom: 12,
+        }}>
+          บิลจริงใน DB #{b.dbBillId}{b.tenantId ? ` · tenant_id=${b.tenantId}` : ''} พร้อมตรวจช่องทางส่งและสถานะชำระ
+        </div>
+      )}
       <div style={{
         padding: 16, background: C.surfaceAlt, borderRadius: 10,
         marginBottom: 16,

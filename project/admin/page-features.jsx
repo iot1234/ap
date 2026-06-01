@@ -439,19 +439,45 @@ function PageFeatures({ setToast, embedded = false, currentUser = null }) {
           borderLeft: `4px solid ${criticalWarnCount ? (C.danger || '#c0392b') : (C.warning || '#c98a2b')}`,
           marginBottom: 12,
         }}>
-          <div style={{ fontFamily: 'IBM Plex Sans Thai', fontSize: 14, fontWeight: 600, marginBottom: 6 }}>
-            {criticalWarnCount ? '🔴' : '⚠️'} ความสัมพันธ์ของ flag ที่ต้องตรวจ ({dependencyWarnings.length}{criticalWarnCount ? ` · วิกฤต ${criticalWarnCount}` : ''})
+          <div style={{ fontFamily: 'IBM Plex Sans Thai', fontSize: 14, fontWeight: 600, marginBottom: 4 }}>
+            มีฟีเจอร์ที่เปิดอยู่แต่ flow ยังไม่พร้อม ({dependencyWarnings.length}{criticalWarnCount ? ` · ต้องแก้ก่อนใช้ ${criticalWarnCount}` : ''})
           </div>
-          <ul style={{ margin: 0, paddingLeft: 20, fontSize: 13, lineHeight: 1.7, color: C.ink2 }}>
+          <div style={{ fontSize: 12.5, color: C.muted, marginBottom: 10, lineHeight: 1.55 }}>
+            รายการด้านล่างคือสาเหตุที่เปิด toggle แล้วผู้ใช้ยังใช้งานไม่ได้จริง หรือระบบอาจทำงานผิด flow
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             {dependencyWarnings.map((w, i) => (
-              <li key={i} style={{ opacity: w.soft ? 0.85 : 1, fontWeight: w.severity === 'critical' ? 600 : 400 }}>
-                <span style={{ marginRight: 4 }}>{w.severity === 'critical' ? '🔴' : '🟡'}</span>
-                <code style={{ background: 'rgba(0,0,0,0.06)', padding: '1px 5px', borderRadius: 3, fontSize: 11.5 }}>{w.flag}</code>{' '}
-                {w.msg}
-                <span style={{ color: C.muted, fontSize: 12, marginLeft: 6 }}>→ {w.fix}</span>
-              </li>
+              <div key={i} style={{
+                opacity: w.soft ? 0.9 : 1,
+                padding: '10px 12px',
+                borderRadius: 8,
+                background: 'rgba(255,255,255,0.52)',
+                border: `1px solid ${w.severity === 'critical' ? (C.danger || '#c0392b') : (C.borderSoft || C.border)}`,
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 5 }}>
+                  <span style={{
+                    fontSize: 11.5,
+                    fontWeight: 700,
+                    color: w.severity === 'critical' ? (C.dangerInk || C.danger || '#7f1d1d') : (C.warningInk || '#7A5A0F'),
+                    background: w.severity === 'critical' ? (C.dangerSoft || '#fdecea') : (C.warningSoft || '#fbf1de'),
+                    padding: '2px 7px',
+                    borderRadius: 999,
+                  }}>
+                    {w.severity === 'critical' ? 'ต้องแก้ก่อนใช้ flow' : 'ควรตรวจ'}
+                  </span>
+                  <code style={{ background: 'rgba(0,0,0,0.06)', padding: '1px 5px', borderRadius: 3, fontSize: 11.5 }}>{w.flag}</code>
+                </div>
+                <div style={{ fontSize: 13, lineHeight: 1.6, color: C.ink2 }}>
+                  <b style={{ color: C.ink }}>ปัญหา:</b> {w.msg}
+                </div>
+                {w.fix ? (
+                  <div style={{ fontSize: 12.5, lineHeight: 1.55, color: C.muted, marginTop: 3 }}>
+                    <b>แก้ไข:</b> {w.fix}
+                  </div>
+                ) : null}
+              </div>
             ))}
-          </ul>
+          </div>
         </Card>
       )}
 
