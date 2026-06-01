@@ -1294,6 +1294,10 @@ test('moved-out tenant debt remains payable through tokenized bill links', () =>
     'readiness must surface moved-out debt as a warning, not a blocking error');
   assert.match(billsExtras, /function billTenantRoomStillMatches\(b\)[\s\S]{0,140}tenant_status === 'moved_out'/,
     'room mismatch guard must not block old-room bills after checkout clears current_room_id');
+  assert.match(billsExtras, /if \(!b\.tenant_current_room\) return false/,
+    'active tenants must be linked to a current room before bill reminders can be sent');
+  assert.match(billsExtras, /billTenantRoomMismatchMessage\(b\)/,
+    'room mismatch blocks must explain whether the tenant moved rooms or is missing current_room_id');
 });
 
 test('public bill payment page shows itemized online bill details', () => {
@@ -7949,10 +7953,16 @@ test("admin billing page preserves ledger statuses and shows full bill breakdown
     "estimate previews must clearly say they are not persisted DB bills");
   assert.match(src, /ส่งไม่ได้เพราะแถวนี้ยังเป็นประมาณการ/,
     "estimate-send blocker must explain why the bill cannot be sent");
-  assert.match(src, /r\.blockCode === 'TENANT_NOT_ACTIVE' \? 'ผู้เช่าออกแล้ว'/,
-    "send readiness must not confuse tenant moved-out state with issued-bill state");
+  assert.match(src, /function tenantStatusUiLabel\(status\)/,
+    "billing page must render tenant statuses through one Thai label helper");
+  assert.match(src, /r\.warnCode === 'EX_TENANT_BILL'/,
+    "moved-out tenant debt must be visible as an ex-tenant send warning");
+  assert.match(src, /sendReadinessBlockLabel\(r\)/,
+    "blocked send rows must show the exact tenant/channel problem");
   assert.doesNotMatch(src, /r\.blockCode === 'TENANT_NOT_ACTIVE' \? 'ออกแล้ว'/,
     "tenant-not-active readiness label must not reuse the issued-bill wording");
+  assert.doesNotMatch(src, /TENANT_NOT_ACTIVE: 'ผู้เช่าออกแล้ว/,
+    "bulk send preview must not call every inactive status moved-out");
 });
 
 test("production readiness checks late-fee policy configuration", () => {

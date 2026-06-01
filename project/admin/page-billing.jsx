@@ -57,6 +57,31 @@ function billStatusMeta(row) {
   return { label: 'รอชำระ', color: 'warning' };
 }
 
+function tenantStatusUiLabel(status) {
+  const raw = String(status || '').trim();
+  const labels = {
+    active: 'กำลังอยู่',
+    moved_out: 'ย้ายออกแล้ว',
+    blacklist: 'บัญชีเฝ้าระวัง',
+    inactive: 'ไม่ใช้งาน',
+    blocked: 'ถูกระงับ',
+  };
+  return labels[raw] || (raw ? `สถานะ ${raw}` : 'ไม่ทราบสถานะ');
+}
+
+function sendReadinessBlockLabel(r) {
+  if (!r) return 'ติดปัญหา';
+  if (r.blockCode === 'NO_TENANT_CHANNEL') return 'ไม่มีช่องทาง';
+  if (r.blockCode === 'EMAIL_NOT_CONFIGURED') return 'อีเมลไม่พร้อม';
+  if (r.blockCode === 'TENANT_MOVED_ROOM') {
+    return r.tenantCurrentRoom ? `ย้ายห้อง ${r.tenantCurrentRoom}` : 'ไม่ผูกห้อง';
+  }
+  if (r.blockCode === 'TENANT_NOT_ACTIVE') return tenantStatusUiLabel(r.tenantStatus);
+  if (r.blockCode === 'TENANT_DELETED') return 'ลบแล้ว';
+  if (r.blockCode === 'BILL_NOT_LINKED') return 'ไม่ผูก';
+  return 'ติดปัญหา';
+}
+
 function billDbStatusToUi(status) {
   const raw = String(status || '').toLowerCase();
   if (raw === 'paid') return 'paid';
@@ -1480,15 +1505,9 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
     {
       key: 'tenant', label: 'เจ้าของบิล', minWidth: 220,
       render: b => {
-        const statusLabel = {
-          active: 'ปัจจุบัน',
-          moved_out: 'ย้ายออกแล้ว',
-          blacklist: 'บัญชีเฝ้าระวัง',
-          inactive: 'ไม่ใช้งาน',
-        };
         const statusText = b.tenantDeletedAt
           ? 'ถูกลบ'
-          : (statusLabel[b.tenantStatus] || b.tenantStatus || '');
+          : (b.tenantStatus ? tenantStatusUiLabel(b.tenantStatus) : '');
         const movedRoom = b.tenantCurrentRoomId
           && String(b.tenantCurrentRoomId) !== String(b.roomId);
         return (
@@ -1646,7 +1665,12 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         if (!r) return <span style={{ fontSize: 11, color: C.muted }}>…</span>;
 
         let mainEl;
-        if (r.canSend && r.warnCode === 'EMAIL_ONLY') {
+        if (r.canSend && r.warnCode === 'EX_TENANT_BILL') {
+          mainEl = (
+            <span title="ผู้เช่าย้ายออกแล้ว — ส่งได้เฉพาะบิลค้างเก่าผ่านลิงก์ชำระเงิน ไม่เปิดสิทธิ์พอร์ทัลกลับ"
+                  style={{ fontSize: 12.5, color: C.warning, fontWeight: 600, whiteSpace: 'nowrap' }}>ผู้เช่าเก่า: ส่งได้</span>
+          );
+        } else if (r.canSend && r.warnCode === 'EMAIL_ONLY') {
           mainEl = (
             <span title="ไม่ผูก LINE — จะส่งทางอีเมล (อาจไปกล่อง spam)"
                   style={{ fontSize: 13, color: C.warning, whiteSpace: 'nowrap' }}>ส่งทางอีเมล</span>
@@ -1665,13 +1689,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
           mainEl = (
             <span title={r.blockMsg || r.blockCode || 'block'}
                   style={{ fontSize: 12, color: C.danger, fontWeight: 600, whiteSpace: 'nowrap' }}>
-              ส่งไม่ได้: {r.blockCode === 'NO_TENANT_CHANNEL' ? 'ไม่มีช่องทาง'
-                : r.blockCode === 'EMAIL_NOT_CONFIGURED' ? 'อีเมลไม่พร้อม'
-                : r.blockCode === 'TENANT_MOVED_ROOM' ? 'ย้ายห้อง'
-                : r.blockCode === 'TENANT_NOT_ACTIVE' ? 'ผู้เช่าออกแล้ว'
-                : r.blockCode === 'TENANT_DELETED' ? 'ลบแล้ว'
-                : r.blockCode === 'BILL_NOT_LINKED' ? 'ไม่ผูก'
-                : 'ติดปัญหา'}
+              ส่งไม่ได้: {sendReadinessBlockLabel(r)}
             </span>
           );
         }
@@ -2546,8 +2564,8 @@ function BulkSendPreviewBody({ preview, C, fmtCurrency }) {
   const blockCodeLabel = {
     BILL_NOT_LINKED: 'บิลไม่ผูกผู้เช่า',
     TENANT_DELETED: 'ผู้เช่าถูกลบ',
-    TENANT_NOT_ACTIVE: 'ผู้เช่าออกแล้ว (moved_out)',
-    TENANT_MOVED_ROOM: 'ผู้เช่าย้ายห้อง',
+    TENANT_NOT_ACTIVE: 'สถานะผู้เช่าไม่พร้อม',
+    TENANT_MOVED_ROOM: 'ผู้เช่าย้ายห้อง/ไม่ผูกห้อง',
     NO_TENANT_CHANNEL: 'ไม่ผูก LINE + ไม่มีอีเมล',
     EMAIL_NOT_CONFIGURED: 'มีอีเมล แต่ระบบ SMTP ยังไม่พร้อม',
   };

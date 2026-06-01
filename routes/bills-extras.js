@@ -192,9 +192,24 @@ function billTenantCanReceiveDebtNotice(status) {
 }
 
 function billTenantRoomStillMatches(b) {
-  if (!b || !b.tenant_current_room) return true;
   if (b.tenant_status === 'moved_out') return true;
+  if (b.tenant_status !== 'active') return false;
+  if (!b.tenant_current_room) return false;
   return String(b.tenant_current_room) === String(b.room_id);
+}
+
+function billTenantRoomMismatchMessage(b) {
+  if (!b?.tenant_current_room) {
+    return 'ผู้เช่าสถานะ active แต่ยังไม่ได้ผูกห้องปัจจุบัน (current_room_id ว่าง)';
+  }
+  return `ผู้เช่าย้ายห้องไปแล้ว (ปัจจุบันอยู่ห้อง ${b.tenant_current_room}, บิลเป็นของห้อง ${b.room_id})`;
+}
+
+function billTenantRoomMismatchHint(b) {
+  if (!b?.tenant_current_room) {
+    return 'ไปที่ /admin#tenants แล้วผูกผู้เช่ากับห้องปัจจุบันก่อนส่งบิล';
+  }
+  return 'ตรวจสอบว่าบิลห้องเก่าควรส่งให้ผู้เช่าคนใหม่ของห้อง — ไม่ใช่ผู้เช่าเก่าที่ย้าย';
 }
 
 module.exports = function buildBillsExtrasRouter(ctx) {
@@ -2179,11 +2194,11 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       // confuses tenants and triggers "นี่ไม่ใช่ห้องของผม" complaints.
       return {
         ok: false,
-        error: `ผู้เช่าย้ายห้องไปแล้ว (ปัจจุบันอยู่ห้อง ${b.tenant_current_room}, บิลเป็นของห้อง ${b.room_id})`,
+        error: billTenantRoomMismatchMessage(b),
         code: 'TENANT_MOVED_ROOM',
         currentRoom: b.tenant_current_room,
         billRoom: b.room_id,
-        hint: 'ตรวจสอบว่าบิลห้องเก่าควรส่งให้ผู้เช่าคนใหม่ของห้อง — ไม่ใช่ผู้เช่าเก่าที่ย้าย',
+        hint: billTenantRoomMismatchHint(b),
       };
     }
     const subject = `บิลรอบ ${b.period} — ห้อง ${b.room_id}`;
@@ -2462,7 +2477,9 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             blockMsg = `ผู้เช่าสถานะ "${b.tenant_status}"`;
           } else if (!billTenantRoomStillMatches(b)) {
             blockCode = 'TENANT_MOVED_ROOM';
-            blockMsg = `ย้ายไปห้อง ${b.tenant_current_room}`;
+            blockMsg = b.tenant_current_room
+              ? `ย้ายไปห้อง ${b.tenant_current_room}`
+              : 'active แต่ไม่ผูกห้องปัจจุบัน';
           } else {
             const lineRecipients = await notifier.getTenantLineRecipients(pool, {
               id: b.tenant_row_id,
@@ -2498,6 +2515,9 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             blockMsg,
             channels,
             tenantName: b.tenant_name || null,
+            tenantStatus: b.tenant_status || null,
+            tenantCurrentRoom: b.tenant_current_room || null,
+            billRoom: b.room_id || null,
             warnCode: !blockCode && b.tenant_status === 'moved_out'
               ? 'EX_TENANT_BILL'
               : (!blockCode && !channels.line && channels.email ? 'EMAIL_ONLY'
@@ -2594,11 +2614,11 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         } else if (!billTenantCanReceiveDebtNotice(b.tenant_status)) {
           issues.push({ sev: 'high', code: 'TENANT_NOT_ACTIVE',
             msg: `ผู้เช่า "${b.tenant_name}" สถานะ "${b.tenant_status}" — ไม่ใช่ผู้เช่าปัจจุบัน`,
-            fix: 'ผู้เช่าออกไปแล้ว — ติดต่อโดยตรง หรือออกบิลให้ผู้เช่าใหม่' });
+            fix: 'ตรวจสถานะผู้เช่าใน /admin#tenants ก่อนส่งบิล หากยังอยู่ให้แก้เป็น active และผูกห้องให้ตรง' });
         } else if (!billTenantRoomStillMatches(b)) {
           issues.push({ sev: 'high', code: 'TENANT_MOVED_ROOM',
-            msg: `ผู้เช่าย้ายห้องไปแล้ว — ปัจจุบันอยู่ห้อง ${b.tenant_current_room} แต่บิลเป็นของห้อง ${b.room_id}`,
-            fix: 'ผู้เช่าใหม่ของห้อง ' + b.room_id + ' ควรเป็นคนรับบิลนี้' });
+            msg: billTenantRoomMismatchMessage(b),
+            fix: billTenantRoomMismatchHint(b) });
         }
 
         // Channel availability — only when tenant is otherwise valid
