@@ -28,19 +28,21 @@ test('withDefaults preserves nested config', () => {
   assert.equal(f.lateFee.enabled, true);
   assert.equal(f.lateFee.ratePctPerMonth, 2.0);
   assert.equal(f.lateFee.gracePeriodDays, 7);
+  assert.equal(f.lateFee.minLateFeeBaht, 0);
   assert.equal(f.lateFee.maxPctOfPrincipal, 0);
   assert.equal(f.lateFee.maxLateFeeBaht, 0);
 });
 
 test('validateConfig validates late-fee caps', () => {
   assert.deepEqual(
-    features.validateConfig({ lateFee: { maxPctOfPrincipal: 50, maxLateFeeBaht: 500 } }),
+    features.validateConfig({ lateFee: { minLateFeeBaht: 20, maxPctOfPrincipal: 50, maxLateFeeBaht: 500 } }),
     []
   );
   const bad = features.validateConfig({
-    lateFee: { maxPctOfPrincipal: 101, maxLateFeeBaht: -1 },
+    lateFee: { minLateFeeBaht: -1, maxPctOfPrincipal: 101, maxLateFeeBaht: -1 },
   });
-  assert.equal(bad.length, 2);
+  assert.equal(bad.length, 3);
+  assert.ok(bad.some((e) => e.field === 'minLateFeeBaht'));
   assert.ok(bad.some((e) => e.field === 'maxPctOfPrincipal'));
   assert.ok(bad.some((e) => e.field === 'maxLateFeeBaht'));
 });

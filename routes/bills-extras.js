@@ -1283,12 +1283,18 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         let lateFeeEnabled = false;
         let ratePctPerMonth = 0;
         let gracePeriodDays = 0;
+        let minLateFeeBaht = 0;
+        let maxLateFeeBaht = 0;
+        let maxPctOfPrincipal = 0;
         try {
           const flags = await features.load(pool).catch(() => ({}));
           if (flags.lateFee?.enabled) {
             lateFeeEnabled = true;
             ratePctPerMonth = Number(flags.lateFee.ratePctPerMonth) || 0;
             gracePeriodDays = Number(flags.lateFee.gracePeriodDays) || 0;
+            minLateFeeBaht = Number(flags.lateFee.minLateFeeBaht) || 0;
+            maxLateFeeBaht = Number(flags.lateFee.maxLateFeeBaht) || 0;
+            maxPctOfPrincipal = Number(flags.lateFee.maxPctOfPrincipal) || 0;
           }
         } catch { /* feature load failure → preserve the fee already on the bill */ }
         const restore = billing.computeRestoredBillAmounts({
@@ -1301,6 +1307,9 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           lateFeeEnabled,
           ratePctPerMonth,
           gracePeriodDays,
+          minLateFeeBaht,
+          maxLateFeeBaht,
+          maxPctOfPrincipal,
         });
         const restoredStatus = restore.status;
         const restoredLateFee = restore.lateFee;

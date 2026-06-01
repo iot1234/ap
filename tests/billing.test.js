@@ -179,6 +179,24 @@ test('statusOf: paid > overdue > pending', () => {
   assert.equal(billing.statusOf({ paid_at: null, due_date: future }), 'pending');
 });
 
+test('statusOf: date-only bills stay pending through the due date', () => {
+  const prevTZ = process.env.TZ;
+  process.env.TZ = 'Asia/Bangkok';
+  try {
+    const dueDate = '2026-05-29';
+    assert.equal(
+      billing.statusOf({ paid_at: null, due_date: dueDate }, new Date('2026-05-29T23:59:59+07:00')),
+      'pending'
+    );
+    assert.equal(
+      billing.statusOf({ paid_at: null, due_date: dueDate }, new Date('2026-05-30T00:00:00+07:00')),
+      'overdue'
+    );
+  } finally {
+    process.env.TZ = prevTZ;
+  }
+});
+
 test('makeBillNo is deterministic for room+period', () => {
   assert.equal(billing.makeBillNo('201', '2026-05'), 'INV-2026-05-201');
 });
@@ -1002,4 +1020,46 @@ test("computeLateFee: caps (maxPctOfPrincipal / maxBaht) bound runaway accrual",
   const highCap = billing.computeLateFee({ ...opts, maxBaht: 999999 });
   assert.equal(highCap.lateFee, uncapped.lateFee);
   assert.equal(highCap.capped, false);
+});
+
+test("computeLateFee: minimum fee applies only after a positive fee accrues", () => {
+  const opts = { base: 10000, dueDate: "2026-01-01", ratePctPerMonth: 1.5, gracePeriodDays: 0 };
+  const tiny = billing.computeLateFee({ ...opts, now: new Date("2026-01-02T12:00:00+07:00"), minLateFeeBaht: 50 });
+  assert.equal(tiny.rawLateFee, 5);
+  assert.equal(tiny.lateFee, 50);
+  assert.equal(tiny.minLateFeeBaht, 50);
+  assert.equal(tiny.minApplied, true);
+
+  const notOverdue = billing.computeLateFee({ ...opts, now: new Date("2026-01-01T23:00:00+07:00"), minLateFeeBaht: 50 });
+  assert.equal(notOverdue.lateFee, 0);
+  assert.equal(notOverdue.minApplied, false);
+
+  const bounded = billing.computeLateFee({
+    ...opts,
+    now: new Date("2026-01-02T12:00:00+07:00"),
+    minLateFeeBaht: 50,
+    maxLateFeeBaht: 40,
+  });
+  assert.equal(bounded.lateFee, 40);
+  assert.equal(bounded.minApplied, true);
+  assert.equal(bounded.capped, true);
+});
+
+test("computeRestoredBillAmounts: restore path honors min and cap late-fee policy", () => {
+  const r = billing.computeRestoredBillAmounts({
+    subtotal: 10000,
+    vat: 0,
+    lateFee: 0,
+    total: 10000,
+    dueDate: "2026-01-01",
+    now: new Date("2026-01-02T12:00:00+07:00"),
+    lateFeeEnabled: true,
+    ratePctPerMonth: 1.5,
+    gracePeriodDays: 0,
+    minLateFeeBaht: 50,
+    maxLateFeeBaht: 40,
+  });
+  assert.equal(r.status, "overdue");
+  assert.equal(r.lateFee, 40);
+  assert.equal(r.total, 10040);
 });

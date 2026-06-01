@@ -3139,6 +3139,7 @@ function lateFeePolicyFromFlags(flags) {
   return {
     ratePctPerMonth: Number(lateFee.ratePctPerMonth) || 0,
     gracePeriodDays: Number(lateFee.gracePeriodDays) || 0,
+    minLateFeeBaht: Number(lateFee.minLateFeeBaht) || 0,
     maxPctOfPrincipal: Number(lateFee.maxPctOfPrincipal) || 0,
     maxLateFeeBaht: Number(lateFee.maxLateFeeBaht) || 0,
   };
@@ -3163,6 +3164,7 @@ function buildLateFeeCalculation(b, policy = {}) {
   const principal = billing.round2(Math.max(0, total - lateFee));
   const ratePctPerMonth = Number(policy.ratePctPerMonth) || 0;
   const gracePeriodDays = Math.max(0, Number(policy.gracePeriodDays) || 0);
+  const minLateFeeBaht = Math.max(0, Number(policy.minLateFeeBaht) || 0);
   const maxPctOfPrincipal = Math.max(0, Number(policy.maxPctOfPrincipal) || 0);
   const maxLateFeeBaht = Math.max(0, Number(policy.maxLateFeeBaht) || 0);
   const calc = billing.computeLateFee({
@@ -3170,8 +3172,9 @@ function buildLateFeeCalculation(b, policy = {}) {
     dueDate: b && b.due_date,
     ratePctPerMonth,
     gracePeriodDays,
+    minLateFeeBaht,
     maxPctOfPrincipal,
-    maxBaht: maxLateFeeBaht,
+    maxLateFeeBaht,
   });
   const daysOver = Number(calc.daysOver) || 0;
   const monthsOver = Number(calc.monthsOver) || 0;
@@ -3180,6 +3183,9 @@ function buildLateFeeCalculation(b, policy = {}) {
     const uncappedLateFee = Number(calc.uncappedLateFee) || lateFee;
     formulaText = `คำนวณจากยอดก่อนค่าปรับ ฿${fmtMoneyTH(principal)} × ${fmtNumberTH(ratePctPerMonth)}%/เดือน × ${fmtNumberTH(daysOver)} วัน ÷ 30 = ฿${fmtMoneyTH(uncappedLateFee)}`;
     if (gracePeriodDays > 0) formulaText += ` (หักระยะผ่อนผัน ${fmtNumberTH(gracePeriodDays)} วันแล้ว)`;
+    if (calc.minApplied) {
+      formulaText += `; ปรับตามขั้นต่ำ ฿${fmtMoneyTH(minLateFeeBaht)}`;
+    }
     if (calc.capped) {
       const caps = [];
       if (maxPctOfPrincipal > 0) caps.push(`${fmtNumberTH(maxPctOfPrincipal)}% ของยอดก่อนค่าปรับ`);
@@ -3192,6 +3198,7 @@ function buildLateFeeCalculation(b, policy = {}) {
     principal,
     ratePctPerMonth,
     gracePeriodDays,
+    minLateFeeBaht,
     maxPctOfPrincipal,
     maxLateFeeBaht,
     daysOver,

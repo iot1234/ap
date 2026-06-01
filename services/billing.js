@@ -637,10 +637,25 @@ function isFlatUtilityConfigured(room, prefix) {
 function parseDueDateLocal(dueDate) {
   if (dueDate instanceof Date) return dueDate;
   if (dueDate == null || dueDate === '') return null;
-  const m = String(dueDate).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  const m = String(dueDate).match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (m) return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])); // local midnight
   const d = new Date(dueDate);
   return Number.isFinite(d.getTime()) ? d : null;
+}
+
+function isDateOnlyDueDate(dueDate) {
+  return typeof dueDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dueDate);
+}
+
+function isPastDue(dueDate, now = new Date()) {
+  const due = parseDueDateLocal(dueDate);
+  const ref = now instanceof Date && Number.isFinite(now.getTime()) ? now : new Date();
+  if (!due || !Number.isFinite(due.getTime()) || !Number.isFinite(ref.getTime())) return false;
+  if (isDateOnlyDueDate(dueDate)) {
+    const cutoff = new Date(due.getFullYear(), due.getMonth(), due.getDate() + 1);
+    return ref.getTime() >= cutoff.getTime();
+  }
+  return due.getTime() < ref.getTime();
 }
 
 /**
@@ -649,10 +664,7 @@ function parseDueDateLocal(dueDate) {
 function statusOf(bill, now = new Date()) {
   if (bill.paid_at) return 'paid';
   if (!bill.due_date) return 'pending';
-  const due = parseDueDateLocal(bill.due_date);
-  if (!due || !Number.isFinite(due.getTime())) return 'pending';
-  if (due.getTime() < now.getTime()) return 'overdue';
-  return 'pending';
+  return isPastDue(bill.due_date, now) ? 'overdue' : 'pending';
 }
 
 /**
@@ -739,7 +751,17 @@ function isChargeApplicableForPeriod(charge, period) {
  *          lateFee already round2'd. daysOver/monthsOver returned for
  *          the audit-log entry ("billed X฿ because 53 days overdue").
  */
-function computeLateFee({ base, dueDate, ratePctPerMonth = 0, gracePeriodDays = 0, maxPctOfPrincipal = 0, maxBaht = 0, now } = {}) {
+function computeLateFee({
+  base,
+  dueDate,
+  ratePctPerMonth = 0,
+  gracePeriodDays = 0,
+  minLateFeeBaht = 0,
+  maxPctOfPrincipal = 0,
+  maxLateFeeBaht = 0,
+  maxBaht = 0,
+  now,
+} = {}) {
   const safeBase = Number(base);
   const ratePct = Number(ratePctPerMonth);
   const grace = Number(gracePeriodDays);
@@ -747,18 +769,43 @@ function computeLateFee({ base, dueDate, ratePctPerMonth = 0, gracePeriodDays = 
   // bills.late_fee column and breaks downstream chk_bills_amounts_nonnegative.
   if (!Number.isFinite(safeBase) || safeBase <= 0
       || !Number.isFinite(ratePct) || ratePct <= 0) {
-    return { lateFee: 0, daysOver: 0, monthsOver: 0, base: Number.isFinite(safeBase) ? safeBase : 0, uncappedLateFee: 0, capped: false };
+    return {
+      lateFee: 0, daysOver: 0, monthsOver: 0,
+      base: Number.isFinite(safeBase) ? safeBase : 0,
+      rawLateFee: 0, uncappedLateFee: 0,
+      minLateFeeBaht: Math.max(0, Number(minLateFeeBaht) || 0),
+      maxLateFeeBaht: Math.max(0, Number(maxLateFeeBaht || maxBaht) || 0),
+      maxPctOfPrincipal: Math.max(0, Number(maxPctOfPrincipal) || 0),
+      minApplied: false,
+      capped: false,
+    };
   }
   const due = parseDueDateLocal(dueDate);
   if (!due || !Number.isFinite(due.getTime())) {
-    return { lateFee: 0, daysOver: 0, monthsOver: 0, base: safeBase, uncappedLateFee: 0, capped: false };
+    return {
+      lateFee: 0, daysOver: 0, monthsOver: 0, base: safeBase,
+      rawLateFee: 0, uncappedLateFee: 0,
+      minLateFeeBaht: Math.max(0, Number(minLateFeeBaht) || 0),
+      maxLateFeeBaht: Math.max(0, Number(maxLateFeeBaht || maxBaht) || 0),
+      maxPctOfPrincipal: Math.max(0, Number(maxPctOfPrincipal) || 0),
+      minApplied: false,
+      capped: false,
+    };
   }
   const reference = now instanceof Date && Number.isFinite(now.getTime()) ? now : new Date();
   const safeGrace = Number.isFinite(grace) ? Math.max(0, grace) : 0;
   const rawDays = Math.floor((reference.getTime() - due.getTime()) / 86_400_000);
   const daysOver = Math.max(0, rawDays - safeGrace);
   if (daysOver <= 0) {
-    return { lateFee: 0, daysOver: 0, monthsOver: 0, base: safeBase, uncappedLateFee: 0, capped: false };
+    return {
+      lateFee: 0, daysOver: 0, monthsOver: 0, base: safeBase,
+      rawLateFee: 0, uncappedLateFee: 0,
+      minLateFeeBaht: Math.max(0, Number(minLateFeeBaht) || 0),
+      maxLateFeeBaht: Math.max(0, Number(maxLateFeeBaht || maxBaht) || 0),
+      maxPctOfPrincipal: Math.max(0, Number(maxPctOfPrincipal) || 0),
+      minApplied: false,
+      capped: false,
+    };
   }
   const monthsOver = daysOver / 30;
   const uncapped = round2(safeBase * (ratePct / 100) * monthsOver);
@@ -767,16 +814,30 @@ function computeLateFee({ base, dueDate, ratePctPerMonth = 0, gracePeriodDays = 
   // ceiling wins. maxPctOfPrincipal caps relative to the bill; maxBaht is an
   // absolute ceiling. A capped fee never exceeds the principal it's based on
   // implicitly through these, but operators set the real policy.
+  const minFee = Math.max(0, Number(minLateFeeBaht) || 0);
   let lateFee = uncapped;
+  const minApplied = lateFee > 0 && minFee > 0 && round2(minFee) > lateFee;
+  if (minApplied) lateFee = round2(minFee);
+  const beforeCaps = lateFee;
   const capPct = Number(maxPctOfPrincipal);
   if (Number.isFinite(capPct) && capPct > 0) {
     lateFee = Math.min(lateFee, round2(safeBase * (capPct / 100)));
   }
-  const capBaht = Number(maxBaht);
+  const capBaht = Number(maxLateFeeBaht || maxBaht);
   if (Number.isFinite(capBaht) && capBaht > 0) {
     lateFee = Math.min(lateFee, round2(capBaht));
   }
-  return { lateFee, daysOver, monthsOver, base: safeBase, uncappedLateFee: uncapped, capped: lateFee < uncapped };
+  lateFee = round2(Math.max(0, lateFee));
+  return {
+    lateFee, daysOver, monthsOver, base: safeBase,
+    rawLateFee: uncapped,
+    uncappedLateFee: uncapped,
+    minLateFeeBaht: minFee,
+    maxLateFeeBaht: Math.max(0, Number(capBaht) || 0),
+    maxPctOfPrincipal: Math.max(0, Number(maxPctOfPrincipal) || 0),
+    minApplied,
+    capped: lateFee < beforeCaps,
+  };
 }
 
 /**
@@ -822,6 +883,7 @@ function computeRestoredBillAmounts({
   subtotal, vat, lateFee = 0, total,
   dueDate, now,
   lateFeeEnabled = false, ratePctPerMonth = 0, gracePeriodDays = 0,
+  minLateFeeBaht = 0, maxLateFeeBaht = 0, maxPctOfPrincipal = 0,
 } = {}) {
   const priorFee = Number(lateFee) || 0;
   const subVat = round2((Number(subtotal) || 0) + (Number(vat) || 0));
@@ -834,8 +896,7 @@ function computeRestoredBillAmounts({
   const principal = Number.isFinite(principalRaw) && principalRaw > 0 ? principalRaw : 0;
 
   const ref = now instanceof Date && Number.isFinite(now.getTime()) ? now : new Date();
-  const due = parseDueDateLocal(dueDate);
-  const isOverdue = !!(due && Number.isFinite(due.getTime()) && due.getTime() < ref.getTime());
+  const isOverdue = isPastDue(dueDate, ref);
 
   if (!isOverdue) {
     // Not yet past due → no late fee applies (R2). Restore to principal only.
@@ -848,9 +909,12 @@ function computeRestoredBillAmounts({
   if (lateFeeEnabled && Number(ratePctPerMonth) > 0) {
     const calc = computeLateFee({
       base: principal,
-      dueDate: due,
+      dueDate,
       ratePctPerMonth,
       gracePeriodDays,
+      minLateFeeBaht,
+      maxLateFeeBaht,
+      maxPctOfPrincipal,
       now: ref,
     });
     fee = calc.lateFee;   // may legitimately be 0 if now within the grace window

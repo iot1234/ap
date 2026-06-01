@@ -91,6 +91,7 @@ const DEFAULTS = Object.freeze({
     // Optional ceilings on the accrued late fee (prevention against runaway
     // accrual on long-overdue bills). 0 = no cap (current behavior). The lower
     // of the two wins when both are set.
+    minLateFeeBaht: 0,      // minimum fee once any positive late fee accrues
     maxPctOfPrincipal: 0,   // cap at X% of the bill principal (subtotal+vat)
     maxLateFeeBaht: 0,      // absolute ฿ ceiling
   },
@@ -387,6 +388,7 @@ function validateConfig(partial) {
     if (has(f, 'vat') && has(f.vat, 'ratePct')) range('vat', 'ratePct', f.vat.ratePct, 0, 30, 'ต้องเป็นตัวเลข 0–30 (%)');
     if (has(f, 'lateFee') && has(f.lateFee, 'ratePctPerMonth')) range('lateFee', 'ratePctPerMonth', f.lateFee.ratePctPerMonth, 0, 100, 'ต้องเป็น 0–100 (%/เดือน)');
     if (has(f, 'lateFee') && has(f.lateFee, 'gracePeriodDays')) range('lateFee', 'gracePeriodDays', f.lateFee.gracePeriodDays, 0, 365, 'ต้องเป็นจำนวนเต็ม 0–365 วัน', true);
+    if (has(f, 'lateFee') && has(f.lateFee, 'minLateFeeBaht')) range('lateFee', 'minLateFeeBaht', f.lateFee.minLateFeeBaht, 0, 1_000_000, 'ต้องเป็นตัวเลข 0–1,000,000 บาท');
     if (has(f, 'lateFee') && has(f.lateFee, 'maxPctOfPrincipal')) range('lateFee', 'maxPctOfPrincipal', f.lateFee.maxPctOfPrincipal, 0, 100, 'ต้องเป็น 0–100 (% ของยอดก่อนค่าปรับ)');
     if (has(f, 'lateFee') && has(f.lateFee, 'maxLateFeeBaht')) range('lateFee', 'maxLateFeeBaht', f.lateFee.maxLateFeeBaht, 0, 10_000_000, 'ต้องเป็นตัวเลข 0–10,000,000 บาท');
     if (has(f, 'meterIot') && has(f.meterIot, 'anomalySigmas')) range('meterIot', 'anomalySigmas', f.meterIot.anomalySigmas, 1, 10, 'ต้องเป็น 1–10');

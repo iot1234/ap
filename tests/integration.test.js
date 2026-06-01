@@ -7624,27 +7624,38 @@ test("scheduler tickLateFee honors late-fee caps + per-room exemption", () => {
   const ui = fs.readFileSync(path.join(__dirname, "..", "project", "admin", "page-features.jsx"), "utf8");
   assert.match(sched, /maxPctOfPrincipal/, "scheduler must read the % cap");
   assert.match(sched, /maxLateFeeBaht/, "scheduler must read the baht cap");
+  assert.match(sched, /minLateFeeBaht/, "scheduler must read the minimum fee");
   assert.match(sched, /lateFeeExemptRooms/, "scheduler must load per-room exemptions");
   // Both phases A + B must skip exempt rooms.
   const skips = sched.split("lateFeeExemptRooms.has(String(b.room_id))").length - 1;
   assert.ok(skips >= 2, "both late-fee phases must skip exempt rooms (got " + skips + ")");
-  // computeLateFee gets the caps passed through.
-  const passes = sched.split("maxBaht: maxLateFeeBaht").length - 1;
-  assert.ok(passes >= 2, "both phases must pass the caps to computeLateFee");
+  // computeLateFee gets the policy bounds passed through.
+  const maxPasses = sched.split("maxLateFeeBaht").length - 1;
+  const minPasses = sched.split("minLateFeeBaht").length - 1;
+  assert.ok(maxPasses >= 4, "both phases must pass the baht cap to computeLateFee");
+  assert.ok(minPasses >= 4, "both phases must pass the minimum fee to computeLateFee");
   assert.match(sched, /capped: !!calc\.capped/,
     "audit log must record whether the applied late fee was capped");
   assert.match(features, /range\('lateFee', 'maxPctOfPrincipal'/,
     "feature validation must reject invalid percentage caps");
+  assert.match(features, /range\('lateFee', 'minLateFeeBaht'/,
+    "feature validation must reject invalid minimum fees");
   assert.match(features, /range\('lateFee', 'maxLateFeeBaht'/,
     "feature validation must reject invalid baht caps");
+  assert.match(ui, /field="minLateFeeBaht"/,
+    "features UI must let admin configure the minimum fee");
   assert.match(ui, /field="maxPctOfPrincipal"/,
     "features UI must let admin configure the percentage cap");
   assert.match(ui, /field="maxLateFeeBaht"/,
     "features UI must let admin configure the baht cap");
   assert.match(server, /maxPctOfPrincipal: Number\(lateFee\.maxPctOfPrincipal\) \|\| 0/,
     "tenant/public bill calculation policy must carry the percentage cap");
-  assert.match(server, /maxBaht: maxLateFeeBaht/,
+  assert.match(server, /minLateFeeBaht: Number\(lateFee\.minLateFeeBaht\) \|\| 0/,
+    "tenant/public bill calculation policy must carry the minimum fee");
+  assert.match(server, /maxLateFeeBaht/,
     "tenant/public bill calculation must pass the baht cap to computeLateFee");
+  assert.match(server, /ปรับตามขั้นต่ำ/,
+    "tenant/public bill explanation must say when the minimum fee was applied");
   assert.match(server, /calc\.capped[\s\S]{0,240}จำกัดตามเพดานค่าปรับ/,
     "tenant/public bill explanation must say when the fee was capped");
 });

@@ -264,6 +264,7 @@ async function tickLateFee(pool, flags, now, state) {
     const gracePeriodDays = lateFeeEnabled ? Number(flags.lateFee.gracePeriodDays || 0) : 0;
     // Optional accrual ceilings (prevention against runaway late fees on
     // long-overdue bills). 0 = no cap (current behavior).
+    const minLateFeeBaht = lateFeeEnabled ? Number(flags.lateFee.minLateFeeBaht || 0) : 0;
     const maxPctOfPrincipal = lateFeeEnabled ? Number(flags.lateFee.maxPctOfPrincipal || 0) : 0;
     const maxLateFeeBaht = lateFeeEnabled ? Number(flags.lateFee.maxLateFeeBaht || 0) : 0;
     // Per-room late-fee exemption (config.billing.lateFeeExemptRooms: string[]) —
@@ -371,8 +372,9 @@ async function tickLateFee(pool, flags, now, state) {
           dueDate: b.due_date,
           ratePctPerMonth: effRate,
           gracePeriodDays,
+          minLateFeeBaht,
           maxPctOfPrincipal,
-          maxBaht: maxLateFeeBaht,
+          maxLateFeeBaht,
           now,
         });
         if (calc.lateFee > 0 && calc.lateFee !== Number(b.late_fee)) {
@@ -396,7 +398,7 @@ async function tickLateFee(pool, flags, now, state) {
                    lateFee: calc.lateFee, base, daysOver: calc.daysOver,
                    monthsOver: calc.monthsOver, ratePctPerMonth: effRate,
                    rateSource: effRate === ratePctMonth ? 'global' : 'contract',
-                   gracePeriodDays, maxPctOfPrincipal, maxLateFeeBaht,
+                   gracePeriodDays, minLateFeeBaht, maxPctOfPrincipal, maxLateFeeBaht,
                    capped: !!calc.capped, due_date: b.due_date, phase: 'A-flip',
                  })]
             ).catch(() => { /* audit best-effort */ });
@@ -457,8 +459,9 @@ async function tickLateFee(pool, flags, now, state) {
             dueDate: b.due_date,
             ratePctPerMonth: effRate,
             gracePeriodDays,
+            minLateFeeBaht,
             maxPctOfPrincipal,
-            maxBaht: maxLateFeeBaht,
+            maxLateFeeBaht,
             now,
           });
           if (calc.lateFee > 0 && calc.lateFee !== Number(b.late_fee)) {
@@ -480,7 +483,7 @@ async function tickLateFee(pool, flags, now, state) {
                    lateFee: calc.lateFee, base, daysOver: calc.daysOver,
                    monthsOver: calc.monthsOver, ratePctPerMonth: effRate,
                    rateSource: effRate === ratePctMonth ? 'global' : 'contract',
-                   gracePeriodDays, maxPctOfPrincipal, maxLateFeeBaht,
+                   gracePeriodDays, minLateFeeBaht, maxPctOfPrincipal, maxLateFeeBaht,
                    capped: !!calc.capped, due_date: b.due_date,
                    prevLateFee: Number(b.late_fee) || 0, phase: 'B-refresh',
                  })]
