@@ -271,6 +271,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
   // null = closed. Holds { bill, method, ref, note, busy } so admin picks
   // payment method (cash/transfer/promptpay) before the row flips paid.
   const [markPaidPrompt, setMarkPaidPrompt] = useState(null);
+  const [billSearch, setBillSearch] = useState('');
 
   // Real bills from DB for the current period. Falls back to client estimate
   // (computed from rooms blob below) when no bills have been issued yet, so
@@ -690,18 +691,38 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         latestPaidBy: real.latest_paid_by || null,
         latestPaidProvider: real.latest_paid_provider || null,
         latestPaidAt: real.latest_paid_at || null,
+        _matchWarning: est._matchWarning || null,
       };
     };
+
+    const dbBillsGroupedByRoom = {};
+    (dbBills || []).forEach((b) => {
+      const key = String(b.room_id || '');
+      if (!key) return;
+      if (!dbBillsGroupedByRoom[key]) dbBillsGroupedByRoom[key] = [];
+      dbBillsGroupedByRoom[key].push(b);
+    });
 
     const consumedDbBillIds = new Set();
     const rows = estimates.map((est) => {
       const tenantId = ownerTenantId(est);
-      const real = tenantId
+      const roomKey = String(est.roomId || '');
+      const roomBills = dbBillsGroupedByRoom[roomKey] || [];
+      let real = tenantId
         ? realBillsByOwnerKey[billOwnerKey(est.roomId, tenantId)]
-        : legacyRealBillsByRoom[String(est.roomId)];
+        : legacyRealBillsByRoom[roomKey];
+      if (!real) {
+        real = roomBills.find((candidate) => dbBillMatchesUiBill(candidate, est));
+      }
+      if (!real && roomBills.length === 1) {
+        real = roomBills[0];
+      }
       if (!real) return { ...est, _source: est._source || 'estimate' };
       consumedDbBillIds.add(Number(real.id));
-      return rowFromDbBill(real, est);
+      const matchedByRoomOnly = !dbBillMatchesUiBill(real, est);
+      return rowFromDbBill(real, matchedByRoomOnly
+        ? { ...est, _matchWarning: 'จับคู่จากห้องเพราะมีบิลจริงใบเดียวในรอบนี้' }
+        : est);
     });
     (dbBills || []).forEach((real) => {
       if (!consumedDbBillIds.has(Number(real.id))) rows.push(rowFromDbBill(real));
@@ -709,13 +730,44 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
     return rows;
   }, [rooms, config, realBillsByOwnerKey, legacyRealBillsByRoom, dbBills, currentPeriod, currentPeriodDate, activeRecurring, periodMeters, serverPreviewBills]);
 
-  const filtered = useMemo(() => {
+  const tabRows = useMemo(() => {
     if (tab === 'current') return bills;
     if (tab === 'unpaid')  return bills.filter(isBillPayableUi).filter(b => b._source === 'db');
     if (tab === 'paid')    return bills.filter(b => b._source === 'db' && b.status === 'paid');
     if (tab === 'review')  return bills.filter(b => (b.pendingSlipCount || 0) > 0);
     return bills;
   }, [bills, tab]);
+
+  const filtered = useMemo(() => {
+    const q = billSearch.trim().toLowerCase();
+    if (!q) return tabRows;
+    return tabRows.filter((b) => {
+      const sourceLabel = b._source === 'db'
+        ? 'บิลจริง ออกแล้ว db ฐานข้อมูล'
+        : 'ประมาณการ estimate ยังไม่บันทึก db';
+      return [
+        b.id,
+        b.dbBillNo,
+        b.dbBillId,
+        b.roomId,
+        b.tenant,
+        b.phone,
+        b.tenantId,
+        b.period,
+        b.periodDisplay,
+        b.dueDate,
+        b.dueDateDisplay,
+        b.dbStatus,
+        b.status,
+        b.total,
+        sourceLabel,
+        billStatusMeta(b).label,
+        tenantStatusUiLabel(b.tenantStatus),
+        b.latestPaidBy,
+        b.latestPaidProvider,
+      ].some((value) => String(value ?? '').toLowerCase().includes(q));
+    });
+  }, [tabRows, billSearch]);
 
   const pendingReviewCount = useMemo(
     () => bills.filter((b) => b._source === 'db' && (b.pendingSlipCount || 0) > 0).length,
@@ -1558,6 +1610,13 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
                   <span title={`bills.tenant_id=${b.tenantId || '-'}`}>tenant_id={b.tenantId || '-'}</span>
                   {statusText && <span>· {statusText}</span>}
                   {movedRoom && <span>· ปัจจุบันห้อง {b.tenantCurrentRoomId}</span>}
+                  {b._matchWarning && (
+                    <span
+                      style={{ color: C.warning || C.accent }}
+                      title="ระบบใช้บิลจริงจาก DB แทนแถวประมาณการ เพราะรอบนี้ห้องนี้มีบิลจริงเพียงใบเดียว">
+                      · {b._matchWarning}
+                    </span>
+                  )}
                 </div>
               )}
             </div>
@@ -1960,6 +2019,59 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         style={{ marginBottom: 14 }}
       />
 
+      <div style={{
+        marginBottom: 12,
+        padding: 12,
+        border: `1px solid ${C.border}`,
+        borderRadius: 8,
+        background: C.surface,
+        display: 'flex',
+        alignItems: 'center',
+        gap: 10,
+        flexWrap: 'wrap',
+      }}>
+        <label style={{
+          flex: '1 1 320px',
+          minWidth: 220,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+        }}>
+          <span style={{ fontSize: 12, fontWeight: 700, color: C.muted, whiteSpace: 'nowrap' }}>ค้นหา</span>
+          <input
+            type="search"
+            value={billSearch}
+            onChange={(e) => setBillSearch(e.target.value)}
+            aria-label="ค้นหารายการบิล"
+            placeholder="ค้นหาเลขบิล ห้อง ผู้เช่า เบอร์ โทร สถานะ"
+            style={{
+              flex: 1,
+              minWidth: 0,
+              height: 36,
+              border: `1px solid ${C.border}`,
+              borderRadius: 8,
+              padding: '0 12px',
+              fontSize: 13,
+              fontFamily: 'IBM Plex Sans Thai, sans-serif',
+              outline: 'none',
+              background: C.bg || '#fff',
+              color: C.ink,
+            }}
+          />
+        </label>
+        {billSearch.trim() && (
+          <Btn variant="ghost" size="sm" onClick={() => setBillSearch('')}>ล้าง</Btn>
+        )}
+        <span style={{ fontSize: 12, color: C.muted }}>
+          พบ {fmt(filtered.length)} จาก {fmt(tabRows.length)} รายการในแท็บนี้
+        </span>
+        {stats.estimateCount > 0 && (
+          <span style={{ fontSize: 12, color: C.warning || C.muted }}>
+            ประมาณการ {fmt(stats.estimateCount)} แถว: ยังไม่เจอบิลจริงใน DB ของห้องนั้น
+          </span>
+        )}
+      </div>
+
       {selected.size > 0 && (
         <Card style={{
           marginBottom: 12, padding: 12,
@@ -2018,6 +2130,15 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
                 icon="ผิดพลาด"
                 title="โหลดบิลไม่สำเร็จ"
                 description={`${dbBillsErr} — ลองรีเฟรชหน้า หรือถ้ายังไม่ได้ ติดต่อทีมเทคนิค`}
+              />
+            );
+          }
+          if (billSearch.trim()) {
+            return (
+              <EmptyState
+                icon="ค้นหา"
+                title="ไม่พบรายการที่ค้นหา"
+                description={`ไม่มีรายการในแท็บนี้ที่ตรงกับ "${billSearch.trim()}" — ลองค้นด้วยเลขบิล ห้อง ผู้เช่า เบอร์ หรือสถานะ`}
               />
             );
           }
