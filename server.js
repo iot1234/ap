@@ -12084,6 +12084,12 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
           code: 'ROOM_CONTRACT_EXISTS',
           conflict,
           hint: 'ให้ใช้สัญญาเดิมที่มีอยู่ หรือปิด/ยกเลิกสัญญาเดิมก่อนสร้างสัญญาใหม่ เพื่อป้องกันห้องเดียวมีหลายสัญญา',
+          nextActions: {
+            contractsUrl: `/admin#contracts?room=${encodeURIComponent(roomId)}&contract=${encodeURIComponent(conflict.id)}`,
+            roomUrl: `/admin#rooms?room=${encodeURIComponent(roomId)}`,
+            pdfUrl: `/api/contracts/${encodeURIComponent(conflict.id)}/pdf`,
+            hint: 'เปิดสัญญาเดิมที่ชนกันได้ทันทีจากปุ่มในหน้าแอดมิน',
+          },
         });
       }
 
@@ -12110,6 +12116,11 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
           hint: conflict.locked_at
             ? 'ใช้สัญญาเดิม หรือปิดสัญญาเดิมก่อนสร้างฉบับใหม่'
             : 'ส่งลิงก์ใหม่จากสัญญาเดิมที่ /admin#contracts หรือส่ง { force: true } เพื่อสร้างใหม่ (audit-logged)',
+          nextActions: {
+            contractsUrl: `/admin#contracts?room=${encodeURIComponent(roomId)}&contract=${encodeURIComponent(conflict.id)}`,
+            pdfUrl: `/api/contracts/${encodeURIComponent(conflict.id)}/pdf`,
+            hint: 'ใช้รายการสัญญาเดิมนี้ต่อ ไม่ต้องสร้างซ้ำ',
+          },
         });
       }
 

@@ -5244,6 +5244,12 @@ test('quick-invite locks the requested room before creating a draft contract', (
     'ROOM_CONTRACT_EXISTS hint must explain why the action is blocked');
   assert.match(block, /TENANT_ROOM_CONTRACT_EXISTS/,
     'must block creating a new invite on top of the same tenant-room locked contract');
+  assert.match(block,
+    /ROOM_CONTRACT_EXISTS[\s\S]{0,900}nextActions:\s*\{[\s\S]{0,300}contractsUrl:[\s\S]{0,300}pdfUrl:/,
+    'room-level contract conflicts must return nextActions so admin can open the conflicting contract');
+  assert.match(block,
+    /TENANT_ROOM_CONTRACT_EXISTS[\s\S]{0,900}DRAFT_CONTRACT_EXISTS[\s\S]{0,900}nextActions:\s*\{[\s\S]{0,300}contractsUrl:[\s\S]{0,300}pdfUrl:/,
+    'same-tenant contract conflicts must return nextActions to reuse the existing contract');
   assert.match(block, /ROOM_RESERVED/,
     'must block reservations owned by another booking/contract');
   assert.match(block, /TENANT_ALREADY_ACTIVE/,
@@ -5872,6 +5878,44 @@ test('contracts page has "+ สร้างสัญญา" entry button + Quick
   assert.doesNotMatch(src, /if \(err && err\.code\) parts\.push/,
     'quick-invite modal should not show technical error codes as primary user copy');
   assert.match(src, /navigator\.clipboard\.writeText/);
+});
+
+test('contracts page accepts room and contract hash deep links as search filters', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-contracts.jsx'), 'utf8');
+  assert.match(src, /const hashContractSearch = \(\) => \{/,
+    'contracts page must parse hash query params');
+  assert.match(src, /params\.get\('contract'\) \|\| params\.get\('room'\) \|\| params\.get\('roomId'\)/,
+    'deep links must support room and contract search values');
+  assert.match(src, /const \[search, setSearch\] = useState\(hashContractSearch\)/,
+    'initial render must apply the hash filter');
+  assert.match(src, /window\.addEventListener\('hashchange', onHash\)/,
+    'contracts page must react when the tenant drawer links to it');
+  assert.match(src, /String\(c\.id \|\| ''\)\.toLowerCase\(\)\.includes\(q\)/,
+    'contract id must be searchable for direct conflict links');
+});
+
+test('tenant contract tab surfaces room-level contract conflicts inline', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-tenants.jsx'), 'utf8');
+  assert.match(src, /const \[contractConflict, setContractConflict\] = React\.useState\(null\)/,
+    'tenant contract tab must keep conflict state instead of relying only on toast');
+  assert.match(src, /ROOM_CONTRACT_EXISTS', 'DRAFT_CONTRACT_EXISTS', 'TENANT_ROOM_CONTRACT_EXISTS/,
+    'tenant tab must treat all contract conflict codes as recoverable states');
+  assert.match(src, /setContractConflict\(conflict\)[\s\S]{0,260}message:\s*\{/,
+    'quick-invite conflict must render inline guidance');
+  assert.match(src, /function ContractConflictCard\(\{ conflict, tenant, busy, C, onOpenContracts, onOpenPdf, onUseExisting, onRefresh \}\)/,
+    'tenant tab must render a dedicated conflict card');
+  assert.match(src, /ContractConflictCard[\s\S]{0,320}onOpenContracts=\{\(\) => openConflictContracts\(contractConflict\)\}/,
+    'conflict card must offer a route to the contracts page');
+  assert.match(src, /window\.location\.hash = `#contracts/,
+    'contracts-page action must deep link to the conflicting room or contract');
+  assert.match(src, /openConflictPdf[\s\S]{0,220}\/api\/contracts\/\$\{encodeURIComponent\(conflict\.id\)\}\/pdf/,
+    'conflict card must let admin view the existing contract PDF');
+  assert.match(src, /useExistingConflictContract[\s\S]{0,260}\/api\/contracts\/\$\{conflict\.id\}/,
+    'same-tenant conflicts must be reusable without creating a duplicate');
 });
 
 test('contracts quick-invite uses vacant room inventory and auto-fills room pricing', () => {

@@ -12,11 +12,21 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
   const { Card, Btn, Input, Select, Modal, Pill, FilterChip, SectionHeading,
           PageContainer, PageHeader } = window;
   const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
+  const hashContractSearch = () => {
+    try {
+      const raw = String(window.location.hash || '');
+      const q = raw.includes('?') ? raw.slice(raw.indexOf('?') + 1) : '';
+      const params = new URLSearchParams(q);
+      return String(params.get('contract') || params.get('room') || params.get('roomId') || '').trim();
+    } catch {
+      return '';
+    }
+  };
 
   const [contracts, setContracts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState('active');
-  const [search, setSearch] = useState('');
+  const [search, setSearch] = useState(hashContractSearch);
   const [editing, setEditing] = useState(null);
   const [signing, setSigning] = useState(null);     // contract being signed online
   const [assigning, setAssigning] = useState(null); // contract for template assignment
@@ -56,11 +66,21 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
     }
   };
   useEffect(() => { refresh(); }, [filter]);
+  useEffect(() => {
+    const onHash = () => {
+      if (!String(window.location.hash || '').replace('#', '').startsWith('contracts')) return;
+      const next = hashContractSearch();
+      if (next) setSearch(next);
+    };
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, []);
 
   const filtered = useMemo(() => {
     if (!search) return contracts;
     const q = search.toLowerCase();
     return contracts.filter((c) =>
+      String(c.id || '').toLowerCase().includes(q) ||
       String(c.contract_no || '').toLowerCase().includes(q) ||
       String(c.tenant_name || '').toLowerCase().includes(q) ||
       String(c.tenant_phone || '').includes(q) ||

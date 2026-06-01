@@ -999,6 +999,7 @@ function TabContract({ t, routeBookingId = '', setToast, addActivity, setRooms, 
   // types it; cleared on close.
   const [cancelling, setCancelling] = React.useState(false);
   const [cancelReason, setCancelReason] = React.useState('');
+  const [contractConflict, setContractConflict] = React.useState(null);
 
   // Defensive: reset per-tenant transient state whenever the admin switches
   // to a different tenant in the drawer. Without this, a freshly-created
@@ -1013,6 +1014,7 @@ function TabContract({ t, routeBookingId = '', setToast, addActivity, setRooms, 
     setApproveError(null);
     setCancelling(false);
     setCancelReason('');
+    setContractConflict(null);
   }, [t.phone, routeBookingId]);
 
   const reload = React.useCallback(async () => {
@@ -1034,7 +1036,9 @@ function TabContract({ t, routeBookingId = '', setToast, addActivity, setRooms, 
       setTenantDbId(tid);
       if (!tid) { setContract(null); return; }
       const d = await apiCall(`/api/contracts?tenantId=${tid}&status=active`);
-      setContract((d.contracts || [])[0] || null);
+      const activeContract = (d.contracts || [])[0] || null;
+      setContract(activeContract);
+      if (activeContract) setContractConflict(null);
     } finally { setLoading(false); }
   }, [t.dbId, t.phone, t.tenantStatus]);
   React.useEffect(() => { reload(); }, [reload]);
@@ -1054,6 +1058,52 @@ function TabContract({ t, routeBookingId = '', setToast, addActivity, setRooms, 
     }
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  };
+
+  const conflictFromError = (err) => {
+    const body = err && (err.raw || err.body) ? (err.raw || err.body) : {};
+    const code = body.code || (err && err.code);
+    if (!['ROOM_CONTRACT_EXISTS', 'DRAFT_CONTRACT_EXISTS', 'TENANT_ROOM_CONTRACT_EXISTS'].includes(code)) return null;
+    return {
+      ...(body.conflict || {}),
+      code,
+      error: body.error || (err && err.message) || 'สร้างสัญญาใหม่ไม่ได้',
+      hint: body.hint || (body.nextActions && body.nextActions.hint) || null,
+      nextActions: body.nextActions || null,
+    };
+  };
+
+  const openConflictContracts = (conflict = contractConflict) => {
+    const params = new URLSearchParams();
+    const roomId = String(conflict?.room_id || t.roomId || '').trim();
+    const contractId = conflict?.id ? String(conflict.id) : '';
+    if (roomId) params.set('room', roomId);
+    if (contractId) params.set('contract', contractId);
+    window.location.hash = `#contracts${params.toString() ? '?' + params.toString() : ''}`;
+  };
+
+  const openConflictPdf = (conflict = contractConflict) => {
+    if (!conflict || !conflict.id) return;
+    window.open(`/api/contracts/${encodeURIComponent(conflict.id)}/pdf`, '_blank', 'noopener');
+  };
+
+  const useExistingConflictContract = async (conflict = contractConflict) => {
+    if (!conflict || !conflict.id) return;
+    setBusy(true);
+    try {
+      const d = await apiCall(`/api/contracts/${conflict.id}`);
+      setContract(d.contract || null);
+      setContractConflict(null);
+      setToast && setToast({ kind: 'success', message: 'เปิดสัญญาเดิมในหน้านี้แล้ว' });
+    } catch (err) {
+      if (window.toastError && setToast) {
+        window.toastError(setToast, err, { action: 'เปิดสัญญาเดิม' });
+      } else {
+        setToast && setToast({ kind: 'danger', message: 'เปิดสัญญาเดิมล้มเหลว: ' + err.message });
+      }
+    } finally {
+      setBusy(false);
+    }
   };
 
   // Send link for an existing draft contract — the contract row already
@@ -1136,6 +1186,18 @@ function TabContract({ t, routeBookingId = '', setToast, addActivity, setRooms, 
         type: 'contract' });
       reload();
     } catch (err) {
+      const conflict = conflictFromError(err);
+      if (conflict) {
+        setContractConflict(conflict);
+        setToast && setToast({
+          kind: 'danger',
+          message: {
+            title: 'พบสัญญาเดิมของห้องนี้',
+            description: 'ดูรายละเอียดในการ์ดสัญญาด้านล่าง แล้วเปิดสัญญาเดิมหรือปิดสัญญาเดิมก่อนสร้างใหม่',
+          },
+        });
+        return;
+      }
       if (window.toastError && setToast) {
         window.toastError(setToast, err, { action: 'สร้างสัญญา/ส่งลิงก์' });
         return;
@@ -1420,6 +1482,18 @@ function TabContract({ t, routeBookingId = '', setToast, addActivity, setRooms, 
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         {liveLinkCard}
+        {contractConflict ? (
+          <ContractConflictCard
+            conflict={contractConflict}
+            tenant={t}
+            busy={busy}
+            C={C}
+            onOpenContracts={() => openConflictContracts(contractConflict)}
+            onOpenPdf={() => openConflictPdf(contractConflict)}
+            onUseExisting={() => useExistingConflictContract(contractConflict)}
+            onRefresh={reload}
+          />
+        ) : null}
         <Card style={{ padding: 16 }}>
           <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 12 }}>
             📜 ยังไม่มีสัญญาเช่า — ตรวจรายละเอียดก่อนส่งลิงก์
@@ -1725,6 +1799,60 @@ function ContractPreFlightSummary({ t, C, fmtCurrency }) {
         <span style={{ wordBreak: 'break-all' }}>{t.email}</span>
       </Row> : null}
     </div>
+  );
+}
+
+function ContractConflictCard({ conflict, tenant, busy, C, onOpenContracts, onOpenPdf, onUseExisting, onRefresh }) {
+  const { Btn } = window;
+  const roomId = conflict.room_id || tenant.roomId || '—';
+  const contractNo = conflict.contract_no || `#${conflict.id || '—'}`;
+  const conflictTenantId = conflict.tenant_id != null ? String(conflict.tenant_id) : '';
+  const currentTenantId = tenant.dbId != null ? String(tenant.dbId)
+    : (tenant.tenantId != null ? String(tenant.tenantId) : '');
+  const canUseExistingHere = !!conflict.id && !!conflictTenantId
+    && !!currentTenantId && conflictTenantId === currentTenantId;
+  return (
+    <Card style={{ padding: 16, background: '#fff7e8', border: '1px solid #f0c36d' }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+        <div style={{ fontSize: 22, lineHeight: 1 }}>⚠️</div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 14, fontWeight: 700, color: '#7a3f12', marginBottom: 6 }}>
+            ห้องนี้มีสัญญาเดิมอยู่แล้ว
+          </div>
+          <div style={{ fontSize: 12.5, color: '#7a3f12', lineHeight: 1.55, marginBottom: 10 }}>
+            ระบบไม่สร้างสัญญาซ้ำให้ห้องเดียวกัน เพื่อกันบิลและสถานะห้องผิดคน
+            {conflict.hint ? <><br />{conflict.hint}</> : null}
+          </div>
+          <div style={{
+            display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '6px 12px',
+            fontSize: 12.5, color: C.ink2, marginBottom: 12,
+          }}>
+            <span style={{ color: C.muted }}>สัญญาเดิม</span><b>{contractNo}</b>
+            <span style={{ color: C.muted }}>ห้อง</span><b>{roomId}</b>
+            <span style={{ color: C.muted }}>ผู้เช่าในสัญญา</span><b>{conflict.tenant_name || conflict.full_name || '-'}</b>
+            <span style={{ color: C.muted }}>สถานะ</span><b>{conflict.status || 'active'}</b>
+          </div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            {canUseExistingHere ? (
+              <Btn variant="primary" size="sm" disabled={busy} onClick={onUseExisting}>
+                ใช้สัญญาเดิมนี้ต่อ
+              </Btn>
+            ) : null}
+            {conflict.id ? (
+              <Btn variant="secondary" size="sm" disabled={busy} onClick={onOpenPdf}>
+                ดู PDF สัญญาเดิม
+              </Btn>
+            ) : null}
+            <Btn variant="ghost" size="sm" disabled={busy} onClick={onOpenContracts}>
+              เปิดหน้าสัญญาที่ชนกัน
+            </Btn>
+            <Btn variant="ghost" size="sm" disabled={busy} onClick={onRefresh}>
+              โหลดข้อมูลใหม่
+            </Btn>
+          </div>
+        </div>
+      </div>
+    </Card>
   );
 }
 
