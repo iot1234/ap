@@ -72,6 +72,8 @@ schemas.checkIn = z.object({
   // the date and stores term_months only when it exactly matches a month span.
   endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'วันสิ้นสุดต้องเป็น YYYY-MM-DD').optional(),
   discountPct: z.coerce.number().nonnegative().max(50).optional(),
+  waterStartReading: z.coerce.number().nonnegative().max(9_999_999).optional(),
+  elecStartReading: z.coerce.number().nonnegative().max(9_999_999).optional(),
   // Legal trail: client surfaces the terms-and-conditions text version so
   // we can store WHICH wording the tenant agreed to. Optional in the
   // schema (open contracts can predate the feature) but checked at

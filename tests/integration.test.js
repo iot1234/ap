@@ -4656,10 +4656,15 @@ test('check-in captures starting meter readings + prorated first-month flat char
   const fs = require('node:fs');
   const path = require('node:path');
   const ops = fs.readFileSync(path.join(__dirname, '..', 'routes', 'tenant-ops.js'), 'utf8');
+  const schema = fs.readFileSync(path.join(__dirname, '..', 'schemas', 'index.js'), 'utf8');
   const feat = fs.readFileSync(path.join(__dirname, '..', 'services', 'features.js'), 'utf8');
 
   assert.match(feat, /meterStartPolicy: 'optional'/,
     'features must default meterStartPolicy to optional');
+  assert.match(schema, /waterStartReading: z\.coerce\.number\(\)\.nonnegative\(\)\.max\(9_999_999\)\.optional\(\)/,
+    'check-in schema must preserve waterStartReading after validation');
+  assert.match(schema, /elecStartReading: z\.coerce\.number\(\)\.nonnegative\(\)\.max\(9_999_999\)\.optional\(\)/,
+    'check-in schema must preserve elecStartReading after validation');
   assert.match(ops, /waterStartReading/, 'check-in must accept waterStartReading');
   assert.match(ops, /elecStartReading/, 'check-in must accept elecStartReading');
   assert.match(ops, /METER_START_BACKWARD/,
@@ -4671,6 +4676,22 @@ test('check-in captures starting meter readings + prorated first-month flat char
   assert.match(ops, /const wifiAmt = r2\(/, 'welcome bill must include prorated wifi');
   assert.match(ops, /water_amount, elec_amount, wifi, other/,
     'welcome bill INSERT must carry flat charge columns');
+});
+
+test('move-in welcome bills avoid bill_no collisions when a room turns over within the same month', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const ops = fs.readFileSync(path.join(__dirname, '..', 'routes', 'tenant-ops.js'), 'utf8');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+
+  assert.match(ops, /SELECT tenant_id FROM bills[\s\S]{0,120}WHERE bill_no=\$1[\s\S]{0,80}FOR UPDATE/,
+    'legacy check-in must lock any existing default welcome bill number before insert');
+  assert.match(ops, /billing\.makeBillNo\(roomId, period, \{ tenantId: id \}\)/,
+    'legacy check-in must fall back to a tenant-suffixed welcome bill number');
+  assert.match(server, /SELECT tenant_id FROM bills[\s\S]{0,120}WHERE bill_no=\$1[\s\S]{0,80}FOR UPDATE/,
+    'contract approval must lock any existing default welcome bill number before insert');
+  assert.match(server, /billing\.makeBillNo\(contract\.room_id, period, \{ tenantId: inv\.tenant_id \}\)/,
+    'contract approval must fall back to a tenant-suffixed welcome bill number');
 });
 
 test('tenant checkin endDate respects month-rollover (Jan31 + 1mo → Feb28/29)', () => {

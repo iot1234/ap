@@ -1973,7 +1973,18 @@ module.exports = function buildTenantOpsRouter(ctx) {
         const period = moveInMatch
           ? `${moveInMatch[1]}-${moveInMatch[2]}`
           : `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
-        const billNo = billing.makeBillNo(roomId, period);
+        let billNo = billing.makeBillNo(roomId, period);
+        const billNoCheck = await client.query(
+          `SELECT tenant_id FROM bills
+             WHERE bill_no=$1 AND deleted_at IS NULL
+             LIMIT 1
+             FOR UPDATE`,
+          [billNo]
+        );
+        const existingBillTenantId = billNoCheck.rows[0]?.tenant_id;
+        if (billNoCheck.rows.length && Number(existingBillTenantId || 0) !== Number(id)) {
+          billNo = billing.makeBillNo(roomId, period, { tenantId: id });
+        }
         // Load config once — due day, first-month discount, and proration all
         // come from it. A missing blob degrades to defaults (full rent, day 15).
         let cfgVal = null;

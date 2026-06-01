@@ -13216,7 +13216,18 @@ app.post('/api/admin/contract-invitations/:id/approve',
             ? [{ label: `ค่าส่วนกลาง${flatFrac < 1 ? ' (ตามวันที่อยู่)' : ''}`, amount: commonAmt }]
             : [];
           const welcomeSubtotal = r2(welcomeRent + wifiAmt + waterAmt + elecAmt + commonAmt);
-          const billNo = billing.makeBillNo(contract.room_id, period);
+          let billNo = billing.makeBillNo(contract.room_id, period);
+          const billNoCheck = await client.query(
+            `SELECT tenant_id FROM bills
+               WHERE bill_no=$1 AND deleted_at IS NULL
+               LIMIT 1
+               FOR UPDATE`,
+            [billNo]
+          );
+          const existingBillTenantId = billNoCheck.rows[0]?.tenant_id;
+          if (billNoCheck.rows.length && Number(existingBillTenantId || 0) !== Number(inv.tenant_id)) {
+            billNo = billing.makeBillNo(contract.room_id, period, { tenantId: inv.tenant_id });
+          }
           if (welcomeSubtotal > 0) {
             const billIns = await client.query(
               `INSERT INTO bills
