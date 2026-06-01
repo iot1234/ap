@@ -126,6 +126,71 @@ test('queue source: tick loads the channel gate and threads it into dispatch', (
   assert.match(src, /if \(gate && gate\[channel\] === false\)/, 'dispatch must enforce the gate');
 });
 
+test('queue source: bill LINE rows without payload.messages are rebuilt as QR Flex messages', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'notificationQueue.js'), 'utf8');
+  assert.match(src, /require\('\.\/billLineMessages'\)/,
+    'queue dispatcher must load the bill LINE message builder');
+  assert.match(src, /payload\.billId != null[\s\S]{0,220}buildQueuedBillLineMessages\(pool, row, payload\)/,
+    'queue dispatcher must rebuild rich bill LINE messages from payload.billId when older jobs are text-only');
+  assert.match(src, /pushMessagesStrict\(oa, row\.recipient, messages/,
+    'rebuilt bill messages must be sent via LINE rich-message push');
+});
+
+test('notifyTenant sends provided LINE rich messages instead of flattening to text', async () => {
+  const line = require('../services/line');
+  const lineOa = require('../services/lineOa');
+  const lineBinding = require('../services/lineBinding');
+  const originals = {
+    pushMessagesStrict: line.pushMessagesStrict,
+    pushText: line.pushText,
+    resolveForTenant: lineOa.resolveForTenant,
+    listTenantRecipients: lineBinding.listTenantRecipients,
+  };
+  const seen = {};
+  try {
+    line.pushMessagesStrict = async (oa, userId, messages) => {
+      seen.oa = oa;
+      seen.userId = userId;
+      seen.messages = messages;
+    };
+    line.pushText = async () => {
+      throw new Error('pushText should not be used for rich LINE payloads');
+    };
+    lineOa.resolveForTenant = async () => ({
+      id: 7,
+      slug: 'test-oa',
+      enabled: true,
+      channelAccessToken: 'token',
+    });
+    lineBinding.listTenantRecipients = async () => [];
+    const messages = [
+      { type: 'flex', altText: 'bill', contents: { type: 'bubble', body: { type: 'box', layout: 'vertical', contents: [] } } },
+      { type: 'text', text: 'fallback' },
+    ];
+    const out = await notifier.notifyTenant({ pool: fakePool(undefined), features: {} }, {
+      id: 1,
+      status: 'active',
+      line_user_id: `U${'1'.repeat(32)}`,
+      line_oa_id: 7,
+    }, {
+      subject: 'Bill',
+      text: 'fallback text',
+      messages,
+    });
+    assert.equal(out.ok, true);
+    assert.equal(out.channel, 'line');
+    assert.equal(seen.userId, `U${'1'.repeat(32)}`);
+    assert.deepEqual(seen.messages, messages);
+  } finally {
+    line.pushMessagesStrict = originals.pushMessagesStrict;
+    line.pushText = originals.pushText;
+    lineOa.resolveForTenant = originals.resolveForTenant;
+    lineBinding.listTenantRecipients = originals.listTenantRecipients;
+  }
+});
+
 // === F4: owner email recipient must fall back to SMTP_FROM ====================
 test('notifier source: owner email falls back to SMTP_FROM (not gated on features.email.from)', () => {
   const fs = require('node:fs');

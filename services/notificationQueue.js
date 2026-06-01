@@ -10,6 +10,7 @@ const lineOa = require('./lineOa');
 const email = require('./email');
 const sms = require('./sms');
 const crypto = require('crypto');
+const billLineMessages = require('./billLineMessages');
 
 const MAX_RETRY = 3;
 const BACKOFF_MIN = [60_000, 5 * 60_000, 30 * 60_000]; // 1m, 5m, 30m
@@ -371,14 +372,25 @@ async function dispatch(pool, features, row, gate) {
     // Rich-message path: payload.messages is the raw LINE messages array
     // (Flex bubble + text fallback for bill reminders). Bundled as ONE
     // push toward the rate limit so we don't double-count for the same
-    // notification. Falls back to plain pushText when the enqueueing
-    // caller didn't compose a rich payload.
+    // notification. When older/automatic bill jobs only carry payload.billId,
+    // rebuild the rich QR payload at dispatch time, then fall back to plain
+    // pushText only if the public QR/link cannot be composed.
     //
     // Use the *Strict variants so HTTP status flows back as err.status
     // (instead of being flattened to "returned false"). processOne uses
     // the status to fast-fail 401 and apply a longer backoff on 429.
-    if (Array.isArray(payload.messages) && payload.messages.length > 0) {
-      await lineNotify.pushMessagesStrict(oa, row.recipient, payload.messages, { retryKey });
+    let messages = Array.isArray(payload.messages) && payload.messages.length > 0
+      ? payload.messages
+      : null;
+    if (!messages && payload.billId != null) {
+      try {
+        messages = await billLineMessages.buildQueuedBillLineMessages(pool, row, payload);
+      } catch (err) {
+        console.warn('[notif-queue] bill LINE rich payload rebuild failed:', err.message);
+      }
+    }
+    if (Array.isArray(messages) && messages.length > 0) {
+      await lineNotify.pushMessagesStrict(oa, row.recipient, messages, { retryKey });
       return;
     }
     await lineNotify.pushTextStrict(oa, row.recipient, guarded.body || guarded.subject || '', { retryKey });

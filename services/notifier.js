@@ -26,7 +26,7 @@ function getQueue() {
 // Per-tenant LINE dispatch: figure out which OA the tenant is bound on,
 // load that OA's credentials, push through it. Falls back to env-OA when
 // tenant.line_oa_id is null (legacy bindings predating multi-OA).
-async function pushLineToTenant(pool, tenant, text) {
+async function pushLineToTenant(pool, tenant, text, messages) {
   const lineId = tenant.line_user_id || tenant.lineUserId || null;
   if (!lineId) return { ok: false, reason: 'no_line_id' };
   if (!lineNotify.isLikelyUserId(lineId)) return { ok: false, reason: 'invalid_line_id' };
@@ -42,6 +42,14 @@ async function pushLineToTenant(pool, tenant, text) {
   }
   if (oa.enabled === false) {
     return { ok: false, reason: 'oa_disabled' };
+  }
+  if (Array.isArray(messages) && messages.length > 0) {
+    try {
+      await lineNotify.pushMessagesStrict(oa, lineId, messages);
+      return { ok: true, oaId: oa.id, oaSlug: oa.slug, lineId, rich: true };
+    } catch (err) {
+      return { ok: false, reason: err.fatal ? 'line_rich_fatal' : 'line_rich_failed', error: err.message };
+    }
   }
   const ok = await lineNotify.pushText(oa, lineId, text);
   return { ok, oaId: oa.id, oaSlug: oa.slug, lineId };
@@ -289,6 +297,9 @@ async function notifyTenant(ctx, tenant, msg) {
   const chGate = await loadNotifyChannelGate(ctx);
   const subject = msg.subject || 'แจ้งเตือน';
   const rawText = msg.text || subject;
+  const lineMessages = Array.isArray(msg.messages) && msg.messages.length > 0
+    ? msg.messages
+    : (Array.isArray(msg.lineMessages) && msg.lineMessages.length > 0 ? msg.lineMessages : null);
   // Accept both DB shape (snake_case from `tenants` table) and the legacy
   // rooms.tenant blob shape (camelCase). Earlier versions only matched
   // snake_case, so callers reading from rooms.tenant got nothing dispatched.
@@ -331,7 +342,7 @@ async function notifyTenant(ctx, tenant, msg) {
         ...tenant,
         line_user_id: recipient.line_user_id,
         line_oa_id: recipient.line_oa_id,
-      }, text);
+      }, text, lineMessages);
       if (result.ok) {
         sent++;
         if (!firstOa) firstOa = result.oaSlug || result.oaId || null;
@@ -407,7 +418,11 @@ async function notifyTenant(ctx, tenant, msg) {
         try {
           await queue.enqueue(pool, {
             channel: 'line', recipient: recipient.line_user_id, subject, body: text,
-            payload: { oaId: recipient.line_oa_id || null, source: 'notifier-fallback' },
+            payload: {
+              oaId: recipient.line_oa_id || null,
+              source: 'notifier-fallback',
+              ...(lineMessages ? { messages: lineMessages } : {}),
+            },
           });
           enqueued = true;
           queuedRecipient = queuedRecipient || recipient.line_user_id;

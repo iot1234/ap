@@ -46,6 +46,7 @@ const roomSync = require('./services/roomSync');
 const billPayments = require('./services/billPayments');
 const lineBinding = require('./services/lineBinding');
 const lineOa = require('./services/lineOa');
+const billTokens = require('./services/billTokens');
 const { schemas } = require('./schemas');
 const { validateBody } = require('./middleware/validate');
 
@@ -113,6 +114,7 @@ if (NODE_ENV !== 'production' && !SESSION_SECRET) {
 }
 const _runtimeSessionSecret = SESSION_SECRET
   || require('crypto').randomBytes(48).toString('base64');
+billTokens.configureRuntimeSecret(_runtimeSessionSecret);
 
 // Keep DATE columns as date-only strings. The pg default can materialise DATE
 // as local-midnight Date objects, which JSON serialises to the previous UTC
@@ -4959,34 +4961,11 @@ app.post('/api/admin/rooms/:roomId/reconcile',
 // QR content is non-sensitive (just a payment QR to the dorm's PromptPay
 // target — anyone scanning it pays the dorm, not steals data), so a
 // time-limited public URL is acceptable trade-off.
-const _crypto = require('crypto');
-const BILL_QR_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;   // 30 days
-function _billQrSigningKey() {
-  // Derive from session secret so the same deploy verifies tokens it
-  // signed. Different secret across deploys → tokens auto-invalidate
-  // on rotation, which is the desired behaviour.
-  return _crypto.createHash('sha256').update(_runtimeSessionSecret + '|bill-qr').digest();
-}
 function signBillQrToken(billId, expiresAt) {
-  const exp = Math.floor((expiresAt || Date.now() + BILL_QR_TOKEN_TTL_MS) / 1000);
-  const payload = `${billId}.${exp}`;
-  const sig = _crypto.createHmac('sha256', _billQrSigningKey())
-    .update(payload).digest('base64')
-    .replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
-  return `${exp}.${sig}`;
+  return billTokens.signBillQrToken(billId, expiresAt);
 }
 function verifyBillQrToken(billId, token) {
-  if (!token || typeof token !== 'string') return false;
-  const [expStr, sig] = String(token).split('.');
-  const exp = Number(expStr);
-  if (!Number.isFinite(exp) || exp <= 0) return false;
-  if (Date.now() > exp * 1000) return false;
-  const expected = _crypto.createHmac('sha256', _billQrSigningKey())
-    .update(`${billId}.${exp}`).digest('base64')
-    .replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
-  try {
-    return _crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
-  } catch { return false; }
+  return billTokens.verifyBillQrToken(billId, token);
 }
 
 const BILL_QR_STATUS_IMAGE_CACHE = new Map();
@@ -5121,30 +5100,11 @@ function renderPaidBillQrStatusPng() {
   return rendered;
 }
 
-const BILL_PAY_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;   // 30 days
-function _billPaySigningKey() {
-  return _crypto.createHash('sha256').update(_runtimeSessionSecret + '|bill-pay').digest();
-}
 function signBillPayToken(billId, expiresAt) {
-  const exp = Math.floor((expiresAt || Date.now() + BILL_PAY_TOKEN_TTL_MS) / 1000);
-  const payload = `${billId}.${exp}`;
-  const sig = _crypto.createHmac('sha256', _billPaySigningKey())
-    .update(payload).digest('base64')
-    .replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
-  return `${exp}.${sig}`;
+  return billTokens.signBillPayToken(billId, expiresAt);
 }
 function verifyBillPayToken(billId, token) {
-  if (!token || typeof token !== 'string') return false;
-  const [expStr, sig] = String(token).split('.');
-  const exp = Number(expStr);
-  if (!Number.isFinite(exp) || exp <= 0) return false;
-  if (Date.now() > exp * 1000) return false;
-  const expected = _crypto.createHmac('sha256', _billPaySigningKey())
-    .update(`${billId}.${exp}`).digest('base64')
-    .replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
-  try {
-    return _crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
-  } catch { return false; }
+  return billTokens.verifyBillPayToken(billId, token);
 }
 
 // GET /p/bill-qr/:billId?t=<token> — PUBLIC endpoint that LINE Platform
