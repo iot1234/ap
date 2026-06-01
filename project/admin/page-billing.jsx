@@ -1267,9 +1267,13 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
       // billing UI just says "ออกบิล N ใบ" and the wrong-mode bills go
       // out unnoticed until a tenant disputes.
       const fellBack = Array.isArray(d.flatFellBack) ? d.flatFellBack : [];
+      const firstMonthSkipped = Array.isArray(d.firstMonthSkipped) ? d.firstMonthSkipped : [];
       const warnings = Array.isArray(d.warnings) ? d.warnings : [];
       const fellBackMsg = fellBack.length
         ? ` · เตือน: ${fellBack.length} ห้อง (${fellBack.slice(0, 3).map((x) => x.roomId).join(', ')}${fellBack.length > 3 ? '…' : ''}) ตั้งโหมดเหมาไว้แต่ยังไม่กรอกจำนวน — บิลถูกออกตามมิเตอร์แทน`
+        : '';
+      const firstMonthMsg = firstMonthSkipped.length
+        ? ` · เดือนแรก ${firstMonthSkipped.length} ห้องถูกข้ามเพื่อไม่ออกบิลซ้ำกับบิลย้ายเข้า/เลขมิเตอร์ตั้งต้น`
         : '';
       const warningMsg = warnings.length
         ? ` · warning ${warnings.length} รายการ (${warnings.slice(0, 3).map((w) => w.code || w.msg || 'WARN').join(', ')}${warnings.length > 3 ? '…' : ''})`
@@ -1278,11 +1282,12 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
         ? ' — ขั้นตอนนี้ยังไม่ได้ส่งให้ผู้เช่า ต้องกด "ส่งบิลค้างชำระ" หรือส่งรายบิลต่อ'
         : '';
       setToast && setToast({
-        kind: (fellBack.length || warnings.length) ? 'warning' : (changedCount > 0 ? 'success' : 'info'),
+        kind: (fellBack.length || warnings.length || firstMonthSkipped.length) ? 'warning' : (changedCount > 0 ? 'success' : 'info'),
         message: (changedCount > 0
           ? `ออก/อัปเดตบิล ${changedCount} ใบสำเร็จ${d.skipped ? ` (ข้าม ${d.skipped} ใบที่มีอยู่แล้วหรือล็อกอยู่)` : ''}${sendHint}`
           : `ไม่มีบิลใหม่สำหรับรอบ ${period} — บิลจริงมีอยู่แล้วหรือรายการถูกข้าม`)
           + fellBackMsg
+          + firstMonthMsg
           + warningMsg,
       });
       // Refresh the DB-bills overlay so the banner + per-row badge flip

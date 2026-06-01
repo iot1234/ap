@@ -612,6 +612,21 @@ function formatYMD(year, monthOneIndexed, day) {
   return `${y}-${m}-${d}`;
 }
 
+function periodFromDate(value) {
+  if (value == null || value === '') return null;
+  const ymd = value instanceof Date && Number.isFinite(value.getTime())
+    ? value.toISOString().slice(0, 10)
+    : String(value).slice(0, 10);
+  const m = /^(\d{4})-(0[1-9]|1[0-2])-\d{2}$/.exec(ymd);
+  return m ? `${m[1]}-${m[2]}` : null;
+}
+
+function contractStartsInPeriod(contract, period) {
+  const p = String(period || '').slice(0, 7);
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(p)) return false;
+  return periodFromDate(contract?.start_date ?? contract?.startDate) === p;
+}
+
 function isFlatUtilityConfigured(room, prefix) {
   const r = room || {};
   const mode = String(r[`${prefix}Mode`] ?? r[`${prefix}_mode`] ?? '').toLowerCase();
@@ -1141,6 +1156,7 @@ function firstMonthProrationFraction({ moveInDay, daysInMonth, prorate = false }
 module.exports = {
   buildBill, buildPaymentBlock, statusOf, makeBillNo,
   formatPeriodNow, formatDueDate, formatYMD, parseDueDateLocal, round2,
+  periodFromDate, contractStartsInPeriod,
   resolveUtilityUsage, resolveUtilityUsageFromBillRow, buildUtilityItem,
   isFlatUtilityConfigured,
   isChargeApplicableForPeriod,

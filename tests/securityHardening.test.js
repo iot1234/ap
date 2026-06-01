@@ -109,6 +109,12 @@ test('admin static source files are session-gated before express.static', () => 
   const staticIdx = src.indexOf("app.use(express.static(path.join(__dirname, 'project')");
   assert.ok(guardIdx > 0 && staticIdx > guardIdx,
     'admin asset guard must run before express.static serves /admin/*.jsx');
+  assert.match(src, /function adminStaticShellPath\(rawPath\)/,
+    'direct Admin Dashboard.html static path must be classified as admin-only');
+  assert.match(src, /Admin Dashboard\\\.html/,
+    'direct static request for Admin Dashboard.html must be protected');
+  assert.match(src, /adminConsoleProbePath\(rawPath\) \|\| adminStaticShellPath\(rawPath\)/,
+    'admin asset guard must protect both /admin/* sources and the direct admin HTML shell');
   assert.match(src, /if \(req\.session && req\.session\.user\) return next\(\)/,
     'logged-in admins must still be able to load admin bundles');
   assert.match(src, /unauthenticated_admin_static_or_route/,

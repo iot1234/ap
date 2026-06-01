@@ -201,6 +201,16 @@ test('makeBillNo is deterministic for room+period', () => {
   assert.equal(billing.makeBillNo('201', '2026-05'), 'INV-2026-05-201');
 });
 
+test('contractStartsInPeriod detects the contract first billing month', () => {
+  assert.equal(billing.periodFromDate('2026-06-15'), '2026-06');
+  assert.equal(billing.periodFromDate(new Date('2026-06-15T00:00:00Z')), '2026-06');
+  assert.equal(billing.periodFromDate('bad-date'), null);
+  assert.equal(billing.contractStartsInPeriod({ start_date: '2026-06-15' }, '2026-06'), true);
+  assert.equal(billing.contractStartsInPeriod({ startDate: '2026-06-01' }, '2026-06'), true);
+  assert.equal(billing.contractStartsInPeriod({ start_date: '2026-06-15' }, '2026-07'), false);
+  assert.equal(billing.contractStartsInPeriod({ start_date: '2026-13-15' }, '2026-13'), false);
+});
+
 // --- R4 — makeBillNo with tenant suffix ------------------------------------
 // When a room changes tenants mid-period (one moves out, another moves in
 // within the same calendar month), the default INV-${period}-${roomId}

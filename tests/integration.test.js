@@ -427,7 +427,7 @@ test('bulk bill generation warns when flat utility mode falls back to metered', 
     'billing-readiness must surface flat-mode misconfiguration before bill generation');
   assert.match(extras, /detail: \{ period, count: flatMisconfigured\.length, rooms: flatMisconfigured\.slice\(0, 20\) \}/,
     'bulk-generate flat fallback warning must include affected rooms');
-  assert.match(extras, /res\.json\(\{ ok: true, period, made, updated, skipped, flatFellBack,\s*warnings: issues\.filter/,
+  assert.match(extras, /res\.json\(\{ ok: true, period, made, updated, skipped, flatFellBack,[\s\S]{0,160}warnings: issues\.filter/,
     'bulk-generate response must expose flat fallback details to the UI');
   assert.match(billingPage, /Array\.isArray\(d\.flatFellBack\)/,
     'billing UI must read flat fallback details');
@@ -933,7 +933,7 @@ test('/api/bills bulk-generate updates an existing unpaid same-slot bill instead
     'changed unpaid bills must get their canonical bill fields updated');
   assert.match(body, /updated\+\+/,
     'successful in-place refresh must increment updated count');
-  assert.match(body, /audit\(req, 'bill\.bulk_generate'[\s\S]{0,120}\{ made, updated, skipped \}/,
+  assert.match(body, /audit\(req, 'bill\.bulk_generate'[\s\S]{0,220}made, updated, skipped/,
     'audit log must include updated count');
 });
 
@@ -7979,6 +7979,36 @@ test("public contract-fill shows the configured due day + late-fee rate (not har
   assert.ok(server.includes("buildPublicView(inv, building, financials)"), "endpoint must pass resolved financials");
   assert.ok(html.includes("view.contract.dueDay"), "fill page must render the configured due day");
   assert.ok(!html.includes("วันที่ 15 ของทุกเดือน"), "fill page must not hardcode the due day");
+});
+
+test("monthly billing skips the first contract month instead of overwriting move-in bills", () => {
+  const fs = require("node:fs"); const path = require("node:path");
+  const billingSvc = fs.readFileSync(path.join(__dirname, "..", "services", "billing.js"), "utf8");
+  const extras = fs.readFileSync(path.join(__dirname, "..", "routes", "bills-extras.js"), "utf8");
+  const sched = fs.readFileSync(path.join(__dirname, "..", "services", "scheduler.js"), "utf8");
+  const server = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  const page = fs.readFileSync(path.join(__dirname, "..", "project", "admin", "page-billing.jsx"), "utf8");
+
+  assert.ok(billingSvc.includes("function contractStartsInPeriod"),
+    "billing service must own the first-month contract detector");
+  assert.match(extras, /FIRST_MONTH_WELCOME_BILL/,
+    "bulk/preview endpoints must surface a clear first-month issue");
+  assert.match(extras, /contractStartsInPeriod\(activeContract, parsed\.period\)[\s\S]{0,800}continue;/,
+    "preview must not show a normal monthly bill for a contract's first period");
+  assert.match(extras, /contractStartsInPeriod\(activeContract, period\)[\s\S]{0,800}firstMonthSkipped/,
+    "bulk generate must skip before writing monthly bills in the first contract month");
+  assert.match(extras, /firstMonthSkipped[\s\S]{0,220}warnings:/,
+    "bulk response must tell the admin UI which rooms were intentionally skipped");
+  assert.match(sched, /contractStartsInPeriod\(activeContract, period\)[\s\S]{0,800}firstMonthSkipped/,
+    "scheduler must also skip first-month contracts before insert");
+  assert.match(sched, /billGenFirstMonthSkipped_/,
+    "scheduler must notify the owner once per period about first-month skips");
+  assert.match(server, /FIRST_MONTH_WELCOME_BILL/,
+    "billing readiness must explain first-month rooms instead of warning about missing monthly meters");
+  assert.match(server, /monthlyBillableTenants/,
+    "readiness must run rate and meter checks only for normal monthly-billable rooms");
+  assert.match(page, /d\.firstMonthSkipped/,
+    "admin billing page must surface first-month skips after generation");
 });
 
 test("admin billing page preserves ledger statuses and shows full bill breakdown", () => {

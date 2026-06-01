@@ -256,7 +256,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
   async function activeContractForRoom(client, roomId) {
     try {
       const cq = await client.query(
-        `SELECT id, monthly_rent, discount_pct, status
+        `SELECT id, monthly_rent, discount_pct, status, start_date
            FROM contracts
           WHERE room_id=$1 AND status='active' AND deleted_at IS NULL
           ORDER BY start_date DESC LIMIT 1`,
@@ -265,6 +265,48 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       return cq.rows[0] || null;
     } catch {
       return null;
+    }
+  }
+
+  function firstMonthBillingIssue(period, rooms) {
+    return {
+      sev: 'info',
+      code: 'FIRST_MONTH_WELCOME_BILL',
+      msg: `${rooms.length} ห้องเป็นเดือนแรกของสัญญา — ระบบจะไม่ออกบิลรายเดือนซ้ำ เพราะบิลย้ายเข้าและเลขมิเตอร์ตั้งต้นดูแลรอบนี้แล้ว`,
+      fix: 'ตรวจบิลย้ายเข้าที่แท็บบิล หรือออกบิลด้วยมือเฉพาะกรณีพิเศษ',
+      detail: { period, count: rooms.length, rooms: rooms.slice(0, 20) },
+    };
+  }
+
+  async function firstMonthRoomsForPeriod(client, eligibleRooms, period) {
+    const roomIds = eligibleRooms.map((r) => String(r?.id || '')).filter(Boolean);
+    if (!roomIds.length) return { ids: new Set(), rooms: [] };
+    try {
+      const cq = await client.query(
+        `SELECT DISTINCT ON (room_id) id, room_id, tenant_id, start_date
+           FROM contracts
+          WHERE room_id = ANY($1::text[])
+            AND status='active' AND deleted_at IS NULL
+          ORDER BY room_id, start_date DESC NULLS LAST, id DESC`,
+        [roomIds]
+      );
+      const ids = new Set();
+      const rooms = [];
+      for (const contract of cq.rows || []) {
+        if (!billing.contractStartsInPeriod(contract, period)) continue;
+        const room = eligibleRooms.find((r) => String(r?.id || '') === String(contract.room_id || ''));
+        ids.add(String(contract.room_id));
+        rooms.push({
+          roomId: String(contract.room_id),
+          tenant: room?.tenant?.name || '',
+          contractId: contract.id || null,
+          tenantId: contract.tenant_id || null,
+        });
+      }
+      return { ids, rooms };
+    } catch (err) {
+      if (err.code !== '42P01' && err.code !== '42703') throw err;
+      return { ids: new Set(), rooms: [] };
     }
   }
 
@@ -545,7 +587,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       let expiredContract = null;
       try {
         const cq = await pool.query(
-          `SELECT id, monthly_rent, discount_pct, status
+          `SELECT id, monthly_rent, discount_pct, status, start_date
              FROM contracts
              WHERE room_id=$1 AND status='active' AND deleted_at IS NULL
              ORDER BY start_date DESC LIMIT 1`,
@@ -604,7 +646,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           let discountPctCheck = 0;
           try {
             const cq = await pool.query(
-              `SELECT id, monthly_rent, discount_pct, status
+              `SELECT id, monthly_rent, discount_pct, status, start_date
                  FROM contracts
                  WHERE room_id=$1 AND status='active' AND deleted_at IS NULL
                  ORDER BY start_date DESC LIMIT 1`,
@@ -1041,6 +1083,15 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         }
         const room = { ...rawRoom, tenant };
         const activeContract = await activeContractForRoom(pool, roomId);
+        if (billing.contractStartsInPeriod(activeContract, parsed.period)) {
+          issues.push(firstMonthBillingIssue(parsed.period, [{
+            roomId,
+            tenant: tenant.name || '',
+            contractId: activeContract.id || null,
+            tenantId: tenant.id || null,
+          }]));
+          continue;
+        }
         const recurringRows = flags.recurringCharges?.enabled
           && flags.recurringCharges?.autoIncludeOnBillGen !== false
           ? await loadRecurringFor(pool, { tenantId: tenant.id || null, roomId })
@@ -1680,9 +1731,15 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         });
         const isFlatModeRequested = (r, prefix) =>
           String(r?.[`${prefix}Mode`] ?? r?.[`${prefix}_mode`] ?? '').toLowerCase() === 'flat';
-        const meteredWaterRooms = eligibleRooms.filter((r) => !billing.isFlatUtilityConfigured(r, 'water'));
-        const meteredElecRooms = eligibleRooms.filter((r) => !billing.isFlatUtilityConfigured(r, 'elec'));
-        const flatMisconfigured = eligibleRooms
+        const firstMonth = await firstMonthRoomsForPeriod(pool, eligibleRooms, period);
+        const monthlyEligibleRooms = eligibleRooms
+          .filter((r) => !firstMonth.ids.has(String(r?.id || '')));
+        if (firstMonth.rooms.length > 0) {
+          issues.push(firstMonthBillingIssue(period, firstMonth.rooms));
+        }
+        const meteredWaterRooms = monthlyEligibleRooms.filter((r) => !billing.isFlatUtilityConfigured(r, 'water'));
+        const meteredElecRooms = monthlyEligibleRooms.filter((r) => !billing.isFlatUtilityConfigured(r, 'elec'));
+        const flatMisconfigured = monthlyEligibleRooms
           .map((r) => {
             const fields = [];
             if (isFlatModeRequested(r, 'water') && !billing.isFlatUtilityConfigured(r, 'water')) fields.push('water');
@@ -1690,8 +1747,8 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             return fields.length ? issueRoom(r, fields) : null;
           })
           .filter(Boolean);
-        const anyMeteredWater = eligibleRooms.some((r) => !billing.isFlatUtilityConfigured(r, 'water'));
-        const anyMeteredElec = eligibleRooms.some((r) => !billing.isFlatUtilityConfigured(r, 'elec'));
+        const anyMeteredWater = monthlyEligibleRooms.some((r) => !billing.isFlatUtilityConfigured(r, 'water'));
+        const anyMeteredElec = monthlyEligibleRooms.some((r) => !billing.isFlatUtilityConfigured(r, 'elec'));
         if (flatMisconfigured.length > 0) {
           issues.push({ sev: 'med', code: 'FLAT_AMOUNT_MISSING',
             msg: `${flatMisconfigured.length} ห้องตั้งค่าน้ำ/ไฟแบบเหมา แต่ยังไม่ได้ใส่จำนวนเหมา ระบบจะ fallback ไปคิดตามมิเตอร์`,
@@ -1715,7 +1772,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           const m = periodMeters[String(r?.id || '')] || {};
           return m[`${prefix}CurrentReading`] != null;
         };
-        const missingMeterRooms = eligibleRooms
+        const missingMeterRooms = monthlyEligibleRooms
           .map((r) => {
             const fields = [];
             if (!billing.isFlatUtilityConfigured(r, 'water') && !hasPeriodReading(r, 'water')) fields.push('water');
@@ -1769,6 +1826,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         // in the response so the /admin#billing toast can show "ห้อง A101
         // กลับไปคิดตามมิเตอร์เพราะยังไม่ตั้งจำนวนเหมา".
         const flatFellBack = [];
+        const firstMonthSkipped = [];
         for (const room of rooms) {
           if (!room || !room.tenant) { skipped++; continue; }
           if (room.status !== 'occupied' && room.status !== 'overdue') { skipped++; continue; }
@@ -1803,7 +1861,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           let activeContract = null;
           try {
             const cq = await pool.query(
-              `SELECT id, monthly_rent, discount_pct, status
+              `SELECT id, monthly_rent, discount_pct, status, start_date
                  FROM contracts
                  WHERE room_id=$1 AND status='active' AND deleted_at IS NULL
                  ORDER BY start_date DESC LIMIT 1`,
@@ -1814,6 +1872,15 @@ module.exports = function buildBillsExtrasRouter(ctx) {
               discountPct = Number(cq.rows[0].discount_pct) || 0;
             }
           } catch { /* legacy deploys */ }
+          if (billing.contractStartsInPeriod(activeContract, period)) {
+            firstMonthSkipped.push({
+              roomId: String(room.id || ''),
+              tenantId: tenantIdForRoom || null,
+              contractId: activeContract.id || null,
+            });
+            skipped++;
+            continue;
+          }
           // Single transaction per room: lock+read recurring_charges,
           // INSERT bill, deactivate one_offs. Reading recurring INSIDE
           // the tx with FOR UPDATE means an admin editing/deleting a
@@ -2044,8 +2111,12 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             billClient.release();
           }
         }
-        audit(req, 'bill.bulk_generate', 'period', period, { made, updated, skipped });
+        audit(req, 'bill.bulk_generate', 'period', period, {
+          made, updated, skipped,
+          firstMonthSkipped: firstMonthSkipped.length,
+        });
         res.json({ ok: true, period, made, updated, skipped, flatFellBack,
+          firstMonthSkipped,
           warnings: issues.filter((i) => i.sev !== 'high') });
       } catch (err) {
         console.error('bulk-generate error:', err);

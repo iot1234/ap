@@ -608,6 +608,12 @@ function adminConsoleProbePath(rawPath) {
   return ADMIN_CONSOLE_PROBE_PATH.test(value);
 }
 
+function adminStaticShellPath(rawPath) {
+  const decoded = safeDecodePath(String(rawPath || '').split('?')[0] || '/');
+  const value = (decoded.ok ? decoded.value : String(rawPath || '')).replace(/\\/g, '/');
+  return /^\/Admin Dashboard\.html$/i.test(value);
+}
+
 function suspiciousUnknownPath(rawPath) {
   const decoded = safeDecodePath(String(rawPath || '').split('?')[0] || '/');
   const value = (decoded.ok ? decoded.value : String(rawPath || '')).replace(/\\/g, '/');
@@ -4498,9 +4504,47 @@ app.get('/api/admin/billing-readiness',
         });
         const isFlatModeRequested = (r, prefix) =>
           String(r?.[`${prefix}Mode`] ?? r?.[`${prefix}_mode`] ?? '').toLowerCase() === 'flat';
-        const meteredWaterRooms = tenantsWithBills.filter((r) => !billing.isFlatUtilityConfigured(r, 'water'));
-        const meteredElecRooms = tenantsWithBills.filter((r) => !billing.isFlatUtilityConfigured(r, 'elec'));
-        const flatMisconfigured = tenantsWithBills
+        const firstMonthRoomIds = new Set();
+        const firstMonthRooms = [];
+        const roomIds = tenantsWithBills.map((r) => String(r?.id || '')).filter(Boolean);
+        if (roomIds.length > 0) {
+          try {
+            const contractQ = await pool.query(
+              `SELECT DISTINCT ON (room_id) id, room_id, tenant_id, start_date
+                 FROM contracts
+                WHERE room_id = ANY($1::text[])
+                  AND status='active' AND deleted_at IS NULL
+                ORDER BY room_id, start_date DESC NULLS LAST, id DESC`,
+              [roomIds]
+            );
+            for (const contract of contractQ.rows || []) {
+              if (!billing.contractStartsInPeriod(contract, readinessPeriod)) continue;
+              const room = tenantsWithBills.find((r) => String(r?.id || '') === String(contract.room_id || ''));
+              firstMonthRoomIds.add(String(contract.room_id));
+              firstMonthRooms.push({
+                roomId: String(contract.room_id),
+                tenant: room?.tenant?.name || '',
+                contractId: contract.id || null,
+                tenantId: contract.tenant_id || null,
+              });
+            }
+          } catch (err) {
+            if (err.code !== '42P01' && err.code !== '42703') throw err;
+          }
+        }
+        if (firstMonthRooms.length > 0) {
+          issues.push({
+            sev: 'info', code: 'FIRST_MONTH_WELCOME_BILL', area: ['issue'],
+            msg: `${firstMonthRooms.length} ห้องเป็นเดือนแรกของสัญญา — ระบบจะไม่ออกบิลรายเดือนซ้ำ เพราะบิลย้ายเข้าและเลขมิเตอร์ตั้งต้นดูแลรอบนี้แล้ว`,
+            fix: 'ตรวจบิลย้ายเข้าที่แท็บบิล หรือออกบิลด้วยมือเฉพาะกรณีพิเศษ',
+            detail: { period: readinessPeriod, count: firstMonthRooms.length, rooms: firstMonthRooms.slice(0, 20) },
+          });
+        }
+        const monthlyBillableTenants = tenantsWithBills
+          .filter((r) => !firstMonthRoomIds.has(String(r?.id || '')));
+        const meteredWaterRooms = monthlyBillableTenants.filter((r) => !billing.isFlatUtilityConfigured(r, 'water'));
+        const meteredElecRooms = monthlyBillableTenants.filter((r) => !billing.isFlatUtilityConfigured(r, 'elec'));
+        const flatMisconfigured = monthlyBillableTenants
           .map((r) => {
             const fields = [];
             if (isFlatModeRequested(r, 'water') && !billing.isFlatUtilityConfigured(r, 'water')) fields.push('water');
@@ -4539,7 +4583,7 @@ app.get('/api/admin/billing-readiness',
           const m = periodMeters[String(r.id)] || {};
           return m[`${prefix}CurrentReading`] != null;
         };
-        const noMeter = tenantsWithBills.filter((r) =>
+        const noMeter = monthlyBillableTenants.filter((r) =>
           (!billing.isFlatUtilityConfigured(r, 'water') && !hasPeriodReading(r, 'water'))
           || (!billing.isFlatUtilityConfigured(r, 'elec') && !hasPeriodReading(r, 'elec'))
         );
@@ -15126,10 +15170,11 @@ app.get('/health/live', (_req, res) => {
 //   - Other static assets (fonts, images) → 1h TTL since they rarely change.
 app.use((req, res, next) => {
   const rawPath = String((req.originalUrl || req.url || '').split('?')[0] || '/');
-  if (!adminConsoleProbePath(rawPath)) return next();
+  const protectedAdminStatic = adminConsoleProbePath(rawPath) || adminStaticShellPath(rawPath);
+  if (!protectedAdminStatic) return next();
   if (req.session && req.session.user) return next();
   recordSecurityEvent(req, 'security.admin_route_probe', {
-    reason: rawPath.startsWith('/admin/')
+    reason: rawPath.startsWith('/admin/') || adminStaticShellPath(rawPath)
       ? 'unauthenticated_admin_static_or_route'
       : 'guessed_admin_console_path',
     path: rawPath.slice(0, 500),
