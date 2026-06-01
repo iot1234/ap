@@ -767,6 +767,26 @@
       title: 'ผู้เช่ายัง active อยู่ห้องอื่น',
       description: (e) => e.hint || `checkout ห้อง ${e.currentRoom || 'เดิม'} ก่อน หรือใช้ force เฉพาะงาน migrate`,
     },
+    TENANT_STATUS_INVALID: {
+      title: 'สถานะผู้เช่าไม่ถูกต้อง',
+      description: 'ใช้ได้เฉพาะ active, moved_out หรือ blacklist',
+    },
+    TENANT_ACTIVE_ROOM_REQUIRED: {
+      title: 'ตั้งเป็น active ยังไม่ได้',
+      description: (e) => e.hint || 'ผู้เช่า active ต้องมีห้องปัจจุบัน เพื่อกันการเปิด portal/ออกบิลโดยไม่รู้ว่าผูกห้องไหน',
+    },
+    TENANT_NONACTIVE_ROOM_FORBIDDEN: {
+      title: 'สถานะกับห้องขัดกัน',
+      description: (e) => e.hint || 'ผู้เช่าที่ย้ายออกหรือ blacklist ต้องไม่ผูก current_room_id; ถ้ายังอยู่ให้ใช้สถานะ active',
+    },
+    TENANT_STATUS_PRECHECK_FAILED: {
+      title: 'ตรวจสถานะผู้เช่าไม่สำเร็จ',
+      description: 'ระบบยังไม่อัปเดตข้อมูล เพื่อป้องกันสถานะผิด ลองใหม่อีกครั้ง',
+    },
+    USE_CHECKOUT_ENDPOINT: {
+      title: 'ต้องใช้ขั้นตอน checkout',
+      description: (e) => e.hint || 'ผู้เช่ายังมีห้อง/สัญญา/บัตร active ต้อง checkout เพื่อปิดทุกอย่างพร้อมกัน',
+    },
     TENANT_BLACKLISTED: {
       title: 'ผู้เช่าอยู่ใน blacklist',
       description: (e) => e.hint || 'ตรวจประวัติผู้เช่าก่อน หากต้อง override ต้องทำอย่างตั้งใจและมี audit',

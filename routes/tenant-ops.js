@@ -992,6 +992,26 @@ module.exports = function buildTenantOpsRouter(ctx) {
     const params = [];
     let i = 1;
     const set = (col, val) => { fields.push(`${col} = $${i++}`); params.push(val); };
+    const requestedStatus = b.status !== undefined ? String(b.status) : undefined;
+    const requestedRoomId = b.roomId !== undefined
+      ? (b.roomId ? String(b.roomId).slice(0, 32).trim() : null)
+      : undefined;
+    let statusContext = null;
+    const loadStatusContext = async () => {
+      if (statusContext) return statusContext;
+      const cur = await pool.query(
+        `SELECT t.status AS tenant_status, t.current_room_id,
+                (SELECT COUNT(*)::int FROM contracts
+                   WHERE tenant_id=t.id AND status='active' AND deleted_at IS NULL) AS active_contracts,
+                (SELECT COUNT(*)::int FROM access_cards
+                   WHERE tenant_id=t.id AND status='active') AS active_cards
+           FROM tenants t
+          WHERE t.id=$1 AND t.deleted_at IS NULL`,
+        [id]
+      );
+      statusContext = cur.rows[0] || null;
+      return statusContext;
+    };
     if (b.fullName !== undefined) set('full_name', String(b.fullName).slice(0, 200));
     if (b.phone !== undefined) {
       // Normalise on update too — without this, admin's "fix the phone format"
@@ -1010,60 +1030,108 @@ module.exports = function buildTenantOpsRouter(ctx) {
       }
       set('line_user_id', lineUserId);
     }
-    if (b.roomId !== undefined) set('current_room_id', b.roomId ? String(b.roomId).slice(0, 32) : null);
-    if (b.status !== undefined) {
-      if (!VALID_TENANT_STATUS.has(String(b.status))) return res.status(400).json({ error: 'invalid status' });
-      // Block direct flip to moved_out when the tenant still has live links
-      // (active contract / active access cards / room assignment). Bare PUT
-      // can only update the tenants row — it doesn't cascade to close the
-      // contract, free the room, revoke cards, or deactivate recurring
-      // charges. Admin using "edit tenant → change status dropdown" was
-      // leaving contracts in status='active' tied to a moved-out tenant,
-      // which broke /api/rooms (still occupied), recurring billing (kept
-      // generating bills), and access control (cards still valid).
-      // Force admin to the dedicated POST /api/tenants/:id/checkout
-      // endpoint which runs the atomic cascade. `force:true` keeps a
-      // migration/cleanup escape hatch (audit-logged) for ghost rows.
-      if (b.status === 'moved_out' && b.force !== true) {
-        try {
-          const cur = await pool.query(
-            `SELECT t.status AS tenant_status, t.current_room_id,
-                    (SELECT COUNT(*)::int FROM contracts
-                       WHERE tenant_id=t.id AND status='active' AND deleted_at IS NULL) AS active_contracts,
-                    (SELECT COUNT(*)::int FROM access_cards
-                       WHERE tenant_id=t.id AND status='active') AS active_cards
-               FROM tenants t
-              WHERE t.id=$1 AND t.deleted_at IS NULL`,
-            [id]
-          );
-          const row = cur.rows[0];
-          if (row && row.tenant_status === 'active'
-              && (row.current_room_id || row.active_contracts > 0 || row.active_cards > 0)) {
-            return res.status(409).json({
-              error: 'ผู้เช่ายัง active อยู่ (ห้อง/สัญญา/บัตร) — ใช้ POST /api/tenants/:id/checkout เพื่อปิดสัญญา + คืนห้อง + เพิกถอนบัตรพร้อมกัน',
-              code: 'USE_CHECKOUT_ENDPOINT',
-              checkoutUrl: `/api/tenants/${id}/checkout`,
-              detail: {
-                currentRoom: row.current_room_id,
-                activeContracts: row.active_contracts,
-                activeCards: row.active_cards,
-              },
-              hint: 'ถ้าต้องการเปลี่ยน status เฉพาะข้อมูล (เช่น migrate / cleanup ghost) ส่ง { force: true } พร้อม audit log',
-            });
-          }
-        } catch (err) {
-          // If the dependency check fails (DB blip, missing table on legacy
-          // deploy), fall closed: refuse the change so we never silently
-          // create the inconsistency the cascade is meant to prevent.
-          console.error('[tenant.put] checkout precheck failed:', err.message);
-          return res.status(500).json({
-            error: 'ตรวจสถานะปัจจุบันไม่สำเร็จ — ลองใหม่หรือใช้ /checkout endpoint',
-            code: 'CHECKOUT_PRECHECK_FAILED',
+    if (requestedStatus !== undefined && !VALID_TENANT_STATUS.has(requestedStatus)) {
+      return res.status(400).json({
+        error: 'สถานะผู้เช่าไม่ถูกต้อง',
+        code: 'TENANT_STATUS_INVALID',
+        allowed: Array.from(VALID_TENANT_STATUS),
+      });
+    }
+    if (requestedStatus !== undefined || requestedRoomId !== undefined) {
+      let row;
+      try {
+        row = await loadStatusContext();
+      } catch (err) {
+        console.error('[tenant.put] status precheck failed:', err.message);
+        return res.status(500).json({
+          error: 'ตรวจสถานะปัจจุบันไม่สำเร็จ — ยังไม่อัปเดตข้อมูลเพื่อป้องกันสถานะผิด',
+          code: 'TENANT_STATUS_PRECHECK_FAILED',
+        });
+      }
+      if (!row) return res.status(404).json({ error: 'not found', code: 'NOT_FOUND' });
+      const finalStatus = requestedStatus !== undefined ? requestedStatus : row.tenant_status;
+      const finalRoomId = requestedRoomId !== undefined ? requestedRoomId : row.current_room_id;
+      if (finalStatus === 'active') {
+        if (!finalRoomId) {
+          return res.status(409).json({
+            error: 'ตั้งผู้เช่าเป็น active ไม่ได้ เพราะยังไม่มีห้องปัจจุบัน',
+            code: 'TENANT_ACTIVE_ROOM_REQUIRED',
+            detail: {
+              currentStatus: row.tenant_status,
+              currentRoom: row.current_room_id,
+              requestedStatus: finalStatus,
+              requestedRoom: finalRoomId,
+            },
+            hint: 'เลือกห้องให้ผู้เช่าก่อน หรือใช้ flow check-in/สร้างสัญญาเพื่อผูกห้องและสถานะให้ครบ',
           });
         }
+        const conflict = await pool.query(
+          `SELECT id, full_name, current_room_id
+             FROM tenants
+            WHERE current_room_id=$1
+              AND status='active'
+              AND deleted_at IS NULL
+              AND id<>$2
+            LIMIT 1`,
+          [finalRoomId, id]
+        );
+        if (conflict.rows.length) {
+          return res.status(409).json({
+            error: `ห้อง ${finalRoomId} มีผู้เช่า active อยู่แล้ว`,
+            code: 'ROOM_OCCUPIED',
+            roomId: finalRoomId,
+            conflict: conflict.rows[0],
+            hint: 'checkout ผู้เช่าปัจจุบันของห้องนี้ก่อน หรือเลือกห้องอื่น',
+            nextActions: {
+              checkoutExistingTenantUrl: `/admin#tenants/${conflict.rows[0].id}?tab=contract`,
+            },
+          });
+        }
+      } else if (finalStatus === 'moved_out' || finalStatus === 'blacklist') {
+        if (requestedRoomId) {
+          return res.status(409).json({
+            error: `สถานะ ${finalStatus} ต้องไม่ผูก current_room_id`,
+            code: 'TENANT_NONACTIVE_ROOM_FORBIDDEN',
+            detail: {
+              currentStatus: row.tenant_status,
+              currentRoom: row.current_room_id,
+              requestedStatus: finalStatus,
+              requestedRoom: requestedRoomId,
+            },
+            hint: 'ถ้าผู้เช่ายังอยู่ ให้ใช้สถานะ active; ถ้าจะย้ายออก/blacklist ให้ checkout หรือปล่อย roomId ว่าง',
+          });
+        }
+        if (row.tenant_status === 'active'
+            && (row.current_room_id || row.active_contracts > 0 || row.active_cards > 0)
+            && b.force !== true) {
+          return res.status(409).json({
+            error: `ผู้เช่ายัง active อยู่ (ห้อง/สัญญา/บัตร) — ใช้ POST /api/tenants/:id/checkout เพื่ออัปเดตสถานะครบชุดก่อนเปลี่ยนเป็น ${finalStatus}`,
+            code: 'USE_CHECKOUT_ENDPOINT',
+            checkoutUrl: `/api/tenants/${id}/checkout`,
+            adminUrl: `/admin#tenants/${id}?tab=contract`,
+            detail: {
+              currentStatus: row.tenant_status,
+              requestedStatus: finalStatus,
+              currentRoom: row.current_room_id,
+              activeContracts: row.active_contracts,
+              activeCards: row.active_cards,
+            },
+            nextActions: {
+              hint: 'ใช้ checkout เพื่อปิดสัญญา คืนห้อง เพิกถอนบัตร และล้าง session ผู้เช่าในรายการเดียว',
+              checkoutUrl: `/api/tenants/${id}/checkout`,
+              adminUrl: `/admin#tenants/${id}?tab=contract`,
+            },
+          });
+        }
+        if (requestedRoomId === undefined && row.current_room_id) {
+          set('current_room_id', null);
+        }
       }
-      set('status', b.status);
-      if (b.status === 'blacklist' && b.blacklistReason) set('blacklist_reason', String(b.blacklistReason).slice(0, 500));
+    }
+    if (requestedRoomId !== undefined) set('current_room_id', requestedRoomId);
+    if (requestedStatus !== undefined) {
+      set('status', requestedStatus);
+      if (requestedStatus === 'blacklist' && b.blacklistReason) set('blacklist_reason', String(b.blacklistReason).slice(0, 500));
     }
     if (b.notes !== undefined) set('notes', b.notes ? String(b.notes).slice(0, 1000) : null);
     if (b.locale !== undefined && ['th', 'en'].includes(b.locale)) set('locale', b.locale);
@@ -1172,19 +1240,69 @@ module.exports = function buildTenantOpsRouter(ctx) {
         }
         return res.status(404).json({ error: 'not found', code: 'NOT_FOUND' });
       }
-      if (b.status === 'moved_out' || b.status === 'blacklist') {
+      if (requestedStatus === 'moved_out' || requestedStatus === 'blacklist') {
         await pool.query(`DELETE FROM tenant_sessions WHERE tenant_id=$1`, [id]).catch((err) => {
           console.warn('[tenant.update] session cleanup failed:', err.message);
         });
+      }
+      const statusTouched = requestedStatus !== undefined || requestedRoomId !== undefined;
+      const previousStatus = statusContext?.tenant_status || null;
+      const previousRoomId = statusContext?.current_room_id || null;
+      const finalStatus = requestedStatus !== undefined ? requestedStatus : previousStatus;
+      const finalRoomId = requestedRoomId !== undefined
+        ? requestedRoomId
+        : ((requestedStatus === 'moved_out' || requestedStatus === 'blacklist') ? null : previousRoomId);
+      const warnings = [];
+      const roomSync = [];
+      if (statusTouched) {
+        const roomsToSync = new Set();
+        if (previousRoomId) roomsToSync.add(String(previousRoomId));
+        if (finalRoomId) roomsToSync.add(String(finalRoomId));
+        if (roomsToSync.size > 0) {
+          const { syncRoom } = require('../services/roomStatus');
+          for (const roomId of roomsToSync) {
+            try {
+              await syncRoom(pool, roomId, { reason: 'tenant-update-status' });
+              roomSync.push({ roomId, ok: true });
+            } catch (err) {
+              console.warn('[tenant.update] room sync failed:', roomId, err.message);
+              roomSync.push({ roomId, ok: false, error: err.message });
+              warnings.push({
+                code: 'ROOM_STATUS_SYNC_FAILED',
+                msg: `อัปเดตผู้เช่าสำเร็จ แต่ซิงก์สถานะห้อง ${roomId} ไม่สำเร็จ`,
+                fix: 'เปิดหน้าห้องพักหรือสถานะระบบเพื่อตรวจ data integrity แล้วลองซิงก์อีกครั้ง',
+              });
+            }
+          }
+        }
       }
       // Audit the change. Include a 'forced' flag when admin bypassed the
       // checkout cascade — that's the breadcrumb if a moved_out tenant later
       // shows up with an orphan contract because of this PUT.
       audit(req, 'tenant.update', 'tenant', String(id), {
         fields: Object.keys(b),
-        forcedMovedOut: b.status === 'moved_out' && b.force === true ? true : undefined,
+        statusUpdate: statusTouched ? {
+          from: previousStatus,
+          to: finalStatus,
+          previousRoomId,
+          roomId: finalRoomId,
+        } : undefined,
+        forcedStatusUpdate: requestedStatus && b.force === true ? requestedStatus : undefined,
       });
-      res.json({ ok: true, id, updated_at: rows[0].updated_at });
+      res.json({
+        ok: true,
+        id,
+        updated_at: rows[0].updated_at,
+        statusUpdate: statusTouched ? {
+          from: previousStatus,
+          to: finalStatus,
+          previousRoomId,
+          roomId: finalRoomId,
+          roomSync,
+          warnings,
+        } : undefined,
+        warnings,
+      });
     } catch (err) {
       console.error('tenant update error:', err);
       res.status(500).json({ error: 'internal error' });

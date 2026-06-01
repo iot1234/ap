@@ -4919,6 +4919,33 @@ test('tenant POST/PUT normalise phone (strip dashes/spaces)', () => {
     'PUT /api/tenants/:id must also normalise on edit');
 });
 
+test('tenant status updates are guarded and sync room state', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const ops = fs.readFileSync(path.join(__dirname, '..', 'routes', 'tenant-ops.js'), 'utf8');
+
+  assert.match(ops, /const requestedStatus = b\.status !== undefined \? String\(b\.status\) : undefined/,
+    'tenant update must normalize the requested status before writing');
+  assert.match(ops, /requestedStatus !== undefined \|\| requestedRoomId !== undefined/,
+    'tenant update must preflight status and room changes together');
+  assert.match(ops, /TENANT_STATUS_INVALID/,
+    'invalid tenant status must return a stable code');
+  assert.match(ops, /TENANT_ACTIVE_ROOM_REQUIRED/,
+    'active tenants must not be saved without current_room_id');
+  assert.match(ops, /TENANT_NONACTIVE_ROOM_FORBIDDEN/,
+    'moved_out/blacklist tenants must not keep a current_room_id');
+  assert.match(ops, /finalStatus === 'moved_out' \|\| finalStatus === 'blacklist'/,
+    'non-active status guard must cover blacklist as well as moved_out');
+  assert.match(ops, /set\('current_room_id', null\)/,
+    'saving a non-active status must clear current_room_id');
+  assert.match(ops, /syncRoom\(pool, roomId, \{ reason: 'tenant-update-status' \}\)/,
+    'tenant status updates must resync affected room status after save');
+  assert.match(ops, /ROOM_STATUS_SYNC_FAILED/,
+    'room sync failures must be returned as warnings instead of hidden');
+  assert.match(ops, /statusUpdate:/,
+    'tenant update response/audit must include a status transition summary');
+});
+
 test('tenant login is wired through schemas.tenantLogin', () => {
   const fs = require('node:fs');
   const path = require('node:path');
@@ -5411,6 +5438,11 @@ test('admin toastError explains booking-to-contract guard codes with next action
     'ROOM_OCCUPIED',
     'ROOM_CONTRACT_EXISTS',
     'ROOM_STRANDED_CONTRACT',
+    'TENANT_STATUS_INVALID',
+    'TENANT_ACTIVE_ROOM_REQUIRED',
+    'TENANT_NONACTIVE_ROOM_FORBIDDEN',
+    'TENANT_STATUS_PRECHECK_FAILED',
+    'USE_CHECKOUT_ENDPOINT',
     'DRAFT_CONTRACT_EXISTS',
     'TENANT_ROOM_CONTRACT_EXISTS',
     'DUPLICATE_QUICK_INVITE',
