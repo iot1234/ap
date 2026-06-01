@@ -1017,7 +1017,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             && bill.waterCurrentReading == null) missingFields.push('water');
         if (!billing.isFlatUtilityConfigured(roomForBilling, 'elec')
             && bill.elecCurrentReading == null) missingFields.push('elec');
-        const payload = billPreviewPayload(bill, recurringList, rawRoom, periodDisplay);
+        const payload = billPreviewPayload(bill, recurringList, room, periodDisplay);
         if (missingFields.length) {
           payload.issues = [{
             sev: 'high',

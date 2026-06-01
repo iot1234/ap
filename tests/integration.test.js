@@ -1808,6 +1808,22 @@ test('admin billing table preserves DB bill owner history by tenant_id', () => {
     'table must display the persisted bills.tenant_id for auditability');
 });
 
+test('bill preview payload uses the resolved tenant row id for DB bill overlay', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'bills-extras.js'), 'utf8');
+
+  const idx = src.indexOf("r.get('/preview-period'");
+  assert.ok(idx > 0, 'should find preview-period route');
+  const body = src.slice(idx, src.indexOf('// FOR UPDATE locks', idx));
+  assert.match(body, /const room = \{ \.\.\.rawRoom, tenant \}/,
+    'preview route must preserve the DB-resolved active tenant');
+  assert.match(body, /billPreviewPayload\(bill, recurringList, room, periodDisplay\)/,
+    'preview payload must carry tenant.id so the UI can match persisted DB bills');
+  assert.doesNotMatch(body, /billPreviewPayload\(bill, recurringList, rawRoom, periodDisplay\)/,
+    'using rawRoom drops tenant.id and makes the send action fall back to legacy plaintext');
+});
+
 test('admin billing UI uses text labels instead of ambiguous icon-only controls', () => {
   // Operators complained the billing icons were unclear. Keep the billing
   // page text-first: no IconBtn rows, no icon prop on primary controls/KPIs,
