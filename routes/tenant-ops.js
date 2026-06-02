@@ -2014,8 +2014,19 @@ module.exports = function buildTenantOpsRouter(ctx) {
             },
           });
         }
+        const resolvedCheckinRent = pricing.resolveBillingRent({
+          room: blobRoomForRent || roomV2ForRent,
+          config: pricingConfig,
+        });
+        const resolvedCheckinRentValue = Number(resolvedCheckinRent.rent);
+        const effectiveMonthlyRent = Number.isFinite(resolvedCheckinRentValue) && resolvedCheckinRentValue > 0
+          ? resolvedCheckinRentValue
+          : Number(monthlyRent);
+        const effectiveDepositAmount = effectiveMonthlyRent > 0
+          ? effectiveMonthlyRent * 2
+          : Number(depositAmount);
         const rentAssessment = pricing.assessContractRent({
-          monthlyRent,
+          monthlyRent: effectiveMonthlyRent,
           room: blobRoomForRent || roomV2ForRent,
           config: pricingConfig,
         });
@@ -2023,8 +2034,8 @@ module.exports = function buildTenantOpsRouter(ctx) {
           await client.query('ROLLBACK');
           return res.status(400).json({
             error: rentAssessment.referenceRent > 0
-              ? `ค่าเช่า ${monthlyRent} ต่ำผิดปกติสำหรับห้อง ${roomId} (ราคาอ้างอิง ${rentAssessment.referenceRent}, ขั้นต่ำที่ยอมรับ ${rentAssessment.minimumRent})`
-              : `ค่าเช่า ${monthlyRent} ต่ำผิดปกติ (ขั้นต่ำที่ยอมรับ ${rentAssessment.minimumRent})`,
+              ? `ค่าเช่า ${effectiveMonthlyRent} ต่ำผิดปกติสำหรับห้อง ${roomId} (ราคาอ้างอิง ${rentAssessment.referenceRent}, ขั้นต่ำที่ยอมรับ ${rentAssessment.minimumRent})`
+              : `ค่าเช่า ${effectiveMonthlyRent} ต่ำผิดปกติ (ขั้นต่ำที่ยอมรับ ${rentAssessment.minimumRent})`,
             code: rentAssessment.code || 'CONTRACT_RENT_TOO_LOW',
             field: rentAssessment.field,
             monthlyRent: rentAssessment.rent,
@@ -2161,7 +2172,7 @@ module.exports = function buildTenantOpsRouter(ctx) {
              ON CONFLICT (contract_no) DO NOTHING
              RETURNING id`,
             [contractNo, id, roomId, moveInDate, endDate,
-             monthlyRent, depositAmount, effectiveTermMonths || null, resolvedDiscountPct,
+             effectiveMonthlyRent, effectiveDepositAmount, effectiveTermMonths || null, resolvedDiscountPct,
              termsVersion]
           );
         } catch (err) {
@@ -2173,7 +2184,7 @@ module.exports = function buildTenantOpsRouter(ctx) {
              ON CONFLICT (contract_no) DO NOTHING
              RETURNING id`,
             [contractNo, id, roomId, moveInDate, endDate,
-             monthlyRent, depositAmount, effectiveTermMonths || null, resolvedDiscountPct]
+             effectiveMonthlyRent, effectiveDepositAmount, effectiveTermMonths || null, resolvedDiscountPct]
           );
         }
         if (!contractIns.rows.length) {
@@ -2300,7 +2311,7 @@ module.exports = function buildTenantOpsRouter(ctx) {
           }
         }
 
-        let welcomeRent = Number(monthlyRent) || 0;
+        let welcomeRent = Number(effectiveMonthlyRent) || 0;
         // Days-lived fraction for the move-in month. Flat charges (wifi / common
         // fee / flat-mode utilities) are prorated by occupancy so a mid-month
         // move-in pays only for the days lived (operator-chosen policy). Rent
@@ -2371,7 +2382,7 @@ module.exports = function buildTenantOpsRouter(ctx) {
         require('../services/roomStatus').syncRoom(pool, roomId, { reason: 'tenant-checkin' })
           .catch((err) => console.warn(`[checkin] room sync failed:`, err.message));
         audit(req, 'tenant.checkin', 'tenant', String(id),
-          { roomId, depositAmount, monthlyRent, contractNo,
+          { roomId, depositAmount: effectiveDepositAmount, monthlyRent: effectiveMonthlyRent, contractNo,
             forced: isForced, missingAtCheckin: missing });
         if (isForced) {
           // Surface forced bypasses to admin via owner notify so the
@@ -2380,7 +2391,7 @@ module.exports = function buildTenantOpsRouter(ctx) {
             subject: '⚠️ checkin ใช้ force=true bypass safety guards',
             text: `tenantId=${id} room=${roomId} by=${req.session.user.username}\n`
               + `missing=${missing.join(',') || 'none'}\n`
-              + `monthlyRent=${monthlyRent} deposit=${depositAmount}`,
+              + `monthlyRent=${effectiveMonthlyRent} deposit=${effectiveDepositAmount}`,
           }).catch(() => {});
         }
 
@@ -2403,8 +2414,8 @@ module.exports = function buildTenantOpsRouter(ctx) {
             const amtStr = Number(welcomeRent).toLocaleString(
               'th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 }
             );
-            const discountNote = welcomeRent < Number(monthlyRent)
-              ? `\n💸 รวมส่วนลด — ปกติ ฿${Number(monthlyRent).toLocaleString('th-TH', { minimumFractionDigits: 2 })}`
+            const discountNote = welcomeRent < Number(effectiveMonthlyRent)
+              ? `\n💸 รวมส่วนลด — ปกติ ฿${Number(effectiveMonthlyRent).toLocaleString('th-TH', { minimumFractionDigits: 2 })}`
               : '';
             notifier.notifyTenant({ pool, features: flags }, tQ.rows[0], {
               subject: `🏠 ยินดีต้อนรับ — บิลรอบแรกของคุณ`,

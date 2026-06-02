@@ -59,9 +59,14 @@ function PageTenants({ rooms, setRooms, config, addActivity, setToast }) {
         : ((rooms && rooms[lastRoomId]) || byPhoneRoom.get(`${cleanPhone}:${lastRoomId}`) || null);
       const roomTenant = room && room.tenant ? room.tenant : {};
       const type = (room && room.type) || 'standard';
-      const rent = row.last_monthly_rent != null
-        ? Number(row.last_monthly_rent)
-        : (room ? (resolveRoomRent ? resolveRoomRent(room, config).rent : room.rent) : 0);
+      const resolvedRoomRent = room
+        ? (resolveRoomRent ? resolveRoomRent(room, config) : { rent: Number(room.rent) || 0 })
+        : null;
+      const rent = currentRoomId && resolvedRoomRent
+        ? Number(resolvedRoomRent.rent || 0)
+        : (row.last_monthly_rent != null
+          ? Number(row.last_monthly_rent)
+          : (resolvedRoomRent ? Number(resolvedRoomRent.rent || 0) : 0));
       const tenantStatus = row.status || 'active';
       const outstandingTotal = Number(row.outstanding_total || 0);
       return {
@@ -384,7 +389,7 @@ function PageTenants({ rooms, setRooms, config, addActivity, setToast }) {
             />
             {drawerTab === 'profile'  && <TabProfile  t={active} />}
             {drawerTab === 'portal'   && <TabPortal   t={active} setToast={setToast} addActivity={addActivity} apiFetch={apiFetch} />}
-            {drawerTab === 'contract' && <TabContract t={active} routeBookingId={routeBookingId} setToast={setToast} addActivity={addActivity} setRooms={setRooms} onTenantChanged={refreshTenants} onClosed={() => setActiveId(null)} />}
+            {drawerTab === 'contract' && <TabContract t={active} routeBookingId={routeBookingId} config={config} setToast={setToast} addActivity={addActivity} setRooms={setRooms} onTenantChanged={refreshTenants} onClosed={() => setActiveId(null)} />}
             {drawerTab === 'bills'    && <TabBills    t={active} />}
             {drawerTab === 'history'  && <TabHistory  t={active} />}
             {drawerTab === 'notes'    && <TabNotes    t={active} setRooms={setRooms} setToast={setToast} addActivity={addActivity} />}
@@ -974,11 +979,12 @@ function TabPortal({ t, setToast, addActivity, apiFetch }) {
 // review / approve / sign — no jumping to /admin#contracts or
 // /admin#contract-invitations. Room + rent are auto-mapped from the tenant's
 // current room (`t.roomId`, `t.rent`) so admin doesn't re-pick the room.
-function TabContract({ t, routeBookingId = '', setToast, addActivity, setRooms, onTenantChanged, onClosed }) {
+function TabContract({ t, routeBookingId = '', config, setToast, addActivity, setRooms, onTenantChanged, onClosed }) {
   const C = window.ADMIN_C;
   const { fmtCurrency } = window;
   const { Card, DefList, Btn, Pill } = window;
   const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
+  const resolveRoomRent = window.resolveRoomRent;
   const [contract, setContract] = React.useState(null);
   const [loading, setLoading] = React.useState(true);
   const [tenantDbId, setTenantDbId] = React.useState(null);
@@ -1044,6 +1050,30 @@ function TabContract({ t, routeBookingId = '', setToast, addActivity, setRooms, 
   React.useEffect(() => { reload(); }, [reload]);
 
   const fmtDate = (s) => s ? new Date(s).toLocaleDateString('th-TH') : '-';
+  const contractRentInfo = React.useMemo(() => {
+    const resolved = t.room && resolveRoomRent
+      ? resolveRoomRent(t.room, config)
+      : null;
+    const resolvedRent = Number(resolved && resolved.rent);
+    const fallbackRent = Number(t.rent);
+    const rent = Number.isFinite(resolvedRent) && resolvedRent > 0
+      ? resolvedRent
+      : (Number.isFinite(fallbackRent) && fallbackRent > 0 ? fallbackRent : 0);
+    const source = resolved && Number.isFinite(resolvedRent) && resolvedRent > 0
+      ? (resolved.source || 'formula')
+      : 'legacy';
+    const sourceLabel = source === 'override'
+      ? 'ราคาพิเศษรายห้อง'
+      : (source === 'formula' ? 'เมนูตั้งราคา' : 'ค่าเดิมของห้อง');
+    return {
+      rent,
+      deposit: rent > 0 ? rent * 2 : 0,
+      source,
+      sourceLabel,
+      warning: resolved && resolved.warning,
+    };
+  }, [t.room, t.rent, config, resolveRoomRent]);
+  const hasCurrentTenancy = t.tenantStatus === 'active' && !!t.currentRoomId;
 
   const copyLink = async (text) => {
     try {
@@ -1144,7 +1174,7 @@ function TabContract({ t, routeBookingId = '', setToast, addActivity, setRooms, 
     // Rent comes from the rooms blob — should never be 0 for a real room,
     // but guard anyway so admin gets a clear "go fix the room" message
     // instead of an opaque server 400.
-    const rent = Number(t.rent);
+    const rent = Number(contractRentInfo.rent);
     if (!Number.isFinite(rent) || rent <= 0) {
       setToast && setToast({ kind: 'danger', message: {
         title: `ห้อง ${t.roomId} ยังไม่กำหนดค่าเช่า`,
@@ -1164,7 +1194,7 @@ function TabContract({ t, routeBookingId = '', setToast, addActivity, setRooms, 
         tenantEmail: t.email || null,
         roomId: t.roomId,
         monthlyRent: rent,
-        deposit: rent * 2,
+        deposit: Number(contractRentInfo.deposit) || rent * 2,
         moveInDate: new Date().toISOString().slice(0, 10),
         termMonths: 12,
         expiresInHours: 168,
@@ -1320,7 +1350,7 @@ function TabContract({ t, routeBookingId = '', setToast, addActivity, setRooms, 
   // closing bill generated. Direct contract PUT remains a fallback for
   // legacy rows where tenantDbId cannot be resolved.
   const cancelContract = async () => {
-    if (!contract) return;
+    if (!contract && !tenantDbId) return;
     const reason = (cancelReason || '').trim();
     if (reason.length < 5) {
       setToast && setToast({ kind: 'danger', message: 'กรุณาระบุเหตุผลก่อนยกเลิกสัญญาอย่างน้อย 5 ตัวอักษร' });
@@ -1328,6 +1358,8 @@ function TabContract({ t, routeBookingId = '', setToast, addActivity, setRooms, 
     }
     setBusy(true);
     try {
+      const closedRoomId = contract ? contract.room_id : (t.currentRoomId || t.roomId);
+      const closedContractNo = contract ? contract.contract_no : 'no-contract';
       if (tenantDbId) {
         await apiCall(`/api/tenants/${tenantDbId}/checkout`, {
           method: 'POST',
@@ -1336,7 +1368,7 @@ function TabContract({ t, routeBookingId = '', setToast, addActivity, setRooms, 
             generateClosingBill: true,
           }),
         });
-      } else {
+      } else if (contract) {
         await apiCall(`/api/contracts/${contract.id}`, {
           method: 'PUT',
           body: JSON.stringify({
@@ -1350,23 +1382,27 @@ function TabContract({ t, routeBookingId = '', setToast, addActivity, setRooms, 
       setCancelReason('');
       setToast && setToast({
         kind: 'success',
-        message: `ยกเลิกสัญญา ${contract.contract_no} แล้ว — ห้อง ${contract.room_id} ว่าง`,
+        message: contract
+          ? `ยกเลิกสัญญา ${closedContractNo} แล้ว — ห้อง ${closedRoomId} ว่าง`
+          : `เช็คเอาท์ ${t.name} จากห้อง ${closedRoomId} แล้ว`,
       });
       addActivity && addActivity({
         icon: '🚫',
-        text: `ยกเลิกสัญญา ${contract.contract_no} (${t.name}, ห้อง ${contract.room_id}) — ${reason.slice(0, 60)}`,
+        text: contract
+          ? `ยกเลิกสัญญา ${closedContractNo} (${t.name}, ห้อง ${closedRoomId}) — ${reason.slice(0, 60)}`
+          : `เช็คเอาท์ ${t.name} (ห้อง ${closedRoomId}) — ${reason.slice(0, 60)}`,
         type: 'contract',
       });
       // Update parent rooms state so this tenant disappears from the
       // tenants table immediately — the server already cascaded room
       // status='vacant' + tenant removed, but the client-side `rooms`
       // blob would stay stale until the next full refetch.
-      if (setRooms && contract.room_id) {
+      if (setRooms && closedRoomId) {
         setRooms((prev) => {
-          if (!prev || !prev[contract.room_id]) return prev;
+          if (!prev || !prev[closedRoomId]) return prev;
           const next = { ...prev };
-          next[contract.room_id] = {
-            ...next[contract.room_id],
+          next[closedRoomId] = {
+            ...next[closedRoomId],
             tenant: null,
             status: 'vacant',
             since: null,
@@ -1498,18 +1534,30 @@ function TabContract({ t, routeBookingId = '', setToast, addActivity, setRooms, 
           <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 12 }}>
             📜 ยังไม่มีสัญญาเช่า — ตรวจรายละเอียดก่อนส่งลิงก์
           </div>
-          <ContractPreFlightSummary t={t} C={C} fmtCurrency={fmtCurrency} />
+          <ContractPreFlightSummary t={t} rentInfo={contractRentInfo} C={C} fmtCurrency={fmtCurrency} />
           <div style={{ fontSize: 12, color: C.muted, margin: '10px 0 14px', lineHeight: 1.5 }}>
             ค่าเช่า ห้อง และข้อมูลผู้เช่าทั้งหมดดึงจากระบบให้แล้ว — แอดมินไม่ต้องกรอกซ้ำ
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-            <ContractActionTile
-              icon="🔑"
-              title="เช็คอินทันที"
-              desc="แอดมินกรอกข้อมูลครบเอง — ใช้เมื่อมีบัตร/ที่อยู่ผู้เช่าอยู่แล้ว"
-              onClick={() => setShowCheckin(true)}
-              C={C}
-            />
+            {hasCurrentTenancy ? (
+              <ContractActionTile
+                icon="🚪"
+                title="เช็คเอาท์/ย้ายออก"
+                desc="ผู้เช่ารายนี้อยู่ในห้องแล้ว จึงไม่ต้องเช็คอินซ้ำ หากต้องย้ายออกให้ปิดจากปุ่มนี้"
+                onClick={() => setCancelling(true)}
+                busy={busy}
+                C={C}
+                tone="danger"
+              />
+            ) : (
+              <ContractActionTile
+                icon="🔑"
+                title="เช็คอินทันที"
+                desc="แอดมินกรอกข้อมูลครบเอง — ใช้เมื่อมีบัตร/ที่อยู่ผู้เช่าอยู่แล้ว"
+                onClick={() => setShowCheckin(true)}
+                C={C}
+              />
+            )}
             <ContractActionTile
               icon="📨"
               title="ส่งลิงก์ให้ผู้เช่ากรอกเอง"
@@ -1524,12 +1572,25 @@ function TabContract({ t, routeBookingId = '', setToast, addActivity, setRooms, 
           <CheckInModal
             tenantId={tenantDbId}
             tenant={t}
+            rentInfo={contractRentInfo}
             onClose={() => setShowCheckin(false)}
             onDone={() => { setShowCheckin(false); reload(); if (onTenantChanged) onTenantChanged();
               setToast && setToast({ kind: 'success', message: `เช็คอิน ${t.name} เรียบร้อย` });
               addActivity && addActivity({ icon: '🔑', text: `เช็คอิน ${t.name} (ห้อง ${t.roomId})`, type: 'contract' });
             }}
             onError={(msg) => setToast && setToast({ kind: 'danger', message: msg })}
+          />
+        ) : null}
+        {cancelling ? (
+          <CancelContractModal
+            contract={null}
+            tenant={t}
+            reason={cancelReason}
+            setReason={setCancelReason}
+            busy={busy}
+            onClose={() => { setCancelling(false); setCancelReason(''); }}
+            onConfirm={cancelContract}
+            C={C}
           />
         ) : null}
       </div>
@@ -1658,17 +1719,20 @@ function TabContract({ t, routeBookingId = '', setToast, addActivity, setRooms, 
 // the audit_log entry without DB forensics.
 function CancelContractModal({ contract, tenant, reason, setReason, busy, onClose, onConfirm, C }) {
   const { Modal, Btn, fmtCurrency } = window;
+  const roomId = contract ? contract.room_id : (tenant && (tenant.currentRoomId || tenant.roomId)) || '-';
+  const monthlyRent = contract ? contract.monthly_rent : (tenant && tenant.rent);
+  const deposit = contract ? contract.deposit : (Number(monthlyRent) > 0 ? Number(monthlyRent) * 2 : 0);
   return (
     <Modal
       open={true}
       onClose={busy ? undefined : onClose}
       width={520}
-      title={`ยกเลิกสัญญา ${contract.contract_no}`}
+      title={contract ? `ยกเลิกสัญญา ${contract.contract_no}` : `เช็คเอาท์ ${tenant && tenant.name ? tenant.name : 'ผู้เช่า'}`}
       footer={
         <>
           <Btn variant="ghost" onClick={onClose} disabled={busy}>ปิด</Btn>
           <Btn variant="danger" onClick={onConfirm} disabled={busy || reason.trim().length < 5}>
-            {busy ? 'กำลังยกเลิก…' : 'ยืนยันยกเลิก'}
+            {busy ? (contract ? 'กำลังยกเลิก…' : 'กำลังเช็คเอาท์…') : (contract ? 'ยืนยันยกเลิก' : 'ยืนยันเช็คเอาท์')}
           </Btn>
         </>
       }
@@ -1679,9 +1743,13 @@ function CancelContractModal({ contract, tenant, reason, setReason, busy, onClos
       }}>
         ⚠️ การยกเลิกจะ:
         <ul style={{ margin: '6px 0 0 0', paddingLeft: 20 }}>
-          <li>ตั้งสถานะสัญญาเป็น "สิ้นสุดแล้ว"</li>
+          {contract ? (
+            <li>ตั้งสถานะสัญญาเป็น "สิ้นสุดแล้ว"</li>
+          ) : (
+            <li>เช็คเอาท์ผู้เช่าที่อยู่ในห้องนี้ แม้ยังไม่พบสัญญา active ในแท็บ</li>
+          )}
           <li>เปลี่ยนสถานะผู้เช่า <b>{tenant && tenant.name}</b> เป็น <b>moved_out</b></li>
-          <li>ปล่อยห้อง <b>{contract.room_id}</b> เป็น <b>vacant</b></li>
+          <li>ปล่อยห้อง <b>{roomId}</b> เป็น <b>vacant</b></li>
           <li>หยุดการออกบิลอัตโนมัติ (รอบเดือนถัดไป)</li>
         </ul>
         บิลที่ค้างชำระอยู่แล้วยังคงค้างไว้ ต้องเก็บ/ปิดยอดเอง
@@ -1691,9 +1759,9 @@ function CancelContractModal({ contract, tenant, reason, setReason, busy, onClos
         padding: 10, background: '#faf6ee', borderRadius: 8, fontSize: 12,
         color: C.muted, marginBottom: 12, lineHeight: 1.5,
       }}>
-        ห้อง: <b style={{ color: C.ink }}>{contract.room_id}</b> ·
-        ค่าเช่า: <b style={{ color: C.ink }}>{fmtCurrency(contract.monthly_rent)}/เดือน</b> ·
-        มัดจำ: <b style={{ color: C.ink }}>{fmtCurrency(contract.deposit)}</b>
+        ห้อง: <b style={{ color: C.ink }}>{roomId}</b> ·
+        ค่าเช่า: <b style={{ color: C.ink }}>{fmtCurrency(monthlyRent)}/เดือน</b> ·
+        มัดจำ: <b style={{ color: C.ink }}>{fmtCurrency(deposit)}</b>
       </div>
 
       <label style={{ display: 'block', fontSize: 12, marginBottom: 4, color: '#5b4f40', fontWeight: 500 }}>
@@ -1720,12 +1788,12 @@ function CancelContractModal({ contract, tenant, reason, setReason, busy, onClos
 // size/amenities), rent (auto-calculated deposit), tenant (name/phone/
 // email). Everything sourced from the tenant's room context (rooms blob),
 // so admin sees exactly what the tenant will receive without re-typing.
-function ContractPreFlightSummary({ t, C, fmtCurrency }) {
+function ContractPreFlightSummary({ t, rentInfo, C, fmtCurrency }) {
   const ADMIN_ROOM_TYPES = window.ADMIN_ROOM_TYPES || {};
   const r = t.room || {};
   const typeInfo = ADMIN_ROOM_TYPES[t.type] || {};
-  const rent = Number(t.rent) || 0;
-  const deposit = rent * 2;
+  const rent = Number(rentInfo && rentInfo.rent) || 0;
+  const deposit = Number(rentInfo && rentInfo.deposit) || (rent * 2);
 
   // Amenity badges — show only what the room actually has.
   const amenities = [];
@@ -1779,9 +1847,16 @@ function ContractPreFlightSummary({ t, C, fmtCurrency }) {
         </Row>
       ) : null}
       <Row icon="💰" label="ค่าเช่า/เดือน">
-        <b style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 14 }}>
-          {fmtCurrency(rent)}
-        </b>
+        <span>
+          <b style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 14 }}>
+            {fmtCurrency(rent)}
+          </b>
+          {rentInfo && rentInfo.sourceLabel ? (
+            <span style={{ color: C.muted, marginLeft: 6, fontSize: 11, fontWeight: 400 }}>
+              ({rentInfo.sourceLabel})
+            </span>
+          ) : null}
+        </span>
       </Row>
       <Row icon="🏦" label="เงินมัดจำ">
         <span style={{ fontFamily: 'JetBrains Mono, monospace' }}>
@@ -1858,23 +1933,27 @@ function ContractConflictCard({ conflict, tenant, busy, C, onOpenContracts, onOp
 
 // Big-tile button for the "no contract yet" 2-way fork. Hover lifts the
 // border so admin can see this is a primary action.
-function ContractActionTile({ icon, title, desc, onClick, busy, C }) {
+function ContractActionTile({ icon, title, desc, onClick, busy, C, tone = 'default' }) {
+  const toneBorder = tone === 'danger' ? '#e6b8ad' : C.border;
+  const toneBg = tone === 'danger' ? '#fff4f1' : C.surface;
+  const toneHoverBorder = tone === 'danger' ? '#c95b43' : C.accent;
+  const toneHoverBg = tone === 'danger' ? '#fff0eb' : '#faf6ee';
   return (
     <button onClick={onClick} disabled={busy}
       style={{
         textAlign: 'left', padding: 14, borderRadius: 10,
-        border: `1px solid ${C.border}`, background: C.surface,
+        border: `1px solid ${toneBorder}`, background: toneBg,
         cursor: busy ? 'wait' : 'pointer', fontFamily: 'inherit',
         opacity: busy ? 0.6 : 1, transition: 'all 0.15s',
       }}
       onMouseOver={(e) => {
         if (busy) return;
-        e.currentTarget.style.borderColor = C.accent;
-        e.currentTarget.style.background = '#faf6ee';
+        e.currentTarget.style.borderColor = toneHoverBorder;
+        e.currentTarget.style.background = toneHoverBg;
       }}
       onMouseOut={(e) => {
-        e.currentTarget.style.borderColor = C.border;
-        e.currentTarget.style.background = C.surface;
+        e.currentTarget.style.borderColor = toneBorder;
+        e.currentTarget.style.background = toneBg;
       }}
     >
       <div style={{ fontSize: 22, marginBottom: 4 }}>{icon}</div>
@@ -2048,7 +2127,7 @@ function ContractPhotoBox({ label, url, C }) {
   );
 }
 
-function CheckInModal({ tenantId, tenant, onClose, onDone, onError }) {
+function CheckInModal({ tenantId, tenant, rentInfo, onClose, onDone, onError }) {
   const C = window.ADMIN_C;
   const { Modal, Btn } = window;
   const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
@@ -2057,10 +2136,12 @@ function CheckInModal({ tenantId, tenant, onClose, onDone, onError }) {
   const estimateContractMonths = window.estimateContractMonths || (() => null);
   const contractDateSummary = window.contractDateSummary || (() => '');
   const initialStartDate = contractTodayYmd();
+  const pricingRent = Number(rentInfo && rentInfo.rent) || Number(tenant.rent) || 0;
+  const pricingDeposit = Number(rentInfo && rentInfo.deposit) || (pricingRent > 0 ? pricingRent * 2 : 0);
   const [form, setForm] = React.useState({
     moveInDate: initialStartDate,
-    monthlyRent: String(tenant.rent || ''),
-    depositAmount: String((tenant.rent || 0) * 2),
+    monthlyRent: pricingRent > 0 ? String(pricingRent) : '',
+    depositAmount: pricingDeposit > 0 ? String(pricingDeposit) : '',
     termMonths: '12',
     endDate: addContractMonths(initialStartDate, 12),
     discountPct: '',  // empty → resolved from termMonths + config.discounts
@@ -2068,6 +2149,7 @@ function CheckInModal({ tenantId, tenant, onClose, onDone, onError }) {
     elecStartReading: '',   // เลขมิเตอร์ไฟตั้งต้นของห้องตอนย้ายเข้า
   });
   const [busy, setBusy] = React.useState(false);
+  const pricingValid = Number.isFinite(pricingRent) && pricingRent > 0;
   const termNumber = Number(form.termMonths);
   const termValid = form.termMonths === ''
     || (Number.isInteger(termNumber) && termNumber >= 1 && termNumber <= 60);
@@ -2111,6 +2193,10 @@ function CheckInModal({ tenantId, tenant, onClose, onDone, onError }) {
       onError && onError('ไม่พบห้องของผู้เช่า — กำหนดห้องที่หน้ารายชื่อก่อน');
       return;
     }
+    if (!pricingValid) {
+      onError && onError('ห้องนี้ยังไม่มีค่าเช่าที่ตั้งไว้ — ไปตั้งราคาที่เมนูตั้งราคา/ห้องพักก่อนเช็คอิน');
+      return;
+    }
     if (!termValid) {
       onError && onError('ระยะสัญญาต้องเป็นจำนวนเต็ม 1-60 เดือน หรือเว้นว่างสำหรับสัญญาไม่จำกัดเวลา');
       return;
@@ -2124,8 +2210,8 @@ function CheckInModal({ tenantId, tenant, onClose, onDone, onError }) {
       const payload = {
         roomId: tenant.roomId,
         moveInDate: form.moveInDate,
-        monthlyRent: Number(form.monthlyRent),
-        depositAmount: Number(form.depositAmount),
+        monthlyRent: pricingRent,
+        depositAmount: pricingDeposit,
       };
       if (form.termMonths) payload.termMonths = Number(form.termMonths);
       if (form.endDate) payload.endDate = form.endDate;
@@ -2151,7 +2237,7 @@ function CheckInModal({ tenantId, tenant, onClose, onDone, onError }) {
       footer={
         <>
           <Btn variant="ghost" onClick={onClose} disabled={busy}>ยกเลิก</Btn>
-          <Btn variant="primary" onClick={submit} disabled={busy || !termValid || !endDateValid}>
+          <Btn variant="primary" onClick={submit} disabled={busy || !termValid || !endDateValid || !pricingValid}>
             {busy ? '…' : 'บันทึก + สร้างสัญญา'}
           </Btn>
         </>
@@ -2179,15 +2265,22 @@ function CheckInModal({ tenantId, tenant, onClose, onDone, onError }) {
           <div>
             <label style={inLbl}>ค่าเช่า/เดือน (บาท)</label>
             <input type="number" step="0.01" min="0" value={form.monthlyRent}
-              onChange={(e) => setForm({ ...form, monthlyRent: e.target.value })}
-              required style={inInp} />
+              readOnly aria-readonly="true"
+              required style={{ ...inInp, background: C.surfaceAlt, color: C.ink }} />
           </div>
           <div>
             <label style={inLbl}>เงินมัดจำ (บาท)</label>
             <input type="number" step="0.01" min="0" value={form.depositAmount}
-              onChange={(e) => setForm({ ...form, depositAmount: e.target.value })}
-              required style={inInp} />
+              readOnly aria-readonly="true"
+              required style={{ ...inInp, background: C.surfaceAlt, color: C.ink }} />
           </div>
+        </div>
+        <div style={{
+          padding: 10, background: '#f7fbff', border: `1px solid ${C.border}`,
+          borderRadius: 6, fontSize: 12, color: C.muted, lineHeight: 1.5,
+        }}>
+          ค่าเช่าและมัดจำดึงจาก {rentInfo && rentInfo.sourceLabel ? rentInfo.sourceLabel : 'ข้อมูลห้อง'} เท่านั้น
+          หากต้องเปลี่ยนราคา ให้แก้ที่เมนูตั้งราคา/ห้องพักก่อน แล้วกลับมาเช็คอินใหม่
         </div>
         <div>
           <label style={inLbl}>วันสิ้นสุดสัญญา (คำนวณอัตโนมัติ/แก้เองได้)</label>

@@ -5180,6 +5180,11 @@ test('checkin enforces moveInDate window + deposit cap + double-occupancy', () =
   assert.match(src, /bookingsUrl:[\s\S]{0,180}contractsUrl:/,
     'reserved-room checkin conflict must include next actions for booking/contract recovery');
   assert.match(src, /pricing\.assessContractRent/, 'rent sanity guard must use the shared pricing helper');
+  assert.match(src, /pricing\.resolveBillingRent/, 'checkin must derive canonical rent from the locked room');
+  assert.match(src, /const effectiveMonthlyRent/, 'checkin must snapshot the resolved room rent');
+  assert.match(src, /effectiveDepositAmount/, 'checkin must derive deposit from the resolved rent');
+  assert.match(src, /effectiveMonthlyRent, effectiveDepositAmount, effectiveTermMonths/,
+    'contract insert must use resolved rent/deposit, not editable form values');
   assert.match(src, /CONTRACT_RENT_TOO_LOW/, 'positive-but-too-low rent must be rejected');
   assert.match(src, /IDENTITY_INCOMPLETE/, 'identity-completeness guard must exist');
   // Force-bypass must record an audit + owner notify so abuses are visible.
@@ -5769,6 +5774,14 @@ test('quick-invite has moveInDate window + deposit cap (parity with checkin)', (
     'quick-invite must surface DEPOSIT_TOO_LARGE like checkin');
   assert.match(block, /pricing\.assessContractRent/,
     'quick-invite must use the shared rent sanity guard');
+  assert.match(block, /pricing\.resolveBillingRent/,
+    'quick-invite must derive canonical rent from the locked room');
+  assert.match(block, /const contractMonthlyRent/,
+    'quick-invite must snapshot resolved rent before inserting contracts');
+  assert.match(block, /contractMonthlyRent, contractDeposit, effectiveTermMonths/,
+    'quick-invite contract insert must use resolved rent/deposit');
+  assert.match(block, /rent: contractMonthlyRent[\s\S]{0,80}deposit: contractDeposit/,
+    'quick-invite room reservation must carry the resolved rent/deposit');
   assert.match(block, /CONTRACT_RENT_TOO_LOW/,
     'quick-invite must reject positive but suspiciously low contract rents');
   assert.match(block, /tenancy\.moveInPastDays \?\? 30/);
@@ -6047,6 +6060,35 @@ test('contracts quick-invite uses vacant room inventory and auto-fills room pric
     'missing room deposit should fall back to 2x rent');
   assert.match(modal, /&& roomAvailable/,
     'submit must be disabled when selected room is not available');
+});
+
+test('tenant contract tab uses room pricing and switches checked-in tenants to checkout', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-tenants.jsx'), 'utf8');
+
+  assert.match(src, /<TabContract[\s\S]{0,140}config=\{config\}/,
+    'tenant contract tab must receive pricing config from the shell');
+  assert.match(src, /const resolvedRoomRent = room[\s\S]{0,180}resolveRoomRent\(room, config\)/,
+    'active tenant rows must display current room pricing, not stale last rent');
+  assert.match(src, /const contractRentInfo = React\.useMemo[\s\S]{0,220}resolveRoomRent\(t\.room, config\)/,
+    'contract actions must resolve rent from the room + config');
+  assert.match(src, /monthlyRent: rent[\s\S]{0,80}deposit: Number\(contractRentInfo\.deposit\) \|\| rent \* 2/,
+    'new tenant contract invites must send resolved rent/deposit');
+  assert.match(src, /<ContractPreFlightSummary t=\{t\} rentInfo=\{contractRentInfo\}/,
+    'pre-flight summary must show the same resolved pricing');
+  assert.match(src, /<CheckInModal[\s\S]{0,140}rentInfo=\{contractRentInfo\}/,
+    'check-in modal must receive resolved pricing');
+  assert.match(src, /const hasCurrentTenancy = t\.tenantStatus === 'active' && !!t\.currentRoomId/,
+    'already checked-in tenants must be detected in the no-contract branch');
+  assert.match(src, /title="เช็คเอาท์\/ย้ายออก"[\s\S]{0,260}setCancelling\(true\)/,
+    'already checked-in tenants must get a checkout action instead of duplicate check-in');
+  assert.match(src, /readOnly aria-readonly="true"/,
+    'check-in rent and deposit inputs must be read-only');
+  assert.doesNotMatch(src, /monthlyRent: Number\(form\.monthlyRent\)/,
+    'check-in payload must not trust editable monthlyRent form state');
+  assert.doesNotMatch(src, /depositAmount: Number\(form\.depositAmount\)/,
+    'check-in payload must not trust editable deposit form state');
 });
 
 test('contract-fill HTML reads view.rejectionReason (camelCase, not snake_case)', () => {

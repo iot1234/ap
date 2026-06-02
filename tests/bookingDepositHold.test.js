@@ -188,8 +188,8 @@ test('booking approval and contract handoff understand preclaimed deposit bookin
     'approval must accept a room already reserved by the same public booking');
   assert.match(server, /String\(candidateRoom\.reservedBy \|\| ''\) === id/,
     'preclaimed approval must still be guarded by reservedBy=booking id');
-  assert.match(server, /bookingFeeCredit = creditToDeposit \? Math\.min\(bookingFee, Math\.max\(deposit, 0\)\) : 0/,
-    'quick-invite must convert credited booking fees into a bounded deposit credit');
+  assert.match(server, /bookingFeeCredit = bookingFeeAppliesToDeposit[\s\S]{0,120}Math\.min\(bookingFeeForDepositCredit, Math\.max\(contractDeposit, 0\)\)/,
+    'quick-invite must convert credited booking fees into a bounded resolved-deposit credit');
   assert.match(server, /booking_fee_credit, deposit_balance_due/,
     'quick-invite must persist deposit credit and remaining balance on contracts');
   assert.match(server, /deposit_credit_amount=\$3,[\s\S]{0,80}deposit_balance_due=\$4/,

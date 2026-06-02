@@ -12217,6 +12217,8 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
       let bookingCarryoverList = null;
       let bookingCarryoverIdx = -1;
       let bookingForInvite = null;
+      let bookingFeeForDepositCredit = 0;
+      let bookingFeeAppliesToDeposit = false;
       let bookingFeeCredit = 0;
       let contractDepositBalanceDue = Math.max(deposit, 0);
       if (bookingIdForRoom) {
@@ -12269,10 +12271,8 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
             hint: 'กลับไปเปิดจาก booking/ผู้เช่าคนเดียวกัน หรือสร้างสัญญาแบบไม่อ้าง booking ถ้าเป็นงานแก้ข้อมูลย้อนหลัง',
           });
         }
-        const bookingFee = Math.max(0, Number(bookingForInvite.bookingFee) || 0);
-        const creditToDeposit = bookingForInvite.bookingFeeAppliesToDeposit === true;
-        bookingFeeCredit = creditToDeposit ? Math.min(bookingFee, Math.max(deposit, 0)) : 0;
-        contractDepositBalanceDue = Math.max(Math.max(deposit, 0) - bookingFeeCredit, 0);
+        bookingFeeForDepositCredit = Math.max(0, Number(bookingForInvite.bookingFee) || 0);
+        bookingFeeAppliesToDeposit = bookingForInvite.bookingFeeAppliesToDeposit === true;
       }
 
       const roomBlobQ = await client.query(
@@ -12357,8 +12357,21 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
         );
         pricingConfig = cfgQ.rows[0]?.value || {};
       } catch { /* keep default pricing reference */ }
+      const resolvedQuickInviteRent = pricing.resolveBillingRent({
+        room: blobRoom || roomV2,
+        config: pricingConfig,
+      });
+      const resolvedQuickInviteRentValue = Number(resolvedQuickInviteRent.rent);
+      const contractMonthlyRent = Number.isFinite(resolvedQuickInviteRentValue) && resolvedQuickInviteRentValue > 0
+        ? resolvedQuickInviteRentValue
+        : monthlyRent;
+      const contractDeposit = contractMonthlyRent > 0 ? contractMonthlyRent * 2 : deposit;
+      bookingFeeCredit = bookingFeeAppliesToDeposit
+        ? Math.min(bookingFeeForDepositCredit, Math.max(contractDeposit, 0))
+        : 0;
+      contractDepositBalanceDue = Math.max(Math.max(contractDeposit, 0) - bookingFeeCredit, 0);
       const rentAssessment = pricing.assessContractRent({
-        monthlyRent,
+        monthlyRent: contractMonthlyRent,
         room: blobRoom || roomV2,
         config: pricingConfig,
       });
@@ -12366,8 +12379,8 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
         await client.query('ROLLBACK');
         return res.status(400).json({
           error: rentAssessment.referenceRent > 0
-            ? `ค่าเช่า ${monthlyRent} ต่ำผิดปกติสำหรับห้อง ${roomId} (ราคาอ้างอิง ${rentAssessment.referenceRent}, ขั้นต่ำที่ยอมรับ ${rentAssessment.minimumRent})`
-            : `ค่าเช่า ${monthlyRent} ต่ำผิดปกติ (ขั้นต่ำที่ยอมรับ ${rentAssessment.minimumRent})`,
+            ? `ค่าเช่า ${contractMonthlyRent} ต่ำผิดปกติสำหรับห้อง ${roomId} (ราคาอ้างอิง ${rentAssessment.referenceRent}, ขั้นต่ำที่ยอมรับ ${rentAssessment.minimumRent})`
+            : `ค่าเช่า ${contractMonthlyRent} ต่ำผิดปกติ (ขั้นต่ำที่ยอมรับ ${rentAssessment.minimumRent})`,
           code: rentAssessment.code || 'CONTRACT_RENT_TOO_LOW',
           field: rentAssessment.field,
           monthlyRent: rentAssessment.rent,
@@ -12420,7 +12433,7 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
          RETURNING id, contract_no, tenant_id, room_id, start_date, end_date,
                    monthly_rent, deposit, status, booking_fee_credit, deposit_balance_due`,
         [contractNo, tenantId, roomId, moveInDate, endDate,
-         monthlyRent, deposit, effectiveTermMonths || null, discountPct,
+         contractMonthlyRent, contractDeposit, effectiveTermMonths || null, discountPct,
          bookingFeeCredit, contractDepositBalanceDue]
       );
       const contract = cIns.rows[0];
@@ -12443,8 +12456,8 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
         type: blobRoom?.type || roomV2?.room_type || undefined,
         floor: blobRoom?.floor ?? roomV2?.floor,
         no: blobRoom?.no || roomV2?.room_no || undefined,
-        rent: blobRoom?.rent ?? (roomV2 ? Number(roomV2.rent_price) : monthlyRent),
-        deposit: blobRoom?.deposit ?? (roomV2 ? Number(roomV2.deposit_price) : deposit),
+        rent: contractMonthlyRent,
+        deposit: contractDeposit,
         wifi: blobRoom?.wifi ?? (roomV2 ? Number(roomV2.wifi_fee || 0) : 0),
         status: 'reserved',
         tenant: {
@@ -12553,7 +12566,7 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
               assignedRoomId: roomId,
               tenantId,
               contractId: contract.id,
-              contractDepositAmount: deposit,
+              contractDepositAmount: contractDeposit,
               depositCreditAmount: bookingFeeCredit,
               depositBalanceDue: contractDepositBalanceDue,
               completedAt: new Date().toISOString(),
