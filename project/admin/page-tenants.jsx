@@ -1075,6 +1075,40 @@ function TabContract({ t, routeBookingId = '', config, setToast, addActivity, se
   }, [t.room, t.rent, config, resolveRoomRent]);
   const hasCurrentTenancy = t.tenantStatus === 'active' && !!t.currentRoomId;
 
+  const inviteDeliveryText = (delivery) => {
+    if (!delivery) return 'สร้างลิงก์แล้ว แต่ยังไม่ทราบผลส่งอัตโนมัติ ให้คัดลอกลิงก์จากกล่องด้านบนส่งให้ผู้เช่า';
+    const channel = ({
+      line: 'LINE',
+      email: 'อีเมล',
+      sms: 'SMS',
+      queue: 'คิวแจ้งเตือน',
+      none: 'ช่องทางอัตโนมัติ',
+    })[delivery.channel] || delivery.channel || 'ระบบแจ้งเตือน';
+    const lineCount = Number(delivery.lineRecipientCount || 0);
+    const suffix = lineCount > 0 ? ` · ห้องนี้ผูก LINE ${lineCount} บัญชี` : '';
+    if (delivery.ok) return `ส่งลิงก์ให้ผู้เช่าทาง ${channel} แล้ว${suffix}`;
+    if (delivery.queued) return `จัดคิวส่งลิงก์ทาง ${channel} แล้ว${suffix}`;
+    if (delivery.requiresManualContact) {
+      return `สร้างลิงก์แล้ว แต่ส่งอัตโนมัติไม่ได้ ให้คัดลอกลิงก์ส่งเองหรือโทรแจ้งผู้เช่า${suffix}`;
+    }
+    return `สร้างลิงก์แล้ว แต่ช่องทาง ${channel} ยังไม่พร้อม${delivery.reason ? ` (${delivery.reason})` : ''} ให้คัดลอกลิงก์ส่งเอง${suffix}`;
+  };
+
+  const showInviteCreatedToast = (d, title) => {
+    const delivery = d && d.delivery;
+    const deliveryKind = delivery && (delivery.ok || delivery.queued) ? 'success' : 'warning';
+    setToast && setToast({
+      kind: deliveryKind,
+      message: {
+        title,
+        description: [
+          inviteDeliveryText(delivery),
+          'ขั้นต่อไป: รอผู้เช่ากรอกข้อมูล ถ่ายรูปบัตรประชาชนหน้า/หลัง และเซ็นผ่านลิงก์นี้ จากนั้นแอดมินกดตรวจสอบ + อนุมัติ',
+        ].join('\n'),
+      },
+    });
+  };
+
   const copyLink = async (text) => {
     try {
       await navigator.clipboard.writeText(text);
@@ -1153,6 +1187,7 @@ function TabContract({ t, routeBookingId = '', config, setToast, addActivity, se
       });
       addActivity && addActivity({ icon: '📨',
         text: `ส่งลิงก์สัญญาให้ ${t.name} (ห้อง ${t.roomId})`, type: 'contract' });
+      showInviteCreatedToast(d, 'สร้างลิงก์สัญญาเรียบร้อย');
       reload();
       if (onTenantChanged) onTenantChanged();
     } catch (err) {
@@ -1214,6 +1249,9 @@ function TabContract({ t, routeBookingId = '', config, setToast, addActivity, se
           ? `สร้างสัญญาจากการจอง ${bookingId} + ส่งลิงก์ให้ ${t.name} (ห้อง ${t.roomId})`
           : `สร้างสัญญา + ส่งลิงก์ให้ ${t.name} (ห้อง ${t.roomId})`,
         type: 'contract' });
+      showInviteCreatedToast(d, bookingId
+        ? 'สร้างสัญญาจาก booking และออกลิงก์แล้ว'
+        : 'สร้างสัญญาและออกลิงก์แล้ว');
       reload();
     } catch (err) {
       const conflict = conflictFromError(err);
@@ -1304,7 +1342,21 @@ function TabContract({ t, routeBookingId = '', config, setToast, addActivity, se
         { method: 'POST' });
       setReviewing(null);
       setLiveLink(null);
-      setToast && setToast({ kind: 'success', message: 'อนุมัติเรียบร้อย — สัญญาถูก lock' });
+      setToast && setToast({
+        kind: result && result.welcomeBillError ? 'warning' : 'success',
+        message: {
+          title: 'อนุมัติเรียบร้อย — สัญญาถูก lock',
+          description: [
+            result && result.welcomeBill
+              ? `บิลรอบแรกถูกสร้างแล้ว: ${result.welcomeBill.bill_no || result.welcomeBill.billNo || 'ดูที่หน้าบิล'}`
+              : 'ตรวจหน้าบิลเพื่อยืนยันบิลรอบแรกและส่งแจ้งเตือนให้ผู้เช่า',
+            result && result.welcomeBillError
+              ? `คำเตือนบิลรอบแรก: ${result.welcomeBillError}`
+              : null,
+            'ขั้นต่อไป: ตรวจบิล/ส่งบิลให้ผู้เช่า แล้ว flow ย้ายเข้าถือว่าจบ',
+          ].filter(Boolean).join('\n'),
+        },
+      });
       addActivity && addActivity({ icon: '✓',
         text: `อนุมัติสัญญา ${contract && contract.contract_no} ของ ${t.name}`, type: 'contract' });
       if (result && result.nextActions && result.nextActions.pdfUrl) {
@@ -1471,15 +1523,29 @@ function TabContract({ t, routeBookingId = '', config, setToast, addActivity, se
   // Submitted-invitation review panel — replaces a separate page hop.
   if (reviewing) {
     return (
-      <ContractReviewPanel
-        detail={reviewing}
-        busy={busy}
-        approveError={approveError}
-        onApprove={approveSubmitted}
-        onReject={rejectSubmitted}
-        onCancel={() => { setReviewing(null); setApproveError(null); }}
-        C={C}
-      />
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <ContractFlowChecklist
+          t={t}
+          contract={contract}
+          liveLink={liveLink}
+          reviewing={true}
+          contractConflict={contractConflict}
+          hasCurrentTenancy={hasCurrentTenancy}
+          rentInfo={contractRentInfo}
+          routeBookingId={routeBookingId}
+          C={C}
+          fmtCurrency={fmtCurrency}
+        />
+        <ContractReviewPanel
+          detail={reviewing}
+          busy={busy}
+          approveError={approveError}
+          onApprove={approveSubmitted}
+          onReject={rejectSubmitted}
+          onCancel={() => { setReviewing(null); setApproveError(null); }}
+          C={C}
+        />
+      </div>
     );
   }
 
@@ -1530,6 +1596,18 @@ function TabContract({ t, routeBookingId = '', config, setToast, addActivity, se
             onRefresh={reload}
           />
         ) : null}
+        <ContractFlowChecklist
+          t={t}
+          contract={contract}
+          liveLink={liveLink}
+          reviewing={false}
+          contractConflict={contractConflict}
+          hasCurrentTenancy={hasCurrentTenancy}
+          rentInfo={contractRentInfo}
+          routeBookingId={routeBookingId}
+          C={C}
+          fmtCurrency={fmtCurrency}
+        />
         <Card style={{ padding: 16 }}>
           <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 12 }}>
             📜 ยังไม่มีสัญญาเช่า — ตรวจรายละเอียดก่อนส่งลิงก์
@@ -1578,7 +1656,13 @@ function TabContract({ t, routeBookingId = '', config, setToast, addActivity, se
               setToast && setToast({ kind: 'success', message: `เช็คอิน ${t.name} เรียบร้อย` });
               addActivity && addActivity({ icon: '🔑', text: `เช็คอิน ${t.name} (ห้อง ${t.roomId})`, type: 'contract' });
             }}
-            onError={(msg) => setToast && setToast({ kind: 'danger', message: msg })}
+            onError={(err) => {
+              if (window.toastError && setToast) {
+                window.toastError(setToast, err, { action: 'เช็คอิน' });
+              } else {
+                setToast && setToast({ kind: 'danger', message: 'เช็คอินล้มเหลว: ' + ((err && err.message) || err || 'unknown') });
+              }
+            }}
           />
         ) : null}
         {cancelling ? (
@@ -1604,6 +1688,19 @@ function TabContract({ t, routeBookingId = '', config, setToast, addActivity, se
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       {liveLinkCard}
+
+      <ContractFlowChecklist
+        t={t}
+        contract={contract}
+        liveLink={liveLink}
+        reviewing={false}
+        contractConflict={contractConflict}
+        hasCurrentTenancy={hasCurrentTenancy}
+        rentInfo={contractRentInfo}
+        routeBookingId={routeBookingId}
+        C={C}
+        fmtCurrency={fmtCurrency}
+      />
 
       {invStatus === 'submitted' ? (
         <Card style={{ padding: 14, background: '#fff7e0', border: '1px solid #f1b32d' }}>
@@ -1873,6 +1970,176 @@ function ContractPreFlightSummary({ t, rentInfo, C, fmtCurrency }) {
       {t.email ? <Row icon="✉️" label="อีเมล">
         <span style={{ wordBreak: 'break-all' }}>{t.email}</span>
       </Row> : null}
+    </div>
+  );
+}
+
+function ContractFlowChecklist({
+  t,
+  contract,
+  liveLink,
+  reviewing,
+  contractConflict,
+  hasCurrentTenancy,
+  rentInfo,
+  routeBookingId,
+  C,
+  fmtCurrency,
+}) {
+  const invStatus = reviewing ? 'submitted' : (contract && contract.active_invitation_status) || (liveLink ? 'pending' : '');
+  const locked = !!(contract && contract.locked_at);
+  const hasContract = !!contract || !!liveLink;
+  const roomId = (contract && contract.room_id) || t.currentRoomId || t.roomId || '';
+  const rent = Number(rentInfo && rentInfo.rent) || Number(contract && contract.monthly_rent) || Number(t.rent) || 0;
+  const deposit = Number(rentInfo && rentInfo.deposit) || Number(contract && contract.deposit) || (rent > 0 ? rent * 2 : 0);
+  const reservedBy = t.room && t.room.reservedBy ? String(t.room.reservedBy) : '';
+  const bookingId = String(routeBookingId || (t.room && t.room.sourceBookingId) || (reservedBy && !reservedBy.startsWith('contract:') ? reservedBy : '') || '');
+  const submitted = invStatus === 'submitted';
+  const pending = invStatus === 'pending';
+
+  const tone = {
+    done: { bg: C.successSoft || '#e6f4ec', fg: C.success || '#2f8f5b', border: C.success || '#2f8f5b', label: 'เสร็จแล้ว' },
+    warn: { bg: C.warningSoft || '#fff7ed', fg: C.warning || '#b45309', border: C.warning || '#b45309', label: 'ต้องทำต่อ' },
+    wait: { bg: C.surfaceAlt || '#f7faf8', fg: C.muted || '#6b7280', border: C.border || '#dfe9e2', label: 'รอขั้นก่อนหน้า' },
+    stop: { bg: C.dangerSoft || '#fef2f2', fg: C.danger || '#b91c1c', border: C.danger || '#b91c1c', label: 'ติดปัญหา' },
+  };
+  const stepTone = (state) => tone[state] || tone.wait;
+
+  const roomReady = !!roomId;
+  const priceReady = Number.isFinite(rent) && rent > 0;
+  const conflict = !!contractConflict;
+  const roomClaimReady = roomReady && (hasCurrentTenancy || hasContract || reservedBy || bookingId);
+  const contractReady = hasContract && !conflict;
+  const tenantSubmitted = locked || submitted || reviewing;
+
+  const steps = [
+    {
+      title: 'ข้อมูลตั้งต้น',
+      state: roomReady && priceReady ? 'done' : 'stop',
+      detail: roomReady && priceReady
+        ? `ห้อง ${roomId} · ค่าเช่า ${fmtCurrency(rent)} · มัดจำ ${fmtCurrency(deposit)}`
+        : roomReady
+          ? 'ห้องนี้ยังไม่มีค่าเช่าที่ใช้งานได้ ให้แก้ที่เมนูตั้งราคา/ห้องพักก่อน'
+          : 'ผู้เช่ายังไม่ผูกห้อง ต้องเลือกห้องก่อนสร้างสัญญา',
+    },
+    {
+      title: 'จอง/ล็อกห้อง',
+      state: roomClaimReady ? 'done' : (roomReady ? 'warn' : 'wait'),
+      detail: bookingId
+        ? `ต่อจาก booking ${bookingId} และห้อง ${roomId}`
+        : reservedBy
+          ? `ห้องถูกล็อกโดย ${reservedBy}`
+          : hasCurrentTenancy
+            ? `ผู้เช่า active อยู่ห้อง ${roomId} แล้ว`
+            : roomReady
+              ? 'ยังไม่เห็น booking/reservation ต้นทาง ถ้าเป็นเคส walk-in ให้เช็คอินหรือส่งลิงก์จากห้องนี้ได้'
+              : 'รอเลือกห้องก่อน',
+    },
+    {
+      title: 'สร้าง/ส่งสัญญา',
+      state: conflict ? 'stop' : (contractReady ? 'done' : 'wait'),
+      detail: conflict
+        ? 'มีสัญญาเดิมชนกัน ใช้สัญญาเดิมหรือปิดสัญญาเดิมก่อนสร้างใหม่'
+        : contract
+          ? `มีสัญญา ${contract.contract_no || ''}${locked ? ' และ lock แล้ว' : ' รอขั้นถัดไป'}`
+          : liveLink
+            ? 'สร้างลิงก์แล้ว ให้ส่ง/คัดลอกให้ผู้เช่ากรอก'
+            : 'ยังไม่ได้สร้างสัญญา เลือกเช็คอินทันทีหรือส่งลิงก์ให้ผู้เช่ากรอก',
+    },
+    {
+      title: 'ผู้เช่ากรอก + แอดมินตรวจ',
+      state: locked ? 'done' : (tenantSubmitted ? 'warn' : (pending ? 'warn' : 'wait')),
+      detail: locked
+        ? 'ตรวจและอนุมัติเรียบร้อยแล้ว'
+        : submitted || reviewing
+          ? 'ผู้เช่าส่งข้อมูลแล้ว ตรวจบัตรหน้า/หลัง ที่อยู่ ผู้ติดต่อฉุกเฉิน และลายเซ็นก่อน lock'
+          : pending
+            ? 'ลิงก์ active แล้ว รอผู้เช่ากรอก ถ้าหาลิงก์ไม่เจอให้สร้างลิงก์ใหม่จากสัญญาเดิม'
+            : 'จะเริ่มหลังสร้างลิงก์หรือเช็คอินด้วยข้อมูลครบ',
+    },
+    {
+      title: 'Lock + บิลแรก',
+      state: locked ? 'done' : (hasCurrentTenancy && !contract ? 'warn' : 'wait'),
+      detail: locked
+        ? 'สัญญามีผลแล้ว ตรวจบิลรอบแรก/ส่งบิลให้ผู้เช่า และใช้งาน portal ต่อได้'
+        : hasCurrentTenancy && !contract
+          ? 'ผู้เช่าอยู่ในห้องแล้วแต่ยังไม่มีสัญญาในระบบ ให้ส่งลิงก์สัญญาหรือเช็คเอาท์ถ้าไม่ใช่เคสนี้'
+          : 'รออนุมัติ + lock สัญญาก่อน ระบบจึงถือว่า flow ย้ายเข้าจบ',
+    },
+  ];
+
+  const nextAction = (() => {
+    if (conflict) return 'ใช้ปุ่มในการ์ดสัญญาที่ชนกัน เพื่อเปิดสัญญาเดิม ดู PDF หรือโหลดข้อมูลใหม่';
+    if (!roomReady) return 'เลือก/ผูกห้องให้ผู้เช่าก่อน';
+    if (!priceReady) return 'แก้ค่าเช่าที่เมนูตั้งราคา/ห้องพักก่อน แล้วกลับมาหน้านี้';
+    if (locked) return 'ไปหน้าบิล ตรวจบิลรอบแรก แล้วส่งแจ้งเตือนให้ผู้เช่า';
+    if (submitted || reviewing) return 'กดตรวจสอบ + อนุมัติ ตรวจรูปบัตรประชาชนทั้งสองด้านและลายเซ็นก่อน lock';
+    if (pending || liveLink) return 'ส่งลิงก์ให้ผู้เช่า รอผู้เช่ากรอก หรือกดสร้างลิงก์ใหม่ถ้าลิงก์เดิมหาย';
+    if (hasCurrentTenancy && !contract) return 'ผู้เช่าอยู่ในห้องแล้ว ให้ส่งลิงก์สัญญาเพื่อเก็บเอกสาร หรือเช็คเอาท์ถ้าต้องปิดเคส';
+    return 'เลือกเช็คอินทันทีหรือส่งลิงก์ให้ผู้เช่ากรอกเอง';
+  })();
+
+  return (
+    <div style={{
+      padding: 14,
+      background: C.bg || '#fff',
+      border: `1px solid ${C.border}`,
+      borderRadius: 10,
+    }}>
+      <div style={{ fontSize: 13, fontWeight: 700, color: C.ink, marginBottom: 8 }}>
+        Flow สัญญาและย้ายเข้า
+      </div>
+      <div style={{ display: 'grid', gap: 8 }}>
+        {steps.map((step, idx) => {
+          const s = stepTone(step.state);
+          return (
+            <div key={step.title} style={{
+              display: 'grid',
+              gridTemplateColumns: '28px minmax(0, 1fr) auto',
+              gap: 10,
+              alignItems: 'start',
+              padding: '9px 10px',
+              border: `1px solid ${s.border}33`,
+              borderRadius: 8,
+              background: s.bg,
+            }}>
+              <div style={{
+                width: 28, height: 28, borderRadius: 999,
+                display: 'grid', placeItems: 'center',
+                background: '#fff', color: s.fg, fontWeight: 700,
+                border: `1px solid ${s.border}55`,
+                fontSize: 12,
+              }}>{idx + 1}</div>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 12.5, fontWeight: 700, color: C.ink }}>{step.title}</div>
+                <div style={{ fontSize: 11.5, color: C.ink2 || C.muted, lineHeight: 1.45, marginTop: 2 }}>
+                  {step.detail}
+                </div>
+              </div>
+              <span style={{
+                fontSize: 10.5,
+                color: s.fg,
+                border: `1px solid ${s.border}55`,
+                borderRadius: 999,
+                padding: '2px 7px',
+                background: '#fff',
+                whiteSpace: 'nowrap',
+              }}>{s.label}</span>
+            </div>
+          );
+        })}
+      </div>
+      <div style={{
+        marginTop: 10,
+        padding: '8px 10px',
+        borderRadius: 8,
+        background: C.surfaceAlt || '#f7faf8',
+        color: C.ink2,
+        fontSize: 12,
+        lineHeight: 1.5,
+      }}>
+        ขั้นต่อไป: {nextAction}
+      </div>
     </div>
   );
 }
@@ -2229,7 +2496,7 @@ function CheckInModal({ tenantId, tenant, rentInfo, onClose, onDone, onError }) 
       });
       onDone && onDone();
     } catch (err) {
-      onError && onError('เช็คอินล้มเหลว: ' + (err.message || 'unknown'));
+      onError && onError(err);
     } finally { setBusy(false); }
   };
   return (

@@ -6091,6 +6091,37 @@ test('tenant contract tab uses room pricing and switches checked-in tenants to c
     'check-in payload must not trust editable deposit form state');
 });
 
+test('tenant contract tab shows a sequential workflow and actionable next steps', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-tenants.jsx'), 'utf8');
+
+  assert.match(src, /function ContractFlowChecklist/,
+    'tenant contract tab must render a dedicated workflow checklist');
+  assert.match(src, /Flow สัญญาและย้ายเข้า/,
+    'workflow checklist title must be visible to admins');
+  for (const step of ['ข้อมูลตั้งต้น', 'จอง/ล็อกห้อง', 'สร้าง/ส่งสัญญา', 'ผู้เช่ากรอก + แอดมินตรวจ', 'Lock + บิลแรก']) {
+    assert.match(src, new RegExp(step.replace(/[+]/g, '\\+')),
+      `workflow checklist must include step: ${step}`);
+  }
+  assert.match(src, /const invStatus = reviewing \? 'submitted' : \(contract && contract\.active_invitation_status\) \|\| \(liveLink \? 'pending' : ''\)/,
+    'workflow must derive status from review, stored invitation status, and just-created live links');
+  assert.match(src, /ขั้นต่อไป: \{nextAction\}/,
+    'workflow must always surface the next action');
+  assert.match(src, /<ContractFlowChecklist[\s\S]{0,320}liveLink=\{liveLink\}[\s\S]{0,320}routeBookingId=\{routeBookingId\}/,
+    'contract tab must pass live link and booking context into the workflow');
+  assert.match(src, /const inviteDeliveryText = \(delivery\) =>/,
+    'contract invite results must explain whether auto-delivery worked');
+  assert.match(src, /showInviteCreatedToast\(d, bookingId/,
+    'new contract invite must show a success\/manual-contact toast after creating the link');
+  assert.match(src, /welcomeBillError[\s\S]{0,320}ขั้นต่อไป: ตรวจบิล\/ส่งบิลให้ผู้เช่า/,
+    'lock success toast must point admins to first-bill verification');
+  assert.match(src, /window\.toastError\(setToast, err, \{ action: 'เช็คอิน' \}\)/,
+    'check-in failures must use the shared friendly error mapper');
+  assert.match(src, /onError && onError\(err\)/,
+    'check-in modal must pass structured backend errors to the parent');
+});
+
 test('contract-fill HTML reads view.rejectionReason (camelCase, not snake_case)', () => {
   // Server's buildPublicView returns rejectionReason; the HTML used to read
   // view.rejection_reason → reject reason was invisible to the tenant.
