@@ -34,7 +34,7 @@ function periodBangkokBounds(period) {
  *
  * Returns the inserted row, augmented with `delta` (consumption since prev).
  */
-async function record(pool, { roomId, meterType, reading, source = 'manual', createdBy = null, period = null }) {
+async function record(pool, { roomId, meterType, reading, source = 'manual', createdBy = null, period = null, allowRollback = false }) {
   if (!ALLOWED_TYPES.has(String(meterType))) throw new Error('invalid meter type');
   const r = Number(reading);
   if (!Number.isFinite(r) || r < 0) throw new Error('invalid reading');
@@ -45,6 +45,25 @@ async function record(pool, { roomId, meterType, reading, source = 'manual', cre
   const prev = safePeriod
     ? await latestBeforePeriod(pool, safeRoom, meterType, safePeriod)
     : await latest(pool, safeRoom, meterType);
+
+  // Meters only count up. A reading BELOW the previous one is either a typo
+  // (1234 instead of 12345 — next bill silently shows 0 units) or a physical
+  // meter replacement/reset. Reject at entry so the bad value never becomes
+  // billing input; the caller resubmits with allowRollback:true after a human
+  // confirms the meter really was reset. detectAnomaly() still flags the
+  // rollback post-hoc, but by then the reading is already saved — this guard
+  // is the before-the-fact layer. Matches the check-in path's
+  // METER_START_BACKWARD guard (routes/tenant-ops.js).
+  if (!allowRollback && prev && r < Number(prev.reading)) {
+    const err = new Error(
+      `เลขมิเตอร์ใหม่ (${r}) น้อยกว่าเลขล่าสุด (${prev.reading}) — มิเตอร์ไม่ควรถอยหลัง`
+    );
+    err.code = 'METER_ROLLBACK';
+    err.httpStatus = 409;
+    err.lastReading = Number(prev.reading);
+    err.attemptedReading = r;
+    throw err;
+  }
   const { rows } = await pool.query(
     `INSERT INTO meter_readings (room_id, meter_type, reading, source, created_by, period, reading_at)
      VALUES ($1,$2,$3,$4,$5,$6,COALESCE($7::timestamptz, NOW()))

@@ -25,6 +25,17 @@
   let isHydrating = false;        // suppress monkey-patch during hydration
   let isAuthenticated = false;     // tenant pages skip PUTs entirely
   let hydratedKeys = new Set();    // which keys came from the server (vs local seed)
+  // Optimistic-lock bases: server row `updated_at` per key, captured on
+  // hydrate/GET and refreshed from every successful PUT. Sent back as
+  // `baseUpdatedAt` so the server can refuse a save built on stale data
+  // (someone else / the scheduler / a public booking changed the blob since
+  // this tab loaded it) instead of silently overwriting it.
+  const baseVersions = new Map();
+  // Latest raw value queued per key while a PUT for that key is in flight —
+  // PUTs are serialised per key so the follow-up save reuses the fresh
+  // updatedAt returned by the previous one (otherwise back-to-back edits
+  // from the SAME tab would false-conflict against their own writes).
+  const latestQueued = new Map();
 
   // CSRF token cache — server endpoints under csrfGuard require both the
   // CSRF cookie (set on /api/csrf-token GET) and the matching X-CSRF-Token
@@ -123,8 +134,11 @@
         return;
       }
       const data = await res.json();
+      // Per-key row versions for the optimistic-lock handshake.
+      const metaUpdatedAt = (data.__meta && data.__meta.updatedAt) || {};
       let count = 0;
       for (const key of SYNCED_KEYS) {
+        if (metaUpdatedAt[key]) baseVersions.set(key, metaUpdatedAt[key]);
         if (data[key] !== undefined && data[key] !== null) {
           const serialised = JSON.stringify(data[key]);
           // Reject oversized server values too. If somehow the DB still has
@@ -181,17 +195,55 @@
     } catch {}
   }
 
+  // Re-fetch ONE key from the server into localStorage (no PUT echo) after a
+  // STALE_WRITE conflict, so the next page interaction starts from the
+  // server's truth instead of the stale local copy that just got refused.
+  async function rehydrateKey(key) {
+    try {
+      const r = await fetch(`/api/data/${encodeURIComponent(key)}`, { credentials: 'include' });
+      if (!r.ok) return false;
+      const j = await r.json();
+      if (j && j.updatedAt) baseVersions.set(key, j.updatedAt);
+      if (j && j.value !== undefined && j.value !== null) {
+        origSetItem(key, JSON.stringify(j.value));
+        hydratedKeys.add(key);
+        return true;
+      }
+    } catch (err) {
+      console.warn(`[api-client] rehydrate ${key} failed`, err);
+    }
+    return false;
+  }
+
   async function flushRetryQueue() {
     if (!isAuthenticated) return;
     const entries = Array.from(retryQueue.entries());
     retryQueue.clear();
     for (const [key, value] of entries) {
       try {
+        const body = { value };
+        const base = baseVersions.get(key);
+        if (base) body.baseUpdatedAt = base;
         const r = await fetchWithCsrfRetry(`/api/data/${encodeURIComponent(key)}`, {
           method: 'PUT',
-          body: JSON.stringify({ value }),
+          body: JSON.stringify(body),
         });
-        if (!r.ok) {
+        if (r.ok) {
+          let resBody = null;
+          try { resBody = await r.json(); } catch {}
+          if (resBody && resBody.updatedAt) baseVersions.set(key, resBody.updatedAt);
+        } else if (r.status === 409) {
+          // The blob changed while we were logged out — do NOT overwrite.
+          let resBody = null;
+          try { resBody = await r.json(); } catch {}
+          await rehydrateKey(key);
+          emitSyncError(key, {
+            status: 409,
+            code: (resBody && resBody.code) || 'STALE_WRITE',
+            error: (resBody && resBody.error)
+              || 'ข้อมูลถูกแก้ไขจากที่อื่นระหว่างหลุดเซสชัน — โหลดข้อมูลใหม่แล้ว กรุณารีเฟรชหน้าและทำรายการอีกครั้ง',
+          });
+        } else {
           console.warn(`[api-client] retry PUT ${key} failed`, r.status);
           emitSyncError(key, { status: r.status, error: `retry PUT failed (${r.status})` });
         }
@@ -203,40 +255,84 @@
     }
   }
 
-  function pushToApi(key, rawJson) {
-    if (pendingTimers.has(key)) clearTimeout(pendingTimers.get(key));
-    const timer = setTimeout(async () => {
-      pendingTimers.delete(key);
-      let value;
-      try { value = JSON.parse(rawJson); } catch { return; }
-      inflight.add(key);
-      try {
-        const res = await fetchWithCsrfRetry(`/api/data/${encodeURIComponent(key)}`, {
-          method: 'PUT',
-          body: JSON.stringify({ value }),
-        });
-        if (res.status === 401) {
-          // Session expired or never authenticated. Stash the value so we
-          // don't lose admin's edit on the next page load — flushed by
-          // login() or me() when auth is restored.
-          retryQueue.set(key, value);
-          isAuthenticated = false;
-        } else if (!res.ok) {
-          console.warn(`[api-client] PUT ${key} failed`, res.status);
-          let body = null;
-          try { body = await res.json(); } catch {}
+  async function sendPut(key, rawJson) {
+    // Serialise per key: if a PUT is already in flight, park the newest value
+    // and send it when the current one settles (with its refreshed base).
+    if (inflight.has(key)) { latestQueued.set(key, rawJson); return; }
+    let value;
+    try { value = JSON.parse(rawJson); } catch { return; }
+    inflight.add(key);
+    try {
+      const body = { value };
+      const base = baseVersions.get(key);
+      if (base) body.baseUpdatedAt = base;
+      const res = await fetchWithCsrfRetry(`/api/data/${encodeURIComponent(key)}`, {
+        method: 'PUT',
+        body: JSON.stringify(body),
+      });
+      if (res.status === 401) {
+        // Session expired or never authenticated. Stash the value so we
+        // don't lose admin's edit on the next page load — flushed by
+        // login() or me() when auth is restored.
+        retryQueue.set(key, value);
+        isAuthenticated = false;
+      } else if (res.status === 409) {
+        let resBody = null;
+        try { resBody = await res.json(); } catch {}
+        const code = (resBody && resBody.code) || null;
+        if (code === 'STALE_WRITE') {
+          // Someone else (another admin, a public booking, the scheduler)
+          // changed this blob after our tab loaded it. The server refused our
+          // save so their change survives. Drop any queued follow-up (it is
+          // built on the same stale state), pull the fresh truth into
+          // localStorage, and tell the admin to redo their edit.
+          latestQueued.delete(key);
+          await rehydrateKey(key);
           emitSyncError(key, {
-            status: res.status,
-            code: body && body.code,
-            error: (body && body.error) || `PUT failed (${res.status})`,
+            status: 409,
+            code,
+            error: (resBody && resBody.error)
+              || 'ข้อมูลถูกแก้ไขจากที่อื่น — ระบบยกเลิกการบันทึกนี้และโหลดข้อมูลล่าสุดแล้ว กรุณารีเฟรชหน้าและทำรายการอีกครั้ง',
+          });
+        } else {
+          emitSyncError(key, {
+            status: 409,
+            code,
+            error: (resBody && resBody.error) || 'PUT failed (409)',
           });
         }
-      } catch (err) {
-        console.warn(`[api-client] PUT ${key} error`, err);
-        emitSyncError(key, { error: err && err.message ? err.message : String(err) });
-      } finally {
-        inflight.delete(key);
+      } else if (!res.ok) {
+        console.warn(`[api-client] PUT ${key} failed`, res.status);
+        let resBody = null;
+        try { resBody = await res.json(); } catch {}
+        emitSyncError(key, {
+          status: res.status,
+          code: resBody && resBody.code,
+          error: (resBody && resBody.error) || `PUT failed (${res.status})`,
+        });
+      } else {
+        let resBody = null;
+        try { resBody = await res.json(); } catch {}
+        if (resBody && resBody.updatedAt) baseVersions.set(key, resBody.updatedAt);
       }
+    } catch (err) {
+      console.warn(`[api-client] PUT ${key} error`, err);
+      emitSyncError(key, { error: err && err.message ? err.message : String(err) });
+    } finally {
+      inflight.delete(key);
+      const queued = latestQueued.get(key);
+      if (queued !== undefined) {
+        latestQueued.delete(key);
+        void sendPut(key, queued);
+      }
+    }
+  }
+
+  function pushToApi(key, rawJson) {
+    if (pendingTimers.has(key)) clearTimeout(pendingTimers.get(key));
+    const timer = setTimeout(() => {
+      pendingTimers.delete(key);
+      void sendPut(key, rawJson);
     }, DEBOUNCE_MS);
     pendingTimers.set(key, timer);
   }
@@ -314,9 +410,15 @@
   window.AP = {
     hydrate,
     syncedKeys: SYNCED_KEYS,
-    isInflight: () => inflight.size > 0,
+    isInflight: () => inflight.size > 0 || latestQueued.size > 0 || pendingTimers.size > 0,
     isAuthenticated: () => isAuthenticated,
     isHydrated: (key) => hydratedKeys.has(key),
+    // Optimistic-lock base for a synced key (server row updated_at at last
+    // hydrate/save). Pages that PUT /api/data/:key directly (pricing,
+    // settings) attach this as `baseUpdatedAt` so their save is refused
+    // instead of silently overwriting another tab's newer write.
+    getBaseVersion: (key) => baseVersions.get(key) || null,
+    setBaseVersion: (key, v) => { if (v) baseVersions.set(key, v); },
     // Bypass for the wrapped setItem/removeItem. Use these when you need to
     // mutate localStorage WITHOUT triggering a PUT/DELETE to the server —
     // e.g. shared.jsx clearing a corrupt/oversized stale blob during load

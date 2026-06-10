@@ -107,6 +107,64 @@ test('lockout.check throws LockedOutError when locked', async () => {
   await assert.rejects(() => lockout.check('admin:foo'), LockedOutError);
 });
 
+test('admin self password change endpoint verifies current password and audits', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const start = server.indexOf("app.post('/api/auth/change-password'");
+  assert.ok(start > 0, 'change-password route must exist');
+  const end = server.indexOf('// --- Data endpoints', start);
+  const block = server.slice(start, end);
+
+  assert.match(block, /sameOrigin,\s*csrfGuard,\s*requireAuth/,
+    'self password change must require a valid authenticated admin session + CSRF');
+  assert.doesNotMatch(block, /requireRole\(/,
+    'self password change must not be owner-only');
+  assert.match(block, /schemas\.changePassword\.safeParse/,
+    'route must validate the dedicated changePassword schema');
+  assert.match(block, /bcrypt\.compare\(currentPassword,\s*user\.password_hash\)/,
+    'route must verify the current password before changing anything');
+  assert.match(block, /bcrypt\.compare\(newPassword,\s*user\.password_hash\)/,
+    'route must reject reusing the current password');
+  assert.match(block, /bcrypt\.hash\(newPassword,\s*12\)/,
+    'new password must be stored with bcrypt cost 12');
+  assert.match(block, /CURRENT_PASSWORD_INCORRECT/,
+    'wrong current password should be surfaced without treating the session as expired');
+  assert.match(block, /PASSWORD_REUSE/,
+    'password reuse should be blocked explicitly');
+  assert.match(block, /lockout\.check\(principal\)/,
+    'step-up password verification must honor existing lockouts');
+  assert.match(block, /lockout\.recordFailure\(principal,\s*'admin'\)/,
+    'wrong current password attempts must count toward lockout');
+  assert.match(block, /DELETE FROM user_sessions/,
+    'successful self password changes should invalidate the admin account other sessions');
+  assert.match(block, /'user\.password_self_change_failed'/,
+    'failed self password changes must be audit logged');
+  assert.match(block, /'user\.password_self_change_locked'/,
+    'locked self password changes must be audit logged');
+  assert.match(block, /'user\.password_self_change'/,
+    'successful self password changes must be audit logged');
+  assert.match(block, /lockout\.reset/,
+    'successful password change should clear stale lockout counters for that admin');
+});
+
+test('admin shell exposes self password modal for every logged-in admin', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const shell = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'shell.jsx'), 'utf8');
+
+  assert.match(shell, /function SelfPasswordModal/,
+    'shell must define a self-service password modal');
+  assert.match(shell, /\/api\/auth\/change-password/,
+    'modal must call the dedicated self password endpoint');
+  assert.match(shell, /currentPassword[\s\S]{0,240}newPassword/,
+    'modal must submit currentPassword and newPassword');
+  assert.match(shell, /function Sidebar\([\s\S]{0,260}setToast/,
+    'sidebar must receive the toast channel for feedback');
+  assert.match(shell, /setToast=\{setToast\}/,
+    'App must pass setToast into Sidebar');
+});
+
 test('IP limiter blocks at threshold even across mixed IPs', () => {
   const lim = makeIpLimiter({ windowMs: 60_000, max: 1 });
   const fakeRes = () => ({
@@ -2445,8 +2503,8 @@ test('monthly meter readings drive billing period instead of room edit units', (
     'scheduler auto-billing must use the period it is generating');
   assert.match(metersPage, /type="month"/,
     'meter page must let admin choose the billing month');
-  assert.match(metersPage, /JSON\.stringify\(\{ meterType: type, reading: newVal, source: 'manual', period \}\)/,
-    'meter page must submit the selected period');
+  assert.match(metersPage, /JSON\.stringify\(\{ meterType: type, reading: newVal, source: 'manual', period, allowRollback \}\)/,
+    'meter page must submit the selected period (and the rollback consent flag)');
   assert.match(billingPage, /\/api\/meters\/period-summary\?period=/,
     'billing preview must read meter values for the selected month');
   assert.match(roomsPage, /label="ค่าไฟ \(หน่วยล่าสุด\)"[\s\S]{0,180}disabled/,
@@ -3094,8 +3152,20 @@ test('scheduler tickContractExpiry expires + alerts upcoming', () => {
   // form (UPDATE contracts c FROM tenants t ...) is also accepted —
   // the alias was added so tenant-side notifications can fire on the
   // same statement that flips status='expired'.
-  assert.match(sched, /UPDATE contracts(?: c)? SET status='expired'[\s\S]{0,400}end_date < CURRENT_DATE/,
+  assert.match(sched, /UPDATE contracts(?: c)? SET status='expired'[\s\S]{0,900}end_date < CURRENT_DATE/,
     'must auto-expire past-due contracts');
+  // Auto-expire must stamp the same closed_* audit fields the manual close
+  // path (PUT /api/contracts/:id) writes — without them reports can't tell
+  // "admin ended early" from "expired on schedule". COALESCE keeps any
+  // pre-existing stamp.
+  assert.match(sched, /UPDATE contracts(?: c)? SET status='expired'[\s\S]{0,200}closed_at = COALESCE\(c\.closed_at, NOW\(\)\)/,
+    'auto-expire must stamp closed_at');
+  assert.match(sched, /closed_type = COALESCE\(c\.closed_type, 'auto_expire'\)/,
+    'auto-expire must stamp closed_type=auto_expire');
+  // Soft-deleted contracts are history, not live tenancies — they must not
+  // be flipped (or notified about) by the expiry tick.
+  assert.match(sched, /UPDATE contracts(?: c)? SET status='expired'[\s\S]{0,900}c\.deleted_at IS NULL/,
+    'auto-expire must skip soft-deleted contracts');
   // The upcoming-expiry window is now operator-configurable via
   // config.notify.contractEndDays (default 30), parameterized into the query —
   // was previously a hardcoded INTERVAL '30 days' that ignored the setting.
@@ -6571,7 +6641,7 @@ test('tenant contract cancel UI uses checkout cascade for early move-out', () =>
   const fs = require('node:fs');
   const path = require('node:path');
   const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-tenants.jsx'), 'utf8');
-  const block = src.match(/const cancelContract = async \(\) => \{[\s\S]+?const rejectSubmitted/);
+  const block = src.match(/const cancelContract = async \(opts = \{\}\) => \{[\s\S]+?const rejectSubmitted/);
   assert.ok(block, 'tenant cancelContract handler must exist');
   assert.match(block[0], /apiCall\(`\/api\/tenants\/\$\{tenantDbId\}\/checkout`/,
     'tenant-page contract cancel should use checkout when tenantDbId is known');

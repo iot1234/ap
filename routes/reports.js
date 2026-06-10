@@ -77,6 +77,64 @@ function send(req, res, rows, sheetName) {
   res.json({ ok: true, rows });
 }
 
+// Aggregate collected booking fees per month for a calendar year. Pure
+// function over the bookings blob (canonical store, capped at 500 newest —
+// far above a year of real volume for a dorm) so it is unit-testable and
+// works on legacy deploys whose relational `bookings` table predates the
+// deposit columns.
+//
+// Money semantics:
+//   - 'verified'  → fee confirmed received (slip verified / admin attested)
+//   - pending     → slip exists but awaits human confirmation
+//                   (pending_review / manual_review / submitted)
+//   - awaiting_slip / rejected / not_required → no money, excluded
+//   - cancelled_collected → verified-fee bookings later cancelled/rejected;
+//     still counted in verified totals (money WAS received) but flagged
+//     separately so the owner can reconcile refunds given out-of-system.
+// Bucketing date: depositVerifiedAt (the money event) → reservedAt →
+// createdAt fallback.
+function aggregateBookingFees(bookingsList, year) {
+  const list = Array.isArray(bookingsList) ? bookingsList : [];
+  const months = {};
+  for (let m = 1; m <= 12; m++) {
+    months[`${year}-${String(m).padStart(2, '0')}`] = {
+      period: `${year}-${String(m).padStart(2, '0')}`,
+      verified_count: 0, verified_amount: 0,
+      pending_count: 0, pending_amount: 0,
+      cancelled_collected_count: 0, cancelled_collected_amount: 0,
+    };
+  }
+  const byMethod = {};
+  const PENDING = new Set(['pending_review', 'manual_review', 'submitted']);
+  for (const b of list) {
+    if (!b || typeof b !== 'object') continue;
+    const fee = Math.round((Number(b.bookingFee) || 0) * 100) / 100;
+    if (!(fee > 0)) continue;
+    const depositStatus = String(b.depositStatus || '');
+    const isVerified = depositStatus === 'verified';
+    const isPending = PENDING.has(depositStatus);
+    if (!isVerified && !isPending) continue;
+    const when = b.depositVerifiedAt || b.reservedAt || b.createdAt || null;
+    const period = typeof when === 'string' && /^\d{4}-\d{2}/.test(when) ? when.slice(0, 7) : null;
+    if (!period || !months[period]) continue;
+    const slot = months[period];
+    if (isVerified) {
+      slot.verified_count += 1;
+      slot.verified_amount = Math.round((slot.verified_amount + fee) * 100) / 100;
+      const method = String(b.depositPaymentMethod || 'ไม่ระบุ');
+      byMethod[method] = Math.round(((byMethod[method] || 0) + fee) * 100) / 100;
+      if (['cancelled', 'rejected'].includes(String(b.status || ''))) {
+        slot.cancelled_collected_count += 1;
+        slot.cancelled_collected_amount = Math.round((slot.cancelled_collected_amount + fee) * 100) / 100;
+      }
+    } else {
+      slot.pending_count += 1;
+      slot.pending_amount = Math.round((slot.pending_amount + fee) * 100) / 100;
+    }
+  }
+  return { rows: Object.values(months), byMethod };
+}
+
 module.exports = function buildReportsRouter(ctx) {
   const { pool, requireAuth, requireRole } = ctx;
   const r = express.Router();
@@ -573,6 +631,35 @@ module.exports = function buildReportsRouter(ctx) {
     }
   });
 
+  // GET /api/reports/booking-fees?year=2026 — เงินค่าจองที่เก็บได้รายเดือน.
+  // Booking fees are deposits (a liability), NOT revenue — so they're
+  // deliberately excluded from /revenue. But they ARE real money in the
+  // owner's account that previously appeared in NO financial view at all:
+  // reconciling a bank statement against the system always came up short by
+  // every booking fee. This endpoint closes that visibility gap.
+  r.get('/booking-fees', requireAuth, managerOrOwner, async (req, res) => {
+    const year = Number(req.query.year) || new Date().getFullYear();
+    if (!Number.isInteger(year) || year < 2020 || year > 2100) {
+      return res.status(400).json({ error: 'invalid year', code: 'INVALID_YEAR' });
+    }
+    try {
+      const blob = await pool.query(
+        `SELECT value FROM app_data WHERE key='baankarn_bookings_v1'`
+      );
+      const list = blob.rows.length && Array.isArray(blob.rows[0].value)
+        ? blob.rows[0].value : [];
+      const { rows, byMethod } = aggregateBookingFees(list, year);
+      const format = String(req.query.format || 'json').toLowerCase();
+      if (format === 'csv' || format === 'xlsx') {
+        return send(req, res, rows, `booking-fees-${year}`);
+      }
+      res.json({ ok: true, year, rows, byMethod });
+    } catch (err) {
+      console.error('booking-fees report error:', err);
+      res.status(500).json({ error: 'internal error', code: 'DB_ERROR' });
+    }
+  });
+
   // GET /api/reports/cashflow?months=12 — naive projection from recent average
   r.get('/cashflow', requireAuth, managerOrOwner, async (req, res) => {
     const months = Math.min(Math.max(Number(req.query.months) || 12, 1), 24);
@@ -608,3 +695,6 @@ module.exports = function buildReportsRouter(ctx) {
 
   return r;
 };
+
+// Exposed for unit tests (pure aggregation, no DB).
+module.exports.aggregateBookingFees = aggregateBookingFees;

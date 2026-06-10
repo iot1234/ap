@@ -363,7 +363,8 @@ const STORAGE_KEYS = {
   config:     'baankarn_config_v1',
   bookings:   'baankarn_bookings_v1',
   activities: 'baankarn_activities_v1',
-  users:      'baankarn_users_v1',
+  // users: removed — the Users page talks to /api/admin/users (auth_users)
+  // directly; api-client.js no longer syncs baankarn_users_v1 either.
 };
 
 function safeParse(s, fallback) {

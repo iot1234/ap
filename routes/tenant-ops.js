@@ -2296,6 +2296,10 @@ module.exports = function buildTenantOpsRouter(ctx) {
             await meter.record(client, {
               roomId, meterType: mt, reading: startVal,
               period, source: 'checkin', createdBy: req.session.user.username,
+              // Backward-reading policy is enforced by the METER_START_BACKWARD
+              // guard above (force-escapable + audit-logged) — don't double-block
+              // a forced reset inside record().
+              allowRollback: true,
             });
             meterStartResult[mt] = {
               reading: startVal, stored: true,
@@ -2784,13 +2788,38 @@ module.exports = function buildTenantOpsRouter(ctx) {
           require('../services/roomStatus').syncRoom(pool, roomId, { reason: 'tenant-checkout' })
             .catch((err) => console.warn(`[checkout] room sync failed:`, err.message));
         }
+        // Outstanding (pending/overdue) bills survive checkout by design —
+        // the debt follows the tenant, not the room. Surface them in the
+        // response so the admin UI can warn "ยังมีบิลค้าง ฿X" at the moment
+        // of checkout instead of the admin discovering it later in reports.
+        // Includes the closing bill just created above (it's 'pending').
+        let outstandingBills = [];
+        let outstandingTotal = 0;
+        try {
+          const ob = await pool.query(
+            `SELECT id, bill_no, period, total, status, due_date
+               FROM bills
+              WHERE tenant_id=$1 AND status IN ('pending','overdue') AND deleted_at IS NULL
+              ORDER BY period, id`,
+            [id]
+          );
+          outstandingBills = ob.rows;
+          outstandingTotal = Math.round(
+            ob.rows.reduce((sum, row) => sum + (Number(row.total) || 0), 0) * 100
+          ) / 100;
+        } catch (err) {
+          console.warn('[checkout] outstanding bill lookup failed:', err.message);
+        }
+        const depositHeld = closedContract ? Number(closedContract.deposit) || 0 : null;
         audit(req, 'tenant.checkout', 'tenant', String(id),
           { oldRoom, releaseRoomIds, roomRelease, reason, refund: effectiveRefund,
             closedContracts: closedContracts.map((c) => c.contract_no || c.id),
             invitationsRevoked: revokedInvitations.rowCount || 0,
             cardsRevoked: revokedCards.rows.map((c) => c.card_id),
             recurringDeactivated: deactivatedRecurring.rows.map((rc) => rc.label),
-            closingBill: closingBill ? closingBill.bill_no : null });
+            closingBill: closingBill ? closingBill.bill_no : null,
+            outstandingTotal,
+            outstandingBillCount: outstandingBills.length });
 
         // Fire-and-forget notify so the tenant knows their access has been
         // revoked + the closing bill (if any) is waiting.
@@ -2826,6 +2855,13 @@ module.exports = function buildTenantOpsRouter(ctx) {
             lines.push(`ยอด: ฿${Number(closingBill.total).toLocaleString('th-TH', { minimumFractionDigits: 2 })}`);
             lines.push(`ครบกำหนด: ${closingBill.due_date}`);
           }
+          // Total owed across ALL open bills (old pending/overdue + the
+          // closing bill) so the tenant sees one final number, not just the
+          // closing bill — pre-existing debt was previously easy to miss.
+          if (outstandingBills.length > 0) {
+            lines.push(``);
+            lines.push(`ยอดค้างชำระรวมทั้งหมด: ฿${outstandingTotal.toLocaleString('th-TH', { minimumFractionDigits: 2 })} (${outstandingBills.length} บิล)`);
+          }
           lines.push(``);
           lines.push(`ขอบคุณที่ใช้บริการ`);
           // force=true so the message reaches the just-moved-out tenant
@@ -2839,11 +2875,14 @@ module.exports = function buildTenantOpsRouter(ctx) {
 
         res.json({
           ok: true, tenantId: id, oldRoom, refund: effectiveRefund,
+          depositHeld,
           releasedRooms: roomRelease.released,
           skippedRooms: roomRelease.skipped,
           invitationsRevoked: revokedInvitations.rowCount || 0,
           cardsRevoked: revokedCards.rowCount,
           closingBill,
+          outstandingBills,
+          outstandingTotal,
         });
       } catch (err) {
         await client.query('ROLLBACK').catch(() => {});

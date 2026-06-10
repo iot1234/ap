@@ -16,6 +16,7 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
   const [detailLoadingId, setDetailLoadingId] = useState(null);
   const [confirmAction, setConfirmAction] = useState(null);
   const [actionReason, setActionReason] = useState('');
+  const [showCreate, setShowCreate] = useState(false);
 
   const filtered = useMemo(() => {
     if (tab === 'all') return bookings;
@@ -289,6 +290,13 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
             fontSize: 10, fontWeight: 600,
             padding: '1px 6px', borderRadius: 4,
           }}>หน้าจอง</span>
+        ) : b.source === 'admin-manual' ? (
+          <span style={{
+            display: 'inline-block', marginLeft: 6,
+            background: C.infoSoft || '#eef6ff', color: C.info || '#1d4ed8',
+            fontSize: 10, fontWeight: 600,
+            padding: '1px 6px', borderRadius: 4,
+          }}>แอดมินจอง</span>
         ) : null;
         return (
           <div>
@@ -333,13 +341,46 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
       <PageHeader
         title="การจองห้องพัก"
         subtitle={`การจองทั้งหมด ${bookings.length} รายการ · รอตรวจสอบ ${counts.pending} รายการ`}
-        actions={<Btn variant="secondary" icon="📤" onClick={() => {
-          if (window.exportBookingsCSV(bookings)) {
-            addActivity && addActivity({ icon: '📤', text: `ส่งออกข้อมูลการจอง ${bookings.length} รายการ เป็น CSV`, type: 'system' });
-            setToast && setToast({ kind: 'success', message: `ดาวน์โหลด CSV ${bookings.length} การจองเรียบร้อย` });
-          }
-        }}>ส่งออก</Btn>}
+        actions={
+          <>
+            <Btn variant="primary" icon="➕" onClick={() => setShowCreate(true)}>
+              จองให้ลูกค้า
+            </Btn>
+            <Btn variant="secondary" icon="📤" onClick={() => {
+              if (window.exportBookingsCSV(bookings)) {
+                addActivity && addActivity({ icon: '📤', text: `ส่งออกข้อมูลการจอง ${bookings.length} รายการ เป็น CSV`, type: 'system' });
+                setToast && setToast({ kind: 'success', message: `ดาวน์โหลด CSV ${bookings.length} การจองเรียบร้อย` });
+              }
+            }}>ส่งออก</Btn>
+          </>
+        }
       />
+
+      {showCreate ? (
+        <CreateBookingModal
+          rooms={rooms}
+          onClose={() => setShowCreate(false)}
+          onCreated={(out) => {
+            setShowCreate(false);
+            // Server already wrote the blob (and reserved the room when one
+            // was picked) — prepend locally so it shows without a refetch.
+            setBookings((prev) => [out.booking, ...prev.filter((x) => x && x.id !== out.booking.id)]);
+            addActivity && addActivity({
+              icon: '📋',
+              text: `จองให้ลูกค้า ${out.booking.name}${out.booking.roomId ? ` (ห้อง ${out.booking.roomId})` : ''}`,
+              type: 'booking',
+            });
+            setToast && setToast(out.applicantRisk
+              ? { kind: 'warning', message: {
+                  title: `บันทึกการจอง ${out.booking.id} แล้ว`,
+                  description: `${out.applicantRisk.message}\n${out.applicantRisk.nextAction || ''}`,
+                } }
+              : { kind: 'success', message: `บันทึกการจอง ${out.booking.id} แล้ว${out.booking.roomId ? ` — ล็อกห้อง ${out.booking.roomId} ให้เรียบร้อย` : ''}` });
+            setActiveId(out.booking.id);
+          }}
+          setToast={setToast}
+        />
+      ) : null}
 
       <Tabs
         items={[
@@ -968,6 +1009,203 @@ function BookingFlowChecklist({ b, depositStatusLabel }) {
         ขั้นต่อไป: {nextAction}
       </div>
     </div>
+  );
+}
+
+// === Admin books on a customer's behalf (walk-in / phone) =================
+// POSTs /api/bookings — the server applies the same locks + guards as the
+// public form (room vacant in both sources, reserve under FOR UPDATE,
+// blacklist + duplicate refusal) so this modal stays a thin form.
+function CreateBookingModal({ rooms, onClose, onCreated, setToast }) {
+  const C = window.ADMIN_C;
+  const { Modal, Btn } = window;
+  const { useState, useEffect, useMemo } = React;
+  const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
+  const todayYmd = new Date().toISOString().slice(0, 10);
+  const [form, setForm] = useState({
+    tenantName: '', phone: '', email: '',
+    roomId: '', roomType: 'standard', floor: '',
+    checkInDate: todayYmd, months: '12', message: '',
+    depositCollected: false, depositPaymentMethod: 'cash',
+  });
+  const [busy, setBusy] = useState(false);
+  const [depositCfg, setDepositCfg] = useState(null);
+  // Deposit settings drive whether the "เก็บค่าจองแล้ว" attestation shows.
+  // The public config endpoint already exposes exactly these fields.
+  useEffect(() => {
+    let cancel = false;
+    fetch('/api/bookings/public/config', { credentials: 'include' })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (!cancel && d && d.booking) setDepositCfg(d.booking); })
+      .catch(() => {});
+    return () => { cancel = true; };
+  }, []);
+  const VACANT_WORDS = new Set(['vacant', 'available', 'empty', 'free']);
+  const vacantRooms = useMemo(() => Object.values(rooms || {})
+    .filter((r) => r && r.id && VACANT_WORDS.has(String(r.status || '').trim().toLowerCase()))
+    .sort((a, b) => String(a.id).localeCompare(String(b.id))), [rooms]);
+  const set = (k) => (e) => {
+    const v = e && e.target ? (e.target.type === 'checkbox' ? e.target.checked : e.target.value) : e;
+    setForm((f) => ({ ...f, [k]: v }));
+  };
+  const depositRelevant = !!(depositCfg && depositCfg.requireDeposit && Number(depositCfg.depositAmount) > 0);
+  const submit = async (e) => {
+    e && e.preventDefault();
+    const name = form.tenantName.trim();
+    const phone = form.phone.trim();
+    if (!name) { setToast && setToast({ kind: 'warning', message: 'กรุณากรอกชื่อผู้จอง' }); return; }
+    if (!phone) { setToast && setToast({ kind: 'warning', message: 'กรุณากรอกเบอร์โทร — ใช้ตรวจการจองซ้ำ/blacklist และติดต่อกลับ' }); return; }
+    const months = Number(form.months);
+    if (form.months !== '' && (!Number.isInteger(months) || months < 1 || months > 60)) {
+      setToast && setToast({ kind: 'warning', message: 'ระยะสัญญาต้องเป็นจำนวนเต็ม 1-60 เดือน' });
+      return;
+    }
+    setBusy(true);
+    try {
+      const payload = {
+        tenantName: name,
+        phone,
+        checkInDate: form.checkInDate || undefined,
+        months: form.months === '' ? undefined : months,
+        message: form.message || undefined,
+      };
+      if (form.email.trim()) payload.email = form.email.trim();
+      if (form.roomId) {
+        payload.roomId = form.roomId;
+      } else {
+        payload.roomType = form.roomType;
+        if (form.floor) payload.floor = String(form.floor);
+      }
+      if (depositRelevant && form.depositCollected) {
+        payload.depositCollected = true;
+        payload.depositPaymentMethod = form.depositPaymentMethod;
+      }
+      const out = await apiCall('/api/bookings', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      onCreated && onCreated(out);
+    } catch (err) {
+      window.toastError
+        ? window.toastError(setToast, err, { action: 'บันทึกการจอง' })
+        : setToast && setToast({ kind: 'danger', message: (err && err.message) || 'บันทึกการจองไม่สำเร็จ' });
+    } finally {
+      setBusy(false);
+    }
+  };
+  const inLbl = { display: 'block', fontSize: 12, fontWeight: 600, color: C.ink2, marginBottom: 4 };
+  const inInp = {
+    width: '100%', padding: '8px 10px', fontSize: 13,
+    border: `1px solid ${C.border}`, borderRadius: 6, boxSizing: 'border-box',
+    background: '#fff', color: C.ink,
+  };
+  return (
+    <Modal open={true} onClose={onClose} title="จองให้ลูกค้า (walk-in / โทรจอง)"
+      footer={
+        <>
+          <Btn variant="ghost" onClick={onClose} disabled={busy}>ยกเลิก</Btn>
+          <Btn variant="primary" onClick={submit} disabled={busy}>
+            {busy ? '…' : 'บันทึกการจอง'}
+          </Btn>
+        </>
+      }
+    >
+      <form onSubmit={submit} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+          <div>
+            <label style={inLbl}>ชื่อผู้จอง *</label>
+            <input value={form.tenantName} onChange={set('tenantName')} required style={inInp} />
+          </div>
+          <div>
+            <label style={inLbl}>เบอร์โทร *</label>
+            <input value={form.phone} onChange={set('phone')} required
+              placeholder="08x-xxx-xxxx" style={inInp} />
+          </div>
+        </div>
+        <div>
+          <label style={inLbl}>อีเมล (ถ้ามี)</label>
+          <input type="email" value={form.email} onChange={set('email')} style={inInp} />
+        </div>
+        <div>
+          <label style={inLbl}>ห้องที่จอง</label>
+          <select value={form.roomId} onChange={set('roomId')} style={inInp}>
+            <option value="">— ไม่ระบุห้อง (ให้เลือกตอนอนุมัติ) —</option>
+            {vacantRooms.map((r) => (
+              <option key={r.id} value={r.id}>
+                ห้อง {r.id}{r.type ? ` · ${r.type}` : ''}{r.floor ? ` · ชั้น ${r.floor}` : ''}
+              </option>
+            ))}
+          </select>
+          <div style={{ fontSize: 11.5, color: C.muted, marginTop: 4 }}>
+            {form.roomId
+              ? 'ระบบจะล็อกห้องนี้ (reserved) ทันที — กันคนอื่นจองซ้ำทั้งจากหน้าเว็บและแอดมิน'
+              : 'แสดงเฉพาะห้องว่าง · ถ้าไม่ระบุ ระบบจะหาห้องตามประเภท/ชั้นตอนกดอนุมัติ'}
+          </div>
+        </div>
+        {!form.roomId ? (
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+            <div>
+              <label style={inLbl}>ประเภทห้องที่ต้องการ</label>
+              <select value={form.roomType} onChange={set('roomType')} style={inInp}>
+                <option value="standard">Standard</option>
+                <option value="deluxe">Deluxe</option>
+                <option value="suite">Suite</option>
+                <option value="studio">Studio</option>
+              </select>
+            </div>
+            <div>
+              <label style={inLbl}>ชั้นที่ต้องการ (เว้นว่าง = ชั้นไหนก็ได้)</label>
+              <input type="number" min="1" max="99" value={form.floor} onChange={set('floor')} style={inInp} />
+            </div>
+          </div>
+        ) : null}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+          <div>
+            <label style={inLbl}>วันเข้าพักโดยประมาณ</label>
+            <input type="date" value={form.checkInDate} onChange={set('checkInDate')} style={inInp} />
+          </div>
+          <div>
+            <label style={inLbl}>ระยะสัญญา (เดือน)</label>
+            <input type="number" min="1" max="60" value={form.months} onChange={set('months')}
+              placeholder="12" style={inInp} />
+          </div>
+        </div>
+        {depositRelevant ? (
+          <div style={{
+            padding: 10, borderRadius: 8,
+            background: C.surfaceAlt || '#f7faf8', border: `1px solid ${C.border}`,
+          }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: C.ink }}>
+              <input type="checkbox" checked={form.depositCollected} onChange={set('depositCollected')} />
+              เก็บค่าจอง ฿{Number(depositCfg.depositAmount).toLocaleString('th-TH')} แล้ว
+              {depositCfg.applyBookingFeeToDeposit ? ' (จะนำไปหักจากเงินมัดจำ)' : ''}
+            </label>
+            {form.depositCollected ? (
+              <div style={{ marginTop: 8 }}>
+                <label style={inLbl}>รับชำระทาง</label>
+                <select value={form.depositPaymentMethod} onChange={set('depositPaymentMethod')} style={inInp}>
+                  <option value="cash">เงินสด</option>
+                  <option value="transfer">โอนเข้าบัญชี</option>
+                  <option value="promptpay">พร้อมเพย์</option>
+                </select>
+                <div style={{ fontSize: 11.5, color: C.muted, marginTop: 4 }}>
+                  ระบบบันทึกชื่อแอดมินผู้ยืนยันการรับเงินลง audit log
+                </div>
+              </div>
+            ) : (
+              <div style={{ fontSize: 11.5, color: C.muted, marginTop: 6 }}>
+                ยังไม่เก็บ = บันทึกเป็นจองแบบไม่มีค่าจอง (เก็บตอนทำสัญญาได้)
+              </div>
+            )}
+          </div>
+        ) : null}
+        <div>
+          <label style={inLbl}>โน้ต/ความต้องการพิเศษ</label>
+          <textarea value={form.message} onChange={set('message')} rows={2}
+            maxLength={500} style={{ ...inInp, resize: 'vertical' }} />
+        </div>
+      </form>
+    </Modal>
   );
 }
 

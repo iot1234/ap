@@ -101,7 +101,10 @@ schemas.uploadIdentity = z.object({
 );
 
 schemas.checkOut = z.object({
-  reason: z.string().max(500).optional(),
+  // Handler re-enforces >=5 chars (CONTRACT_CLOSE_REASON_REQUIRED) — declared
+  // here too so the schema doesn't advertise reason as optional when it isn't.
+  reason: z.string({ required_error: 'ระบุเหตุผลการย้ายออกอย่างน้อย 5 ตัวอักษร' })
+    .trim().min(5, 'ระบุเหตุผลการย้ายออกอย่างน้อย 5 ตัวอักษร').max(500),
   finalDepositReturn: z.coerce.number().nonnegative().max(1_000_000).optional(),
   // Admin opts out of the auto-generated pro-rated closing bill (e.g. when
   // checkout falls on the last day of the month and the regular monthly
@@ -258,6 +261,31 @@ schemas.publicBooking = z.object({
   // Version is just an opaque label — a future revision can still match
   // historical bookings to the wording they actually saw.
   agreedTermsVersion: z.string().max(64).optional(),
+});
+
+// Admin books on a customer's behalf (walk-in / phone booking). Mirrors
+// publicBooking but: phone is REQUIRED (the booking must be reachable +
+// dedupable + blacklist-checkable — the public form can rely on the person
+// standing in front of the screen, a phone booking can't), no hold-token /
+// slip fields (admin collects the fee in person and attests via
+// depositCollected), and months is adjustable up-front.
+schemas.adminBooking = z.object({
+  // min(1) makes '' fail the first union branch and fall through to the
+  // ''→undefined normaliser (a bare .max() accepts '' and would keep it).
+  roomId: z.string().min(1).max(32).optional().or(z.literal('').transform(() => undefined)),
+  tenantName: z.string().trim().min(1).max(120),
+  phone: phoneStr,
+  email: z.string().email().max(200).optional().or(z.literal('').transform(() => undefined)),
+  checkInDate: z.string().min(1).max(16).optional().or(z.literal('').transform(() => undefined)),
+  floor: z.coerce.string().min(1).max(4).optional().or(z.literal('').transform(() => undefined)),
+  roomType: z.enum(['standard', 'deluxe', 'suite', 'studio']).optional(),
+  months: z.coerce.number().int().min(1).max(60).optional(),
+  message: z.string().max(500).optional(),
+  // true = admin already received the booking fee (cash / transfer seen on
+  // their own banking app). Recorded as depositStatus='verified' with
+  // provider='manual' + the admin's username in the audit log.
+  depositCollected: z.boolean().optional(),
+  depositPaymentMethod: z.enum(['cash', 'transfer', 'promptpay']).optional(),
 });
 
 // --- tickets --------------------------------------------------------------

@@ -187,6 +187,134 @@ function canonicalPageId(id) {
   return PAGE_ALIASES[id] || id;
 }
 
+function SelfPasswordModal({ open, onClose, currentUser, setToast }) {
+  const C = window.ADMIN_C;
+  const [form, setForm] = useState({ currentPassword: '', newPassword: '', confirmPassword: '' });
+  const [error, setError] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!open) {
+      setForm({ currentPassword: '', newPassword: '', confirmPassword: '' });
+      setError('');
+      setSaving(false);
+    }
+  }, [open]);
+
+  if (!window.Modal) return null;
+
+  const setField = (key, value) => {
+    setForm((prev) => ({ ...prev, [key]: value }));
+    if (error) setError('');
+  };
+
+  const validationError = () => {
+    if (!form.currentPassword) return 'กรุณากรอกรหัสผ่านปัจจุบัน';
+    if (!form.newPassword || form.newPassword.length < 12) return 'รหัสผ่านใหม่ต้องมีอย่างน้อย 12 ตัวอักษร';
+    if (form.newPassword !== form.confirmPassword) return 'ยืนยันรหัสผ่านใหม่ไม่ตรงกัน';
+    if (form.newPassword === form.currentPassword) return 'รหัสผ่านใหม่ต้องไม่ซ้ำกับรหัสเดิม';
+    return '';
+  };
+
+  const submit = async (ev) => {
+    ev && ev.preventDefault && ev.preventDefault();
+    const v = validationError();
+    if (v) { setError(v); return; }
+    setSaving(true);
+    setError('');
+    try {
+      const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
+      if (!apiCall) throw new Error('ไม่พบตัวช่วยเรียก API');
+      await apiCall('/api/auth/change-password', {
+        method: 'POST',
+        body: JSON.stringify({
+          currentPassword: form.currentPassword,
+          newPassword: form.newPassword,
+        }),
+      });
+      setToast && setToast({
+        kind: 'success',
+        message: {
+          title: 'เปลี่ยนรหัสผ่านแล้ว',
+          description: `บัญชี ${currentUser?.username || 'admin'} ใช้รหัสใหม่ในการเข้าสู่ระบบครั้งถัดไป`,
+        },
+      });
+      onClose && onClose();
+    } catch (err) {
+      let msg = err && err.message ? err.message : 'เปลี่ยนรหัสผ่านไม่สำเร็จ';
+      if (err && err.code === 'CURRENT_PASSWORD_INCORRECT') msg = 'รหัสผ่านปัจจุบันไม่ถูกต้อง';
+      if (err && err.code === 'PASSWORD_REUSE') msg = 'รหัสผ่านใหม่ต้องไม่ซ้ำกับรหัสเดิม';
+      if (err && err.code === 'VALIDATION_ERROR') msg = 'รหัสผ่านใหม่ต้องมีอย่างน้อย 12 ตัวอักษร';
+      setError(msg);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const field = (key, label, autoComplete) => (
+    <label style={{ display: 'block', marginBottom: 12 }}>
+      <div style={{ fontSize: 12.5, fontWeight: 500, color: C.ink2, marginBottom: 6 }}>{label}</div>
+      <input
+        type="password"
+        value={form[key]}
+        onChange={(e) => setField(key, e.target.value)}
+        autoComplete={autoComplete}
+        disabled={saving}
+        style={{
+          width: '100%',
+          height: 40,
+          border: `1px solid ${error ? (C.danger || '#DC2626') : C.border}`,
+          borderRadius: 9,
+          padding: '0 12px',
+          color: C.ink,
+          background: saving ? C.surfaceMuted : C.surface,
+          fontFamily: 'inherit',
+          fontSize: 13.5,
+          outline: 'none',
+          boxSizing: 'border-box',
+        }}
+      />
+    </label>
+  );
+
+  return (
+    <window.Modal
+      open={open}
+      onClose={saving ? undefined : onClose}
+      title="เปลี่ยนรหัสผ่านของฉัน"
+      width={440}
+      footer={
+        <>
+          <window.Btn variant="ghost" onClick={onClose} disabled={saving}>ยกเลิก</window.Btn>
+          <window.Btn variant="primary" onClick={submit} disabled={saving}>
+            {saving ? 'กำลังบันทึก...' : 'บันทึกรหัสใหม่'}
+          </window.Btn>
+        </>
+      }
+    >
+      <form onSubmit={submit}>
+        <div style={{ fontSize: 13, color: C.muted, marginBottom: 14, lineHeight: 1.5 }}>
+          บัญชี: <strong style={{ color: C.ink }}>{currentUser?.username || 'admin'}</strong>
+        </div>
+        {field('currentPassword', 'รหัสผ่านปัจจุบัน', 'current-password')}
+        {field('newPassword', 'รหัสผ่านใหม่', 'new-password')}
+        {field('confirmPassword', 'ยืนยันรหัสผ่านใหม่', 'new-password')}
+        {error && (
+          <div role="alert" style={{
+            marginTop: 4,
+            padding: '10px 12px',
+            borderRadius: 8,
+            background: C.dangerSoft || '#FEE2E2',
+            color: C.dangerInk || C.danger || '#991B1B',
+            fontSize: 13,
+            lineHeight: 1.5,
+          }}>{error}</div>
+        )}
+      </form>
+    </window.Modal>
+  );
+}
+
 // ---------- Sidebar -------------------------------------------------------
 // Width modes:
 //   - 260px (expanded, default) — full labels + section headings
@@ -194,8 +322,9 @@ function canonicalPageId(id) {
 //   - mobile drawer — always 260px expanded, slides in from left
 // User's choice persists in localStorage so a wide-monitor user who collapsed
 // once doesn't have to re-collapse every reload.
-function Sidebar({ page, setPage, mobileOpen, setMobileOpen, isMobile, pendingBookings, overdueRooms, buildingName, currentUser, collapsed, setCollapsed }) {
+function Sidebar({ page, setPage, mobileOpen, setMobileOpen, isMobile, pendingBookings, overdueRooms, buildingName, currentUser, collapsed, setCollapsed, setToast }) {
   const C = window.ADMIN_C;
+  const [passwordOpen, setPasswordOpen] = useState(false);
   const shortName = String(buildingName || '').trim() || 'ที่พักของคุณ';
   // Collapse only applies to non-mobile. Mobile drawer is always full width.
   const isCollapsed = !isMobile && collapsed;
@@ -464,6 +593,21 @@ function Sidebar({ page, setPage, mobileOpen, setMobileOpen, isMobile, pendingBo
               </div>
             )}
             <button
+              onClick={() => setPasswordOpen(true)}
+              title="เปลี่ยนรหัสผ่านของฉัน"
+              aria-label="เปลี่ยนรหัสผ่านของฉัน"
+              style={{
+                background: 'transparent', border: `1px solid ${C.navBorder}`,
+                color: C.navInkSoft, fontSize: 11,
+                padding: isCollapsed ? '4px 6px' : '4px 8px',
+                borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit',
+                display: isCollapsed ? 'none' : 'inline-block',
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255,255,255,0.08)'; e.currentTarget.style.color = '#fff'; }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = C.navInkSoft; }}>
+              รหัส
+            </button>
+            <button
               onClick={() => { if (window.AP && window.AP.logout) window.AP.logout(); }}
               title="ออกจากระบบ"
               aria-label="ออกจากระบบ"
@@ -480,6 +624,19 @@ function Sidebar({ page, setPage, mobileOpen, setMobileOpen, isMobile, pendingBo
             </button>
           </div>
           {isCollapsed && (
+            <button
+              onClick={() => setPasswordOpen(true)}
+              title="เปลี่ยนรหัสผ่านของฉัน"
+              aria-label="เปลี่ยนรหัสผ่านของฉัน"
+              style={{
+                marginTop: 8, width: '100%', height: 28,
+                background: 'transparent', border: `1px solid ${C.navBorder}`,
+                color: C.navInkSoft, fontSize: 11,
+                borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit',
+                display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+              }}>รหัส</button>
+          )}
+          {isCollapsed && (
             // Logout button as a separate row when collapsed (icon-only).
             <button
               onClick={() => { if (window.AP && window.AP.logout) window.AP.logout(); }}
@@ -495,6 +652,12 @@ function Sidebar({ page, setPage, mobileOpen, setMobileOpen, isMobile, pendingBo
           )}
         </div>
       </aside>
+      <SelfPasswordModal
+        open={passwordOpen}
+        onClose={() => setPasswordOpen(false)}
+        currentUser={currentUser}
+        setToast={setToast}
+      />
     </>
   );
 }
@@ -815,16 +978,25 @@ function App() {
         }
         if (bRes.ok) {
           const bd = await bRes.json();
+          // Re-base the optimistic lock on the version we just saw: the
+          // merge below triggers saveBookings → PUT, and without the fresh
+          // base every new public booking would false-conflict the echo.
+          if (bd?.updatedAt && window.AP?.setBaseVersion) {
+            window.AP.setBaseVersion('baankarn_bookings_v1', bd.updatedAt);
+          }
           if (Array.isArray(bd?.value)) {
             setBookings((prev) => {
-              // Only merge in genuinely-new public-form submissions; never
-              // resurrect a booking the admin removed locally. Filtering by
-              // source='public-form' stops admin-edited bookings (which the
-              // poll re-fetches) from being prepended as duplicates if their
-              // id were ever to mismatch.
+              // Only merge in genuinely-new submissions; never resurrect a
+              // booking the admin removed locally. Source filter stops
+              // admin-edited bookings (which the poll re-fetches) from being
+              // prepended as duplicates if their id were ever to mismatch.
+              // 'admin-manual' = a colleague booked on a customer's behalf
+              // from another tab/device — must appear here just like a
+              // public-form submission does.
               const known = new Set(prev.map((b) => b.id));
               const additions = bd.value.filter(
-                (b) => b && b.source === 'public-form' && !known.has(b.id)
+                (b) => b && (b.source === 'public-form' || b.source === 'admin-manual')
+                  && !known.has(b.id)
               );
               return additions.length ? [...additions, ...prev] : prev;
             });
@@ -1201,6 +1373,7 @@ function App() {
         currentUser={currentUser}
         collapsed={collapsed}
         setCollapsed={setCollapsed}
+        setToast={setToast}
       />
       <main style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
         <TopBar

@@ -140,6 +140,11 @@ function PageMeters({ rooms, setToast }) {
     // loaded; force admin to confirm before posting.
     const newVal = Number(reading);
     const latest = list && list.length ? Number(list[list.length - 1].reading) : null;
+    // When admin confirms a decreasing reading, the server still re-checks
+    // against ITS latest value (authoritative, period-aware) and refuses
+    // unless we pass allowRollback — the confirm here doubles as that
+    // explicit consent, which the server audit-logs.
+    let allowRollback = false;
     if (latest != null && Number.isFinite(latest) && newVal < latest) {
       const t = type === 'water' ? 'ค่าน้ำ' : 'ค่าไฟ';
       const ok = window.confirm(
@@ -150,9 +155,10 @@ function PageMeters({ rooms, setToast }) {
         `📌 มิเตอร์ปกติเดินขึ้นเสมอ — ค่าลดลงมักเกิดจาก:\n` +
         `   1) พิมพ์ผิด (เช่น พิมพ์ 999 แทน 9999)\n` +
         `   2) มิเตอร์ถูก reset/เปลี่ยนตัวใหม่ — ในกรณีนี้ควรแจ้ง admin ก่อนบันทึก\n\n` +
-        `ยืนยันบันทึกตามนี้ใช่หรือไม่?`
+        `ยืนยันบันทึกตามนี้ใช่หรือไม่? (ระบบจะบันทึกการยืนยันนี้ใน audit log)`
       );
       if (!ok) return;
+      allowRollback = true;
     }
     // Detect "huge jump" — new value > 5× the last delta (cheap heuristic;
     // server's 3σ is more accurate but only fires after save). Helps catch
@@ -176,10 +182,36 @@ function PageMeters({ rooms, setToast }) {
     }
     try {
       const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
-      const d = await apiCall(`/api/meters/${encodeURIComponent(roomId)}/readings`, {
-        method: 'POST',
-        body: JSON.stringify({ meterType: type, reading: newVal, source: 'manual', period }),
-      });
+      let d;
+      try {
+        d = await apiCall(`/api/meters/${encodeURIComponent(roomId)}/readings`, {
+          method: 'POST',
+          body: JSON.stringify({ meterType: type, reading: newVal, source: 'manual', period, allowRollback }),
+        });
+      } catch (errFirst) {
+        // Server-side rollback guard fired (its "latest" is period-aware and
+        // can differ from the list rendered here). Give the admin one
+        // explicit confirm with the SERVER's numbers, then retry with
+        // allowRollback so a real meter reset can still be recorded.
+        if (errFirst && errFirst.code === 'METER_ROLLBACK' && !allowRollback) {
+          const t = type === 'water' ? 'ค่าน้ำ' : 'ค่าไฟ';
+          const last = Number((errFirst.raw && errFirst.raw.lastReading) ?? errFirst.lastReading);
+          const ok = window.confirm(
+            `⚠ ระบบพบว่า${t}ห้อง ${roomId} ลดลงจากเลขล่าสุดในระบบ\n\n` +
+            `เลขล่าสุดในระบบ: ${Number.isFinite(last) ? last.toFixed(2) : '-'}\n` +
+            `เลขที่กรอก:        ${newVal.toFixed(2)}\n\n` +
+            `ถ้ามิเตอร์ถูกเปลี่ยน/รีเซ็ตจริง กดตกลงเพื่อยืนยันบันทึก (ระบบจะบันทึก audit)\n` +
+            `ถ้าเป็นการพิมพ์ผิด กดยกเลิกแล้วแก้เลขก่อน`
+          );
+          if (!ok) return;
+          d = await apiCall(`/api/meters/${encodeURIComponent(roomId)}/readings`, {
+            method: 'POST',
+            body: JSON.stringify({ meterType: type, reading: newVal, source: 'manual', period, allowRollback: true }),
+          });
+        } else {
+          throw errFirst;
+        }
+      }
       setReading('');
       // Anomaly is NOT a save failure — it's a successful save with a
       // warning attached. Use kind:'warning' so the visual matches.

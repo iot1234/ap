@@ -231,6 +231,20 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
                           <Pill color="warning">🔒 LOCKED</Pill>
                         </div>
                       ) : null}
+                      {/* Deposit settlement state for closed contracts — recorded
+                          only via the checkout flow, so an ended contract with
+                          deposit_returned=null means the refund was never logged. */}
+                      {c.status !== 'active' && Number(c.deposit) > 0 ? (
+                        c.deposit_returned != null ? (
+                          <div style={{ marginTop: 4, fontSize: 11, color: C.success || '#2e7d32' }}>
+                            คืนมัดจำแล้ว ฿{fmtCurrency(c.deposit_returned)}
+                          </div>
+                        ) : (
+                          <div style={{ marginTop: 4, fontSize: 11, color: C.warningInk || '#9a6b00' }}>
+                            ยังไม่บันทึกคืนมัดจำ (฿{fmtCurrency(c.deposit)})
+                          </div>
+                        )
+                      ) : null}
                       {c.active_invitation_status === 'pending' ? (
                         <div style={{ marginTop: 4 }}>
                           <Pill color="info">📨 ลิงก์รอผู้เช่ากรอก</Pill>

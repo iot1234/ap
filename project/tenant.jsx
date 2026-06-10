@@ -641,6 +641,10 @@ function paymentNoticeFromError(err, locale) {
     DUPLICATE_TRANSACTION: th ? 'เลขอ้างอิงรายการโอนซ้ำ' : 'Duplicate transfer reference.',
     PAYMENT_UNDER_REVIEW: th ? 'มีสลิปรอตรวจสอบอยู่แล้ว' : 'A slip is already under review.',
     SLIP_UPLOAD_LIMIT_REACHED: th ? 'อัปโหลดครบ 3 ครั้งแล้ว — กรุณาติดต่อแอดมิน' : 'Upload limit reached — contact admin.',
+    BILL_NOT_LINKED: th ? 'บิลนี้ยังไม่ผูกกับบัญชีผู้เช่า — กรุณาติดต่อแอดมิน' : 'This bill is not linked to a tenant account — contact admin.',
+    BILL_NOT_PAYABLE: th ? 'บิลนี้ไม่อยู่ในสถานะที่ชำระได้ (อาจชำระแล้วหรือถูกยกเลิก)' : 'This bill cannot be paid (already paid or voided).',
+    PAID: th ? 'บิลนี้ชำระเรียบร้อยแล้ว' : 'This bill has already been paid.',
+    SLIP_UPLOAD_DISABLED: th ? 'ระบบยังไม่เปิดรับอัปโหลดสลิปออนไลน์ กรุณาติดต่อแอดมิน' : 'Online slip upload is not enabled — contact admin.',
   };
   const message = byCode[code] || (err && err.message) || (th ? 'อัปโหลดสลิปไม่สำเร็จ' : 'Slip upload failed');
   const details = [];

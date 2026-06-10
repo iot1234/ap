@@ -193,6 +193,22 @@ const pool = new Pool({
 
 pool.on('error', (err) => console.error('[pg] pool error:', sanitizeError(err)));
 
+// Pin every SQL session to Asia/Bangkok so CURRENT_DATE / NOW()::date in the
+// scheduler (late-fee flip, payment reminders, contract expiry, checkout
+// end_date stamps) agree with the JS side (process.env.TZ above). Hosted
+// Postgres defaults to UTC: without this, every date boundary in SQL lags
+// ICT by 7 hours — a bill due "yesterday" doesn't flip overdue until 07:00,
+// and a checkout at 01:00 stamps the contract end_date with the previous
+// day. node-postgres serialises queries per client in FIFO order, so this
+// SET always runs before any query handed to the connection's acquirer.
+// Mirrors db/pool.js — that pool has the same handler but is only a
+// fallback; THIS pool is the one the app and scheduler actually use.
+pool.on('connect', (client) => {
+  client.query("SET timezone='Asia/Bangkok'").catch((err) => {
+    console.error('[pg] SET timezone failed:', sanitizeError(err));
+  });
+});
+
 async function loadContractTermsSnapshot(db, contract = {}) {
   let rawTemplate = null;
   let templateId = contract.template_id || null;
@@ -823,6 +839,84 @@ app.get('/api/auth/me', (req, res) => {
   res.json({ user: req.session && req.session.user ? req.session.user : null });
 });
 
+app.post('/api/auth/change-password', sameOrigin, csrfGuard, requireAuth, async (req, res) => {
+  const r = schemas.changePassword.safeParse(req.body || {});
+  if (!r.success) return res.status(400).json(require('./middleware/validate').formatZodError(r.error));
+  const { currentPassword, newPassword } = r.data;
+  const sessionUser = req.session && req.session.user ? req.session.user : null;
+  const userId = Number(sessionUser && sessionUser.id);
+  if (!Number.isInteger(userId) || userId < 1) {
+    return res.status(401).json({ error: 'unauthorized', code: 'UNAUTHORIZED' });
+  }
+
+  try {
+    const { rows } = await pool.query(
+      'SELECT id, username, password_hash FROM auth_users WHERE id=$1',
+      [userId]
+    );
+    const user = rows[0] || null;
+    if (!user) {
+      return req.session.destroy(() => {
+        res.status(401).json({ error: 'account no longer exists', code: 'UNAUTHORIZED' });
+      });
+    }
+
+    const principal = `admin:${String(user.username).toLowerCase().trim()}`;
+    try {
+      await lockout.check(principal);
+    } catch (err) {
+      if (err.code === 'LOCKED_OUT') {
+        await audit(req, 'user.password_self_change_locked', 'user', String(user.id),
+          { username: user.username });
+        const minutes = Math.ceil((err.retryAfterMs || 0) / 60_000);
+        return res.status(429).json({
+          error: `บัญชีถูกล็อกชั่วคราว — ลองใหม่ใน ${minutes} นาที`,
+          code: 'LOCKED_OUT',
+        });
+      }
+      throw err;
+    }
+
+    const currentOk = await bcrypt.compare(currentPassword, user.password_hash);
+    if (!currentOk) {
+      lockout.recordFailure(principal, 'admin').catch(() => {});
+      audit(req, 'user.password_self_change_failed', 'user', String(user.id),
+        { username: user.username, reason: 'wrong_current_password' });
+      return res.status(400).json({
+        error: 'รหัสผ่านปัจจุบันไม่ถูกต้อง',
+        code: 'CURRENT_PASSWORD_INCORRECT',
+      });
+    }
+
+    const samePassword = await bcrypt.compare(newPassword, user.password_hash);
+    if (samePassword) {
+      audit(req, 'user.password_self_change_failed', 'user', String(user.id),
+        { username: user.username, reason: 'password_reuse' });
+      return res.status(400).json({
+        error: 'รหัสผ่านใหม่ต้องไม่ซ้ำกับรหัสเดิม',
+        code: 'PASSWORD_REUSE',
+      });
+    }
+
+    const hash = await bcrypt.hash(newPassword, 12);
+    await pool.query('UPDATE auth_users SET password_hash=$1 WHERE id=$2', [hash, user.id]);
+    if (req.sessionID) {
+      await pool.query(
+        `DELETE FROM user_sessions WHERE (sess::jsonb->'user'->>'id')::int = $1 AND sid <> $2`,
+        [user.id, req.sessionID]
+      ).catch((err) => {
+        console.warn('[auth] self password session cleanup failed:', sanitizeError(err));
+      });
+    }
+    lockout.reset(principal).catch(() => {});
+    audit(req, 'user.password_self_change', 'user', String(user.id), { username: user.username });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('auth change-password error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
 // --- Data endpoints (JSONB key-value store) -------------------------------
 // Whitelist of allowed keys to prevent abuse. Public reads only see masked
 // rooms (no tenant PII); the rest are admin-only.
@@ -999,8 +1093,9 @@ app.get('/api/data/:key', async (req, res) => {
     if (key === 'baankarn_rooms_v1') {
       await releaseExpiredPublicBookingHolds(pool);
     }
-    const { rows } = await pool.query('SELECT value FROM app_data WHERE key=$1', [key]);
+    const { rows } = await pool.query('SELECT value, updated_at FROM app_data WHERE key=$1', [key]);
     let value = rows.length ? rows[0].value : null;
+    const updatedAt = rows.length ? rows[0].updated_at : null;
     if (!isAuth && key === 'baankarn_rooms_v1') {
       // Load config so the public rent reflects the current pricing formula
       // (admin's /admin#pricing edits show up here without waiting for a
@@ -1014,7 +1109,7 @@ app.get('/api/data/:key', async (req, res) => {
       value = maskRoomsPublic(value, cfg);
     }
     if (!isAuth && key === 'baankarn_config_v1') value = maskConfigPublic(value);
-    res.json({ key, value });
+    res.json({ key, value, updatedAt });
   } catch (err) {
     console.error('data GET error:', err);
     res.status(500).json({ error: 'internal error' });
@@ -1029,7 +1124,7 @@ app.get('/api/data', async (req, res) => {
       await releaseExpiredPublicBookingHolds(pool);
     }
     const { rows } = await pool.query(
-      'SELECT key, value FROM app_data WHERE key = ANY($1)',
+      'SELECT key, value, updated_at FROM app_data WHERE key = ANY($1)',
       [keys]
     );
     const out = {};
@@ -1040,12 +1135,18 @@ app.get('/api/data', async (req, res) => {
       ? rows.find((x) => x.key === 'baankarn_config_v1')
       : null;
     const rawConfigForRooms = rawConfigRow ? rawConfigRow.value : null;
+    // Per-key row versions for the optimistic-lock handshake (PUT
+    // baseUpdatedAt). Tucked under `__meta` so existing consumers that
+    // iterate known keys (api-client SYNCED_KEYS) are unaffected.
+    const meta = { updatedAt: {} };
     for (const r of rows) {
       let v = r.value;
       if (!isAuth && r.key === 'baankarn_rooms_v1')  v = maskRoomsPublic(v, rawConfigForRooms);
       if (!isAuth && r.key === 'baankarn_config_v1') v = maskConfigPublic(v);
       out[r.key] = v;
+      meta.updatedAt[r.key] = r.updated_at;
     }
+    out.__meta = meta;
     res.json(out);
   } catch (err) {
     console.error('data GET-all error:', err);
@@ -1285,29 +1386,97 @@ app.put('/api/data/:key', sameOrigin, csrfGuard, requireAuth, requireRole('owner
     configWarnings = warnings;
     serialised = JSON.stringify(value);
   }
+  // Optimistic concurrency: the client may echo back the `updated_at` it
+  // hydrated (body.baseUpdatedAt). These blobs are read-modify-write across
+  // HTTP — admin loads the rooms blob, edits in the browser for minutes,
+  // then PUTs the WHOLE object back. Meanwhile a public booking, the hold
+  // sweeper, a check-in, or another admin may have changed the same blob —
+  // without a version check the stale PUT silently erases those changes
+  // (e.g. a room reserved by a new booking flips back to vacant → double
+  // booking). When baseUpdatedAt is present and doesn't match the row, the
+  // save is refused with 409 STALE_WRITE so the client re-hydrates first.
+  // Clients that don't send it (older/static pages) keep last-write-wins.
+  const baseUpdatedAtRaw = req.body && typeof req.body === 'object' && !Array.isArray(req.body)
+    ? req.body.baseUpdatedAt : undefined;
+  let baseUpdatedAtMs = null;
+  if (baseUpdatedAtRaw !== undefined && baseUpdatedAtRaw !== null && baseUpdatedAtRaw !== '') {
+    const t = new Date(baseUpdatedAtRaw).getTime();
+    if (!Number.isFinite(t)) {
+      return res.status(400).json({
+        error: 'baseUpdatedAt ต้องเป็นเวลารูปแบบ ISO ที่อ่านได้',
+        code: 'INVALID_BASE_UPDATED_AT',
+      });
+    }
+    baseUpdatedAtMs = t;
+  }
   // For room/config blobs: use a transaction with SELECT FOR UPDATE to prevent
   // last-write-wins when two admins save simultaneously (admin A's save would
   // silently overwrite admin B's room changes). Bookings blob has its own
-  // per-endpoint locking, so skip it here to avoid nested-lock contention.
+  // per-endpoint locking, so skip the unconditional lock to avoid nested-lock
+  // contention — but ANY key takes the locked path when a version check was
+  // requested (the check must be atomic with the write).
   const LOCK_KEYS = new Set(['baankarn_rooms_v1', 'baankarn_config_v1']);
+  let savedUpdatedAt = null;
   try {
-    if (LOCK_KEYS.has(key)) {
+    if (LOCK_KEYS.has(key) || baseUpdatedAtMs !== null) {
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
-        await client.query(
-          `SELECT 1 FROM app_data WHERE key=$1 FOR UPDATE`, [key]
-        ).catch(() => {}); // row may not exist yet — that's fine
-        await client.query(
+        let currentRow = null;
+        try {
+          const cur = await client.query(
+            `SELECT updated_at, updated_by FROM app_data WHERE key=$1 FOR UPDATE`, [key]
+          );
+          currentRow = cur.rows[0] || null;
+        } catch { /* row/table may not exist yet — that's fine */ }
+        if (baseUpdatedAtMs !== null && currentRow && currentRow.updated_at) {
+          // Compare at second precision — the JSON round-trip through the
+          // browser keeps milliseconds but older stored values may carry
+          // microseconds Postgres-side. Mirrors db/optimisticLock.js.
+          const dbMs = new Date(currentRow.updated_at).getTime();
+          if (Math.floor(dbMs / 1000) !== Math.floor(baseUpdatedAtMs / 1000)) {
+            // Stale base — but if the submitted value is SEMANTICALLY
+            // IDENTICAL to what's stored (jsonb equality ignores key order),
+            // this is just the admin UI echoing back a change the server
+            // already applied (e.g. local state patched after a checkout
+            // endpoint mutated the same blob). Accept it as a no-op and hand
+            // back the current version so the client re-bases, instead of
+            // crying STALE_WRITE over nothing.
+            const sameQ = await client.query(
+              `SELECT (value = $2::jsonb) AS same FROM app_data WHERE key=$1`,
+              [key, serialised]
+            );
+            if (sameQ.rows[0] && sameQ.rows[0].same === true) {
+              await client.query('COMMIT');
+              return res.json({
+                ok: true, key, noop: true,
+                roomSync: null, warnings: configWarnings,
+                updatedAt: currentRow.updated_at,
+              });
+            }
+            await client.query('ROLLBACK');
+            return res.status(409).json({
+              error: 'ข้อมูลชุดนี้ถูกแก้ไขโดยผู้ใช้อื่นหรือระบบหลังจากหน้าจอนี้โหลดมา — ระบบยกเลิกการบันทึกเพื่อไม่ให้ทับข้อมูลล่าสุด',
+              code: 'STALE_WRITE',
+              key,
+              currentUpdatedAt: currentRow.updated_at,
+              currentUpdatedBy: currentRow.updated_by || null,
+              hint: 'โหลดข้อมูลล่าสุดแล้วทำรายการอีกครั้ง',
+            });
+          }
+        }
+        const ins = await client.query(
           `INSERT INTO app_data (key, value, updated_by)
            VALUES ($1, $2::jsonb, $3)
            ON CONFLICT (key) DO UPDATE
              SET value = EXCLUDED.value,
                  updated_at = NOW(),
-                 updated_by = EXCLUDED.updated_by`,
+                 updated_by = EXCLUDED.updated_by
+           RETURNING updated_at`,
           [key, serialised, req.session.user.username]
         );
         await client.query('COMMIT');
+        savedUpdatedAt = ins.rows[0] ? ins.rows[0].updated_at : null;
       } catch (err) {
         await client.query('ROLLBACK').catch(() => {});
         throw err;
@@ -1315,15 +1484,17 @@ app.put('/api/data/:key', sameOrigin, csrfGuard, requireAuth, requireRole('owner
         client.release();
       }
     } else {
-      await pool.query(
+      const ins = await pool.query(
         `INSERT INTO app_data (key, value, updated_by)
          VALUES ($1, $2::jsonb, $3)
          ON CONFLICT (key) DO UPDATE
            SET value = EXCLUDED.value,
                updated_at = NOW(),
-               updated_by = EXCLUDED.updated_by`,
+               updated_by = EXCLUDED.updated_by
+         RETURNING updated_at`,
         [key, serialised, req.session.user.username]
       );
+      savedUpdatedAt = ins.rows[0] ? ins.rows[0].updated_at : null;
     }
     audit(req, 'data.put', 'app_data', key);
     let roomSyncResult = null;
@@ -1372,7 +1543,12 @@ app.put('/api/data/:key', sameOrigin, csrfGuard, requireAuth, requireRole('owner
         }
       });
     }
-    res.json({ ok: true, key, roomSync: roomSyncResult, warnings: configWarnings });
+    res.json({
+      ok: true, key, roomSync: roomSyncResult, warnings: configWarnings,
+      // Fresh row version — the client stores this as its next baseUpdatedAt
+      // so consecutive saves from the same tab don't false-conflict.
+      updatedAt: savedUpdatedAt,
+    });
   } catch (err) {
     console.error('data PUT error:', err);
     res.status(500).json({ error: 'internal error' });
@@ -8364,6 +8540,403 @@ function normaliseBookingPhone(phone) {
   return String(phone || '').replace(/[\s-]/g, '').slice(0, 32);
 }
 
+// === Admin creates a booking on a customer's behalf ========================
+// Walk-in / phone bookings used to have NO entry path — the only writer was
+// the public form, so the front desk either typed bookings into the public
+// page (losing the admin audit trail) or skipped the booking step entirely
+// (losing the room reservation + deposit paper trail). This endpoint mirrors
+// the public path's guarantees with the SAME locks and dual-writes:
+//   - bookings blob + rooms blob + rooms_v2 locked FOR UPDATE in one tx
+//   - room must be vacant in BOTH sources before it flips to 'reserved'
+//   - relational dual-write (source='admin-manual') with legacy fallback
+//   - deposit credit math identical to the public flow
+// plus admin-specific safeguards the public path can't do:
+//   - blacklist refusal (same rule the approve paths enforce later — fail
+//     at the door, not after the customer already paid)
+//   - duplicate guard: an open booking with the same phone for the same
+//     room is almost always a double-submit
+// Staff may create bookings (it's the front-desk job); approval stays
+// owner/manager-gated like before.
+app.post('/api/bookings', sameOrigin, csrfGuard, requireAuth,
+  requireRole('owner', 'manager', 'staff'), validateBody(schemas.adminBooking),
+  async (req, res) => {
+  const b = req.body;
+  const str = (v, max) => (typeof v === 'string' ? v.slice(0, max) : '');
+  const cleaned = {
+    roomId:      str(b.roomId, 32).trim(),
+    tenantName:  str(b.tenantName, 120).trim(),
+    phone:       str(b.phone, 32).trim(),
+    email:       str(b.email, 120).trim(),
+    checkInDate: str(b.checkInDate, 16).trim(),
+    floor:       str(b.floor, 4).trim(),
+    roomType:    str(b.roomType, 32),
+    message:     str(b.message, 500),
+  };
+  const months = Number.isInteger(b.months) ? b.months : 12;
+  if (cleaned.checkInDate) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(cleaned.checkInDate)) {
+      return res.status(400).json({ error: 'checkInDate ต้องเป็น YYYY-MM-DD', code: 'INVALID_DATE' });
+    }
+    const target = new Date(cleaned.checkInDate + 'T00:00:00Z');
+    const today = new Date(new Date().toISOString().slice(0, 10) + 'T00:00:00Z');
+    const diff = (target - today) / 86_400_000;
+    // Slightly wider past-window than the public form (-30 vs -7): the front
+    // desk occasionally records a booking the day after the phone call.
+    if (diff < -30 || diff > 365) {
+      return res.status(400).json({
+        error: `วันเข้าพัก (${cleaned.checkInDate}) อยู่นอกช่วงที่อนุญาต (ย้อนหลัง ≤ 30 วัน / ล่วงหน้า ≤ 365 วัน)`,
+        code: 'MOVE_IN_OUT_OF_WINDOW',
+      });
+    }
+  }
+  let bookingSettings;
+  try {
+    ({ settings: bookingSettings } = await publicBookingDepositInfo());
+  } catch (err) {
+    console.error('admin booking config load error:', err);
+    return res.status(500).json({ error: 'internal error', code: 'CONFIG_ERROR' });
+  }
+  // NOTE: bookingSettings.enabled gates the PUBLIC form only — admin can
+  // record bookings even while online booking is switched off (that's the
+  // point of the flexibility: walk-in business doesn't stop).
+  const normalisedPhone = normaliseBookingPhone(cleaned.phone);
+  // Blacklist refusal — the approve / quick-invite / booking-approve paths
+  // all refuse blacklisted tenants later; refusing HERE means the customer
+  // is told at the counter, not after they've waited days for review.
+  try {
+    const black = await pool.query(
+      `SELECT id, full_name FROM tenants
+         WHERE deleted_at IS NULL AND status='blacklist'
+           AND REPLACE(REPLACE(COALESCE(phone, ''), ' ', ''), '-', '')=$1
+         LIMIT 1`,
+      [normalisedPhone]
+    );
+    if (black.rows.length) {
+      return res.status(409).json({
+        error: `เบอร์นี้ตรงกับผู้เช่าใน blacklist (${black.rows[0].full_name || 'ไม่ระบุชื่อ'}) — ไม่สามารถรับจองได้`,
+        code: 'TENANT_BLACKLISTED',
+        tenantId: black.rows[0].id,
+        hint: 'ตรวจประวัติที่หน้าผู้เช่า หากต้องการรับกลับจริง ให้ปลดสถานะ blacklist อย่างตั้งใจก่อน แล้วค่อยจองใหม่',
+      });
+    }
+  } catch (err) {
+    if (err.code !== '42P01' && err.code !== '42703') {
+      console.warn('[admin-booking] blacklist check skipped:', err.message);
+    }
+  }
+  // Same "already an active tenant" advisory the public path attaches —
+  // not a block (tenant booking a second room for family is legitimate),
+  // but the approver must see it.
+  let applicantRisk = null;
+  try {
+    const existingTenant = await pool.query(
+      `SELECT id, full_name, current_room_id
+         FROM tenants
+        WHERE deleted_at IS NULL AND status='active'
+          AND (phone=$1 OR REPLACE(REPLACE(COALESCE(phone, ''), ' ', ''), '-', '')=$2)
+        ORDER BY updated_at DESC
+        LIMIT 1`,
+      [cleaned.phone, normalisedPhone]
+    );
+    if (existingTenant.rows.length) {
+      const t = existingTenant.rows[0];
+      applicantRisk = {
+        code: 'APPLICANT_PHONE_ALREADY_ACTIVE_TENANT',
+        tenantId: t.id,
+        tenantName: t.full_name || null,
+        currentRoomId: t.current_room_id || null,
+        message: t.current_room_id
+          ? `เบอร์นี้มีผู้เช่า active อยู่ห้อง ${t.current_room_id} แล้ว`
+          : 'เบอร์นี้มีผู้เช่า active อยู่แล้ว',
+        nextAction: 'ยืนยันว่าเป็นผู้เช่าเดิมจองอีกห้อง หรือจองแทนคนอื่น ก่อนอนุมัติและสร้างสัญญา',
+      };
+    }
+  } catch (err) {
+    if (err.code !== '42P01' && err.code !== '42703') {
+      console.warn('[admin-booking] active-tenant risk check skipped:', err.message);
+    }
+  }
+  const VALID_TYPES = ['standard', 'deluxe', 'suite', 'studio'];
+  const wantType = VALID_TYPES.includes(cleaned.roomType) ? cleaned.roomType : 'standard';
+  const wantFloor = Number(cleaned.floor) || null;
+  const bookingId = 'BK-ADM-' + require('crypto').randomBytes(6).toString('hex');
+  const createdBy = req.session.user.username;
+  // Deposit attestation: depositCollected=true means the admin HOLDS the
+  // booking fee already (cash on the counter / transfer they verified on
+  // their own banking app). depositStatus='verified' + provider='manual'
+  // reuses the exact states the approve checklist already understands.
+  const depositCollected = b.depositCollected === true
+    && bookingSettings.requireDeposit && Number(bookingSettings.depositAmount) > 0;
+  const depositRequired = depositCollected;
+  const newBooking = {
+    id: bookingId,
+    name: cleaned.tenantName,
+    phone: cleaned.phone,
+    wantType,
+    wantFloor,
+    moveIn: cleaned.checkInDate || null,
+    months,
+    deposit: depositCollected ? bookingSettings.depositAmount : 0,
+    depositRequired,
+    bookingFee: depositCollected ? bookingSettings.depositAmount : 0,
+    bookingFeeAppliesToDeposit: depositCollected ? bookingSettings.applyBookingFeeToDeposit : false,
+    depositMinimumAmount: bookingSettings.minimumAmount,
+    depositCreditAmount: 0,
+    depositBalanceDue: null,
+    contractDepositEstimate: null,
+    depositStatus: depositCollected ? 'verified' : 'not_required',
+    depositSlipUrl: null,
+    depositSlipFileId: null,
+    depositSlipHash: null,
+    depositVerifyProvider: depositCollected ? 'manual' : null,
+    depositVerifyCode: null,
+    depositVerifyReason: depositCollected
+      ? `แอดมิน ${createdBy} ยืนยันว่าเก็บค่าจองแล้ว (${b.depositPaymentMethod || 'cash'})`
+      : null,
+    depositVerifyAttempts: [],
+    depositVerifiedAt: depositCollected ? new Date().toISOString() : null,
+    depositTransactionRef: null,
+    depositPaymentMethod: depositCollected ? (b.depositPaymentMethod || 'cash') : null,
+    depositVerification: null,
+    holdTokenHash: null,
+    holdExpiresAt: null,
+    reservedAt: null,
+    status: 'pending',
+    createdAt: new Date().toISOString(),
+    createdBy,
+    email: cleaned.email,
+    message: cleaned.message,
+    riskFlags: applicantRisk ? [applicantRisk.code] : [],
+    applicantRisk,
+    source: 'admin-manual',
+    roomId: cleaned.roomId || '',
+    citizenIdTail: null,
+    citizenIdImageFrontId: null,
+    agreedTermsVersion: null,
+    agreedTermsAt: null,
+  };
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query(
+      'SELECT value FROM app_data WHERE key=$1 FOR UPDATE',
+      ['baankarn_bookings_v1']
+    );
+    const list = (rows.length && Array.isArray(rows[0].value)) ? rows[0].value : [];
+    // Duplicate guard — an OPEN booking for the same phone (and same room
+    // when one is named) is a double-submit, not a second customer.
+    const openStatuses = new Set(['pending', 'reviewing', 'approved']);
+    const dup = list.find((x) => x
+      && openStatuses.has(String(x.status || 'pending'))
+      && normaliseBookingPhone(x.phone) === normalisedPhone
+      && (!cleaned.roomId || String(x.assignedRoomId || x.roomId || '') === cleaned.roomId));
+    if (dup) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        error: `เบอร์นี้มีการจองค้างอยู่แล้ว (${dup.id}${dup.roomId ? ` · ห้อง ${dup.roomId}` : ''} · ${dup.status})`,
+        code: 'DUPLICATE_BOOKING',
+        existingBookingId: dup.id,
+        hint: 'เปิดการจองเดิมเพื่อดำเนินการต่อ หรือยกเลิกของเดิมก่อนถ้าลูกค้าเปลี่ยนใจ',
+      });
+    }
+    if (cleaned.roomId) {
+      await releaseExpiredPublicBookingHolds(client);
+      const roomRow = await client.query(
+        `SELECT value FROM app_data WHERE key='baankarn_rooms_v1' FOR UPDATE`
+      );
+      const rooms = roomRow.rows.length && roomRow.rows[0].value && typeof roomRow.rows[0].value === 'object'
+        ? roomRow.rows[0].value
+        : {};
+      let room = rooms[cleaned.roomId] || null;
+      let v2Room = null;
+      try {
+        const v2 = await client.query(
+          `SELECT room_code, room_type, floor, room_no, rent_price, deposit_price, wifi_fee, status
+             FROM rooms_v2
+            WHERE room_code=$1 AND deleted_at IS NULL
+            FOR UPDATE`,
+          [cleaned.roomId]
+        );
+        v2Room = v2.rows[0] || null;
+        if (!room && v2Room) room = roomFromV2(v2Room);
+      } catch (err) {
+        if (err.code !== '42P01') throw err;
+      }
+      if (!room) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'ไม่พบห้องนี้', code: 'ROOM_NOT_FOUND' });
+      }
+      const vacant = isVacantStatus(room.status) && (!v2Room || isVacantStatus(v2Room.status));
+      if (!vacant) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: isPublicHoldRoom(room)
+            ? 'ห้องนี้ถูกล็อกโดยผู้จองหน้าเว็บอยู่ — รอหมดเวลาล็อกหรือเลือกห้องอื่น'
+            : `ห้องนี้ไม่ว่างสำหรับจอง (${room.status})`,
+          code: isPublicHoldRoom(room) ? 'ROOM_HELD' : 'ROOM_NOT_VACANT',
+          currentStatus: room.status,
+          expiresAt: isPublicHoldRoom(room) ? (room.reservationExpiresAt || null) : null,
+        });
+      }
+      const contractDepositEstimate = Math.max(0, Number(room.deposit ?? v2Room?.deposit_price ?? 0) || 0);
+      const depositCreditAmount = depositCollected && newBooking.bookingFeeAppliesToDeposit
+        ? Math.min(Number(newBooking.bookingFee) || 0, contractDepositEstimate)
+        : 0;
+      newBooking.contractDepositEstimate = contractDepositEstimate;
+      newBooking.depositCreditAmount = depositCreditAmount;
+      newBooking.depositBalanceDue = contractDepositEstimate > 0
+        ? Math.max(contractDepositEstimate - depositCreditAmount, 0)
+        : null;
+      const reservedAt = new Date().toISOString();
+      newBooking.reservedAt = reservedAt;
+      newBooking.assignedRoomId = cleaned.roomId;
+      rooms[cleaned.roomId] = {
+        ...room,
+        id: room.id || cleaned.roomId,
+        status: 'reserved',
+        tenant: {
+          name: cleaned.tenantName,
+          phone: cleaned.phone || '',
+          email: cleaned.email || '',
+          occupation: '',
+          score: 'A',
+          since: new Date().toISOString().slice(0, 10),
+        },
+        reservedBy: newBooking.id,
+        reservedAt,
+        reservationMode: 'admin_booking',
+        depositStatus: newBooking.depositStatus,
+        bookingFee: newBooking.bookingFee,
+        bookingFeeAppliesToDeposit: newBooking.bookingFeeAppliesToDeposit,
+        depositCreditAmount: newBooking.depositCreditAmount,
+        depositBalanceDue: newBooking.depositBalanceDue,
+      };
+      delete rooms[cleaned.roomId].reservationExpiresAt;
+      delete rooms[cleaned.roomId].holdExpiresAt;
+      delete rooms[cleaned.roomId].holdTokenHash;
+      await client.query(
+        `INSERT INTO app_data (key, value, updated_by) VALUES ($1, $2, $3)
+           ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW(), updated_by=EXCLUDED.updated_by`,
+        ['baankarn_rooms_v1', JSON.stringify(rooms), createdBy]
+      );
+      try {
+        const reserveV2 = await client.query(
+          `UPDATE rooms_v2 SET status='reserved', updated_at=NOW()
+             WHERE room_code=$1 AND status='vacant' AND deleted_at IS NULL`,
+          [cleaned.roomId]
+        );
+        if (v2Room && reserveV2.rowCount !== 1) {
+          throw Object.assign(new Error('room no longer vacant'), { code: 'ROOM_NOT_VACANT' });
+        }
+      } catch (err) {
+        if (err.code === '42P01') {
+          // legacy deploy without rooms_v2: the JSONB reservation above is enough
+        } else if (err.code === 'ROOM_NOT_VACANT') {
+          await client.query('ROLLBACK');
+          return res.status(409).json({ error: 'ห้องนี้ไม่ว่างสำหรับจอง', code: 'ROOM_NOT_VACANT' });
+        } else {
+          throw err;
+        }
+      }
+    }
+    list.unshift(newBooking);
+    const capped = list.slice(0, 500);
+    await client.query(
+      `INSERT INTO app_data (key, value, updated_by) VALUES ($1, $2, $3)
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW(), updated_by = EXCLUDED.updated_by`,
+      ['baankarn_bookings_v1', JSON.stringify(capped), createdBy]
+    );
+    // Relational dual-write — same columns as the public path, with the
+    // legacy-deploy fallback. Best-effort by design (blob is the read model).
+    try {
+      await client.query(
+        `INSERT INTO bookings
+            (external_id, name, phone, email, want_type, want_floor,
+             move_in, months, deposit, status, source, message, room_id,
+             deposit_required, booking_fee, booking_fee_applies_to_deposit,
+             deposit_credit_amount, deposit_balance_due, deposit_minimum_amount,
+             deposit_status, deposit_verify_provider, deposit_verify_reason,
+             deposit_verified_at, deposit_payment_method, reserved_at)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'pending','admin-manual',$10,$11,
+                  $12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
+          ON CONFLICT (external_id) DO NOTHING`,
+        [
+          newBooking.id, newBooking.name, newBooking.phone || null,
+          cleaned.email || null, wantType, wantFloor,
+          cleaned.checkInDate || null, months, newBooking.deposit,
+          cleaned.message || null, cleaned.roomId || null,
+          newBooking.depositRequired,
+          newBooking.bookingFee || 0,
+          newBooking.bookingFeeAppliesToDeposit === true,
+          newBooking.depositCreditAmount || 0,
+          newBooking.depositBalanceDue,
+          newBooking.depositMinimumAmount || 0,
+          newBooking.depositStatus || null,
+          newBooking.depositVerifyProvider || null,
+          newBooking.depositVerifyReason || null,
+          newBooking.depositVerifiedAt || null,
+          newBooking.depositPaymentMethod || null,
+          newBooking.reservedAt || null,
+        ]
+      );
+    } catch (err) {
+      if (err.code === '42703') {
+        try {
+          await client.query(
+            `INSERT INTO bookings
+                (external_id, name, phone, email, want_type, want_floor,
+                 move_in, months, deposit, status, source, message, room_id)
+              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'pending','admin-manual',$10,$11)
+              ON CONFLICT (external_id) DO NOTHING`,
+            [
+              newBooking.id, newBooking.name, newBooking.phone || null,
+              cleaned.email || null, wantType, wantFloor,
+              cleaned.checkInDate || null, months, newBooking.deposit,
+              cleaned.message || null, cleaned.roomId || null,
+            ]
+          );
+        } catch (e2) {
+          console.warn('[admin-booking] relational dual-write fallback also failed:', e2.message);
+        }
+      } else {
+        console.warn('[admin-booking] relational dual-write skipped:', err.message);
+      }
+    }
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('admin booking create error:', err);
+    return res.status(500).json({ error: 'internal error' });
+  } finally {
+    client.release();
+  }
+  audit(req, 'booking.create', 'booking', bookingId, {
+    source: 'admin-manual',
+    roomId: cleaned.roomId || null,
+    wantType,
+    wantFloor,
+    depositCollected,
+    depositPaymentMethod: newBooking.depositPaymentMethod,
+    applicantRisk: applicantRisk ? applicantRisk.code : null,
+  });
+  // Owner visibility when a STAFF account books — owner/manager are the
+  // approvers, so a staff-recorded booking should land in their inbox the
+  // same way a public one does. Owner/manager creating their own booking
+  // already know about it; skip the self-notification.
+  if (req.session.user.role === 'staff') {
+    const flags = req.features || (await features.load(pool).catch(() => ({})));
+    notifier.notifyOwner({ pool, features: flags }, {
+      subject: `📋 จองใหม่ (โดยแอดมิน ${createdBy})`,
+      text: `ชื่อ: ${cleaned.tenantName}\nโทร: ${cleaned.phone || '-'}\n`
+        + `ห้อง: ${cleaned.roomId || 'ยังไม่ระบุ'}\nวันเข้าพัก: ${cleaned.checkInDate || '-'}\n`
+        + `ค่าจอง: ${depositCollected ? `฿${Number(newBooking.bookingFee).toLocaleString('th-TH')} (เก็บแล้ว · ${newBooking.depositPaymentMethod})` : 'ยังไม่เก็บ'}\n`
+        + `${applicantRisk ? `⚠️ ${applicantRisk.message}\n` : ''}`
+        + `รหัสการจอง: ${bookingId}\n— เปิด /admin#bookings เพื่อตรวจสอบและอนุมัติ`,
+    }).catch(() => {});
+  }
+  res.json({ ok: true, booking: newBooking, applicantRisk });
+});
+
 async function ensureApprovedBookingTenant(client, { booking, roomId }) {
   const fullName = String(booking?.name || booking?.tenantName || '').slice(0, 200).trim();
   const phone = normaliseBookingPhone(booking?.phone);
@@ -8804,8 +9377,27 @@ app.post('/api/bookings/:id/approve-and-assign', sameOrigin, csrfGuard, requireA
         roomId: assignedRoomId,
       });
     }
+    // Approving a booking whose deposit slip sits in a review state IS the
+    // human verification — the approve drawer shows the slip + verifier
+    // outcome, and the admin clicked "อนุมัติ" with that on screen. Stamp
+    // the deposit verified so (a) the booking checklist stops warning
+    // forever, (b) /api/reports/booking-fees counts the money as confirmed
+    // received instead of perpetually "รอตรวจ". awaiting_slip / rejected
+    // can't reach here (the guard above refuses approval), so this only
+    // promotes slips a human actually saw.
+    const DEPOSIT_REVIEW_STATES = new Set(['pending_review', 'manual_review', 'submitted']);
+    const stampDepositVerified = !!(booking.depositRequired
+      && Number(booking.bookingFee) > 0
+      && DEPOSIT_REVIEW_STATES.has(String(booking.depositStatus || '')));
+    const depositStamp = stampDepositVerified ? {
+      depositStatus: 'verified',
+      depositVerifiedAt: new Date().toISOString(),
+      depositVerifyReason: `ยืนยันพร้อมการอนุมัติการจองโดย ${req.session.user.username}`,
+      depositVerifyProvider: booking.depositVerifyProvider || 'manual',
+    } : null;
     bookings[bIdx] = {
       ...booking,
+      ...(depositStamp || {}),
       status: 'approved',
       roomId: assignedRoomId || booking.roomId || null,
       tenantId: preContractTenantId || booking.tenantId || null,
@@ -8816,6 +9408,13 @@ app.post('/api/bookings/:id/approve-and-assign', sameOrigin, csrfGuard, requireA
       updatedAt: new Date().toISOString(),
       updatedBy: req.session.user.username,
     };
+    // Keep the room's reservation copy of the deposit state in step with the
+    // booking (the public create path copies it; without this the room shows
+    // the stale pre-approval state until the next full room save).
+    if (depositStamp && assignedRoomId && rooms[assignedRoomId]
+        && 'depositStatus' in rooms[assignedRoomId]) {
+      rooms[assignedRoomId].depositStatus = depositStamp.depositStatus;
+    }
 
     // Persist both blobs in the same transaction.
     await client.query(
@@ -8839,6 +9438,21 @@ app.post('/api/bookings/:id/approve-and-assign', sameOrigin, csrfGuard, requireA
           WHERE external_id=$1`,
         [id, assignedRoomId || null]
       );
+      if (depositStamp) {
+        // Separate statement so legacy deploys missing the deposit columns
+        // (42703) only lose the deposit mirror, not the status mirror above.
+        await client.query(
+          `UPDATE bookings
+              SET deposit_status=$2,
+                  deposit_verified_at=NOW(),
+                  deposit_verify_reason=$3,
+                  updated_at=NOW()
+            WHERE external_id=$1`,
+          [id, depositStamp.depositStatus, depositStamp.depositVerifyReason]
+        ).catch((err) => {
+          if (err.code !== '42703') throw err;
+        });
+      }
     } catch (err) {
       console.warn('[booking] relational status sync skipped:', err.message);
     }
@@ -8847,6 +9461,7 @@ app.post('/api/bookings/:id/approve-and-assign', sameOrigin, csrfGuard, requireA
     audit(req, 'booking.approve', 'booking', id, {
       assignedRoomId, wantType: booking.wantType, wantFloor: booking.wantFloor,
       preContractTenantId,
+      depositVerifiedOnApprove: stampDepositVerified || undefined,
     });
     // Full bridge remains a best-effort cleanup for legacy room edits, but
     // approve-and-assign already wrote the selected applicant's tenant row
@@ -9510,15 +10125,38 @@ app.post('/api/meters/:roomId/readings', sameOrigin, csrfGuard, requireAuth, req
     if (!roomFound) {
       return res.status(404).json({ error: 'room not found', code: 'ROOM_NOT_FOUND' });
     }
-    const row = await meter.record(pool, {
-      roomId, meterType, reading,
-      // A2 — only 'manual' is appropriate for admin-entered readings; an
-      // admin shouldn't be able to claim a reading came from MQTT/simulator
-      // (those come from scheduler / device endpoints with bearer auth).
-      source: 'manual',
-      createdBy: req.session.user.username,
-      period,
-    });
+    let row;
+    try {
+      row = await meter.record(pool, {
+        roomId, meterType, reading,
+        // A2 — only 'manual' is appropriate for admin-entered readings; an
+        // admin shouldn't be able to claim a reading came from MQTT/simulator
+        // (those come from scheduler / device endpoints with bearer auth).
+        source: 'manual',
+        createdBy: req.session.user.username,
+        period,
+        // Backward reading is refused unless the admin explicitly confirms a
+        // meter replacement/reset. The confirmation is audit-logged below so
+        // a disputed bill can be traced back to who accepted the rollback.
+        allowRollback: req.body && req.body.allowRollback === true,
+      });
+    } catch (err) {
+      if (err && err.code === 'METER_ROLLBACK') {
+        return res.status(409).json({
+          error: err.message,
+          code: 'METER_ROLLBACK',
+          lastReading: err.lastReading,
+          attemptedReading: err.attemptedReading,
+          hint: 'ตรวจเลขที่กรอกอีกครั้ง — ถ้ามิเตอร์ถูกเปลี่ยน/รีเซ็ตจริง ส่ง { allowRollback: true } เพื่อยืนยัน (ระบบจะบันทึก audit)',
+        });
+      }
+      throw err;
+    }
+    if (req.body && req.body.allowRollback === true) {
+      audit(req, 'meter.rollback_confirmed', 'meter', String(row.id), {
+        meterType: row.meter_type, reading: row.reading, period: row.period || null,
+      });
+    }
     // A2 — anomaly detection is fail-soft: if features not loaded for any
     // reason, default sigmas=3 and still notify. The notifier is already
     // non-throwing, but we additionally swallow any awaits so the admin's
@@ -10653,6 +11291,20 @@ function validateContractApprovalTarget(inv, contract) {
       action: 'แก้เงินมัดจำก่อน approve',
     });
   }
+  // Date sanity — the create paths (quick-invite / checkin) validate this,
+  // but a contract edited or migrated outside those paths could reach
+  // approval with end < start. Locking such a contract poisons everything
+  // downstream: term display, expiry scheduler, closing-bill proration.
+  if (contract.start_date && contract.end_date
+      && String(contract.end_date) < String(contract.start_date)) {
+    issues.push({
+      code: 'CONTRACT_DATES_INVALID',
+      field: 'end_date',
+      label: `วันสิ้นสุดสัญญา (${contract.end_date}) มาก่อนวันเริ่ม (${contract.start_date})`,
+      consequence: 'สัญญาจะหมดอายุทันทีที่ approve และวันครบกำหนด/บิลปิดยอดจะคำนวณผิด',
+      action: 'แก้วันเริ่ม/วันสิ้นสุดสัญญาให้ถูกต้องก่อน approve',
+    });
+  }
   if (contract.tenant_id && inv.tenant_id
       && Number(contract.tenant_id) !== Number(inv.tenant_id)) {
     issues.push({
@@ -10734,6 +11386,7 @@ app.get('/api/contracts', requireAuth, async (req, res) => {
                 c.start_date, c.end_date, c.term_months,
                 c.monthly_rent, c.deposit, c.discount_pct,
                 c.booking_fee_credit, c.deposit_balance_due,
+                c.deposit_returned, c.deposit_returned_at,
                 c.status, c.signed_at, c.created_at,
                 c.closed_at, c.closed_by, c.closed_reason, c.closed_type,
                 c.locked_at, c.locked_by, c.template_id,
@@ -12749,6 +13402,7 @@ app.get('/api/admin/contract-invitations',
         `SELECT i.id, i.contract_id, i.tenant_id, i.status,
                 i.draft, i.submitted_at, i.approved_at, i.approved_by,
                 i.rejected_at, i.rejected_by, i.rejection_reason,
+                i.revoked_at, i.revoked_by,
                 i.expires_at, i.created_by, i.created_at, i.updated_at,
                 c.contract_no, c.room_id,
                 t.full_name AS tenant_name, t.phone AS tenant_phone
@@ -12893,7 +13547,7 @@ app.post('/api/admin/contract-invitations/:id/approve',
       // the check here makes EVERY downstream write (drafts, tenant
       // fields, room bind, welcome bill) refuse to fire on a phantom row.
       const tenantGuard = await client.query(
-        `SELECT id FROM tenants WHERE id=$1 AND deleted_at IS NULL FOR UPDATE`,
+        `SELECT id, status FROM tenants WHERE id=$1 AND deleted_at IS NULL FOR UPDATE`,
         [inv.tenant_id]
       );
       if (!tenantGuard.rows.length) {
@@ -12903,6 +13557,20 @@ app.post('/api/admin/contract-invitations/:id/approve',
           code: 'TENANT_DELETED',
           tenantId: inv.tenant_id,
           hint: 'ลบ invitation เก่า + ผูก contract กับผู้เช่าคนปัจจุบัน แล้วออก invitation ใหม่',
+        });
+      }
+      // Approval reactivates the tenant (status → 'active' in the room-binding
+      // block below), so a tenant blacklisted AFTER the invite went out must
+      // not slip back in through this door. quick-invite and the booking
+      // approve path both refuse blacklisted tenants — without this mirror,
+      // approve-invitation was the one unguarded entrance.
+      if (tenantGuard.rows[0].status === 'blacklist') {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'ผู้เช่ารายนี้อยู่ใน blacklist — ไม่สามารถ approve สัญญาได้',
+          code: 'TENANT_BLACKLISTED',
+          tenantId: inv.tenant_id,
+          hint: 'ตรวจสอบประวัติผู้เช่าก่อน หากต้องการรับกลับจริง ให้ปลดสถานะ blacklist ที่หน้าผู้เช่าอย่างตั้งใจ แล้วค่อย approve',
         });
       }
 
@@ -14690,6 +15358,18 @@ app.post('/api/admin/restore', restoreBodyParser, sameOrigin, csrfGuard, require
         if (rows.length === 0) { stats[t] = { inserted: 0 }; continue; }
 
         const cols = Object.keys(rows[0]);
+        // Column names are interpolated as quoted identifiers below (they can't
+        // be bound as $N params), so they must be real snake_case identifiers.
+        // The backup blob is caller-supplied and its integrity hash is optional
+        // (absent on legacy dumps, line ~14617), so a crafted key containing a
+        // double-quote could break out of "..." and inject SQL. Reject the
+        // whole table with a clear message instead of trusting the keys.
+        const badCol = cols.find((c) => !/^[a-z_][a-z0-9_]*$/i.test(c));
+        if (badCol) {
+          stats[t] = { skipped: `invalid column name: ${String(badCol).slice(0, 40)}` };
+          errors.push(`${t}: invalid column name in backup — table skipped`);
+          continue;
+        }
         const colList = cols.map((c) => `"${c}"`).join(',');
         const placeholders = cols.map((_, i) => `$${i + 1}`).join(',');
         let inserted = 0, failed = 0;

@@ -591,6 +591,27 @@
       title: 'มีคนอื่นแก้ไขข้อมูลนี้แล้ว',
       description: 'โปรดรีเฟรชหน้าเพื่อโหลดข้อมูลใหม่ ก่อนแก้ไขซ้ำ',
     },
+    // Optimistic lock on the shared JSONB blobs (rooms/config/bookings).
+    // The save was REFUSED — nothing was overwritten. The api-client already
+    // re-pulled the fresh server copy into localStorage; the operator must
+    // refresh so the on-screen React state matches before re-applying edits.
+    STALE_WRITE: {
+      title: 'ข้อมูลถูกแก้ไขจากที่อื่น — ระบบยังไม่บันทึกของคุณ',
+      description: (e) => [
+        e.currentUpdatedBy ? `ผู้แก้ไขล่าสุด: ${e.currentUpdatedBy}` : null,
+        'ระบบยกเลิกการบันทึกนี้เพื่อไม่ให้ทับข้อมูลล่าสุดของคนอื่น',
+        'กดรีเฟรชหน้าเพื่อโหลดข้อมูลล่าสุด แล้วทำรายการเดิมอีกครั้ง',
+      ].filter(Boolean).join('\n'),
+    },
+    // Meter readings must not decrease. Admin either fixes the typo or, for
+    // a real meter replacement/reset, confirms with allowRollback:true.
+    METER_ROLLBACK: {
+      title: 'เลขมิเตอร์น้อยกว่าครั้งก่อน',
+      description: (e) => [
+        e.lastReading != null ? `เลขล่าสุดในระบบ: ${e.lastReading} · เลขที่กรอก: ${e.attemptedReading}` : null,
+        'ตรวจเลขที่กรอกอีกครั้ง — ถ้ามิเตอร์ถูกเปลี่ยน/รีเซ็ตจริง ให้ติ๊กยืนยันการรีเซ็ตมิเตอร์แล้วบันทึกซ้ำ',
+      ].filter(Boolean).join('\n'),
+    },
     BILL_DUPLICATE: {
       title: 'มีบิลของรอบนี้อยู่แล้ว',
       description: 'ทำการ void บิลเดิมก่อน หากต้องการสร้างใหม่',

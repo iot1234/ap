@@ -26,6 +26,9 @@ function PageReports({ rooms, config, addActivity, setToast }) {
   // Replaced Math.sin fabrications — see audit, May 2026.
   const [revRows, setRevRows] = React.useState(null);   // null=loading
   const [occRows, setOccRows] = React.useState(null);
+  // เงินค่าจองที่เก็บได้ — deposits are NOT in /revenue (liability, not
+  // income) but the owner reconciling a bank statement needs to see them.
+  const [bookingFees, setBookingFees] = React.useState(null);
   const currentPeriod = useMemo(() => {
     const d = new Date();
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
@@ -39,11 +42,12 @@ function PageReports({ rooms, config, addActivity, setToast }) {
     const year = new Date().getFullYear();
     (async () => {
       try {
-        const [oRes, aRes, revRes, occRes] = await Promise.all([
+        const [oRes, aRes, revRes, occRes, bfRes] = await Promise.all([
           fetch('/api/reports/overview', { credentials: 'include' }),
           fetch('/api/reports/aged-receivable', { credentials: 'include' }),
           fetch(`/api/reports/revenue?year=${year}`, { credentials: 'include' }),
           fetch(`/api/reports/occupancy?year=${year}`, { credentials: 'include' }),
+          fetch(`/api/reports/booking-fees?year=${year}`, { credentials: 'include' }),
         ]);
         if (cancel) return;
         if (oRes.ok)   setLiveOverview(await oRes.json());
@@ -52,6 +56,7 @@ function PageReports({ rooms, config, addActivity, setToast }) {
         else           setRevRows([]);
         if (occRes.ok) setOccRows(((await occRes.json()).rows) || []);
         else           setOccRows([]);
+        if (bfRes.ok)  setBookingFees(await bfRes.json());
       } catch {
         if (!cancel) { setRevRows([]); setOccRows([]); }
       }
@@ -400,6 +405,67 @@ function PageReports({ rooms, config, addActivity, setToast }) {
             </div>
           </Card>
         )}
+
+        {bookingFees && Array.isArray(bookingFees.rows) && (() => {
+          const totalVerified = bookingFees.rows.reduce((s, r) => s + (Number(r.verified_amount) || 0), 0);
+          const totalPending = bookingFees.rows.reduce((s, r) => s + (Number(r.pending_amount) || 0), 0);
+          const totalCancelled = bookingFees.rows.reduce((s, r) => s + (Number(r.cancelled_collected_amount) || 0), 0);
+          const activeMonths = bookingFees.rows.filter((r) =>
+            (Number(r.verified_count) || 0) + (Number(r.pending_count) || 0) > 0);
+          if (!activeMonths.length) return null;
+          const methods = Object.entries(bookingFees.byMethod || {});
+          return (
+            <Card>
+              <SectionHeading
+                title="เงินค่าจองที่เก็บได้"
+                subtitle={`ปี ${bookingFees.year} — เงินมัดจำ/ค่าจองไม่ใช่รายได้ จึงไม่รวมในกราฟรายได้ แต่เป็นเงินเข้าบัญชีจริงที่ต้องกระทบยอดได้`}
+                level={3}
+              />
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 12 }}>
+                <div style={{ padding: 14, background: C.surfaceAlt, border: `1px solid ${C.border}`, borderRadius: 10 }}>
+                  <div style={{ fontSize: 11.5, color: C.muted, fontWeight: 500 }}>ยืนยันรับแล้ว</div>
+                  <div style={{ fontSize: 22, fontWeight: 600, color: '#2e9b6a', marginTop: 4 }}>
+                    {fmtCurrency(totalVerified)}
+                  </div>
+                  {methods.length ? (
+                    <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>
+                      {methods.map(([m, amt]) => `${m === 'cash' ? 'เงินสด' : m === 'transfer' ? 'โอน' : m === 'promptpay' ? 'พร้อมเพย์' : m} ${fmtCurrency(amt)}`).join(' · ')}
+                    </div>
+                  ) : null}
+                </div>
+                <div style={{ padding: 14, background: C.surfaceAlt, border: `1px solid ${C.border}`, borderRadius: 10 }}>
+                  <div style={{ fontSize: 11.5, color: C.muted, fontWeight: 500 }}>มีสลิป รอยืนยัน</div>
+                  <div style={{ fontSize: 22, fontWeight: 600, color: '#c98a2b', marginTop: 4 }}>
+                    {fmtCurrency(totalPending)}
+                  </div>
+                  <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>
+                    ตรวจ/อนุมัติที่หน้าการจอง — อนุมัติแล้วระบบนับเป็นยืนยันให้
+                  </div>
+                </div>
+                <div style={{ padding: 14, background: C.surfaceAlt, border: `1px solid ${C.border}`, borderRadius: 10 }}>
+                  <div style={{ fontSize: 11.5, color: C.muted, fontWeight: 500 }}>จองที่ยกเลิกหลังเก็บเงิน</div>
+                  <div style={{ fontSize: 22, fontWeight: 600, color: totalCancelled > 0 ? '#b54639' : C.ink, marginTop: 4 }}>
+                    {fmtCurrency(totalCancelled)}
+                  </div>
+                  <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>
+                    {totalCancelled > 0 ? 'ตรวจการคืนเงินนอกระบบให้ครบ' : 'ไม่มี — ไม่ต้องตามคืนเงิน'}
+                  </div>
+                </div>
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                {activeMonths.map((r) => (
+                  <div key={r.period} style={{
+                    padding: '6px 10px', background: '#fff', border: `1px solid ${C.border}`,
+                    borderRadius: 8, fontSize: 12, color: C.ink2,
+                  }}>
+                    <b>{r.period}</b> · ยืนยัน {fmtCurrency(r.verified_amount)} ({r.verified_count})
+                    {Number(r.pending_count) > 0 ? ` · รอตรวจ ${fmtCurrency(r.pending_amount)} (${r.pending_count})` : ''}
+                  </div>
+                ))}
+              </div>
+            </Card>
+          );
+        })()}
 
         {liveOverview && liveOverview.counts && (
           <Card>

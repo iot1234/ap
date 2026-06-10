@@ -1401,7 +1401,7 @@ function TabContract({ t, routeBookingId = '', config, setToast, addActivity, se
   // room freed, sessions/cards revoked, recurring charges disabled, and
   // closing bill generated. Direct contract PUT remains a fallback for
   // legacy rows where tenantDbId cannot be resolved.
-  const cancelContract = async () => {
+  const cancelContract = async (opts = {}) => {
     if (!contract && !tenantDbId) return;
     const reason = (cancelReason || '').trim();
     if (reason.length < 5) {
@@ -1412,13 +1412,18 @@ function TabContract({ t, routeBookingId = '', config, setToast, addActivity, se
     try {
       const closedRoomId = contract ? contract.room_id : (t.currentRoomId || t.roomId);
       const closedContractNo = contract ? contract.contract_no : 'no-contract';
+      let checkoutResult = null;
       if (tenantDbId) {
-        await apiCall(`/api/tenants/${tenantDbId}/checkout`, {
+        const body = { reason, generateClosingBill: true };
+        // Deposit return rides on checkout (the only endpoint that can
+        // persist contracts.deposit_returned). null = admin chose to skip.
+        const fdr = opts && opts.finalDepositReturn;
+        if (fdr != null && Number.isFinite(Number(fdr)) && Number(fdr) >= 0) {
+          body.finalDepositReturn = Number(fdr);
+        }
+        checkoutResult = await apiCall(`/api/tenants/${tenantDbId}/checkout`, {
           method: 'POST',
-          body: JSON.stringify({
-            reason,
-            generateClosingBill: true,
-          }),
+          body: JSON.stringify(body),
         });
       } else if (contract) {
         await apiCall(`/api/contracts/${contract.id}`, {
@@ -1432,12 +1437,33 @@ function TabContract({ t, routeBookingId = '', config, setToast, addActivity, se
       }
       setCancelling(false);
       setCancelReason('');
-      setToast && setToast({
-        kind: 'success',
-        message: contract
-          ? `ยกเลิกสัญญา ${closedContractNo} แล้ว — ห้อง ${closedRoomId} ว่าง`
-          : `เช็คเอาท์ ${t.name} จากห้อง ${closedRoomId} แล้ว`,
-      });
+      const outstandingTotal = Number(checkoutResult && checkoutResult.outstandingTotal) || 0;
+      const outstandingCount = (checkoutResult && Array.isArray(checkoutResult.outstandingBills))
+        ? checkoutResult.outstandingBills.length : 0;
+      const refundRecorded = checkoutResult && checkoutResult.refund != null
+        ? Number(checkoutResult.refund) : null;
+      const baseMsg = contract
+        ? `ยกเลิกสัญญา ${closedContractNo} แล้ว — ห้อง ${closedRoomId} ว่าง`
+        : `เช็คเอาท์ ${t.name} จากห้อง ${closedRoomId} แล้ว`;
+      if (outstandingTotal > 0) {
+        setToast && setToast({
+          kind: 'warning',
+          message: {
+            title: baseMsg,
+            description: [
+              `⚠️ ยังมีบิลค้างชำระ ${outstandingCount} ใบ รวม ${fmtCurrency(outstandingTotal)} — ติดตามเก็บที่ /admin#billing`,
+              refundRecorded != null ? `บันทึกคืนมัดจำ ${fmtCurrency(refundRecorded)} แล้ว` : null,
+            ].filter(Boolean).join('\n'),
+          },
+        });
+      } else {
+        setToast && setToast({
+          kind: 'success',
+          message: refundRecorded != null
+            ? { title: baseMsg, description: `บันทึกคืนมัดจำ ${fmtCurrency(refundRecorded)} แล้ว · ไม่มีบิลค้างชำระ` }
+            : baseMsg,
+        });
+      }
       addActivity && addActivity({
         icon: '🚫',
         text: contract
@@ -1669,6 +1695,7 @@ function TabContract({ t, routeBookingId = '', config, setToast, addActivity, se
           <CancelContractModal
             contract={null}
             tenant={t}
+            tenantDbId={tenantDbId}
             reason={cancelReason}
             setReason={setCancelReason}
             busy={busy}
@@ -1798,6 +1825,7 @@ function TabContract({ t, routeBookingId = '', config, setToast, addActivity, se
         <CancelContractModal
           contract={contract}
           tenant={t}
+          tenantDbId={tenantDbId}
           reason={cancelReason}
           setReason={setCancelReason}
           busy={busy}
@@ -1814,11 +1842,40 @@ function TabContract({ t, routeBookingId = '', config, setToast, addActivity, se
 // audit log captures WHY the lease was terminated — admin support cases
 // later asking "who cancelled this and why?" should be answerable from
 // the audit_log entry without DB forensics.
-function CancelContractModal({ contract, tenant, reason, setReason, busy, onClose, onConfirm, C }) {
+function CancelContractModal({ contract, tenant, tenantDbId, reason, setReason, busy, onClose, onConfirm, C }) {
   const { Modal, Btn, fmtCurrency } = window;
+  const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
   const roomId = contract ? contract.room_id : (tenant && (tenant.currentRoomId || tenant.roomId)) || '-';
   const monthlyRent = contract ? contract.monthly_rent : (tenant && tenant.rent);
   const deposit = contract ? contract.deposit : (Number(monthlyRent) > 0 ? Number(monthlyRent) * 2 : 0);
+  // Outstanding pending/overdue bills for THIS tenant — fetched when the
+  // modal opens so admin sees the real debt before confirming, instead of
+  // the old generic "บิลที่ค้างอยู่ยังคงค้างไว้" line with no number.
+  // null = loading, [] = none, undefined = lookup failed (non-blocking).
+  const [outstanding, setOutstanding] = React.useState(tenantDbId ? null : []);
+  // Deposit return: the checkout endpoint is the ONLY write path for
+  // contracts.deposit_returned — if admin skips it here it can't be
+  // recorded later, so the field lives in this modal.
+  const [depositReturn, setDepositReturn] = React.useState('');
+  React.useEffect(() => {
+    if (!tenantDbId || !apiCall) return;
+    let cancelled = false;
+    Promise.all([
+      apiCall(`/api/bills?tenantId=${encodeURIComponent(tenantDbId)}&status=pending&limit=100`),
+      apiCall(`/api/bills?tenantId=${encodeURIComponent(tenantDbId)}&status=overdue&limit=100`),
+    ]).then(([p, o]) => {
+      if (cancelled) return;
+      setOutstanding([...(p.bills || []), ...(o.bills || [])]);
+    }).catch(() => { if (!cancelled) setOutstanding(undefined); });
+    return () => { cancelled = true; };
+  }, [tenantDbId]);
+  const outstandingTotal = Array.isArray(outstanding)
+    ? Math.round(outstanding.reduce((s, b) => s + (Number(b.total) || 0), 0) * 100) / 100
+    : 0;
+  const depositNum = depositReturn === '' ? null : Number(depositReturn);
+  const depositInvalid = depositReturn !== ''
+    && (!Number.isFinite(depositNum) || depositNum < 0 || depositNum > Number(deposit || 0));
+  const confirm = () => onConfirm({ finalDepositReturn: depositReturn === '' ? null : depositNum });
   return (
     <Modal
       open={true}
@@ -1828,7 +1885,7 @@ function CancelContractModal({ contract, tenant, reason, setReason, busy, onClos
       footer={
         <>
           <Btn variant="ghost" onClick={onClose} disabled={busy}>ปิด</Btn>
-          <Btn variant="danger" onClick={onConfirm} disabled={busy || reason.trim().length < 5}>
+          <Btn variant="danger" onClick={confirm} disabled={busy || reason.trim().length < 5 || depositInvalid}>
             {busy ? (contract ? 'กำลังยกเลิก…' : 'กำลังเช็คเอาท์…') : (contract ? 'ยืนยันยกเลิก' : 'ยืนยันเช็คเอาท์')}
           </Btn>
         </>
@@ -1860,6 +1917,69 @@ function CancelContractModal({ contract, tenant, reason, setReason, busy, onClos
         ค่าเช่า: <b style={{ color: C.ink }}>{fmtCurrency(monthlyRent)}/เดือน</b> ·
         มัดจำ: <b style={{ color: C.ink }}>{fmtCurrency(deposit)}</b>
       </div>
+
+      {outstanding === null ? (
+        <div style={{ fontSize: 12, color: C.muted, marginBottom: 12 }}>กำลังตรวจสอบบิลค้างชำระ…</div>
+      ) : outstanding === undefined ? (
+        <div style={{ fontSize: 12, color: C.muted, marginBottom: 12 }}>
+          ⚠️ ตรวจสอบบิลค้างชำระไม่สำเร็จ — ตรวจที่หน้า /admin#billing ก่อนยืนยัน
+        </div>
+      ) : outstanding.length > 0 ? (
+        <div style={{
+          padding: 10, background: '#fdecea', border: '1px solid #e57373',
+          borderRadius: 8, fontSize: 12, marginBottom: 12, lineHeight: 1.6,
+        }}>
+          <div style={{ fontWeight: 600, color: C.danger || '#c0392b', marginBottom: 4 }}>
+            💸 มีบิลค้างชำระ {outstanding.length} ใบ รวม {fmtCurrency(outstandingTotal)}
+          </div>
+          {outstanding.slice(0, 5).map((b) => (
+            <div key={b.id} style={{ color: '#7a3b32' }}>
+              • {b.bill_no} ({b.period}) — {fmtCurrency(b.total)}
+            </div>
+          ))}
+          {outstanding.length > 5 ? (
+            <div style={{ color: '#7a3b32' }}>… และอีก {outstanding.length - 5} ใบ</div>
+          ) : null}
+          <div style={{ color: '#7a3b32', marginTop: 4 }}>
+            หนี้จะติดตามผู้เช่า (ไม่หายไปกับห้อง) — เก็บเงิน/หักมัดจำให้เรียบร้อยก่อนคืนส่วนที่เหลือ
+          </div>
+        </div>
+      ) : (
+        <div style={{ fontSize: 12, color: C.success || '#2e7d32', marginBottom: 12 }}>
+          ✓ ไม่มีบิลค้างชำระ
+        </div>
+      )}
+
+      {tenantDbId && contract ? (
+        <div style={{ marginBottom: 12 }}>
+          <label style={{ display: 'block', fontSize: 12, marginBottom: 4, color: '#5b4f40', fontWeight: 500 }}>
+            คืนเงินมัดจำให้ผู้เช่า (บาท)
+          </label>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <input type="number" min="0" max={Number(deposit) || 0} step="0.01"
+              placeholder="เว้นว่าง = ยังไม่บันทึกการคืน"
+              value={depositReturn}
+              onChange={(e) => setDepositReturn(e.target.value)}
+              style={{
+                flex: 1, padding: '8px 10px', border: `1px solid ${depositInvalid ? '#e57373' : '#ece4d4'}`,
+                borderRadius: 6, fontSize: 13, fontFamily: 'inherit', boxSizing: 'border-box',
+              }} />
+            <Btn variant="secondary" size="sm" disabled={busy}
+              onClick={() => setDepositReturn(String(Number(deposit) || 0))}>
+              คืนเต็ม {fmtCurrency(deposit)}
+            </Btn>
+          </div>
+          <div style={{ fontSize: 11, color: depositInvalid ? (C.danger || '#c0392b') : C.muted, marginTop: 4 }}>
+            {depositInvalid
+              ? `ต้องเป็นตัวเลข 0 ถึง ${fmtCurrency(deposit)} (มัดจำตามสัญญา)`
+              : 'บันทึกลงสัญญาเพื่อใช้ในรายงาน — ระบบบันทึกได้เฉพาะตอนเช็คเอาท์เท่านั้น ถ้าเว้นว่างจะไม่มีบันทึกการคืนมัดจำ'}
+          </div>
+        </div>
+      ) : tenantDbId ? (
+        <div style={{ fontSize: 11, color: C.muted, marginBottom: 12 }}>
+          ผู้เช่ารายนี้ไม่มีสัญญา active ในระบบ — ไม่มีที่บันทึกการคืนมัดจำ (จัดการนอกระบบ)
+        </div>
+      ) : null}
 
       <label style={{ display: 'block', fontSize: 12, marginBottom: 4, color: '#5b4f40', fontWeight: 500 }}>
         เหตุผลที่ยกเลิก (audit log)

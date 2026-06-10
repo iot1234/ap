@@ -145,10 +145,18 @@ function PageSettings({ rooms, setRooms, config, setConfig, bookings, setBooking
 
     setSaving(true);
     try {
+      // baseUpdatedAt = optimistic lock — a save built on a config loaded
+      // before another tab's save gets refused (409 STALE_WRITE) instead of
+      // silently erasing that newer write.
+      const baseUpdatedAt = window.AP && window.AP.getBaseVersion
+        ? window.AP.getBaseVersion('baankarn_config_v1') : null;
       const out = await apiCall('/api/data/baankarn_config_v1', {
         method: 'PUT',
-        body: JSON.stringify({ value: next }),
+        body: JSON.stringify({ value: next, ...(baseUpdatedAt ? { baseUpdatedAt } : {}) }),
       });
+      if (out && out.updatedAt && window.AP && window.AP.setBaseVersion) {
+        window.AP.setBaseVersion('baankarn_config_v1', out.updatedAt);
+      }
       setDraft(next);
       setConfig(next);
       addActivity && addActivity({ icon: '⚙️', text: 'อัปเดตการตั้งค่าระบบ', type: 'system' });

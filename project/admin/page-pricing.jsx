@@ -213,10 +213,18 @@ function PagePricing({ config, setConfig, rooms, addActivity, setToast, embedded
     }
     setSaving(true);
     try {
+      // baseUpdatedAt = optimistic lock — if another tab/admin saved config
+      // after this page loaded, the server answers 409 STALE_WRITE instead
+      // of letting this save overwrite theirs (surfaced via catch below).
+      const baseUpdatedAt = window.AP && window.AP.getBaseVersion
+        ? window.AP.getBaseVersion('baankarn_config_v1') : null;
       const out = await apiCall('/api/data/baankarn_config_v1', {
         method: 'PUT',
-        body: JSON.stringify({ value: next }),
+        body: JSON.stringify({ value: next, ...(baseUpdatedAt ? { baseUpdatedAt } : {}) }),
       });
+      if (out && out.updatedAt && window.AP && window.AP.setBaseVersion) {
+        window.AP.setBaseVersion('baankarn_config_v1', out.updatedAt);
+      }
       const nextJson = JSON.stringify(next);
       lastConfigJsonRef.current = nextJson;
       setDraft(next);

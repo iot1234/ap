@@ -18,6 +18,12 @@ test('login: too-long username rejected', () => {
   assert.equal(r.success, false);
 });
 
+test('changePassword: requires current password and strong new password', () => {
+  assert.equal(schemas.changePassword.safeParse({ newPassword: 'longenoughpw1' }).success, false);
+  assert.equal(schemas.changePassword.safeParse({ currentPassword: 'old', newPassword: 'short' }).success, false);
+  assert.equal(schemas.changePassword.safeParse({ currentPassword: 'old', newPassword: 'newlongenoughpw1' }).success, true);
+});
+
 test('publicBooking: tenantName required', () => {
   const r = schemas.publicBooking.safeParse({ phone: '0812345678' });
   assert.equal(r.success, false);

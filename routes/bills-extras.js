@@ -1854,6 +1854,21 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         // กลับไปคิดตามมิเตอร์เพราะยังไม่ตั้งจำนวนเหมา".
         const flatFellBack = [];
         const firstMonthSkipped = [];
+        // Distinguish "deployment that never uses the tenants table" (legacy
+        // blob-only mode — billing with tenant_id NULL is the designed
+        // fallback) from "tenants table is in use but THIS room has no active
+        // tenant" (blob/relational drift — e.g. tenant checked out, blob room
+        // still shows them). In the drift case a generated bill would be an
+        // orphan: invisible in the tenant portal, no LINE/email recipient,
+        // and late fees accrue on it forever. Skip + surface instead.
+        let relationalTenantsInUse = false;
+        try {
+          const probe = await pool.query(
+            `SELECT 1 FROM tenants WHERE deleted_at IS NULL LIMIT 1`
+          );
+          relationalTenantsInUse = probe.rows.length > 0;
+        } catch { /* table absent on legacy deploys → blob-only mode */ }
+        const tenantlessSkipped = [];
         for (const room of rooms) {
           if (!room || !room.tenant) { bumpSkip('noTenant'); continue; }
           if (room.status !== 'occupied' && room.status !== 'overdue') { bumpSkip('notBillableStatus'); continue; }
@@ -1875,6 +1890,14 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             );
             if (tq.rows.length) tenantIdForRoom = tq.rows[0].id;
           } catch { /* ignore */ }
+          if (relationalTenantsInUse && !tenantIdForRoom) {
+            tenantlessSkipped.push({
+              roomId: String(room.id || ''),
+              blobTenantName: String(room.tenant?.name || ''),
+            });
+            bumpSkip('noActiveTenantRecord');
+            continue;
+          }
           // Match the manual + scheduler paths: pull discount_pct from the
           // active contract so bulk-generate honors the contract-length
           // discount the admin recorded at check-in.
@@ -2149,11 +2172,13 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         audit(req, 'bill.bulk_generate', 'period', period, {
           made, updated, skipped,
           firstMonthSkipped: firstMonthSkipped.length,
+          tenantlessSkipped: tenantlessSkipped.length,
           skipSummary,
         });
         res.json({ ok: true, period, made, updated, skipped, flatFellBack,
           skipSummary,
           firstMonthSkipped,
+          tenantlessSkipped,
           warnings: issues.filter((i) => i.sev !== 'high') });
       } catch (err) {
         console.error('bulk-generate error:', err);

@@ -232,14 +232,22 @@ async function list(pool, { includeDeleted = false } = {}) {
   );
   const items = rows.map((r) => rowToPublic(r, false));
   // If no DB rows, expose the env OA so admin UI can still show something.
+  // Strip the raw channel credentials first: list() is client-facing and
+  // owner/manager-reachable, while DB rows are already redacted to
+  // hasAccessToken/hasChannelSecret booleans by rowToPublic(row, false).
+  // _envOa() must keep returning the real token/secret for INTERNAL callers
+  // (getById(0) → webhook signature verify + outbound sending), so we redact
+  // a copy here. Leaking the channel access token = full control of the
+  // building's LINE notification channel (push to every bound tenant).
   if (items.length === 0) {
     const env = _envOa();
     if (env) {
+      const { channelAccessToken, channelSecret, ...envPublic } = env;
       try {
         const stats = await getBindingStats(pool, 0);
-        items.push({ ...env, ...stats, isEnvOa: true, id: 0 });
+        items.push({ ...envPublic, ...stats, isEnvOa: true, id: 0 });
       } catch {
-        items.push({ ...env, isEnvOa: true, id: 0 });
+        items.push({ ...envPublic, isEnvOa: true, id: 0 });
       }
     }
   }
