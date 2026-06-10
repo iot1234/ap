@@ -769,16 +769,16 @@ async function tickBillGen(pool, flags, now, state) {
       return;
     }
 
-    // Single source of truth: config.notify.dueOnDay. The manual-bill flow
-    // in page-billing.jsx reads the same key, so admin sees one value drive
-    // both the "Generate bills" modal default and the scheduler's bill day.
-    const rawDueDay = Number(config?.notify?.dueOnDay || 15);
-    const dueDay = Number.isFinite(rawDueDay) ? Math.max(1, Math.min(28, rawDueDay)) : 15;
-    // Build YYYY-MM-DD from local year/month + dueDay directly — Date()→
+    // Building-wide default: config.notify.dueOnDay. The FINAL per-room due
+    // date is resolved inside the loop via billing.resolveBillDueDay — a
+    // contract-locked due day (terms_template_snapshot.financials.dueDay,
+    // the day printed on the tenant's signed PDF) wins over this config
+    // value, same precedence rule as the rent and the late-fee rate.
+    // formatYMD builds YYYY-MM-DD from local year/month directly — Date()→
     // toISOString() round-trip subtracts the timezone offset and on
     // Asia/Bangkok (UTC+7) returns the previous day, so bills issued on
     // the 1st with dueDay=15 would silently land on the 14th in storage.
-    const dueDate = billing.formatYMD(now.getFullYear(), now.getMonth() + 1, dueDay);
+    const configDueDay = config?.notify?.dueOnDay;
     let made = 0;
     // Track each successfully-inserted bill so we can fan out tenant
     // notifications AFTER the loop completes (one queue enqueue per bill,
@@ -852,7 +852,12 @@ async function tickBillGen(pool, flags, now, state) {
       let expiredContract = null;
       try {
         const cq = await pool.query(
-          `SELECT id, monthly_rent, discount_pct, status, start_date
+          // contract_due_day: the due day the tenant SIGNED. Only locked
+          // contracts carry the snapshot — drafts must not override config.
+          `SELECT id, monthly_rent, discount_pct, status, start_date,
+                  CASE WHEN locked_at IS NOT NULL
+                       THEN (terms_template_snapshot->'financials'->>'dueDay')::numeric
+                  END AS contract_due_day
              FROM contracts
              WHERE room_id=$1 AND status='active' AND deleted_at IS NULL
              ORDER BY start_date DESC LIMIT 1`,
@@ -867,11 +872,15 @@ async function tickBillGen(pool, flags, now, state) {
           // fixed term (no renewal signed) must keep their SIGNED rate, not
           // jump to the current pricing formula. Pull the most-recent expired
           // contract for the resident tenant and let resolveBillingRent honor
-          // its locked rate (tier 1.5). discount_pct continues too. Scoped to
-          // the tenant currently in the room so a previous tenant's old
-          // contract can't leak into a new (un-contracted) occupant's bill.
+          // its locked rate (tier 1.5). discount_pct + the signed due day
+          // continue too. Scoped to the tenant currently in the room so a
+          // previous tenant's old contract can't leak into a new
+          // (un-contracted) occupant's bill.
           const eq = await pool.query(
-            `SELECT id, monthly_rent, discount_pct, status
+            `SELECT id, monthly_rent, discount_pct, status,
+                    CASE WHEN locked_at IS NOT NULL
+                         THEN (terms_template_snapshot->'financials'->>'dueDay')::numeric
+                    END AS contract_due_day
                FROM contracts
                WHERE room_id=$1 AND status='expired' AND deleted_at IS NULL
                  AND ($2::bigint IS NULL OR tenant_id=$2)
@@ -892,6 +901,12 @@ async function tickBillGen(pool, flags, now, state) {
         });
         continue;
       }
+      // Per-room due date — signed day > building config > 15.
+      const due = billing.resolveBillDueDay({
+        contractDueDay: (activeContract || expiredContract)?.contract_due_day,
+        configDueDay,
+      });
+      const dueDate = billing.formatYMD(now.getFullYear(), now.getMonth() + 1, due.day);
       // Transactional bill insert + one_off deactivation. Reading
       // recurring INSIDE the tx with FOR UPDATE means an admin editing
       // /deleting a recurring row in another tab waits for our tx to

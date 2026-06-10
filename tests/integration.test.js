@@ -485,7 +485,7 @@ test('bulk bill generation warns when flat utility mode falls back to metered', 
     'billing-readiness must surface flat-mode misconfiguration before bill generation');
   assert.match(extras, /detail: \{ period, count: flatMisconfigured\.length, rooms: flatMisconfigured\.slice\(0, 20\) \}/,
     'bulk-generate flat fallback warning must include affected rooms');
-  assert.match(extras, /res\.json\(\{ ok: true, period, made, updated, skipped, flatFellBack,[\s\S]{0,160}warnings: issues\.filter/,
+  assert.match(extras, /res\.json\(\{ ok: true, period, made, updated, skipped, flatFellBack,[\s\S]{0,500}warnings: issues\.filter/,
     'bulk-generate response must expose flat fallback details to the UI');
   assert.match(extras, /skipSummary/,
     'bulk-generate response must explain why bills were skipped');
@@ -3065,7 +3065,7 @@ test('bill generation blocks missing period meter readings unless forced', () =>
   const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   const ui = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-billing.jsx'), 'utf8');
   const start = route.indexOf("r.post('/bulk-generate'");
-  const end = route.indexOf('// Build YYYY-MM-DD', start);
+  const end = route.indexOf('// Due dates are built from the operator-supplied PERIOD', start);
   assert.ok(start > -1 && end > start, 'bulk-generate preflight block must be locatable');
   const block = route.slice(start, end);
   assert.match(block, /meter\.buildPeriodSummary\(pool, rooms, period\)/,
@@ -3968,11 +3968,14 @@ test('scheduler + bulk-generate use formatYMD for dueDate', () => {
   // rather than the wallclock month); scheduler still uses now.* because
   // it always runs for the current month. Match either form so a future
   // refactor that switches scheduler to period-derived too still passes.
-  assert.match(sched, /billing\.formatYMD\(now\.getFullYear\(\), now\.getMonth\(\) \+ 1, dueDay\)/,
+  // Per-room due day now flows through billing.resolveBillDueDay (which
+  // owns the 1-28 validation) so a contract-locked day wins; formatYMD is
+  // still the only date constructor (timezone-safe).
+  assert.match(sched, /billing\.formatYMD\(now\.getFullYear\(\), now\.getMonth\(\) \+ 1, due\.day\)/,
     'scheduler must use formatYMD for due date');
-  assert.match(sched, /Math\.max\(1, Math\.min\(28, rawDueDay\)\)/,
-    'scheduler due day must be clamped like manual bulk generation');
-  assert.match(bulk, /billing\.formatYMD\((?:now\.getFullYear\(\), now\.getMonth\(\) \+ 1|periodYear, periodMonth), dueDay\)/,
+  assert.match(sched, /billing\.resolveBillDueDay\(/,
+    'scheduler due day must run through the shared precedence/validation helper');
+  assert.match(bulk, /billing\.formatYMD\(periodYear, periodMonth, due\.day\)/,
     'bulk-generate must use formatYMD for due date');
 });
 
@@ -8187,7 +8190,7 @@ test("monthly billing skips the first contract month instead of overwriting move
     "preview must not show a normal monthly bill for a contract's first period");
   assert.match(extras, /contractStartsInPeriod\(activeContract, period\)[\s\S]{0,800}firstMonthSkipped/,
     "bulk generate must skip before writing monthly bills in the first contract month");
-  assert.match(extras, /firstMonthSkipped[\s\S]{0,220}warnings:/,
+  assert.match(extras, /firstMonthSkipped[\s\S]{0,600}warnings:/,
     "bulk response must tell the admin UI which rooms were intentionally skipped");
   assert.match(sched, /contractStartsInPeriod\(activeContract, period\)[\s\S]{0,800}firstMonthSkipped/,
     "scheduler must also skip first-month contracts before insert");

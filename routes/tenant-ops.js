@@ -2238,6 +2238,10 @@ module.exports = function buildTenantOpsRouter(ctx) {
         // Due day from config.notify.dueOnDay (clamped 1-28, default 15) so the
         // move-in bill agrees with recurring bills + the signed contract PDF —
         // previously hardcoded to 15, contradicting an operator's configured day.
+        // NOTE: a check-in-created contract has no terms snapshot yet (it locks
+        // later, at sign/approve, capturing the SAME config value) — so config
+        // IS the signed day here. The per-contract precedence
+        // (billing.resolveBillDueDay) applies from the first recurring bill on.
         const rawDueDay = Number(cfgVal?.notify?.dueOnDay);
         const dueDay = Number.isFinite(rawDueDay) ? Math.max(1, Math.min(28, rawDueDay)) : 15;
         // Build dueDate from the period (not wallclock) using the same

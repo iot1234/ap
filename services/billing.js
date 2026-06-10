@@ -1131,6 +1131,42 @@ function resolvePrincipalLateFee({ tier, lateFee, action, adminWaive = false, au
 }
 
 /**
+ * Resolve the due DAY (1-28) for a generated bill. Mirrors the rent and
+ * late-fee-rate precedence rule used everywhere else in the system: what
+ * the tenant SIGNED beats the operator's current global setting.
+ *
+ *   1. contractDueDay   — contracts.terms_template_snapshot.financials.dueDay.
+ *                         Stamped when the contract is locked (approve/sign)
+ *                         and printed on the contract PDF ("ชำระภายในวันที่ X").
+ *                         Billing the tenant earlier than the signed day is a
+ *                         contract violation; later silently changes terms.
+ *   2. requestedDueDay  — operator's explicit per-run choice (bulk/preview
+ *                         UI). Applies to rooms WITHOUT a locked contract.
+ *   3. configDueDay     — config.notify.dueOnDay (building-wide default).
+ *   4. fallback         — caller-supplied last resort (default 15).
+ *
+ * Every candidate is validated independently (finite, 1-28, truncated to an
+ * integer) — an invalid value falls through to the NEXT source instead of
+ * clamping, so a corrupted snapshot can't silently move every due date to
+ * the 1st/28th. Returns { day, source } so callers can audit/display where
+ * the date came from.
+ */
+function resolveBillDueDay({ contractDueDay, requestedDueDay, configDueDay, fallback = 15 } = {}) {
+  const valid = (v) => {
+    if (v == null || v === '') return null;
+    const n = Number(v);
+    return Number.isFinite(n) && n >= 1 && n <= 28 ? Math.trunc(n) : null;
+  };
+  const c = valid(contractDueDay);
+  if (c != null) return { day: c, source: 'contract' };
+  const r = valid(requestedDueDay);
+  if (r != null) return { day: r, source: 'request' };
+  const g = valid(configDueDay);
+  if (g != null) return { day: g, source: 'config' };
+  return { day: valid(fallback) ?? 15, source: 'default' };
+}
+
+/**
  * Proration fraction for a mid-month MOVE-IN's first-month rent. Mirrors the
  * move-out (closing bill) proration so the two ends of a tenancy are symmetric.
  * Gated by config.billing.prorateFirstMonth (default off → fraction 1 = full
@@ -1162,6 +1198,7 @@ module.exports = {
   isChargeApplicableForPeriod,
   computeLateFee,
   computeRestoredBillAmounts,
+  resolveBillDueDay,
   validatePaymentAmount,
   validatePaidLedger,
   resolvePrincipalLateFee,

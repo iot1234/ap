@@ -14136,13 +14136,18 @@ app.post('/api/admin/contract-invitations/:id/approve',
           const period = moveInMatch
             ? `${moveInMatch[1]}-${moveInMatch[2]}`
             : billing.formatPeriodNow();
-          // Due day from config.notify.dueOnDay (clamped 1-28, default 15) so the
-          // move-in bill agrees with recurring bills + the signed contract PDF.
+          // Due day for the welcome bill: the snapshot being locked onto THIS
+          // contract right now is the authoritative source — it is literally
+          // the due day printed on the PDF the tenant just signed. Config is
+          // the fallback for templates that don't carry financials.
           const dueCfg = await client.query(
             `SELECT value FROM app_data WHERE key='baankarn_config_v1' LIMIT 1`
           ).then((r) => r.rows[0]?.value || null).catch(() => null);
-          const rawDueDay = Number(dueCfg?.notify?.dueOnDay);
-          const dueDay = Number.isFinite(rawDueDay) ? Math.max(1, Math.min(28, rawDueDay)) : 15;
+          const welcomeDue = billing.resolveBillDueDay({
+            contractDueDay: termsSnapshot?.snapshot?.financials?.dueDay,
+            configDueDay: dueCfg?.notify?.dueOnDay,
+          });
+          const dueDay = welcomeDue.day;
           const dueDate = moveInMatch
             ? billing.formatYMD(Number(moveInMatch[1]), Number(moveInMatch[2]), dueDay)
             : billing.formatDueDate(dueDay);

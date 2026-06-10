@@ -256,13 +256,47 @@ module.exports = function buildBillsExtrasRouter(ctx) {
   async function activeContractForRoom(client, roomId) {
     try {
       const cq = await client.query(
-        `SELECT id, monthly_rent, discount_pct, status, start_date
+        // contract_due_day: the due day the tenant SIGNED (printed on the
+        // contract PDF). Only locked contracts carry the snapshot — an
+        // unsigned draft must not override the operator's setting yet.
+        // resolveBillDueDay validates/clamps; NULL falls through.
+        `SELECT id, monthly_rent, discount_pct, status, start_date,
+                CASE WHEN locked_at IS NOT NULL
+                     THEN (terms_template_snapshot->'financials'->>'dueDay')::numeric
+                END AS contract_due_day
            FROM contracts
           WHERE room_id=$1 AND status='active' AND deleted_at IS NULL
           ORDER BY start_date DESC LIMIT 1`,
         [roomId]
       );
       return cq.rows[0] || null;
+    } catch {
+      return null;
+    }
+  }
+
+  // Expired-contract continuation for the bulk/preview paths — a tenant who
+  // stayed past a fixed term (no renewal yet) keeps their SIGNED rate and
+  // SIGNED due day, exactly like the scheduler + single-bill paths already
+  // do. Without this, bulk-generate silently jumped a stay-on tenant's rent
+  // to the current formula the day their contract expired. Scoped to the
+  // resident tenant so a previous tenant's old contract can't leak into a
+  // new occupant's bill.
+  async function expiredContractForRoom(client, roomId, tenantId) {
+    try {
+      const eq = await client.query(
+        `SELECT id, monthly_rent, discount_pct, status,
+                CASE WHEN locked_at IS NOT NULL
+                     THEN (terms_template_snapshot->'financials'->>'dueDay')::numeric
+                END AS contract_due_day
+           FROM contracts
+          WHERE room_id=$1 AND status='expired' AND deleted_at IS NULL
+            AND ($2::bigint IS NULL OR tenant_id=$2)
+          ORDER BY end_date DESC NULLS LAST, start_date DESC LIMIT 1`,
+        [roomId, tenantId || null]
+      );
+      const row = eq.rows[0];
+      return row && Number(row.monthly_rent) > 0 ? row : null;
     } catch {
       return null;
     }
@@ -583,44 +617,33 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       // length discount) AND monthly_rent (NEW: locked rate from signing —
       // services/pricing.js prefers this over room.rent/formula so admin
       // changing /admin#pricing mid-contract doesn't break existing tenants).
-      let discountPct = 0;
-      let activeContract = null;
-      let expiredContract = null;
-      try {
-        const cq = await pool.query(
-          `SELECT id, monthly_rent, discount_pct, status, start_date
-             FROM contracts
-             WHERE room_id=$1 AND status='active' AND deleted_at IS NULL
-             ORDER BY start_date DESC LIMIT 1`,
-          [b.roomId]
-        );
-        if (cq.rows[0]) {
-          activeContract = cq.rows[0];
-          discountPct = Number(cq.rows[0].discount_pct) || 0;
-        } else {
-          // Mirror the scheduler: a tenant who stayed past a fixed term keeps
-          // their SIGNED rate (month-to-month continuation), not the current
-          // formula. Scoped to the resident tenant so a prior tenant's expired
-          // contract can't leak into a new occupant's preview/bill.
-          const eq = await pool.query(
-            `SELECT id, monthly_rent, discount_pct, status
-               FROM contracts
-               WHERE room_id=$1 AND status='expired' AND deleted_at IS NULL
-                 AND ($2::bigint IS NULL OR tenant_id=$2)
-               ORDER BY end_date DESC NULLS LAST, start_date DESC LIMIT 1`,
-            [b.roomId, tid || null]
-          );
-          if (eq.rows[0] && Number(eq.rows[0].monthly_rent) > 0) {
-            expiredContract = eq.rows[0];
-            discountPct = Number(eq.rows[0].discount_pct) || 0;
-          }
-        }
-      } catch { /* contracts may be empty on legacy deploys */ }
+      // Shared helpers keep this path's SQL identical to preview/bulk —
+      // including the contract_due_day snapshot column.
+      const activeContract = await activeContractForRoom(pool, b.roomId);
+      const expiredContract = activeContract
+        ? null
+        : await expiredContractForRoom(pool, b.roomId, tid || null);
+      const contractForBill = activeContract || expiredContract;
+      const discountPct = Number(contractForBill?.discount_pct) || 0;
+      // Due date: an explicit b.dueDate from the admin form is a deliberate
+      // per-bill decision and wins. When absent, the signed due day governs,
+      // then config.notify.dueOnDay — same precedence as every other path.
+      let dueDateForBill = b.dueDate;
+      if (!dueDateForBill) {
+        const due = billing.resolveBillDueDay({
+          contractDueDay: contractForBill?.contract_due_day,
+          configDueDay: config?.notify?.dueOnDay,
+        });
+        const pm = String(b.period || billing.formatPeriodNow()).match(/^(\d{4})-(\d{2})$/);
+        dueDateForBill = pm
+          ? billing.formatYMD(Number(pm[1]), Number(pm[2]), due.day)
+          : billing.formatDueDate(due.day);
+      }
       const roomForBilling = await meter.attachBillingReadingsForPeriod(pool, room, b.period);
       computed = billing.buildBill({
         room: roomForBilling, contract: activeContract, expiredContract, config, features: flags,
         recurring: recurringList,
-        period: b.period, dueDate: b.dueDate,
+        period: b.period, dueDate: dueDateForBill,
         discountPct,
       });
     } else if (b.roomId && b.period && !b.compute) {
@@ -1093,6 +1116,20 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           }]));
           continue;
         }
+        // Stay-on tenants past a fixed term keep their signed terms — match
+        // the scheduler/single-bill paths so the preview shows the SAME rent
+        // and due date the generate step will produce.
+        const expiredContract = activeContract
+          ? null
+          : await expiredContractForRoom(pool, roomId, tenant.id || null);
+        const contractForBill = activeContract || expiredContract;
+        const due = billing.resolveBillDueDay({
+          contractDueDay: contractForBill?.contract_due_day,
+          requestedDueDay: requestedDue,
+          configDueDay: configuredDue,
+          fallback: 7,   // matches the bulk UI default (page-billing.jsx dueOnDay || 7)
+        });
+        const roomDueDate = billing.formatYMD(parsed.year, parsed.month, due.day);
         const recurringRows = flags.recurringCharges?.enabled
           && flags.recurringCharges?.autoIncludeOnBillGen !== false
           ? await loadRecurringFor(pool, { tenantId: tenant.id || null, roomId })
@@ -1105,12 +1142,13 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         const bill = billing.buildBill({
           room: roomForBilling,
           contract: activeContract,
+          expiredContract,
           config,
           features: flags,
           recurring: recurringList,
           period: parsed.period,
-          dueDate,
-          discountPct: Number(activeContract?.discount_pct) || 0,
+          dueDate: roomDueDate,
+          discountPct: Number(contractForBill?.discount_pct) || 0,
         });
         const missingFields = [];
         if (!billing.isFlatUtilityConfigured(roomForBilling, 'water')
@@ -1118,6 +1156,10 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         if (!billing.isFlatUtilityConfigured(roomForBilling, 'elec')
             && bill.elecCurrentReading == null) missingFields.push('elec');
         const payload = billPreviewPayload(bill, recurringList, room, periodDisplay);
+        // Where this room's due date came from — 'contract' rows are pinned
+        // by the signed snapshot and ignore the per-run dueDay selector, so
+        // the operator can see (not guess) why a row differs from the rest.
+        payload.dueDateSource = due.source;
         if (missingFields.length) {
           payload.issues = [{
             sev: 'high',
@@ -1679,9 +1721,11 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           period,
         });
       }
-      const rawDueDay = Number(req.body?.dueDay);
-      const dueDay = Number.isFinite(rawDueDay) && rawDueDay >= 1 && rawDueDay <= 28
-        ? rawDueDay : 15;
+      // Per-run due-day override. Validation + the full precedence chain
+      // (contract snapshot > this request value > config.notify.dueOnDay >
+      // 7) live in billing.resolveBillDueDay, evaluated PER ROOM inside the
+      // loop so contract-locked rooms keep their signed day.
+      const rawDueDay = req.body?.dueDay;
       const force = req.body?.force === true;
       const forceReason = String(req.body?.forceReason || req.body?.overrideReason || '').trim().slice(0, 500);
       try {
@@ -1826,13 +1870,12 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           });
         }
 
-        // Build YYYY-MM-DD from the operator-supplied PERIOD (not "now") so
-        // back-filled bills (admin generates April from May 5th) carry the
-        // intended month, not the wallclock month. Match scheduler.tickBillGen
-        // by using formatYMD directly so Asia/Bangkok timezone offset can't
-        // shift the day back via toISOString(). periodYear/Month validated
-        // at the top of this handler.
-        const dueDate = billing.formatYMD(periodYear, periodMonth, dueDay);
+        // Due dates are built from the operator-supplied PERIOD (not "now")
+        // so back-filled bills (admin generates April from May 5th) carry
+        // the intended month — computed PER ROOM inside the loop via
+        // resolveBillDueDay so contract-locked due days win. formatYMD keeps
+        // Asia/Bangkok offsets from shifting the day via toISOString().
+        const dueDaySources = {};
         let made = 0, updated = 0, skipped = 0;
         const skipReasons = {
           noTenant: 0,
@@ -1908,21 +1951,16 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           //     prefers this over room.rent/formula so admin changing
           //     /admin#pricing mid-contract doesn't break existing tenants)
           // See services/pricing.js#resolveBillingRent for the priority.
-          let discountPct = 0;
-          let activeContract = null;
-          try {
-            const cq = await pool.query(
-              `SELECT id, monthly_rent, discount_pct, status, start_date
-                 FROM contracts
-                 WHERE room_id=$1 AND status='active' AND deleted_at IS NULL
-                 ORDER BY start_date DESC LIMIT 1`,
-              [room.id]
-            );
-            if (cq.rows[0]) {
-              activeContract = cq.rows[0];
-              discountPct = Number(cq.rows[0].discount_pct) || 0;
-            }
-          } catch { /* legacy deploys */ }
+          const activeContract = await activeContractForRoom(pool, room.id);
+          // Stay-on tenants past a fixed term keep their SIGNED rate + due
+          // day — match the scheduler/single-bill paths (bulk previously
+          // skipped this lookup and jumped a stay-on tenant's rent to the
+          // current formula the day their contract expired).
+          const expiredContract = activeContract
+            ? null
+            : await expiredContractForRoom(pool, room.id, tenantIdForRoom);
+          const contractForBill = activeContract || expiredContract;
+          const discountPct = Number(contractForBill?.discount_pct) || 0;
           if (billing.contractStartsInPeriod(activeContract, period)) {
             firstMonthSkipped.push({
               roomId: String(room.id || ''),
@@ -1932,6 +1970,17 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             bumpSkip('firstMonth');
             continue;
           }
+          // Per-room due date: the day the tenant SIGNED wins over the
+          // operator's per-run selector and the global config. Same
+          // precedence rule as the rent + late-fee rate.
+          const due = billing.resolveBillDueDay({
+            contractDueDay: contractForBill?.contract_due_day,
+            requestedDueDay: rawDueDay,
+            configDueDay: config?.notify?.dueOnDay,
+            fallback: 7,   // matches the bulk UI default (page-billing.jsx dueOnDay || 7)
+          });
+          const roomDueDate = billing.formatYMD(periodYear, periodMonth, due.day);
+          dueDaySources[due.source] = (dueDaySources[due.source] || 0) + 1;
           // Single transaction per room: lock+read recurring_charges,
           // INSERT bill, deactivate one_offs. Reading recurring INSIDE
           // the tx with FOR UPDATE means an admin editing/deleting a
@@ -1974,7 +2023,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
               }
             }
             const roomForBilling = await meter.attachBillingReadingsForPeriod(billClient, room, period);
-            const bill = billing.buildBill({ room: roomForBilling, contract: activeContract, config, features: flags, recurring, period, dueDate, discountPct });
+            const bill = billing.buildBill({ room: roomForBilling, contract: activeContract, expiredContract, config, features: flags, recurring, period, dueDate: roomDueDate, discountPct });
             // Capture which utilities silently fell back from flat → metered
             // for this room. waterFlatFellBack/elecFlatFellBack are set by
             // services/billing.js#resolveFlatMode when mode='flat' but the
@@ -2174,12 +2223,16 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           made, updated, skipped,
           firstMonthSkipped: firstMonthSkipped.length,
           tenantlessSkipped: tenantlessSkipped.length,
+          dueDaySources,
           skipSummary,
         });
         res.json({ ok: true, period, made, updated, skipped, flatFellBack,
           skipSummary,
           firstMonthSkipped,
           tenantlessSkipped,
+          // How many rooms used which due-day source ('contract' = pinned by
+          // the signed snapshot; those ignore the per-run dueDay selector).
+          dueDaySources,
           warnings: issues.filter((i) => i.sev !== 'high') });
       } catch (err) {
         console.error('bulk-generate error:', err);
