@@ -80,6 +80,19 @@ const TRANSIENT_CODES = new Set([
   'SLIP_PENDING',       // provider accepted the image but bank data is not ready yet
   'NOT_CONFIGURED',     // provider key missing (caller already gates, defensive)
   'UNKNOWN_PROVIDER',   // typo in features.slipUpload.providers
+  // strictReceiverTail mode: the receiver DID match, but on fewer than 6
+  // digits — statistically weaker evidence. Transient by design: the next
+  // provider in the chain may return more digits, and if none does the slip
+  // parks in the admin queue (a human confirms) instead of false-rejecting
+  // a tenant who genuinely paid.
+  'RECEIVER_TAIL_WEAK',
+  // The provider confirmed the slip is REAL but the receiver account it
+  // returned is missing / too masked / aligned ambiguously — we can neither
+  // confirm nor confidently deny it's our account. Same reasoning as above:
+  // try the next provider (it may reveal more digits), else park for a
+  // human. A genuine payment must never be auto-rejected because a provider
+  // masked the account too aggressively.
+  'RECEIVER_UNREADABLE',
 ]);
 
 function detectImageMime(buffer) {
@@ -173,6 +186,157 @@ function mapProviderParty(party, matchedAccount) {
     name: pickLocalizedName(account) || pickLocalizedName(party) || pickLocalizedName(matchedAccount),
     bank: pickBankShort(party?.bank) || pickBankShort(matchedAccount?.bank),
     account: pickAccountValue(account) || pickAccountValue(party) || pickAccountValue(matchedAccount),
+  };
+}
+
+// Separator characters banks/providers embed for display — NOT masks.
+// Stripped before any comparison so '123-4-56789-0' and '1234567890' agree.
+const ACCOUNT_SEPARATORS_RE = /[\s\-./]/g;
+
+/**
+ * Normalise a provider receiver-account string into a comparable pattern:
+ * digits survive as-is, separators vanish, and EVERY other character
+ * (x, X, *, •, ●, #, ?, letters from "N/A"-style placeholders…) becomes the
+ * canonical mask '*'. Returns the pattern plus how many real digits it
+ * reveals — the caller's confidence currency.
+ */
+function normalizeMaskedAccount(raw) {
+  const s = String(raw || '').replace(ACCOUNT_SEPARATORS_RE, '');
+  let pattern = '';
+  let revealed = 0;
+  for (const ch of s) {
+    if (ch >= '0' && ch <= '9') { pattern += ch; revealed++; }
+    else pattern += '*';
+  }
+  return { pattern, revealed };
+}
+
+// Compare one normalised pattern against one expected account.
+// Returns { kind: 'match'|'conflict'|'ambiguous', matchedDigits, mode, ... }.
+//
+// Three comparison modes, picked by what the data allows:
+//   'tail'        — pattern is pure digits (provider sent the tail or the
+//                   full number). Longest common tail, capped at 6.
+//   'positional'  — pattern has masks AND the same length as the expected
+//                   account → every revealed digit must equal the expected
+//                   digit at ITS OWN position ('12**5***99' style).
+//   'right-align' — pattern has masks but a different length (separator
+//                   variations, partial captures). Right-align and compare
+//                   the overlap. A conflict here is only 'ambiguous', never
+//                   'conflict': the alignment is a guess, and a guessed
+//                   alignment must not produce a confident rejection.
+function compareAccountPattern(expectedDigits, pattern, revealed) {
+  if (!revealed) return { kind: 'ambiguous', matchedDigits: 0, mode: 'none' };
+  const hasMask = pattern.includes('*');
+  if (!hasMask) {
+    const compareLen = Math.min(6, expectedDigits.length, pattern.length);
+    // Fewer than 4 contiguous digits is too little signal to confirm OR
+    // confidently deny — ambiguous, a human decides.
+    if (compareLen < 4) return { kind: 'ambiguous', matchedDigits: compareLen, mode: 'tail' };
+    const expectedTail = expectedDigits.slice(-compareLen);
+    const actualTail = pattern.slice(-compareLen);
+    return expectedTail === actualTail
+      ? { kind: 'match', matchedDigits: compareLen, mode: 'tail', expectedTail, actualTail }
+      : { kind: 'conflict', matchedDigits: 0, mode: 'tail', expectedTail, actualTail };
+  }
+  const confident = pattern.length === expectedDigits.length;
+  const offset = expectedDigits.length - pattern.length;   // 0 when confident
+  const mode = confident ? 'positional' : 'right-align';
+  let matched = 0;
+  for (let i = 0; i < pattern.length; i++) {
+    const ch = pattern[i];
+    if (ch === '*') continue;
+    const j = i + offset;
+    if (j < 0 || j >= expectedDigits.length) {
+      // Revealed digit lands outside the expected account under this
+      // alignment — the alignment itself is wrong; can't judge.
+      return { kind: 'ambiguous', matchedDigits: 0, mode };
+    }
+    if (expectedDigits[j] !== ch) {
+      // Equal-length positional disagreement is real evidence of a wrong
+      // account; a right-aligned guess disagreeing proves nothing.
+      return { kind: confident ? 'conflict' : 'ambiguous', matchedDigits: 0, mode };
+    }
+    matched++;
+  }
+  // All revealed digits agree. Require ≥4 of them before calling it a
+  // match — '*9********' agreeing on one digit is 1-in-10 luck, not proof.
+  if (matched < 4) return { kind: 'ambiguous', matchedDigits: matched, mode };
+  return { kind: 'match', matchedDigits: matched, mode };
+}
+
+/**
+ * Pure receiver-account matcher — extracted from verifyOne so the comparison
+ * rules are unit-testable without a live provider. Handles every masking
+ * shape providers send back:
+ *   - pure tail / full number:  '345678', '1234567899'
+ *   - leading mask:             'xxx-x-x345678'
+ *   - SCATTERED mask:           '12**5***99', '1*3*5****9'
+ * Decision policy (รัดกุมทั้งสองทาง):
+ *   - confident agreement   → 'match' (or 'weak' under strict with <6 digits)
+ *   - confident disagreement→ 'mismatch'  (hard reject downstream)
+ *   - anything uncertain    → 'unreadable' (parks in the admin queue —
+ *     never auto-verifies, never falsely accuses the tenant)
+ *
+ * @param {Object} opts
+ * @param {Array}  opts.acceptableTargets - [{ digits, method, label }]
+ * @param {string} opts.actualAccount     - receiver account string from provider
+ * @param {boolean} [opts.strict]         - strictReceiverTail mode: a match on
+ *   fewer than 6 revealed digits is downgraded to outcome 'weak' (caller
+ *   parks the slip for admin review instead of auto-verifying)
+ * @returns {{ outcome: 'skip'|'unreadable'|'match'|'weak'|'mismatch',
+ *             detail?: Object, actualTail?: string, expectedTails?: string[],
+ *             reason?: string }}
+ */
+function matchReceiverTail({ acceptableTargets, actualAccount, strict = false }) {
+  const targets = Array.isArray(acceptableTargets) ? acceptableTargets.filter((t) => t && t.digits) : [];
+  if (!targets.length) return { outcome: 'skip' };
+  if (!String(actualAccount || '').trim()) {
+    return { outcome: 'unreadable', reason: 'no_account' };
+  }
+  const { pattern, revealed } = normalizeMaskedAccount(actualAccount);
+  if (!revealed) {
+    return { outcome: 'unreadable', reason: 'no_account' };
+  }
+  let best = null;            // strongest confident match across targets
+  let sawAmbiguous = false;   // at least one target couldn't be judged
+  const expectedTails = [];
+  for (const target of targets) {
+    const expectedDigits = target.digits;
+    expectedTails.push(expectedDigits.slice(-Math.min(6, expectedDigits.length)));
+    const cmp = compareAccountPattern(expectedDigits, pattern, revealed);
+    if (cmp.kind === 'match') {
+      const detail = {
+        method: target.method || null,
+        label: target.label || null,
+        compareLen: cmp.matchedDigits,
+        mode: cmp.mode,
+        ...(cmp.expectedTail ? { expectedTail: cmp.expectedTail, actualTail: cmp.actualTail } : {}),
+      };
+      if (!best || detail.compareLen > best.compareLen) best = detail;
+    } else if (cmp.kind === 'ambiguous') {
+      sawAmbiguous = true;
+    }
+    // 'conflict' carries no state — it only becomes a mismatch when EVERY
+    // target conflicts confidently (checked below).
+  }
+  if (best) {
+    // Strict mode: a 4-5 digit agreement is real evidence but not the
+    // 6-digit confidence the operator asked for — park it for a human.
+    if (strict && best.compareLen < 6) {
+      return { outcome: 'weak', detail: best };
+    }
+    return { outcome: 'match', detail: best };
+  }
+  if (sawAmbiguous) {
+    // No confident match, and at least one comparison couldn't be judged —
+    // too little signal to accuse the tenant of paying the wrong account.
+    return { outcome: 'unreadable', reason: 'insufficient_digits', revealedDigits: revealed };
+  }
+  return {
+    outcome: 'mismatch',
+    actualTail: pattern.replace(/\*/g, '').slice(-6),
+    expectedTails,
   };
 }
 
@@ -410,70 +574,54 @@ async function verifyOne(providerId, buffer, expected) {
     }
   }
 
-  if (acceptableTargets.length && !result.receiver?.account) {
+  const tailCheck = matchReceiverTail({
+    acceptableTargets,
+    actualAccount: result.receiver?.account,
+    strict: expected.strictReceiverTail === true,
+  });
+  if (tailCheck.outcome === 'unreadable') {
     return {
       ok: false,
-      error: 'ไม่สามารถยืนยันบัญชีปลายทางจากสลิปได้',
+      error: tailCheck.reason === 'insufficient_digits'
+        ? `เลขบัญชีบนสลิปถูกปิดบังจนเทียบไม่ได้ (อ่านได้ ${tailCheck.revealedDigits} หลัก) — ส่งเข้าคิวแอดมินตรวจยืนยัน`
+        : 'ไม่สามารถยืนยันบัญชีปลายทางจากสลิปได้ — ส่งเข้าคิวแอดมินตรวจยืนยัน',
       code: 'RECEIVER_UNREADABLE',
+      transRef: result.transRef,
+      amount: result.amount,
+      raw: result.raw,
+      provider: providerId,
+    };
+  }
+  if (tailCheck.outcome === 'mismatch') {
+    return {
+      ok: false,
+      error: `บัญชีปลายทางไม่ใช่ของหอพัก — สลิปจ่ายไปที่บัญชีลงท้าย ${tailCheck.actualTail} ` +
+             `แต่หอพักรับที่บัญชีลงท้าย ${tailCheck.expectedTails.join(' หรือ ')}`,
+      code: 'RECEIVER_MISMATCH',
       transRef: result.transRef,
       raw: result.raw,
       provider: providerId,
     };
   }
-  if (acceptableTargets.length && result.receiver?.account) {
-    const actualDigits = String(result.receiver.account).replace(/[^0-9]/g, '');
-    // Provider returned account with fewer than 4 digits → suspicious.
-    // Reject rather than letting an empty/garbage value match.
-    if (actualDigits.length < 4) {
-      return {
-        ok: false,
-        error: `ไม่สามารถยืนยันบัญชีปลายทางจากสลิป — provider ส่งเลขบัญชีสั้นเกินไป (${actualDigits.length} หลัก)`,
-        code: 'RECEIVER_UNREADABLE',
-        transRef: result.transRef,
-        raw: result.raw,
-        provider: providerId,
-      };
-    }
-    // Compare the longest tail both sides can provide, capped at 6 digits.
-    // Bumping from 4 → 6 drops collision odds from 1e-4 to 1e-6.
-    // We try every acceptable target; PASS if ANY matches.
-    let matched = false;
-    let matchDetail = null;
-    const expectedTails = [];
-    for (const target of acceptableTargets) {
-      const expectedDigits = target.digits;
-      if (!expectedDigits) continue;
-      const compareLen = Math.min(6, expectedDigits.length, actualDigits.length);
-      const expectedTail = expectedDigits.slice(-compareLen);
-      const actualTail = actualDigits.slice(-compareLen);
-      expectedTails.push(expectedTail);
-      if (expectedTail && actualTail && expectedTail === actualTail) {
-        matched = true;
-        matchDetail = {
-          method: target.method || null,
-          label: target.label || null,
-          compareLen,
-          expectedTail,
-          actualTail,
-        };
-        break;
-      }
-    }
-    if (!matched) {
-      const actualTail = actualDigits.slice(-6);
-      return {
-        ok: false,
-        error: `บัญชีปลายทางไม่ใช่ของหอพัก — สลิปจ่ายไปที่บัญชีลงท้าย ${actualTail} ` +
-               `แต่หอพักรับที่บัญชีลงท้าย ${expectedTails.join(' หรือ ')}`,
-        code: 'RECEIVER_MISMATCH',
-        transRef: result.transRef,
-        raw: result.raw,
-        provider: providerId,
-      };
-    }
-    if (matchDetail) {
-      result.receiverMatch = matchDetail;
-    }
+  if (tailCheck.outcome === 'weak') {
+    // Receiver matched, but on fewer digits than strict mode demands. The
+    // slip is PROBABLY fine — park for a human instead of auto-verifying
+    // (TRANSIENT code: the fallback chain may try a provider that returns
+    // more digits, and the upload endpoint maps it to 'pending', never to
+    // a tenant-facing rejection).
+    return {
+      ok: false,
+      error: `บัญชีปลายทางตรงเพียง ${tailCheck.detail.compareLen} หลักที่อ่านได้ (โหมดเข้มงวดต้องการ 6) — ส่งเข้าคิวแอดมินตรวจยืนยัน`,
+      code: 'RECEIVER_TAIL_WEAK',
+      transRef: result.transRef,
+      amount: result.amount,
+      receiverMatch: tailCheck.detail,
+      raw: result.raw,
+      provider: providerId,
+    };
+  }
+  if (tailCheck.outcome === 'match') {
+    result.receiverMatch = tailCheck.detail;
   }
   return result;
 }
@@ -898,6 +1046,10 @@ module.exports = {
   getConfiguredProviders,
   auditProviders,
   probeAll,
+  // Pure tail matcher — exported for unit tests so the comparison rules
+  // (mask handling, 6-digit cap, strict weak-match downgrade) are pinned
+  // without a live provider call.
+  matchReceiverTail,
   // Exported so server.js (and any future caller) can reuse the same set
   // without re-declaring it. A drift between server.js's local copy and the
   // verifier's would silently mis-classify rejections — a 'UNKNOWN_PROVIDER'

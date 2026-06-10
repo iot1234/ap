@@ -1005,6 +1005,13 @@ async function checkDataIntegrity(pool) {
         (SELECT COUNT(*)::int FROM payments
           WHERE status NOT IN ('pending','verified','rejected')
              OR amount <= 0) AS invalid_payment_rows,
+        -- Slips waiting in the admin queue past 12h. The scheduler's
+        -- pending-slip alert escalates per slip; this count puts the same
+        -- signal on /admin#health so an operator landing there sees the
+        -- backlog without waiting for the next LINE message.
+        (SELECT COUNT(*)::int FROM payments
+          WHERE status='pending'
+            AND created_at <= NOW() - INTERVAL '12 hours') AS aged_pending_slips,
         (SELECT COUNT(*)::int FROM tenants t
            JOIN rooms_v2 rv
              ON rv.room_code = t.current_room_id
@@ -1330,6 +1337,7 @@ async function checkDataIntegrity(pool) {
         // R2-followup — invariant total = subtotal + vat + late_fee.
         bills_with_total_breakdown_mismatch: Number(counts.bills_with_total_breakdown_mismatch) || 0,
         invalid_payment_rows: Number(counts.invalid_payment_rows) || 0,
+        aged_pending_slips: Number(counts.aged_pending_slips) || 0,
         active_tenant_room_status_mismatch: Number(counts.active_tenant_room_status_mismatch) || 0,
         active_tenants_without_room: Number(counts.active_tenants_without_room) || 0,
         busy_rooms_without_active_tenant: Number(counts.busy_rooms_without_active_tenant) || 0,
@@ -1433,6 +1441,14 @@ async function checkDataIntegrity(pool) {
     }
     if (detail.counts.invalid_payment_rows > 0) {
       errors.push('payment rows contain invalid statuses or non-positive amounts');
+    }
+    if (detail.counts.aged_pending_slips > 0) {
+      // Warning, not error: the data is consistent — a human just hasn't
+      // clicked verify yet. Tenants who already paid are waiting on it.
+      warnings.push(
+        `${detail.counts.aged_pending_slips} slip(s) waiting in the verify queue for over 12h - ` +
+        `review at /admin#payments (tenants who paid are waiting for confirmation)`
+      );
     }
     if (detail.counts.active_tenant_room_status_mismatch > 0) {
       errors.push('active tenants are assigned to rooms not marked occupied/overdue');

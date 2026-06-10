@@ -399,6 +399,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
     }
 
     await notifier.notifyOwner({ pool, features: flags }, {
+      category: 'billing',
       subject: 'Bill voided',
       text: lines.join('\n'),
     });
@@ -2406,6 +2407,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
     const canEmailTenant = !!b.email && emailReady;
     if (!hasLine && !canEmailTenant) {
       const owner = await notifier.notifyOwner({ pool, features: flags }, {
+        category: 'billing',
         subject: b.email
           ? 'Bill send skipped: email not configured'
           : 'Bill send skipped: no tenant channel',
@@ -3387,6 +3389,10 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             .catch((err) => console.warn(`[bills.pay] room sync failed:`, err.message));
         }
         restoreAccessCardsAfterPayment(pool, row.tenant_id, null, 'pay').catch(() => {});
+        billPayments.notifyOwnerPaymentReceived(pool, {
+          billId: id, amount: payment.rows[0].amount,
+          method, source: 'manual-pay', actor: verifier,
+        }).catch(() => {});
         res.json({ ok: true, bill: paid.rows[0], payment: payment.rows[0] });
       } catch (err) {
         await client.query('ROLLBACK').catch(() => {});
@@ -3647,6 +3653,10 @@ module.exports = function buildBillsExtrasRouter(ctx) {
               .catch((err) => console.warn(`[bills.verify-slip] room sync failed:`, err.message));
           }
           restoreAccessCardsAfterPayment(pool, paidTenantId, null, 'verify-slip').catch(() => {});
+          billPayments.notifyOwnerPaymentReceived(pool, {
+            billId: id, amount: pres.rows[0].amount,
+            method: 'slip', source: 'verify-slip', actor: verifier,
+          }).catch(() => {});
         }
         // Fire-and-forget tenant notification with the verdict
         try {

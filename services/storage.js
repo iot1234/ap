@@ -213,6 +213,7 @@ async function saveBase64({
         const features = require('./features');
         const flags = await features.load(pool).catch(() => ({}));
         notifier.notifyOwner({ pool, features: flags }, {
+          category: 'system',
           subject: 'อัปโหลดไฟล์ขึ้น R2/S3 ไม่สำเร็จ — ระบบบันทึกไว้ในเครื่องชั่วคราว',
           text: `ไฟล์ ${safeCategory}/${filename} ยังส่งขึ้นพื้นที่เก็บไฟล์ถาวรไม่ได้\n\n`
             + `สาเหตุจากระบบ: ${s3FailureMsg}\n\n`

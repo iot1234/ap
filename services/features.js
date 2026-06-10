@@ -43,6 +43,25 @@ const DEFAULTS = Object.freeze({
     // Emergency/legacy escape hatch only. When false, uploaded slips stay in
     // the admin queue unless a configured provider actually verifies them.
     allowUnverifiedAutoApprove: false,
+    // Ask the provider to ALSO check the receiver on their side (EasySlip
+    // matchAccount against accounts registered in their dashboard, Slip2Go
+    // checkReceiver against our PromptPay target). Our local tail-match
+    // stays canonical either way — this adds a second, full-number check
+    // for operators who registered their accounts with the provider.
+    providerReceiverCheck: false,
+    // Strict receiver tail: banks mask leading digits, so the local match
+    // compares up to the last 6. When a provider returns fewer than 6
+    // usable digits the match is statistically weaker (4 digits ≈ 1 in
+    // 10,000 collision). With strict mode ON such weak matches never
+    // auto-verify — the slip parks in the admin queue with the comparison
+    // detail attached. OFF keeps the long-standing behaviour (any ≥4-digit
+    // tail match auto-verifies).
+    strictReceiverTail: false,
+    // Alert the owner when an uploaded slip sits in the 'pending' admin
+    // queue longer than this many hours (1-168; 0 disables). The daily
+    // overdue digest already lists queue size — this is the faster,
+    // per-slip escalation so a tenant who paid isn't left hanging.
+    pendingSlipAlertHours: 12,
   },
   photoUpload: {
     enabled: true,

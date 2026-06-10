@@ -591,6 +591,59 @@ async function migrate(pool, opts = {}) {
     -- issuing a new one. Reduces phishing window (only one valid code live).
     CREATE UNIQUE INDEX IF NOT EXISTS uq_owner_claim_pending_per_oa
       ON owner_claim_tokens(COALESCE(oa_id, 0)) WHERE status = 'pending';
+
+    -- === Multi-admin notification recipients ==============================
+    -- Unlimited admin/staff LINE accounts that receive system alerts
+    -- (bookings, payments, move-in/out, maintenance, scheduler events) IN
+    -- ADDITION to the single legacy owner contact. Lifecycle: admin issues
+    -- an ADMIN-XXXXXXXX code → staff sends it to the OA from their own
+    -- LINE → webhook claims it → row created here. Each row can be
+    -- disabled (mute without losing the binding) or revoked (terminal —
+    -- re-bind requires a fresh code). History is preserved: revocation
+    -- stamps revoked_at instead of deleting.
+    CREATE TABLE IF NOT EXISTS admin_line_recipients (
+      id              BIGSERIAL PRIMARY KEY,
+      line_user_id    TEXT NOT NULL,
+      line_oa_id      BIGINT,            -- OA to push through; NULL = default/env OA
+      label           TEXT,              -- operator-facing name ("ผู้จัดการ เอ")
+      enabled         BOOLEAN NOT NULL DEFAULT TRUE,
+      created_by      TEXT,
+      created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      revoked_at      TIMESTAMPTZ,
+      revoked_by      TEXT
+    );
+    -- One ACTIVE row per (OA, LINE account). Revoked rows stay as history
+    -- and don't block a later re-bind.
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_admin_line_recipients_active
+      ON admin_line_recipients(COALESCE(line_oa_id, 0), line_user_id)
+      WHERE revoked_at IS NULL;
+    -- Per-recipient category mutes. Stored as an array of MUTED category
+    -- keys (services/adminRecipients.js#CATEGORIES) so categories added in
+    -- the future default to ON for everyone — for alerts, over-notifying a
+    -- new event type beats silently dropping it. '[]' = receives everything.
+    ALTER TABLE admin_line_recipients
+      ADD COLUMN IF NOT EXISTS muted_categories JSONB NOT NULL DEFAULT '[]'::jsonb;
+
+    -- Bind tokens for the flow above. Unlike owner_claim_tokens there is NO
+    -- one-pending-per-OA limit: the operator may hand codes to several
+    -- staff in the same sitting. Each token stays single-use + short-TTL.
+    CREATE TABLE IF NOT EXISTS admin_recipient_tokens (
+      id              BIGSERIAL PRIMARY KEY,
+      code            TEXT NOT NULL,
+      oa_id           BIGINT,            -- NULL = claimable on any OA
+      label           TEXT,              -- pre-assigned recipient label
+      status          TEXT NOT NULL DEFAULT 'pending',   -- pending | claimed | expired | revoked
+      claimed_user_id TEXT,
+      claimed_at      TIMESTAMPTZ,
+      recipient_id    BIGINT,            -- admin_line_recipients row created on claim
+      expires_at      TIMESTAMPTZ NOT NULL,
+      created_by      TEXT,
+      created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_admin_recipient_tokens_code
+      ON admin_recipient_tokens(code);
   `);
 
   // === FK cascade hardening (idempotent) ===================================

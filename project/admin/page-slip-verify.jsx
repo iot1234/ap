@@ -41,6 +41,9 @@ function PageSlipVerify({ setToast }) {
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState(null);
   const [err, setErr] = useState('');
+  // Draft for the pending-slip escalation threshold (hours). '' = follow the
+  // saved value; only diverges while the operator is typing.
+  const [alertHoursDraft, setAlertHoursDraft] = useState('');
   // providerStatus carries per-provider readiness from secrets.testGroup.
   // Refreshed whenever the underlying keys change so the "ตอนนี้พร้อมไหม?"
   // panel auto-updates as admin saves a new key without forcing them to
@@ -736,6 +739,88 @@ function PageSlipVerify({ setToast }) {
         ),
         React.createElement('div', { style: { color: C.muted, fontSize: 12.5, marginTop: 8 } },
           '💡 เคล็ดลับ: หลังตั้งค่าครบ ทดลองให้ผู้เช่าคนหนึ่งส่งสลิปเล็ก ๆ (เช่นบิล ฿1) ก่อน เพื่อยืนยันว่า e2e ทำงาน ก่อนรอบบิลใหญ่จริง',
+        ),
+      ),
+    ),
+
+    // Hardening — optional strictness knobs. All default OFF so the
+    // long-standing behaviour is unchanged until the operator opts in.
+    React.createElement(Card, null,
+      React.createElement(SectionHeading, null, 'ความเข้มงวดการตรวจ (ตัวเลือกเสริม)'),
+      React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 14, fontSize: 13 } },
+        // strictReceiverTail
+        React.createElement('div', null,
+          React.createElement('label', { style: { display: 'flex', alignItems: 'flex-start', gap: 10, cursor: 'pointer' } },
+            React.createElement('input', {
+              type: 'checkbox',
+              checked: features?.slipUpload?.strictReceiverTail === true,
+              disabled: busy,
+              onChange: (e) => saveFeature({ slipUpload: { strictReceiverTail: e.target.checked } }),
+              style: { marginTop: 3 },
+            }),
+            React.createElement('div', null,
+              React.createElement('div', { style: { fontWeight: 600 } }, 'โหมดเข้มงวดเลขท้ายบัญชี (strictReceiverTail)'),
+              React.createElement('div', { style: { color: C.muted, fontSize: 12.5, lineHeight: 1.55 } },
+                'ธนาคารปิดบังเลขบัญชีได้หลายรูปแบบ (xxx-x-x1234, 12**5***99, 1*3*5****9) — '
+                + 'ระบบเทียบทุกหลักที่อ่านได้ตามตำแหน่งจริง เปิดโหมดนี้แล้ว '
+                + 'สลิปที่อ่านเลขตรงกันได้น้อยกว่า 6 หลักจะไม่ auto-ผ่าน '
+                + 'แต่เข้าคิวให้แอดมินยืนยันแทน (ไม่มีทาง reject ผู้เช่าผิด ๆ)'),
+            ),
+          ),
+        ),
+        // providerReceiverCheck
+        React.createElement('div', null,
+          React.createElement('label', { style: { display: 'flex', alignItems: 'flex-start', gap: 10, cursor: 'pointer' } },
+            React.createElement('input', {
+              type: 'checkbox',
+              checked: features?.slipUpload?.providerReceiverCheck === true,
+              disabled: busy,
+              onChange: (e) => saveFeature({ slipUpload: { providerReceiverCheck: e.target.checked } }),
+              style: { marginTop: 3 },
+            }),
+            React.createElement('div', null,
+              React.createElement('div', { style: { fontWeight: 600 } }, 'ให้ provider ตรวจบัญชีผู้รับซ้ำอีกชั้น (providerReceiverCheck)'),
+              React.createElement('div', { style: { color: C.muted, fontSize: 12.5, lineHeight: 1.55 } },
+                'ส่งคำสั่งให้ EasySlip (matchAccount — ต้องลงทะเบียนบัญชีในแดชบอร์ดของเขาก่อน) '
+                + 'และ Slip2Go (checkReceiver เทียบกับ PromptPay ของหอ) ตรวจ "เลขบัญชีเต็ม" ฝั่ง provider '
+                + 'เพิ่มจากการเทียบเลขท้ายฝั่งเรา — เปิดได้เมื่อตั้งค่าฝั่ง provider แล้วเท่านั้น'),
+            ),
+          ),
+        ),
+        // pendingSlipAlertHours
+        React.createElement('div', null,
+          React.createElement('div', { style: { fontWeight: 600, marginBottom: 4 } },
+            'แจ้งเตือนสลิปค้างคิวตรวจ (pendingSlipAlertHours)'),
+          React.createElement('div', { style: { color: C.muted, fontSize: 12.5, lineHeight: 1.55, marginBottom: 8 } },
+            'แจ้ง owner ทาง LINE/อีเมลเมื่อสลิปนั่งรอในคิวนานเกินชั่วโมงที่ตั้ง (แจ้งครั้งเดียวต่อสลิป) — '
+            + 'เร็วกว่ารอสรุปรายวัน · 0 = ปิดการแจ้งเตือนนี้'),
+          React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+            React.createElement('input', {
+              type: 'number', min: 0, max: 168, step: 1,
+              value: alertHoursDraft === ''
+                ? String(features?.slipUpload?.pendingSlipAlertHours ?? 12)
+                : alertHoursDraft,
+              disabled: busy,
+              onChange: (e) => setAlertHoursDraft(e.target.value),
+              style: {
+                width: 90, padding: '6px 8px', fontSize: 13,
+                border: `1px solid ${C.border}`, borderRadius: 6,
+              },
+            }),
+            React.createElement('span', { style: { color: C.muted, fontSize: 12.5 } }, 'ชั่วโมง'),
+            React.createElement(Btn, {
+              disabled: busy || alertHoursDraft === '',
+              onClick: () => {
+                const n = Number(alertHoursDraft);
+                if (!Number.isInteger(n) || n < 0 || n > 168) {
+                  setToast && setToast({ kind: 'warning', message: 'ต้องเป็นจำนวนเต็ม 0-168 ชั่วโมง (0 = ปิด)' });
+                  return;
+                }
+                saveFeature({ slipUpload: { pendingSlipAlertHours: n } });
+                setAlertHoursDraft('');
+              },
+            }, 'บันทึก'),
+          ),
         ),
       ),
     ),

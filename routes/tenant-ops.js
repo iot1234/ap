@@ -1624,6 +1624,7 @@ module.exports = function buildTenantOpsRouter(ctx) {
           backFile ? 'หลัง' : null,
         ].filter(Boolean).join('+');
         notifier.notifyOwner({ pool, features: flags }, {
+          category: 'security',
           subject: `📇 บันทึกบัตรประชาชน — tenant id=${id}`,
           text: `admin ${req.session.user.username} บันทึกภาพบัตร${sides ? ' (' + sides + ')' : ''}`
             + (citizenTail ? `\nหมายเลข: ***-${citizenTail}` : '')
@@ -2392,12 +2393,28 @@ module.exports = function buildTenantOpsRouter(ctx) {
           // Surface forced bypasses to admin via owner notify so the
           // operator who clicked "force anyway" can be reviewed later.
           notifier.notifyOwner({ pool, features: flags }, {
+            category: 'security',
             subject: '⚠️ checkin ใช้ force=true bypass safety guards',
             text: `tenantId=${id} room=${roomId} by=${req.session.user.username}\n`
               + `missing=${missing.join(',') || 'none'}\n`
               + `monthlyRent=${effectiveMonthlyRent} deposit=${effectiveDepositAmount}`,
           }).catch(() => {});
         }
+        // Move-in event for the whole admin team (owner + every bound admin
+        // recipient): which room, who, on what terms. Fires for EVERY
+        // check-in — the force alert above stays a separate security signal.
+        notifier.notifyOwner({ pool, features: flags }, {
+          category: 'tenancy',
+          subject: `🏠 ย้ายเข้า — ห้อง ${roomId}`,
+          text: [
+            `ผู้เช่า: ${existing.full_name || `#${id}`}${existing.phone ? ` (${existing.phone})` : ''}`,
+            `ห้อง: ${roomId} · เข้าพัก: ${moveInDate}`,
+            `ค่าเช่า: ฿${Number(effectiveMonthlyRent).toLocaleString('th-TH')}/เดือน · มัดจำ: ฿${Number(effectiveDepositAmount).toLocaleString('th-TH')}`,
+            `สัญญา: ${contractNo}${endDate ? ` (ถึง ${endDate})` : ' (ไม่กำหนดวันสิ้นสุด)'}`,
+            `บิลแรก: ${billNo} รอบ ${period} ครบกำหนด ${dueDate}`,
+            `ดำเนินการโดย: ${req.session.user.username}`,
+          ].join('\n'),
+        }).catch(() => {});
 
         // Notify the new tenant about their welcome bill so they don't have
         // to log in to discover they owe money. Without this, tenants miss
@@ -2820,6 +2837,33 @@ module.exports = function buildTenantOpsRouter(ctx) {
             closingBill: closingBill ? closingBill.bill_no : null,
             outstandingTotal,
             outstandingBillCount: outstandingBills.length });
+
+        // Move-out event for the whole admin team (owner + every bound admin
+        // recipient): which room freed up, deposit settlement, and whether
+        // debt is still outstanding (the number that decides if anyone needs
+        // to chase the ex-tenant).
+        try {
+          const flags = await features.load(pool);
+          notifier.notifyOwner({ pool, features: flags }, {
+            category: 'tenancy',
+            subject: `🚪 ย้ายออก — ห้อง ${releaseRoomIds.join(', ') || oldRoom || '-'}`,
+            text: [
+              `ผู้เช่า: ${tenant.full_name || `#${id}`}${tenant.phone ? ` (${tenant.phone})` : ''}`,
+              `ห้องที่ปล่อยว่าง: ${releaseRoomIds.join(', ') || oldRoom || '-'}`,
+              `เหตุผล: ${reason}`,
+              effectiveRefund != null && Number.isFinite(effectiveRefund)
+                ? `คืนเงินมัดจำ: ฿${Number(effectiveRefund).toLocaleString('th-TH', { minimumFractionDigits: 2 })}${depositHeld != null ? ` (จากมัดจำ ฿${depositHeld.toLocaleString('th-TH')})` : ''}`
+                : 'ไม่ได้บันทึกการคืนมัดจำในระบบ',
+              closingBill
+                ? `บิลปิดบัญชี: ${closingBill.bill_no} ฿${Number(closingBill.total).toLocaleString('th-TH', { minimumFractionDigits: 2 })}`
+                : null,
+              outstandingBills.length > 0
+                ? `⚠️ ค้างชำระรวม: ฿${outstandingTotal.toLocaleString('th-TH', { minimumFractionDigits: 2 })} (${outstandingBills.length} บิล) — ติดตามเก็บก่อนคืนส่วนต่าง`
+                : 'ไม่มีบิลค้างชำระ ✓',
+              `ดำเนินการโดย: ${req.session.user.username}`,
+            ].filter(Boolean).join('\n'),
+          }).catch(() => {});
+        } catch { /* team alert must not break checkout */ }
 
         // Fire-and-forget notify so the tenant knows their access has been
         // revoked + the closing bill (if any) is waiting.

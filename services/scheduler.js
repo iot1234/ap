@@ -58,6 +58,7 @@ const SCHEDULER_JOB_IMPACT = Object.freeze({
   'notif-prune': 'คิวแจ้งเตือนเก่าที่ failed อาจยังไม่ถูกล้าง',
   'orphan-slip-prune': 'ไฟล์สลิปกำพร้าอาจยังไม่ถูกลบออกจาก storage',
   'payment-reminder': 'ผู้เช่าอาจไม่ได้รับ reminder ก่อนวันครบกำหนดชำระ',
+  'pending-slip-alert': 'สลิปที่ค้างคิวตรวจนานอาจไม่ถูกแจ้งเตือนถึงเจ้าของ',
   'anomaly': 'health/anomaly alert รอบนี้อาจไม่ทำงาน',
 });
 
@@ -90,6 +91,7 @@ async function notifySchedulerFailure(pool, flags, state, job, err) {
   const impact = SCHEDULER_JOB_IMPACT[job] || 'งานเบื้องหลังบางส่วนอาจไม่ทำงานครบถ้วน';
   try {
     await notifier.notifyOwner({ pool, features: flags || {} }, {
+      category: 'system',
       subject: `งานอัตโนมัติทำงานไม่สำเร็จ: ${job}`,
       text: [
         'ระบบงานอัตโนมัติทำงานไม่สำเร็จ',
@@ -627,6 +629,7 @@ async function tickRoomStatusSync(pool, _flags, now, state) {
       if (summary.changed >= 3) {
         try {
           await notifier.notifyOwner({ pool, features: _flags || {} }, {
+            category: 'system',
             subject: `🔄 ปรับสถานะห้องอัตโนมัติ ${summary.changed} ห้อง`,
             text: `Daily roomStatus sync ปรับ ${summary.changed} ห้อง (จาก ${summary.scanned}):\n\n`
               + summary.changes.slice(0, 20).map((c) =>
@@ -748,6 +751,7 @@ async function tickBillGen(pool, flags, now, state) {
         for (const i of issues) console.warn('  • ' + i);
         try {
           await notifier.notifyOwner({ pool, features: flags }, {
+            category: 'billing',
             subject: `⚠️ ออกบิลอัตโนมัติรอบ ${period} ถูกข้าม`,
             text: `ระบบไม่สามารถออกบิลอัตโนมัติเพราะตั้งค่ายังไม่ครบ:\n\n` +
                   issues.map((i, n) => `${n + 1}. ${i}`).join('\n') +
@@ -1035,6 +1039,7 @@ async function tickBillGen(pool, flags, now, state) {
           return `  • ห้อง ${r.roomId}: ${parts.join(' + ')} — กลับไปคิดตามมิเตอร์`;
         });
         notifier.notifyOwner({ pool, features: flags }, {
+          category: 'billing',
           subject: `⚠️ ${flatFellBack.length} ห้อง: โหมดเหมา (flat) ตั้งไม่ครบ`,
           text: [
             `รอบบิล ${period} — ${flatFellBack.length} ห้องเปิดโหมดเหมาไว้ แต่ไม่ได้ใส่จำนวนเหมา ระบบจึงคิดเงินตามมิเตอร์แทน`,
@@ -1056,6 +1061,7 @@ async function tickBillGen(pool, flags, now, state) {
         const lines = firstMonthSkipped.slice(0, 20).map((r) =>
           `  • ห้อง ${r.roomId}${r.contractId ? ` (สัญญา #${r.contractId})` : ''}`);
         notifier.notifyOwner({ pool, features: flags }, {
+          category: 'billing',
           subject: `ข้ามบิลรายเดือนเดือนแรก ${firstMonthSkipped.length} ห้อง`,
           text: [
             `รอบบิล ${period} มี ${firstMonthSkipped.length} ห้องที่สัญญาเริ่มในเดือนนี้`,
@@ -1078,6 +1084,7 @@ async function tickBillGen(pool, flags, now, state) {
         const lines = tenantlessSkipped.slice(0, 20).map((r) =>
           `  • ห้อง ${r.roomId}${r.blobTenantName ? ` (ผังห้องระบุ: ${r.blobTenantName})` : ''}`);
         notifier.notifyOwner({ pool, features: flags }, {
+          category: 'billing',
           subject: `⚠️ ข้ามออกบิล ${tenantlessSkipped.length} ห้อง — ไม่พบผู้เช่า active ในระบบ`,
           text: [
             `รอบบิล ${period} — ${tenantlessSkipped.length} ห้องมีผู้เช่าในผังห้อง แต่ไม่พบผู้เช่าสถานะ active ในตารางผู้เช่า`,
@@ -1098,7 +1105,7 @@ async function tickBillGen(pool, flags, now, state) {
 
     if (made > 0) {
       notifier.notifyOwner({ pool, features: flags },
-        { subject: 'ออกบิลอัตโนมัติ', text: `ออกบิลรอบ ${period} จำนวน ${made} ใบ` }
+        { category: 'billing', subject: 'ออกบิลอัตโนมัติ', text: `ออกบิลรอบ ${period} จำนวน ${made} ใบ` }
       ).catch(() => {});
       // Notify each tenant about their newly-generated bill so they don't
       // miss the due date. Without this, scheduler bills sit silently in
@@ -1605,6 +1612,7 @@ async function tickContractExpiry(pool, _flags, now, state) {
       }
       try {
         await notifier.notifyOwner({ pool, features: _flags || {} }, {
+          category: 'tenancy',
           subject: '📋 รายงานสัญญา (รายวัน)',
           text: lines.join('\n'),
         });
@@ -1805,6 +1813,7 @@ async function tickOverdueDigest(pool, flags, now, state) {
 
     try {
       await notifier.notifyOwner({ pool, features: flags || {} }, {
+        category: 'billing',
         subject: rows.length === 0
           ? '✅ รายงานบิลค้างชำระ — ไม่มี'
           : `🔴 บิลค้างชำระ ${rows.length} ใบ — ฿${totalOverdue.toLocaleString('th-TH', { minimumFractionDigits: 2 })}`,
@@ -1948,6 +1957,7 @@ async function tickAutoReconcileRooms(pool, flags, now, state) {
     if (lines.length > 0) {
       try {
         await notifier.notifyOwner({ pool, features: flags || {} }, {
+          category: 'system',
           subject: reconciled.length > 0 && remaining.length === 0
             ? `✅ Reconciled ${reconciled.length} stranded room(s)`
             : `⚠️ ห้องสถานะไม่สอดคล้อง ${stranded.length} ห้อง`,
@@ -2344,6 +2354,84 @@ async function tickPruneOrphanSlips(pool, _flags, now, state) {
 }
 
 let _ticking = false;
+// Escalate slips stuck in the 'pending' admin queue beyond the operator's
+// threshold (features.slipUpload.pendingSlipAlertHours, default 12; 0 = off).
+// The daily overdue digest already prints the queue SIZE — this is the
+// faster per-slip escalation so a tenant who already paid isn't left
+// waiting days for a verify click. Runs hourly; each payment alerts ONCE
+// (state.alertedPendingSlips latch, pruned when the payment leaves the
+// pending state so a re-upload after rejection can alert again).
+async function tickPendingSlipAlert(pool, flags, now, state) {
+  if (!flags?.slipUpload?.enabled) return;
+  const rawHours = Number(flags.slipUpload.pendingSlipAlertHours);
+  if (!Number.isFinite(rawHours) || rawHours <= 0) return;   // 0/absent = off
+  const hours = Math.max(1, Math.min(168, Math.trunc(rawHours)));
+  try {
+    if (!state.alertedPendingSlips || typeof state.alertedPendingSlips !== 'object') {
+      state.alertedPendingSlips = {};
+    }
+    // Prune the latch against the FULL pending set (not just the aged ones)
+    // so entries for verified/rejected payments drop out and the state file
+    // stays bounded by the live queue size.
+    const allPending = await pool.query(
+      `SELECT id FROM payments WHERE status='pending'`
+    );
+    const livePendingIds = new Set(allPending.rows.map((r) => String(r.id)));
+    let pruned = false;
+    for (const key of Object.keys(state.alertedPendingSlips)) {
+      if (!livePendingIds.has(key)) {
+        delete state.alertedPendingSlips[key];
+        pruned = true;
+      }
+    }
+    const { rows } = await pool.query(
+      `SELECT p.id, p.amount, p.created_at, p.bill_id,
+              b.bill_no, b.room_id, b.period,
+              t.full_name
+         FROM payments p
+         LEFT JOIN bills b ON b.id = p.bill_id
+         LEFT JOIN tenants t ON t.id = p.tenant_id
+        WHERE p.status='pending'
+          AND p.created_at <= NOW() - make_interval(hours => $1)
+        ORDER BY p.created_at ASC
+        LIMIT 50`,
+      [hours]
+    );
+    const fresh = rows.filter((r) => !state.alertedPendingSlips[String(r.id)]);
+    if (!fresh.length) {
+      if (pruned) writeState(state);
+      return;
+    }
+    const lines = fresh.slice(0, 10).map((r) => {
+      const waitedH = Math.max(1, Math.floor((now.getTime() - new Date(r.created_at).getTime()) / 3_600_000));
+      const amt = Number(r.amount).toLocaleString('th-TH', { minimumFractionDigits: 2 });
+      const who = r.full_name || '(ไม่มีผู้เช่าผูก)';
+      const bill = r.bill_no || (r.bill_id ? `#${r.bill_id}` : '-');
+      return `  • ห้อง ${r.room_id || '-'} · ${who} — ฿${amt} (บิล ${bill}${r.period ? ` รอบ ${r.period}` : ''}) · รอมา ${waitedH} ชม.`;
+    });
+    await notifier.notifyOwner({ pool, features: flags }, {
+      category: 'payment',
+      subject: `⏳ สลิปรอตรวจค้างเกิน ${hours} ชม. — ${fresh.length} รายการ`,
+      text: [
+        `มีสลิปที่ผู้เช่าส่งแล้วแต่ยังไม่ได้ตรวจ ค้างคิวเกิน ${hours} ชั่วโมง:`,
+        ``,
+        ...lines,
+        fresh.length > 10 ? `  …และอีก ${fresh.length - 10} รายการ` : null,
+        ``,
+        `ผู้เช่าที่โอนแล้วกำลังรอผล — ตรวจที่ /admin#payments`,
+        `(ปรับเกณฑ์ได้ที่ features → slipUpload.pendingSlipAlertHours, 0 = ปิด)`,
+      ].filter(Boolean).join('\n'),
+    });
+    for (const r of fresh) {
+      state.alertedPendingSlips[String(r.id)] = new Date().toISOString();
+    }
+    writeState(state);
+  } catch (err) {
+    console.error('[scheduler] pending-slip alert failed:', err.message);
+    return { error: err.message };
+  }
+}
+
 async function tick(pool) {
   // Re-entrancy guard. setInterval fires hourly, but a heavy cycle (large
   // bill-gen + slow LINE/SMTP fan-out) could exceed TICK_MS. Overlapping ticks
@@ -2439,6 +2527,11 @@ async function _runTick(pool) {
     // dueOnDay = bill-gen day) get the "ครบกำหนดวันนี้" alert immediately.
     // Daily idempotent via state.lastPaymentReminderAt + bills.last_reminded_at.
     { job: 'payment-reminder', promise: _withAdvisoryLock(pool, `paymentReminder-${todayKey}`, () => tickPaymentReminder(pool, flags, now, state)) },
+    // Hourly (not daily-latched): a slip crossing the aging threshold at
+    // 14:00 shouldn't wait for tomorrow's tick. Per-payment latch inside
+    // makes repeat fires no-ops; the hour-scoped advisory lock stops
+    // multi-replica double-sends within the same hour.
+    { job: 'pending-slip-alert', promise: _withAdvisoryLock(pool, `pendingSlipAlert-${localHourKey(now)}`, () => tickPendingSlipAlert(pool, flags, now, state)) },
   ];
   const results = await Promise.allSettled(jobs.map((j) => j.promise));
   for (const [i, r] of results.entries()) {

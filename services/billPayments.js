@@ -229,9 +229,62 @@ async function deactivateCarriedLateFees(client, billId) {
   return upd.rows.map((r) => Number(r.id));
 }
 
+// Owner/admin-side "เงินเข้า" alert — fired post-commit from EVERY path that
+// lands a verified payment (tenant slip auto-verify, admin verify-slip,
+// admin payment-queue verify, counter /pay). With multi-admin recipients
+// wired into notifier.notifyOwner, this is what keeps the whole team aware
+// of money coming in without opening /admin#payments. Fire-and-forget.
+async function notifyOwnerPaymentReceived(pool, { billId, amount, method, source, actor } = {}) {
+  try {
+    const flags = await features.load(pool).catch(() => ({}));
+    let bill = null;
+    if (billId) {
+      const { rows } = await pool.query(
+        `SELECT b.bill_no, b.room_id, b.period, b.total, b.status,
+                t.full_name AS tenant_name
+           FROM bills b
+           LEFT JOIN tenants t ON t.id = b.tenant_id
+          WHERE b.id=$1 LIMIT 1`,
+        [billId]
+      );
+      bill = rows[0] || null;
+    }
+    const amt = Number(amount);
+    const amtText = Number.isFinite(amt)
+      ? amt.toLocaleString('th-TH', { minimumFractionDigits: 2 }) : '-';
+    const methodTh = ({
+      cash: 'เงินสด',
+      transfer: 'โอนธนาคาร',
+      promptpay: 'PromptPay',
+      slip: 'สลิปโอน',
+      manual: 'บันทึกโดยเจ้าหน้าที่',
+    })[String(method || '').toLowerCase()] || (method || '-');
+    const sourceTh = ({
+      'auto-verify': 'ตรวจสลิปอัตโนมัติ',
+      'verify-slip': 'แอดมินยืนยันสลิป',
+      'payment-verify': 'แอดมินยืนยันสลิป (คิวชำระเงิน)',
+      'manual-pay': 'บันทึกรับเงินที่เคาน์เตอร์',
+    })[source] || source || '-';
+    await notifier.notifyOwner({ pool, features: flags }, {
+      category: 'payment',
+      subject: `💰 รับเงินแล้ว — ห้อง ${bill?.room_id || '-'} ฿${amtText}`,
+      text: [
+        `ห้อง: ${bill?.room_id || '-'}${bill?.tenant_name ? ` · ${bill.tenant_name}` : ''}`,
+        `บิล: ${bill?.bill_no || (billId ? `#${billId}` : '-')}${bill?.period ? ` (รอบ ${bill.period})` : ''}`,
+        `จำนวน: ฿${amtText} · ช่องทาง: ${methodTh}`,
+        `ยืนยันโดย: ${sourceTh}${actor ? ` (${actor})` : ''}`,
+        bill?.status === 'paid' ? 'สถานะบิล: ชำระแล้ว ✓' : null,
+      ].filter(Boolean).join('\n'),
+    });
+  } catch (err) {
+    console.warn('[notifyOwnerPaymentReceived]', err.message);
+  }
+}
+
 module.exports = {
   loadBuildingName,
   notifyTenantOnPayment,
+  notifyOwnerPaymentReceived,
   carryLateFeeToNextBill,
   deactivateCarriedLateFees,
   _carriedLateFeeLabelPrefix: CARRIED_LATE_FEE_LABEL_PREFIX,

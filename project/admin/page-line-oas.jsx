@@ -4,7 +4,7 @@
 // Tenants bind through any OA → notifications go back through THE SAME OA.
 // ===========================================================================
 
-const { useState, useEffect } = React;
+const { useState, useEffect, useRef } = React;
 
 function PageLineOas({ setToast }) {
   const C = window.ADMIN_C;
@@ -472,6 +472,8 @@ function PageLineOas({ setToast }) {
         </div>
       </Card>
 
+      <AdminRecipientsCard oas={items} setToast={setToast} />
+
       {/* Edit / Add modal */}
       <Modal
         open={!!editing}
@@ -841,6 +843,265 @@ function DiagMetric({ C, label, value, hint, color }) {
       </div>
       <div style={{ fontSize: 10.5, color: C.muted, marginTop: 2 }}>{hint}</div>
     </div>
+  );
+}
+
+// === Multi-admin notification recipients =================================
+// Unlimited staff LINE accounts receiving every system alert (booking /
+// payment / move-in / move-out / maintenance / scheduler) alongside the
+// single legacy owner contact. Bind flow: issue ADMIN-XXXXXXXX → staff
+// sends it to the OA from their own LINE → row appears here. Owner can
+// mute (ปิดชั่วคราว), relabel, or revoke (ยกเลิกถาวร — ต้องออกรหัสใหม่).
+function AdminRecipientsCard({ oas, setToast }) {
+  const C = window.ADMIN_C;
+  const { Card, Btn, Pill, SectionHeading, Toggle } = window;
+  const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
+  const [list, setList] = useState(null);          // null = loading
+  const [categories, setCategories] = useState([]); // catalog from the server (single whitelist)
+  const [busy, setBusy] = useState(false);
+  const [label, setLabel] = useState('');
+  const [oaId, setOaId] = useState('');
+  const [token, setToken] = useState(null);        // { id, code, expiresAt, status }
+  const pollRef = useRef(null);
+
+  const reload = async () => {
+    try {
+      const r = await fetch('/api/admin/line/admin-recipients', { credentials: 'same-origin' });
+      const d = await r.json().catch(() => ({}));
+      setList(r.ok && Array.isArray(d.items) ? d.items : []);
+      if (r.ok && Array.isArray(d.categories)) setCategories(d.categories);
+    } catch { setList([]); }
+  };
+  useEffect(() => { reload(); return () => { if (pollRef.current) clearInterval(pollRef.current); }; }, []);
+
+  const stopPoll = () => { if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; } };
+
+  const issueCode = async () => {
+    setBusy(true);
+    try {
+      const body = {};
+      if (label.trim()) body.label = label.trim();
+      if (oaId) body.oaId = Number(oaId);
+      const out = await apiCall('/api/admin/line/admin-recipients/tokens', {
+        method: 'POST', body: JSON.stringify(body),
+      });
+      setToken({ id: out.id, code: out.code, expiresAt: out.expiresAt, status: 'pending' });
+      stopPoll();
+      // Poll until claimed/expired so the operator sees the ✓ without refreshing.
+      pollRef.current = setInterval(async () => {
+        try {
+          const r = await fetch(`/api/admin/line/admin-recipients/tokens/${out.id}`, { credentials: 'same-origin' });
+          const d = await r.json().catch(() => ({}));
+          if (!r.ok) return;
+          if (d.status && d.status !== 'pending') {
+            setToken((t) => (t && t.id === out.id ? { ...t, status: d.status, claimedTail: d.claimedTail } : t));
+            stopPoll();
+            if (d.status === 'claimed') {
+              setToast && setToast({ kind: 'success', message: `ผูกผู้รับแจ้งเตือนแอดมินสำเร็จ${d.claimedTail ? ` (${d.claimedTail})` : ''}` });
+              reload();
+            }
+          }
+        } catch { /* keep polling */ }
+      }, 2500);
+    } catch (err) {
+      window.toastError ? window.toastError(setToast, err, { action: 'ออกรหัสผูกแอดมิน' })
+        : setToast && setToast({ kind: 'danger', message: (err && err.message) || 'ออกรหัสไม่สำเร็จ' });
+    } finally { setBusy(false); }
+  };
+
+  const toggleEnabled = async (row) => {
+    setBusy(true);
+    try {
+      await apiCall(`/api/admin/line/admin-recipients/${row.id}`, {
+        method: 'PUT', body: JSON.stringify({ enabled: !row.enabled }),
+      });
+      setToast && setToast({ kind: 'success', message: !row.enabled
+        ? `เปิดรับแจ้งเตือน: ${row.label || row.lineUserIdMasked}`
+        : `ปิดรับแจ้งเตือนชั่วคราว: ${row.label || row.lineUserIdMasked}` });
+      reload();
+    } catch (err) {
+      window.toastError && window.toastError(setToast, err, { action: 'สลับการรับแจ้งเตือน' });
+    } finally { setBusy(false); }
+  };
+
+  const relabel = async (row) => {
+    const next = window.prompt('ตั้งชื่อผู้รับแจ้งเตือนนี้ (เว้นว่าง = ไม่มีชื่อ)', row.label || '');
+    if (next === null) return;
+    setBusy(true);
+    try {
+      await apiCall(`/api/admin/line/admin-recipients/${row.id}`, {
+        method: 'PUT', body: JSON.stringify({ label: next.trim() }),
+      });
+      reload();
+    } catch (err) {
+      window.toastError && window.toastError(setToast, err, { action: 'แก้ชื่อผู้รับแจ้งเตือน' });
+    } finally { setBusy(false); }
+  };
+
+  // Toggle one notification category for one recipient. Sends the FULL
+  // muted list (replace semantics) so the server's whitelist validation
+  // sees exactly what will be stored — no read-modify-write race on the
+  // server side, and a stale UI gets a clean 400 naming the bad key.
+  const toggleCategory = async (row, catKey) => {
+    const muted = Array.isArray(row.mutedCategories) ? row.mutedCategories : [];
+    const next = muted.includes(catKey)
+      ? muted.filter((k) => k !== catKey)
+      : [...muted, catKey];
+    setBusy(true);
+    try {
+      await apiCall(`/api/admin/line/admin-recipients/${row.id}`, {
+        method: 'PUT', body: JSON.stringify({ mutedCategories: next }),
+      });
+      reload();
+    } catch (err) {
+      window.toastError && window.toastError(setToast, err, { action: 'ตั้งค่าหมวดแจ้งเตือน' });
+    } finally { setBusy(false); }
+  };
+
+  const revoke = async (row) => {
+    const ok = window.confirm(
+      `ยกเลิกผู้รับแจ้งเตือน "${row.label || row.lineUserIdMasked}" ถาวร?\n\n` +
+      'บัญชีนี้จะไม่ได้รับแจ้งเตือนอีก — ถ้าต้องการกลับมารับ ต้องออกรหัส ADMIN ใหม่ให้ผูกอีกครั้ง'
+    );
+    if (!ok) return;
+    setBusy(true);
+    try {
+      await apiCall(`/api/admin/line/admin-recipients/${row.id}`, { method: 'DELETE' });
+      setToast && setToast({ kind: 'success', message: `ยกเลิกผู้รับแจ้งเตือนแล้ว` });
+      reload();
+    } catch (err) {
+      window.toastError && window.toastError(setToast, err, { action: 'ยกเลิกผู้รับแจ้งเตือน' });
+    } finally { setBusy(false); }
+  };
+
+  const realOas = (oas || []).filter((o) => o && o.id);
+  return (
+    <Card style={{ marginTop: 16 }}>
+      <SectionHeading
+        title="ผู้รับแจ้งเตือนแอดมิน (ผูกได้ไม่จำกัด)"
+        subtitle="ทุกบัญชีที่เปิดรับจะได้รับแจ้งเตือนระบบทั้งหมด — การจอง · ชำระเงิน/รับเงิน · ย้ายเข้า-ย้ายออก · แจ้งซ่อม · ออกบิล · งานอัตโนมัติ — เพิ่มจากผู้ติดต่อ Owner หลักเดิม"
+        level={3}
+      />
+      <div style={{
+        display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'flex-end', marginBottom: 12,
+        padding: 12, background: C.surfaceAlt, borderRadius: 8, border: `1px solid ${C.border}`,
+      }}>
+        <div>
+          <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: C.ink2, marginBottom: 4 }}>
+            ชื่อเรียก (ไม่บังคับ)
+          </label>
+          <input value={label} onChange={(e) => setLabel(e.target.value)}
+            placeholder="เช่น ผู้จัดการ เอ" maxLength={120}
+            style={{ padding: '7px 10px', fontSize: 13, border: `1px solid ${C.border}`, borderRadius: 6, width: 170 }} />
+        </div>
+        {realOas.length > 0 ? (
+          <div>
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: C.ink2, marginBottom: 4 }}>
+              ผูกผ่าน OA
+            </label>
+            <select value={oaId} onChange={(e) => setOaId(e.target.value)}
+              style={{ padding: '7px 10px', fontSize: 13, border: `1px solid ${C.border}`, borderRadius: 6 }}>
+              <option value="">OA หลัก (default)</option>
+              {realOas.map((o) => <option key={o.id} value={o.id}>{o.name || o.slug}</option>)}
+            </select>
+          </div>
+        ) : null}
+        <Btn variant="primary" onClick={issueCode} disabled={busy}>➕ ออกรหัสผูกแอดมิน</Btn>
+      </div>
+      {token ? (
+        <div style={{
+          padding: 12, marginBottom: 12, borderRadius: 8,
+          background: token.status === 'claimed' ? '#f0f9f0' : (token.status === 'pending' ? '#fffaf0' : '#fff5f4'),
+          border: `1px solid ${token.status === 'claimed' ? '#bce0bc' : (token.status === 'pending' ? '#f0dcb4' : '#f0c5c0')}`,
+          fontSize: 13, lineHeight: 1.6,
+        }}>
+          {token.status === 'pending' ? (
+            <>
+              <div>ให้แอดมินคนใหม่เพิ่ม OA เป็นเพื่อน แล้วพิมพ์รหัสนี้ส่งในแชท (หมดอายุใน 10 นาที · ใช้ได้ครั้งเดียว):</div>
+              <div style={{
+                fontFamily: 'JetBrains Mono, monospace', fontSize: 22, fontWeight: 700,
+                letterSpacing: 1, margin: '6px 0', userSelect: 'all',
+              }}>{token.code}</div>
+              <div style={{ color: C.muted, fontSize: 12 }}>หน้านี้จะขึ้น ✓ อัตโนมัติเมื่อผูกสำเร็จ</div>
+            </>
+          ) : token.status === 'claimed' ? (
+            <div>✅ ผูกสำเร็จ{token.claimedTail ? ` — LINE ${token.claimedTail}` : ''} (รายชื่ออัปเดตด้านล่าง)</div>
+          ) : (
+            <div>❌ รหัส {token.code} {token.status === 'expired' ? 'หมดอายุแล้ว' : 'ถูกยกเลิก/ใช้ไปแล้ว'} — กด "ออกรหัสผูกแอดมิน" เพื่อออกใหม่</div>
+          )}
+        </div>
+      ) : null}
+      {list === null ? (
+        <div style={{ padding: 16, color: C.muted, fontSize: 13 }}>กำลังโหลด…</div>
+      ) : list.length === 0 ? (
+        <div style={{ padding: 14, fontSize: 13, color: C.muted, lineHeight: 1.6 }}>
+          ยังไม่มีผู้รับแจ้งเตือนเพิ่มเติม — ตอนนี้แจ้งเตือนเข้าเฉพาะผู้ติดต่อ Owner หลัก
+          (ตั้งที่การ์ด OA ด้านบน) · กด "ออกรหัสผูกแอดมิน" เพื่อเพิ่มทีมงานกี่คนก็ได้
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {list.map((row) => {
+            const muted = Array.isArray(row.mutedCategories) ? row.mutedCategories : [];
+            return (
+            <div key={row.id} style={{
+              padding: '10px 12px', border: `1px solid ${C.border}`, borderRadius: 8,
+              background: row.enabled ? '#fff' : (C.surfaceAlt || '#f7f7f4'),
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div style={{ fontSize: 13.5, fontWeight: 600, color: C.ink }}>
+                    {row.label || '(ไม่มีชื่อ)'}{' '}
+                    <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 11.5, color: C.muted, fontWeight: 400 }}>
+                      {row.lineUserIdMasked}
+                    </span>
+                  </div>
+                  <div style={{ fontSize: 11.5, color: C.muted }}>
+                    ผ่าน {row.oaName || 'OA หลัก'} · ผูกเมื่อ {row.createdAt ? new Date(row.createdAt).toLocaleDateString('th-TH') : '-'}
+                  </div>
+                </div>
+                <Pill color={row.enabled ? 'success' : 'neutral'} size="sm">
+                  {row.enabled
+                    ? (muted.length ? `รับ ${Math.max(0, categories.length - muted.length)}/${categories.length} หมวด` : 'รับทุกหมวด')
+                    : 'ปิดชั่วคราว'}
+                </Pill>
+                {Toggle ? (
+                  <Toggle checked={row.enabled} onChange={() => toggleEnabled(row)} disabled={busy} />
+                ) : (
+                  <Btn variant="ghost" onClick={() => toggleEnabled(row)} disabled={busy}>
+                    {row.enabled ? 'ปิด' : 'เปิด'}
+                  </Btn>
+                )}
+                <Btn variant="ghost" onClick={() => relabel(row)} disabled={busy}>✏️</Btn>
+                <Btn variant="danger" onClick={() => revoke(row)} disabled={busy}>ยกเลิก</Btn>
+              </div>
+              {row.enabled && categories.length ? (
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 8 }}>
+                  {categories.map((cat) => {
+                    const receiving = !muted.includes(cat.key);
+                    return (
+                      <button key={cat.key}
+                        onClick={() => toggleCategory(row, cat.key)}
+                        disabled={busy}
+                        title={`${cat.desc || ''}${receiving ? ' · กดเพื่อปิดหมวดนี้' : ' · กดเพื่อเปิดหมวดนี้'}`}
+                        style={{
+                          padding: '3px 10px', borderRadius: 999, fontSize: 11.5,
+                          fontFamily: 'inherit', cursor: busy ? 'not-allowed' : 'pointer',
+                          border: `1px solid ${receiving ? (C.success || '#2e9b6a') : C.border}`,
+                          background: receiving ? (C.successSoft || '#eef9f0') : 'transparent',
+                          color: receiving ? (C.success || '#1f5f3a') : C.muted,
+                          textDecoration: receiving ? 'none' : 'line-through',
+                        }}>
+                        {receiving ? '🔔' : '🔕'} {cat.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : null}
+            </div>
+          ); })}
+        </div>
+      )}
+    </Card>
   );
 }
 

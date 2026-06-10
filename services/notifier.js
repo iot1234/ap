@@ -12,6 +12,7 @@ const email = require('./email');
 const sms = require('./sms');
 const secrets = require('./secrets');
 const lineBinding = require('./lineBinding');
+const adminRecipients = require('./adminRecipients');
 // Lazy-required to avoid a circular module-load cycle (notificationQueue
 // dispatches via line/email/sms — which never reach back into notifier,
 // but Node still evaluates the require eagerly at top-of-file).
@@ -145,6 +146,12 @@ async function notifyOwner(ctx, msg) {
   const chGate = await loadNotifyChannelGate(ctx);
   const text = msg.text || msg.subject || '';
   const subject = msg.subject || 'แจ้งเตือนระบบ';
+  // Per-recipient category filtering. Call sites tag msg.category with one
+  // of adminRecipients.CATEGORIES; unknown/missing normalises to 'system'
+  // inside wantsCategory so a typo can never silently drop an alert class.
+  // Filtering applies to the multi-admin recipients ONLY — the legacy owner
+  // contact stays the unfiltered safety net.
+  const category = msg.category || 'system';
   // Owner email recipient: prefer an explicit OWNER_EMAIL secret, then the
   // configured From address, then the SMTP_FROM secret. We must NOT gate the
   // attempt on features.email.from — email.send() resolves its own From
@@ -173,49 +180,130 @@ async function notifyOwner(ctx, msg) {
       error: 'invalid owner LINE userId shape',
     });
   }
-  // Track which channels we've already attempted inline so the queue
-  // fallback below doesn't re-fire the same broken channel. Previously
-  // a failed LINE push got logged as 'failed' AND re-enqueued through
-  // the SAME OA — the worker retried 3× through the same channel access
-  // token, generating 4 failure log rows for one alert.
-  let lineInlineTried = false;
-  // Transient = network / timeout / 429 / 5xx — the alert can still be
-  // delivered later, so we re-queue it. Structural = bad token / OA disabled /
-  // invalid userId / 4xx — won't fix itself, so re-queuing would only burn
-  // retries on a broken channel. We branch the queue fallback on this.
-  let lineTransientFail = false;
-  let emailInlineTried = false;
-  if (chGate.line && oaForOwner && oaForOwner.channelAccessToken && lineOwner) {
-    lineInlineTried = true;
-    try {
-      // pushTextStrict THROWS on failure with .status / .fatal attached, so we
-      // can classify the failure. (The boolean pushText collapsed every cause
-      // to false, which is why transient LINE blips used to be dropped here.)
-      await lineNotify.pushTextStrict(oaForOwner, lineOwner, text);
-      await logResult(pool, {
-        channel: 'line',
-        recipient: lineOwner,
-        subject, body: `[oa:${oaForOwner.slug}] ${text}`,
-        status: 'sent',
-      });
-      return { channel: 'line', ok: true, oa: oaForOwner.slug };
-    } catch (err) {
-      const status = Number(err && err.status);
-      const structural = (err && err.fatal === true)
-        || (Number.isFinite(status) && status >= 400 && status < 500 && status !== 429);
-      lineTransientFail = !structural;
-      await logResult(pool, {
-        channel: 'line',
-        recipient: lineOwner,
-        subject, body: `[oa:${oaForOwner.slug}] ${text}`,
-        status: 'failed',
-        error: `${structural ? 'structural' : 'transient'}: ${(err && err.message) || 'push failed'}`
-          + (Number.isFinite(status) ? ` (HTTP ${status})` : ''),
-      });
+  // Build the full LINE recipient set: the legacy single owner contact PLUS
+  // every enabled multi-admin recipient (admin_line_recipients). Each entry
+  // carries the OA it should push through; rows with line_oa_id NULL ride
+  // the default OA. De-dup by (effective OA, userId) so an owner who ALSO
+  // bound themselves as an admin recipient gets ONE message, not two.
+  const lineTargets = [];
+  {
+    const seen = new Set();
+    const defaultOaKey = oaForOwner && oaForOwner.id != null ? String(oaForOwner.id) : 'env';
+    const addTarget = (userId, oaId, kind) => {
+      const clean = lineNotify.isLikelyUserId(userId) ? String(userId).trim() : null;
+      if (!clean) return;
+      const key = `${oaId != null ? String(oaId) : defaultOaKey}:${clean}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      lineTargets.push({ userId: clean, oaId: oaId != null ? oaId : null, kind });
+    };
+    addTarget(lineOwner, null, 'owner');
+    if (chGate.line) {
+      try {
+        const extra = await adminRecipients.listActiveRecipients(pool);
+        for (const r of extra) {
+          if (!adminRecipients.wantsCategory(r.muted_categories, category)) continue;
+          addTarget(r.line_user_id, r.line_oa_id, 'admin');
+        }
+      } catch (err) {
+        console.warn('[notifier] admin recipients load failed:', err.message);
+      }
     }
   }
 
-  // 2. Email (fallback)
+  // Resolve OA credentials once per distinct OA (most deployments have one).
+  const oaCache = new Map();
+  if (oaForOwner) oaCache.set('default', oaForOwner);
+  async function resolveOaFor(target) {
+    const key = target.oaId != null ? String(target.oaId) : 'default';
+    if (oaCache.has(key)) return oaCache.get(key);
+    let oa = null;
+    try {
+      oa = await lineOa.resolveForTenant(pool, target.oaId, { withSecrets: true });
+    } catch { oa = null; }
+    oaCache.set(key, oa);
+    return oa;
+  }
+
+  // 1. LINE — push to EVERY target. Success = at least one delivery; email
+  // only fires as a fallback when LINE reached nobody (same semantics the
+  // single-owner version had, extended across the recipient set).
+  // Transient = network / timeout / 429 / 5xx — the queue's retry/backoff
+  // exists exactly for those, so transient-failed targets get re-queued.
+  // Structural = bad token / OA disabled / invalid userId / other 4xx — it
+  // won't fix itself; re-queuing would only burn retries and spam the log.
+  let lineSent = 0;
+  let lineFailed = 0;
+  let firstSentOaSlug = null;
+  const queueCandidates = [];   // [{ target, oa }] — transient failures to re-queue
+  if (chGate.line && lineTargets.length) {
+    for (const target of lineTargets) {
+      const oa = await resolveOaFor(target);
+      if (!oa || !oa.channelAccessToken || oa.enabled === false) {
+        lineFailed++;
+        await logResult(pool, {
+          channel: 'line', recipient: target.userId, subject, body: text,
+          status: 'skipped',
+          error: `[${target.kind}] OA not configured/disabled for this recipient`,
+        });
+        continue;
+      }
+      try {
+        // pushTextStrict THROWS on failure with .status / .fatal attached, so
+        // we can classify the failure. (The boolean pushText collapsed every
+        // cause to false, which is why transient LINE blips used to be dropped.)
+        await lineNotify.pushTextStrict(oa, target.userId, text);
+        lineSent++;
+        if (!firstSentOaSlug) firstSentOaSlug = oa.slug;
+        await logResult(pool, {
+          channel: 'line', recipient: target.userId,
+          subject, body: `[oa:${oa.slug}][${target.kind}] ${text}`,
+          status: 'sent',
+        });
+      } catch (err) {
+        lineFailed++;
+        const status = Number(err && err.status);
+        const structural = (err && err.fatal === true)
+          || (Number.isFinite(status) && status >= 400 && status < 500 && status !== 429);
+        if (!structural) queueCandidates.push({ target, oa });
+        await logResult(pool, {
+          channel: 'line', recipient: target.userId,
+          subject, body: `[oa:${oa.slug}][${target.kind}] ${text}`,
+          status: 'failed',
+          error: `${structural ? 'structural' : 'transient'}: ${(err && err.message) || 'push failed'}`
+            + (Number.isFinite(status) ? ` (HTTP ${status})` : ''),
+        });
+      }
+    }
+  }
+  // Re-queue the transient-failed targets BEFORE returning success — a
+  // 5-recipient alert where 4 delivered and 1 timed out should still retry
+  // that one, otherwise multi-recipient fan-out silently drops stragglers.
+  const queue = getQueue();
+  if (queue && queueCandidates.length) {
+    for (const { target, oa } of queueCandidates) {
+      try {
+        await queue.enqueue(pool, {
+          channel: 'line', recipient: target.userId, subject, body: text,
+          payload: { oaId: oa.id, source: 'notifier-owner-fallback' },
+        });
+        await logResult(pool, {
+          channel: 'queue', recipient: target.userId, subject, body: text,
+          status: 'queued',
+          error: `[${target.kind}] LINE failed transiently — re-queued for retry`,
+        });
+      } catch { /* best-effort */ }
+    }
+  }
+  if (lineSent > 0) {
+    return {
+      channel: 'line', ok: true, oa: firstSentOaSlug,
+      recipients: lineSent, failedRecipients: lineFailed,
+    };
+  }
+
+  // 2. Email (fallback — nobody reachable over LINE)
+  let emailInlineTried = false;
   if (chGate.email && email.isConfigured(features) && ownerEmailTo) {
     emailInlineTried = true;
     const to = ownerEmailTo;
@@ -231,33 +319,13 @@ async function notifyOwner(ctx, msg) {
     if (ok) return { channel: 'email', ok: true };
   }
 
-  // 3. Queue fallback. We re-queue LINE when it was either NOT attempted
-  // inline, OR attempted and failed *transiently* (network/timeout/429/5xx) —
-  // those are exactly what the queue's retry/backoff exists to ride out, so a
-  // brief LINE outage never silently drops a high-priority owner alert. We do
-  // NOT re-queue a *structural* failure (bad token, OA disabled, 4xx): it
-  // won't fix itself and re-queuing would just burn retries and spam the log.
-  //
-  // Owner alerts are the highest-priority class (anomaly detector, contract
-  // expiry, slip queue summary), so silent loss on a transient blip is bad —
-  // but duplicate-spam through a broken channel is worse for signal/noise.
-  const queue = getQueue();
+  // 3. Queue fallback for targets that were never attempted inline (e.g. the
+  // whole LINE gate was on but every push failed transiently → already queued
+  // above; here we cover "queued nothing yet" paths) + the email channel.
   if (queue) {
-    if (chGate.line && oaForOwner && oaForOwner.channelAccessToken && lineOwner && (!lineInlineTried || lineTransientFail)) {
-      try {
-        await queue.enqueue(pool, {
-          channel: 'line', recipient: lineOwner, subject, body: text,
-          payload: { oaId: oaForOwner.id, source: 'notifier-owner-fallback' },
-        });
-        await logResult(pool, {
-          channel: 'queue', recipient: lineOwner, subject, body: text,
-          status: 'queued',
-          error: lineTransientFail
-            ? 'owner LINE failed transiently — re-queued for retry'
-            : 'owner LINE not attempted inline — enqueued',
-        });
-        return { channel: 'queue', ok: false, queued: true };
-      } catch { /* fall through */ }
+    if (queueCandidates.length) {
+      // Transient LINE failures were already enqueued above — report queued.
+      return { channel: 'queue', ok: false, queued: true };
     }
     if (chGate.email && email.isConfigured(features) && ownerEmailTo && !emailInlineTried) {
       const to = ownerEmailTo;

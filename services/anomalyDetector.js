@@ -149,6 +149,7 @@ async function tick(pool, state) {
   try {
     const flags = await features.load(pool);
     await notifier.notifyOwner({ pool, features: flags }, {
+      category: 'system',
       subject,
       text: `${subject}\n\n${lines.join('\n')}\n\nดูรายละเอียดเต็ม: /admin#health`,
     });

@@ -576,6 +576,7 @@ async function maybeNotifySecurityEvent(req, action, detail = {}) {
   const ua = bucket.lastUa ? `\nUser-Agent: ${bucket.lastUa}` : '';
   const flags = await features.load(pool).catch(() => ({}));
   await notifier.notifyOwner({ pool, features: flags }, {
+    category: 'security',
     subject: `แจ้งเตือนความปลอดภัย: ${rule.title}`,
     text: [
       rule.title,
@@ -1318,6 +1319,43 @@ app.put('/api/data/:key', sameOrigin, csrfGuard, requireAuth, requireRole('owner
       }
     }
     const payment = value.payment && typeof value.payment === 'object' ? value.payment : null;
+    // Cross-feature safeguard: changing the RECEIVING account while unpaid
+    // bills are in flight strands every QR / bank-info message already sent
+    // — tenants who pay the OLD account will fail the slip receiver check
+    // and pile up in the admin queue. Legitimate (changing banks happens),
+    // so warn — never block — and tell the operator what to expect.
+    if (payment) {
+      try {
+        const digitsOf = (v) => String(v || '').replace(/[^0-9]/g, '');
+        const receiverKeys = ['promptpay', 'bankAcc', 'truemoneyPhone'];
+        const cur = await pool.query(
+          `SELECT value->'payment' AS payment FROM app_data WHERE key=$1`, [key]
+        );
+        const stored = cur.rows.length && cur.rows[0].payment && typeof cur.rows[0].payment === 'object'
+          ? cur.rows[0].payment : null;
+        if (stored) {
+          const changed = receiverKeys.filter((k) => {
+            const before = digitsOf(stored[k]);
+            const after = digitsOf(payment[k]);
+            return before && after && before !== after;
+          });
+          if (changed.length) {
+            const unpaid = await pool.query(
+              `SELECT COUNT(*)::int AS n FROM bills
+                WHERE status IN ('pending','overdue') AND deleted_at IS NULL`
+            );
+            const n = Number(unpaid.rows[0]?.n) || 0;
+            if (n > 0) {
+              warnings.push(
+                `เปลี่ยนบัญชีรับเงิน (${changed.join(', ')}) ขณะมีบิลค้างชำระ ${n} ใบ — `
+                + `QR/ข้อความที่ส่งไปแล้วชี้บัญชีเดิม ผู้เช่าที่โอนเข้าบัญชีเดิมหลังจากนี้`
+                + `สลิปจะติดตรวจที่คิวแอดมิน (RECEIVER_MISMATCH) — แนะนำส่งบิลแจ้งซ้ำหลังบันทึก`
+              );
+            }
+          }
+        }
+      } catch { /* warning is best-effort — never block the save on a probe failure */ }
+    }
     if (payment) {
       const trueMoneyPhone = String(payment.truemoneyPhone || payment.trueMoneyPhone || payment.walletPhone || '')
         .replace(/[\s-]/g, '');
@@ -1524,6 +1562,7 @@ app.put('/api/data/:key', sameOrigin, csrfGuard, requireAuth, requireRole('owner
         try {
           const flags = await features.load(pool).catch(() => ({}));
           await notifier.notifyOwner({ pool, features: flags }, {
+            category: 'system',
             subject: '⚠️ ระบบ sync ผู้เช่าล้มเหลว — กรุณาตรวจสอบ',
             text: [
               'ระบบไม่สามารถ sync ข้อมูลผู้เช่าจากผังห้องเข้าตาราง tenants ได้',
@@ -2752,6 +2791,13 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBookingSubmit, validateBod
                 billId: bookingId,
                 promptpayTarget: ppTarget || null,
                 additionalReceiverTargets: extraTargets,
+                // Same operator hardening as the bill-slip path — booking
+                // deposits go to the same receiving accounts, so the same
+                // receiver scrutiny applies. Weak/strict outcomes are
+                // TRANSIENT → this path already maps them to pending_review.
+                easyslipMatchAccount: bookingFlags?.slipUpload?.providerReceiverCheck === true,
+                slip2goCheckReceiver: bookingFlags?.slipUpload?.providerReceiverCheck === true,
+                strictReceiverTail: bookingFlags?.slipUpload?.strictReceiverTail === true,
               },
               bookingFlags
             );
@@ -3161,6 +3207,7 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBookingSubmit, validateBod
     try {
       const flags = await features.load(pool);
       notifier.notifyOwner({ pool, features: flags }, {
+        category: 'booking',
         subject: '📋 ผู้เช่าใหม่ขอจอง',
         text: `ชื่อ: ${cleaned.tenantName}\nโทร: ${cleaned.phone || '-'}\nห้อง: ${cleaned.roomId || '-'}\nวันเข้าพัก: ${cleaned.checkInDate || '-'}\nค่าจอง: ${newBooking.bookingFee ? `฿${Number(newBooking.bookingFee).toLocaleString('th-TH')}` : '-'} (${newBooking.depositStatus || 'not_required'})\nผลตรวจสลิป: ${newBooking.depositVerification?.title || newBooking.depositVerifyCode || '-'}\nนโยบาย: ${newBooking.bookingFeeAppliesToDeposit ? 'นำค่าจองไปหัก/นับรวมกับเงินมัดจำ' : 'ค่าจองแยกจากเงินมัดจำ'}\nมัดจำคงเหลือโดยประมาณ: ${newBooking.depositBalanceDue != null ? `฿${Number(newBooking.depositBalanceDue).toLocaleString('th-TH')}` : '-'}${newBooking.lineBinding?.error ? `\n⚠️ LINE: สร้างรหัสผูก LINE ไม่สำเร็จ (${newBooking.lineBinding.error})\nขั้นต่อไป: ${newBooking.lineBinding.nextAction}` : ''}${newBooking.applicantRisk ? `\n⚠️ ข้อควรตรวจ: ${newBooking.applicantRisk.message}\nขั้นต่อไป: ${newBooking.applicantRisk.nextAction}` : ''}\nรหัสการจอง: ${newBooking.id}\n— ขั้นต่อไป: เปิด /admin#bookings เพื่อตรวจสอบและกดอนุมัติการจองนี้`,
       }).catch(() => {});
@@ -3550,6 +3597,7 @@ app.post('/api/maintenance', sameOrigin, rateLimitTicket, validateBody(schemas.c
     try {
       const flags = await features.load(pool);
       notifier.notifyOwner({ pool, features: flags }, {
+        category: 'maintenance',
         subject: `🛠 แจ้งซ่อมใหม่ (${ticket.priority})`,
         text: `เลขที่: ${ticket.ticket_no}\n` +
               `ห้อง: ${ticket.room_id} (${ticket.tenant_name || '-'})\n` +
@@ -4572,6 +4620,141 @@ app.get('/api/admin/line/owner-claim/:id',
       });
     } catch (err) {
       console.error('owner-claim get error:', err);
+      res.status(500).json({ error: 'internal error' });
+    }
+  });
+
+// === Multi-admin notification recipients ===================================
+// Unlimited staff LINE accounts that receive every system alert alongside
+// the single legacy owner contact. Owner-gated end to end: who hears about
+// money/bookings is an owner decision. Flow mirrors owner-claim (ADMIN-
+// namespace, single-use codes typed into the OA chat), management adds
+// enable/disable (mute), relabel, and terminal revoke.
+app.get('/api/admin/line/admin-recipients',
+  requireAuth, requireRole('owner'),
+  async (req, res) => {
+    try {
+      const adminRecipients = require('./services/adminRecipients');
+      const items = await adminRecipients.listRecipients(pool, {
+        includeRevoked: req.query.includeRevoked === '1',
+      });
+      // Catalog rides along so the UI renders chips from the same whitelist
+      // the server validates against — no second hardcoded list to drift.
+      res.json({ ok: true, items, categories: adminRecipients.CATEGORIES });
+    } catch (err) {
+      if (err.code === '42P01') {
+        const adminRecipients = require('./services/adminRecipients');
+        return res.json({ ok: true, items: [], categories: adminRecipients.CATEGORIES });
+      }
+      console.error('admin-recipients list error:', err);
+      res.status(500).json({ error: 'internal error' });
+    }
+  });
+
+app.post('/api/admin/line/admin-recipients/tokens',
+  sameOrigin, csrfGuard, requireAuth, requireRole('owner'),
+  async (req, res) => {
+    const oaId = req.body?.oaId ? Number(req.body.oaId) : null;
+    const label = req.body?.label ? String(req.body.label).slice(0, 120) : null;
+    try {
+      const adminRecipients = require('./services/adminRecipients');
+      const token = await adminRecipients.createToken(pool, {
+        oaId, label, createdBy: req.session.user.username,
+      });
+      audit(req, 'line.admin_recipient.token_create', 'admin_recipient_token',
+        String(token.id), { oaId, label, code: token.code });
+      res.json({ ok: true, ...token });
+    } catch (err) {
+      console.error('admin-recipient token create error:', err);
+      res.status(500).json({ error: err.message || 'internal error' });
+    }
+  });
+
+app.get('/api/admin/line/admin-recipients/tokens/:id',
+  requireAuth, requireRole('owner'),
+  async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+    try {
+      const adminRecipients = require('./services/adminRecipients');
+      const t = await adminRecipients.getToken(pool, id);
+      if (!t) return res.status(404).json({ error: 'not found' });
+      res.json({
+        ok: true,
+        id: t.id, code: t.code, oaId: t.oa_id, label: t.label, status: t.status,
+        claimedTail: t.claimed_user_id ? '...' + String(t.claimed_user_id).slice(-6) : null,
+        recipientId: t.recipient_id || null,
+        claimedAt: t.claimed_at, expiresAt: t.expires_at,
+      });
+    } catch (err) {
+      console.error('admin-recipient token get error:', err);
+      res.status(500).json({ error: 'internal error' });
+    }
+  });
+
+app.put('/api/admin/line/admin-recipients/:id',
+  sameOrigin, csrfGuard, requireAuth, requireRole('owner'),
+  async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+    try {
+      const adminRecipients = require('./services/adminRecipients');
+      const out = {};
+      if (typeof req.body?.enabled === 'boolean') {
+        const r = await adminRecipients.setEnabled(pool, id, req.body.enabled, req.session.user.username);
+        if (!r) return res.status(404).json({ error: 'recipient not found or revoked', code: 'NOT_FOUND' });
+        out.enabled = r.enabled;
+        audit(req, req.body.enabled ? 'line.admin_recipient.enable' : 'line.admin_recipient.disable',
+          'admin_line_recipient', String(id), {});
+      }
+      if (req.body?.label !== undefined) {
+        const r = await adminRecipients.setLabel(pool, id, req.body.label);
+        if (!r) return res.status(404).json({ error: 'recipient not found or revoked', code: 'NOT_FOUND' });
+        out.label = r.label;
+        audit(req, 'line.admin_recipient.relabel', 'admin_line_recipient', String(id),
+          { label: r.label });
+      }
+      if (req.body?.mutedCategories !== undefined) {
+        // Whitelist BEFORE touching the DB so the admin sees exactly which
+        // keys were rejected (typo'd client, stale UI after a catalog change).
+        const check = adminRecipients.validateMutedCategories(req.body.mutedCategories);
+        if (!check.ok) {
+          return res.status(400).json({
+            error: `หมวดแจ้งเตือนไม่ถูกต้อง: ${check.invalid.join(', ')}`,
+            code: 'INVALID_CATEGORIES',
+            invalid: check.invalid,
+            allowed: adminRecipients.CATEGORIES.map((c) => c.key),
+          });
+        }
+        const r = await adminRecipients.setMutedCategories(pool, id, check.list);
+        if (!r) return res.status(404).json({ error: 'recipient not found or revoked', code: 'NOT_FOUND' });
+        out.mutedCategories = r.mutedCategories;
+        audit(req, 'line.admin_recipient.categories', 'admin_line_recipient', String(id),
+          { mutedCategories: r.mutedCategories });
+      }
+      if (!Object.keys(out).length) {
+        return res.status(400).json({ error: 'nothing to update (enabled / label / mutedCategories)' });
+      }
+      res.json({ ok: true, id, ...out });
+    } catch (err) {
+      console.error('admin-recipient update error:', err);
+      res.status(500).json({ error: 'internal error' });
+    }
+  });
+
+app.delete('/api/admin/line/admin-recipients/:id',
+  sameOrigin, csrfGuard, requireAuth, requireRole('owner'),
+  async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'invalid id' });
+    try {
+      const adminRecipients = require('./services/adminRecipients');
+      const ok = await adminRecipients.revoke(pool, id, req.session.user.username);
+      if (!ok) return res.status(404).json({ error: 'recipient not found or already revoked', code: 'NOT_FOUND' });
+      audit(req, 'line.admin_recipient.revoke', 'admin_line_recipient', String(id), {});
+      res.json({ ok: true, id, revoked: true });
+    } catch (err) {
+      console.error('admin-recipient revoke error:', err);
       res.status(500).json({ error: 'internal error' });
     }
   });
@@ -6742,6 +6925,7 @@ app.post('/api/tenant/maintenance/:id/rate', sameOrigin, csrfGuard, requireTenan
     try {
       const flags = await features.load(pool);
       notifier.notifyOwner({ pool, features: flags }, {
+        category: 'maintenance',
         subject: `⭐ ผู้เช่าให้คะแนน ${rating}/5`,
         text: `Ticket ${rows[0].ticket_no} — ${rating}/5${comment ? `\n"${comment}"` : ''}`,
       }).catch(() => {});
@@ -7012,6 +7196,15 @@ async function tenantPaymentUploadHandler(req, res) {
               billId,
               promptpayTarget: ppTarget || null,
               additionalReceiverTargets: extraTargets,
+              // Operator hardening opt-ins (features.slipUpload.*):
+              //   providerReceiverCheck → ask the provider to ALSO verify the
+              //     receiver with the FULL account it has registered (our
+              //     local tail-match stays canonical either way).
+              //   strictReceiverTail → a tail match on <6 digits parks in the
+              //     admin queue instead of auto-verifying.
+              easyslipMatchAccount: req.features?.slipUpload?.providerReceiverCheck === true,
+              slip2goCheckReceiver: req.features?.slipUpload?.providerReceiverCheck === true,
+              strictReceiverTail: req.features?.slipUpload?.strictReceiverTail === true,
             },
             req.features
           );
@@ -8253,6 +8446,14 @@ app.put('/api/payments/:id/verify', sameOrigin, csrfGuard, requireAuth, requireR
           }).catch((err) => console.warn(`[payment.verify] access-card restore failed:`, err.message));
         } catch (err) { console.warn(`[payment.verify] access-card restore outer error:`, err.message); }
       }
+      // "เงินเข้า" alert to the owner + every bound admin recipient — the
+      // money event the team actually cares about, fired from the same
+      // post-commit spot as the room/access cascades.
+      billPayments.notifyOwnerPaymentReceived(pool, {
+        billId: row.bill_id, amount: row.amount,
+        method: row.method || 'slip', source: 'payment-verify',
+        actor: req.session.user.username,
+      }).catch(() => {});
       return res.json({ ok: true, payment: row });
     }
     // accept === false — reject path. No bill UPDATE needed because a
@@ -8926,6 +9127,7 @@ app.post('/api/bookings', sameOrigin, csrfGuard, requireAuth,
   if (req.session.user.role === 'staff') {
     const flags = req.features || (await features.load(pool).catch(() => ({})));
     notifier.notifyOwner({ pool, features: flags }, {
+      category: 'booking',
       subject: `📋 จองใหม่ (โดยแอดมิน ${createdBy})`,
       text: `ชื่อ: ${cleaned.tenantName}\nโทร: ${cleaned.phone || '-'}\n`
         + `ห้อง: ${cleaned.roomId || 'ยังไม่ระบุ'}\nวันเข้าพัก: ${cleaned.checkInDate || '-'}\n`
@@ -9479,6 +9681,7 @@ app.post('/api/bookings/:id/approve-and-assign', sameOrigin, csrfGuard, requireA
         try {
           const flags = await features.load(pool).catch(() => ({}));
           await notifier.notifyOwner({ pool, features: flags }, {
+            category: 'booking',
             subject: `⚠️ การจอง ${id} อนุมัติแล้วแต่ sync ผู้เช่าล้มเหลว`,
             text: [
               `การจอง ${id} (${booking.name || '-'} · ${booking.phone || '-'}) อนุมัติแล้ว`,
@@ -9513,6 +9716,7 @@ app.post('/api/bookings/:id/approve-and-assign', sameOrigin, csrfGuard, requireA
               `กรุณาเตรียมบัตรประชาชนตัวจริงในวันเซ็นสัญญา`,
       });
       notifier.notifyOwner({ pool, features: flags }, {
+        category: 'booking',
         subject: `✅ อนุมัติการจอง ${id}${assignedRoomId ? ` → ห้อง ${assignedRoomId}` : ''}`,
         text: [
           `${booking.name || '-'} (${booking.phone || '-'})`,
@@ -9917,6 +10121,7 @@ app.put('/api/bookings/:id', sameOrigin, csrfGuard, requireAuth, requireRole('ow
         // Owner notification — concise audit-style line.
         const subj = `📋 Booking ${id}: ${before.status} → ${updated.status}`;
         notifier.notifyOwner({ pool, features: flags }, {
+          category: 'booking',
           subject: subj,
           text: [
             `${updated.name || '-'} (${updated.phone || '-'})`,
@@ -9987,6 +10192,7 @@ async function notifyRoomPhotoUploadRejected(req, refId, classification) {
   const status = storage.storageStatus();
   const user = req.session && req.session.user ? req.session.user.username : 'unknown';
   notifier.notifyOwner({ pool, features: flags }, {
+    category: 'system',
     subject: 'อัปโหลดรูปห้องถูกปฏิเสธ',
     text: [
       'ระบบปฏิเสธการอัปโหลดรูปห้อง เพราะไฟล์หรือข้อมูลไม่ถูกต้อง/ผิดปกติ',
@@ -10703,8 +10909,10 @@ async function notifyOtherOwners(req, msg) {
     // We notify owners by LINE userId only when they have one bound. Email
     // fallback runs through notifier.notifyOwner which targets the
     // configured LINE_OWNER_USER_ID / OWNER_EMAIL, so we always at least
-    // hit the system owner channel.
-    await notifier.notifyOwner({ pool, features: flags }, msg);
+    // hit the system owner channel. User-management changes are a security
+    // trail (hijacked owner session leaves a visible wake) — category
+    // 'security' unless the caller tagged otherwise.
+    await notifier.notifyOwner({ pool, features: flags }, { category: 'security', ...msg });
     // Plus per-owner LINE push for any other owner with line_user_id set.
     const { rows } = await pool.query(
       `SELECT u.id, u.username FROM auth_users u
@@ -11844,6 +12052,7 @@ app.put('/api/contracts/:id', sameOrigin, csrfGuard, requireAuth, requireRole('o
             for (const w of closeEffects.warnings || []) lines.push(`คำเตือน: ${w.message}`);
           }
           notifier.notifyOwner({ pool, features: flags }, {
+            category: 'tenancy',
             subject: `ปิดสัญญา ${contract.contract_no}`,
             text: lines.join('\n'),
           }).catch(() => {});
@@ -12033,6 +12242,7 @@ app.post('/api/contracts/:id/sign', sameOrigin, csrfGuard, requireAuth, requireR
       try {
         const flags = await features.load(pool);
         notifier.notifyOwner({ pool, features: flags }, {
+          category: 'tenancy',
           subject: `✍️ ลงนามสัญญา ${contract.contract_no}`,
           text: `admin ${req.session.user.username} บันทึกลายเซ็นสัญญา\n`
             + `contract id=${id} tenantId=${contract.tenant_id}\n`
@@ -14110,6 +14320,7 @@ app.post('/api/admin/contract-invitations/:id/approve',
           `📄 ดู PDF: ${proto}://${host}/api/contracts/${contract.id}/pdf`,
         ].filter(Boolean);
         notifier.notifyOwner({ pool, features: flags }, {
+          category: 'tenancy',
           subject: `✅ อนุมัติสัญญา ${contract.contract_no || ''} — ห้อง ${contract.room_id || ''}`,
           text: lines.join('\n'),
         }).catch(() => {});
@@ -14645,6 +14856,7 @@ app.post('/api/contract-fill/:token/submit', rateLimitContractFill, sameOrigin, 
     try {
       const flags = await features.load(pool);
       notifier.notifyOwner({ pool, features: flags }, {
+        category: 'tenancy',
         subject: '📥 ผู้เช่าส่งสัญญาให้ตรวจสอบ',
         text: `invitation #${inv.id} (contract ${inv.contract_id}) — เข้าตรวจที่ /admin#contract-invitations`,
       }).catch(() => {});

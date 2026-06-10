@@ -644,8 +644,14 @@ test('slipVerifier rejects auto-verify when provider omits receiver account', ()
   const path = require('node:path');
   const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'slipVerifier.js'), 'utf8');
 
-  assert.match(src, /acceptableTargets\.length && !result\.receiver\?\.account/,
-    'auto-verify must require a provider receiver account when any receiver target is configured');
+  // The receiver comparison now lives in the pure matchReceiverTail helper
+  // (behaviour unit-tested in tests/paymentHardening.test.js). Pin that
+  // verifyOne still routes the provider's receiver through it and that a
+  // missing account can never silently pass.
+  assert.match(src, /actualAccount: result\.receiver\?\.account/,
+    'auto-verify must feed the provider receiver account into the tail matcher');
+  assert.match(src, /outcome: 'unreadable', reason: 'no_account'/,
+    'a missing receiver account must resolve to the unreadable outcome');
   assert.match(src, /code:\s*'RECEIVER_UNREADABLE'/,
     'missing receiver account should be classified as RECEIVER_UNREADABLE');
 });
@@ -671,7 +677,7 @@ test('slipVerifier accepts configured manual receivers as secondary receiver tar
     'slipVerifier must accept additionalReceiverTargets in expected');
   assert.match(src, /typeof value === 'object'[\s\S]{0,160}value\.target \|\| value\.account \|\| value\.phone/,
     'slipVerifier must accept structured additional receiver targets');
-  assert.match(src, /result\.receiverMatch = matchDetail/,
+  assert.match(src, /result\.receiverMatch = tailCheck\.detail/,
     'slipVerifier must return which receiver target matched the slip');
 });
 
@@ -3799,7 +3805,9 @@ test('checkin notifies the tenant about the welcome bill', () => {
   );
   const idx = ops.indexOf("audit(req, 'tenant.checkin'");
   assert.ok(idx > 0, 'checkin handler must exist');
-  const after = ops.slice(idx, idx + 3000);
+  // Window covers the force-bypass alert + the team move-in alert that now
+  // sit between the audit call and the tenant welcome push.
+  const after = ops.slice(idx, idx + 5000);
   assert.match(after, /notifier\.notifyTenant/,
     'checkin must call notifyTenant after creating the welcome bill');
   assert.match(after, /ยินดีต้อนรับ/,

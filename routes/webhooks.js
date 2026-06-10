@@ -13,6 +13,7 @@ const lineSvc = require('../services/line');
 const lineOa = require('../services/lineOa');
 const lineBinding = require('../services/lineBinding');
 const ownerClaim = require('../services/ownerClaim');
+const adminRecipients = require('../services/adminRecipients');
 const secrets = require('../services/secrets');
 const notifier = require('../services/notifier');
 const features = require('../services/features');
@@ -262,6 +263,55 @@ module.exports = function buildWebhooksRouter(ctx) {
       return;
     }
 
+    // 0.5) Admin-recipient code — match ADMIN-XXXXXXXX. The multi-person
+    //      counterpart to owner-claim: any number of staff LINE accounts can
+    //      bind as system-alert recipients. Same security shape: single-use,
+    //      short-TTL, only the issuing admin knows the code, and the
+    //      namespace is distinct from OWNER-/BIND- so flows can't collide.
+    if (adminRecipients.isClaimCode(text)) {
+      let result;
+      try {
+        result = await adminRecipients.tryClaim(pool, {
+          code: text, lineUserId: userId, oaId: oa.id || null,
+        });
+      } catch (err) {
+        console.error(`[line:${oa.slug}] admin-recipient claim error:`, err.message);
+        await lineSvc.replyText(oa, ev.replyToken, '⚠️ ระบบขัดข้อง — โปรดลองใหม่');
+        return;
+      }
+      if (result.ok) {
+        await lineSvc.replyText(oa, ev.replyToken,
+          (result.already
+            ? `✅ บัญชีนี้เป็นผู้รับแจ้งเตือนแอดมินของ ${oa.name} อยู่แล้ว (เปิดรับอีกครั้งให้เรียบร้อย)\n\n`
+            : `✅ ผูกบัญชีนี้เป็นผู้รับแจ้งเตือนแอดมินของ ${oa.name} เรียบร้อย${result.label ? ` (${result.label})` : ''}\n\n`) +
+          `จะได้รับแจ้งเตือนระบบทั้งหมด: การจอง / ชำระเงิน / ย้ายเข้า-ย้ายออก / แจ้งซ่อม / บิล ฯลฯ\n\n` +
+          `เจ้าของระบบเปิด-ปิด/ยกเลิกการรับแจ้งเตือนนี้ได้ที่ /admin#line-oas`);
+        // Visibility: tell the EXISTING recipients that someone new joined —
+        // an unexpected join here is a security signal worth seeing.
+        try {
+          const flags = await features.load(pool);
+          notifier.notifyOwner({ pool, features: flags }, {
+            category: 'security',
+            subject: result.already ? 'ผู้รับแจ้งเตือนแอดมินเปิดรับอีกครั้ง' : 'มีผู้รับแจ้งเตือนแอดมินคนใหม่',
+            text: `${result.label || 'ไม่ระบุชื่อ'} ผูก LINE เป็นผู้รับแจ้งเตือนแอดมิน ผ่าน ${oa.name}\n` +
+              `LINE userId (ท้าย): ...${String(userId || '').slice(-6)}\n` +
+              `จัดการได้ที่ /admin#line-oas`,
+          }).catch(() => {});
+        } catch { /* visibility alert must not break the reply */ }
+        return;
+      }
+      const messages = {
+        invalid:      '❌ รหัสไม่ถูกต้อง — ขอรหัสใหม่จากเจ้าของระบบ (/admin#line-oas)',
+        expired:      '❌ รหัสหมดอายุ (เกิน 10 นาที) — ขอรหัสใหม่จากเจ้าของระบบ',
+        already_used: '❌ รหัสนี้ถูกใช้ไปแล้ว — ขอรหัสใหม่จากเจ้าของระบบ',
+        revoked:      '❌ รหัสนี้ถูกยกเลิก — ขอรหัสใหม่จากเจ้าของระบบ',
+        wrong_oa:     '❌ รหัสนี้ออกให้ใช้กับ LINE OA อื่น — ส่งในแชทของ OA ที่ถูกต้อง',
+        error:        '⚠️ เกิดข้อผิดพลาด — โปรดลองใหม่',
+      };
+      await lineSvc.replyText(oa, ev.replyToken, messages[result.reason] || '❌ ผูกผู้รับแจ้งเตือนไม่สำเร็จ');
+      return;
+    }
+
     // 1) Binding code — match BIND-XXXXXXXX (case-insensitive, 4-16 hex)
     if (isBindCode(text)) {
       let result;
@@ -300,6 +350,7 @@ module.exports = function buildWebhooksRouter(ctx) {
         try {
           const flags = await features.load(pool);
           notifier.notifyOwner({ pool, features: flags }, {
+            category: 'booking',
             subject: 'มีผู้เช่าผูก LINE OA',
             text: `${result.fullName}${room} ผูก LINE OA สำเร็จ ผ่าน ${oa.name}${bindingCount == null ? '' : `\nห้อง/การจองนี้ผูก LINE แล้วทั้งหมด ${bindingCount} บัญชี`}`,
           }).catch(() => {});
@@ -310,6 +361,7 @@ module.exports = function buildWebhooksRouter(ctx) {
         try {
           const flags = await features.load(pool);
           notifier.notifyOwner({ pool, features: flags }, {
+            category: 'booking',
             subject: 'LINE binding ต้องตรวจสอบ',
             text: [
               `เหตุผล: ${result.reason}`,
