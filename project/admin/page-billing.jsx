@@ -930,7 +930,15 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
       const readiness = await fetchBillingReadiness();
       const fmt = formatReadinessIssues(readiness, 'payment');
       if (fmt) readinessIssues = fmt;
-    } catch { /* readiness fetch is best-effort */ }
+    } catch {
+      // Probe failed (network/server) — say so instead of showing nothing,
+      // so "no warnings" can't be mistaken for "check passed".
+      readinessIssues = {
+        count: 1,
+        high: 1,
+        lines: '1. [สำคัญ] (READINESS_CHECK_FAILED) ตรวจสอบความพร้อมระบบรับชำระไม่สำเร็จ — ยังบันทึกชำระได้ตามปกติ\n   → ถ้าต้องการเห็นคำเตือนการตั้งค่า (PromptPay/ตรวจสลิป) ให้รีเฟรชหน้าแล้วเปิดหน้าต่างนี้ใหม่',
+      };
+    }
     // Open the structured method-picker modal. Replaces the old
     // window.confirm() that hardcoded method='transfer' — admin can now
     // record cash payments without inventing a fake slip + the tenant
@@ -1420,7 +1428,18 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
           readiness = d;
           setBatchReadiness(d);
         }
-      } catch { /* fall through with stale data */ }
+      } catch { /* fall through — warned below */ }
+    }
+    if (!readiness || readiness.period !== currentPeriod) {
+      // Don't open the preview silently on stale/missing readiness — the
+      // "พร้อมส่ง/ติดบล็อก" counts drive the admin's decision.
+      setToast && setToast({
+        kind: 'warning',
+        message: {
+          title: 'ตรวจสอบความพร้อมส่งไม่สำเร็จ',
+          description: 'ตัวเลข "พร้อมส่ง/ติดบล็อก" ในหน้าต่างถัดไปอาจไม่เป็นปัจจุบัน — ระบบจะตรวจซ้ำรายใบตอนส่งจริงอีกชั้น ถ้าไม่แน่ใจให้รีเฟรชหน้าก่อนส่ง',
+        },
+      });
     }
     setBulkSendPreview({ pending, totalAmount, readiness });
   };
@@ -2461,6 +2480,7 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
                  disabled={markPaidPrompt.busy}>ยกเลิก</Btn>
             <Btn variant="primary"
                  onClick={async () => {
+                   if (markPaidPrompt.busy) return;
                    setMarkPaidPrompt({ ...markPaidPrompt, busy: true });
                    const ok = await submitMarkPaid({
                      bill: markPaidPrompt.bill,
@@ -2473,7 +2493,9 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
                    else setMarkPaidPrompt({ ...markPaidPrompt, busy: false });
                  }}
                  disabled={markPaidPrompt.busy}>
-              {markPaidPrompt.busy ? 'กำลังบันทึก…' : 'ยืนยันบันทึก'}
+              {markPaidPrompt.busy
+                ? 'กำลังบันทึก…'
+                : `ยืนยันบันทึก (${({ cash: 'เงินสด', transfer: 'โอนธนาคาร', promptpay: 'PromptPay' })[markPaidPrompt.method] || markPaidPrompt.method})`}
             </Btn>
           </>
         )}

@@ -2741,6 +2741,10 @@ async function tickPaymentReminder(pool, flags, now, state) {
 
     const notifQueue = require('./notificationQueue');
     let reminded = 0;
+    // Bills whose tenant has neither LINE nor email — collected so the run
+    // can tell the owner instead of skipping silently (a tenant who never
+    // gets reminders looks identical to one who ignores them otherwise).
+    const unreachable = [];
     for (const b of due) {
       // Skip rooms with no reachable channel; owner gets a separate
       // alert via the queue/notifier failure path if needed.
@@ -2757,7 +2761,10 @@ async function tickPaymentReminder(pool, flags, now, state) {
       const lineBindingCount = recipients.length;
       const hasLine = lineBindingCount > 0;
       const hasEmail = !!(b.email);
-      if (!hasLine && !hasEmail) continue;
+      if (!hasLine && !hasEmail) {
+        unreachable.push(`ห้อง ${b.room_id} · ${b.bill_no} · ${b.full_name || 'ผู้เช่า'} (ยอด ${Number(b.total) || 0} บาท)`);
+        continue;
+      }
 
       const dueDt = b.due_date ? new Date(b.due_date) : null;
       const dueDayStr = dueDt
@@ -2863,6 +2870,22 @@ async function tickPaymentReminder(pool, flags, now, state) {
     }
     if (reminded > 0) {
       console.log(`[scheduler] payment reminders sent for ${reminded}/${due.length} bill(s)`);
+    }
+    if (unreachable.length > 0) {
+      // Once per day (this tick is day-latched) — tell the owner WHICH bills
+      // got no reminder and how to fix the channel, instead of dropping them.
+      try {
+        await notifier.notifyOwner({ pool, features: flags || {} }, {
+          category: 'billing',
+          subject: `🔕 เตือนชำระส่งไม่ถึงผู้เช่า ${unreachable.length} ราย (ไม่มีช่องทางติดต่อ)`,
+          text: 'บิลถึงกำหนด/ค้างชำระต่อไปนี้ ระบบส่งเตือนอัตโนมัติไม่ได้ เพราะผู้เช่าไม่มีทั้ง LINE และอีเมล:\n\n'
+            + unreachable.slice(0, 20).map((s, i) => `${i + 1}. ${s}`).join('\n')
+            + (unreachable.length > 20 ? `\n…และอีก ${unreachable.length - 20} ราย` : '')
+            + '\n\nวิธีแก้: เปิดหน้าผู้เช่า → ผูก LINE (เมนู "ผูกห้อง ↔ LINE") หรือเพิ่มอีเมล แล้วกดส่งเตือนซ้ำที่หน้าบิล/ใบแจ้งหนี้',
+        });
+      } catch (err) {
+        console.warn('[scheduler] unreachable-tenant digest failed:', err.message);
+      }
     }
     state.lastPaymentReminderAt = todayKey;
     writeState(state);

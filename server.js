@@ -1514,10 +1514,36 @@ app.put('/api/data/:key', sameOrigin, csrfGuard, requireAuth, requireRole('owner
     const u = value.utilities && typeof value.utilities === 'object' ? value.utilities : {};
     for (const k of ['waterRate', 'elecRate']) {
       const v = Number(u[k]);
-      if (Number.isFinite(v) && v > 0 && v < MIN_SENSIBLE_UTILITY) {
+      if (Number.isFinite(v) && v < 0) {
+        // Negative rate flips the bill line into a credit — never legitimate.
+        hardIssues.push(`utilities.${k} = ${v} — อัตราค่าน้ำ/ค่าไฟติดลบไม่ได้ (บิลจะกลายเป็นยอดติดลบ)`);
+      } else if (Number.isFinite(v) && v > 0 && v < MIN_SENSIBLE_UTILITY) {
         warnings.push(`utilities.${k} = ${v} (ต่ำผิดปกติ — บิลค่าน้ำ/ค่าไฟอาจต่ำกว่าที่คาด)`);
       }
     }
+    // Cross-feature heads-up: utility-rate changes apply only to bills
+    // generated AFTER this save (issued bills keep their snapshot), so tell
+    // the operator explicitly instead of letting them assume old unpaid
+    // bills re-price themselves.
+    try {
+      const curU = await pool.query(
+        `SELECT value->'utilities' AS utilities FROM app_data WHERE key=$1`, [key]
+      );
+      const storedU = curU.rows.length && curU.rows[0].utilities
+        && typeof curU.rows[0].utilities === 'object' ? curU.rows[0].utilities : null;
+      if (storedU) {
+        for (const k of ['waterRate', 'elecRate']) {
+          const before = Number(storedU[k]);
+          const after = Number(u[k]);
+          if (Number.isFinite(before) && Number.isFinite(after) && before !== after) {
+            warnings.push(
+              `utilities.${k} เปลี่ยน ${before} → ${after} — มีผลเฉพาะบิลที่ออกหลังจากนี้ `
+              + `บิลค้างชำระเดิมยังใช้เรทเก่า ถ้าต้องการเรทใหม่กับบิลเดิมให้ void แล้วออกบิลใหม่`
+            );
+          }
+        }
+      }
+    } catch { /* heads-up is best-effort — never block the save on a probe failure */ }
     const payment = value.payment && typeof value.payment === 'object' ? value.payment : null;
     // Cross-feature safeguard: changing the RECEIVING account while unpaid
     // bills are in flight strands every QR / bank-info message already sent

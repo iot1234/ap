@@ -410,6 +410,15 @@ function validateConfig(partial) {
     if (has(f, 'lateFee') && has(f.lateFee, 'minLateFeeBaht')) range('lateFee', 'minLateFeeBaht', f.lateFee.minLateFeeBaht, 0, 1_000_000, 'ต้องเป็นตัวเลข 0–1,000,000 บาท');
     if (has(f, 'lateFee') && has(f.lateFee, 'maxPctOfPrincipal')) range('lateFee', 'maxPctOfPrincipal', f.lateFee.maxPctOfPrincipal, 0, 100, 'ต้องเป็น 0–100 (% ของยอดก่อนค่าปรับ)');
     if (has(f, 'lateFee') && has(f.lateFee, 'maxLateFeeBaht')) range('lateFee', 'maxLateFeeBaht', f.lateFee.maxLateFeeBaht, 0, 10_000_000, 'ต้องเป็นตัวเลข 0–10,000,000 บาท');
+    // Cross-field: a floor above the ceiling makes the two caps fight each
+    // other (min pushes the fee UP past the max that clamps it DOWN).
+    if (has(f, 'lateFee') && has(f.lateFee, 'minLateFeeBaht') && has(f.lateFee, 'maxLateFeeBaht')) {
+      const minB = num(f.lateFee.minLateFeeBaht);
+      const maxB = num(f.lateFee.maxLateFeeBaht);
+      need(!(Number.isFinite(minB) && Number.isFinite(maxB) && minB > 0 && maxB > 0 && minB > maxB),
+        'lateFee', 'minLateFeeBaht',
+        'lateFee.minLateFeeBaht ต้องไม่มากกว่า maxLateFeeBaht — ขั้นต่ำสูงกว่าเพดานทำให้ค่าปรับขัดแย้งกันเอง');
+    }
     if (has(f, 'meterIot') && has(f.meterIot, 'anomalySigmas')) range('meterIot', 'anomalySigmas', f.meterIot.anomalySigmas, 1, 10, 'ต้องเป็น 1–10');
     if (has(f, 'tenantPortal') && has(f.tenantPortal, 'sessionDays')) range('tenantPortal', 'sessionDays', f.tenantPortal.sessionDays, 1, 365, 'ต้องเป็นจำนวนเต็ม 1–365 วัน', true);
     if (has(f, 'roomBooking') && has(f.roomBooking, 'holdMinutes')) range('roomBooking', 'holdMinutes', f.roomBooking.holdMinutes, 1, 1440, 'ต้องเป็นจำนวนเต็ม 1–1440 นาที', true);

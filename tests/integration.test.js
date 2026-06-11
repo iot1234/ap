@@ -6403,6 +6403,53 @@ test('checkin room advisory lock also covers forced checkins', () => {
     'advisory room lock must be taken before (outside) the force gate');
 });
 
+test('finance config save rejects negative utility rates and explains rate-change scope', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(src, /hardIssues\.push\(`utilities\.\$\{k\} = \$\{v\} — อัตราค่าน้ำ\/ค่าไฟติดลบไม่ได้/,
+    'negative water/elec rates must hard-fail the config save, not silently persist');
+  assert.match(src, /มีผลเฉพาะบิลที่ออกหลังจากนี้/,
+    'changing a utility rate must warn that issued bills keep their old snapshot');
+});
+
+test('late-fee floor cannot exceed its ceiling', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'features.js'), 'utf8');
+  assert.match(src, /minLateFeeBaht ต้องไม่มากกว่า maxLateFeeBaht/,
+    'features config must reject minLateFeeBaht > maxLateFeeBaht');
+});
+
+test('billing readiness probes fail loudly instead of silently', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-billing.jsx'), 'utf8');
+  assert.match(src, /READINESS_CHECK_FAILED/,
+    'mark-paid readiness probe failure must surface as a visible warning, not an empty panel');
+  assert.match(src, /ตรวจสอบความพร้อมส่งไม่สำเร็จ/,
+    'bulk-send must warn when the readiness counts may be stale');
+  assert.match(src, /if \(markPaidPrompt\.busy\) return;/,
+    'mark-paid confirm must guard double-clicks before any async work');
+  assert.match(src, /ยืนยันบันทึก \(\$\{/,
+    'mark-paid confirm button must state the payment method being recorded');
+});
+
+test('payment-pipeline failures leave visible trails', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const bills = fs.readFileSync(path.join(__dirname, '..', 'routes', 'bills-extras.js'), 'utf8');
+  assert.match(bills, /paid-confirmation notify failed for bill/,
+    'a failed tenant paid-confirmation must be logged, not swallowed');
+  const sched = fs.readFileSync(path.join(__dirname, '..', 'services', 'scheduler.js'), 'utf8');
+  assert.match(sched, /const unreachable = \[\];/,
+    'reminder tick must collect tenants it could not reach');
+  assert.match(sched, /เตือนชำระส่งไม่ถึงผู้เช่า/,
+    'owner must get a digest of unreachable tenants');
+  assert.match(sched, /ผูก LINE/,
+    'the unreachable digest must say how to fix the channel');
+});
+
 test('contract-fill HTML reads view.rejectionReason (camelCase, not snake_case)', () => {
   // Server's buildPublicView returns rejectionReason; the HTML used to read
   // view.rejection_reason → reject reason was invisible to the tenant.

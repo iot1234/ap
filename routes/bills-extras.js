@@ -3801,7 +3801,12 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           paid.rows[0] || row,
           verifier,
           supersededPending.rows.length
-        ).catch(() => {});
+        ).catch((err) => {
+          // Payment is committed — only the tenant "ชำระแล้ว" confirmation
+          // failed. Leave a loud log trail so a dead SMTP/LINE token doesn't
+          // silently eat every receipt.
+          console.warn(`[bill.pay] paid-confirmation notify failed for bill ${row.bill_no || id}:`, err.message);
+        });
         audit(req, 'bill.manual_pay', 'bill', String(id), {
           paymentId: payment.rows[0].id,
           amount: Number(payment.rows[0].amount),
