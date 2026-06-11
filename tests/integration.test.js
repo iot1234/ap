@@ -6165,8 +6165,10 @@ test('tenant contract tab uses room pricing and switches checked-in tenants to c
     'active tenant rows must display current room pricing, not stale last rent');
   assert.match(src, /const contractRentInfo = React\.useMemo[\s\S]{0,220}resolveRoomRent\(t\.room, config\)/,
     'contract actions must resolve rent from the room + config');
-  assert.match(src, /monthlyRent: rent[\s\S]{0,80}deposit: Number\(contractRentInfo\.deposit\) \|\| rent \* 2/,
-    'new tenant contract invites must send resolved rent/deposit');
+  assert.match(src, /resolveRoomDeposit\(t\.room, config, rent\)/,
+    'contract actions must resolve deposit from the room + config');
+  assert.match(src, /monthlyRent: rent[\s\S]{0,160}deposit: Number\.isFinite\(contractDeposit\) && contractDeposit >= 0 \? contractDeposit : rent \* 2/,
+    'new tenant contract invites must send resolved rent/deposit and preserve an intentional zero deposit');
   assert.match(src, /<ContractPreFlightSummary t=\{t\} rentInfo=\{contractRentInfo\}/,
     'pre-flight summary must show the same resolved pricing');
   assert.match(src, /<CheckInModal[\s\S]{0,140}rentInfo=\{contractRentInfo\}/,

@@ -522,6 +522,12 @@ function positiveMoneyOrNull(v) {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
+function nonNegativeMoneyOrNull(v) {
+  if (v === undefined || v === null || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
 function resolveRoomRent(room, config) {
   if (!room || typeof room !== 'object') {
     return { rent: 0, source: 'legacy', formula: 0, override: null };
@@ -553,6 +559,26 @@ function resolveRoomRent(room, config) {
   }
   const legacy = positiveMoneyOrNull(room.rent ?? room.rentPrice ?? room.rent_price) || 0;
   return { rent: legacy, source: 'legacy', formula, override: null };
+}
+
+function resolveRoomDeposit(room, config, rentInput) {
+  const type = room?.type || room?.room_type || room?.roomType || 'standard';
+  const configured = nonNegativeMoneyOrNull((config?.rates || {})[type]?.deposit);
+  if (configured !== null) {
+    return { deposit: Math.round(configured * 100) / 100, source: 'pricing_config', sourceLabel: 'เมนูตั้งราคา' };
+  }
+
+  const roomDeposit = nonNegativeMoneyOrNull(room?.deposit ?? room?.depositPrice ?? room?.deposit_price);
+  if (roomDeposit !== null) {
+    return { deposit: Math.round(roomDeposit * 100) / 100, source: 'room_snapshot', sourceLabel: 'ค่า fallback ของห้อง' };
+  }
+
+  const rent = nonNegativeMoneyOrNull(rentInput);
+  if (rent !== null) {
+    return { deposit: Math.round(rent * 2 * 100) / 100, source: 'rent_x2', sourceLabel: 'ค่าเช่า x 2' };
+  }
+
+  return { deposit: 0, source: 'none', sourceLabel: 'ยังไม่ได้กำหนด' };
 }
 
 // --- Aggregate stats for dashboard ----------------------------------------
@@ -827,7 +853,7 @@ Object.assign(window, {
   loadRooms, saveRooms, loadConfig, saveConfig,
   loadBookings, saveBookings, loadActivities, saveActivities,
   resetAll, deepMerge,
-  computeRoomRent, resolveRoomRent, computeStats,
+  computeRoomRent, resolveRoomRent, resolveRoomDeposit, computeStats,
   // export/import
   downloadFile, exportCSV, exportJSON, importJSON,
   exportRoomsCSV, exportTenantsCSV, exportBookingsCSV, exportBillsCSV, exportFullBackup,

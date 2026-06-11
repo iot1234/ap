@@ -239,7 +239,7 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
   const ADMIN_ROOM_TYPES = window.ADMIN_ROOM_TYPES;
   const ADMIN_ROOM_TYPE_KEYS = window.ADMIN_ROOM_TYPE_KEYS;
   const ADMIN_VIEWS = window.ADMIN_VIEWS;
-  const { fmt, fmtCurrency, resolveRoomRent, computeRoomRent } = window;
+  const { fmt, fmtCurrency, resolveRoomRent, resolveRoomDeposit, computeRoomRent } = window;
   const { Card, Btn, IconBtn, Input, Select, Toggle, Textarea, StatusBadge, Pill, DataTable,
           Drawer, Modal, SearchInput, FilterChip, PageContainer, PageHeader, SectionHeading, DefList } = window;
 
@@ -595,11 +595,15 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
       ? computeRoomRent(data.type, Number(data.floor), data.view, features, config)
       : Number(data.rent);
     const rent = Number(data.rent) || formulaRent || t.baseRent;
+    const depositInfo = resolveRoomDeposit
+      ? resolveRoomDeposit({ type: data.type }, config, rent)
+      : { deposit: rent * 2 };
+    const deposit = Number(depositInfo.deposit);
     const rentIsOverride = Math.abs(Number(rent) - Number(formulaRent || 0)) >= 0.01;
     const newRoom = {
       id: data.id, floor: Number(data.floor), no: Number(data.no || 1),
       type: data.type, status: 'vacant',
-      rent, deposit: rent * 2,
+      rent, deposit: Number.isFinite(deposit) && deposit >= 0 ? deposit : rent * 2,
       tenant: null, since: null, contractEnd: null,
       water: 0, elec: 0, waterUnits: 0, elecUnits: 0, wifi: config.utilities.wifi || 250,
       photos: normaliseRoomPhotos(data.photos), notes: '',
@@ -644,6 +648,10 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
       ? computeRoomRent(data.type, f, data.view, features, config)
       : Number(data.rent);
     const rent = Number(data.rent) || formulaRent || t.baseRent;
+    const depositInfo = resolveRoomDeposit
+      ? resolveRoomDeposit({ type: data.type }, config, rent)
+      : { deposit: rent * 2 };
+    const deposit = Number(depositInfo.deposit);
     const rentIsOverride = Math.abs(Number(rent) - Number(formulaRent || 0)) >= 0.01;
     let added = 0, skipped = 0;
     setRooms(prev => {
@@ -654,7 +662,7 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
         next[id] = {
           id, floor: f, no: n, type: data.type, status: 'vacant',
           rent,
-          deposit: rent * 2,
+          deposit: Number.isFinite(deposit) && deposit >= 0 ? deposit : rent * 2,
           tenant: null, since: null, contractEnd: null,
           water: 0, elec: 0, waterUnits: 0, elecUnits: 0,
           wifi: config.utilities.wifi || 250,
@@ -1666,12 +1674,13 @@ function RoomEditForm({ room, originalRoom, onUpdate, onServerPatch, config, set
   const ADMIN_ROOM_TYPES = window.ADMIN_ROOM_TYPES;
   const ADMIN_ROOM_TYPE_KEYS = window.ADMIN_ROOM_TYPE_KEYS;
   const ADMIN_VIEWS = window.ADMIN_VIEWS;
-  const { fmt, fmtCurrency, computeRoomRent, resolveRoomRent } = window;
+  const { fmt, fmtCurrency, computeRoomRent, resolveRoomRent, resolveRoomDeposit } = window;
   const { Input, Select, Toggle, Textarea, SectionHeading, DefList, Pill, Btn } = window;
   const apiFetch = window.requireApiFetch ? window.requireApiFetch() : window.apiFetch;
   const notify = setToast || window.toast;
   const roomPhotoInputRef = React.useRef(null);
   const [photoBusy, setPhotoBusy] = React.useState(false);
+  const [showLegacyDeposit, setShowLegacyDeposit] = React.useState(false);
 
   // Server-side audit for this room: cross-checks blob, rooms_v2, contracts,
   // and outstanding bills to surface inconsistencies the rooms-blob UI alone
@@ -1761,6 +1770,18 @@ function RoomEditForm({ room, originalRoom, onUpdate, onServerPatch, config, set
   };
   const effectiveRent = Number(rentInfo.rent) || 0;
   const overrideRent = rentInfo.override == null ? '' : rentInfo.override;
+  const fallbackRoomDeposit = Number(room.deposit);
+  const depositInfo = resolveRoomDeposit
+    ? resolveRoomDeposit(room, config, effectiveRent || computedRent)
+    : {
+      deposit: Number.isFinite(fallbackRoomDeposit) && fallbackRoomDeposit >= 0
+        ? fallbackRoomDeposit
+        : (effectiveRent > 0 ? effectiveRent * 2 : 0),
+      source: 'room_snapshot',
+      sourceLabel: 'ค่า fallback ของห้อง',
+    };
+  const effectiveDeposit = Number(depositInfo.deposit) || 0;
+  const depositUsesPricing = depositInfo.source === 'pricing_config';
   const featurePremium = config?.featurePremium || {};
   const featureToggleRows = [
     {
@@ -1810,27 +1831,39 @@ function RoomEditForm({ room, originalRoom, onUpdate, onServerPatch, config, set
   ));
 
   const clearRentOverride = () => {
-    onUpdate({
+    const patch = {
       rent: computedRent,
-      deposit: computedRent * 2,
       rentOverride: null,
       rentOverrideReason: null,
       rentOverrideAt: null,
       rentOverrideBy: null,
-    });
+    };
+    const currentDeposit = Number(room.deposit);
+    if (!Number.isFinite(currentDeposit)
+      || currentDeposit === 0
+      || Math.abs(currentDeposit - effectiveRent * 2) < 0.01) {
+      patch.deposit = computedRent * 2;
+    }
+    onUpdate(patch);
   };
 
   const setRentOverride = (v) => {
     const n = Number(v);
     if (Number.isFinite(n) && n > 0) {
-      onUpdate({
+      const patch = {
         rent: n,
-        deposit: n * 2,
         rentOverride: n,
         rentOverrideReason: room.rentOverrideReason || 'manual room price',
         rentOverrideAt: new Date().toISOString(),
         rentOverrideBy: 'admin-ui',
-      });
+      };
+      const currentDeposit = Number(room.deposit);
+      if (!Number.isFinite(currentDeposit)
+        || currentDeposit === 0
+        || Math.abs(currentDeposit - effectiveRent * 2) < 0.01) {
+        patch.deposit = n * 2;
+      }
+      onUpdate(patch);
     } else {
       clearRentOverride();
     }
@@ -1996,6 +2029,8 @@ function RoomEditForm({ room, originalRoom, onUpdate, onServerPatch, config, set
             { label: 'ค่าเช่าปัจจุบัน', value: fmtCurrency(effectiveRent), bold: true },
             { label: 'ราคาตามสูตร',   value: fmtCurrency(computedRent) },
             { label: 'ที่มาราคา', value: rentInfo.source === 'override' ? 'ราคาพิเศษรายห้อง' : rentInfo.source === 'formula' ? 'สูตรจาก Pricing' : 'ค่าเดิม' },
+            { label: 'มัดจำสัญญาใหม่', value: fmtCurrency(effectiveDeposit), bold: true },
+            { label: 'ที่มามัดจำ', value: depositInfo.sourceLabel || 'เมนูตั้งราคา' },
           ]}
         />
       </div>
@@ -2235,8 +2270,8 @@ function RoomEditForm({ room, originalRoom, onUpdate, onServerPatch, config, set
           fontSize: 12.5, color: C.infoInk || C.ink2, lineHeight: 1.55,
           marginBottom: 10,
         }}>
-          หน้านี้ใช้ตั้งค่าอัตรา/โหมดประจำห้องเท่านั้น. หน่วยค่าน้ำและค่าไฟของแต่ละเดือนต้องบันทึกที่หน้า มิเตอร์
-          เพื่อให้บิลดึงเลขตามรอบเดือนที่ออกจริง.
+          ราคากลางและเงินมัดจำแก้ที่เมนูตั้งราคาเป็นหลัก. หน้านี้ใช้กำหนดข้อยกเว้นรายห้องและโหมดค่าน้ำ/ค่าไฟของห้องนี้เท่านั้น.
+          หน่วยค่าน้ำและค่าไฟของแต่ละเดือนต้องบันทึกที่หน้า มิเตอร์ เพื่อให้บิลดึงเลขตามรอบเดือนที่ออกจริง.
           <div style={{ marginTop: 8 }}>
             <Btn variant="secondary" onClick={() => { window.location.hash = 'meters'; }}>ไปหน้ามิเตอร์</Btn>
           </div>
@@ -2249,11 +2284,51 @@ function RoomEditForm({ room, originalRoom, onUpdate, onServerPatch, config, set
             onChange={setRentOverride}
             hint="ปล่อยว่างเพื่อใช้ราคาตามสูตรจากหน้า Pricing"
           />
-          <Input
-            label="เงินมัดจำ" type="number" suffix="บาท"
-            value={room.deposit}
-            onChange={(v) => onUpdate({ deposit: Number(v) })}
-          />
+          <div style={{
+            padding: 12,
+            border: `1px solid ${depositUsesPricing ? C.success || C.border : C.warning || C.border}`,
+            borderRadius: 8,
+            background: depositUsesPricing ? (C.successSoft || C.surfaceAlt) : C.warningSoft,
+            minWidth: 0,
+          }}>
+            <div style={{ fontSize: 12, color: depositUsesPricing ? (C.successInk || C.ink2) : C.warningInk, marginBottom: 4 }}>
+              เงินมัดจำสำหรับสัญญาใหม่
+            </div>
+            <div style={{
+              display: 'flex', alignItems: 'baseline', justifyContent: 'space-between',
+              gap: 10, flexWrap: 'wrap',
+            }}>
+              <b style={{ fontSize: 20, color: C.ink }}>{fmtCurrency(effectiveDeposit)}</b>
+              <span style={{ fontSize: 11.5, color: C.muted }}>{depositInfo.sourceLabel || 'เมนูตั้งราคา'}</span>
+            </div>
+            <div style={{ fontSize: 11.5, color: C.muted, lineHeight: 1.45, marginTop: 6 }}>
+              แก้ค่าหลักที่เมนูตั้งราคา เพื่อให้ booking, check-in, quick invite และสัญญาใหม่ใช้ยอดเดียวกัน
+            </div>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 8 }}>
+              <Btn variant="secondary" size="sm" onClick={() => { window.location.hash = 'pricing'; }}>
+                เปิดเมนูตั้งราคา
+              </Btn>
+              <Btn variant="ghost" size="sm" onClick={() => setShowLegacyDeposit(v => !v)}>
+                {showLegacyDeposit ? 'ซ่อนค่า fallback' : 'ดูค่า fallback'}
+              </Btn>
+            </div>
+          </div>
+          {showLegacyDeposit ? (
+            <div style={{
+              gridColumn: '1 / -1',
+              padding: 12,
+              border: `1px dashed ${C.borderStrong || C.border}`,
+              borderRadius: 8,
+              background: C.surfaceAlt,
+            }}>
+              <Input
+                label="มัดจำ fallback ของห้อง" type="number" suffix="บาท"
+                value={room.deposit}
+                onChange={(v) => onUpdate({ deposit: Number(v) })}
+                hint="ใช้เฉพาะเมื่อเมนูตั้งราคาไม่ได้กำหนดมัดจำของประเภทห้องนี้"
+              />
+            </div>
+          ) : null}
           {/* Water section — mode toggle drives whether the metered inputs
               or the flat-amount input shows. Both modes save to the room
               blob so admin can flip back and forth without losing data. */}

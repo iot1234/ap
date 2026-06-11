@@ -10,7 +10,7 @@ const { useState, useMemo } = React;
 function PageTenants({ rooms, setRooms, config, addActivity, setToast }) {
   const C = window.ADMIN_C;
   const ADMIN_ROOM_TYPES = window.ADMIN_ROOM_TYPES;
-  const { fmt, fmtCurrency, resolveRoomRent } = window;
+  const { fmt, fmtCurrency, resolveRoomRent, resolveRoomDeposit } = window;
   const { Card, Btn, IconBtn, Avatar, Pill, StatusBadge, DataTable, Drawer,
           SearchInput, FilterChip, PageContainer, PageHeader, SectionHeading,
           DefList, Tabs, Modal, Input, Select, Textarea } = window;
@@ -1065,14 +1065,23 @@ function TabContract({ t, routeBookingId = '', config, setToast, addActivity, se
     const sourceLabel = source === 'override'
       ? 'ราคาพิเศษรายห้อง'
       : (source === 'formula' ? 'เมนูตั้งราคา' : 'ค่าเดิมของห้อง');
+    const depositInfo = t.room && resolveRoomDeposit
+      ? resolveRoomDeposit(t.room, config, rent)
+      : null;
+    const resolvedDeposit = Number(depositInfo && depositInfo.deposit);
+    const deposit = Number.isFinite(resolvedDeposit) && resolvedDeposit >= 0
+      ? resolvedDeposit
+      : (rent > 0 ? rent * 2 : 0);
     return {
       rent,
-      deposit: rent > 0 ? rent * 2 : 0,
+      deposit,
       source,
       sourceLabel,
+      depositSource: depositInfo?.source || 'rent_x2',
+      depositSourceLabel: depositInfo?.sourceLabel || 'ค่าเช่า x 2',
       warning: resolved && resolved.warning,
     };
-  }, [t.room, t.rent, config, resolveRoomRent]);
+  }, [t.room, t.rent, config, resolveRoomRent, resolveRoomDeposit]);
   const hasCurrentTenancy = t.tenantStatus === 'active' && !!t.currentRoomId;
 
   const inviteDeliveryText = (delivery) => {
@@ -1223,13 +1232,14 @@ function TabContract({ t, routeBookingId = '', config, setToast, addActivity, se
       const routedBookingId = String(routeBookingId || '').trim().slice(0, 64);
       const bookingId = routedBookingId
         || (reservedBy && !reservedBy.startsWith('contract:') ? reservedBy : null);
+      const contractDeposit = Number(contractRentInfo.deposit);
       const payload = {
         tenantName: t.name,
         tenantPhone: String(t.phone || '').replace(/[\s-]/g, ''),
         tenantEmail: t.email || null,
         roomId: t.roomId,
         monthlyRent: rent,
-        deposit: Number(contractRentInfo.deposit) || rent * 2,
+        deposit: Number.isFinite(contractDeposit) && contractDeposit >= 0 ? contractDeposit : rent * 2,
         // Local-timezone today: toISOString() is the UTC date — before 07:00
         // Thai time that backdates the contract's move-in by one day.
         moveInDate: window.contractTodayYmd ? window.contractTodayYmd()
@@ -2213,7 +2223,8 @@ function ContractPreFlightSummary({ t, rentInfo, C, fmtCurrency }) {
   const r = t.room || {};
   const typeInfo = ADMIN_ROOM_TYPES[t.type] || {};
   const rent = Number(rentInfo && rentInfo.rent) || 0;
-  const deposit = Number(rentInfo && rentInfo.deposit) || (rent * 2);
+  const depositValue = Number(rentInfo && rentInfo.deposit);
+  const deposit = Number.isFinite(depositValue) && depositValue >= 0 ? depositValue : (rent * 2);
 
   // Amenity badges — show only what the room actually has.
   const amenities = [];
@@ -2279,11 +2290,13 @@ function ContractPreFlightSummary({ t, rentInfo, C, fmtCurrency }) {
         </span>
       </Row>
       <Row icon="🏦" label="เงินมัดจำ">
-        <span style={{ fontFamily: 'JetBrains Mono, monospace' }}>
-          {fmtCurrency(deposit)}
-        </span>
-        <span style={{ color: C.muted, marginLeft: 6, fontSize: 11, fontWeight: 400 }}>
-          (ค่าเช่า × 2)
+        <span>
+          <b style={{ fontFamily: 'JetBrains Mono, monospace' }}>
+            {fmtCurrency(deposit)}
+          </b>
+          <span style={{ color: C.muted, marginLeft: 6, fontSize: 11, fontWeight: 400 }}>
+            ({rentInfo?.depositSourceLabel || 'เมนูตั้งราคา'})
+          </span>
         </span>
       </Row>
       <Row icon="👤" label="ผู้เช่า">
@@ -2314,7 +2327,11 @@ function ContractFlowChecklist({
   const hasContract = !!contract || !!liveLink;
   const roomId = (contract && contract.room_id) || t.currentRoomId || t.roomId || '';
   const rent = Number(rentInfo && rentInfo.rent) || Number(contract && contract.monthly_rent) || Number(t.rent) || 0;
-  const deposit = Number(rentInfo && rentInfo.deposit) || Number(contract && contract.deposit) || (rent > 0 ? rent * 2 : 0);
+  const rentInfoDeposit = Number(rentInfo && rentInfo.deposit);
+  const contractDeposit = Number(contract && contract.deposit);
+  const deposit = Number.isFinite(rentInfoDeposit) && rentInfoDeposit >= 0
+    ? rentInfoDeposit
+    : (Number.isFinite(contractDeposit) && contractDeposit >= 0 ? contractDeposit : (rent > 0 ? rent * 2 : 0));
   const reservedBy = t.room && t.room.reservedBy ? String(t.room.reservedBy) : '';
   const bookingId = String(routeBookingId || (t.room && t.room.sourceBookingId) || (reservedBy && !reservedBy.startsWith('contract:') ? reservedBy : '') || '');
   const submitted = invStatus === 'submitted';
@@ -2727,11 +2744,14 @@ function CheckInModal({ tenantId, tenant, rentInfo, onClose, onDone, onError }) 
   const contractDateSummary = window.contractDateSummary || (() => '');
   const initialStartDate = contractTodayYmd();
   const pricingRent = Number(rentInfo && rentInfo.rent) || Number(tenant.rent) || 0;
-  const pricingDeposit = Number(rentInfo && rentInfo.deposit) || (pricingRent > 0 ? pricingRent * 2 : 0);
+  const pricingDepositValue = Number(rentInfo && rentInfo.deposit);
+  const pricingDeposit = Number.isFinite(pricingDepositValue) && pricingDepositValue >= 0
+    ? pricingDepositValue
+    : (pricingRent > 0 ? pricingRent * 2 : 0);
   const [form, setForm] = React.useState({
     moveInDate: initialStartDate,
     monthlyRent: pricingRent > 0 ? String(pricingRent) : '',
-    depositAmount: pricingDeposit > 0 ? String(pricingDeposit) : '',
+    depositAmount: Number.isFinite(pricingDeposit) && pricingDeposit >= 0 ? String(pricingDeposit) : '',
     termMonths: '12',
     endDate: addContractMonths(initialStartDate, 12),
     discountPct: '',  // empty → resolved from termMonths + config.discounts
@@ -2869,8 +2889,9 @@ function CheckInModal({ tenantId, tenant, rentInfo, onClose, onDone, onError }) 
           padding: 10, background: '#f7fbff', border: `1px solid ${C.border}`,
           borderRadius: 6, fontSize: 12, color: C.muted, lineHeight: 1.5,
         }}>
-          ค่าเช่าและมัดจำดึงจาก {rentInfo && rentInfo.sourceLabel ? rentInfo.sourceLabel : 'ข้อมูลห้อง'} เท่านั้น
-          หากต้องเปลี่ยนราคา ให้แก้ที่เมนูตั้งราคา/ห้องพักก่อน แล้วกลับมาเช็คอินใหม่
+          ค่าเช่าดึงจาก {rentInfo && rentInfo.sourceLabel ? rentInfo.sourceLabel : 'ข้อมูลห้อง'}
+          และมัดจำดึงจาก {rentInfo && rentInfo.depositSourceLabel ? rentInfo.depositSourceLabel : 'เมนูตั้งราคา'} เท่านั้น
+          หากต้องเปลี่ยนราคา ให้แก้ที่เมนูตั้งราคา หรือใช้ override รายห้องในหน้าห้องพักก่อน แล้วกลับมาเช็คอินใหม่
         </div>
         <div>
           <label style={inLbl}>วันสิ้นสุดสัญญา (คำนวณอัตโนมัติ/แก้เองได้)</label>

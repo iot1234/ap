@@ -1195,6 +1195,7 @@ function QuickInviteModal({ rooms = {}, config, renewFrom = null, onClose, onSav
   const { Modal, Btn } = window;
   const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
   const resolveRoomRent = window.resolveRoomRent;
+  const resolveRoomDeposit = window.resolveRoomDeposit;
   const contractTodayYmd = window.contractTodayYmd || (() => new Date().toISOString().slice(0, 10));
   const addContractMonths = window.addContractMonths || (() => '');
   const estimateContractMonths = window.estimateContractMonths || (() => null);
@@ -1246,9 +1247,20 @@ function QuickInviteModal({ rooms = {}, config, renewFrom = null, onClose, onSav
   const setRoomId = (roomId) => {
     const room = roomList.find((r) => String(r.id) === String(roomId));
     setForm((f) => {
+      if (!room) {
+        return {
+          ...f,
+          roomId,
+          monthlyRent: '',
+          deposit: '',
+        };
+      }
       const rentInfo = resolveRoomRent ? resolveRoomRent(room, config) : { rent: room?.rent };
       const rent = Number(rentInfo.rent);
-      const deposit = Number(room?.deposit);
+      const depositInfo = resolveRoomDeposit
+        ? resolveRoomDeposit(room, config, Number.isFinite(rent) && rent > 0 ? rent : undefined)
+        : { deposit: room?.deposit };
+      const deposit = Number(depositInfo.deposit);
       return {
         ...f,
         roomId,
@@ -1272,6 +1284,16 @@ function QuickInviteModal({ rooms = {}, config, renewFrom = null, onClose, onSav
         : f.deposit,
     }));
   };
+  const selectedRoom = useMemo(
+    () => roomList.find((r) => String(r.id) === String(form.roomId)) || null,
+    [roomList, form.roomId]
+  );
+  const selectedRentInfo = selectedRoom && resolveRoomRent
+    ? resolveRoomRent(selectedRoom, config)
+    : null;
+  const selectedDepositInfo = selectedRoom && resolveRoomDeposit
+    ? resolveRoomDeposit(selectedRoom, config, Number(form.monthlyRent))
+    : null;
   const setMoveInDate = (value) => {
     setForm((f) => ({
       ...f,
@@ -1479,17 +1501,37 @@ function QuickInviteModal({ rooms = {}, config, renewFrom = null, onClose, onSav
               ) : null}
             </div>
             <div>
-              <label style={lbl}>ค่าเช่า/เดือน *</label>
+              <label style={lbl}>ค่าเช่า/เดือนที่จะล็อกในสัญญา *</label>
               <input style={inp} type="number" step="0.01" min="0"
                 value={form.monthlyRent}
                 onChange={(e) => setRent(e.target.value)} />
             </div>
             <div>
-              <label style={lbl}>มัดจำ</label>
+              <label style={lbl}>มัดจำที่จะล็อกในสัญญา</label>
               <input style={inp} type="number" step="0.01" min="0"
                 value={form.deposit}
                 onChange={(e) => setForm({ ...form, deposit: e.target.value })} />
             </div>
+          </div>
+          <div style={{
+            marginTop: 8,
+            padding: 10,
+            background: C.infoSoft || C.surfaceAlt,
+            border: `1px solid ${(C.info || C.accent)}33`,
+            borderRadius: 6,
+            fontSize: 12,
+            color: C.infoInk || C.muted,
+            lineHeight: 1.5,
+          }}>
+            {selectedRoom ? (
+              <>
+                ค่าเช่าที่เลือกมาจาก {selectedRentInfo?.source === 'override' ? 'override รายห้อง' : selectedRentInfo?.source === 'formula' ? 'เมนูตั้งราคา' : 'ข้อมูลห้อง'}
+                {' '}และมัดจำมาจาก {selectedDepositInfo?.sourceLabel || 'เมนูตั้งราคา'}.
+                เมื่อสร้างสัญญาแล้ว ยอดนี้จะถูกล็อกไว้ในสัญญา หากต้องเปลี่ยนราคากลางให้แก้ที่เมนูตั้งราคาก่อนสร้างสัญญา
+              </>
+            ) : (
+              <>เลือกห้องก่อน ระบบจะดึงค่าเช่าและมัดจำจากเมนูตั้งราคา/override รายห้องมาเติมให้อัตโนมัติ</>
+            )}
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 8 }}>
             <div>

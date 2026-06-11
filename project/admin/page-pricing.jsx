@@ -167,6 +167,27 @@ function PagePricing({ config, setConfig, rooms, addActivity, setToast, embedded
 
   const dirty = useMemo(() => JSON.stringify(draft) !== JSON.stringify(config), [draft, config]);
   const review = useMemo(() => buildPricingReview(draft, config, rooms), [draft, config, rooms]);
+  const pricingStats = useMemo(() => {
+    const list = rooms && typeof rooms === 'object' ? Object.values(rooms) : [];
+    const resolveRoomRent = window.resolveRoomRent;
+    let overrideCount = 0;
+    let formulaCount = 0;
+    let legacyCount = 0;
+    for (const room of list) {
+      if (!room || typeof room !== 'object') continue;
+      const info = resolveRoomRent ? resolveRoomRent(room, draft) : null;
+      if (info?.source === 'override') overrideCount++;
+      else if (info?.source === 'formula') formulaCount++;
+      else legacyCount++;
+    }
+    return {
+      roomCount: list.length,
+      formulaCount,
+      overrideCount,
+      legacyCount,
+      affectedFutureRooms: review.impact.length,
+    };
+  }, [rooms, draft, review.impact.length]);
 
   // Derive the unique sorted list of floors actually present so the
   // "พรีเมียมตามชั้น" inputs + preview floor selector show every floor an
@@ -366,6 +387,44 @@ function PagePricing({ config, setConfig, rooms, addActivity, setToast, embedded
         </div>
       )}
 
+      <Card style={{ marginBottom: 16, background: C.surfaceAlt, border: `1px solid ${C.border}` }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 14, flexWrap: 'wrap', alignItems: 'flex-start' }}>
+          <div style={{ minWidth: 240, flex: '1 1 320px' }}>
+            <div style={{ fontSize: 15, fontWeight: 700, color: C.ink, marginBottom: 4 }}>
+              ศูนย์กลางราคาเดียว
+            </div>
+            <div style={{ fontSize: 12.5, color: C.ink2, lineHeight: 1.6 }}>
+              ค่าเช่าและมัดจำสำหรับ booking, quick invite, check-in และสัญญาใหม่จะอ้างอิงจากหน้านี้ก่อนเสมอ.
+              หน้าห้องพักใช้แก้เฉพาะลักษณะห้องหรือ override รายห้อง ส่วนสัญญา active จะยังใช้ยอดที่ล็อกไว้จนกว่าจะเลือกอัปเดตสัญญา.
+            </div>
+          </div>
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(110px, 1fr))',
+            gap: 8,
+            flex: '1 1 460px',
+          }}>
+            {[
+              { label: 'ห้องใช้สูตรกลาง', value: pricingStats.formulaCount, tone: C.success },
+              { label: 'override รายห้อง', value: pricingStats.overrideCount, tone: C.warning },
+              { label: 'ค่าเดิม fallback', value: pricingStats.legacyCount, tone: C.muted },
+              { label: 'กำลังจะเปลี่ยน', value: pricingStats.affectedFutureRooms, tone: dirty ? C.accent : C.muted },
+            ].map((item) => (
+              <div key={item.label} style={{
+                padding: 10,
+                borderRadius: 8,
+                background: C.surface,
+                border: `1px solid ${C.borderSoft}`,
+                minWidth: 0,
+              }}>
+                <div style={{ fontSize: 11, color: C.muted, marginBottom: 3 }}>{item.label}</div>
+                <div style={{ fontSize: 20, fontWeight: 800, color: item.tone || C.ink }}>{item.value}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </Card>
+
       {dirty && (
         <div style={{
           padding: '10px 14px', marginBottom: 16,
@@ -422,10 +481,10 @@ function PagePricing({ config, setConfig, rooms, addActivity, setToast, embedded
 
       <Tabs
         items={[
-          { value: 'rates',    label: 'ราคาฐาน',         icon: '🏷️' },
-          { value: 'utils',    label: 'ค่าน้ำ-ไฟ',       icon: '💡' },
-          { value: 'discount', label: 'ส่วนลด',           icon: '🎁' },
-          { value: 'fees',     label: 'ค่าธรรมเนียม',  icon: '📑' },
+          { value: 'rates',    label: 'ค่าเช่า+มัดจำ',  icon: '🏷️' },
+          { value: 'utils',    label: 'น้ำ/ไฟ/ส่วนกลาง', icon: '💡' },
+          { value: 'discount', label: 'ส่วนลดสัญญา',     icon: '🎁' },
+          { value: 'fees',     label: 'ค่าปรับ/อื่นๆ',    icon: '📑' },
         ]}
         value={tab}
         onChange={setTab}
@@ -600,7 +659,7 @@ function TabRates({ draft, updatePath, floorsForPricing }) {
   const ADMIN_ROOM_TYPES = window.ADMIN_ROOM_TYPES;
   const ADMIN_ROOM_TYPE_KEYS = window.ADMIN_ROOM_TYPE_KEYS;
   const ADMIN_VIEWS = window.ADMIN_VIEWS;
-  const { fmtCurrency, computeRoomRent } = window;
+  const { fmtCurrency, computeRoomRent, resolveRoomDeposit } = window;
   const { Card, Input, Select, Toggle, SectionHeading, Pill } = window;
 
   const [previewType, setPreviewType] = useState('deluxe');
@@ -609,6 +668,10 @@ function TabRates({ draft, updatePath, floorsForPricing }) {
   const [previewFeats, setPreviewFeats] = useState({ balcony: true, ac: true, parking: false, kitchen: false });
 
   const previewRent = computeRoomRent(previewType, Number(previewFloor), previewView, previewFeats, draft);
+  const previewDepositInfo = resolveRoomDeposit
+    ? resolveRoomDeposit({ type: previewType }, draft, previewRent)
+    : { deposit: previewRent * 2, sourceLabel: 'ค่าเช่า x 2' };
+  const previewDeposit = Number(previewDepositInfo.deposit) || 0;
   const featurePremiumItems = [
     { key: 'balcony', label: 'มีระเบียง', premium: Number(draft.featurePremium.balcony || 0) },
     { key: 'ac', label: 'แอร์', premium: Number(draft.featurePremium.ac || 0) },
@@ -623,14 +686,13 @@ function TabRates({ draft, updatePath, floorsForPricing }) {
           <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start', fontSize: 13, color: '#7A5A0F', lineHeight: 1.6 }}>
             <span style={{ fontSize: 16, lineHeight: 1 }}>ℹ️</span>
             <div>
-              <b>ราคาที่ตั้งใหม่จะมีผลกับ</b>: ห้องว่าง / สัญญาที่เซ็นหลังจากนี้.
-              ผู้เช่าที่มีสัญญาอยู่แล้วจะยังจ่ายตามอัตราในสัญญา (locked-at-signing) จนกว่าจะหมดสัญญาหรือต่อสัญญาใหม่
-              — เป็นไปตามข้อกำหนดสิทธิผู้เช่า. หากต้องการเปลี่ยนเฉพาะห้อง ให้ใช้ <b>Rent Override</b> ที่หน้าห้องพักแทน.
+              <b>แก้ราคาหลักที่นี่ที่เดียว</b>: ค่าเช่าและมัดจำในหน้านี้จะถูกใช้กับ booking, quick invite, check-in และสัญญาใหม่.
+              ห้องที่ต้องใช้ราคาไม่เหมือนสูตรให้ไปตั้ง <b>override รายห้อง</b> ที่หน้าห้องพัก. สัญญา active จะไม่เปลี่ยนจนกว่าจะยืนยันในหน้าตรวจผลกระทบ.
             </div>
           </div>
         </Card>
         <Card>
-          <SectionHeading title="ราคาตามประเภทห้อง" subtitle="ราคาเช่าพื้นฐานและเงินมัดจำของแต่ละประเภท" level={3} />
+          <SectionHeading title="ค่าเช่าและมัดจำกลางตามประเภทห้อง" subtitle="จุดตั้งราคาหลักสำหรับผู้เช่าใหม่และสัญญาใหม่" level={3} />
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
             {ADMIN_ROOM_TYPE_KEYS.map(k => {
               const t = ADMIN_ROOM_TYPES[k];
@@ -655,15 +717,23 @@ function TabRates({ draft, updatePath, floorsForPricing }) {
                     label="ค่าเช่า/เดือน" type="number" suffix="บาท"
                     value={r.rent}
                     onChange={(v) => {
-                      updatePath(`rates.${k}.rent`, Number(v));
-                      updatePath(`rates.${k}.deposit`, Number(v) * 2);
+                      const nextRent = Number(v);
+                      const oldRent = Number(r.rent);
+                      const currentDeposit = Number(r.deposit);
+                      updatePath(`rates.${k}.rent`, nextRent);
+                      if (!Number.isFinite(currentDeposit)
+                        || currentDeposit === 0
+                        || (Number.isFinite(oldRent) && Math.abs(currentDeposit - oldRent * 2) < 0.01)) {
+                        updatePath(`rates.${k}.deposit`, nextRent * 2);
+                      }
                     }}
+                    hint="ถ้ามัดจำยังเป็น 2 เดือน ระบบจะปรับตามค่าเช่าให้"
                   />
                   <Input
-                    label="เงินมัดจำ" type="number" suffix="บาท"
+                    label="เงินมัดจำกลาง" type="number" suffix="บาท"
                     value={r.deposit}
                     onChange={(v) => updatePath(`rates.${k}.deposit`, Number(v))}
-                    hint="ปกติเท่ากับ 2 เดือน"
+                    hint="ค่านี้ถูกใช้กับสัญญาใหม่ก่อนค่า fallback ของห้อง"
                   />
                 </div>
               );
@@ -779,6 +849,19 @@ function TabRates({ draft, updatePath, floorsForPricing }) {
             <span style={{ fontFamily: 'IBM Plex Sans Thai, sans-serif', fontSize: 22, fontWeight: 700, color: '#fff' }}>
               {fmtCurrency(previewRent)}
             </span>
+          </div>
+          <div style={{
+            marginTop: 8, padding: 12,
+            background: 'rgba(255,255,255,0.07)', borderRadius: 10,
+            display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8,
+          }}>
+            <span style={{ fontSize: 12.5, color: '#ebe1cc' }}>มัดจำสัญญาใหม่</span>
+            <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 15, fontWeight: 700, color: '#fff' }}>
+              {fmtCurrency(previewDeposit)}
+            </span>
+          </div>
+          <div style={{ fontSize: 11, color: '#8a7d6b', marginTop: 6, textAlign: 'right' }}>
+            มัดจำจาก {previewDepositInfo.sourceLabel || 'เมนูตั้งราคา'}
           </div>
           <div style={{ fontSize: 11, color: '#8a7d6b', marginTop: 8, textAlign: 'right' }}>
             * ยังไม่รวมค่าน้ำ ค่าไฟ และค่าธรรมเนียมอื่นๆ
