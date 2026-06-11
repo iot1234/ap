@@ -237,7 +237,7 @@ function PageSettings({ rooms, setRooms, config, setConfig, bookings, setBooking
           /admin#pricing URL still works (standalone PageContainer mode). */}
       {tab === 'pricing'  && window.PagePricing
         ? <window.PagePricing config={config} setConfig={setConfig} rooms={rooms}
-                              addActivity={addActivity} setToast={setToast} embedded />
+                              addActivity={addActivity} setToast={setToast} embedded currentUser={currentUser} />
         : null}
       {tab === 'bookingDeposit' && window.PageBookingDepositSettings
         ? <window.PageBookingDepositSettings setToast={setToast} embedded currentUser={currentUser} />

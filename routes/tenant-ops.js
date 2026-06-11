@@ -1939,7 +1939,8 @@ module.exports = function buildTenantOpsRouter(ctx) {
         try {
           const roomV2Q = await client.query(
             `SELECT room_code, room_type, floor, room_no, rent_price, deposit_price,
-                    wifi_fee, status, rent_override, rent_override_reason
+                    wifi_fee, status, rent_override, rent_override_reason,
+                    view_type, has_balcony, has_parking, has_kitchen, has_ac
                FROM rooms_v2
               WHERE room_code=$1 AND deleted_at IS NULL
               FOR UPDATE`,
@@ -2019,23 +2020,19 @@ module.exports = function buildTenantOpsRouter(ctx) {
         const effectiveMonthlyRent = Number.isFinite(resolvedCheckinRentValue) && resolvedCheckinRentValue > 0
           ? resolvedCheckinRentValue
           : Number(monthlyRent);
-        // Deposit precedence mirrors the rent resolution above: the room's
-        // own configured deposit wins (per-room promo/special — blob
-        // `deposit`/`depositPrice`, rooms_v2 `deposit_price`), then the
-        // 2-months-of-rent convention the admin UI displays, then the
-        // request value (legacy rooms with no resolvable rent). The
-        // request's depositAmount never overrides room pricing — it used to
-        // be validated by the cap guard and then silently replaced with
-        // rent×2, so checkout could "refund" money that was never collected.
-        const roomDepositRaw = blobRoomForRent?.deposit
-          ?? blobRoomForRent?.depositPrice
-          ?? roomV2ForRent?.deposit_price;
-        const roomDepositValue = Number(roomDepositRaw);
-        const effectiveDepositAmount = Number.isFinite(roomDepositValue) && roomDepositValue > 0
-          ? roomDepositValue
-          : (effectiveMonthlyRent > 0
-            ? effectiveMonthlyRent * 2
-            : Number(depositAmount));
+        // Deposit follows the same contract-pricing resolver used by the
+        // pricing impact guard: current /admin#pricing deposit template first,
+        // then a room-level deposit snapshot, then the 2-month convention. The
+        // request's depositAmount remains only a last legacy fallback.
+        const resolvedCheckinDeposit = pricing.resolveContractDeposit({
+          room: blobRoomForRent || roomV2ForRent,
+          config: pricingConfig,
+          rent: effectiveMonthlyRent,
+        });
+        const resolvedCheckinDepositValue = Number(resolvedCheckinDeposit.deposit);
+        const effectiveDepositAmount = Number.isFinite(resolvedCheckinDepositValue) && resolvedCheckinDepositValue >= 0
+          ? resolvedCheckinDepositValue
+          : Number(depositAmount);
         const rentAssessment = pricing.assessContractRent({
           monthlyRent: effectiveMonthlyRent,
           room: blobRoomForRent || roomV2ForRent,

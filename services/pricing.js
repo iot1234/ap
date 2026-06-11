@@ -51,6 +51,16 @@ function positiveNumberOrNull(v) {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
+function nonNegativeNumberOrNull(v) {
+  if (v === undefined || v === null || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
+function roundMoney(n) {
+  return Math.round((Number(n) || 0) * 100) / 100;
+}
+
 function isImplausiblyLowRent(v, min = MIN_SENSIBLE_RENT) {
   if (v === undefined || v === null || v === '') return false;
   const n = Number(v);
@@ -234,6 +244,28 @@ function resolveExpectedRoomRent({ room, config }) {
   return resolveBillingRent({ room, config });
 }
 
+function resolveContractDeposit({ room, config, rent } = {}) {
+  const type = roomTypeOf(room);
+  const configured = nonNegativeNumberOrNull(config?.rates?.[type]?.deposit);
+  if (configured !== null) {
+    return { deposit: roundMoney(configured), source: 'pricing_config' };
+  }
+
+  const roomDeposit = nonNegativeNumberOrNull(
+    room?.deposit ?? room?.depositPrice ?? room?.deposit_price
+  );
+  if (roomDeposit !== null) {
+    return { deposit: roundMoney(roomDeposit), source: 'room' };
+  }
+
+  const monthlyRent = nonNegativeNumberOrNull(rent);
+  if (monthlyRent !== null) {
+    return { deposit: roundMoney(monthlyRent * 2), source: 'rent_x2' };
+  }
+
+  return { deposit: 0, source: 'none' };
+}
+
 function assessContractRent({ monthlyRent, room = null, config = null } = {}) {
   const rent = Number(monthlyRent);
   if (!Number.isFinite(rent) || rent <= 0) {
@@ -305,12 +337,152 @@ function previewImpact(rooms, oldConfig, newConfig) {
   return { unchanged, willChange };
 }
 
+function roomIdOf(room) {
+  return room?.id || room?.room_code || room?.roomCode || room?.roomId || null;
+}
+
+function makeRoomMap(rooms) {
+  const list = Array.isArray(rooms) ? rooms : Object.values(rooms || {});
+  const map = new Map();
+  for (const room of list) {
+    if (!room || typeof room !== 'object') continue;
+    const id = roomIdOf(room);
+    if (!id) continue;
+    map.set(String(id), room);
+  }
+  return map;
+}
+
+function statusIsExistingTenancy(status) {
+  return ['occupied', 'overdue'].includes(String(status || '').toLowerCase());
+}
+
+/**
+ * Authoritative preview for /admin#pricing saves. It separates:
+ *   - active contracts: locked today, can be updated only by explicit choice
+ *   - future rooms: vacant/reserved/maintenance rooms that will feed the next
+ *     contract/check-in price
+ *
+ * This stays pure so backend and tests can share the same money math.
+ */
+function previewPricingChangeImpact({ rooms, contracts = [], oldConfig, newConfig } = {}) {
+  const roomMap = makeRoomMap(rooms);
+  const activeRoomIds = new Set(
+    (Array.isArray(contracts) ? contracts : [])
+      .map((c) => c && c.room_id)
+      .filter(Boolean)
+      .map(String)
+  );
+
+  const activeContractChanges = [];
+  const futureRoomChanges = [];
+
+  for (const contract of Array.isArray(contracts) ? contracts : []) {
+    if (!contract || !contract.room_id) continue;
+    const room = roomMap.get(String(contract.room_id));
+    if (!room) {
+      activeContractChanges.push({
+        type: 'missing_room',
+        roomId: String(contract.room_id),
+        contractId: contract.id || null,
+        contractNo: contract.contract_no || null,
+        tenantName: contract.tenant_name || contract.full_name || null,
+        currentRent: roundMoney(contract.monthly_rent),
+        currentDeposit: roundMoney(contract.deposit),
+      });
+      continue;
+    }
+
+    const oldRent = resolveExpectedRoomRent({ room, config: oldConfig });
+    const newRent = resolveExpectedRoomRent({ room, config: newConfig });
+    const oldDeposit = resolveContractDeposit({ room, config: oldConfig, rent: oldRent.rent });
+    const newDeposit = resolveContractDeposit({ room, config: newConfig, rent: newRent.rent });
+    const rentSettingChanged = Math.abs(roundMoney(oldRent.rent) - roundMoney(newRent.rent)) >= 0.01;
+    const depositSettingChanged = Math.abs(oldDeposit.deposit - newDeposit.deposit) >= 0.01;
+    if (!rentSettingChanged && !depositSettingChanged) continue;
+
+    const currentRent = roundMoney(contract.monthly_rent);
+    const currentDeposit = roundMoney(contract.deposit);
+    activeContractChanges.push({
+      type: 'active_contract',
+      roomId: String(contract.room_id),
+      contractId: contract.id || null,
+      contractNo: contract.contract_no || null,
+      tenantId: contract.tenant_id || null,
+      tenantName: contract.tenant_name || contract.full_name || null,
+      status: contract.status || 'active',
+      currentRent,
+      currentDeposit,
+      oldSettingRent: roundMoney(oldRent.rent),
+      newSettingRent: roundMoney(newRent.rent),
+      oldSettingDeposit: oldDeposit.deposit,
+      newSettingDeposit: newDeposit.deposit,
+      rentSourceBefore: oldRent.source || null,
+      rentSourceAfter: newRent.source || null,
+      depositSourceBefore: oldDeposit.source,
+      depositSourceAfter: newDeposit.source,
+      rentDelta: roundMoney(roundMoney(newRent.rent) - currentRent),
+      depositDelta: roundMoney(newDeposit.deposit - currentDeposit),
+      willUpdateRent: Math.abs(roundMoney(newRent.rent) - currentRent) >= 0.01,
+      willUpdateDeposit: Math.abs(newDeposit.deposit - currentDeposit) >= 0.01,
+    });
+  }
+
+  for (const room of roomMap.values()) {
+    const roomId = String(roomIdOf(room));
+    if (!roomId || activeRoomIds.has(roomId) || statusIsExistingTenancy(room.status)) continue;
+    const oldRent = resolveExpectedRoomRent({ room, config: oldConfig });
+    const newRent = resolveExpectedRoomRent({ room, config: newConfig });
+    const oldDeposit = resolveContractDeposit({ room, config: oldConfig, rent: oldRent.rent });
+    const newDeposit = resolveContractDeposit({ room, config: newConfig, rent: newRent.rent });
+    const rentChanged = Math.abs(roundMoney(oldRent.rent) - roundMoney(newRent.rent)) >= 0.01;
+    const depositChanged = Math.abs(oldDeposit.deposit - newDeposit.deposit) >= 0.01;
+    if (!rentChanged && !depositChanged) continue;
+    futureRoomChanges.push({
+      roomId,
+      status: room.status || 'unknown',
+      type: roomTypeOf(room),
+      oldRent: roundMoney(oldRent.rent),
+      newRent: roundMoney(newRent.rent),
+      oldDeposit: oldDeposit.deposit,
+      newDeposit: newDeposit.deposit,
+      rentSourceBefore: oldRent.source || null,
+      rentSourceAfter: newRent.source || null,
+      depositSourceBefore: oldDeposit.source,
+      depositSourceAfter: newDeposit.source,
+      rentDelta: roundMoney(roundMoney(newRent.rent) - roundMoney(oldRent.rent)),
+      depositDelta: roundMoney(newDeposit.deposit - oldDeposit.deposit),
+    });
+  }
+
+  const activeRentDelta = roundMoney(activeContractChanges.reduce(
+    (sum, item) => sum + (item.type === 'active_contract' ? Number(item.rentDelta || 0) : 0), 0
+  ));
+  const activeDepositDelta = roundMoney(activeContractChanges.reduce(
+    (sum, item) => sum + (item.type === 'active_contract' ? Number(item.depositDelta || 0) : 0), 0
+  ));
+
+  return {
+    summary: {
+      activeContractChanges: activeContractChanges.length,
+      futureRoomChanges: futureRoomChanges.length,
+      activeRentDelta,
+      activeDepositDelta,
+      requiresReview: activeContractChanges.length > 0 || futureRoomChanges.length > 0,
+    },
+    activeContractChanges,
+    futureRoomChanges,
+  };
+}
+
 module.exports = {
   resolveBillingRent,
   resolveExpectedRoomRent,
+  resolveContractDeposit,
   assessContractRent,
   computeFromFormula,
   previewImpact,
+  previewPricingChangeImpact,
   isImplausiblyLowRent,
   hasImplausiblyLowConfiguredRate,
   MIN_SENSIBLE_RENT,

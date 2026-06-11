@@ -241,20 +241,20 @@ function bangkokToday() {
 
 // === 1. Deposit derived from room pricing + cap on the derived value =======
 
-test('check-in stores the room-configured deposit, not rent×2, on the contract', async () => {
+test('check-in falls back to the room-configured deposit when pricing has no deposit template', async () => {
   const { res, captured } = await runCheckin();
   assert.equal(res.statusCode, 200, JSON.stringify(res.body));
   assert.ok(captured.contractInsert, 'contract INSERT must run');
   // params: [contractNo, id, roomId, start, end, rent, deposit, ...]
   assert.equal(captured.contractInsert.params[5], 4500, 'rent snapshots from the room');
   assert.equal(captured.contractInsert.params[6], 3000,
-    'deposit must come from the room\'s configured deposit (3000), not rent×2 (9000)');
+    'deposit must fall back to the room\'s configured deposit (3000), not rent×2 (9000)');
 });
 
 test('deposit cap guard validates the derived deposit that lands on the contract', () => {
   const ops = read('routes', 'tenant-ops.js');
-  assert.match(ops, /const roomDepositRaw = blobRoomForRent\?\.deposit\s*\n?\s*\?\? blobRoomForRent\?\.depositPrice\s*\n?\s*\?\? roomV2ForRent\?\.deposit_price/,
-    'deposit precedence: blob deposit/depositPrice → rooms_v2.deposit_price');
+  assert.match(ops, /pricing\.resolveContractDeposit\(\{[\s\S]{0,160}config: pricingConfig,[\s\S]{0,80}rent: effectiveMonthlyRent/,
+    'deposit must use the pricing/contract deposit resolver');
   assert.match(ops, /if \(!isForced && effectiveDepositAmount > maxDeposit\)/,
     'DEPOSIT_TOO_LARGE must check the DERIVED deposit');
   assert.doesNotMatch(ops, /Number\(depositAmount\) > maxDeposit/,

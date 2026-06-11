@@ -1083,6 +1083,203 @@ function maskConfigPublic(cfg) {
   return out;
 }
 
+const PRICING_CONTRACT_UPDATE_CONFIRM = 'UPDATE_ACTIVE_CONTRACTS';
+
+function pricingImpactRoomFromV2(row) {
+  if (!row) return null;
+  return {
+    id: row.room_code,
+    room_code: row.room_code,
+    type: row.room_type,
+    room_type: row.room_type,
+    floor: row.floor,
+    no: row.room_no,
+    room_no: row.room_no,
+    rent: Number(row.rent_price),
+    rent_price: Number(row.rent_price),
+    rent_override: row.rent_override == null ? null : Number(row.rent_override),
+    rent_override_reason: row.rent_override_reason || null,
+    deposit: Number(row.deposit_price || 0),
+    deposit_price: Number(row.deposit_price || 0),
+    wifi: Number(row.wifi_fee || 0),
+    wifi_fee: Number(row.wifi_fee || 0),
+    view: row.view_type || '',
+    view_type: row.view_type || '',
+    balcony: !!row.has_balcony,
+    has_balcony: !!row.has_balcony,
+    parking: !!row.has_parking,
+    has_parking: !!row.has_parking,
+    kitchen: !!row.has_kitchen,
+    has_kitchen: !!row.has_kitchen,
+    ac: row.has_ac === null || row.has_ac === undefined ? undefined : !!row.has_ac,
+    has_ac: row.has_ac === null || row.has_ac === undefined ? undefined : !!row.has_ac,
+    status: row.status || 'vacant',
+  };
+}
+
+function mergePricingImpactRooms(roomsObj, v2Rows) {
+  const map = new Map();
+  if (roomsObj && typeof roomsObj === 'object') {
+    for (const [id, room] of Object.entries(roomsObj)) {
+      if (!room || typeof room !== 'object') continue;
+      const roomId = String(room.id || id || '').trim();
+      if (!roomId) continue;
+      map.set(roomId, { ...room, id: roomId });
+    }
+  }
+  for (const row of Array.isArray(v2Rows) ? v2Rows : []) {
+    const v2Room = pricingImpactRoomFromV2(row);
+    if (!v2Room || !v2Room.id) continue;
+    const existing = map.get(String(v2Room.id));
+    map.set(String(v2Room.id), {
+      ...(existing || {}),
+      ...v2Room,
+      id: String(v2Room.id),
+      status: (existing && existing.status) || v2Room.status || 'vacant',
+      view: (existing && existing.view) || v2Room.view || '',
+      rentOverride: existing && existing.rentOverride !== undefined ? existing.rentOverride : v2Room.rent_override,
+      rentOverrideReason: existing && existing.rentOverrideReason !== undefined
+        ? existing.rentOverrideReason : v2Room.rent_override_reason,
+    });
+  }
+  return Array.from(map.values()).sort((a, b) => String(a.id).localeCompare(String(b.id), 'th'));
+}
+
+async function loadPricingImpactInputs(db) {
+  const configRow = await db.query(`SELECT value FROM app_data WHERE key='baankarn_config_v1' LIMIT 1`);
+  const roomsRow = await db.query(`SELECT value FROM app_data WHERE key='baankarn_rooms_v1' LIMIT 1`);
+  const contractsQ = await db.query(
+    `SELECT c.id, c.contract_no, c.tenant_id, c.room_id, c.monthly_rent,
+            c.deposit, c.status, c.start_date, c.end_date,
+            t.full_name AS tenant_name, t.phone AS tenant_phone
+       FROM contracts c
+       LEFT JOIN tenants t ON t.id=c.tenant_id AND t.deleted_at IS NULL
+      WHERE c.status='active' AND c.deleted_at IS NULL
+      ORDER BY c.room_id ASC, c.id ASC`
+  ).catch((err) => {
+    if (err.code === '42P01' || err.code === '42703') return { rows: [] };
+    throw err;
+  });
+  let v2Rows = [];
+  try {
+    const v2 = await db.query(
+      `SELECT room_code, floor, room_no, room_type, status, rent_price,
+              rent_override, rent_override_reason, deposit_price, wifi_fee,
+              view_type, has_balcony, has_parking, has_kitchen, has_ac
+         FROM rooms_v2
+        WHERE deleted_at IS NULL
+        ORDER BY room_code ASC`
+    );
+    v2Rows = v2.rows || [];
+  } catch (err) {
+    if (err.code !== '42P01' && err.code !== '42703') throw err;
+  }
+  return {
+    currentConfig: configRow.rows[0]?.value || {},
+    rooms: mergePricingImpactRooms(roomsRow.rows[0]?.value || {}, v2Rows),
+    contracts: contractsQ.rows || [],
+  };
+}
+
+async function buildPricingImpactForConfig(db, nextConfig) {
+  const inputs = await loadPricingImpactInputs(db);
+  return pricing.previewPricingChangeImpact({
+    rooms: inputs.rooms,
+    contracts: inputs.contracts,
+    oldConfig: inputs.currentConfig,
+    newConfig: nextConfig || {},
+  });
+}
+
+async function applyPricingToActiveContracts(client, nextConfig) {
+  const inputs = await loadPricingImpactInputs(client);
+  const roomMap = new Map((inputs.rooms || []).map((room) => [String(room.id || room.room_code || ''), room]));
+  const updated = [];
+  const skipped = [];
+  for (const contract of inputs.contracts || []) {
+    const room = roomMap.get(String(contract.room_id || ''));
+    if (!room) {
+      skipped.push({
+        roomId: contract.room_id,
+        contractId: contract.id,
+        contractNo: contract.contract_no,
+        tenantName: contract.tenant_name,
+        reason: 'missing_room',
+      });
+      continue;
+    }
+    const rentInfo = pricing.resolveExpectedRoomRent({ room, config: nextConfig || {} });
+    const depositInfo = pricing.resolveContractDeposit({ room, config: nextConfig || {}, rent: rentInfo.rent });
+    const currentRent = Number(contract.monthly_rent) || 0;
+    const currentDeposit = Number(contract.deposit) || 0;
+    const nextRent = Number(rentInfo.rent);
+    const nextDeposit = Number(depositInfo.deposit);
+    const willUpdateRent = Math.abs(nextRent - currentRent) >= 0.01;
+    const willUpdateDeposit = Math.abs(nextDeposit - currentDeposit) >= 0.01;
+    if (!willUpdateRent && !willUpdateDeposit) continue;
+    if (!Number.isFinite(nextRent) || nextRent <= 0 || !Number.isFinite(nextDeposit) || nextDeposit < 0) {
+      skipped.push({
+        roomId: contract.room_id,
+        contractId: contract.id,
+        contractNo: contract.contract_no,
+        tenantName: contract.tenant_name,
+        nextRent,
+        nextDeposit,
+        reason: 'invalid_target_amount',
+      });
+      continue;
+    }
+    const upd = await client.query(
+      `UPDATE contracts
+          SET monthly_rent=$1,
+              deposit=$2,
+              updated_at=NOW()
+       WHERE id=$3 AND status='active' AND deleted_at IS NULL
+       RETURNING id, contract_no, room_id, monthly_rent, deposit`,
+      [nextRent, nextDeposit, contract.id]
+    );
+    if (!upd.rows.length) {
+      skipped.push({
+        roomId: contract.room_id,
+        contractId: contract.id,
+        contractNo: contract.contract_no,
+        tenantName: contract.tenant_name,
+        reason: 'contract_changed_before_update',
+      });
+      continue;
+    }
+    updated.push({
+      contractId: contract.id,
+      contractNo: contract.contract_no,
+      roomId: contract.room_id,
+      tenantName: contract.tenant_name,
+      rent: { from: currentRent, to: Number(upd.rows[0].monthly_rent) },
+      deposit: { from: currentDeposit, to: Number(upd.rows[0].deposit) },
+    });
+  }
+  return {
+    ok: true,
+    updatedCount: updated.length,
+    skippedCount: skipped.length,
+    updated,
+    skipped: skipped.slice(0, 20),
+  };
+}
+
+app.post('/api/admin/pricing-impact', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager', 'staff'), async (req, res) => {
+  const nextConfig = req.body && req.body.value !== undefined ? req.body.value : req.body;
+  if (!nextConfig || typeof nextConfig !== 'object' || Array.isArray(nextConfig)) {
+    return res.status(400).json({ error: 'value must be a config object', code: 'BAD_SHAPE' });
+  }
+  try {
+    const impact = await buildPricingImpactForConfig(pool, nextConfig);
+    res.json({ ok: true, impact });
+  } catch (err) {
+    console.error('pricing impact error:', err);
+    res.status(500).json({ error: 'internal error', code: 'DB_ERROR' });
+  }
+});
+
 app.get('/api/data/:key', async (req, res) => {
   const key = req.params.key;
   if (!ALLOWED_KEYS.has(key)) return res.status(400).json({ error: 'invalid key' });
@@ -1255,6 +1452,9 @@ app.put('/api/data/:key', sameOrigin, csrfGuard, requireAuth, requireRole('owner
   // ambiguous or broken, such as an enabled payment receiver with no valid
   // target.
   let configWarnings = [];
+  let pricingImpactReview = null;
+  let pricingContractUpdateMode = 'new_only';
+  let pricingContractUpdateResult = null;
   if (key === 'baankarn_config_v1') {
     // === Payment-receiver protection (AuthZ) ================================
     // value.payment.{promptpay,bankAcc,truemoneyPhone,…} decides WHERE every
@@ -1421,6 +1621,51 @@ app.put('/api/data/:key', sameOrigin, csrfGuard, requireAuth, requireRole('owner
         hint: 'แก้ค่าที่หน้า /admin#settings แล้วบันทึกใหม่ ระบบจะบล็อกเฉพาะข้อมูลที่ทำให้ระบบทำงานต่อไม่ได้',
       });
     }
+    const rawMode = req.body && typeof req.body === 'object' && !Array.isArray(req.body)
+      ? req.body.pricingContractMode
+      : undefined;
+    pricingContractUpdateMode = rawMode === 'update_active' ? 'update_active' : 'new_only';
+    const pricingImpactAcknowledged = !!(req.body && typeof req.body === 'object' && !Array.isArray(req.body)
+      && req.body.pricingImpactAcknowledged === true);
+    if (pricingContractUpdateMode === 'update_active') {
+      if (!privileged) {
+        return res.status(403).json({
+          error: 'เฉพาะ owner/manager เท่านั้นที่อัปเดตยอดในสัญญา active ได้',
+          code: 'PRICING_CONTRACT_UPDATE_FORBIDDEN',
+          hint: 'เลือกบันทึกเฉพาะสัญญาใหม่ หรือให้ owner/manager เป็นผู้ทำรายการ',
+        });
+      }
+      const confirmToken = req.body && typeof req.body === 'object' && !Array.isArray(req.body)
+        ? req.body.pricingContractConfirm
+        : null;
+      if (confirmToken !== PRICING_CONTRACT_UPDATE_CONFIRM) {
+        return res.status(400).json({
+          error: 'ต้องยืนยันการอัปเดตสัญญา active อย่างชัดเจน',
+          code: 'PRICING_CONTRACT_UPDATE_CONFIRM_REQUIRED',
+          required: PRICING_CONTRACT_UPDATE_CONFIRM,
+        });
+      }
+    }
+
+    pricingImpactReview = await buildPricingImpactForConfig(pool, value);
+    if (pricingImpactReview?.summary?.requiresReview && !pricingImpactAcknowledged) {
+      return res.status(409).json({
+        error: 'ต้องตรวจผลกระทบของการเปลี่ยนราคาก่อนบันทึก',
+        code: 'PRICING_IMPACT_REVIEW_REQUIRED',
+        impact: pricingImpactReview,
+        hint: 'ตรวจรายชื่อห้อง/สัญญาที่กระทบ แล้วเลือกว่าจะใช้เฉพาะสัญญาใหม่หรืออัปเดตสัญญา active ด้วย',
+      });
+    }
+    if (pricingImpactReview?.summary?.activeContractChanges > 0) {
+      if (pricingContractUpdateMode === 'update_active') {
+        warnings.push(`ยืนยันให้อัปเดตสัญญา active ${pricingImpactReview.summary.activeContractChanges} รายการตาม pricing ใหม่`);
+      } else {
+        warnings.push(`สัญญา active ${pricingImpactReview.summary.activeContractChanges} รายการจะยังใช้ยอดเดิมในสัญญา — pricing ใหม่มีผลกับสัญญาใหม่/ต่อสัญญา`);
+      }
+    }
+    if (pricingImpactReview?.summary?.futureRoomChanges > 0) {
+      warnings.push(`ห้องที่ยังไม่ lock สัญญา ${pricingImpactReview.summary.futureRoomChanges} ห้องจะใช้ยอด pricing ใหม่ในสัญญาถัดไป`);
+    }
     configWarnings = warnings;
     serialised = JSON.stringify(value);
   }
@@ -1513,6 +1758,9 @@ app.put('/api/data/:key', sameOrigin, csrfGuard, requireAuth, requireRole('owner
            RETURNING updated_at`,
           [key, serialised, req.session.user.username]
         );
+        if (key === 'baankarn_config_v1' && pricingContractUpdateMode === 'update_active') {
+          pricingContractUpdateResult = await applyPricingToActiveContracts(client, value);
+        }
         await client.query('COMMIT');
         savedUpdatedAt = ins.rows[0] ? ins.rows[0].updated_at : null;
       } catch (err) {
@@ -1535,6 +1783,13 @@ app.put('/api/data/:key', sameOrigin, csrfGuard, requireAuth, requireRole('owner
       savedUpdatedAt = ins.rows[0] ? ins.rows[0].updated_at : null;
     }
     audit(req, 'data.put', 'app_data', key);
+    if (pricingContractUpdateResult) {
+      audit(req, 'pricing.contracts_bulk_update', 'contract', 'bulk', {
+        updatedCount: pricingContractUpdateResult.updatedCount,
+        skippedCount: pricingContractUpdateResult.skippedCount,
+        updated: pricingContractUpdateResult.updated.slice(0, 20),
+      });
+    }
     let roomSyncResult = null;
     // Bridge: when admin saves the rooms blob, mirror tenant info into
     // the tenants table so the tenant portal + bills + LINE binding all
@@ -1584,6 +1839,8 @@ app.put('/api/data/:key', sameOrigin, csrfGuard, requireAuth, requireRole('owner
     }
     res.json({
       ok: true, key, roomSync: roomSyncResult, warnings: configWarnings,
+      pricingImpact: pricingImpactReview,
+      contractUpdates: pricingContractUpdateResult,
       // Fresh row version — the client stores this as its next baseUpdatedAt
       // so consecutive saves from the same tab don't false-conflict.
       updatedAt: savedUpdatedAt,
@@ -2963,14 +3220,16 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBookingSubmit, validateBod
       let v2Room = null;
       try {
         const v2 = await client.query(
-          `SELECT room_code, room_type, floor, room_no, rent_price, deposit_price, wifi_fee, status
+          `SELECT room_code, room_type, floor, room_no, rent_price, deposit_price, wifi_fee, status,
+                  view_type, has_balcony, has_parking, has_kitchen, has_ac,
+                  rent_override, rent_override_reason
              FROM rooms_v2
             WHERE room_code=$1 AND deleted_at IS NULL
             FOR UPDATE`,
           [cleaned.roomId]
         );
         v2Room = v2.rows[0] || null;
-        if (!room && v2Room) room = roomFromV2(v2Room);
+        if (!room && v2Room) room = pricingImpactRoomFromV2(v2Room);
       } catch (err) {
         if (err.code !== '42P01') throw err;
       }
@@ -3004,7 +3263,20 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBookingSubmit, validateBod
           code: 'BOOKING_HOLD_EXPIRED',
         });
       }
-      const contractDepositEstimate = Math.max(0, Number(room.deposit ?? v2Room?.deposit_price ?? 0) || 0);
+      let pricingConfig = {};
+      try {
+        const cfgQ = await client.query(
+          `SELECT value FROM app_data WHERE key='baankarn_config_v1' LIMIT 1`
+        );
+        pricingConfig = cfgQ.rows[0]?.value || {};
+      } catch { /* deposit estimate falls back through the resolver */ }
+      const bookingRentInfo = pricing.resolveBillingRent({ room, config: pricingConfig });
+      const bookingDepositInfo = pricing.resolveContractDeposit({
+        room,
+        config: pricingConfig,
+        rent: bookingRentInfo.rent,
+      });
+      const contractDepositEstimate = Math.max(0, Number(bookingDepositInfo.deposit) || 0);
       const depositCreditAmount = bookingSettings.requireDeposit && bookingSettings.applyBookingFeeToDeposit
         ? Math.min(Number(newBooking.bookingFee) || 0, contractDepositEstimate)
         : 0;
@@ -8952,14 +9224,16 @@ app.post('/api/bookings', sameOrigin, csrfGuard, requireAuth,
       let v2Room = null;
       try {
         const v2 = await client.query(
-          `SELECT room_code, room_type, floor, room_no, rent_price, deposit_price, wifi_fee, status
+          `SELECT room_code, room_type, floor, room_no, rent_price, deposit_price, wifi_fee, status,
+                  view_type, has_balcony, has_parking, has_kitchen, has_ac,
+                  rent_override, rent_override_reason
              FROM rooms_v2
             WHERE room_code=$1 AND deleted_at IS NULL
             FOR UPDATE`,
           [cleaned.roomId]
         );
         v2Room = v2.rows[0] || null;
-        if (!room && v2Room) room = roomFromV2(v2Room);
+        if (!room && v2Room) room = pricingImpactRoomFromV2(v2Room);
       } catch (err) {
         if (err.code !== '42P01') throw err;
       }
@@ -8979,7 +9253,20 @@ app.post('/api/bookings', sameOrigin, csrfGuard, requireAuth,
           expiresAt: isPublicHoldRoom(room) ? (room.reservationExpiresAt || null) : null,
         });
       }
-      const contractDepositEstimate = Math.max(0, Number(room.deposit ?? v2Room?.deposit_price ?? 0) || 0);
+      let pricingConfig = {};
+      try {
+        const cfgQ = await client.query(
+          `SELECT value FROM app_data WHERE key='baankarn_config_v1' LIMIT 1`
+        );
+        pricingConfig = cfgQ.rows[0]?.value || {};
+      } catch { /* deposit estimate falls back through the resolver */ }
+      const bookingRentInfo = pricing.resolveBillingRent({ room, config: pricingConfig });
+      const bookingDepositInfo = pricing.resolveContractDeposit({
+        room,
+        config: pricingConfig,
+        rent: bookingRentInfo.rent,
+      });
+      const contractDepositEstimate = Math.max(0, Number(bookingDepositInfo.deposit) || 0);
       const depositCreditAmount = depositCollected && newBooking.bookingFeeAppliesToDeposit
         ? Math.min(Number(newBooking.bookingFee) || 0, contractDepositEstimate)
         : 0;
@@ -13186,7 +13473,9 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
       let roomV2 = null;
       try {
         const roomV2Q = await client.query(
-          `SELECT room_code, room_type, floor, room_no, rent_price, deposit_price, wifi_fee, status
+          `SELECT room_code, room_type, floor, room_no, rent_price, deposit_price, wifi_fee, status,
+                  view_type, has_balcony, has_parking, has_kitchen, has_ac,
+                  rent_override, rent_override_reason
              FROM rooms_v2
              WHERE room_code=$1 AND deleted_at IS NULL
              FOR UPDATE`,
@@ -13265,7 +13554,15 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
       const contractMonthlyRent = Number.isFinite(resolvedQuickInviteRentValue) && resolvedQuickInviteRentValue > 0
         ? resolvedQuickInviteRentValue
         : monthlyRent;
-      const contractDeposit = contractMonthlyRent > 0 ? contractMonthlyRent * 2 : deposit;
+      const resolvedQuickInviteDeposit = pricing.resolveContractDeposit({
+        room: blobRoom || roomV2,
+        config: pricingConfig,
+        rent: contractMonthlyRent,
+      });
+      const resolvedQuickInviteDepositValue = Number(resolvedQuickInviteDeposit.deposit);
+      const contractDeposit = Number.isFinite(resolvedQuickInviteDepositValue) && resolvedQuickInviteDepositValue >= 0
+        ? resolvedQuickInviteDepositValue
+        : deposit;
       bookingFeeCredit = bookingFeeAppliesToDeposit
         ? Math.min(bookingFeeForDepositCredit, Math.max(contractDeposit, 0))
         : 0;

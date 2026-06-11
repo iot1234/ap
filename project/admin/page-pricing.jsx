@@ -136,7 +136,7 @@ function buildPricingReview(draft, current, rooms) {
 // "ตั้งราคา" tab without duplicating the outer PageContainer + PageHeader
 // chrome. The standalone route /admin#pricing keeps working for legacy
 // bookmarks / direct links.
-function PagePricing({ config, setConfig, rooms, addActivity, setToast, embedded = false }) {
+function PagePricing({ config, setConfig, rooms, addActivity, setToast, embedded = false, currentUser = null }) {
   const C = window.ADMIN_C;
   const ADMIN_ROOM_TYPES = window.ADMIN_ROOM_TYPES;
   const ADMIN_ROOM_TYPE_KEYS = window.ADMIN_ROOM_TYPE_KEYS;
@@ -154,6 +154,7 @@ function PagePricing({ config, setConfig, rooms, addActivity, setToast, embedded
   const [tab, setTab] = useState('rates');
   const [draft, setDraft] = useState(config);
   const [confirmReset, setConfirmReset] = useState(false);
+  const [impactReview, setImpactReview] = useState(null);
   const [saving, setSaving] = useState(false);
   const lastConfigJsonRef = React.useRef(JSON.stringify(config));
 
@@ -218,9 +219,16 @@ function PagePricing({ config, setConfig, rooms, addActivity, setToast, embedded
       // of letting this save overwrite theirs (surfaced via catch below).
       const baseUpdatedAt = window.AP && window.AP.getBaseVersion
         ? window.AP.getBaseVersion('baankarn_config_v1') : null;
+      const body = {
+        value: next,
+        ...(baseUpdatedAt ? { baseUpdatedAt } : {}),
+        ...(options.pricingImpactAcknowledged ? { pricingImpactAcknowledged: true } : {}),
+        ...(options.pricingContractMode ? { pricingContractMode: options.pricingContractMode } : {}),
+        ...(options.pricingContractConfirm ? { pricingContractConfirm: options.pricingContractConfirm } : {}),
+      };
       const out = await apiCall('/api/data/baankarn_config_v1', {
         method: 'PUT',
-        body: JSON.stringify({ value: next, ...(baseUpdatedAt ? { baseUpdatedAt } : {}) }),
+        body: JSON.stringify(body),
       });
       if (out && out.updatedAt && window.AP && window.AP.setBaseVersion) {
         window.AP.setBaseVersion('baankarn_config_v1', out.updatedAt);
@@ -236,19 +244,31 @@ function PagePricing({ config, setConfig, rooms, addActivity, setToast, embedded
         type: 'system',
       });
       const serverWarnings = Array.isArray(out && out.warnings) ? out.warnings : [];
+      const updatedContracts = Number(out?.contractUpdates?.updatedCount || 0);
       if (serverWarnings.length) {
         setToast && setToast({
           kind: 'warning',
-          message: `บันทึกแล้ว แต่มีคำเตือน: ${serverWarnings.slice(0, 3).join(', ')}`,
+          message: `บันทึกแล้ว${updatedContracts ? ` · อัปเดตสัญญา ${updatedContracts} รายการ` : ''} แต่มีคำเตือน: ${serverWarnings.slice(0, 3).join(', ')}`,
         });
       } else {
         setToast && setToast({
           kind: 'success',
-          message: options.successMessage || 'บันทึกการตั้งค่าราคาเรียบร้อย',
+          message: updatedContracts
+            ? `บันทึกการตั้งราคาและอัปเดตสัญญา ${updatedContracts} รายการแล้ว`
+            : (options.successMessage || 'บันทึกการตั้งค่าราคาเรียบร้อย'),
         });
       }
       return true;
     } catch (err) {
+      if (err && err.code === 'PRICING_IMPACT_REVIEW_REQUIRED') {
+        if (options.closeReset) setConfirmReset(false);
+        setImpactReview({
+          draft: clonePricingValue(next),
+          impact: err.raw && err.raw.impact ? err.raw.impact : null,
+          hint: err.hint || '',
+        });
+        return false;
+      }
       const issues = Array.isArray(err && err.issues) && err.issues.length
         ? `: ${err.issues.slice(0, 3).join(', ')}`
         : '';
@@ -279,6 +299,22 @@ function PagePricing({ config, setConfig, rooms, addActivity, setToast, embedded
       successMessage: 'บันทึกการตั้งราคาเรียบร้อย',
     });
   };
+  const saveReviewedImpact = async (mode) => {
+    if (!impactReview || !impactReview.draft) return;
+    const wantsContractUpdate = mode === 'update_active';
+    const ok = await savePricingDraft(clonePricingValue(impactReview.draft), {
+      pricingImpactAcknowledged: true,
+      pricingContractMode: wantsContractUpdate ? 'update_active' : 'new_only',
+      pricingContractConfirm: wantsContractUpdate ? 'UPDATE_ACTIVE_CONTRACTS' : undefined,
+      activityText: wantsContractUpdate
+        ? 'อัปเดตการตั้งราคาและยอดสัญญา active'
+        : 'อัปเดตการตั้งราคาเฉพาะสัญญาใหม่',
+      successMessage: wantsContractUpdate
+        ? 'บันทึกการตั้งราคาและอัปเดตสัญญา active แล้ว'
+        : 'บันทึกการตั้งราคาแล้ว สัญญาเดิมยังใช้ยอดเดิม',
+    });
+    if (ok) setImpactReview(null);
+  };
   const handleReset = async () => {
     const next = resetPricingSections(config);
     await savePricingDraft(next, {
@@ -287,6 +323,15 @@ function PagePricing({ config, setConfig, rooms, addActivity, setToast, embedded
       activityText: 'รีเซ็ตการตั้งราคาเป็นค่าเริ่มต้น',
       successMessage: 'รีเซ็ตเป็นค่าเริ่มต้นแล้ว',
     });
+  };
+  const impact = impactReview?.impact || {};
+  const impactSummary = impact.summary || {};
+  const impactActiveContracts = Array.isArray(impact.activeContractChanges) ? impact.activeContractChanges : [];
+  const impactFutureRooms = Array.isArray(impact.futureRoomChanges) ? impact.futureRoomChanges : [];
+  const canUpdateActiveContracts = ['owner', 'manager'].includes(String(currentUser?.role || ''));
+  const signedMoney = (v) => {
+    const n = Number(v) || 0;
+    return `${n >= 0 ? '+' : '-'}${fmtMoney(Math.abs(n))}`;
   };
 
   return (
@@ -392,6 +437,126 @@ function PagePricing({ config, setConfig, rooms, addActivity, setToast, embedded
       {tab === 'utils'    && <TabUtils    draft={draft} updatePath={updatePath} />}
       {tab === 'discount' && <TabDiscount draft={draft} updatePath={updatePath} />}
       {tab === 'fees'     && <TabFees     draft={draft} updatePath={updatePath} />}
+
+      <Modal
+        open={!!impactReview}
+        onClose={() => !saving && setImpactReview(null)}
+        title="ตรวจผลกระทบก่อนบันทึกราคา"
+        footer={
+          <>
+            <Btn variant="ghost" onClick={() => setImpactReview(null)} disabled={saving}>กลับไปแก้ราคา</Btn>
+            <Btn variant="primary" tone="finance" onClick={() => saveReviewedImpact('new_only')} disabled={saving}>
+              {saving ? 'กำลังบันทึก...' : 'ใช้เฉพาะสัญญาใหม่'}
+            </Btn>
+            <Btn
+              variant="danger"
+              onClick={() => saveReviewedImpact('update_active')}
+              disabled={saving || !canUpdateActiveContracts || impactActiveContracts.length === 0}
+              title={!canUpdateActiveContracts ? 'เฉพาะ owner/manager เท่านั้น' : ''}
+            >
+              เปลี่ยนสัญญา active ด้วย
+            </Btn>
+          </>
+        }
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12, fontSize: 13, color: C.ink2, lineHeight: 1.55 }}>
+          <div style={{
+            padding: 12, borderRadius: 8,
+            background: C.warningSoft, border: `1px solid ${C.warning}55`,
+            color: C.warningInk,
+          }}>
+            ราคากลางที่เปลี่ยนจะไม่ควรแก้สัญญาเดิมโดยอัตโนมัติ เพราะสัญญา active มีค่าเช่า/มัดจำที่ล็อกไว้แล้ว
+            เลือก “ใช้เฉพาะสัญญาใหม่” ถ้าต้องการให้ผู้เช่าปัจจุบันจ่ายยอดเดิมจนหมดสัญญาหรือต่อสัญญาใหม่
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 8 }}>
+            <div style={{ padding: 10, border: `1px solid ${C.border}`, borderRadius: 8, background: C.surfaceAlt }}>
+              <div style={{ fontSize: 11.5, color: C.muted }}>สัญญา active ที่ต้องตรวจ</div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: C.ink }}>{impactSummary.activeContractChanges || 0}</div>
+            </div>
+            <div style={{ padding: 10, border: `1px solid ${C.border}`, borderRadius: 8, background: C.surfaceAlt }}>
+              <div style={{ fontSize: 11.5, color: C.muted }}>ห้องสำหรับสัญญาใหม่</div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: C.ink }}>{impactSummary.futureRoomChanges || 0}</div>
+            </div>
+            <div style={{ padding: 10, border: `1px solid ${C.border}`, borderRadius: 8, background: C.surfaceAlt }}>
+              <div style={{ fontSize: 11.5, color: C.muted }}>ค่าเช่ารวมถ้าแก้สัญญา</div>
+              <div style={{ fontSize: 18, fontWeight: 700, color: Number(impactSummary.activeRentDelta || 0) >= 0 ? C.success : C.danger }}>
+                {signedMoney(impactSummary.activeRentDelta || 0)}
+              </div>
+            </div>
+          </div>
+
+          {impactActiveContracts.length > 0 ? (
+            <div>
+              <div style={{ fontWeight: 700, color: C.ink, marginBottom: 6 }}>
+                สัญญา active ที่ยอด pricing ใหม่ต่างจากยอดเดิม
+              </div>
+              <div style={{ maxHeight: 250, overflow: 'auto', border: `1px solid ${C.border}`, borderRadius: 8 }}>
+                {impactActiveContracts.slice(0, 20).map((it, idx) => (
+                  <div key={`${it.contractId || it.roomId || idx}`} style={{
+                    padding: 10,
+                    borderTop: idx === 0 ? 0 : `1px solid ${C.borderSoft}`,
+                    background: idx % 2 ? C.surfaceAlt : C.surface,
+                  }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+                      <b style={{ color: C.ink }}>ห้อง {it.roomId || '-'} · {it.tenantName || 'ไม่ระบุผู้เช่า'}</b>
+                      <span style={{ color: C.muted }}>{it.contractNo || `สัญญา #${it.contractId || '-'}`}</span>
+                    </div>
+                    {it.type === 'missing_room' ? (
+                      <div style={{ color: C.danger, marginTop: 4 }}>ไม่พบข้อมูลห้องสำหรับคำนวณราคาใหม่ ระบบจะไม่อัปเดตสัญญานี้</div>
+                    ) : (
+                      <div style={{ marginTop: 5, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                        <div>ค่าเช่าสัญญา: <b>{fmtMoney(it.currentRent)}</b> → <b>{fmtMoney(it.newSettingRent)}</b></div>
+                        <div>มัดจำสัญญา: <b>{fmtMoney(it.currentDeposit)}</b> → <b>{fmtMoney(it.newSettingDeposit)}</b></div>
+                      </div>
+                    )}
+                  </div>
+                ))}
+                {impactActiveContracts.length > 20 ? (
+                  <div style={{ padding: 10, color: C.muted, borderTop: `1px solid ${C.borderSoft}` }}>
+                    ยังมีอีก {impactActiveContracts.length - 20} สัญญา
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
+
+          {impactFutureRooms.length > 0 ? (
+            <div>
+              <div style={{ fontWeight: 700, color: C.ink, marginBottom: 6 }}>
+                ห้องที่ยังไม่ lock สัญญาและจะใช้ราคานี้กับคนเข้าใหม่
+              </div>
+              <div style={{ maxHeight: 170, overflow: 'auto', border: `1px solid ${C.border}`, borderRadius: 8 }}>
+                {impactFutureRooms.slice(0, 12).map((it, idx) => (
+                  <div key={`${it.roomId || idx}`} style={{
+                    padding: 9,
+                    borderTop: idx === 0 ? 0 : `1px solid ${C.borderSoft}`,
+                    display: 'grid',
+                    gridTemplateColumns: 'minmax(70px, 0.7fr) minmax(0, 1.2fr) minmax(0, 1.2fr)',
+                    gap: 8,
+                    background: idx % 2 ? C.surfaceAlt : C.surface,
+                  }}>
+                    <b style={{ color: C.ink }}>ห้อง {it.roomId}</b>
+                    <span>ค่าเช่า {fmtMoney(it.oldRent)} → {fmtMoney(it.newRent)}</span>
+                    <span>มัดจำ {fmtMoney(it.oldDeposit)} → {fmtMoney(it.newDeposit)}</span>
+                  </div>
+                ))}
+                {impactFutureRooms.length > 12 ? (
+                  <div style={{ padding: 9, color: C.muted, borderTop: `1px solid ${C.borderSoft}` }}>
+                    ยังมีอีก {impactFutureRooms.length - 12} ห้อง
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
+
+          {!canUpdateActiveContracts && impactActiveContracts.length > 0 ? (
+            <div style={{ padding: 10, borderRadius: 8, background: C.dangerSoft, color: C.dangerInk }}>
+              บัญชี role {currentUser?.role || '-'} บันทึกเฉพาะสัญญาใหม่ได้ แต่การแก้ยอดในสัญญา active ต้องใช้ owner/manager
+            </div>
+          ) : null}
+        </div>
+      </Modal>
 
       {/* Reset confirm */}
       <Modal

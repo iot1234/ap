@@ -278,3 +278,53 @@ test('previewImpact: per-room override is not reported as formula impact', () =>
   assert.strictEqual(impact.unchanged, 1);
   assert.deepStrictEqual(impact.willChange.map((x) => x.roomId), ['102']);
 });
+
+test('resolveContractDeposit: pricing deposit wins over room snapshot for contract previews', () => {
+  const out = pricing.resolveContractDeposit({
+    room: { id: '101', type: 'standard', deposit: 9000 },
+    config: { rates: { standard: { rent: 5000, deposit: 12000 } } },
+    rent: 5000,
+  });
+  assert.strictEqual(out.deposit, 12000);
+  assert.strictEqual(out.source, 'pricing_config');
+});
+
+test('previewPricingChangeImpact: separates active contracts from future rooms', () => {
+  const rooms = [
+    { id: '101', type: 'standard', floor: 1, status: 'occupied' },
+    { id: '102', type: 'standard', floor: 1, status: 'vacant' },
+  ];
+  const contracts = [{
+    id: 7,
+    contract_no: 'CT-7',
+    tenant_id: 12,
+    tenant_name: 'Somchai',
+    room_id: '101',
+    status: 'active',
+    monthly_rent: 4500,
+    deposit: 9000,
+  }];
+  const oldCfg = { rates: { standard: { rent: 4500, deposit: 9000 } } };
+  const newCfg = { rates: { standard: { rent: 5000, deposit: 10000 } } };
+  const impact = pricing.previewPricingChangeImpact({ rooms, contracts, oldConfig: oldCfg, newConfig: newCfg });
+  assert.strictEqual(impact.summary.activeContractChanges, 1);
+  assert.strictEqual(impact.summary.futureRoomChanges, 1);
+  assert.strictEqual(impact.activeContractChanges[0].roomId, '101');
+  assert.strictEqual(impact.activeContractChanges[0].currentRent, 4500);
+  assert.strictEqual(impact.activeContractChanges[0].newSettingRent, 5000);
+  assert.strictEqual(impact.activeContractChanges[0].currentDeposit, 9000);
+  assert.strictEqual(impact.activeContractChanges[0].newSettingDeposit, 10000);
+  assert.strictEqual(impact.futureRoomChanges[0].roomId, '102');
+});
+
+test('previewPricingChangeImpact: room override shields future room rent but still shows deposit template change', () => {
+  const rooms = [{ id: '201', type: 'deluxe', floor: 1, status: 'vacant', rentOverride: 5500 }];
+  const oldCfg = { rates: { deluxe: { rent: 5800, deposit: 11600 } } };
+  const newCfg = { rates: { deluxe: { rent: 6500, deposit: 13000 } } };
+  const impact = pricing.previewPricingChangeImpact({ rooms, contracts: [], oldConfig: oldCfg, newConfig: newCfg });
+  assert.strictEqual(impact.summary.futureRoomChanges, 1);
+  assert.strictEqual(impact.futureRoomChanges[0].oldRent, 5500);
+  assert.strictEqual(impact.futureRoomChanges[0].newRent, 5500);
+  assert.strictEqual(impact.futureRoomChanges[0].oldDeposit, 11600);
+  assert.strictEqual(impact.futureRoomChanges[0].newDeposit, 13000);
+});
