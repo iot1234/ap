@@ -1286,10 +1286,22 @@ module.exports = function buildTenantOpsRouter(ctx) {
     // second UPDATE returns 0 rows → 409 with the current state so the UI
     // can prompt the user to reload before retrying. Without `version` we
     // fall back to last-write-wins (preserves backwards compat).
+    //
+    // Compare at MILLISECOND precision on both sides: updated_at is written
+    // by NOW() which carries microseconds, but the client echoes back the
+    // JSON-serialised Date (milliseconds only). A raw equality therefore
+    // failed for ~every row, making every version-carrying PUT die with a
+    // spurious VERSION_CONFLICT.
     let lockClause = '';
     if (b.version) {
+      if (!Number.isFinite(Date.parse(b.version))) {
+        return res.status(400).json({
+          error: 'version ต้องเป็น timestamp (ค่า updated_at เดิมจากระบบ)',
+          code: 'INVALID_VERSION',
+        });
+      }
       params.push(b.version);
-      lockClause = ` AND updated_at = $${params.length}`;
+      lockClause = ` AND date_trunc('milliseconds', updated_at) = date_trunc('milliseconds', $${params.length}::timestamptz)`;
     }
     params.push(id);
     try {

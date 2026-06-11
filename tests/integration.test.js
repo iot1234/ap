@@ -6302,6 +6302,33 @@ test('locked-contract identity gap card opens a real backfill modal (no dead-end
     'successful backfill must reload the contract so warnings recompute');
   assert.match(src, /file\.size > 1_500_000/,
     'image picker must reject oversized files client-side with a clear message');
+  assert.match(src, /function thaiCitizenIdChecksumOk/,
+    'modal must validate the citizen-ID check digit client-side before any API call');
+  assert.match(src, /disabled=\{saving \|\| !row \|\| !!citizenProblem\}/,
+    'save button must be disabled while the citizen ID is invalid');
+  assert.match(src, /บันทึกไม่ได้: \$\{citizenProblem\}/,
+    'disabled save button must say WHY it cannot be clicked');
+  assert.match(src, /updated_at: \(saved && saved\.updated_at\) \|\| r\.updated_at/,
+    'a successful PUT must refresh the local version so retries do not self-conflict');
+  assert.match(src, /ระบบโหลดเวอร์ชันล่าสุดให้แล้ว/,
+    'VERSION_CONFLICT must auto-reload the fresh row instead of dead-ending the admin');
+  assert.match(src, /รูปด้านหน้าและด้านหลังเป็นไฟล์เดียวกัน/,
+    'picking the same file for both card sides must warn the admin');
+});
+
+test('tenant PUT optimistic lock compares versions at millisecond precision', () => {
+  // updated_at is written by NOW() (microseconds) but clients echo back the
+  // JSON-serialised Date (milliseconds). Raw equality made EVERY
+  // version-carrying PUT fail with a spurious VERSION_CONFLICT.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'tenant-ops.js'), 'utf8');
+  assert.match(src, /date_trunc\('milliseconds', updated_at\) = date_trunc\('milliseconds', \$\$\{params\.length\}::timestamptz\)/,
+    'version lock clause must truncate both sides to millisecond precision');
+  assert.match(src, /Number\.isFinite\(Date\.parse\(b\.version\)\)/,
+    'unparsable version values must be rejected explicitly, not crash the cast');
+  assert.match(src, /code: 'INVALID_VERSION'/,
+    'bad version input must return a machine-readable code');
 });
 
 test('contracts page explains the locked send-link block in every case', () => {

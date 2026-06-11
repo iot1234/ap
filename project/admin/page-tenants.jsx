@@ -2331,6 +2331,16 @@ function tenantContractMissingLabel(code) {
   }[code] || code);
 }
 
+// Client mirror of services/thaiId.validateChecksum (official mod-11 spec) —
+// catches typo'd citizen IDs BEFORE any API round-trip, so the backfill modal
+// never half-saves (profile PUT ok, identity POST rejected) over a typo.
+function thaiCitizenIdChecksumOk(digits13) {
+  if (!/^\d{13}$/.test(digits13)) return false;
+  let sum = 0;
+  for (let i = 0; i < 12; i++) sum += Number(digits13[i]) * (13 - i);
+  return (11 - (sum % 11)) % 10 === Number(digits13[12]);
+}
+
 function contractIdentityGap(contract) {
   const warnings = Array.isArray(contract && contract.warnings) ? contract.warnings : [];
   const warning = warnings.find((w) => w && w.code === 'CONTRACT_IDENTITY_INCOMPLETE');
@@ -2433,6 +2443,18 @@ function TenantIdentityBackfillModal({ tenantDbId, tenantName, missing, onClose,
   }, [tenantDbId]);
 
   const citizenIdNorm = String(form.citizenId || '').replace(/[\s-]/g, '');
+  // Live citizen-ID validation with a SPECIFIC reason — the save button stays
+  // disabled (and says why) instead of letting the server bounce the request.
+  const citizenProblem = !citizenIdNorm
+    ? ''
+    : !/^\d{13}$/.test(citizenIdNorm)
+      ? `เลขบัตรต้องเป็นตัวเลข 13 หลัก (ตอนนี้กรอก ${citizenIdNorm.length} ตัว)`
+      : !thaiCitizenIdChecksumOk(citizenIdNorm)
+        ? 'เลขบัตรไม่ผ่านการตรวจ check digit (mod-11) — มักเกิดจากพิมพ์สลับ/ตกหลัก ตรวจทีละหลักอีกครั้ง'
+        : '';
+  // Picking the SAME file for both card sides is almost always a mis-click —
+  // warn loudly but don't block (a single combined photo is rare-but-legal).
+  const sameCardImage = !!(front && back && front.dataUrl === back.dataUrl);
   // Live checklist — "what's still missing if I save right now". Mirrors the
   // server's buildContractWarnings() field list so admin sees the same six
   // items the warning counts.
@@ -2440,7 +2462,7 @@ function TenantIdentityBackfillModal({ tenantDbId, tenantName, missing, onClose,
     address: !!String(form.address || '').trim(),
     emergencyContactName: !!String(form.emergencyContactName || '').trim(),
     emergencyContactPhone: !!String(form.emergencyContactPhone || '').trim(),
-    citizenId: !!(row && row.citizen_id_tail) || /^\d{13}$/.test(citizenIdNorm),
+    citizenId: citizenIdNorm ? !citizenProblem : !!(row && row.citizen_id_tail),
     citizenIdFront: !!(row && row.citizen_id_image_front_id) || !!front,
     citizenIdBack: !!(row && row.citizen_id_image_back_id) || !!back,
   };
@@ -2483,8 +2505,8 @@ function TenantIdentityBackfillModal({ tenantDbId, tenantName, missing, onClose,
   const submit = async () => {
     if (saving || !row) return;
     setError('');
-    if (citizenIdNorm && !/^\d{13}$/.test(citizenIdNorm)) {
-      setError('เลขบัตรประชาชนต้องเป็นตัวเลข 13 หลัก (ตอนนี้กรอก ' + citizenIdNorm.length + ' หลัก)');
+    if (citizenProblem) {
+      setError(citizenProblem);
       return;
     }
     const trimmed = (v) => String(v || '').trim();
@@ -2505,11 +2527,24 @@ function TenantIdentityBackfillModal({ tenantDbId, tenantName, missing, onClose,
     let savedProfile = false;
     try {
       if (Object.keys(profilePatch).length) {
-        await apiCall(`/api/tenants/${tenantDbId}`, {
+        const saved = await apiCall(`/api/tenants/${tenantDbId}`, {
           method: 'PUT',
           body: JSON.stringify({ ...profilePatch, version: row.updated_at }),
         });
         savedProfile = true;
+        // Sync local row to what just landed (values + new version). Without
+        // this, a later identity-step failure leaves the modal holding a
+        // stale version and the retry dies on VERSION_CONFLICT against its
+        // own previous save.
+        setRow((r) => ({
+          ...r,
+          address: profilePatch.address !== undefined ? profilePatch.address : r.address,
+          emergency_contact_name: profilePatch.emergencyContactName !== undefined
+            ? profilePatch.emergencyContactName : r.emergency_contact_name,
+          emergency_contact_phone: profilePatch.emergencyContactPhone !== undefined
+            ? profilePatch.emergencyContactPhone : r.emergency_contact_phone,
+          updated_at: (saved && saved.updated_at) || r.updated_at,
+        }));
       }
       if (hasIdentity) {
         await apiCall(`/api/tenants/${tenantDbId}/identity`, {
@@ -2530,6 +2565,20 @@ function TenantIdentityBackfillModal({ tenantDbId, tenantName, missing, onClose,
       });
       onSaved && onSaved();
     } catch (err) {
+      if (err && err.code === 'VERSION_CONFLICT') {
+        // Genuine concurrent edit — recover automatically: pull the fresh
+        // row (new version + current values) and let admin just hit save
+        // again, instead of telling them to close/reopen the modal.
+        try {
+          const d2 = await apiCall(`/api/tenants/${tenantDbId}`);
+          if (d2 && d2.tenant) setRow(d2.tenant);
+          setError('ข้อมูลผู้เช่าถูกแก้จากที่อื่นพร้อมกัน — ระบบโหลดเวอร์ชันล่าสุดให้แล้ว ตรวจค่าที่กรอกอีกครั้งแล้วกด "บันทึกข้อมูลย้อนหลัง" ซ้ำได้เลย');
+        } catch {
+          setError(friendlyError(err));
+        }
+        setSaving(false);
+        return;
+      }
       // Partial-success is called out explicitly: the PUT may have landed
       // before the identity POST failed, and re-submitting the same text is
       // harmless but confusing if the admin doesn't know what stuck.
@@ -2572,7 +2621,13 @@ function TenantIdentityBackfillModal({ tenantDbId, tenantName, missing, onClose,
       footer={
         <>
           <Btn variant="ghost" onClick={onClose} disabled={saving}>ปิด</Btn>
-          <Btn variant="primary" onClick={submit} disabled={saving || !row}>
+          <Btn variant="primary" onClick={submit}
+            disabled={saving || !row || !!citizenProblem}
+            title={!row
+              ? (loadErr ? 'บันทึกไม่ได้: โหลดข้อมูลผู้เช่าไม่สำเร็จ — ปิดแล้วเปิดใหม่' : 'กำลังโหลดข้อมูลผู้เช่า…')
+              : citizenProblem
+                ? `บันทึกไม่ได้: ${citizenProblem}`
+                : undefined}>
             {saving ? 'กำลังบันทึก…' : 'บันทึกข้อมูลย้อนหลัง'}
           </Btn>
         </>
@@ -2622,15 +2677,32 @@ function TenantIdentityBackfillModal({ tenantDbId, tenantName, missing, onClose,
             onChange={(v) => setForm((p) => ({ ...p, emergencyContactPhone: v }))}
             placeholder="0812345678" />
         </div>
-        <Input label={row && row.citizen_id_tail
-            ? `เลขบัตรประชาชน (ในระบบมีลงท้าย ${row.citizen_id_tail} แล้ว — กรอกเฉพาะถ้าต้องการแก้)`
-            : 'เลขบัตรประชาชน 13 หลัก'}
-          value={form.citizenId}
-          onChange={(v) => setForm((p) => ({ ...p, citizenId: v }))}
-          placeholder="13 หลัก"
-          hint="เก็บแบบเข้ารหัสในฐานข้อมูล และตรวจ check digit อัตโนมัติ" />
+        <div>
+          <Input label={row && row.citizen_id_tail
+              ? `เลขบัตรประชาชน (ในระบบมีลงท้าย ${row.citizen_id_tail} แล้ว — กรอกเฉพาะถ้าต้องการแก้)`
+              : 'เลขบัตรประชาชน 13 หลัก'}
+            value={form.citizenId}
+            onChange={(v) => setForm((p) => ({ ...p, citizenId: v }))}
+            placeholder="13 หลัก"
+            hint={citizenProblem ? undefined : 'เก็บแบบเข้ารหัสในฐานข้อมูล และตรวจ check digit อัตโนมัติ'} />
+          {citizenProblem ? (
+            <div style={{ fontSize: 11.5, color: C.danger || '#c0392b', marginTop: 4, lineHeight: 1.5 }}>
+              ✗ {citizenProblem}
+            </div>
+          ) : null}
+        </div>
         {fileRow('front', front, row && row.citizen_id_image_front_id)}
         {fileRow('back', back, row && row.citizen_id_image_back_id)}
+        {sameCardImage ? (
+          <div style={{
+            fontSize: 11.5, color: C.warning || '#b45309', lineHeight: 1.5,
+            padding: '6px 10px', borderRadius: 6,
+            background: C.warningSoft || '#fff7ed', border: `1px solid ${C.warning || '#b45309'}55`,
+          }}>
+            ⚠️ รูปด้านหน้าและด้านหลังเป็นไฟล์เดียวกัน — มักเกิดจากเลือกผิด ตรวจให้แน่ใจก่อนบันทึก
+            (ถ้าถ่ายสองด้านมาในรูปเดียวตั้งใจแล้ว บันทึกต่อได้)
+          </div>
+        ) : null}
       </div>
       {error ? (
         <div style={{
