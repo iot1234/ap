@@ -568,9 +568,30 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
         <ContractEditModal
           contract={editing}
           onClose={() => setEditing(null)}
-          onSaved={(c) => {
+          onSaved={(c, effects) => {
             setEditing(null);
-            setToast && setToast({ kind: 'success', message: `บันทึก ${c.contract_no} แล้ว` });
+            if (effects && typeof effects === 'object') {
+              // Contract was CLOSED — report the cascade's actual outcome so
+              // "tenant still active" can never hide behind a success toast.
+              const warns = Array.isArray(effects.warnings)
+                ? effects.warnings.map((w) => w && w.message).filter(Boolean) : [];
+              setToast && setToast({
+                kind: warns.length ? 'warning' : 'success',
+                message: {
+                  title: `ปิดสัญญา ${c.contract_no} แล้ว`,
+                  description: [
+                    effects.tenantMovedOut
+                      ? 'ผู้เช่าถูกตั้งเป็น "ย้ายออก" แล้ว'
+                      : 'ผู้เช่ายังคงสถานะเดิม (ไม่ได้ย้ายออกอัตโนมัติ)',
+                    effects.roomFreed ? 'ปล่อยห้องเป็นว่างแล้ว' : null,
+                    effects.invitationsRevoked > 0 ? `ยกเลิกลิงก์ค้าง ${effects.invitationsRevoked} ลิงก์` : null,
+                    ...warns,
+                  ].filter(Boolean).join('\n'),
+                },
+              });
+            } else {
+              setToast && setToast({ kind: 'success', message: `บันทึก ${c.contract_no} แล้ว` });
+            }
             addActivity && addActivity({ icon: '📜', text: `แก้ไขสัญญา ${c.contract_no}`, type: 'system' });
             refresh();
           }}
@@ -1254,7 +1275,10 @@ function ContractEditModal({ contract, onClose, onSaved, onError }) {
         method: 'PUT',
         body: JSON.stringify(payload),
       });
-      onSaved && onSaved(d.contract);
+      // Pass the close-cascade effects through — the page toast must report
+      // what ACTUALLY happened (tenant moved out or not, warnings), not a
+      // blanket promise.
+      onSaved && onSaved(d.contract, d.effects || null);
     } catch (err) {
       onError && onError(inviteErrorMessage('บันทึกล้มเหลว', err));
     } finally { setBusy(false); }
@@ -1305,7 +1329,9 @@ function ContractEditModal({ contract, onClose, onSaved, onError }) {
             border: '1px solid #f5c0b4', borderRadius: 6,
             fontSize: 12, color: C.dangerInk || '#8a2f2b', lineHeight: 1.5,
           }}>
-            เมื่อบันทึก ระบบจะปิดสัญญา ตั้งวันสิ้นสุดเป็นวันนี้ถ้าไม่ได้ระบุไว้ ย้ายผู้เช่าออก ปล่อยห้องเป็นว่าง ยกเลิกลิงก์สัญญาที่ยังค้าง เพิกถอนสิทธิที่ผูกกับผู้เช่ารายนี้ และส่งแจ้งเตือนให้ผู้เกี่ยวข้อง
+            เมื่อบันทึก ระบบจะปิดสัญญา ตั้งวันสิ้นสุดเป็นวันนี้ถ้าไม่ได้ระบุไว้ ยกเลิกลิงก์สัญญาที่ยังค้าง
+            และถ้าผู้เช่าถือห้องตามสัญญาอยู่ (หรือยังไม่เคยย้ายเข้าและไม่มีสัญญาอื่น) จะตั้งเป็นย้ายออก
+            ปล่อยห้องว่าง และเพิกถอนสิทธิอัตโนมัติ — ผลที่เกิดขึ้นจริงจะสรุปให้หลังบันทึก
           </div>
         ) : null}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>

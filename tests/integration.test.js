@@ -4977,8 +4977,8 @@ test('booking cancellation releases only its own reserved room', () => {
     /SELECT id, full_name, phone[\s\S]{0,220}FROM tenants[\s\S]{0,180}WHERE \$\{tenantClauses\.join\(' AND '\)\}[\s\S]{0,160}FOR UPDATE/,
     'release must lock and find the mirrored tenant before cleanup');
   assert.match(block,
-    /SELECT id FROM contracts[\s\S]{0,160}tenant_id=\$1 AND room_id=\$2[\s\S]{0,160}status='active'/,
-    'release must not move out a tenant that already has an active contract');
+    /SELECT id, room_id FROM contracts[\s\S]{0,160}tenant_id=\$1[\s\S]{0,160}status='active'/,
+    'release must not move out a tenant that already has an active contract ANYWHERE');
   assert.match(block,
     /UPDATE tenants[\s\S]{0,180}SET status='moved_out',[\s\S]{0,120}current_room_id=NULL/,
     'release must clear the pre-contract tenant link created by booking approval');
@@ -6479,6 +6479,94 @@ test('contract flow never claims another tenant\'s room hold as its own', () => 
     'the step detail must say the visible booking belongs to the other tenant');
   assert.match(src, /มีผู้เช่ารายอื่นอยู่ — เลือกทางใดทางหนึ่ง/,
     'next-action must offer concrete resolutions for the double-tenant case');
+});
+
+test('closing a contract reconciles never-moved-in tenants instead of leaving zombies', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  // The reported bug: cancelling an unsigned invite-flow contract left the
+  // tenant 'active' with no room and no contract forever.
+  assert.match(src, /else if \(t && t\.status === 'active' && !t\.current_room_id\)/,
+    'close cascade must handle the never-moved-in (NULL room) tenant');
+  assert.match(src, /TENANT_HAS_OTHER_ACTIVE_CONTRACT/,
+    'multi-contract tenants must be kept active with an explicit warning');
+  // Invitation revoke must run for ALL closing contracts, including
+  // tenant_id-NULL orphans — i.e. before/outside the tenant-cascade gate.
+  const revokeIdx = src.indexOf('closeEffects.invitationsRevoked = revokedInvites.rowCount');
+  const tenantGateIdx = src.indexOf('if (isClosingContract && contract.tenant_id) {');
+  assert.ok(revokeIdx > 0 && tenantGateIdx > revokeIdx,
+    'invitation revoke must not depend on contract.tenant_id');
+  // Renewal overlap: closing one of two active contracts on the same room
+  // must not evict the tenant from the still-live one.
+  assert.match(src, /roomOverlapContract/,
+    'same-room overlapping contract must block the eviction cascade');
+});
+
+test('contracts page reports the real close outcome, not a blanket promise', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-contracts.jsx'), 'utf8');
+  assert.match(src, /onSaved && onSaved\(d\.contract, d\.effects \|\| null\)/,
+    'close effects must flow from the modal to the page');
+  assert.match(src, /ผู้เช่ายังคงสถานะเดิม \(ไม่ได้ย้ายออกอัตโนมัติ\)/,
+    'the toast must say when the tenant was NOT moved out');
+  assert.match(src, /ผลที่เกิดขึ้นจริงจะสรุปให้หลังบันทึก/,
+    'the pre-save text must not promise unconditional move-out');
+});
+
+test('tenant drawer offers cleanup for active tenants with no room and no contract', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-tenants.jsx'), 'utf8');
+  assert.match(src, /ตั้งเป็นย้ายออก \(เคลียร์สถานะ\)/,
+    'zombie tenants need an in-product remediation tile');
+});
+
+test('checkout hardening: sticky blacklist, no phantom closing bill, full invite revoke', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'tenant-ops.js'), 'utf8');
+  assert.match(src, /CASE WHEN status='blacklist' THEN status ELSE 'moved_out' END/,
+    'a replayed checkout must not demote a blacklisted tenant');
+  assert.match(src, /wantClosingBill && billingRoom && closedContract && tenantCurrentRoom/,
+    'closing bill must require actual occupancy, not just a contract');
+  assert.match(src, /contract_id IN \(SELECT id FROM contracts WHERE tenant_id=\$1 AND deleted_at IS NULL\)/,
+    'checkout must revoke pending invitations across ALL the tenant\'s contracts');
+});
+
+test('booking cancel restores a tenant who holds a live contract elsewhere', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(src, /CASE WHEN room_id=\$2 THEN 0 ELSE 1 END/,
+    'cancel cleanup must look at the tenant\'s contracts on ANY room');
+  assert.match(src, /restored room \$\{liveContract\.room_id\} from live contract/,
+    'a second-room booking cancel must restore the original room pointer, not move the tenant out');
+});
+
+test('sitting-tenant renewal keeps the room occupied and the tenant bound', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(src, /let sittingRenewal = false;/,
+    'quick-invite must detect the sitting-tenant renewal case');
+  assert.match(src, /sameTenantPreclaimedRoom && !sittingRenewal/,
+    'renewal must not strip the sitting tenant\'s current_room_id');
+  assert.match(src, /sittingRenewal \? \(blobRoom\?\.status \|\| 'occupied'\) : 'reserved'/,
+    'renewal must not demote an occupied room to reserved (billing would pause)');
+});
+
+test('auto-expired contracts reconcile tenant and room state', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'scheduler.js'), 'utf8');
+  assert.match(src, /tenant\.auto_moved_out/,
+    'expiry sweep must move out tenants whose only contract just expired');
+  assert.match(src, /\(current_room_id IS NULL OR current_room_id=\$2\)/,
+    'expiry cascade must not touch tenants living in a different room');
+  assert.match(src, /contract-auto-expire/,
+    'expiry cascade must resync the freed room');
 });
 
 test('contract-fill HTML reads view.rejectionReason (camelCase, not snake_case)', () => {

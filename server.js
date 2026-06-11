@@ -10316,17 +10316,26 @@ app.put('/api/bookings/:id', sameOrigin, csrfGuard, requireAuth, requireRole('ow
             );
             const tenantRow = tFind.rows[0] || null;
             if (tenantRow) {
+              // Check the tenant's contracts ANYWHERE, not just the released
+              // room. Approving a second-room booking re-points
+              // current_room_id at the new room; cancelling that booking
+              // must not flip a tenant who still holds a live contract on
+              // their original room to moved_out — restore the pointer to
+              // the contract's room instead.
               const activeContract = await client.query(
-                `SELECT id FROM contracts
-                  WHERE tenant_id=$1 AND room_id=$2
+                `SELECT id, room_id FROM contracts
+                  WHERE tenant_id=$1
                     AND status='active' AND deleted_at IS NULL
+                  ORDER BY (CASE WHEN room_id=$2 THEN 0 ELSE 1 END),
+                           locked_at DESC NULLS LAST, start_date DESC NULLS LAST, id DESC
                   LIMIT 1`,
                 [tenantRow.id, roomToRelease]
               ).catch((err) => {
                 if (err.code === '42P01') return { rows: [] };
                 throw err;
               });
-              if (!activeContract.rows.length) {
+              const liveContract = activeContract.rows[0] || null;
+              if (!liveContract) {
                 const tUpd = await client.query(
                   `UPDATE tenants
                       SET status='moved_out',
@@ -10347,7 +10356,22 @@ app.put('/api/bookings/:id', sameOrigin, csrfGuard, requireAuth, requireRole('ow
                     phone: tUpd.rows[0].phone,
                   };
                 }
+              } else if (String(liveContract.room_id || '') !== String(roomToRelease)) {
+                // Tenant's real tenancy lives on another room — point them back.
+                await client.query(
+                  `UPDATE tenants
+                      SET current_room_id=$2, updated_at=NOW(),
+                          notes=trim(BOTH E'\n' FROM COALESCE(notes || E'\n', '') || $3)
+                    WHERE id=$1 AND status='active' AND current_room_id=$4`,
+                  [
+                    tenantRow.id,
+                    String(liveContract.room_id),
+                    `[auto] booking ${id} ${updated.status}: restored room ${liveContract.room_id} from live contract`,
+                    roomToRelease,
+                  ]
+                );
               }
+              // else: live contract on the released room itself — leave the tenant alone.
             }
           }
           const { tenant, reservedBy, reservedAt, ...rest } = room;
@@ -12245,7 +12269,10 @@ app.put('/api/contracts/:id', sameOrigin, csrfGuard, requireAuth, requireRole('o
 
       // Cascade: closing the contract → tenant moves out + room freed.
       // Skip if tenant is already non-active (idempotent re-closure).
-      if (isClosingContract && contract.tenant_id && contract.room_id) {
+      // The invitation revoke + reserved-room release are keyed on the
+      // CONTRACT alone — they must run even when tenant_id is NULL
+      // (legacy/orphan rows), otherwise the fill link outlives the close.
+      if (isClosingContract) {
         closeEffects = {
           tenantMovedOut: false,
           roomFreed: false,
@@ -12266,14 +12293,36 @@ app.put('/api/contracts/:id', sameOrigin, csrfGuard, requireAuth, requireRole('o
           throw err;
         });
         closeEffects.invitationsRevoked = revokedInvites.rowCount || 0;
-        let roomFreed = false;
+      }
+      if (isClosingContract && contract.tenant_id) {
         const tQ = await client.query(
           `SELECT id, status, current_room_id FROM tenants
              WHERE id=$1 AND deleted_at IS NULL FOR UPDATE`,
           [contract.tenant_id]
         );
         const t = tQ.rows[0];
-        if (t && t.status === 'active' && String(t.current_room_id || '') === String(contract.room_id)) {
+        // Renewal-overlap guard: when ANOTHER active contract for the same
+        // tenant exists on the same room (old + renewal coexisting), closing
+        // one of them must not evict the tenant from a tenancy that is
+        // still live under the other.
+        let roomOverlapContract = null;
+        if (t && t.status === 'active' && contract.room_id
+            && String(t.current_room_id || '') === String(contract.room_id)) {
+          const ovQ = await client.query(
+            `SELECT id, contract_no FROM contracts
+               WHERE room_id=$1 AND tenant_id=$2 AND status='active'
+                 AND deleted_at IS NULL AND id<>$3
+               LIMIT 1`,
+            [contract.room_id, contract.tenant_id, contract.id]
+          );
+          roomOverlapContract = ovQ.rows[0] || null;
+        }
+        if (roomOverlapContract) {
+          closeEffects.warnings.push({
+            code: 'TENANT_HAS_OTHER_ACTIVE_CONTRACT',
+            message: `สัญญาถูกปิด แต่ผู้เช่ายังมีสัญญา ${roomOverlapContract.contract_no || roomOverlapContract.id} ที่ active บนห้องเดียวกัน (เช่น สัญญาต่ออายุ) จึงไม่ย้ายผู้เช่าออก/ปล่อยห้อง`,
+          });
+        } else if (t && t.status === 'active' && String(t.current_room_id || '') === String(contract.room_id)) {
           await client.query(
             `UPDATE tenants SET status='moved_out', current_room_id=NULL, updated_at=NOW()
                WHERE id=$1`,
@@ -12333,15 +12382,46 @@ app.put('/api/contracts/:id', sameOrigin, csrfGuard, requireAuth, requireRole('o
           ).catch((err) => {
             if (err.code !== '42P01') throw err;
           });
-          roomFreed = true;
           closeEffects.roomFreed = true;
+        } else if (t && t.status === 'active' && !t.current_room_id) {
+          // The tenant never moved in (invite-flow row, room binds only at
+          // approve+lock). Closing their ONLY contract must not leave them
+          // "active" with no room and no contract — the zombie the tenants
+          // list then shows as a green ใช้งาน forever. Guard on other live
+          // contracts so a multi-room tenant is never deactivated by
+          // closing one of their contracts.
+          const otherActive = await client.query(
+            `SELECT id FROM contracts
+               WHERE tenant_id=$1 AND status='active' AND deleted_at IS NULL AND id<>$2
+               LIMIT 1`,
+            [contract.tenant_id, contract.id]
+          );
+          if (!otherActive.rows.length) {
+            await client.query(
+              `UPDATE tenants SET status='moved_out', current_room_id=NULL, updated_at=NOW()
+                 WHERE id=$1`,
+              [contract.tenant_id]
+            );
+            const sessions = await client.query(
+              `DELETE FROM tenant_sessions WHERE tenant_id=$1`, [contract.tenant_id]
+            );
+            closeEffects.tenantMovedOut = true;
+            closeEffects.sessionsRevoked = sessions.rowCount || 0;
+          } else {
+            closeEffects.warnings.push({
+              code: 'TENANT_HAS_OTHER_ACTIVE_CONTRACT',
+              message: 'สัญญาถูกปิด แต่ผู้เช่ายังมีสัญญา active ฉบับอื่น จึงคงสถานะใช้งานไว้',
+            });
+          }
         } else if (t && t.status === 'active') {
           closeEffects.warnings.push({
             code: 'TENANT_ROOM_MISMATCH_ON_CLOSE',
             message: 'สัญญาถูกปิด แต่ผู้เช่า active อยู่คนละห้อง จึงไม่ย้ายผู้เช่าออกหรือเพิกถอนสิทธิอัตโนมัติ',
           });
         }
-        if (!roomFreed) {
+      }
+      if (isClosingContract && contract.room_id && closeEffects && !closeEffects.roomFreed) {
+        {
           const rQ = await client.query(
             `SELECT value FROM app_data WHERE key='baankarn_rooms_v1' FOR UPDATE`
           );
@@ -13695,7 +13775,26 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
       );
       const contract = cIns.rows[0];
 
-      if (sameTenantPreclaimedRoom) {
+      // Renewal of a SITTING tenant (active + occupying this room under a
+      // locked contract): they live there RIGHT NOW. Stripping their
+      // current_room_id / demoting the room to 'reserved' would disarm every
+      // later cleanup cascade and silently stop auto-billing under the
+      // still-active old contract.
+      let sittingRenewal = false;
+      try {
+        const sitQ = await client.query(
+          `SELECT 1 FROM tenants t
+             JOIN contracts c ON c.tenant_id = t.id
+            WHERE t.id=$1 AND t.current_room_id=$2 AND t.status='active' AND t.deleted_at IS NULL
+              AND c.room_id=$2 AND c.status='active' AND c.locked_at IS NOT NULL AND c.deleted_at IS NULL
+            LIMIT 1`,
+          [tenantId, roomId]
+        );
+        sittingRenewal = sitQ.rows.length > 0;
+      } catch (err) {
+        if (err.code !== '42P01') throw err;
+      }
+      if (sameTenantPreclaimedRoom && !sittingRenewal) {
         // Convert a tenant-modal preclaim into the normal invitation state:
         // the tenant profile exists, the room is reserved by contract:N, and
         // current_room_id is written only after admin approves the submission.
@@ -13716,7 +13815,9 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
         rent: contractMonthlyRent,
         deposit: contractDeposit,
         wifi: blobRoom?.wifi ?? (roomV2 ? Number(roomV2.wifi_fee || 0) : 0),
-        status: 'reserved',
+        // Sitting renewal keeps the room 'occupied' — billing for the live
+        // tenancy must not pause while the renewal link is out for signing.
+        status: sittingRenewal ? (blobRoom?.status || 'occupied') : 'reserved',
         tenant: {
           name: tenantName,
           phone: tenantPhone,
@@ -13736,14 +13837,16 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
         ['baankarn_rooms_v1', JSON.stringify(roomsForInvite), req.session.user.username]
       );
       try {
-        const reservableStatuses = sameTenantPreclaimedRoom
-          ? ['vacant', 'occupied']
-          : ['vacant'];
-        await client.query(
-          `UPDATE rooms_v2 SET status='reserved', updated_at=NOW()
-             WHERE room_code=$1 AND status = ANY($2::text[]) AND deleted_at IS NULL`,
-          [roomId, reservableStatuses]
-        );
+        if (!sittingRenewal) {
+          const reservableStatuses = sameTenantPreclaimedRoom
+            ? ['vacant', 'occupied']
+            : ['vacant'];
+          await client.query(
+            `UPDATE rooms_v2 SET status='reserved', updated_at=NOW()
+               WHERE room_code=$1 AND status = ANY($2::text[]) AND deleted_at IS NULL`,
+            [roomId, reservableStatuses]
+          );
+        }
       } catch (err) {
         if (err.code !== '42P01') throw err;
       }

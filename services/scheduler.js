@@ -2136,6 +2136,55 @@ async function tickContractExpiry(pool, _flags, now, state) {
     if (expired.rowCount > 0) {
       console.log(`[scheduler] auto-expired ${expired.rowCount} contract(s) past end_date`);
     }
+    // Reconcile tenant + room state for every auto-expired contract. The
+    // bulk UPDATE above only flips the contract row — without this loop the
+    // tenant stays 'active' (and the room occupied) with no live contract,
+    // the same zombie state the manual close path used to create. The
+    // other-active-contract guard keeps renewals safe: if the tenant already
+    // signed a follow-up contract, nothing is touched.
+    for (const row of expired.rows) {
+      try {
+        if (!row.tenant_id || row.deleted_at || row.tenant_status !== 'active') continue;
+        const other = await pool.query(
+          `SELECT id FROM contracts
+             WHERE tenant_id=$1 AND status='active' AND deleted_at IS NULL
+             LIMIT 1`,
+          [row.tenant_id]
+        );
+        if (other.rows.length) continue;   // renewal/other tenancy still live
+        // Move out only when the tenant holds THIS contract's room or holds
+        // no room at all — a tenant living in a different room under a
+        // separate arrangement is left untouched.
+        const upd = await pool.query(
+          `UPDATE tenants SET status='moved_out', current_room_id=NULL, updated_at=NOW()
+             WHERE id=$1 AND status='active'
+               AND (current_room_id IS NULL OR current_room_id=$2)
+             RETURNING id`,
+          [row.tenant_id, row.room_id]
+        );
+        if (!upd.rows.length) continue;
+        await pool.query(`DELETE FROM tenant_sessions WHERE tenant_id=$1`, [row.tenant_id])
+          .catch(() => { /* best-effort */ });
+        if (row.room_id) {
+          try {
+            await require('./roomStatus').syncRoom(pool, String(row.room_id), { reason: 'contract-auto-expire' });
+          } catch (err) {
+            console.warn('[scheduler] expire room sync failed:', row.room_id, err.message);
+          }
+        }
+        await pool.query(
+          `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, detail)
+           VALUES ($1, $2, $3, $4, $5::jsonb)`,
+          ['system:scheduler', 'tenant.auto_moved_out', 'tenant', String(row.tenant_id),
+           JSON.stringify({
+             contractId: row.id, contract_no: row.contract_no,
+             roomId: row.room_id, reason: 'contract auto-expired past end_date',
+           })]
+        ).catch(() => { /* audit best-effort */ });
+      } catch (err) {
+        console.warn(`[scheduler] expire cascade failed for contract ${row.id}:`, err.message);
+      }
+    }
 
     // (2) upcoming expiries — anything ending within the operator-configured
     // window (config.notify.contractEndDays, default 30, clamped 1-365) that's

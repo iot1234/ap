@@ -185,8 +185,13 @@ function makeCheckoutPool({ vatEnabled = false, ratePct = 7, carriedLateFee = 0 
         line_user_id: null, line_oa_id: null, email: null, phone: '0812345678',
         status: 'active' }] };
     }
-    if (/UPDATE tenants SET status='moved_out'/.test(s)) return { rowCount: 1, rows: [] };
+    if (/CASE WHEN status='blacklist' THEN status ELSE 'moved_out' END/.test(s)) {
+      return { rowCount: 1, rows: [] };
+    }
     if (/DELETE FROM tenant_sessions/.test(s)) return { rowCount: 1, rows: [] };
+    // Must precede the SELECT matcher below — the tenant-wide invitation
+    // revoke embeds a `SELECT id FROM contracts` subquery.
+    if (/UPDATE contract_invitations/.test(s)) return { rowCount: 0, rows: [] };
     if (/SELECT id FROM contracts/.test(s)) {
       captured.refundTarget = { sql: s, params };
       return { rows: [{ id: 22 }] };
@@ -195,7 +200,6 @@ function makeCheckoutPool({ vatEnabled = false, ratePct = 7, carriedLateFee = 0 
       captured.contractUpdate = { sql: s, params };
       return { rows: contractRows, rowCount: contractRows.length };
     }
-    if (/UPDATE contract_invitations/.test(s)) return { rowCount: 0, rows: [] };
     if (/UPDATE app_data/.test(s)) return { rowCount: 1, rows: [] };
     if (/UPDATE rooms_v2/.test(s)) return { rowCount: 1, rows: [] };
     if (/UPDATE access_cards/.test(s)) return { rowCount: 0, rows: [] };

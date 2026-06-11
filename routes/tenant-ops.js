@@ -2706,9 +2706,13 @@ module.exports = function buildTenantOpsRouter(ctx) {
         const tenant = tres.rows[0];
         const tenantCurrentRoom = tenant.current_room_id ? String(tenant.current_room_id) : null;
 
-        // Mark tenant moved_out
+        // Mark tenant moved_out. Blacklist is sticky: a replayed/late checkout
+        // on a tenant the admin already blacklisted must not quietly demote
+        // them back to plain moved_out.
         await client.query(
-          `UPDATE tenants SET status='moved_out', current_room_id=NULL, updated_at=NOW(),
+          `UPDATE tenants SET
+             status = CASE WHEN status='blacklist' THEN status ELSE 'moved_out' END,
+             current_room_id=NULL, updated_at=NOW(),
              notes = COALESCE(notes,'') || CASE WHEN $2::text IS NOT NULL THEN E'\n[checkout] ' || $2::text ELSE '' END
            WHERE id=$1`,
           [id, reason]
@@ -2772,19 +2776,21 @@ module.exports = function buildTenantOpsRouter(ctx) {
         ].filter(Boolean)));
         const oldRoom = tenantCurrentRoom || contractRooms[0] || null;
         const roomRelease = { released: [], skipped: [] };
-        const revokedInvitations = closedContractIds.length
-          ? await client.query(
-              `UPDATE contract_invitations
-                  SET status='revoked', revoked_at=NOW(), revoked_by=$2, updated_at=NOW()
-                WHERE contract_id = ANY($1::bigint[])
-                  AND status IN ('pending','submitted')
-                RETURNING id`,
-              [closedContractIds, req.session.user.username]
-            ).catch((err) => {
-              if (err.code === '42P01' || err.code === '42703') return { rowCount: 0, rows: [] };
-              throw err;
-            })
-          : { rowCount: 0, rows: [] };
+        // Revoke pending links on ALL of this tenant's contracts, not just the
+        // ones closed in this call — a straggler invitation on an
+        // already-closed contract would otherwise outlive the checkout and
+        // still accept tenant input.
+        const revokedInvitations = await client.query(
+          `UPDATE contract_invitations
+              SET status='revoked', revoked_at=NOW(), revoked_by=$2, updated_at=NOW()
+            WHERE status IN ('pending','submitted')
+              AND contract_id IN (SELECT id FROM contracts WHERE tenant_id=$1 AND deleted_at IS NULL)
+            RETURNING id`,
+          [id, req.session.user.username]
+        ).catch((err) => {
+          if (err.code === '42P01' || err.code === '42703') return { rowCount: 0, rows: [] };
+          throw err;
+        });
 
         // Flip room status to vacant in BOTH JSONB blob and rooms_v2.
         const normalizedTenantPhone = String(tenant.phone || '').replace(/[\s-]/g, '');
@@ -3033,7 +3039,10 @@ module.exports = function buildTenantOpsRouter(ctx) {
         // a 23505 error.
         let closingBill = null;
         let closingBillDetail = null;
-        if (wantClosingBill && billingRoom && closedContract) {
+        // tenantCurrentRoom gate: a tenant who never moved in (unsigned
+        // invite-flow contract, current_room_id NULL) must not receive a
+        // pro-rated closing bill for days they never lived.
+        if (wantClosingBill && billingRoom && closedContract && tenantCurrentRoom) {
           // Skip only if this tenant already has a closing bill for the
           // room+period. Another tenant can legitimately have a bill for the
           // same room+period after a mid-month move.

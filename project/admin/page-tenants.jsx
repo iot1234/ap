@@ -1796,6 +1796,17 @@ function TabContract({ t, routeBookingId = '', config, setToast, addActivity, se
               busy={busy}
               C={C}
             />
+            {!hasCurrentTenancy && t.tenantStatus === 'active' ? (
+              <ContractActionTile
+                icon="🧹"
+                title="ตั้งเป็นย้ายออก (เคลียร์สถานะ)"
+                desc="ผู้เช่าสถานะใช้งานแต่ไม่มีห้องและไม่มีสัญญา — ถ้าไม่ได้จะเข้าพักแล้ว ใช้ปุ่มนี้ปิดสถานะให้ถูกต้อง"
+                onClick={() => setCancelling(true)}
+                busy={busy}
+                C={C}
+                tone="danger"
+              />
+            ) : null}
           </div>
         </Card>
         {showCheckin ? (
