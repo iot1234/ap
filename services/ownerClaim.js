@@ -18,19 +18,19 @@
 //   - Token is single-use + expires after 5 min.
 //   - One pending token per OA at a time (uq_owner_claim_pending_per_oa).
 //   - Admin must be owner-role to create tokens (route enforces).
-//   - Code namespace is OWNER-{8 hex} → distinct from tenant BIND-{...}
+//   - Code namespace is OWNER-{8..16 hex} → distinct from tenant BIND-{...}
 //     so a tenant's binding flow can't trip the owner-claim webhook branch.
 
 const crypto = require('crypto');
 
-const CODE_RE = /^OWNER-[A-F0-9]{8}$/i;
+const CODE_RE = /^OWNER-[A-F0-9]{8,16}$/i;  // accept legacy 8-hex + new 16-hex
 const TTL_MS = 5 * 60 * 1000;          // 5 minutes
 
 function generateCode() {
-  // 4 random bytes → 8 hex chars (uppercased). Plenty of entropy for a
-  // 5-min-window single-use code; longer codes were rejected as harder to
-  // type on the LINE app keyboard.
-  return 'OWNER-' + crypto.randomBytes(4).toString('hex').toUpperCase();
+  // 8 random bytes → 16 hex chars (uppercased): 64-bit, single-use, 5-min
+  // window. Pasted from the issuing screen into LINE chat, so length is not a
+  // typing burden.
+  return 'OWNER-' + crypto.randomBytes(8).toString('hex').toUpperCase();
 }
 
 function isClaimCode(text) {

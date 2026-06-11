@@ -371,6 +371,18 @@ app.use(helmet({
 }));
 app.disable('x-powered-by');
 
+// Permissions-Policy: deny powerful browser features by default. Helmet 8 does
+// not emit this header, so set it explicitly -- defence in depth so any future
+// XSS/embedded context can't silently reach camera/mic/geolocation/etc. The
+// app's only device need is the camera on slip/ID upload pages, which use a
+// plain <input type=file> (no getUserMedia), so camera=() is safe.
+app.use((_req, res, next) => {
+  res.setHeader('Permissions-Policy',
+    'camera=(), microphone=(), geolocation=(), usb=(), payment=(), ' +
+    'accelerometer=(), gyroscope=(), magnetometer=(), interest-cohort=()');
+  next();
+});
+
 // Compress text responses and static source files. The current frontend still
 // serves JSX directly to the browser, so gzip materially reduces cold-load
 // transfer size until the app moves to a real build/bundle pipeline.
@@ -7595,6 +7607,41 @@ async function tenantPaymentUploadHandler(req, res) {
         && req.features.slipUpload.requireVerification === false
         && req.features.slipUpload.autoVerify !== true;
       initialStatus = allowUnverifiedAutoApprove ? 'verified' : 'pending';
+    }
+    // Replay-after-reversal guard. When an admin VOIDS a bill or UNMARKS it
+    // paid, the reversed payment is flipped to status='rejected', dropping its
+    // slip_hash + transaction_ref out of the pending/verified unique indexes —
+    // so the same REAL bank transfer could be silently re-credited on a fresh
+    // upload. Those reversals stamp a distinctive rejected_reason
+    // (superseded_by_void: / unmark_paid_correction:), which separates them
+    // from an ordinary wrong-bill slip reject (that one is meant to be
+    // resubmittable). If this upload matches a reversed ref, never auto-verify
+    // it — route it to the admin queue so a human re-confirms against the
+    // reversal history. Detective only: it can downgrade verified->pending,
+    // never hard-reject a genuine payment.
+    if (initialStatus === 'verified') {
+      try {
+        const reversedRef = await pool.query(
+          `SELECT 1 FROM payments
+             WHERE status='rejected'
+               AND (rejected_reason LIKE 'superseded_by_void:%'
+                    OR rejected_reason LIKE 'unmark_paid_correction:%')
+               AND (slip_hash = $1
+                    OR ($2::text IS NOT NULL AND transaction_ref = $2))
+             LIMIT 1`,
+          [slipHash, (verifyResult && verifyResult.transRef) ? String(verifyResult.transRef) : null]
+        );
+        if (reversedRef.rows.length) {
+          initialStatus = 'pending';
+          initialReason = 'สลิป/รายการโอนนี้ตรงกับการชำระที่เคยถูกยกเลิกหรือกลับรายการ — ส่งเข้าคิวแอดมินเพื่อตรวจสอบก่อนยืนยัน';
+        }
+      } catch (e) {
+        // Best-effort: a lookup failure must not block a legitimate payment;
+        // the partial unique indexes remain the hard integrity backstop.
+        if (e && e.code !== '42P01' && e.code !== '42703') {
+          console.warn('[pay] reversed-ref replay check failed:', e.message);
+        }
+      }
     }
     if (!effectivePaymentBlock) {
       try {

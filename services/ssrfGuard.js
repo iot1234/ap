@@ -3,22 +3,27 @@
 // HTTP target whose URL/host is operator-configurable (Slip2Go API URL, R2/S3
 // endpoint, etc.). Without this an admin (or anyone who can write a secret) can
 // point an outbound call at cloud metadata (169.254.169.254), loopback, or the
-// platform's private network (*.railway.internal, 10/8 …) and turn a tenant
+// platform's private network (*.railway.internal, 10/8 ...) and turn a tenant
 // slip upload / a "test connection" click into a request to internal services
-// — leaking the bearer token and any response back out.
+// -- leaking the bearer token and any response back out.
 //
-// Two layers:
-//   assertSafeUrl(raw)          — sync: require https, reject internal hostnames
+// Three layers:
+//   assertSafeUrl(raw)          -- sync: require https, reject internal hostnames
 //                                 and literal private/reserved IPs. Use at
 //                                 config-write time and before client setup.
-//   assertSafeUrlResolved(raw)  — async: the above PLUS a DNS lookup so a public
+//   assertSafeUrlResolved(raw)  -- async: the above PLUS a DNS lookup so a public
 //                                 hostname that resolves to an internal IP
 //                                 (DNS-rebinding) is also rejected. Use right
 //                                 before firing an outbound request on a path
 //                                 that untrusted input can trigger.
+//   safeLookup(host, opts, cb)  -- a `lookup` hook for http(s).request /
+//                                 https.Agent that pins the connection to a
+//                                 validated address, closing the resolve-then-
+//                                 connect TOCTOU the two asserts can't cover.
 
 const net = require('net');
 const dns = require('dns').promises;
+const dnsCb = require('dns');
 
 function ipToLong(ip) {
   const p = ip.split('.').map(Number);
@@ -70,7 +75,7 @@ function ipv6ToHextets(input) {
   const tail = halves.length === 2 ? (halves[1] ? halves[1].split(':') : []) : null;
   let groups;
   if (tail === null) {
-    groups = head;                                              // no '::' — must be 8 groups
+    groups = head;                                              // no '::' -- must be 8 groups
   } else {
     const missing = 8 - head.length - tail.length;
     if (missing < 0) return null;
@@ -123,7 +128,7 @@ function isBlockedIp(ip) {
   const v = net.isIP(ip);
   if (v === 4) return isBlockedIPv4(ip);
   if (v === 6) return isBlockedIPv6(ip);
-  return true; // not a literal IP — let hostname rules in assertSafeUrl decide
+  return true; // not a literal IP -- let hostname rules in assertSafeUrl decide
 }
 
 function assertSafeUrl(raw, { allowHttp = false } = {}) {
@@ -163,4 +168,38 @@ async function assertSafeUrlResolved(raw, opts) {
   return u;
 }
 
-module.exports = { assertSafeUrl, assertSafeUrlResolved, isBlockedIp };
+// A drop-in `lookup` for http(s).request / https.Agent options. It resolves the
+// host and only ever hands the socket an address that passes the SSRF block
+// list. Because the address the socket connects to is the SAME one we just
+// validated (not a second, independent OS resolution), this closes the
+// DNS-rebinding TOCTOU window that an assert-then-connect sequence leaves open.
+// Use this on every outbound request whose host is operator/tenant-influenced
+// (Slip2Go verify, R2/S3 endpoint).
+function safeLookup(hostname, options, callback) {
+  if (typeof options === 'function') { callback = options; options = {}; }
+  const opts = options || {};
+  // Literal IP: no DNS to do -- validate the literal directly.
+  if (net.isIP(hostname)) {
+    const fam = net.isIP(hostname);
+    if (isBlockedIp(hostname)) {
+      return process.nextTick(callback, new Error('outbound host is a private/reserved IP address'));
+    }
+    return process.nextTick(
+      callback, null,
+      opts.all ? [{ address: hostname, family: fam }] : hostname,
+      fam
+    );
+  }
+  dnsCb.lookup(hostname, { all: true, verbatim: opts.verbatim !== false }, (err, addresses) => {
+    if (err) return callback(err);
+    const list = Array.isArray(addresses) ? addresses : [addresses];
+    const safe = list.filter((a) => a && a.address && !isBlockedIp(a.address));
+    if (!safe.length) {
+      return callback(new Error('outbound host resolves to a private/reserved IP address'));
+    }
+    if (opts.all) return callback(null, safe);
+    return callback(null, safe[0].address, safe[0].family);
+  });
+}
+
+module.exports = { assertSafeUrl, assertSafeUrlResolved, isBlockedIp, safeLookup };

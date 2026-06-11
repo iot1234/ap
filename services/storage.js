@@ -6,6 +6,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const https = require('https');
 const crypto = require('crypto');
 const secrets = require('./secrets');
 const ssrfGuard = require('./ssrfGuard');
@@ -42,9 +43,22 @@ function getS3Client() {
   let lib;
   try { lib = require('@aws-sdk/client-s3'); }
   catch { return null; }
+  // Pin DNS on every request the SDK makes so R2_ENDPOINT can't be DNS-rebound
+  // to an internal IP after the sync assertSafeUrl() check above (which doesn't
+  // resolve). safeLookup re-validates the resolved address at connect time and
+  // hands the socket only a block-list-clean IP. If the smithy HTTP handler
+  // isn't available, fall back to the default handler (sync guard still applies).
+  let requestHandler;
+  try {
+    const { NodeHttpHandler } = require('@smithy/node-http-handler');
+    requestHandler = new NodeHttpHandler({
+      httpsAgent: new https.Agent({ keepAlive: true, lookup: ssrfGuard.safeLookup }),
+    });
+  } catch { requestHandler = undefined; }
   _s3Client = new lib.S3Client({
     region, endpoint: ep, forcePathStyle: true,
     credentials: { accessKeyId: id, secretAccessKey: sec },
+    ...(requestHandler ? { requestHandler } : {}),
   });
   _s3Client._lib = lib;
   _s3ClientKey = cacheKey;

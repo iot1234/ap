@@ -3,14 +3,14 @@
 // match-on-message flow that the webhook calls when a tenant sends their
 // code in chat.
 //
-// Code format: BIND-XXXXXXXX (8 hex chars, uppercase). 4 bytes = 4.3 billion
-// combinations. Combined with per-tenant uniqueness + 7-day expiry +
+// Code format: BIND-XXXXXXXXXXXX (12 hex chars, uppercase). 6 bytes = 281
+// trillion combinations. Combined with per-tenant uniqueness + expiry +
 // rate-limited webhook, brute force is infeasible.
 
 const crypto = require('crypto');
 
 const CODE_PREFIX = 'BIND-';
-const CODE_LEN = 8;       // hex chars
+const CODE_LEN = 12;      // hex chars (6 bytes, 48-bit; was 8/32-bit)
 const DEFAULT_TTL_DAYS = 7;
 
 function lineBindingError(message, code, status = 400) {

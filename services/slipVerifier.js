@@ -1106,6 +1106,11 @@ async function verifyViaSlip2Go(buffer, expected) {
       port: endpoint.port || undefined,
       path: endpoint.pathname + endpoint.search,
       method: 'POST',
+      // Pin DNS to the validated resolution: the socket connects only to an
+      // address that passes the SSRF block list, closing the rebinding TOCTOU
+      // between assertSafeUrlResolved() above and this connect. SNI/cert
+      // validation still uses endpoint.hostname.
+      lookup: ssrfGuard.safeLookup,
       headers: {
         'Content-Type': contentType,
         'Content-Length': body.length,

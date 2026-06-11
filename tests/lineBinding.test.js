@@ -30,9 +30,9 @@ function buildFakePool(scenarios = {}) {
   return { query, connect, _calls: calls };
 }
 
-test('generateCode produces BIND- prefix + 8 hex', () => {
+test('generateCode produces BIND- prefix + 12 hex', () => {
   const c = lb.generateCode();
-  assert.match(c, /^BIND-[A-F0-9]{8}$/);
+  assert.match(c, /^BIND-[A-F0-9]{12}$/);
 });
 
 test('issue: throws if tenant not found', async () => {
