@@ -1932,8 +1932,13 @@ module.exports = function buildTenantOpsRouter(ctx) {
         // The advisory lock is xact-scoped so it auto-releases on commit/
         // rollback. The hash is FNV-1a of the room id string, clamped to
         // int32 (Postgres advisory locks accept (int4, int4) signatures).
-        if (!isForced) {
-          // Hash room_id → int32 advisory key (see scheduler's _lockKeyFor).
+        // Hash room_id → int32 advisory key (see scheduler's _lockKeyFor).
+        // Taken for FORCED checkins too: force skips the occupancy REFUSAL
+        // below (migrate semantics), but two concurrent forced checkins on
+        // the same room still serialise here instead of racing each other
+        // to the uq_tenants_active_room index and burning one transaction
+        // on a 23505 rollback.
+        {
           let h = 0x811c9dc5;
           const s = String(roomId);
           for (let i = 0; i < s.length; i++) {
@@ -1947,6 +1952,8 @@ module.exports = function buildTenantOpsRouter(ctx) {
             'SELECT pg_advisory_xact_lock($1::int, $2::int)',
             [0x434b494e, lockKey]
           );
+        }
+        if (!isForced) {
           const occupants = await client.query(
             `SELECT id, full_name FROM tenants
                WHERE current_room_id=$1 AND status='active' AND deleted_at IS NULL AND id<>$2

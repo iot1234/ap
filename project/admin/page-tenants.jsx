@@ -1415,7 +1415,11 @@ function TabContract({ t, routeBookingId = '', config, setToast, addActivity, se
       const d = await apiCall(`/api/admin/contract-invitations/${found.id}`);
       setReviewing(d.invitation);
     } catch (err) {
-      setToast && setToast({ kind: 'danger', message: 'โหลดล้มเหลว: ' + err.message });
+      if (window.toastError && setToast) {
+        window.toastError(setToast, err, { action: 'เปิดรายการตรวจสอบ' });
+      } else {
+        setToast && setToast({ kind: 'danger', message: 'โหลดล้มเหลว: ' + err.message });
+      }
     } finally { setBusy(false); }
   };
 
@@ -1633,7 +1637,11 @@ function TabContract({ t, routeBookingId = '', config, setToast, addActivity, se
       setToast && setToast({ kind: 'success', message: 'ส่งกลับให้ผู้เช่าแก้ไขแล้ว' });
       reload();
     } catch (err) {
-      setToast && setToast({ kind: 'danger', message: 'ส่งกลับล้มเหลว: ' + err.message });
+      if (window.toastError && setToast) {
+        window.toastError(setToast, err, { action: 'ส่งกลับให้ผู้เช่าแก้ไข' });
+      } else {
+        setToast && setToast({ kind: 'danger', message: 'ส่งกลับล้มเหลว: ' + err.message });
+      }
     } finally { setBusy(false); }
   };
 

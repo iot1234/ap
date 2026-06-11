@@ -6369,6 +6369,40 @@ test('bill endpoints return machine-readable codes for common failures', () => {
     'preview-period must code its failure response');
 });
 
+test('booking-to-contract lifecycle errors route through the guided error mapper', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const tenants = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-tenants.jsx'), 'utf8');
+  const contracts = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-contracts.jsx'), 'utf8');
+  const invites = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-contract-invitations.jsx'), 'utf8');
+
+  assert.match(tenants, /window\.toastError\(setToast, err, \{ action: 'ส่งกลับให้ผู้เช่าแก้ไข' \}\)/,
+    'rejecting a submitted invitation must surface code-mapped guidance, not raw err.message');
+  assert.match(tenants, /window\.toastError\(setToast, err, \{ action: 'เปิดรายการตรวจสอบ' \}\)/,
+    'opening the review panel must surface code-mapped guidance');
+  assert.match(contracts, /window\.toastError\(setToast, e, \{ action: 'โหลดสัญญา' \}\)/,
+    'contract list load failures must explain connectivity/codes');
+  assert.match(invites, /window\.toastError\(setToast, err, \{ action: 'โหลดใบเชิญ' \}\)/,
+    'invitation list load failures must explain connectivity/codes');
+  assert.match(contracts, /onError && onError\(inviteErrorMessage\('ลงนามล้มเหลว', err\)\)/,
+    'sign-contract failures must include the server hint/nextActions');
+  const editSaves = contracts.match(/onError && onError\(inviteErrorMessage\('บันทึกล้มเหลว', err\)\)/g) || [];
+  assert.ok(editSaves.length >= 2,
+    'contract edit/template save failures must include the server hint/nextActions');
+});
+
+test('checkin room advisory lock also covers forced checkins', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'tenant-ops.js'), 'utf8');
+  // The advisory lock must sit OUTSIDE the !isForced gate: lock first, then
+  // only the occupancy refusal is skippable by force. Otherwise two forced
+  // checkins race to the unique index instead of serialising.
+  assert.match(src,
+    /\[0x434b494e, lockKey\][\s\S]{0,20}\);[\s\S]{0,16}\}[\s\S]{0,16}if \(!isForced\) \{[\s\S]{0,40}const occupants/,
+    'advisory room lock must be taken before (outside) the force gate');
+});
+
 test('contract-fill HTML reads view.rejectionReason (camelCase, not snake_case)', () => {
   // Server's buildPublicView returns rejectionReason; the HTML used to read
   // view.rejection_reason → reject reason was invisible to the tenant.

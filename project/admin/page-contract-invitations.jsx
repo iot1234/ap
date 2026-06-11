@@ -35,7 +35,11 @@ function PageContractInvitations({ setToast, addActivity }) {
       }
       setInvitations(list);
     } catch (err) {
-      setToast && setToast({ kind: 'danger', message: 'โหลดล้มเหลว: ' + err.message });
+      if (window.toastError && setToast) {
+        window.toastError(setToast, err, { action: 'โหลดใบเชิญ' });
+      } else {
+        setToast && setToast({ kind: 'danger', message: 'โหลดล้มเหลว: ' + err.message });
+      }
     } finally {
       setLoading(false);
     }

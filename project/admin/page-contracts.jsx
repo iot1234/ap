@@ -126,7 +126,11 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
       const d = await apiCall('/api/contracts');
       setContracts(d.contracts || []);
     } catch (e) {
-      setToast && setToast({ kind: 'danger', message: 'โหลดสัญญาล้มเหลว: ' + e.message });
+      if (window.toastError && setToast) {
+        window.toastError(setToast, e, { action: 'โหลดสัญญา' });
+      } else {
+        setToast && setToast({ kind: 'danger', message: 'โหลดสัญญาล้มเหลว: ' + e.message });
+      }
     } finally {
       setLoading(false);
     }
@@ -963,7 +967,7 @@ function SignContractModal({ contract, onClose, onSaved, onError }) {
       });
       onSaved && onSaved(d.contract);
     } catch (err) {
-      onError && onError('ลงนามล้มเหลว: ' + err.message);
+      onError && onError(inviteErrorMessage('ลงนามล้มเหลว', err));
     } finally {
       setBusy(false);
     }
@@ -1062,7 +1066,7 @@ function AssignTemplateModal({ contract, templates, onClose, onSaved, onError, o
       });
       onSaved && onSaved();
     } catch (err) {
-      onError && onError('บันทึกล้มเหลว: ' + err.message);
+      onError && onError(inviteErrorMessage('บันทึกล้มเหลว', err));
     } finally {
       setBusy(false);
     }
@@ -1252,7 +1256,7 @@ function ContractEditModal({ contract, onClose, onSaved, onError }) {
       });
       onSaved && onSaved(d.contract);
     } catch (err) {
-      onError && onError('บันทึกล้มเหลว: ' + (err.message || 'unknown'));
+      onError && onError(inviteErrorMessage('บันทึกล้มเหลว', err));
     } finally { setBusy(false); }
   };
 
