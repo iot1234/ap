@@ -2650,7 +2650,7 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBookingSubmit, validateBod
       return res.status(400).json({ error: 'checkInDate ต้องเป็น YYYY-MM-DD', code: 'INVALID_DATE' });
     }
     const target = new Date(cleaned.checkInDate + 'T00:00:00Z');
-    const today = new Date(new Date().toISOString().slice(0, 10) + 'T00:00:00Z');
+    const today = new Date(billing.localTodayYmd() + 'T00:00:00Z');
     const diff = (target - today) / 86_400_000;
     // Public bookings get a more lenient 7-days-past / 365-days-future
     // window than admin checkin (which is stricter). Bookers occasionally
@@ -3028,7 +3028,7 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBookingSubmit, validateBod
           email: cleaned.email || '',
           occupation: '',
           score: 'A',
-          since: new Date().toISOString().slice(0, 10),
+          since: billing.localTodayYmd(),
         },
         reservedBy: newBooking.id,
         reservedAt,
@@ -8779,7 +8779,7 @@ app.post('/api/bookings', sameOrigin, csrfGuard, requireAuth,
       return res.status(400).json({ error: 'checkInDate ต้องเป็น YYYY-MM-DD', code: 'INVALID_DATE' });
     }
     const target = new Date(cleaned.checkInDate + 'T00:00:00Z');
-    const today = new Date(new Date().toISOString().slice(0, 10) + 'T00:00:00Z');
+    const today = new Date(billing.localTodayYmd() + 'T00:00:00Z');
     const diff = (target - today) / 86_400_000;
     // Slightly wider past-window than the public form (-30 vs -7): the front
     // desk occasionally records a booking the day after the phone call.
@@ -9001,7 +9001,7 @@ app.post('/api/bookings', sameOrigin, csrfGuard, requireAuth,
           email: cleaned.email || '',
           occupation: '',
           score: 'A',
-          since: new Date().toISOString().slice(0, 10),
+          since: billing.localTodayYmd(),
         },
         reservedBy: newBooking.id,
         reservedAt,
@@ -9546,7 +9546,7 @@ app.post('/api/bookings/:id/approve-and-assign', sameOrigin, csrfGuard, requireA
           email: booking.email || '',
           occupation: '',
           score: 'A',
-          since: new Date().toISOString().slice(0, 10),
+          since: billing.localTodayYmd(),
         },
         // Track the booking that reserved this room so admin can see the
         // link in the room editor + un-reserve cleanly if booking is
@@ -11121,7 +11121,7 @@ function buildContractWarnings(row) {
   const locked = !!row.locked_at;
   const tenantRoom = row.tenant_current_room_id || row.current_room_id || null;
   const endYmd = row.end_date ? String(row.end_date).slice(0, 10) : null;
-  const todayYmd = new Date().toISOString().slice(0, 10);
+  const todayYmd = billing.localTodayYmd();
 
   if (isActive && row.tenant_id && !row.tenant_status) {
     warnings.push(contractWarning(
@@ -12842,7 +12842,7 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
 
     // (1) moveInDate window — catches "typed wrong year" errors.
     if (!isForced) {
-      const today = new Date(new Date().toISOString().slice(0, 10) + 'T00:00:00Z');
+      const today = new Date(billing.localTodayYmd() + 'T00:00:00Z');
       const target = new Date(moveInDate + 'T00:00:00Z');
       if (Number.isFinite(target.getTime())) {
         const diffDays = Math.round((target - today) / 86_400_000);

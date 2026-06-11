@@ -773,11 +773,15 @@
   let depositSlipReading = false;
   let depositSlipError = '';
 
-  // Default check-in date: 7 days from today
+  // Default check-in date: 7 days from today. Format in the BROWSER's local
+  // timezone — toISOString() is UTC, which before 07:00 Thai time is still
+  // yesterday and shifts both the default and the min a day back.
+  const toLocalYmd = (d) =>
+    d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
   const dt = new Date();
   dt.setDate(dt.getDate() + 7);
-  document.getElementById('checkInDate').value = dt.toISOString().slice(0, 10);
-  document.getElementById('checkInDate').min = new Date().toISOString().slice(0, 10);
+  document.getElementById('checkInDate').value = toLocalYmd(dt);
+  document.getElementById('checkInDate').min = toLocalYmd(new Date());
 
   const params = new URLSearchParams(window.location.search);
   const roomIdParam = (params.get('roomId') || '').trim().slice(0, 32);

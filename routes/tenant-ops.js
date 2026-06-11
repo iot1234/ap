@@ -832,7 +832,7 @@ module.exports = function buildTenantOpsRouter(ctx) {
           { roomId, currentStatus: blockingStatus });
       }
 
-      const today = new Date().toISOString().slice(0, 10);
+      const today = billing.localTodayYmd();
       const blobTenant = {
         name: tenantRow.full_name || fullName,
         phone: tenantRow.phone || phone,
@@ -1730,7 +1730,7 @@ module.exports = function buildTenantOpsRouter(ctx) {
       // (1) moveInDate sanity — within configured past/future window.
       // Catches typos like "2027-..." and prevents back-dated checkins
       // older than the operator-allowed grace window. Bypass with force.
-      const todayStr = new Date().toISOString().slice(0, 10);
+      const todayStr = billing.localTodayYmd();
       const today = new Date(todayStr + 'T00:00:00Z');
       const target = new Date(moveInDate + 'T00:00:00Z');
       if (Number.isFinite(target.getTime())) {

@@ -548,7 +548,7 @@ function AddTenantModal({ open, onClose, rooms, setRooms, busy, setBusy, initial
                 score: 'A',
                 tenantId: d.tenant && d.tenant.id ? d.tenant.id : null,
               },
-              since: window.fmtDateTH ? window.fmtDateTH(new Date()) : new Date().toISOString().slice(0, 10),
+              since: window.fmtDateTH ? window.fmtDateTH(new Date()) : new Date().toLocaleDateString('en-CA'),
             };
           }
           return next;
@@ -1230,7 +1230,10 @@ function TabContract({ t, routeBookingId = '', config, setToast, addActivity, se
         roomId: t.roomId,
         monthlyRent: rent,
         deposit: Number(contractRentInfo.deposit) || rent * 2,
-        moveInDate: new Date().toISOString().slice(0, 10),
+        // Local-timezone today: toISOString() is the UTC date — before 07:00
+        // Thai time that backdates the contract's move-in by one day.
+        moveInDate: window.contractTodayYmd ? window.contractTodayYmd()
+          : new Date().toLocaleDateString('en-CA'),
         termMonths: 12,
         expiresInHours: 168,
       };

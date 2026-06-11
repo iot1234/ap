@@ -612,6 +612,16 @@ function formatYMD(year, monthOneIndexed, day) {
   return `${y}-${m}-${d}`;
 }
 
+// Today as YYYY-MM-DD in the SERVER's local timezone (Asia/Bangkok by
+// default — server.js sets process.env.TZ at boot). new Date()
+// .toISOString().slice(0, 10) returns the UTC date instead, which is
+// yesterday between 00:00 and 06:59 Bangkok time; every "what day is it"
+// decision (move-in windows, contract-expiry warnings, tenant since dates)
+// must go through here so they agree with the scheduler's local-date math.
+function localTodayYmd(now = new Date()) {
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+}
+
 function periodFromDate(value) {
   if (value == null || value === '') return null;
   const ymd = value instanceof Date && Number.isFinite(value.getTime())
@@ -1191,7 +1201,7 @@ function firstMonthProrationFraction({ moveInDay, daysInMonth, prorate = false }
 
 module.exports = {
   buildBill, buildPaymentBlock, statusOf, makeBillNo,
-  formatPeriodNow, formatDueDate, formatYMD, parseDueDateLocal, round2,
+  formatPeriodNow, formatDueDate, formatYMD, localTodayYmd, parseDueDateLocal, round2,
   periodFromDate, contractStartsInPeriod,
   resolveUtilityUsage, resolveUtilityUsageFromBillRow, buildUtilityItem,
   isFlatUtilityConfigured,

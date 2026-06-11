@@ -1021,7 +1021,10 @@ function CreateBookingModal({ rooms, onClose, onCreated, setToast }) {
   const { Modal, Btn } = window;
   const { useState, useEffect, useMemo } = React;
   const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
-  const todayYmd = new Date().toISOString().slice(0, 10);
+  // Local-timezone today — toISOString() would give the UTC date, which is
+  // yesterday before 07:00 in Thailand and pre-fills a backdated check-in.
+  const todayYmd = window.contractTodayYmd ? window.contractTodayYmd()
+    : new Date().toLocaleDateString('en-CA');
   const [form, setForm] = useState({
     tenantName: '', phone: '', email: '',
     roomId: '', roomType: 'standard', floor: '',
