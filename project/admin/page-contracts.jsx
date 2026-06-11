@@ -75,6 +75,9 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
 
   const contractWarningMeta = (warning) => {
     const code = String((warning && warning.code) || '');
+    if (code === 'CONTRACT_IDENTITY_INCOMPLETE') {
+      return { domain: 'ผู้เช่า', tone: 'danger', fix: 'เปิดผู้เช่า → แท็บสัญญา → ปุ่ม "เติมข้อมูล/อัปโหลดเอกสาร" เพื่อบันทึกข้อมูล/รูปบัตรย้อนหลัง' };
+    }
     if (code.includes('IDENTITY') || code.includes('TENANT')) {
       return { domain: 'ผู้เช่า', tone: 'danger', fix: 'เปิดหน้า/แท็บผู้เช่า แล้วเติมข้อมูลหรือ checkout ให้ตรงสถานะ' };
     }
@@ -538,9 +541,11 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
                         <Btn size="sm" variant="ghost" onClick={() => setInviting(c)}
                           title="ส่งลิงก์ให้ผู้เช่ากรอกสัญญาเอง">📨</Btn>
                       ) : null}
-                      {c.status === 'active' && c.locked_at && contractIdentityGap(c) ? (
+                      {c.status === 'active' && c.locked_at ? (
                         <Btn size="sm" variant="ghost" disabled={true}
-                          title={`ส่งลิงก์ไม่ได้: สัญญา lock แล้วและยังขาด ${contractIdentityGap(c).join(', ')}`}>
+                          title={contractIdentityGap(c)
+                            ? `ส่งลิงก์ไม่ได้: สัญญา lock แล้วและยังขาด ${contractIdentityGap(c).join(', ')} — เปิดผู้เช่า → แท็บสัญญา → ปุ่ม "เติมข้อมูล/อัปโหลดเอกสาร" เพื่อบันทึกย้อนหลัง`
+                            : 'ส่งลิงก์ไม่ได้: สัญญา lock แล้ว — ลิงก์กรอกใช้ได้เฉพาะก่อน approve/lock ถ้าต้องแก้ข้อมูลให้ทำสัญญาฉบับใหม่/ต่อสัญญา'}>
                           🔒 ส่งลิงก์ไม่ได้
                         </Btn>
                       ) : null}

@@ -6271,6 +6271,77 @@ test('tenant contract tab shows a sequential workflow and actionable next steps'
     'check-in modal must pass structured backend errors to the parent');
 });
 
+test('locked-contract identity gap card opens a real backfill modal (no dead-end advice)', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-tenants.jsx'), 'utf8');
+
+  assert.match(src, /function TenantIdentityBackfillModal/,
+    'tenant drawer must ship an admin-side backfill modal for locked contracts');
+  assert.match(src, /onBackfill=\{\(\) => setBackfilling\(true\)\}/,
+    'identity gap card must wire its backfill button to open the modal');
+  assert.match(src, /เติมข้อมูล\/อัปโหลดเอกสาร<\/Btn>/,
+    'identity gap card must show an explicit backfill action');
+  assert.match(src, /\/api\/tenants\/\$\{tenantDbId\}`, \{[\s\S]{0,40}method: 'PUT'/,
+    'backfill modal must persist address/emergency contact via PUT /api/tenants/:id');
+  assert.match(src, /version: row\.updated_at/,
+    'backfill PUT must send the optimistic-lock version so concurrent edits 409 instead of overwriting');
+  assert.match(src, /\/api\/tenants\/\$\{tenantDbId\}\/identity/,
+    'backfill modal must upload citizen-ID images via the identity endpoint');
+  assert.match(src, /frontDataUrl/, 'backfill modal must send the front card image');
+  assert.match(src, /backDataUrl/, 'backfill modal must send the back card image');
+  assert.match(src, /FEATURE_DISABLED: 'ฟีเจอร์อัปโหลดรูป \(photoUpload\) ปิดอยู่/,
+    'backfill modal must translate the photoUpload feature gate into an actionable message');
+  assert.match(src, /CITIZEN_ID_DUPLICATE/,
+    'backfill modal must explain duplicate citizen-ID conflicts');
+  assert.match(src, /VERSION_CONFLICT/,
+    'backfill modal must explain concurrent-edit conflicts');
+  assert.match(src, /บันทึกที่อยู่\/ผู้ติดต่อฉุกเฉินแล้ว แต่ส่วนเลขบัตร\/รูปบัตรยังไม่สำเร็จ/,
+    'backfill modal must call out partial success so admins know what already saved');
+  assert.match(src, /onSaved=\{\(\) => \{ setBackfilling\(false\); reload\(\); \}\}/,
+    'successful backfill must reload the contract so warnings recompute');
+  assert.match(src, /file\.size > 1_500_000/,
+    'image picker must reject oversized files client-side with a clear message');
+});
+
+test('contracts page explains the locked send-link block in every case', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-contracts.jsx'), 'utf8');
+  assert.match(src, /\{c\.status === 'active' && c\.locked_at \? \(/,
+    'disabled send-link button must appear for ALL locked active contracts, not only those with identity gaps');
+  assert.match(src, /ลิงก์กรอกใช้ได้เฉพาะก่อน approve\/lock/,
+    'locked-without-gap contracts must still explain why the link is unavailable');
+  assert.match(src, /เติมข้อมูล\/อัปโหลดเอกสาร/,
+    'identity-gap tooltip must point to the backfill action in the tenant drawer');
+});
+
+test('recurring charges reject inverted date ranges on create and update', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'recurring-charges.js'), 'utf8');
+  assert.match(src, /if \(b\.startAt && b\.endAt && b\.endAt < b\.startAt\)/,
+    'POST must reject endAt before startAt');
+  assert.match(src, /const nextStart = b\.startAt !== undefined/,
+    'PUT must validate the effective range against stored values');
+  assert.match(src, /nextEnd < nextStart/,
+    'PUT must reject updates that invert the stored range');
+  const rangeCodes = (src.match(/INVALID_DATE_RANGE/g) || []).length;
+  assert.ok(rangeCodes >= 2, 'both create and update paths must return INVALID_DATE_RANGE');
+});
+
+test('bill endpoints return machine-readable codes for common failures', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'bills-extras.js'), 'utf8');
+  const notFound = (src.match(/code: 'BILL_NOT_FOUND'/g) || []).length;
+  assert.ok(notFound >= 2, 'render + void must both code their bill-not-found responses');
+  assert.match(src, /code: 'BILL_FIELDS_REQUIRED'/,
+    'render must code its missing-fields response');
+  assert.match(src, /code: 'PREVIEW_FAILED'/,
+    'preview-period must code its failure response');
+});
+
 test('contract-fill HTML reads view.rejectionReason (camelCase, not snake_case)', () => {
   // Server's buildPublicView returns rejectionReason; the HTML used to read
   // view.rejection_reason → reject reason was invisible to the tenant.

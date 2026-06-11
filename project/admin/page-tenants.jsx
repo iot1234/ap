@@ -1061,6 +1061,9 @@ function TabContract({ t, routeBookingId = '', config, setToast, addActivity, se
   const [cancelling, setCancelling] = React.useState(false);
   const [cancelReason, setCancelReason] = React.useState('');
   const [contractConflict, setContractConflict] = React.useState(null);
+  // Backfill modal for locked contracts with incomplete identity docs —
+  // opened from LockedContractIdentityGapCard.
+  const [backfilling, setBackfilling] = React.useState(false);
 
   // Defensive: reset per-tenant transient state whenever the admin switches
   // to a different tenant in the drawer. Without this, a freshly-created
@@ -1076,6 +1079,7 @@ function TabContract({ t, routeBookingId = '', config, setToast, addActivity, se
     setCancelling(false);
     setCancelReason('');
     setContractConflict(null);
+    setBackfilling(false);
   }, [t.phone, routeBookingId]);
 
   const reload = React.useCallback(async () => {
@@ -1850,10 +1854,22 @@ function TabContract({ t, routeBookingId = '', config, setToast, addActivity, se
           contract={contract}
           gap={identityGap}
           C={C}
+          onBackfill={() => setBackfilling(true)}
           onOpenContracts={() => {
             window.location.hash = `#contracts?contract=${encodeURIComponent(contract.id)}&room=${encodeURIComponent(contract.room_id || '')}`;
           }}
           onOpenPdf={() => window.open(`/api/contracts/${contract.id}/pdf`, '_blank', 'noopener')}
+        />
+      ) : null}
+
+      {backfilling && tenantDbId ? (
+        <TenantIdentityBackfillModal
+          tenantDbId={tenantDbId}
+          tenantName={t.name}
+          missing={identityGap && identityGap.warning ? identityGap.warning.missing : []}
+          setToast={setToast}
+          onClose={() => setBackfilling(false)}
+          onSaved={() => { setBackfilling(false); reload(); }}
         />
       ) : null}
 
@@ -2328,7 +2344,7 @@ function contractIdentityGap(contract) {
   };
 }
 
-function LockedContractIdentityGapCard({ contract, gap, C, onOpenContracts, onOpenPdf }) {
+function LockedContractIdentityGapCard({ contract, gap, C, onBackfill, onOpenContracts, onOpenPdf }) {
   const { Card, Btn } = window;
   return (
     <Card style={{ padding: 14, background: C.dangerSoft || '#fff1f0', border: `1px solid ${C.danger || '#c0392b'}` }}>
@@ -2350,9 +2366,11 @@ function LockedContractIdentityGapCard({ contract, gap, C, onOpenContracts, onOp
         lineHeight: 1.5,
         marginBottom: 10,
       }}>
-        ทางแก้ที่ปลอดภัย: เติมข้อมูล/อัปโหลดเอกสารย้อนหลังให้ผู้เช่าในระบบ หรือสร้าง/ต่อสัญญาฉบับใหม่แล้วส่งลิงก์ก่อน lock
+        ทางแก้ที่ปลอดภัย: กดปุ่ม "เติมข้อมูล/อัปโหลดเอกสาร" ด้านล่างเพื่อบันทึกข้อมูลย้อนหลังให้ผู้เช่ารายนี้ได้ทันที
+        (ไม่ต้องง้อลิงก์) หรือสร้าง/ต่อสัญญาฉบับใหม่แล้วส่งลิงก์ก่อน lock
       </div>
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        <Btn variant="primary" size="sm" icon="✎" onClick={onBackfill}>เติมข้อมูล/อัปโหลดเอกสาร</Btn>
         <Btn variant="secondary" size="sm" onClick={onOpenContracts}>เปิดในหน้าสัญญา</Btn>
         <Btn variant="ghost" size="sm" onClick={onOpenPdf}>ดู PDF ปัจจุบัน</Btn>
         <Btn variant="ghost" size="sm" disabled={true}
@@ -2361,6 +2379,268 @@ function LockedContractIdentityGapCard({ contract, gap, C, onOpenContracts, onOp
         </Btn>
       </div>
     </Card>
+  );
+}
+
+// === TenantIdentityBackfillModal =========================================
+// The actionable way out of CONTRACT_IDENTITY_INCOMPLETE on a locked
+// contract. The tenant-fill link is intentionally blocked after approve/lock,
+// so this modal writes the tenant profile directly from the admin side:
+//   - address + emergency contact + citizen ID  → PUT /api/tenants/:id
+//     (optimistic-locked via `version` so a concurrent edit 409s instead of
+//     silently overwriting)
+//   - citizen-ID card photos (front/back)        → POST /api/tenants/:id/identity
+//     (feature-gated `photoUpload`; checksum + cross-tenant dedup enforced
+//     server-side)
+// Contract warnings are recomputed from the tenants table at read time, so a
+// successful save + contract reload clears the "ต้องตรวจ" state with no extra
+// step.
+function TenantIdentityBackfillModal({ tenantDbId, tenantName, missing, onClose, onSaved, setToast }) {
+  const C = window.ADMIN_C;
+  const { Modal, Btn, Input, Textarea } = window;
+  const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
+  const [row, setRow] = React.useState(null);      // GET /api/tenants/:id payload
+  const [loadErr, setLoadErr] = React.useState('');
+  const [form, setForm] = React.useState({
+    address: '', emergencyContactName: '', emergencyContactPhone: '', citizenId: '',
+  });
+  const [front, setFront] = React.useState(null);  // { dataUrl, name }
+  const [back, setBack] = React.useState(null);
+  const [error, setError] = React.useState('');
+  const [saving, setSaving] = React.useState(false);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    setRow(null);
+    setLoadErr('');
+    (async () => {
+      try {
+        const d = await apiCall(`/api/tenants/${tenantDbId}`);
+        if (cancelled) return;
+        const tRow = (d && d.tenant) || {};
+        setRow(tRow);
+        setForm({
+          address: tRow.address || '',
+          emergencyContactName: tRow.emergency_contact_name || '',
+          emergencyContactPhone: tRow.emergency_contact_phone || '',
+          citizenId: '',
+        });
+      } catch (err) {
+        if (!cancelled) setLoadErr((err && err.message) || 'โหลดข้อมูลผู้เช่าไม่สำเร็จ');
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [tenantDbId]);
+
+  const citizenIdNorm = String(form.citizenId || '').replace(/[\s-]/g, '');
+  // Live checklist — "what's still missing if I save right now". Mirrors the
+  // server's buildContractWarnings() field list so admin sees the same six
+  // items the warning counts.
+  const itemDone = {
+    address: !!String(form.address || '').trim(),
+    emergencyContactName: !!String(form.emergencyContactName || '').trim(),
+    emergencyContactPhone: !!String(form.emergencyContactPhone || '').trim(),
+    citizenId: !!(row && row.citizen_id_tail) || /^\d{13}$/.test(citizenIdNorm),
+    citizenIdFront: !!(row && row.citizen_id_image_front_id) || !!front,
+    citizenIdBack: !!(row && row.citizen_id_image_back_id) || !!back,
+  };
+  const checklist = ['address', 'emergencyContactName', 'emergencyContactPhone',
+    'citizenId', 'citizenIdFront', 'citizenIdBack'];
+
+  const pickImage = (side) => (ev) => {
+    const file = ev.target.files && ev.target.files[0];
+    ev.target.value = '';
+    if (!file) return;
+    if (!/^image\//.test(file.type || '')) {
+      setError('ไฟล์รูปบัตรต้องเป็นรูปภาพ (JPG/PNG) — ไฟล์ที่เลือกไม่ใช่รูป');
+      return;
+    }
+    if (file.size > 1_500_000) {
+      setError('รูปใหญ่เกิน 1.5MB — ย่อ/บีบอัดรูปก่อน แล้วเลือกใหม่อีกครั้ง');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const val = { dataUrl: String(reader.result || ''), name: file.name };
+      if (side === 'front') setFront(val); else setBack(val);
+      setError('');
+    };
+    reader.onerror = () => setError('อ่านไฟล์รูปไม่สำเร็จ — ลองเลือกรูปใหม่อีกครั้ง');
+    reader.readAsDataURL(file);
+  };
+
+  // Server codes → actionable Thai. Raw err.message is the fallback only.
+  const friendlyError = (err) => ({
+    INVALID_CITIZEN_ID: 'เลขบัตรประชาชนต้องเป็นตัวเลข 13 หลัก',
+    INVALID_CHECKSUM: 'เลขบัตรไม่ผ่านการตรวจ check digit (mod-11) — ตรวจการพิมพ์ทีละหลักอีกครั้ง',
+    CITIZEN_ID_DUPLICATE: 'เลขบัตรนี้ผูกกับผู้เช่ารายอื่นในระบบแล้ว — ตรวจรายชื่อผู้เช่าก่อนว่าใช่คนเดียวกันหรือไม่',
+    INVALID_EMERGENCY_PHONE: 'เบอร์ผู้ติดต่อฉุกเฉินไม่ถูกต้อง — ต้องเป็นตัวเลข 8-20 หลัก',
+    FEATURE_DISABLED: 'ฟีเจอร์อัปโหลดรูป (photoUpload) ปิดอยู่ — เปิดที่เมนู Features แล้วกลับมาอัปโหลดรูปบัตรอีกครั้ง (ข้อมูลตัวหนังสือบันทึกได้ตามปกติ)',
+    VERSION_CONFLICT: 'ข้อมูลผู้เช่าเพิ่งถูกแก้จากหน้าจออื่น — ปิดหน้าต่างนี้แล้วเปิดใหม่เพื่อโหลดข้อมูลล่าสุดก่อนบันทึกซ้ำ',
+    NOTHING_TO_SAVE: 'ยังไม่มีข้อมูลใหม่ให้บันทึก — กรอกข้อมูลหรือเลือกรูปก่อน',
+  }[err && err.code] || (err && err.message) || 'บันทึกไม่สำเร็จ — ลองใหม่อีกครั้ง');
+
+  const submit = async () => {
+    if (saving || !row) return;
+    setError('');
+    if (citizenIdNorm && !/^\d{13}$/.test(citizenIdNorm)) {
+      setError('เลขบัตรประชาชนต้องเป็นตัวเลข 13 หลัก (ตอนนี้กรอก ' + citizenIdNorm.length + ' หลัก)');
+      return;
+    }
+    const trimmed = (v) => String(v || '').trim();
+    const profilePatch = {};
+    if (trimmed(form.address) !== trimmed(row.address)) profilePatch.address = trimmed(form.address);
+    if (trimmed(form.emergencyContactName) !== trimmed(row.emergency_contact_name)) {
+      profilePatch.emergencyContactName = trimmed(form.emergencyContactName);
+    }
+    if (trimmed(form.emergencyContactPhone) !== trimmed(row.emergency_contact_phone)) {
+      profilePatch.emergencyContactPhone = trimmed(form.emergencyContactPhone);
+    }
+    const hasIdentity = !!(citizenIdNorm || front || back);
+    if (!Object.keys(profilePatch).length && !hasIdentity) {
+      setError('ยังไม่ได้แก้ไขอะไร — กรอกข้อมูลที่ขาดหรือเลือกรูปบัตรก่อนบันทึก');
+      return;
+    }
+    setSaving(true);
+    let savedProfile = false;
+    try {
+      if (Object.keys(profilePatch).length) {
+        await apiCall(`/api/tenants/${tenantDbId}`, {
+          method: 'PUT',
+          body: JSON.stringify({ ...profilePatch, version: row.updated_at }),
+        });
+        savedProfile = true;
+      }
+      if (hasIdentity) {
+        await apiCall(`/api/tenants/${tenantDbId}/identity`, {
+          method: 'POST',
+          body: JSON.stringify({
+            ...(citizenIdNorm ? { citizenId: citizenIdNorm } : {}),
+            ...(front ? { frontDataUrl: front.dataUrl } : {}),
+            ...(back ? { backDataUrl: back.dataUrl } : {}),
+          }),
+        });
+      }
+      setToast && setToast({
+        kind: 'success',
+        message: {
+          title: 'เติมข้อมูลย้อนหลังให้ผู้เช่าแล้ว',
+          description: 'ระบบตรวจความครบของสัญญาใหม่อัตโนมัติ — เมื่อครบทุกรายการ ป้าย "ต้องตรวจ" และการ์ดแดงจะหายไปเอง',
+        },
+      });
+      onSaved && onSaved();
+    } catch (err) {
+      // Partial-success is called out explicitly: the PUT may have landed
+      // before the identity POST failed, and re-submitting the same text is
+      // harmless but confusing if the admin doesn't know what stuck.
+      const prefix = savedProfile
+        ? 'บันทึกที่อยู่/ผู้ติดต่อฉุกเฉินแล้ว แต่ส่วนเลขบัตร/รูปบัตรยังไม่สำเร็จ: '
+        : '';
+      setError(prefix + friendlyError(err));
+      setSaving(false);
+    }
+  };
+
+  const fileRow = (side, picked, existingId) => (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
+      padding: '8px 10px', border: `1px solid ${C.border}`, borderRadius: 8,
+    }}>
+      <div style={{ fontSize: 12.5, color: C.ink, minWidth: 120, fontWeight: 500 }}>
+        {side === 'front' ? 'รูปบัตรด้านหน้า' : 'รูปบัตรด้านหลัง'}
+      </div>
+      <div style={{ fontSize: 11.5, color: picked || existingId ? (C.success || '#2f8f5b') : (C.danger || '#c0392b'), flex: 1, minWidth: 120 }}>
+        {picked ? `เลือกแล้ว: ${picked.name}` : existingId ? 'มีรูปในระบบแล้ว (เลือกใหม่ = แทนที่)' : 'ยังไม่มีรูปในระบบ'}
+      </div>
+      <label style={{
+        fontSize: 12, padding: '5px 10px', borderRadius: 6, cursor: 'pointer',
+        border: `1px solid ${C.border}`, background: C.surface || '#fff', color: C.ink,
+      }}>
+        เลือกรูป…
+        <input type="file" accept="image/*" style={{ display: 'none' }}
+          disabled={saving} onChange={pickImage(side)} />
+      </label>
+    </div>
+  );
+
+  return (
+    <Modal
+      open={true}
+      onClose={saving ? undefined : onClose}
+      title={`เติมข้อมูล/อัปโหลดเอกสารย้อนหลัง — ${tenantName || 'ผู้เช่า'}`}
+      width={620}
+      footer={
+        <>
+          <Btn variant="ghost" onClick={onClose} disabled={saving}>ปิด</Btn>
+          <Btn variant="primary" onClick={submit} disabled={saving || !row}>
+            {saving ? 'กำลังบันทึก…' : 'บันทึกข้อมูลย้อนหลัง'}
+          </Btn>
+        </>
+      }
+    >
+      {loadErr ? (
+        <div style={{
+          padding: 10, borderRadius: 8, marginBottom: 12, fontSize: 12.5, lineHeight: 1.5,
+          background: C.dangerSoft || '#fef2f2', border: `1px solid ${C.danger || '#c0392b'}`, color: C.danger || '#9f2d20',
+        }}>
+          โหลดข้อมูลผู้เช่าไม่สำเร็จ: {loadErr} — ปิดแล้วลองเปิดใหม่อีกครั้ง
+        </div>
+      ) : null}
+      <div style={{
+        padding: 10, borderRadius: 8, marginBottom: 12,
+        background: C.surfaceAlt || '#f7faf8', border: `1px solid ${C.border}`,
+        fontSize: 12, color: C.ink2, lineHeight: 1.55,
+      }}>
+        สัญญานี้ lock แล้ว ผู้เช่าจึงกรอกผ่านลิงก์ไม่ได้อีก — แอดมินบันทึกแทนได้ที่นี่
+        ข้อมูลจะเข้าโปรไฟล์ผู้เช่าโดยตรง และระบบจะนับความครบของสัญญาใหม่ให้ทันทีหลังบันทึก
+      </div>
+      <div style={{ display: 'grid', gap: 4, marginBottom: 12 }}>
+        {checklist.map((key) => (
+          <div key={key} style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 12 }}>
+            <span style={{ color: itemDone[key] ? (C.success || '#2f8f5b') : (C.danger || '#c0392b'), width: 16, textAlign: 'center' }}>
+              {itemDone[key] ? '✓' : '✗'}
+            </span>
+            <span style={{ color: itemDone[key] ? C.muted : C.ink }}>
+              {tenantContractMissingLabel(key)}
+              {itemDone[key] ? '' : ' — ยังขาด'}
+            </span>
+          </div>
+        ))}
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <Textarea label="ที่อยู่ผู้เช่า (ตามบัตร/ที่ติดต่อได้)" rows={2}
+          value={form.address}
+          onChange={(v) => setForm((p) => ({ ...p, address: v }))}
+          placeholder="บ้านเลขที่ ถนน ตำบล อำเภอ จังหวัด รหัสไปรษณีย์" />
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+          <Input label="ชื่อผู้ติดต่อฉุกเฉิน"
+            value={form.emergencyContactName}
+            onChange={(v) => setForm((p) => ({ ...p, emergencyContactName: v }))}
+            placeholder="เช่น คุณแม่ สมหญิง" />
+          <Input label="เบอร์ผู้ติดต่อฉุกเฉิน"
+            value={form.emergencyContactPhone}
+            onChange={(v) => setForm((p) => ({ ...p, emergencyContactPhone: v }))}
+            placeholder="0812345678" />
+        </div>
+        <Input label={row && row.citizen_id_tail
+            ? `เลขบัตรประชาชน (ในระบบมีลงท้าย ${row.citizen_id_tail} แล้ว — กรอกเฉพาะถ้าต้องการแก้)`
+            : 'เลขบัตรประชาชน 13 หลัก'}
+          value={form.citizenId}
+          onChange={(v) => setForm((p) => ({ ...p, citizenId: v }))}
+          placeholder="13 หลัก"
+          hint="เก็บแบบเข้ารหัสในฐานข้อมูล และตรวจ check digit อัตโนมัติ" />
+        {fileRow('front', front, row && row.citizen_id_image_front_id)}
+        {fileRow('back', back, row && row.citizen_id_image_back_id)}
+      </div>
+      {error ? (
+        <div style={{
+          marginTop: 12, padding: 10, borderRadius: 8, fontSize: 12.5, lineHeight: 1.55,
+          background: C.dangerSoft || '#fef2f2', border: `1px solid ${C.danger || '#c0392b'}`, color: C.danger || '#9f2d20',
+        }}>
+          {error}
+        </div>
+      ) : null}
+    </Modal>
   );
 }
 
@@ -2613,7 +2893,7 @@ function ContractFlowChecklist({
     if (conflict) return 'ใช้ปุ่มในการ์ดสัญญาที่ชนกัน เพื่อเปิดสัญญาเดิม ดู PDF หรือโหลดข้อมูลใหม่';
     if (!roomReady) return 'เลือก/ผูกห้องให้ผู้เช่าก่อน';
     if (!priceReady) return 'แก้ค่าเช่าที่เมนูตั้งราคา/ห้องพักก่อน แล้วกลับมาหน้านี้';
-    if (lockedIdentityGap) return `สัญญานี้ lock แล้ว จึงสร้างลิงก์กรอกสัญญาไม่ได้ — ขาด ${identityGap.labels.join(', ')} ให้เติมข้อมูลย้อนหลังหรือทำสัญญาฉบับใหม่ก่อน lock`;
+    if (lockedIdentityGap) return `สัญญานี้ lock แล้ว จึงสร้างลิงก์กรอกสัญญาไม่ได้ — ขาด ${identityGap.labels.join(', ')} กดปุ่ม "เติมข้อมูล/อัปโหลดเอกสาร" ในการ์ดแดงด้านล่างเพื่อบันทึกย้อนหลัง หรือทำสัญญาฉบับใหม่ก่อน lock`;
     if (locked) return 'ไปหน้าบิล ตรวจบิลรอบแรก แล้วส่งแจ้งเตือนให้ผู้เช่า';
     if (submitted || reviewing) return 'กดตรวจสอบ + อนุมัติ ตรวจรูปบัตรประชาชนทั้งสองด้านและลายเซ็นก่อน lock';
     if (pending || liveLink) return 'ส่งลิงก์ให้ผู้เช่า รอผู้เช่ากรอก หรือกดสร้างลิงก์ใหม่ถ้าลิงก์เดิมหาย';

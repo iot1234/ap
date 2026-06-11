@@ -171,6 +171,14 @@ module.exports = function buildRecurringChargesRouter(ctx) {
       const b = req.body;
       if (!b.label) return res.status(400).json({ error: 'label required' });
       if (b.amount == null) return res.status(400).json({ error: 'amount required' });
+      if (b.startAt && b.endAt && b.endAt < b.startAt) {
+        return res.status(400).json({
+          error: 'ช่วงวันที่ไม่ถูกต้อง — วันสิ้นสุดต้องไม่มาก่อนวันเริ่ม',
+          code: 'INVALID_DATE_RANGE',
+          detail: { startAt: b.startAt, endAt: b.endAt },
+          hint: 'สลับวันเริ่ม/วันสิ้นสุด หรือเว้นวันสิ้นสุดว่างถ้าต้องการเก็บต่อเนื่อง',
+        });
+      }
       try {
         const targetErr = await validateRecurringTarget(pool, {
           roomId: b.roomId || null,
@@ -226,8 +234,29 @@ module.exports = function buildRecurringChargesRouter(ctx) {
       fields.push('updated_at = NOW()');
       params.push(id);
       try {
-        const { rows: prev } = await pool.query('SELECT * FROM recurring_charges WHERE id=$1', [id]);
+        const { rows: prev } = await pool.query(
+          `SELECT *, start_at::text AS start_at_text, end_at::text AS end_at_text
+             FROM recurring_charges WHERE id=$1`,
+          [id]
+        );
         if (!prev.length) return res.status(404).json({ error: 'not found' });
+        // Validate the EFFECTIVE date range (request value falling back to the
+        // stored one) — updating just one side must not invert the range, or
+        // the charge silently never matches a billing period again.
+        const nextStart = b.startAt !== undefined
+          ? (b.startAt || null)
+          : (prev[0].start_at_text ? String(prev[0].start_at_text).slice(0, 10) : null);
+        const nextEnd = b.endAt !== undefined
+          ? (b.endAt || null)
+          : (prev[0].end_at_text ? String(prev[0].end_at_text).slice(0, 10) : null);
+        if (nextStart && nextEnd && nextEnd < nextStart) {
+          return res.status(400).json({
+            error: 'ช่วงวันที่ไม่ถูกต้อง — วันสิ้นสุดต้องไม่มาก่อนวันเริ่ม',
+            code: 'INVALID_DATE_RANGE',
+            detail: { startAt: nextStart, endAt: nextEnd },
+            hint: 'สลับวันเริ่ม/วันสิ้นสุด หรือเว้นวันสิ้นสุดว่างถ้าต้องการเก็บต่อเนื่อง',
+          });
+        }
         if (b.roomId !== undefined || b.tenantId !== undefined) {
           const targetErr = await validateRecurringTarget(pool, {
             roomId: b.roomId !== undefined ? b.roomId || null : prev[0].room_id,

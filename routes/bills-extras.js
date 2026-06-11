@@ -1206,7 +1206,13 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             WHERE b.id=$1 AND b.deleted_at IS NULL`,
           [renderBillId]
         );
-        if (!rows.length) return res.status(404).json({ error: 'bill not found' });
+        if (!rows.length) {
+          return res.status(404).json({
+            error: 'ไม่พบบิลนี้ในระบบ (อาจถูกลบหรือเลขบิลผิด)',
+            code: 'BILL_NOT_FOUND',
+            billId: renderBillId,
+          });
+        }
         // Refuse to render PDFs for voided bills. The PromptPay QR in the
         // rendered PDF is still scannable; a tenant who got the void
         // notification but didn't read it could pay against a dead bill.
@@ -1225,7 +1231,10 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       }
     }
     if (!bill || !bill.tenantName || bill.total == null) {
-      return res.status(400).json({ error: 'bill.tenantName and bill.total required' });
+      return res.status(400).json({
+        error: 'bill.tenantName and bill.total required',
+        code: 'BILL_FIELDS_REQUIRED',
+      });
     }
     const billTotal = Number(bill.total);
     if (!Number.isFinite(billTotal) || billTotal <= 0 || billTotal > MAX_AMOUNT) {
@@ -1411,7 +1420,10 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       });
     } catch (err) {
       console.error('bill preview-period error:', err);
-      res.status(500).json({ error: 'preview failed' });
+      res.status(500).json({
+        error: 'สร้างตัวอย่างบิลของงวดนี้ไม่สำเร็จ — ลองใหม่อีกครั้ง ถ้ายังพังให้ตรวจ log ฝั่งเซิร์ฟเวอร์',
+        code: 'PREVIEW_FAILED',
+      });
     }
   });
 
@@ -1443,7 +1455,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       );
       if (!billLock.rows.length) {
         await client.query('ROLLBACK');
-        return res.status(404).json({ error: 'not found' });
+        return res.status(404).json({ error: 'ไม่พบบิลนี้ในระบบ', code: 'BILL_NOT_FOUND' });
       }
       if (billLock.rows[0].status === 'void') {
         await client.query('ROLLBACK');
