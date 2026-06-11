@@ -6452,6 +6452,35 @@ test('payment-pipeline failures leave visible trails', () => {
     'the unreachable digest must say how to fix the channel');
 });
 
+test('booking approval refuses rooms that already carry an active contract', () => {
+  // Check-in had this guard; booking-approve did not — an approval could
+  // bind a NEW tenant to a room whose contract flow for another tenant was
+  // already in flight (two active tenants pointing at one room, the
+  // contract holder forever un-approvable).
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(src,
+    /assignedRoomId = candidate\.id;[\s\S]{0,1800}FROM contracts[\s\S]{0,800}ROOM_CONTRACT_EXISTS/,
+    'the assigned room must be checked against existing contracts before reservation');
+  assert.match(src, /อนุมัติ booking นี้เข้าห้องนี้ไม่ได้จนกว่าจะจัดการสัญญาเดิม/,
+    'the refusal must explain what to do in admin-facing Thai');
+});
+
+test('contract flow never claims another tenant\'s room hold as its own', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-tenants.jsx'), 'utf8');
+  assert.match(src, /const roomHeldByOther = !hasCurrentTenancy/,
+    'flow must detect when the room is held by a different tenant');
+  assert.match(src, /state: roomHeldByOther \? 'stop'/,
+    'a foreign room hold must render the จอง/ล็อกห้อง step as ติดปัญหา, not เสร็จแล้ว');
+  assert.match(src, /ถือครองอยู่ — booking\/การจองที่เห็นบนห้องนี้เป็นของรายนั้น/,
+    'the step detail must say the visible booking belongs to the other tenant');
+  assert.match(src, /มีผู้เช่ารายอื่นอยู่ — เลือกทางใดทางหนึ่ง/,
+    'next-action must offer concrete resolutions for the double-tenant case');
+});
+
 test('contract-fill HTML reads view.rejectionReason (camelCase, not snake_case)', () => {
   // Server's buildPublicView returns rejectionReason; the HTML used to read
   // view.rejection_reason → reject reason was invisible to the tenant.

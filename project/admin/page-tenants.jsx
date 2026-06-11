@@ -2893,6 +2893,19 @@ function ContractFlowChecklist({
   const pending = invStatus === 'pending';
   const identityGap = contractIdentityGap(contract);
   const lockedIdentityGap = locked && !!identityGap;
+  // The room blob's claim (tenant / reservedBy / sourceBookingId) belongs to
+  // whoever HOLDS the room — not necessarily this tenant. Without this check,
+  // a tenant whose contract points at a room someone else occupies would see
+  // the other tenant's booking rendered as their own green "จอง/ล็อกห้อง".
+  const phoneKey = (s) => String(s || '').replace(/[\s-]/g, '');
+  const roomOccupant = t.room && t.room.tenant && typeof t.room.tenant === 'object' ? t.room.tenant : null;
+  const roomOccupantName = roomOccupant && roomOccupant.name ? String(roomOccupant.name).trim() : '';
+  const ownRoomClaim =
+    (reservedBy && contract && reservedBy === `contract:${contract.id}`)
+    || (roomOccupant && phoneKey(roomOccupant.phone) && phoneKey(roomOccupant.phone) === phoneKey(t.phone));
+  const roomHeldByOther = !hasCurrentTenancy && !!t.room
+    && ['occupied', 'reserved'].includes(String(t.room.status || ''))
+    && !ownRoomClaim;
 
   const tone = {
     done: { bg: C.successSoft || '#e6f4ec', fg: C.success || '#2f8f5b', border: C.success || '#2f8f5b', label: 'เสร็จแล้ว' },
@@ -2921,8 +2934,10 @@ function ContractFlowChecklist({
     },
     {
       title: 'จอง/ล็อกห้อง',
-      state: roomClaimReady ? 'done' : (roomReady ? 'warn' : 'wait'),
-      detail: bookingId
+      state: roomHeldByOther ? 'stop' : (roomClaimReady ? 'done' : (roomReady ? 'warn' : 'wait')),
+      detail: roomHeldByOther
+        ? `ห้อง ${roomId} มีผู้เช่ารายอื่น${roomOccupantName ? ` (${roomOccupantName})` : ''}ถือครองอยู่ — booking/การจองที่เห็นบนห้องนี้เป็นของรายนั้น ไม่ใช่ของผู้เช่ารายนี้`
+        : bookingId
         ? `ต่อจาก booking ${bookingId} และห้อง ${roomId}`
         : reservedBy
           ? `ห้องถูกล็อกโดย ${reservedBy}`
@@ -2973,6 +2988,7 @@ function ContractFlowChecklist({
     if (conflict) return 'ใช้ปุ่มในการ์ดสัญญาที่ชนกัน เพื่อเปิดสัญญาเดิม ดู PDF หรือโหลดข้อมูลใหม่';
     if (!roomReady) return 'เลือก/ผูกห้องให้ผู้เช่าก่อน';
     if (!priceReady) return 'แก้ค่าเช่าที่เมนูตั้งราคา/ห้องพักก่อน แล้วกลับมาหน้านี้';
+    if (roomHeldByOther) return `ห้อง ${roomId} มีผู้เช่ารายอื่นอยู่ — เลือกทางใดทางหนึ่ง: เช็คเอาท์/ย้ายผู้เช่ารายนั้น, ยกเลิกสัญญา/ลิงก์ของรายนี้ถ้าซ้ำซ้อน แล้วสร้างใหม่กับห้องอื่น`;
     if (lockedIdentityGap) return `สัญญานี้ lock แล้ว จึงสร้างลิงก์กรอกสัญญาไม่ได้ — ขาด ${identityGap.labels.join(', ')} กดปุ่ม "เติมข้อมูล/อัปโหลดเอกสาร" ในการ์ดแดงด้านล่างเพื่อบันทึกย้อนหลัง หรือทำสัญญาฉบับใหม่ก่อน lock`;
     if (locked) return 'ไปหน้าบิล ตรวจบิลรอบแรก แล้วส่งแจ้งเตือนให้ผู้เช่า';
     if (submitted || reviewing) return 'กดตรวจสอบ + อนุมัติ ตรวจรูปบัตรประชาชนทั้งสองด้านและลายเซ็นก่อน lock';

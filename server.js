@@ -9845,6 +9845,40 @@ app.post('/api/bookings/:id/approve-and-assign', sameOrigin, csrfGuard, requireA
     }
     {
       assignedRoomId = candidate.id;
+      // Refuse rooms that already carry an active contract — locked OR still
+      // waiting for the tenant to sign. Check-in has this exact guard but
+      // booking-approve didn't, so an approval could claim a room whose
+      // contract flow for ANOTHER tenant was already in flight: two "active"
+      // tenants both pointing at the room, and the contract holder's
+      // invitation forever un-approvable against the new occupant.
+      let roomContract = null;
+      try {
+        const fcQ = await client.query(
+          `SELECT id, contract_no, tenant_id, locked_at
+             FROM contracts
+            WHERE room_id=$1 AND status='active' AND deleted_at IS NULL
+            ORDER BY locked_at DESC NULLS LAST, created_at DESC
+            LIMIT 1
+            FOR UPDATE`,
+          [String(assignedRoomId)]
+        );
+        roomContract = fcQ.rows[0] || null;
+      } catch (err) {
+        if (err.code !== '42P01') throw err;
+      }
+      if (roomContract) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: `ห้อง ${assignedRoomId} มีสัญญาเช่า${roomContract.locked_at ? 'มีผล' : 'ที่รอผู้เช่าลงนาม'}อยู่แล้ว (${roomContract.contract_no || roomContract.id})`,
+          code: 'ROOM_CONTRACT_EXISTS',
+          conflict: roomContract,
+          hint: 'อนุมัติ booking นี้เข้าห้องนี้ไม่ได้จนกว่าจะจัดการสัญญาเดิม — ใช้สัญญาเดิมต่อ ยกเลิกสัญญาเดิมถ้าซ้ำซ้อน หรือมอบหมาย booking นี้เข้าห้องอื่น',
+          nextActions: {
+            contractsUrl: `/admin#contracts?room=${encodeURIComponent(assignedRoomId)}&contract=${encodeURIComponent(roomContract.id)}`,
+            bookingsUrl: `/admin#bookings?booking=${encodeURIComponent(id)}`,
+          },
+        });
+      }
       // Apply reservation in the source the candidate came from. If the
       // room exists ONLY in rooms_v2, mirror a minimal rooms blob entry too
       // so the admin UI (which still reads from the blob in places) sees
