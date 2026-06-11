@@ -990,6 +990,7 @@ async function tickBillGen(pool, flags, now, state) {
         }
         const roomForBilling = await meter.attachBillingReadingsForPeriod(billClient, room, period);
         const bill = billing.buildBill({ room: roomForBilling, contract: activeContract, expiredContract, config, features: flags, recurring, period, dueDate, discountPct });
+        billing.applyPaymentReferenceCents(bill, { tenantId, maxTotal: promptpay.MAX_AMOUNT });
 
         // R5 — surface flat-mode silent fallbacks. Recorded per room; the
         // owner alert below fires once at the end of the run with the full
@@ -1009,7 +1010,11 @@ async function tickBillGen(pool, flags, now, state) {
         // tenant case; on collision, retry once with the `-T${tenantId}`
         // suffix which the partial unique `uq_bills_room_period_tenant_active`
         // accommodates.
-        const otherJson = JSON.stringify(recurring || []);
+        let otherItems = Array.isArray(recurring) ? [...recurring] : [];
+        if (Number(bill.paymentReferenceCents) > 0) {
+          otherItems = billing.appendPaymentReferenceLine(otherItems, bill.paymentReferenceCents);
+        }
+        const otherJson = JSON.stringify(otherItems);
         const buildInsert = (billNoForInsert) => billClient.query(
           `INSERT INTO bills (bill_no, tenant_id, room_id, period, rent,
               water_prev_reading, water_current_reading, water_units, water_rate, water_amount,

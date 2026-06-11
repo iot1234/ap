@@ -2047,15 +2047,19 @@ test('tenant bill modal blocks bad payment steps before slip upload', () => {
   const tenant = fs.readFileSync(path.join(__dirname, '..', 'project', 'tenant.jsx'), 'utf8');
 
   assert.match(tenant, /const PAYMENT_TOLERANCE_THB = 1/,
-    'tenant UI must share the same 1 THB mismatch tolerance as the server guard');
+    'tenant UI must keep the legacy 1 THB tolerance for whole-baht totals');
+  assert.match(tenant, /function paymentToleranceForTotal\(total\)/,
+    'tenant UI must tighten amount matching when bill totals include satang reference cents');
+  assert.match(tenant, /function moneyDiff\(a, b\)/,
+    'tenant UI must round currency differences before comparing satang tolerances');
   assert.match(tenant, /setReadinessError/,
     'tenant UI must keep readiness API failures visible instead of dropping them');
   assert.match(tenant, /const d = await r\.json\(\)\.catch\(\(\) => \(\{\}\)\)/,
     'tenant UI must parse readiness error payloads such as BILL_NOT_LINKED');
   assert.match(tenant, /readinessHardError/,
     'tenant UI must classify hard readiness failures before upload');
-  assert.match(tenant, /Math\.abs\(paymentAmount - billTotal\) > PAYMENT_TOLERANCE_THB/,
-    'tenant UI must block amount mismatches before reading/uploading the slip image');
+  assert.match(tenant, /moneyDiff\(paymentAmount, billTotal\) > paymentToleranceForTotal\(billTotal\)/,
+    'tenant UI must block amount mismatches before reading/uploading the slip image using the bill-specific tolerance');
   assert.match(tenant, /const slipUploadBlocked =[\s\S]{0,220}amountMismatch/,
     'tenant UI must disable the upload action when the amount cannot pass the server');
   assert.match(tenant, /disabled=\{busy \|\| slipUploadBlocked\}/,
@@ -6208,6 +6212,12 @@ test('tenant contract tab uses room pricing and switches checked-in tenants to c
     'new tenant contract invites must send resolved rent/deposit and preserve an intentional zero deposit');
   assert.match(src, /<ContractPreFlightSummary t=\{t\} rentInfo=\{contractRentInfo\}/,
     'pre-flight summary must show the same resolved pricing');
+  assert.match(src, /const preflightIssues = \[/,
+    'pre-flight summary must explicitly list missing contract setup fields');
+  assert.match(src, /เช็คก่อนสร้าง\/ส่งสัญญา/,
+    'pre-flight summary must show a clear readiness header');
+  assert.match(src, /ยังไม่พร้อม \$\{blockers\.length\} จุด/,
+    'pre-flight summary must show how many blocking items are missing');
   assert.match(src, /<CheckInModal[\s\S]{0,140}rentInfo=\{contractRentInfo\}/,
     'check-in modal must receive resolved pricing');
   assert.match(src, /const hasCurrentTenancy = t\.tenantStatus === 'active' && !!t\.currentRoomId/,
@@ -6239,6 +6249,14 @@ test('tenant contract tab shows a sequential workflow and actionable next steps'
     'workflow must derive status from review, stored invitation status, and just-created live links');
   assert.match(src, /ขั้นต่อไป: \{nextAction\}/,
     'workflow must always surface the next action');
+  assert.match(src, /function contractIdentityGap/,
+    'workflow must detect locked contracts with incomplete identity documents');
+  assert.match(src, /lockedIdentityGap/,
+    'workflow must treat locked-but-incomplete contracts as a separate blocked state');
+  assert.match(src, /จึงสร้างลิงก์กรอกสัญญาไม่ได้/,
+    'workflow next action must explain why no tenant-fill link can be created after lock');
+  assert.match(src, /function LockedContractIdentityGapCard/,
+    'tenant drawer must show a dedicated card for locked contracts that still miss documents');
   assert.match(src, /<ContractFlowChecklist[\s\S]{0,320}liveLink=\{liveLink\}[\s\S]{0,320}routeBookingId=\{routeBookingId\}/,
     'contract tab must pass live link and booking context into the workflow');
   assert.match(src, /const inviteDeliveryText = \(delivery\) =>/,
@@ -6613,13 +6631,19 @@ test('admin UI: contract review shows approval consequences and disables incompl
   const fs = require('node:fs');
   const path = require('node:path');
   const page = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-contract-invitations.jsx'), 'utf8');
+  assert.match(page, /function approvalChecklistItems/,
+    'admin review must render a full checklist, not just a hidden blocker');
   assert.match(page, /function approvalPrecheckWarnings/);
-  assert.match(page, /\['citizenId', 'เลขบัตรประชาชน 13 หลัก'/,
+  assert.match(page, /field: 'citizenId'[\s\S]{0,80}label: 'เลขบัตรประชาชน 13 หลัก'/,
     'admin review must block approval when the citizen ID number itself is missing');
-  assert.match(page, /field === 'citizenId'[\s\S]{0,120}replace\(\/\[\^0-9\]\/g, ''\)\.length !== 13/,
+  assert.match(page, /check\.field === 'citizenId'[\s\S]{0,140}replace\(\/\[\^0-9\]\/g, ''\)\.length !== 13/,
     'admin review must treat short/non-13-digit citizen IDs as incomplete');
+  assert.match(page, /defaultApprovalRejectReason\(approvalWarnings\)/,
+    'reject form must be prefilled with the exact missing fields');
   assert.match(page, /approvalWarnings\.length/);
-  assert.match(page, /disabled=\{busy \|\| approvalWarnings\.length > 0\}/);
+  assert.match(page, /disabled=\{busy \|\| !detail \|\| approvalWarnings\.length > 0\}/);
+  assert.match(page, /approvalChecklist\.length/,
+    'review body must show checklist completion count');
   assert.match(page, /function formatApprovalErrorMessage/,
     'approval failures must be formatted with backend issue details');
   assert.match(page, /issueSummary/,
@@ -6639,6 +6663,8 @@ test('contracts page has invite button + InviteTenantModal', () => {
   // Modal generates link via API + shows token ONCE + offers copy
   assert.match(src, /function InviteTenantModal/);
   assert.match(src, /\/api\/contracts\/\$\{contract\.id\}\/invite-tenant/);
+  assert.match(src, /if \(contract\.locked_at\)/,
+    'InviteTenantModal must block stale locked-contract link creation before calling the API');
   assert.match(src, /setResult\(d\)/,
     'InviteTenantModal must keep the full response so delivery status is not lost');
   assert.match(src, /inviteDeliverySummary\(result\.delivery\)/,
@@ -6654,8 +6680,24 @@ test('contracts page displays server-side contract warnings', () => {
   const path = require('node:path');
   const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-contracts.jsx'), 'utf8');
   assert.match(src, /counts\.warnings/);
+  assert.match(src, /counts\.errors/);
   assert.match(src, /Array\.isArray\(c\.warnings\)/);
-  assert.match(src, /c\.warning_severity === 'error'/);
+  assert.match(src, /const contractWarningMeta = \(warning\) =>/,
+    'contracts page must classify warning domains for admins');
+  assert.match(src, /const contractReadiness = \(contract\) =>/,
+    'contracts page must compute readiness badges from warnings and invitation state');
+  assert.match(src, /const ContractWarningStack/,
+    'contracts page must render detailed per-contract warning stacks');
+  assert.match(src, /const hasError = warnings\.some\(\(w\) => w\.severity === 'error'\)/,
+    'contract warning stack must treat error warnings as blocking');
+  assert.match(src, /contractIssueBuckets/,
+    'contracts page must summarize warning domains at the top');
+  assert.match(src, /key: 'review'/,
+    'contracts page must offer a dedicated filter for contracts that need review');
+  assert.match(src, /const contractIdentityGap = \(contract\) =>/,
+    'contracts page must detect locked contracts that cannot receive tenant-fill links');
+  assert.match(src, /ส่งลิงก์ไม่ได้/,
+    'locked incomplete contracts must show an explicit disabled link action instead of hiding the reason');
   assert.match(src, /w\.consequence/);
   assert.match(src, /formatContractWarningDetail\(w\)/,
     'contracts page must render actionable warning details');
@@ -6663,6 +6705,8 @@ test('contracts page displays server-side contract warnings', () => {
     'identity warning missing fields must be translated for admins');
   assert.match(src, /ขาด: \$\{missing\.join\(', '\)\}/,
     'identity warnings must list exactly what is missing');
+  assert.match(src, /ต้องแก้ที่: \{meta\.fix\}/,
+    'warning stack must point admins to the place/action that fixes the issue');
 });
 
 test('contracts list warns when locked contract is missing citizen ID number', () => {
@@ -6736,6 +6780,14 @@ test('tenant contract review panel keeps approval issue details visible', () => 
     'inline approval error panel must list issue details');
   assert.match(src, /it\.action \? ` — \$\{it\.action\}`/,
     'inline approval error panel must show actionable fixes');
+  assert.match(src, /function contractReviewChecklistItems/,
+    'inline review panel must show a complete pre-lock checklist');
+  assert.match(src, /missingReviewItems\.length/,
+    'inline review panel must track missing required review fields');
+  assert.match(src, /disabled=\{busy \|\| missingReviewItems\.length > 0\}/,
+    'inline approve button must stay disabled while required fields are missing');
+  assert.match(src, /contractReviewRejectReason\(missingReviewItems\)/,
+    'inline reject form must prefill the exact missing fields for the tenant');
 });
 
 test('contracts page hides manual signing for locked contracts', () => {
@@ -7719,6 +7771,12 @@ test('page-payments.jsx: surfaces tier-aware mismatch alert (R2-followup)', () =
   const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-payments.jsx'), 'utf8');
   assert.match(src, /amountTier/,
     'admin payments UI must read amountTier from verify_payload');
+  assert.match(src, /function paymentToleranceForTotal\(total\)/,
+    'admin payments UI must use the same whole-baht vs satang tolerance split as the backend');
+  assert.match(src, /function moneyDiff\(a, b\)/,
+    'admin payments UI must round currency differences before comparing satang tolerances');
+  assert.doesNotMatch(src, /const TOL = 1/,
+    'admin payments UI must not classify decimal bill amounts with the legacy whole-baht tolerance');
   assert.match(src, /ผู้เช่าจ่ายค่าเช่าสุจริต/,
     'principal-tier alert must explain the good-faith waiver behaviour');
   assert.match(src, /lateFeeChoice/,

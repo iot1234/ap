@@ -236,7 +236,8 @@ function bangkokToday() {
   const tm = bkk.getUTCMonth() + 1;
   const td = bkk.getUTCDate();
   const daysInMonth = new Date(Date.UTC(ty, tm, 0)).getUTCDate();
-  return { td, daysInMonth };
+  const period = `${ty}-${String(tm).padStart(2, '0')}`;
+  return { td, daysInMonth, period };
 }
 
 // === 1. Deposit derived from room pricing + cap on the derived value =======
@@ -270,16 +271,22 @@ test('deposit cap guard validates the derived deposit that lands on the contract
 // === 2. VAT parity ==========================================================
 
 test('welcome bill carries VAT like every recurring bill', async () => {
-  const { res, captured } = await runCheckin();
+  const { res, captured, moveInDate } = await runCheckin();
   assert.equal(res.statusCode, 200, JSON.stringify(res.body));
   assert.ok(captured.billInsert, 'welcome bill INSERT must run');
   const p = captured.billInsert.params;
+  const period = moveInDate.slice(0, 7);
+  const billNo = billing.makeBillNo('101', period);
+  const paymentRef = billing.paymentReferenceCents(
+    billing.paymentReferenceSeedForBill({ billNo, roomId: '101', period, tenantId: 7 })
+  );
+  const subtotalWithRef = r2(4500 + paymentRef);
   // params: [billNo, id, roomId, period, rent, water, elec, wifi, other,
   //          subtotal, vat, total, dueDate]
   assert.equal(p[4], 4500, 'welcome rent');
-  assert.equal(p[9], 4500, 'welcome subtotal');
+  assert.equal(p[9], subtotalWithRef, 'welcome subtotal includes payment-reference cents');
   assert.equal(p[10], r2(4500 * 0.07), 'VAT 7% on the vatable subtotal');
-  assert.equal(p[11], r2(4500 * 1.07), 'total = subtotal + vat');
+  assert.equal(p[11], r2(subtotalWithRef + r2(4500 * 0.07)), 'total = subtotal + vat');
   assert.match(captured.billInsert.sql, /\$10, \$11, 0, \$12, \$13/,
     'vat/total must be bound parameters — not the old hardcoded vat=0, total=subtotal');
 });
@@ -289,15 +296,20 @@ test('checkout closing bill applies VAT to vatable charges but never the carried
   assert.equal(res.statusCode, 200, JSON.stringify(res.body));
   assert.ok(captured.billInsert, 'closing bill INSERT must run');
   const p = captured.billInsert.params;
-  const { td, daysInMonth } = bangkokToday();
+  const { td, daysInMonth, period } = bangkokToday();
   const proRatedRent = r2(4500 * (td / daysInMonth));
+  const billNo = billing.makeBillNo('202-X', period, { tenantId: 7 });
+  const paymentRef = billing.paymentReferenceCents(
+    billing.paymentReferenceSeedForBill({ billNo, roomId: '202', period, tenantId: 7 })
+  );
+  const subtotalWithRef = r2(proRatedRent + 300 + paymentRef);
   // params: [billNo, id, room, period, rent, dueDate, other, subtotal,
   //          lateFee, total, water, elec, wifi, vat]
   assert.equal(p[4], proRatedRent, 'pro-rated rent');
-  assert.equal(p[7], r2(proRatedRent + 300), 'subtotal folds the carried late fee as principal');
+  assert.equal(p[7], subtotalWithRef, 'subtotal folds carried late fee plus payment-reference cents');
   assert.equal(p[13], r2(proRatedRent * 0.07),
     'VAT base excludes the carried late fee (penalties are outside Thai VAT — R1)');
-  assert.equal(p[9], r2(r2(proRatedRent + 300) + r2(proRatedRent * 0.07)),
+  assert.equal(p[9], r2(subtotalWithRef + r2(proRatedRent * 0.07)),
     'total = subtotal + vat');
   assert.match(captured.billInsert.sql, /subtotal, vat, late_fee, total/,
     'closing bill INSERT must persist the vat column');

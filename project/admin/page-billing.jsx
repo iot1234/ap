@@ -2276,7 +2276,12 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
               if (Array.isArray(b.charges)) {
                 b.charges
                   .filter((c) => !/ส่วนกลาง/.test(String((c && c.label) || '')))
-                  .forEach((c) => items.push({ label: c.label, amount: Number(c.amount) || 0 }));
+                  .forEach((c) => items.push({
+                    label: c.label,
+                    qty: c.qty == null ? '' : String(c.qty),
+                    detail: c.detail || '',
+                    amount: Number(c.amount) || 0,
+                  }));
               }
               if (b.penalty > 0) {
                 items.push({ label: `ค่าปรับล่าช้า (${b.overdueDays || 0} วัน)`, amount: b.penalty });

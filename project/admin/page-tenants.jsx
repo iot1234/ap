@@ -1138,6 +1138,17 @@ function TabContract({ t, routeBookingId = '', config, setToast, addActivity, se
     };
   }, [t.room, t.rent, config, resolveRoomRent, resolveRoomDeposit]);
   const hasCurrentTenancy = t.tenantStatus === 'active' && !!t.currentRoomId;
+  const identityGap = contractIdentityGap(contract);
+  const lockedIdentityGap = !!(contract && contract.locked_at && identityGap);
+
+  const lockedInviteBlockMessage = (prefix = 'สร้างลิงก์ไม่ได้') => ({
+    title: `${prefix} — สัญญานี้ถูก lock แล้ว`,
+    description: [
+      identityGap ? `ข้อมูล/เอกสารที่ยังขาด: ${identityGap.labels.join(', ')}` : null,
+      'ระบบป้องกันการออกลิงก์กรอกสัญญาบนฉบับที่ lock แล้ว เพราะผู้เช่าจะกรอกได้แต่แอดมิน approve/lock ซ้ำไม่ได้',
+      'ทางแก้: เติมข้อมูล/อัปโหลดเอกสารย้อนหลังในข้อมูลผู้เช่า หรือสร้าง/ต่อสัญญาฉบับใหม่แล้วส่งลิงก์ก่อน lock',
+    ].filter(Boolean).join('\n'),
+  });
 
   const inviteDeliveryText = (delivery) => {
     if (!delivery) return 'สร้างลิงก์แล้ว แต่ยังไม่ทราบผลส่งอัตโนมัติ ให้คัดลอกลิงก์จากกล่องด้านบนส่งให้ผู้เช่า';
@@ -1238,6 +1249,10 @@ function TabContract({ t, routeBookingId = '', config, setToast, addActivity, se
   // carries room/rent, server just needs to mint the token.
   const sendInviteForExistingContract = async () => {
     if (!contract) return;
+    if (contract.locked_at) {
+      setToast && setToast({ kind: 'warning', message: lockedInviteBlockMessage() });
+      return;
+    }
     setBusy(true);
     try {
       const d = await apiCall(`/api/contracts/${contract.id}/invite-tenant`, {
@@ -1830,6 +1845,18 @@ function TabContract({ t, routeBookingId = '', config, setToast, addActivity, se
         fmtCurrency={fmtCurrency}
       />
 
+      {lockedIdentityGap ? (
+        <LockedContractIdentityGapCard
+          contract={contract}
+          gap={identityGap}
+          C={C}
+          onOpenContracts={() => {
+            window.location.hash = `#contracts?contract=${encodeURIComponent(contract.id)}&room=${encodeURIComponent(contract.room_id || '')}`;
+          }}
+          onOpenPdf={() => window.open(`/api/contracts/${contract.id}/pdf`, '_blank', 'noopener')}
+        />
+      ) : null}
+
       {invStatus === 'submitted' ? (
         <Card style={{ padding: 14, background: '#fff7e0', border: '1px solid #f1b32d' }}>
           <div style={{ fontSize: 14, fontWeight: 600, color: '#6b4d10', marginBottom: 6 }}>
@@ -1924,6 +1951,14 @@ function TabContract({ t, routeBookingId = '', config, setToast, addActivity, se
             <Btn variant="ghost" size="sm" icon="🚫"
               onClick={() => setCancelling(true)} disabled={busy}>
               ยกเลิกสัญญา
+            </Btn>
+          ) : null}
+          {isLocked ? (
+            <Btn variant="ghost" size="sm" icon="🔒" disabled={true}
+              title={identityGap
+                ? `ส่งลิงก์ไม่ได้: สัญญา lock แล้วและยังขาด ${identityGap.labels.join(', ')}`
+                : 'ส่งลิงก์ไม่ได้: สัญญา lock แล้ว'}>
+              ส่งลิงก์ไม่ได้
             </Btn>
           ) : null}
         </div>
@@ -2268,6 +2303,67 @@ function CancelContractModal({ contract, tenant, tenantDbId, room, config, reaso
   );
 }
 
+function tenantContractMissingLabel(code) {
+  return ({
+    address: 'ที่อยู่ผู้เช่า',
+    emergencyContactName: 'ชื่อผู้ติดต่อฉุกเฉิน',
+    emergencyContactPhone: 'เบอร์ผู้ติดต่อฉุกเฉิน',
+    emergencyContact: 'ผู้ติดต่อฉุกเฉิน',
+    citizenId: 'เลขบัตรประชาชน 13 หลัก',
+    citizenIdFront: 'รูปบัตรประชาชนด้านหน้า',
+    citizenIdBack: 'รูปบัตรประชาชนด้านหลัง',
+  }[code] || code);
+}
+
+function contractIdentityGap(contract) {
+  const warnings = Array.isArray(contract && contract.warnings) ? contract.warnings : [];
+  const warning = warnings.find((w) => w && w.code === 'CONTRACT_IDENTITY_INCOMPLETE');
+  if (!warning) return null;
+  const labels = Array.isArray(warning.missing)
+    ? warning.missing.map(tenantContractMissingLabel).filter(Boolean)
+    : [];
+  return {
+    warning,
+    labels: labels.length ? labels : ['ข้อมูลผู้เช่า/เอกสารประกอบสัญญา'],
+  };
+}
+
+function LockedContractIdentityGapCard({ contract, gap, C, onOpenContracts, onOpenPdf }) {
+  const { Card, Btn } = window;
+  return (
+    <Card style={{ padding: 14, background: C.dangerSoft || '#fff1f0', border: `1px solid ${C.danger || '#c0392b'}` }}>
+      <div style={{ fontSize: 14, fontWeight: 700, color: C.danger || '#9f2d20', marginBottom: 6 }}>
+        สัญญา lock แล้ว แต่ข้อมูลผู้เช่า/เอกสารยังไม่ครบ
+      </div>
+      <div style={{ fontSize: 12.5, color: C.ink2, lineHeight: 1.6, marginBottom: 10 }}>
+        ขาด: <b>{gap.labels.join(', ')}</b><br/>
+        ระบบไม่เปิดปุ่มสร้างลิงก์ให้ผู้เช่ากรอกบนสัญญานี้ เพราะลิงก์สัญญาใช้เฉพาะก่อน approve/lock เท่านั้น
+        ถ้าฝืนออกลิงก์ ผู้เช่าจะกรอกได้แต่แอดมินจะอนุมัติซ้ำไม่ได้ จึงป้องกันไว้ตั้งแต่หน้า admin
+      </div>
+      <div style={{
+        padding: 10,
+        borderRadius: 8,
+        background: '#fff',
+        border: `1px solid ${C.border}`,
+        fontSize: 12,
+        color: C.ink2,
+        lineHeight: 1.5,
+        marginBottom: 10,
+      }}>
+        ทางแก้ที่ปลอดภัย: เติมข้อมูล/อัปโหลดเอกสารย้อนหลังให้ผู้เช่าในระบบ หรือสร้าง/ต่อสัญญาฉบับใหม่แล้วส่งลิงก์ก่อน lock
+      </div>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        <Btn variant="secondary" size="sm" onClick={onOpenContracts}>เปิดในหน้าสัญญา</Btn>
+        <Btn variant="ghost" size="sm" onClick={onOpenPdf}>ดู PDF ปัจจุบัน</Btn>
+        <Btn variant="ghost" size="sm" disabled={true}
+          title="ส่งลิงก์ไม่ได้ เพราะสัญญานี้ถูก lock แล้ว">
+          🔒 ส่งลิงก์ไม่ได้
+        </Btn>
+      </div>
+    </Card>
+  );
+}
+
 // Pre-flight summary shown before admin sends the contract link. Mirrors
 // every field the system will lock into the contract — room (type/floor/
 // size/amenities), rent (auto-calculated deposit), tenant (name/phone/
@@ -2277,9 +2373,20 @@ function ContractPreFlightSummary({ t, rentInfo, C, fmtCurrency }) {
   const ADMIN_ROOM_TYPES = window.ADMIN_ROOM_TYPES || {};
   const r = t.room || {};
   const typeInfo = ADMIN_ROOM_TYPES[t.type] || {};
+  const displayRoomId = t.roomId || t.currentRoomId || '';
   const rent = Number(rentInfo && rentInfo.rent) || 0;
   const depositValue = Number(rentInfo && rentInfo.deposit);
   const deposit = Number.isFinite(depositValue) && depositValue >= 0 ? depositValue : (rent * 2);
+  const preflightIssues = [
+    !displayRoomId ? { level: 'danger', label: 'ยังไม่ผูกห้อง', fix: 'เลือกห้องให้ผู้เช่าก่อนสร้างสัญญา' } : null,
+    !(Number.isFinite(rent) && rent > 0) ? { level: 'danger', label: 'ยังไม่มีค่าเช่า', fix: 'ตั้งค่าเช่าที่เมนูตั้งราคา/ห้องพักก่อนส่งลิงก์' } : null,
+    !String(t.name || '').trim() ? { level: 'danger', label: 'ยังไม่มีชื่อผู้เช่า', fix: 'กรอกชื่อผู้เช่าให้ครบก่อนออกสัญญา' } : null,
+    !String(t.phone || '').trim() ? { level: 'warning', label: 'ยังไม่มีเบอร์ผู้เช่า', fix: 'เพิ่มเบอร์โทรเพื่อส่งลิงก์/แจ้งเตือนอัตโนมัติและติดต่อกลับ' } : null,
+    !String(t.email || '').trim() ? { level: 'info', label: 'ยังไม่มีอีเมลผู้เช่า', fix: 'ถ้ามีอีเมลให้เพิ่มไว้เป็นช่องทางสำรองในการส่งลิงก์' } : null,
+  ].filter(Boolean);
+  const blockers = preflightIssues.filter((it) => it.level === 'danger');
+  const preflightReady = blockers.length === 0;
+  const preflightWarningOnly = preflightReady && preflightIssues.length > 0;
 
   // Amenity badges — show only what the room actually has.
   const amenities = [];
@@ -2307,8 +2414,41 @@ function ContractPreFlightSummary({ t, rentInfo, C, fmtCurrency }) {
 
   return (
     <div style={{ background: '#faf6ee', borderRadius: 10, padding: '4px 14px' }}>
+      <div style={{
+        margin: '10px 0 6px',
+        padding: 10,
+        borderRadius: 8,
+        border: `1px solid ${preflightReady ? (preflightWarningOnly ? '#f1b32d' : (C.success || '#2f8f5b')) : (C.danger || '#c0392b')}33`,
+        background: preflightReady
+          ? (preflightWarningOnly ? (C.warningSoft || '#fff7ed') : (C.successSoft || '#e6f4ec'))
+          : (C.dangerSoft || '#fff1f0'),
+        color: C.ink2,
+        fontSize: 12,
+        lineHeight: 1.5,
+      }}>
+        <div style={{
+          display: 'flex', justifyContent: 'space-between', gap: 8,
+          fontWeight: 700, color: C.ink, marginBottom: preflightIssues.length ? 4 : 0,
+        }}>
+          <span>เช็คก่อนสร้าง/ส่งสัญญา</span>
+          <span style={{ color: preflightReady ? (preflightWarningOnly ? (C.warningInk || '#92400e') : (C.success || '#2f8f5b')) : (C.danger || '#c0392b') }}>
+            {preflightReady ? (preflightWarningOnly ? 'สร้างได้ แต่ควรเติมข้อมูล' : 'พร้อมสร้างสัญญา') : `ยังไม่พร้อม ${blockers.length} จุด`}
+          </span>
+        </div>
+        {preflightIssues.length ? (
+          <ul style={{ margin: '4px 0 0 18px', padding: 0 }}>
+            {preflightIssues.map((it) => (
+              <li key={it.label}>
+                <b>{it.label}</b>: {it.fix}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <div style={{ color: C.muted }}>ข้อมูลตั้งต้นครบสำหรับสร้างสัญญา ส่งลิงก์ และสร้างบิลแรกหลังอนุมัติ</div>
+        )}
+      </div>
       <Row icon="🏠" label="ห้อง">
-        <b>{t.roomId || '—'}</b>
+        <b>{displayRoomId || '—'}</b>
         {t.floor ? <span style={{ color: C.muted, marginLeft: 6, fontWeight: 400 }}>
           · ชั้น {t.floor}</span> : null}
         {typeInfo.th ? <span style={{ color: C.muted, marginLeft: 6, fontWeight: 400 }}>
@@ -2391,6 +2531,8 @@ function ContractFlowChecklist({
   const bookingId = String(routeBookingId || (t.room && t.room.sourceBookingId) || (reservedBy && !reservedBy.startsWith('contract:') ? reservedBy : '') || '');
   const submitted = invStatus === 'submitted';
   const pending = invStatus === 'pending';
+  const identityGap = contractIdentityGap(contract);
+  const lockedIdentityGap = locked && !!identityGap;
 
   const tone = {
     done: { bg: C.successSoft || '#e6f4ec', fg: C.success || '#2f8f5b', border: C.success || '#2f8f5b', label: 'เสร็จแล้ว' },
@@ -2405,7 +2547,7 @@ function ContractFlowChecklist({
   const conflict = !!contractConflict;
   const roomClaimReady = roomReady && (hasCurrentTenancy || hasContract || reservedBy || bookingId);
   const contractReady = hasContract && !conflict;
-  const tenantSubmitted = locked || submitted || reviewing;
+  const tenantSubmitted = submitted || reviewing;
 
   const steps = [
     {
@@ -2443,8 +2585,10 @@ function ContractFlowChecklist({
     },
     {
       title: 'ผู้เช่ากรอก + แอดมินตรวจ',
-      state: locked ? 'done' : (tenantSubmitted ? 'warn' : (pending ? 'warn' : 'wait')),
-      detail: locked
+      state: lockedIdentityGap ? 'stop' : (locked ? 'done' : (tenantSubmitted ? 'warn' : (pending ? 'warn' : 'wait'))),
+      detail: lockedIdentityGap
+        ? `สัญญา lock แล้ว แต่ยังขาด ${identityGap.labels.join(', ')} — ระบบไม่ออกลิงก์กรอกสัญญาซ้ำเพราะ approve/lock ซ้ำไม่ได้`
+        : locked
         ? 'ตรวจและอนุมัติเรียบร้อยแล้ว'
         : submitted || reviewing
           ? 'ผู้เช่าส่งข้อมูลแล้ว ตรวจบัตรหน้า/หลัง ที่อยู่ ผู้ติดต่อฉุกเฉิน และลายเซ็นก่อน lock'
@@ -2454,8 +2598,10 @@ function ContractFlowChecklist({
     },
     {
       title: 'Lock + บิลแรก',
-      state: locked ? 'done' : (hasCurrentTenancy && !contract ? 'warn' : 'wait'),
-      detail: locked
+      state: lockedIdentityGap ? 'warn' : (locked ? 'done' : (hasCurrentTenancy && !contract ? 'warn' : 'wait')),
+      detail: lockedIdentityGap
+        ? 'สัญญามีผลแล้ว แต่หลักฐานประกอบยังไม่ครบ ตรวจ/เติมข้อมูลย้อนหลังให้ครบก่อนถือว่าเอกสารสมบูรณ์'
+        : locked
         ? 'สัญญามีผลแล้ว ตรวจบิลรอบแรก/ส่งบิลให้ผู้เช่า และใช้งาน portal ต่อได้'
         : hasCurrentTenancy && !contract
           ? 'ผู้เช่าอยู่ในห้องแล้วแต่ยังไม่มีสัญญาในระบบ ให้ส่งลิงก์สัญญาหรือเช็คเอาท์ถ้าไม่ใช่เคสนี้'
@@ -2467,6 +2613,7 @@ function ContractFlowChecklist({
     if (conflict) return 'ใช้ปุ่มในการ์ดสัญญาที่ชนกัน เพื่อเปิดสัญญาเดิม ดู PDF หรือโหลดข้อมูลใหม่';
     if (!roomReady) return 'เลือก/ผูกห้องให้ผู้เช่าก่อน';
     if (!priceReady) return 'แก้ค่าเช่าที่เมนูตั้งราคา/ห้องพักก่อน แล้วกลับมาหน้านี้';
+    if (lockedIdentityGap) return `สัญญานี้ lock แล้ว จึงสร้างลิงก์กรอกสัญญาไม่ได้ — ขาด ${identityGap.labels.join(', ')} ให้เติมข้อมูลย้อนหลังหรือทำสัญญาฉบับใหม่ก่อน lock`;
     if (locked) return 'ไปหน้าบิล ตรวจบิลรอบแรก แล้วส่งแจ้งเตือนให้ผู้เช่า';
     if (submitted || reviewing) return 'กดตรวจสอบ + อนุมัติ ตรวจรูปบัตรประชาชนทั้งสองด้านและลายเซ็นก่อน lock';
     if (pending || liveLink) return 'ส่งลิงก์ให้ผู้เช่า รอผู้เช่ากรอก หรือกดสร้างลิงก์ใหม่ถ้าลิงก์เดิมหาย';
@@ -2639,6 +2786,43 @@ function formatCitizenId(raw) {
   return `${s[0]}-${s.slice(1, 5)}-${s.slice(5, 10)}-${s.slice(10, 12)}-${s[12]}`;
 }
 
+function contractReviewChecklistItems(detail) {
+  const draft = (detail && detail.draft) || {};
+  const checks = [
+    { field: 'address', group: 'ข้อมูลผู้เช่า', label: 'ที่อยู่ผู้เช่า', fix: 'ให้ผู้เช่ากรอกที่อยู่ก่อน lock สัญญา' },
+    { field: 'emergencyContactName', group: 'ผู้ติดต่อฉุกเฉิน', label: 'ชื่อผู้ติดต่อฉุกเฉิน', fix: 'ขอชื่อผู้ติดต่อฉุกเฉินจากผู้เช่า' },
+    { field: 'emergencyContactPhone', group: 'ผู้ติดต่อฉุกเฉิน', label: 'เบอร์ผู้ติดต่อฉุกเฉิน', fix: 'ขอเบอร์ฉุกเฉินที่โทรได้จริง' },
+    { field: 'citizenId', group: 'ยืนยันตัวตน', label: 'เลขบัตรประชาชน 13 หลัก', fix: 'ให้ผู้เช่ากรอกเลขบัตรให้ครบ 13 หลัก' },
+    { field: 'citizenIdImageFrontId', group: 'ยืนยันตัวตน', label: 'รูปบัตรด้านหน้า', fix: 'อัปโหลดรูปด้านหน้าบัตรที่อ่านเลขได้ชัดเจน' },
+    { field: 'citizenIdImageBackId', group: 'ยืนยันตัวตน', label: 'รูปบัตรด้านหลัง', fix: 'อัปโหลดรูปด้านหลังบัตรให้ครบ' },
+    { field: 'signatureFileId', group: 'ลายเซ็น', label: 'ลายเซ็นผู้เช่า', fix: 'ให้ผู้เช่าเซ็นก่อนส่งกลับมาใหม่' },
+  ];
+  return checks.map((item) => {
+    const value = draft[item.field];
+    const fallbackUrl = item.field === 'citizenIdImageFrontId'
+      ? detail && detail.draft_front_url
+      : item.field === 'citizenIdImageBackId'
+        ? detail && detail.draft_back_url
+        : item.field === 'signatureFileId'
+          ? detail && detail.draft_signature_url
+          : '';
+    const missing = item.field === 'citizenId'
+      ? String(value || '').replace(/\D/g, '').length !== 13
+      : item.field.endsWith('Id')
+        ? ((!Number.isInteger(Number(value)) || Number(value) < 1) && !fallbackUrl)
+        : !String(value || '').trim();
+    return { ...item, ready: !missing };
+  });
+}
+
+function contractReviewRejectReason(items) {
+  if (!items.length) return '';
+  return [
+    'กรุณาแก้ข้อมูลต่อไปนี้ก่อนส่งสัญญาใหม่:',
+    ...items.map((it, idx) => `${idx + 1}. ${it.label} — ${it.fix}`),
+  ].join('\n');
+}
+
 // Inline review panel — shows tenant's submitted draft + photos + signature
 // directly inside the tenant drawer so admin can approve without page hops.
 // `approveError` lets the parent surface server-side failures (room conflict,
@@ -2649,6 +2833,15 @@ function ContractReviewPanel({ detail, busy, approveError, onApprove, onReject, 
   const draft = detail.draft || {};
   const [showRejectForm, setShowRejectForm] = React.useState(false);
   const [rejectReason, setRejectReason] = React.useState('');
+  const reviewChecklist = contractReviewChecklistItems(detail);
+  const missingReviewItems = reviewChecklist.filter((item) => !item.ready);
+  const readyReviewCount = reviewChecklist.length - missingReviewItems.length;
+  const openRejectForm = () => {
+    if (!rejectReason.trim() && missingReviewItems.length) {
+      setRejectReason(contractReviewRejectReason(missingReviewItems));
+    }
+    setShowRejectForm(true);
+  };
 
   const Section = ({ title, children }) => (
     <div style={{ marginBottom: 12, padding: 12, background: '#faf6ee', borderRadius: 8 }}>
@@ -2670,6 +2863,35 @@ function ContractReviewPanel({ detail, busy, approveError, onApprove, onReject, 
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
         <div style={{ fontSize: 14, fontWeight: 600 }}>ตรวจสอบสัญญาที่ผู้เช่ากรอก</div>
         <Btn variant="ghost" size="sm" onClick={onCancel} disabled={busy}>← ย้อน</Btn>
+      </div>
+
+      <div style={{
+        padding: 10,
+        marginBottom: 12,
+        borderRadius: 8,
+        border: `1px solid ${missingReviewItems.length ? '#f1b32d' : (C.success || '#2f8f5b')}55`,
+        background: missingReviewItems.length ? (C.warningSoft || '#fff7ed') : (C.successSoft || '#e6f4ec'),
+        color: C.ink2,
+        fontSize: 12,
+        lineHeight: 1.45,
+      }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, marginBottom: 6 }}>
+          <b style={{ color: C.ink }}>ความครบถ้วนก่อน lock</b>
+          <span style={{ fontWeight: 700, color: missingReviewItems.length ? (C.warningInk || '#92400e') : (C.success || '#2f8f5b') }}>
+            {readyReviewCount}/{reviewChecklist.length} ครบ
+          </span>
+        </div>
+        {missingReviewItems.length ? (
+          <ul style={{ margin: '0 0 0 18px', padding: 0 }}>
+            {missingReviewItems.map((it) => (
+              <li key={it.field}>
+                <b>{it.group}: {it.label}</b> — {it.fix}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <div style={{ color: C.muted }}>ข้อมูลสำคัญครบแล้ว ตรวจภาพบัตรกับเลขจริงอีกครั้งก่อนอนุมัติ</div>
+        )}
       </div>
 
       <Section title="ที่อยู่">
@@ -2758,8 +2980,8 @@ function ContractReviewPanel({ detail, busy, approveError, onApprove, onReject, 
         </div>
       ) : (
         <div style={{ display: 'flex', gap: 8, marginTop: 10, justifyContent: 'flex-end' }}>
-          <Btn variant="ghost" onClick={() => setShowRejectForm(true)} disabled={busy}>ขอให้แก้</Btn>
-          <Btn variant="primary" onClick={onApprove} disabled={busy}>
+          <Btn variant="ghost" onClick={openRejectForm} disabled={busy}>ขอให้แก้</Btn>
+          <Btn variant="primary" onClick={onApprove} disabled={busy || missingReviewItems.length > 0}>
             {busy ? 'กำลังอนุมัติ…' : '✓ อนุมัติ + lock'}
           </Btn>
         </div>

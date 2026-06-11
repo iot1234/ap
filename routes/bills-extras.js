@@ -45,6 +45,11 @@ const { renderBillPdf } = require('../services/pdf');
 const { schemas } = require('../schemas');
 const { validateBody } = require('../middleware/validate');
 const billPayments = require('../services/billPayments');
+// Pure due-date helper shared with the scheduler so bulk-generate and the
+// nightly auto-gen agree on "due day already passed this month" handling
+// (services/scheduler.js exports it side-effect-free; jobs start only via
+// start()).
+const { billGenDueDateFor } = require('../services/scheduler');
 
 function billEmailReady(flags) {
   return email.isConfigured(flags || {});
@@ -128,7 +133,14 @@ function buildStoredBillPdfObject(b, config, paymentBlock) {
   }
   for (const it of otherList) {
     const amt = Number(it.amount) || 0;
-    if (amt > 0) items.push({ label: String(it.label || 'อื่นๆ'), qty: '', amount: amt });
+    if (amt > 0) {
+      items.push({
+        label: String(it.label || 'อื่นๆ'),
+        qty: it.qty == null ? '' : String(it.qty),
+        detail: it.detail ? String(it.detail) : '',
+        amount: amt,
+      });
+    }
   }
   if (Number(b.late_fee) > 0) {
     items.push({ label: 'ค่าปรับชำระล่าช้า', qty: '', amount: Number(b.late_fee) });
@@ -185,6 +197,86 @@ async function loadRecurringFor(pool, { tenantId, roomId }) {
     params
   );
   return rows;
+}
+
+// Rerun/resubmit safety for one_off charges. The FIRST generation run folds
+// a one_off into the bill and flips it active=FALSE; a rerun's active=TRUE
+// recurring load no longer sees it, so the recomputed bill would silently
+// drop the line while the charge row stays inactive — the amount would never
+// be billed anywhere. A line is resurrected only when it is BOTH on the
+// existing bill's `other` AND backed by an inactive one_off row for the same
+// tenant/room (one row backs one line). Lines the current run already
+// produces (charge still active / admin-reactivated) are never doubled, and
+// unmatched display lines (e.g. 'ค่าส่วนกลาง') pass through untouched.
+function matchConsumedOneOffLines(existingOther, currentList, inactiveOneOffs) {
+  let existingItems = Array.isArray(existingOther) ? existingOther : [];
+  if (!Array.isArray(existingOther) && typeof existingOther === 'string') {
+    try {
+      const parsed = JSON.parse(existingOther);
+      existingItems = Array.isArray(parsed) ? parsed : [];
+    } catch { existingItems = []; }
+  }
+  const sameLine = (a, b) =>
+    String(a?.label || '') === String(b?.label || '')
+    && Math.abs((Number(a?.amount) || 0) - (Number(b?.amount) || 0)) <= billing.PAYMENT_TOLERANCE_THB;
+  const candidates = (Array.isArray(inactiveOneOffs) ? inactiveOneOffs : [])
+    .map((r) => ({ label: r.label, amount: Number(r.amount) || 0 }));
+  const current = Array.isArray(currentList) ? [...currentList] : [];
+  const kept = [];
+  for (const item of existingItems) {
+    const dupIdx = current.findIndex((x) => sameLine(x, item));
+    if (dupIdx !== -1) { current.splice(dupIdx, 1); continue; }
+    const matchIdx = candidates.findIndex((x) => sameLine(x, item));
+    if (matchIdx === -1) continue;
+    candidates.splice(matchIdx, 1);
+    kept.push({ label: String(item.label || ''), amount: Number(item.amount) || 0 });
+  }
+  return kept;
+}
+
+// DB side of the merge above: pull this tenant/room's inactive one_offs and
+// match them against the existing bill's stored lines. Carries reversed by
+// void/unmark-paid carry the reversed marker in notes and stay gone — their
+// source bill no longer owes them (carries consumed by bill-gen have no
+// marker, so a legitimately billed carry line survives the rerun).
+async function consumedOneOffLinesForBill(client, { tenantId, roomId, existingOther, currentList }) {
+  const params = [];
+  const ors = [];
+  if (tenantId) { params.push(tenantId); ors.push(`tenant_id = $${params.length}`); }
+  if (roomId)   { params.push(roomId);   ors.push(`room_id = $${params.length}`); }
+  if (!ors.length) return [];
+  params.push(billPayments._carriedLateFeeReversedMarker);
+  try {
+    const { rows } = await client.query(
+      `SELECT label, amount FROM recurring_charges
+         WHERE active = FALSE AND frequency = 'one_off'
+           AND (${ors.join(' OR ')})
+           AND POSITION($${params.length} IN COALESCE(notes, '')) = 0`,
+      params
+    );
+    return matchConsumedOneOffLines(existingOther, currentList, rows);
+  } catch (err) {
+    if (err.code === '42P01') return [];   // legacy deploy without the table
+    throw err;
+  }
+}
+
+// Late fees are OWNED by scheduler.tickLateFee and accrue in-place on the
+// existing bill — buildBill always returns lateFee:0, so regenerating a bill
+// must carry the accrued fee over instead of treating it as drift (which
+// silently waived the fee with no waive decision and no audit entry). The
+// fee survives while the bill stays past due; a due date moved to today or
+// the future means the bill is no longer late, so the fee resets and a
+// stale 'overdue' flips back to 'pending'. pending → overdue is NOT done
+// here: that flip stays with the scheduler tick, which also notifies the
+// tenant and assesses the initial fee.
+function regenPreservedLateFeeAndStatus(existing, dueDate, now = new Date()) {
+  const dueDateStatus = billing.statusOf({ paid_at: null, due_date: dueDate }, now);
+  const lateFee = dueDateStatus === 'overdue' ? (Number(existing?.late_fee) || 0) : 0;
+  const status = (existing?.status === 'overdue' && dueDateStatus === 'pending')
+    ? 'pending'
+    : existing?.status;
+  return { lateFee, status };
 }
 
 function billTenantCanReceiveDebtNotice(status) {
@@ -351,6 +443,9 @@ module.exports = function buildBillsExtrasRouter(ctx) {
   }
 
   function billPreviewPayload(bill, recurringList, room, periodDisplay) {
+    const previewCharges = Number(bill.paymentReferenceCents) > 0
+      ? billing.appendPaymentReferenceLine(recurringList, bill.paymentReferenceCents)
+      : (Array.isArray(recurringList) ? recurringList : []);
     return {
       id: bill.billNo || `INV-${bill.period}-${bill.roomId}`,
       billNo: bill.billNo,
@@ -381,13 +476,14 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       elecCurrentReading: bill.elecCurrentReading,
       wifi: bill.wifi,
       commonFee: bill.commonFee || 0,
-      charges: recurringList,
-      chargesTotal: recurringList.reduce((sum, x) => sum + (Number(x.amount) || 0), 0),
+      charges: previewCharges,
+      chargesTotal: previewCharges.reduce((sum, x) => sum + (Number(x.amount) || 0), 0),
       subtotal: bill.subtotal,
       vat: bill.vat,
       penalty: bill.lateFee,
       lateFee: bill.lateFee,
       total: bill.total,
+      paymentReferenceCents: bill.paymentReferenceCents || 0,
       dueDate: bill.dueDate,
       dueDateDisplay: bill.dueDate,
       status: room?.billPaidAt ? 'paid' : 'unpaid',
@@ -551,6 +647,19 @@ module.exports = function buildBillsExtrasRouter(ctx) {
   // verified payments — anything paid/void/locked is refused with
   // BILL_LOCKED_FOR_LEDGER so admin can't silently overwrite a ledger row.
   r.post('/', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'),
+    // schemas.generateBill strips unknown keys (Zod default object mode) and
+    // validateBody replaces req.body with the stripped result — stash the
+    // drift-override escape hatch BEFORE validation runs, otherwise the
+    // documented `{ manualOverride: true, overrideReason }` resend is
+    // silently discarded and BILL_TOTAL_DRIFT becomes an unrecoverable loop.
+    (req, _res, next) => {
+      req.billDriftOverride = {
+        manualOverride: req.body?.manualOverride === true,
+        overrideReason: typeof req.body?.overrideReason === 'string'
+          ? req.body.overrideReason : '',
+      };
+      next();
+    },
     validateBody(schemas.generateBill), async (req, res) => {
     const b = req.body || {};
     const flags = await features.load(pool);
@@ -587,7 +696,12 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       // B1 — auto-load recurring charges if recurringCharges flag on and the
       // caller didn't explicitly pass `recurring`. Resolve the active tenant
       // first so per-tenant charges (parking, cleaning) match the right person.
-      let recurringList = Array.isArray(b.recurring) ? b.recurring : [];
+      // buildBill folds recurring amounts into subtotal/total ONLY when the
+      // recurringCharges flag is on — mirror that gate here, otherwise the
+      // stored bill (and its PDF reconstruction) renders `other` line items
+      // whose amounts are NOT in the total the tenant is asked to pay.
+      let recurringList = flags.recurringCharges?.enabled && Array.isArray(b.recurring)
+        ? b.recurring : [];
       if (Array.isArray(b.recurring) && !Array.isArray(b.other)) {
         otherForStorage = recurringList;
       }
@@ -618,6 +732,29 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         otherForStorage = recurringList;
         // Only deactivate one_off charges that actually got billed this period.
         usedOneOffIds = applicable.filter((r) => r.frequency === 'one_off').map((r) => r.id);
+        // Resubmit/double-click safety: a one_off consumed by an earlier
+        // submission for this slot is active=FALSE now, so it vanished from
+        // the load above — resurrect the line items the existing bill
+        // already carries, or the ON CONFLICT update would rewrite the bill
+        // without them and the charge would never be billed anywhere.
+        const slotQ = await pool.query(
+          `SELECT other FROM bills
+            WHERE room_id=$1 AND period=$2
+              AND COALESCE(tenant_id, 0)=COALESCE($3::bigint, 0)
+              AND deleted_at IS NULL AND status <> 'void'
+            ORDER BY created_at DESC LIMIT 1`,
+          [b.roomId, periodForFilter, tid]
+        );
+        if (slotQ.rows[0]) {
+          const consumedLines = await consumedOneOffLinesForBill(pool, {
+            tenantId: tid, roomId: b.roomId,
+            existingOther: slotQ.rows[0].other, currentList: recurringList,
+          });
+          if (consumedLines.length) {
+            recurringList = [...recurringList, ...consumedLines];
+            otherForStorage = recurringList;
+          }
+        }
       }
       // Resolve the active contract for BOTH discount_pct (legacy: contract-
       // length discount) AND monthly_rent (NEW: locked rate from signing —
@@ -672,21 +809,31 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         const roomCheck = roomsObjCheck[b.roomId]
           || (Object.values(roomsObjCheck || {}).find((r) => r.id === b.roomId));
         if (roomCheck) {
-          let activeContractCheck = null;
-          let discountPctCheck = 0;
-          try {
-            const cq = await pool.query(
-              `SELECT id, monthly_rent, discount_pct, status, start_date
-                 FROM contracts
-                 WHERE room_id=$1 AND status='active' AND deleted_at IS NULL
-                 ORDER BY start_date DESC LIMIT 1`,
-              [b.roomId]
-            );
-            if (cq.rows[0]) {
-              activeContractCheck = cq.rows[0];
-              discountPctCheck = Number(cq.rows[0].discount_pct) || 0;
-            }
-          } catch { /* legacy: no contracts table */ }
+          // Resolve the resident tenant FIRST (same query as the compute
+          // path) — tenant-scoped recurring rows (carried late fees are
+          // always tenant-scoped) and the stay-on contract fallback below
+          // both need it, otherwise a bill that exactly matches what
+          // generation produces gets a false BILL_TOTAL_DRIFT.
+          let tidCheck = b.tenantId || null;
+          if (!tidCheck) {
+            try {
+              const tq = await pool.query(
+                `SELECT id FROM tenants WHERE current_room_id=$1 AND status='active' AND deleted_at IS NULL
+                   ORDER BY updated_at DESC LIMIT 1`,
+                [b.roomId]
+              );
+              if (tq.rows.length) tidCheck = tq.rows[0].id;
+            } catch { /* legacy: no tenants table */ }
+          }
+          // Same contract resolution as compute/preview/bulk — INCLUDING the
+          // expired-contract continuation, so a stay-on tenant's SIGNED rent
+          // isn't flagged as drift against the current formula rate.
+          const activeContractCheck = await activeContractForRoom(pool, b.roomId, b.period);
+          const expiredContractCheck = activeContractCheck
+            ? null
+            : await expiredContractForRoom(pool, b.roomId, tidCheck);
+          const contractForCheck = activeContractCheck || expiredContractCheck;
+          const discountPctCheck = Number(contractForCheck?.discount_pct) || 0;
           let recurringForRecompute = Array.isArray(b.recurring) ? b.recurring : [];
           // Load DB recurring if caller didn't pass any AND flag is on — match
           // the compute:true path's behaviour so the comparison is apples-to-apples.
@@ -694,15 +841,36 @@ module.exports = function buildBillsExtrasRouter(ctx) {
               && flags.recurringCharges?.autoIncludeOnBillGen !== false
               && !b.recurring) {
             try {
-              const dbRec = await loadRecurringFor(pool, { tenantId: b.tenantId || null, roomId: b.roomId });
+              const dbRec = await loadRecurringFor(pool, { tenantId: tidCheck, roomId: b.roomId });
               const applicable = dbRec.filter((r) => billing.isChargeApplicableForPeriod(r, b.period));
               recurringForRecompute = applicable.map((r) => ({ label: r.label, amount: Number(r.amount) }));
+              // One_offs consumed by an earlier run stay part of what
+              // generation produces (see the bulk rerun merge) — include
+              // them here too so resubmitting that bill doesn't drift.
+              const slotQ = await pool.query(
+                `SELECT other FROM bills
+                  WHERE room_id=$1 AND period=$2
+                    AND COALESCE(tenant_id, 0)=COALESCE($3::bigint, 0)
+                    AND deleted_at IS NULL AND status <> 'void'
+                  ORDER BY created_at DESC LIMIT 1`,
+                [b.roomId, b.period, tidCheck]
+              );
+              if (slotQ.rows[0]) {
+                const consumedLines = await consumedOneOffLinesForBill(pool, {
+                  tenantId: tidCheck, roomId: b.roomId,
+                  existingOther: slotQ.rows[0].other, currentList: recurringForRecompute,
+                });
+                if (consumedLines.length) {
+                  recurringForRecompute = [...recurringForRecompute, ...consumedLines];
+                }
+              }
             } catch { /* fall back to no recurring */ }
           }
           const roomForBillingCheck = await meter.attachBillingReadingsForPeriod(pool, roomCheck, b.period);
           const recomputed = billing.buildBill({
             room: roomForBillingCheck,
             contract: activeContractCheck,
+            expiredContract: expiredContractCheck,
             config: configCheck,
             features: flags,
             recurring: recurringForRecompute,
@@ -725,7 +893,9 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             // Block unless admin opted in. The override flag MUST be paired
             // with a non-trivial reason so the audit log explains WHY the
             // operator chose to bypass — useful for tenant disputes later.
-            if (b.manualOverride !== true) {
+            // Read from the pre-validation stash (see middleware above) —
+            // Zod already stripped these keys from req.body.
+            if (req.billDriftOverride?.manualOverride !== true) {
               return res.status(412).json({
                 error: 'ตัวเลขในบิลที่ส่งไม่ตรงกับที่ระบบคำนวณได้ — ตรวจสอบยอดอีกครั้งก่อนยืนยัน',
                 code: 'BILL_TOTAL_DRIFT',
@@ -740,7 +910,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
                 },
               });
             }
-            const reason = String(b.overrideReason || '').trim();
+            const reason = String(req.billDriftOverride?.overrideReason || '').trim();
             if (reason.length < 5) {
               return res.status(400).json({
                 error: 'ต้องระบุ overrideReason อย่างน้อย 5 ตัวอักษรเมื่อใช้ manualOverride',
@@ -768,8 +938,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         });
       }
     }
-    const totalAmount = Number(computed.total);
-    const subtotalAmount = computed.subtotal == null ? totalAmount : Number(computed.subtotal);
+    billing.applyPaymentReferenceCents(computed, { maxTotal: MAX_AMOUNT });
     // Persist the common-area fee as a visible line in `other` so the stored
     // bill + its PDF reconstruction show it. It is ALREADY folded into
     // computed.subtotal/total by buildBill (so the total=subtotal+vat+late_fee
@@ -779,6 +948,12 @@ module.exports = function buildBillsExtrasRouter(ctx) {
     if (commonFeeAmt > 0 && !otherForStorage.some((x) => /ส่วนกลาง/.test(String((x && x.label) || '')))) {
       otherForStorage = [...otherForStorage, { label: 'ค่าส่วนกลาง', amount: commonFeeAmt }];
     }
+    const paymentRefAmt = Number(computed.paymentReferenceCents) || 0;
+    if (paymentRefAmt > 0) {
+      otherForStorage = billing.appendPaymentReferenceLine(otherForStorage, paymentRefAmt);
+    }
+    const totalAmount = Number(computed.total);
+    const subtotalAmount = computed.subtotal == null ? totalAmount : Number(computed.subtotal);
     if (!computed.billNo || !computed.roomId || !computed.period || !computed.dueDate
         || !Number.isFinite(totalAmount) || totalAmount <= 0 || totalAmount > MAX_AMOUNT
         || !Number.isFinite(subtotalAmount) || subtotalAmount < 0) {
@@ -864,7 +1039,13 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           computed.billNo = billNoForInsert;
         }
       }
-      const { rows } = await billClient.query(
+      // DO UPDATE keeps bills.late_fee — late fees are owned by
+      // scheduler.tickLateFee and accrue in-place on the row; a resubmit
+      // (buildBill always sends late_fee=0) must not wipe the accrued fee.
+      // When the new due date is not past, the bill is no longer late at
+      // all, so the fee resets and a stale 'overdue' flips back to
+      // 'pending' (total = subtotal + vat + late_fee holds either way).
+      const insertBillRow = (billNoArg) => billClient.query(
         `INSERT INTO bills
          (bill_no, tenant_id, room_id, period, rent,
           water_prev_reading, water_current_reading, water_units, water_rate, water_amount,
@@ -883,8 +1064,15 @@ module.exports = function buildBillsExtrasRouter(ctx) {
            elec_units=EXCLUDED.elec_units,
            elec_rate=EXCLUDED.elec_rate, elec_amount=EXCLUDED.elec_amount,
            wifi=EXCLUDED.wifi, other=EXCLUDED.other,
-           subtotal=EXCLUDED.subtotal, vat=EXCLUDED.vat, late_fee=EXCLUDED.late_fee,
-           total=EXCLUDED.total, due_date=EXCLUDED.due_date
+           subtotal=EXCLUDED.subtotal, vat=EXCLUDED.vat,
+           late_fee=CASE WHEN EXCLUDED.due_date < CURRENT_DATE
+                         THEN bills.late_fee ELSE 0 END,
+           total=EXCLUDED.subtotal + EXCLUDED.vat
+                 + (CASE WHEN EXCLUDED.due_date < CURRENT_DATE
+                         THEN bills.late_fee ELSE 0 END),
+           due_date=EXCLUDED.due_date,
+           status=CASE WHEN bills.status='overdue' AND EXCLUDED.due_date >= CURRENT_DATE
+                       THEN 'pending' ELSE bills.status END
          WHERE bills.status IN ('pending','overdue')
            AND bills.deleted_at IS NULL
            AND (
@@ -897,7 +1085,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
            )
          RETURNING *`,
         [
-          billNoForInsert, tenantId, computed.roomId, computed.period,
+          billNoArg, tenantId, computed.roomId, computed.period,
           computed.rent || 0,
           computed.waterPrevReading, computed.waterCurrentReading,
           computed.waterUnits || 0, computed.waterRate || 0, computed.waterAmount || 0,
@@ -909,9 +1097,10 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           totalAmount, computed.dueDate,
         ]
       );
+      let { rows } = await insertBillRow(billNoForInsert);
       if (!rows.length) {
         const locked = await billClient.query(
-          `SELECT b.id, b.status,
+          `SELECT b.id, b.status, b.deleted_at,
                   EXISTS (
                     SELECT 1 FROM payments p
                      WHERE p.bill_id=b.id AND p.status='verified'
@@ -922,15 +1111,32 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             LIMIT 1`,
           [computed.billNo]
         );
-        await billClient.query('ROLLBACK');
         const current = locked.rows[0] || {};
-        return res.status(409).json({
-          error: 'existing bill is locked because it is paid, void, deleted, or has a verified payment',
-          code: 'BILL_LOCKED_FOR_LEDGER',
-          billId: current.id,
-          billStatus: current.status,
-          hasVerifiedPayment: !!current.has_verified_payment,
-        });
+        // A void/deleted row keeps its bill_no forever (bill_no is a FULL
+        // unique constraint) even though the room/period guard index ignores
+        // it — and void-then-recreate is the documented correction flow
+        // ("ทำการ void ก่อนถ้าต้องการสร้างใหม่"). Climb a numbered suffix
+        // instead of dead-ending the operator with BILL_LOCKED_FOR_LEDGER.
+        if (current.status === 'void' || current.deleted_at != null) {
+          for (let attempt = 2; attempt <= 5 && !rows.length; attempt++) {
+            const retryBillNo = `${computed.billNo}-${attempt}`;
+            const retry = await insertBillRow(retryBillNo);
+            if (retry.rows.length) {
+              rows = retry.rows;
+              computed.billNo = retryBillNo;
+            }
+          }
+        }
+        if (!rows.length) {
+          await billClient.query('ROLLBACK');
+          return res.status(409).json({
+            error: 'existing bill is locked because it is paid, void, deleted, or has a verified payment',
+            code: 'BILL_LOCKED_FOR_LEDGER',
+            billId: current.id,
+            billStatus: current.status,
+            hasVerifiedPayment: !!current.has_verified_payment,
+          });
+        }
       }
       // B1 — mark consumed one_off recurring charges inactive so they don't
       // appear on next month's bill. This MUST commit atomically with the bill
@@ -955,6 +1161,13 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         // explain why its total disagrees with the resolver.
         manualOverride: driftReport ? { reason: driftReport.reason, drifts: driftReport.drifts } : null,
       });
+      // An upsert can flip a stale 'overdue' back to 'pending' (due date
+      // moved into the future) — cascade to the room card immediately,
+      // same pattern as /void, instead of waiting for the daily tick.
+      if (rows[0].room_id) {
+        require('../services/roomStatus').syncRoom(pool, rows[0].room_id, { reason: 'bill-upsert' })
+          .catch((err) => console.warn('[bill.create] room sync failed:', err.message));
+      }
       res.json({ ok: true, bill: rows[0], computed });
     } catch (err) {
       await billClient.query('ROLLBACK').catch(() => {});
@@ -1156,6 +1369,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           dueDate: roomDueDate,
           discountPct: Number(contractForBill?.discount_pct) || 0,
         });
+        billing.applyPaymentReferenceCents(bill, { tenantId: tenant.id || null, maxTotal: MAX_AMOUNT });
         const missingFields = [];
         if (!billing.isFlatUtilityConfigured(roomForBilling, 'water')
             && bill.waterCurrentReading == null) missingFields.push('water');
@@ -1296,10 +1510,15 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       }
       // Reverse any carried-forward late fee: a one_off recurring charge created
       // when this bill's payment was settled with action='carry' must not bill
-      // the tenant next month for a now-voided bill.
+      // the tenant next month for a now-voided bill. A carry ALREADY consumed
+      // by next-period bill-gen is frozen inside that issued bill — report it
+      // (find must run BEFORE deactivate: deactivate stamps the reversed
+      // marker that find excludes) and warn the admin instead of silently
+      // editing the issued next-period bill.
+      const consumedCarries = await billPayments.findConsumedCarriedLateFees(client, id);
       const deactivatedCarries = await billPayments.deactivateCarriedLateFees(client, id);
       await client.query('COMMIT');
-      result = { bill: voided.rows[0], reversedPayments, deactivatedCarries };
+      result = { bill: voided.rows[0], reversedPayments, deactivatedCarries, consumedCarries };
     } catch (err) {
       await client.query('ROLLBACK').catch(() => {});
       console.error('bill void error:', err);
@@ -1311,6 +1530,8 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       reason,
       force: !!force,
       reversedPayments: result.reversedPayments,
+      deactivatedCarries: result.deactivatedCarries,
+      consumedCarries: result.consumedCarries,
     });
     notifyBillVoided(result.bill, reason, req.session.user.username).catch(() => {});
     // Notify tenant if their verified payment was reversed by this void.
@@ -1334,7 +1555,21 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       require('../services/roomStatus').syncRoom(pool, result.bill.room_id, { reason: 'bill-void' })
         .catch((err) => console.warn(`[bill.void] room sync failed:`, err.message));
     }
-    res.json({ ok: true, bill: result.bill, reversedPayments: result.reversedPayments });
+    // consumedCarryWarning fails toward admin review: the carried fee is
+    // already a line inside next period's ISSUED bill, which we never edit
+    // silently — the operator must adjust (or void) that bill themselves.
+    const consumedCarrySum = billing.round2(
+      result.consumedCarries.reduce((sum, c) => sum + (Number(c.amount) || 0), 0)
+    );
+    res.json({
+      ok: true,
+      bill: result.bill,
+      reversedPayments: result.reversedPayments,
+      consumedCarries: result.consumedCarries,
+      warning: result.consumedCarries.length
+        ? `บิลรอบถัดไปยังมีค่าปรับยกมา ฿${consumedCarrySum.toLocaleString('th-TH')} จากบิลที่ถูกยกเลิก — โปรดปรับบิลรอบถัดไปเอง`
+        : undefined,
+    });
   });
 
   // POST /api/bills/:id/unmark-paid — admin correction path: undo a "paid"
@@ -1445,6 +1680,53 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             maxPctOfPrincipal = Number(flags.lateFee.maxPctOfPrincipal) || 0;
           }
         } catch { /* feature load failure → preserve the fee already on the bill */ }
+        // The rate the tenant SIGNED wins over the global rate — mirror
+        // scheduler.tickLateFee's resolveBillRate, otherwise unmark-paid
+        // re-assesses a penalty a locked contract forbids (snapshot rate 0
+        // is honored: rate 0 takes the preserve-prior-fee path below, and
+        // Phase B never lowers a fee, so a wrong restore would stick).
+        if (lateFeeEnabled && row.tenant_id != null) {
+          try {
+            const crq = await client.query(
+              `SELECT (c.terms_template_snapshot->'financials'->>'lateFeeRate')::numeric AS contract_late_fee_rate
+                 FROM contracts c
+                WHERE c.room_id = $1 AND c.tenant_id = $2
+                  AND c.locked_at IS NOT NULL
+                  AND c.terms_template_snapshot IS NOT NULL
+                ORDER BY c.start_date DESC NULLS LAST, c.id DESC
+                LIMIT 1`,
+              [row.room_id, row.tenant_id]
+            );
+            const cr = Number(crq.rows[0]?.contract_late_fee_rate);
+            if (crq.rows[0]?.contract_late_fee_rate != null && Number.isFinite(cr) && cr >= 0) {
+              ratePctPerMonth = cr;
+            }
+          } catch { /* legacy deploy without contracts → keep the global rate */ }
+        }
+        // Per-room exemption (config.billing.lateFeeExemptRooms) — same set
+        // tickLateFee honors. Disabling here takes the preserve-the-existing-
+        // fee path in computeRestoredBillAmounts (normally 0 on exempt rooms)
+        // instead of recomputing a fee the room is configured not to pay.
+        if (lateFeeEnabled) {
+          try {
+            const { rows: cfgRows } = await client.query(
+              `SELECT value FROM app_data WHERE key='baankarn_config_v1' LIMIT 1`
+            );
+            const exempt = cfgRows[0]?.value?.billing?.lateFeeExemptRooms;
+            if (Array.isArray(exempt) && exempt.map((x) => String(x)).includes(String(row.room_id))) {
+              lateFeeEnabled = false;
+            }
+          } catch { /* config blob missing — no exemptions */ }
+        }
+        // A carry already consumed by next-period bill-gen is frozen inside
+        // that ISSUED bill. Find those BEFORE deactivateCarriedLateFees runs
+        // (it stamps the reversed marker that this lookup excludes) and
+        // subtract the already-billed amount from the restored fee so the
+        // same lateness is never owed twice.
+        const consumedCarries = await billPayments.findConsumedCarriedLateFees(client, id);
+        const consumedCarriedLateFee = billing.round2(
+          consumedCarries.reduce((sum, c) => sum + (Number(c.amount) || 0), 0)
+        );
         const restore = billing.computeRestoredBillAmounts({
           subtotal: row.subtotal,
           vat: row.vat,
@@ -1458,6 +1740,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           minLateFeeBaht,
           maxLateFeeBaht,
           maxPctOfPrincipal,
+          consumedCarriedLateFee,
         });
         const restoredStatus = restore.status;
         const restoredLateFee = restore.lateFee;
@@ -1486,6 +1769,8 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           reason,
           restoredStatus,
           deactivatedCarries,
+          consumedCarries,
+          consumedCarriedLateFee,
           reversedPayments: reversed.rows.map((p) => ({
             id: p.id, amount: Number(p.amount), method: p.method, ref: p.ref,
           })),
@@ -1513,6 +1798,10 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           reversedPayments: reversed.rows.map((p) => ({
             id: p.id, amount: Number(p.amount), method: p.method, ref: p.ref,
           })),
+          consumedCarries,
+          warning: consumedCarries.length
+            ? `ค่าปรับยกมา ฿${consumedCarriedLateFee.toLocaleString('th-TH')} ถูกเก็บในบิลรอบถัดไปที่ออกแล้ว — ระบบหักส่วนนี้ออกจากค่าปรับที่คืนให้บิลนี้แล้ว`
+            : undefined,
         });
       } catch (err) {
         await client.query('ROLLBACK').catch(() => {});
@@ -1985,7 +2274,16 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             configDueDay: config?.notify?.dueOnDay,
             fallback: 7,   // matches the bulk UI default (page-billing.jsx dueOnDay || 7)
           });
-          const roomDueDate = billing.formatYMD(periodYear, periodMonth, due.day);
+          // Scheduler parity: generating for the CURRENT period after the due
+          // day already passed must roll the due date forward (same
+          // billGenDueDateFor policy as the nightly job) so the bill isn't
+          // born overdue and accruing a fee for days before it existed.
+          // Back-filled historical periods (and future ones) keep their
+          // in-period due date: billing.formatYMD(periodYear, periodMonth,
+          // due.day) — the date the tenant actually owed back then.
+          const roomDueDate = period === billing.formatPeriodNow()
+            ? billGenDueDateFor(new Date(), due)
+            : billing.formatYMD(periodYear, periodMonth, due.day);
           dueDaySources[due.source] = (dueDaySources[due.source] || 0) + 1;
           // Single transaction per room: lock+read recurring_charges,
           // INSERT bill, deactivate one_offs. Reading recurring INSIDE
@@ -2028,8 +2326,41 @@ module.exports = function buildBillsExtrasRouter(ctx) {
                 if (rcErr.code !== '42P01') throw rcErr;
               }
             }
+            // Lock the existing same-slot bill (if any) BEFORE recomputing:
+            // one_off charges the FIRST run consumed are active=FALSE now, so
+            // they vanished from `recurring` — resurrect the lines the
+            // existing bill already carries (matched against inactive one_off
+            // rows, reversed carries excluded), otherwise the rerun rewrites
+            // the bill without them and the amount is never billed anywhere.
+            const existingSlot = await billClient.query(
+              `SELECT b.id, b.bill_no, b.status, b.rent,
+                      b.water_prev_reading, b.water_current_reading, b.water_units, b.water_rate, b.water_amount,
+                      b.elec_prev_reading, b.elec_current_reading, b.elec_units, b.elec_rate, b.elec_amount,
+                      b.wifi, b.other, b.subtotal, b.vat, b.late_fee, b.total, b.due_date,
+                      EXISTS (
+                        SELECT 1 FROM payments p
+                         WHERE p.bill_id=b.id AND p.status='verified'
+                      ) AS has_verified_payment
+                 FROM bills b
+                WHERE b.room_id=$1 AND b.period=$2
+                  AND COALESCE(b.tenant_id, 0)=COALESCE($3::bigint, 0)
+                  AND b.deleted_at IS NULL AND b.status <> 'void'
+                ORDER BY b.created_at DESC
+                LIMIT 1
+                FOR UPDATE`,
+              [room.id, period, tenantIdForRoom]
+            );
+            const existing = existingSlot.rows[0] || null;
+            if (existing) {
+              const consumedLines = await consumedOneOffLinesForBill(billClient, {
+                tenantId: tenantIdForRoom, roomId: room.id,
+                existingOther: existing.other, currentList: recurring,
+              });
+              if (consumedLines.length) recurring = [...recurring, ...consumedLines];
+            }
             const roomForBilling = await meter.attachBillingReadingsForPeriod(billClient, room, period);
             const bill = billing.buildBill({ room: roomForBilling, contract: activeContract, expiredContract, config, features: flags, recurring, period, dueDate: roomDueDate, discountPct });
+            billing.applyPaymentReferenceCents(bill, { tenantId: tenantIdForRoom, maxTotal: MAX_AMOUNT });
             // Capture which utilities silently fell back from flat → metered
             // for this room. waterFlatFellBack/elecFlatFellBack are set by
             // services/billing.js#resolveFlatMode when mode='flat' but the
@@ -2046,10 +2377,13 @@ module.exports = function buildBillsExtrasRouter(ctx) {
             // Include the common-area fee as a visible `other` line (it's
             // already in bill.subtotal/total via buildBill; this is for display
             // + PDF reconstruction parity with the single-bill path).
-            const otherItems = Array.isArray(recurring) ? [...recurring] : [];
+            let otherItems = Array.isArray(recurring) ? [...recurring] : [];
             if (Number(bill.commonFee) > 0
                 && !otherItems.some((x) => /ส่วนกลาง/.test(String((x && x.label) || '')))) {
               otherItems.push({ label: 'ค่าส่วนกลาง', amount: Number(bill.commonFee) });
+            }
+            if (Number(bill.paymentReferenceCents) > 0) {
+              otherItems = billing.appendPaymentReferenceLine(otherItems, bill.paymentReferenceCents);
             }
             const otherJson = JSON.stringify(otherItems);
             const moneyDiffers = (left, right) =>
@@ -2072,27 +2406,17 @@ module.exports = function buildBillsExtrasRouter(ctx) {
               }
               return JSON.stringify(value);
             };
-            const existingSlot = await billClient.query(
-              `SELECT b.id, b.bill_no, b.status, b.rent,
-                      b.water_prev_reading, b.water_current_reading, b.water_units, b.water_rate, b.water_amount,
-                      b.elec_prev_reading, b.elec_current_reading, b.elec_units, b.elec_rate, b.elec_amount,
-                      b.wifi, b.other, b.subtotal, b.vat, b.late_fee, b.total, b.due_date,
-                      EXISTS (
-                        SELECT 1 FROM payments p
-                         WHERE p.bill_id=b.id AND p.status='verified'
-                      ) AS has_verified_payment
-                 FROM bills b
-                WHERE b.room_id=$1 AND b.period=$2
-                  AND COALESCE(b.tenant_id, 0)=COALESCE($3::bigint, 0)
-                  AND b.deleted_at IS NULL AND b.status <> 'void'
-                ORDER BY b.created_at DESC
-                LIMIT 1
-                FOR UPDATE`,
-              [bill.roomId, period, tenantIdForRoom]
-            );
-            if (existingSlot.rows[0]) {
-              const existing = existingSlot.rows[0];
+            if (existing) {
               const payableStatus = existing.status === 'pending' || existing.status === 'overdue';
+              // Scheduler-accrued late_fee is NOT drift — see
+              // regenPreservedLateFeeAndStatus. The recomputed principal
+              // coexists with the preserved fee (total = subtotal + vat +
+              // late_fee holds), and only a due date moved off 'past due'
+              // resets the fee + downgrades a stale 'overdue'.
+              const preserved = regenPreservedLateFeeAndStatus(existing, bill.dueDate);
+              const totalWithFee = billing.round2(
+                (Number(bill.subtotal) || 0) + (Number(bill.vat) || 0) + preserved.lateFee
+              );
               const changed =
                 moneyDiffers(existing.rent, bill.rent) ||
                 nullableNumberDiffers(existing.water_prev_reading, bill.waterPrevReading) ||
@@ -2109,8 +2433,8 @@ module.exports = function buildBillsExtrasRouter(ctx) {
                 stableOtherJson(existing.other) !== otherJson ||
                 moneyDiffers(existing.subtotal, bill.subtotal) ||
                 moneyDiffers(existing.vat, bill.vat) ||
-                moneyDiffers(existing.late_fee, bill.lateFee) ||
-                moneyDiffers(existing.total, bill.total) ||
+                moneyDiffers(existing.late_fee, preserved.lateFee) ||
+                moneyDiffers(existing.total, totalWithFee) ||
                 ymd(existing.due_date) !== ymd(bill.dueDate);
               if (!payableStatus || existing.has_verified_payment) {
                 await billClient.query('COMMIT');
@@ -2131,7 +2455,8 @@ module.exports = function buildBillsExtrasRouter(ctx) {
                     elec_prev_reading=$9, elec_current_reading=$10,
                     elec_units=$11, elec_rate=$12, elec_amount=$13,
                     wifi=$14, other=$15::jsonb,
-                    subtotal=$16, vat=$17, late_fee=$18, total=$19, due_date=$20
+                    subtotal=$16, vat=$17, late_fee=$18, total=$19, due_date=$20,
+                    status=$21
                   WHERE id=$1`,
                 [
                   existing.id, tenantIdForRoom, bill.rent,
@@ -2140,8 +2465,8 @@ module.exports = function buildBillsExtrasRouter(ctx) {
                   bill.elecPrevReading, bill.elecCurrentReading,
                   bill.elecUnits, bill.elecRate, bill.elecAmount,
                   bill.wifi, otherJson,
-                  bill.subtotal, bill.vat, bill.lateFee, bill.total,
-                  bill.dueDate,
+                  bill.subtotal, bill.vat, preserved.lateFee, totalWithFee,
+                  bill.dueDate, preserved.status,
                 ]
               );
               if (usedOneOffIds.length) {
@@ -2152,6 +2477,13 @@ module.exports = function buildBillsExtrasRouter(ctx) {
                 );
               }
               await billClient.query('COMMIT');
+              if (preserved.status !== existing.status) {
+                // overdue → pending downgrade must cascade to the room card
+                // immediately — same pattern as /void's post-commit sync.
+                require('../services/roomStatus')
+                  .syncRoom(pool, room.id, { reason: 'bill-bulk-regenerate' })
+                  .catch((err) => console.warn('[bulk-generate] room sync failed:', err.message));
+              }
               updated++;
               continue;
             }
@@ -2183,16 +2515,26 @@ module.exports = function buildBillsExtrasRouter(ctx) {
               ]
             );
             let ins = await buildInsert(bill.billNo);
-            if (ins.rowCount === 0 && tenantIdForRoom) {
+            if (ins.rowCount === 0) {
               const probe = await billClient.query(
-                `SELECT tenant_id FROM bills
-                  WHERE bill_no = $1 AND deleted_at IS NULL LIMIT 1`,
+                `SELECT tenant_id, status, deleted_at FROM bills
+                  WHERE bill_no = $1 LIMIT 1`,
                 [bill.billNo]
               );
-              const existingTenantId = probe.rows[0]?.tenant_id;
-              if (existingTenantId != null && Number(existingTenantId) !== Number(tenantIdForRoom)) {
+              const blocking = probe.rows[0];
+              const existingTenantId = blocking?.deleted_at == null ? blocking?.tenant_id : null;
+              if (tenantIdForRoom && existingTenantId != null
+                  && Number(existingTenantId) !== Number(tenantIdForRoom)) {
                 const suffixed = billing.makeBillNo(bill.roomId, period, { tenantId: tenantIdForRoom });
                 ins = await buildInsert(suffixed);
+              } else if (blocking && (blocking.status === 'void' || blocking.deleted_at != null)) {
+                // bill_no is globally UNIQUE *including* void rows, but the
+                // room/period guard index ignores them — void-then-regenerate
+                // is the documented correction flow, so climb the attempt
+                // suffix instead of miscounting the room as 'duplicate'.
+                for (let attempt = 2; attempt <= 5 && ins.rowCount === 0; attempt++) {
+                  ins = await buildInsert(billing.makeBillNo(bill.roomId, period, { attempt }));
+                }
               }
             }
             if (ins.rowCount) {
@@ -2492,6 +2834,37 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         ownerNotified: !!(owner.ok || owner.queued),
       };
     }
+    // R7-followup-2 — ATOMIC cooldown claim. The SELECT-based check above is
+    // a fast-fail for friendly error copy; this conditional UPDATE is the
+    // actual race guard: two concurrent callers (scheduler tickPaymentReminder
+    // racing an admin /send, bulk-send racing a single send, or a
+    // double-click) can BOTH pass the stale read, but only one wins this
+    // stamp. force:true still claims, so the next caller's window restarts.
+    // Claimed before enqueueing — every no-channel/validation path has
+    // already returned above. If an enqueue throws after the claim, the cost
+    // is a 60s cooldown on retry (or force:true), which is strictly better
+    // than the duplicate LINE push this guard exists to prevent.
+    const claim = await pool.query(
+      `UPDATE bills
+         SET last_reminded_at=NOW(),
+             reminder_count = COALESCE(reminder_count, 0) + 1
+       WHERE id=$1
+         AND ($2::boolean
+              OR last_reminded_at IS NULL
+              OR last_reminded_at < NOW() - ($3::int * INTERVAL '1 millisecond'))
+       RETURNING last_reminded_at`,
+      [billId, !!_opts.force, REMINDER_COOLDOWN_MS]
+    );
+    if (!claim.rows.length) {
+      return {
+        ok: false,
+        error: 'มีคำขอส่งเตือนบิลนี้ซ้อนกันจากอีกช่องทาง — ระบบกันส่งซ้ำให้แล้ว',
+        code: 'REMINDER_COOLDOWN',
+        cooldownMs: REMINDER_COOLDOWN_MS,
+        lastRemindedAt: b.last_reminded_at,
+        hint: 'อีกคำขอเพิ่งส่งสำเร็จภายในไม่กี่วินาที — ไม่ต้องส่งซ้ำ หรือส่ง force:true ถ้าตั้งใจ',
+      };
+    }
     if (hasLine) {
       // Build a Flex Message bundle (Flex bubble + text fallback) so the
       // tenant sees the bill summary + QR image + "จ่ายเลย" button in the
@@ -2543,19 +2916,9 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       });
       enqueued.push({ channel: 'email', id: qid });
     }
-    // Stamp last_reminded_at + bump reminder_count so the next time admin
-    // opens the send modal they see "ส่งไปแล้ว N ครั้ง · ล่าสุด ...".
-    // Only stamp when we actually enqueued something — NO_TENANT_CHANNEL
-    // already returned above so we only reach here on a real send.
-    if (enqueued.length > 0) {
-      await pool.query(
-        `UPDATE bills
-           SET last_reminded_at=NOW(),
-               reminder_count = COALESCE(reminder_count, 0) + 1
-         WHERE id=$1`,
-        [billId]
-      ).catch((err) => console.warn('[enqueueBillNotifications] stamp last_reminded_at failed:', err.message));
-    }
+    // last_reminded_at + reminder_count were already stamped by the atomic
+    // claim above (BEFORE enqueueing) — the send modal's "ส่งไปแล้ว N ครั้ง ·
+    // ล่าสุด ..." copy reads those same columns.
     return { ok: true, enqueued, lineCount: lineBindingCount };
   }
 
@@ -3815,3 +4178,9 @@ module.exports = function buildBillsExtrasRouter(ctx) {
 
   return r;
 };
+
+// Pure helpers exposed for unit tests only (module.exports stays the router
+// factory above; routes/index.js is unaffected by these properties).
+module.exports._matchConsumedOneOffLines = matchConsumedOneOffLines;
+module.exports._consumedOneOffLinesForBill = consumedOneOffLinesForBill;
+module.exports._regenPreservedLateFeeAndStatus = regenPreservedLateFeeAndStatus;

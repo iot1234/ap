@@ -195,7 +195,11 @@ function fmt(n) {
   if (n == null || isNaN(n)) return '0';
   return Number(n).toLocaleString('th-TH');
 }
-function fmtCurrency(n) { return '฿' + fmt(Math.round(n || 0)); }
+function fmtCurrency(n) {
+  const value = Number(n || 0);
+  if (!Number.isFinite(value)) return '฿0.00';
+  return '฿' + value.toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
 function fmtPercent(n) { return Math.round(n) + '%'; }
 function fmtDateTH(d) {
   const dt = (d instanceof Date) ? d : new Date(d);

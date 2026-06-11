@@ -11,6 +11,15 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 
 const PAYMENT_TOLERANCE_THB = 1;
 
+function paymentToleranceForTotal(total) {
+  const n = Math.round((Number(total) || 0) * 100) / 100;
+  return Math.abs(Math.round(n * 100) % 100) > 0 ? 0.01 : PAYMENT_TOLERANCE_THB;
+}
+
+function moneyDiff(a, b) {
+  return Math.round(Math.abs((Number(a) || 0) - (Number(b) || 0)) * 100) / 100;
+}
+
 // R4 — format bill_no for tenant display. Backend's services/billing.js#makeBillNo
 // can emit `INV-2026-05-201-T42` when a room hosts two tenants in the same
 // calendar month (move-out + move-in within the period). The "-T42" suffix
@@ -1794,7 +1803,7 @@ function BillDetailBody({ bill, locale, refresh, slipFeature }) {
   const amountInvalid = !Number.isFinite(paymentAmount) || paymentAmount <= 0;
   const amountMismatch = !amountInvalid
     && Number.isFinite(billTotal)
-    && Math.abs(paymentAmount - billTotal) > PAYMENT_TOLERANCE_THB;
+    && moneyDiff(paymentAmount, billTotal) > paymentToleranceForTotal(billTotal);
   const readinessHardError = readinessError && readinessError.sev === 'high';
   const blockingIssues = readiness ? (readiness.issues || []).filter((i) => i.sev === 'high') : [];
   if (readinessHardError) blockingIssues.push(readinessError);

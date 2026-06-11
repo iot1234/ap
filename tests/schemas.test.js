@@ -180,6 +180,25 @@ test('generateBill: manual bill preserves meter reading snapshots', () => {
   assert.equal(bad.success, false);
 });
 
+test('generateBill: manual bill preserves line item qty and detail', () => {
+  const r = schemas.generateBill.safeParse({
+    roomId: '101',
+    billNo: 'INV-1',
+    period: '2026-05',
+    dueDate: '2026-05-15',
+    total: 100.25,
+    other: [{
+      label: 'payment reference',
+      qty: '',
+      detail: 'unique cents for reconciliation',
+      amount: 0.25,
+    }],
+  });
+  assert.equal(r.success, true);
+  assert.equal(r.data.other[0].detail, 'unique cents for reconciliation');
+  assert.equal(r.data.other[0].qty, '');
+});
+
 test('rooms schema accepts nullable per-room rent override fields', () => {
   const base = {
     floor: 1,

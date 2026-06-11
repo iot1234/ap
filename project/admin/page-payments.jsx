@@ -24,6 +24,16 @@ const FILTER_ALL = 'all';
 const PAYMENT_STATUS_ORDER = ['pending', 'verified', 'rejected'];
 const PAYMENT_PAGE_LIMIT = 500;
 const FILTER_ALL_LABEL = '\u0e17\u0e31\u0e49\u0e07\u0e2b\u0e21\u0e14';
+const PAYMENT_TOLERANCE_THB = 1;
+
+function paymentToleranceForTotal(total) {
+  const n = Math.round((Number(total) || 0) * 100) / 100;
+  return Math.abs(Math.round(n * 100) % 100) > 0 ? 0.01 : PAYMENT_TOLERANCE_THB;
+}
+
+function moneyDiff(a, b) {
+  return Math.round(Math.abs((Number(a) || 0) - (Number(b) || 0)) * 100) / 100;
+}
 
 function paymentStatusLabel(status) {
   return PAYMENT_STATUS_LABEL[status] || status || '-';
@@ -660,8 +670,8 @@ function SlipModal({ payment, busy, onClose, onDecide }) {
   const isPrincipalDecision = lateFeeForDecision > 0
     && Number.isFinite(paidAmtForDecision) && Number.isFinite(principalForDecision)
     && Number.isFinite(billTotalForDecision)
-    && Math.abs(paidAmtForDecision - principalForDecision) <= 1
-    && Math.abs(paidAmtForDecision - billTotalForDecision) > 1;
+    && moneyDiff(paidAmtForDecision, principalForDecision) <= paymentToleranceForTotal(principalForDecision)
+    && moneyDiff(paidAmtForDecision, billTotalForDecision) > paymentToleranceForTotal(billTotalForDecision);
   const slipMeta = paymentStatusMeta(C, payment.status);
   const billMeta = billStatusMeta(C, payment.bill_status);
   return (
@@ -711,16 +721,17 @@ function SlipModal({ payment, busy, onClose, onDecide }) {
           if (!Number.isFinite(billTotal) || billTotal <= 0 || !Number.isFinite(amt)) return null;
           const lateFee = Number(payment.verify_payload?.amountTier?.billLateFeeAtUpload || 0);
           const principal = Number(payment.verify_payload?.amountTier?.principalAtUpload) || (billTotal - lateFee);
-          const TOL = 1;   // matches PAYMENT_TOLERANCE_THB on the backend
-          const diffTotal = Math.abs(amt - billTotal);
-          const diffPrincipal = Math.abs(amt - principal);
+          const totalTolerance = paymentToleranceForTotal(billTotal);
+          const principalTolerance = paymentToleranceForTotal(principal);
+          const diffTotal = moneyDiff(amt, billTotal);
+          const diffPrincipal = moneyDiff(amt, principal);
           let alert = null;
-          if (diffTotal <= TOL) {
+          if (diffTotal <= totalTolerance) {
             alert = { tone: 'success', icon: '✅', title: 'ยอดตรงกับบิลพอดี',
               desc: lateFee > 0
                 ? `ผู้เช่าจ่ายยอดเต็ม (รวมค่าปรับ ฿${fmtMoney(lateFee)})`
                 : 'ยอดที่ผู้เช่าระบุตรงกับยอดบิลปัจจุบัน' };
-          } else if (lateFee > 0 && diffPrincipal <= TOL) {
+          } else if (lateFee > 0 && diffPrincipal <= principalTolerance) {
             alert = { tone: 'warning', icon: '💡', title: 'ผู้เช่าจ่ายค่าเช่าสุจริต (ยังไม่รวมค่าปรับ)',
               desc: `ผู้เช่าโอน ฿${fmtMoney(amt)} = ค่าเช่า+ค่าน้ำไฟ — ค่าปรับ ฿${fmtMoney(lateFee)} เพิ่งขึ้นภายหลัง. เลือก "อนุมัติ + ยกค่าปรับ" เพื่อยกเว้น หรือ "ปฏิเสธ" เพื่อให้ผู้เช่าจ่ายค่าปรับเพิ่ม` };
           } else {

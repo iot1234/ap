@@ -182,6 +182,8 @@ const billUnits = z.coerce.number().nonnegative().max(9_999_999);
 const billReading = z.coerce.number().nonnegative().max(999_999_999);
 const billLineItems = z.array(z.object({
   label: z.string().trim().min(1).max(80),
+  qty: z.coerce.string().max(80).optional(),
+  detail: z.coerce.string().max(240).optional(),
   amount: billMoney,
 })).max(100);
 

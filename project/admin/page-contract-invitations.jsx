@@ -213,24 +213,40 @@ function PageContractInvitations({ setToast, addActivity }) {
   );
 }
 
-function approvalPrecheckWarnings(detail) {
+function approvalChecklistItems(detail) {
   const draft = (detail && detail.draft) || {};
   const checks = [
-    ['signatureFileId', 'ลายเซ็นผู้เช่า', 'ถ้าอนุมัติต่อ PDF จะถูก lock โดยไม่มีลายเซ็น'],
-    ['address', 'ที่อยู่ผู้เช่า', 'ถ้าอนุมัติต่อ สัญญาจะไม่มีที่อยู่อ้างอิง'],
-    ['emergencyContactName', 'ชื่อผู้ติดต่อฉุกเฉิน', 'ทีมงานจะไม่มีชื่อผู้ติดต่อเมื่อเกิดเหตุฉุกเฉิน'],
-    ['emergencyContactPhone', 'เบอร์ผู้ติดต่อฉุกเฉิน', 'ทีมงานจะติดต่อฉุกเฉินไม่ได้'],
-    ['citizenId', 'เลขบัตรประชาชน 13 หลัก', 'สัญญาจะไม่มีเลขบัตรประชาชนสำหรับยืนยันตัวตนและตรวจซ้ำ'],
-    ['citizenIdImageFrontId', 'รูปบัตรประชาชนด้านหน้า', 'ตรวจตัวตนย้อนหลังไม่ครบ'],
-    ['citizenIdImageBackId', 'รูปบัตรประชาชนด้านหลัง', 'เอกสารยืนยันตัวตนไม่ครบทั้งสองด้าน'],
+    { field: 'signatureFileId', group: 'ลายเซ็น', label: 'ลายเซ็นผู้เช่า', consequence: 'ถ้าอนุมัติต่อ PDF จะถูก lock โดยไม่มีลายเซ็น', fix: 'ให้ผู้เช่าเซ็นในขั้นลายเซ็นแล้วส่งใหม่' },
+    { field: 'address', group: 'ข้อมูลผู้เช่า', label: 'ที่อยู่ผู้เช่า', consequence: 'ถ้าอนุมัติต่อ สัญญาจะไม่มีที่อยู่อ้างอิง', fix: 'ให้ผู้เช่ากรอกที่อยู่ตามบัตรหรือที่อยู่ติดต่อได้' },
+    { field: 'emergencyContactName', group: 'ผู้ติดต่อฉุกเฉิน', label: 'ชื่อผู้ติดต่อฉุกเฉิน', consequence: 'ทีมงานจะไม่มีชื่อผู้ติดต่อเมื่อเกิดเหตุฉุกเฉิน', fix: 'ให้ผู้เช่ากรอกชื่อผู้ติดต่อฉุกเฉิน' },
+    { field: 'emergencyContactPhone', group: 'ผู้ติดต่อฉุกเฉิน', label: 'เบอร์ผู้ติดต่อฉุกเฉิน', consequence: 'ทีมงานจะติดต่อฉุกเฉินไม่ได้', fix: 'ให้ผู้เช่ากรอกเบอร์ติดต่อฉุกเฉินที่โทรได้จริง' },
+    { field: 'citizenId', group: 'ยืนยันตัวตน', label: 'เลขบัตรประชาชน 13 หลัก', consequence: 'สัญญาจะไม่มีเลขบัตรประชาชนสำหรับยืนยันตัวตนและตรวจซ้ำ', fix: 'ให้ผู้เช่ากรอกเลขบัตรประชาชนให้ครบ 13 หลัก' },
+    { field: 'citizenIdImageFrontId', group: 'ยืนยันตัวตน', label: 'รูปบัตรประชาชนด้านหน้า', consequence: 'ตรวจตัวตนย้อนหลังไม่ครบ', fix: 'ให้อัปโหลดรูปด้านหน้าบัตรที่อ่านเลขได้ชัดเจน' },
+    { field: 'citizenIdImageBackId', group: 'ยืนยันตัวตน', label: 'รูปบัตรประชาชนด้านหลัง', consequence: 'เอกสารยืนยันตัวตนไม่ครบทั้งสองด้าน', fix: 'ให้อัปโหลดรูปด้านหลังบัตรให้ครบ' },
   ];
-  return checks.filter(([field]) => {
-    const value = draft[field];
-    if (field === 'citizenId') return String(value || '').replace(/[^0-9]/g, '').length !== 13;
-    return field.endsWith('Id')
+  return checks.map((check) => {
+    const value = draft[check.field];
+    const missing = check.field === 'citizenId'
+      ? String(value || '').replace(/[^0-9]/g, '').length !== 13
+      : check.field.endsWith('Id')
       ? (!Number.isInteger(Number(value)) || Number(value) < 1)
       : !String(value || '').trim();
-  }).map(([field, label, consequence]) => ({ field, label, consequence }));
+    return { ...check, ready: !missing };
+  });
+}
+
+function approvalPrecheckWarnings(detail) {
+  return approvalChecklistItems(detail)
+    .filter((item) => !item.ready)
+    .map(({ field, group, label, consequence, fix }) => ({ field, group, label, consequence, fix }));
+}
+
+function defaultApprovalRejectReason(warnings) {
+  if (!warnings.length) return '';
+  return [
+    'กรุณาแก้ข้อมูลต่อไปนี้ก่อนส่งสัญญาใหม่:',
+    ...warnings.map((w, idx) => `${idx + 1}. ${w.label} — ${w.fix || w.consequence}`),
+  ].join('\n');
 }
 
 function formatApprovalErrorMessage(err) {
@@ -270,7 +286,8 @@ function ReviewModal({ invitation, onClose, onAction, onError }) {
   const [busy, setBusy] = useState(false);
   const [rejectReason, setRejectReason] = useState('');
   const [showReject, setShowReject] = useState(false);
-  const approvalWarnings = approvalPrecheckWarnings(detail);
+  const approvalChecklist = detail ? approvalChecklistItems(detail) : [];
+  const approvalWarnings = detail ? approvalPrecheckWarnings(detail) : [];
 
   useEffect(() => {
     apiCall(`/api/admin/contract-invitations/${invitation.id}`).then((d) => {
@@ -279,8 +296,15 @@ function ReviewModal({ invitation, onClose, onAction, onError }) {
   }, [invitation.id]);
 
   const approve = async () => {
+    if (!detail) {
+      onError('กำลังโหลดข้อมูลสัญญา กรุณารอสักครู่');
+      return;
+    }
     if (approvalWarnings.length) {
-      onError('ยังอนุมัติไม่ได้: ข้อมูลสำคัญยังไม่ครบ ให้กด "ขอให้แก้" แล้วส่งกลับให้ผู้เช่ากรอก');
+      onError({
+        title: `ยังอนุมัติไม่ได้ — ขาด ${approvalWarnings.length} จุด`,
+        description: defaultApprovalRejectReason(approvalWarnings),
+      });
       return;
     }
     if (!confirm('อนุมัติ + ลงข้อมูลให้ผู้เช่า + lock สัญญา?\n\nผลที่จะเกิดขึ้น:\n- ข้อมูลผู้เช่าจะถูกบันทึกเข้าระบบ\n- ห้องจะเปลี่ยนเป็น occupied\n- สัญญาจะถูก lock และแก้เงื่อนไขสำคัญไม่ได้\n- ระบบจะสร้างบิลแรกถ้ายังไม่มี')) return;
@@ -327,6 +351,13 @@ function ReviewModal({ invitation, onClose, onAction, onError }) {
     } finally { setBusy(false); }
   };
 
+  const openRejectForm = () => {
+    if (!rejectReason.trim() && approvalWarnings.length) {
+      setRejectReason(defaultApprovalRejectReason(approvalWarnings));
+    }
+    setShowReject(true);
+  };
+
   return (
     <Modal
       open={true}
@@ -345,8 +376,8 @@ function ReviewModal({ invitation, onClose, onAction, onError }) {
           ) : (
             <>
               <Btn variant="ghost" onClick={onClose} disabled={busy}>ปิด</Btn>
-              <Btn variant="ghost" onClick={() => setShowReject(true)} disabled={busy}>ขอให้แก้</Btn>
-              <Btn variant="primary" onClick={approve} disabled={busy || approvalWarnings.length > 0}>
+              <Btn variant="ghost" onClick={openRejectForm} disabled={busy || !detail}>ขอให้แก้</Btn>
+              <Btn variant="primary" onClick={approve} disabled={busy || !detail || approvalWarnings.length > 0}>
                 {busy ? '…' : '✓ อนุมัติ + lock'}
               </Btn>
             </>
@@ -375,15 +406,16 @@ function ReviewModal({ invitation, onClose, onAction, onError }) {
             onChange={(e) => setRejectReason(e.target.value)} />
         </div>
       ) : (
-        <ReviewBody detail={detail} approvalWarnings={approvalWarnings} />
+        <ReviewBody detail={detail} approvalWarnings={approvalWarnings} approvalChecklist={approvalChecklist} />
       )}
     </Modal>
   );
 }
 
-function ReviewBody({ detail, approvalWarnings = [] }) {
+function ReviewBody({ detail, approvalWarnings = [], approvalChecklist = [] }) {
   const C = window.ADMIN_C;
   const draft = detail.draft || {};
+  const readyCount = approvalChecklist.filter((item) => item.ready).length;
   const Section = ({ title, children }) => (
     <div style={{ marginBottom: 16, padding: 12, background: C.surfaceAlt, borderRadius: 8 }}>
       <div style={{ fontWeight: 600, marginBottom: 8, color: C.accent, fontSize: 13 }}>{title}</div>
@@ -405,10 +437,10 @@ function ReviewBody({ detail, approvalWarnings = [] }) {
           border: '1px solid #f1b32d', borderRadius: 8,
           color: C.warningInk || C.ink2, fontSize: 13, lineHeight: 1.55,
         }}>
-          <b>ยัง approve ไม่ได้</b> — ถ้าฝืนอนุมัติ สัญญาจะถูก lock โดยข้อมูลสำคัญไม่ครบ:
+          <b>ยัง approve ไม่ได้</b> — ข้อมูลครบ {readyCount}/{approvalChecklist.length} จุด ถ้าฝืนอนุมัติ สัญญาจะถูก lock โดยข้อมูลสำคัญไม่ครบ:
           <ul style={{ margin: '8px 0 0 18px', padding: 0 }}>
             {approvalWarnings.map((w) => (
-              <li key={w.field}><b>{w.label}</b>: {w.consequence}</li>
+              <li key={w.field}><b>{w.group}: {w.label}</b>: {w.consequence}</li>
             ))}
           </ul>
         </div>
@@ -421,6 +453,35 @@ function ReviewBody({ detail, approvalWarnings = [] }) {
           เมื่อกดอนุมัติ ระบบจะบันทึกข้อมูลผู้เช่า, เปลี่ยนห้องเป็น occupied, lock สัญญา และเปิด PDF ให้ตรวจทันที
         </div>
       )}
+      {approvalChecklist.length ? (
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))',
+          gap: 8,
+          marginBottom: 16,
+        }}>
+          {approvalChecklist.map((item) => (
+            <div key={item.field} style={{
+              padding: 10,
+              borderRadius: 8,
+              border: `1px solid ${item.ready ? (C.success || '#15803d') : '#f1b32d'}33`,
+              background: item.ready ? (C.successSoft || '#dcfce7') : (C.warningSoft || '#fff7ed'),
+              color: C.ink2,
+              fontSize: 12,
+              lineHeight: 1.45,
+            }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, marginBottom: 4 }}>
+                <b style={{ color: C.ink }}>{item.label}</b>
+                <span style={{ color: item.ready ? (C.success || '#15803d') : (C.warningInk || '#92400e'), fontWeight: 700 }}>
+                  {item.ready ? 'ครบแล้ว' : 'ยังไม่ครบ'}
+                </span>
+              </div>
+              <div style={{ color: C.muted }}>{item.group}</div>
+              {!item.ready ? <div style={{ marginTop: 3 }}>ต้องทำ: {item.fix}</div> : null}
+            </div>
+          ))}
+        </div>
+      ) : null}
       <Section title="ข้อมูลสัญญา">
         <KV k="เลขที่สัญญา" v={detail.contract_no} />
         <KV k="ห้อง" v={detail.room_id} />

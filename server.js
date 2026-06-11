@@ -14560,7 +14560,14 @@ app.post('/api/admin/contract-invitations/:id/approve',
           if (billNoCheck.rows.length && Number(existingBillTenantId || 0) !== Number(inv.tenant_id)) {
             billNo = billing.makeBillNo(contract.room_id, period, { tenantId: inv.tenant_id });
           }
-          if (welcomeSubtotal > 0) {
+          const welcomePaymentRef = billing.applyPaymentReferenceCents({
+            billNo, roomId: contract.room_id, period,
+            subtotal: welcomeSubtotal, vat: 0, lateFee: 0, total: welcomeSubtotal,
+            other: welcomeOther,
+          }, { tenantId: inv.tenant_id });
+          const adjustedWelcomeSubtotal = Number(welcomePaymentRef.subtotal) || welcomeSubtotal;
+          const adjustedWelcomeOther = Array.isArray(welcomePaymentRef.other) ? welcomePaymentRef.other : welcomeOther;
+          if (adjustedWelcomeSubtotal > 0) {
             const billIns = await client.query(
               `INSERT INTO bills
                  (bill_no, tenant_id, room_id, period, rent,
@@ -14570,8 +14577,8 @@ app.post('/api/admin/contract-invitations/:id/approve',
                ON CONFLICT DO NOTHING
                RETURNING id, bill_no, period, total, due_date`,
               [billNo, inv.tenant_id, contract.room_id, period, welcomeRent,
-               waterAmt, elecAmt, wifiAmt, JSON.stringify(welcomeOther),
-               welcomeSubtotal, dueDate]
+               waterAmt, elecAmt, wifiAmt, JSON.stringify(adjustedWelcomeOther),
+               adjustedWelcomeSubtotal, dueDate]
             );
             if (billIns.rows.length) welcomeBillCreated = billIns.rows[0];
           }

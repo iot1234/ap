@@ -2452,10 +2452,10 @@ module.exports = function buildTenantOpsRouter(ctx) {
           ? _pickNum(billRoomObj.waterFlatAmount, billRoomObj.water_flat_amount) : 0) * flatFrac);
         const elecAmt = r2((billing.isFlatUtilityConfigured(billRoomObj, 'elec')
           ? _pickNum(billRoomObj.elecFlatAmount, billRoomObj.elec_flat_amount) : 0) * flatFrac);
-        const welcomeOther = commonAmt > 0
+        let welcomeOther = commonAmt > 0
           ? [{ label: `ค่าส่วนกลาง${flatFrac < 1 ? ' (ตามวันที่อยู่)' : ''}`, amount: commonAmt }]
           : [];
-        const welcomeSubtotal = r2(welcomeRent + wifiAmt + waterAmt + elecAmt + commonAmt);
+        let welcomeSubtotal = r2(welcomeRent + wifiAmt + waterAmt + elecAmt + commonAmt);
         // VAT parity with billing.buildBill (R1): rent + utilities + wifi +
         // common fee are the vatable revenue stream, so the move-in month
         // must carry VAT exactly like every recurring bill — otherwise a
@@ -2463,7 +2463,15 @@ module.exports = function buildTenantOpsRouter(ctx) {
         const welcomeVat = flags?.vat?.enabled
           ? r2(welcomeSubtotal * (Number(flags.vat.ratePct || 0) / 100))
           : 0;
-        const welcomeTotal = r2(welcomeSubtotal + welcomeVat);
+        let welcomeTotal = r2(welcomeSubtotal + welcomeVat);
+        const welcomePaymentRef = billing.applyPaymentReferenceCents({
+          billNo, roomId, period,
+          subtotal: welcomeSubtotal, vat: welcomeVat, lateFee: 0, total: welcomeTotal,
+          other: welcomeOther,
+        }, { tenantId: id });
+        welcomeSubtotal = Number(welcomePaymentRef.subtotal) || welcomeSubtotal;
+        welcomeTotal = Number(welcomePaymentRef.total) || welcomeTotal;
+        welcomeOther = Array.isArray(welcomePaymentRef.other) ? welcomePaymentRef.other : welcomeOther;
         // Skip a zero-total welcome bill (e.g. free first month) — the bills
         // CHECK requires total > 0, and there's nothing to collect anyway.
         let welcomeBillSkipped = null;
@@ -3067,7 +3075,7 @@ module.exports = function buildTenantOpsRouter(ctx) {
             // subtotal preserves it, and late_fee=0 still lets the closing bill
             // accrue its own late fee later if it goes unpaid.
             const closingLateFee = carriedLateFeeTotal > 0 ? carriedLateFeeTotal : 0;
-            const closingSubtotal = r2(
+            let closingSubtotal = r2(
               proRatedRent + closingWater + closingElec + closingWifi + closingCommon + closingLateFee
             );
             // VAT parity with billing.buildBill (R1): the final partial month
@@ -3080,12 +3088,12 @@ module.exports = function buildTenantOpsRouter(ctx) {
             const closingVat = flags?.vat?.enabled
               ? r2(closingVatBase * (Number(flags.vat.ratePct || 0) / 100))
               : 0;
-            const closingTotal = r2(closingSubtotal + closingVat);
+            let closingTotal = r2(closingSubtotal + closingVat);
             // The prorated rent already lives in the rent column, so we do NOT
             // add a duplicate 'pro-rate' line (it double-counted rent in the
             // itemised PDF). Only charges without a dedicated column (common
             // fee, carried late fee) get display lines.
-            const otherLines = [];
+            let otherLines = [];
             if (closingCommon > 0) {
               otherLines.push({ label: 'ค่าส่วนกลาง (ตามวันที่อยู่)', amount: closingCommon, daysLived, daysInMonth });
             }
@@ -3093,6 +3101,14 @@ module.exports = function buildTenantOpsRouter(ctx) {
               otherLines.push({ label: 'ค่าปรับล่าช้าค้างยกมา', amount: closingLateFee, daysLived, daysInMonth });
             }
             // A 100% discount (or a rent×fraction that rounds to ฿0.00) with no
+            const closingPaymentRef = billing.applyPaymentReferenceCents({
+              billNo, roomId: billingRoom, period,
+              subtotal: closingSubtotal, vat: closingVat, lateFee: 0, total: closingTotal,
+              other: otherLines,
+            }, { tenantId: id });
+            closingSubtotal = Number(closingPaymentRef.subtotal) || closingSubtotal;
+            closingTotal = Number(closingPaymentRef.total) || closingTotal;
+            otherLines = Array.isArray(closingPaymentRef.other) ? closingPaymentRef.other : otherLines;
             // carried late fee makes closingTotal=0, which violates the bills
             // `total > 0` CHECK constraint. The INSERT would throw 23514 and —
             // since the catch below only swallows 23505 — abort the ENTIRE

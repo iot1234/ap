@@ -8,10 +8,10 @@
 //   2) EasySlip 401/403/429 (bad key, quota, rate limit) are operator-side
 //      problems → PROVIDER_ERROR (transient), so the provider fallback
 //      chain continues and genuine slips are not rejected as fake.
-//   3) Provider-side EXACT amount matching (SlipOK amount, EasySlip
-//      matchAmount, Slip2Go checkAmount eq) is opt-in only — by default the
-//      local ±PAYMENT_TOLERANCE_THB cross-check in verifyOne is canonical,
-//      so bank-rounded slips (±0.25–1฿) are not hard-rejected upstream.
+//   3) Provider-side exact amount matching (SlipOK amount, EasySlip
+//      matchAmount, Slip2Go checkAmount eq) is opt-in only. verifyOne's local
+//      dynamic tolerance is canonical: whole-baht bills keep the 1 THB
+//      allowance, while satang-reference bills require satang-level matching.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -239,21 +239,40 @@ test('EasySlip tenant-actionable 400 still hard-rejects and stops the chain', as
 
 // === 3) Provider-side exact-amount checks are opt-in =======================
 
-test('bank-rounded amount (±1฿ tolerance) auto-verifies; no exact amount sent to SlipOK', async () => {
+test('whole-baht bank-rounded amount (plus 1 THB) auto-verifies; no exact amount sent to SlipOK', async () => {
   const sv = freshVerifier({ SLIPOK_API_KEY: 'k' });
-  // Bill total 4,815.75 (VAT satang); tenant transferred a rounded 4,816.00.
-  // PAYMENT_TOLERANCE_THB=1.0 says every enforcement point must accept it.
+  // Whole-baht legacy bill total 4,815; tenant transferred 4,816.00.
+  // PAYMENT_TOLERANCE_THB=1.0 still accepts this for bills without satang.
+  const mock = mockHttps({
+    'api.slipok.com': slipokSuccess({ amount: 4816.00 }),
+  });
+  try {
+    const out = await sv.verifyWithFallback(JPEG,
+      { amount: 4815, promptpayTarget: '0812345678' }, features('slipok'));
+    assert.equal(out.ok, true, '1 THB drift is within the documented tolerance for whole-baht bills');
+    const sent = JSON.parse(mock.captured[0].body.toString());
+    assert.ok(!('amount' in sent),
+      'must not ask SlipOK for exact-equality matching by default — it would pre-empt the tolerance');
+    assert.ok(sent.files, 'image still sent');
+  } finally {
+    mock.restore();
+    cleanupEnv();
+  }
+});
+
+test('decimal reference amount rejects whole-baht rounded slip locally', async () => {
+  const sv = freshVerifier({ SLIPOK_API_KEY: 'k' });
   const mock = mockHttps({
     'api.slipok.com': slipokSuccess({ amount: 4816.00 }),
   });
   try {
     const out = await sv.verifyWithFallback(JPEG,
       { amount: 4815.75, promptpayTarget: '0812345678' }, features('slipok'));
-    assert.equal(out.ok, true, '0.25฿ drift is within the documented tolerance');
+    assert.equal(out.ok, false);
+    assert.equal(out.code, 'AMOUNT_MISMATCH');
     const sent = JSON.parse(mock.captured[0].body.toString());
     assert.ok(!('amount' in sent),
-      'must not ask SlipOK for exact-equality matching by default — it would pre-empt the tolerance');
-    assert.ok(sent.files, 'image still sent');
+      'provider exact-amount matching remains opt-in; the stricter satang check is local');
   } finally {
     mock.restore();
     cleanupEnv();
@@ -297,9 +316,9 @@ test('EasySlip matchAmount omitted by default, sent only when opted in', async (
   const sv = freshVerifier({ EASYSLIP_API_KEY: 'k' });
   const mock = mockHttps({ 'api.easyslip.com': easyslipSuccess });
   try {
-    const expected = { amount: 4815.75, promptpayTarget: '0812345678' };
+    const expected = { amount: 4815, promptpayTarget: '0812345678' };
     const out = await sv.verifyWithFallback(JPEG, expected, features('easyslip'));
-    assert.equal(out.ok, true, 'within-tolerance drift verifies via the local check');
+    assert.equal(out.ok, true, 'whole-baht within-tolerance drift verifies via the local check');
     const defaultBody = mock.captured[0].body.toString('latin1');
     assert.ok(!defaultBody.includes('name="matchAmount"'),
       'exact-equality matchAmount must not be sent by default');

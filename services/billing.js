@@ -529,6 +529,86 @@ function buildPaymentBlock(config) {
 
 function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
 
+const PAYMENT_REFERENCE_CENTS_LABEL = 'เศษสตางค์ตรวจยอดชำระ';
+const PAYMENT_REFERENCE_CENTS_DETAIL = 'ยอดเฉพาะบิลนี้เพื่อช่วยตรวจรายการโอน';
+
+function paymentReferenceSeedForBill(bill = {}, extra = {}) {
+  return [
+    extra.billNo ?? bill.billNo ?? bill.bill_no ?? '',
+    extra.roomId ?? bill.roomId ?? bill.room_id ?? '',
+    extra.period ?? bill.period ?? '',
+    extra.tenantId ?? bill.tenantId ?? bill.tenant_id ?? '',
+  ].map((part) => String(part || '')).join('|');
+}
+
+function paymentReferenceCents(seed) {
+  const text = String(seed || '');
+  let hash = 2166136261;
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619) >>> 0;
+  }
+  return round2(((hash % 99) + 1) / 100);
+}
+
+function isPaymentReferenceLine(item) {
+  return String(item?.label || '').trim() === PAYMENT_REFERENCE_CENTS_LABEL;
+}
+
+function paymentReferenceLine(amount) {
+  const cents = round2(amount);
+  return {
+    label: PAYMENT_REFERENCE_CENTS_LABEL,
+    qty: '',
+    amount: cents,
+    detail: PAYMENT_REFERENCE_CENTS_DETAIL,
+  };
+}
+
+function appendPaymentReferenceLine(items, amount) {
+  const list = Array.isArray(items) ? [...items] : [];
+  const cents = round2(amount);
+  if (!Number.isFinite(cents) || cents <= 0) return list;
+  if (list.some(isPaymentReferenceLine)) return list;
+  list.push(paymentReferenceLine(cents));
+  return list;
+}
+
+function applyPaymentReferenceCents(bill, extra = {}) {
+  if (!bill || typeof bill !== 'object') return bill;
+  if (Number(bill.paymentReferenceCents) > 0) return bill;
+  if ((Array.isArray(bill.items) && bill.items.some(isPaymentReferenceLine))
+      || (Array.isArray(bill.other) && bill.other.some(isPaymentReferenceLine))) {
+    return bill;
+  }
+  const total = Number(bill.total);
+  const vat = Number(bill.vat || bill.vat_amount || 0) || 0;
+  const lateFee = Number(bill.lateFee ?? bill.late_fee ?? 0) || 0;
+  const subtotalRaw = bill.subtotal == null || bill.subtotal === ''
+    ? round2(total - vat - lateFee)
+    : Number(bill.subtotal);
+  if (!Number.isFinite(total) || total <= 0
+      || !Number.isFinite(subtotalRaw) || subtotalRaw < 0) {
+    return bill;
+  }
+  const seed = typeof extra === 'string'
+    ? extra
+    : paymentReferenceSeedForBill(bill, extra);
+  const cents = paymentReferenceCents(seed);
+  const maxTotal = Number(extra && typeof extra === 'object' ? extra.maxTotal : undefined);
+  if (!Number.isFinite(cents) || cents <= 0
+      || (Number.isFinite(maxTotal) && round2(total + cents) > maxTotal)) {
+    return bill;
+  }
+  bill.subtotal = round2(subtotalRaw + cents);
+  bill.total = round2(total + cents);
+  bill.paymentReferenceCents = cents;
+  bill.paymentReferenceLabel = PAYMENT_REFERENCE_CENTS_LABEL;
+  if (Array.isArray(bill.items)) bill.items = appendPaymentReferenceLine(bill.items, cents);
+  if (Array.isArray(bill.other)) bill.other = appendPaymentReferenceLine(bill.other, cents);
+  return bill;
+}
+
 /**
  * Build a unique bill_no.
  *
@@ -1005,7 +1085,7 @@ function computeRestoredBillAmounts({
 function validatePaymentAmount({ amount, total, lateFee = 0, tolerance } = {}) {
   const tol = Number.isFinite(Number(tolerance)) && Number(tolerance) >= 0
     ? Number(tolerance)
-    : PAYMENT_TOLERANCE_THB;
+    : paymentToleranceForTotal(total);
   const safeAmount = Number(amount);
   const safeTotal = Number(total);
   const safeLateFee = Number(lateFee) || 0;
@@ -1019,7 +1099,7 @@ function validatePaymentAmount({ amount, total, lateFee = 0, tolerance } = {}) {
       closest: safeTotal, diff: Math.abs(safeAmount - safeTotal),
     };
   }
-  const exactDiff = Math.abs(safeAmount - safeTotal);
+  const exactDiff = round2(Math.abs(safeAmount - safeTotal));
   if (exactDiff <= tol) {
     return {
       ok: true, tier: 'exact',
@@ -1031,7 +1111,7 @@ function validatePaymentAmount({ amount, total, lateFee = 0, tolerance } = {}) {
   // Only consider the principal tier when there's an active late_fee. If
   // late_fee=0, total==principal and the exact check above already covered it.
   if (safeLateFee > 0) {
-    const principalDiff = Math.abs(safeAmount - principal);
+  const principalDiff = round2(Math.abs(safeAmount - principal));
     if (principalDiff <= tol) {
       return {
         ok: true, tier: 'principal',
@@ -1067,6 +1147,16 @@ function validatePaymentAmount({ amount, total, lateFee = 0, tolerance } = {}) {
 // Tightening this value affects all six paths together — that's the point.
 const PAYMENT_TOLERANCE_THB = 1.0;
 
+function hasNonZeroCents(value) {
+  const n = round2(value);
+  if (!Number.isFinite(n)) return false;
+  return Math.abs(Math.round(n * 100) % 100) > 0;
+}
+
+function paymentToleranceForTotal(total, fallback = PAYMENT_TOLERANCE_THB) {
+  return hasNonZeroCents(total) ? 0.01 : fallback;
+}
+
 /**
  * Final paid-ledger guard. This runs after any late_fee waiver has been
  * applied and immediately before a bill is marked paid. At that point the
@@ -1083,7 +1173,7 @@ const PAYMENT_TOLERANCE_THB = 1.0;
 function validatePaidLedger({ paymentAmount, billTotal, tolerance } = {}) {
   const tol = Number.isFinite(Number(tolerance)) && Number(tolerance) >= 0
     ? Number(tolerance)
-    : PAYMENT_TOLERANCE_THB;
+    : paymentToleranceForTotal(billTotal);
   const rawAmount = Number(paymentAmount);
   const rawTotal = Number(billTotal);
   const safeAmount = Number.isFinite(rawAmount) ? round2(rawAmount) : rawAmount;
@@ -1231,6 +1321,14 @@ module.exports = {
   validatePaymentAmount,
   validatePaidLedger,
   resolvePrincipalLateFee,
+  paymentReferenceSeedForBill,
+  paymentReferenceCents,
+  paymentReferenceLine,
+  appendPaymentReferenceLine,
+  applyPaymentReferenceCents,
+  PAYMENT_REFERENCE_CENTS_LABEL,
+  hasNonZeroCents,
+  paymentToleranceForTotal,
   firstMonthProrationFraction,
   PAYMENT_TOLERANCE_THB,
 };

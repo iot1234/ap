@@ -73,12 +73,54 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
     return warning.consequence || '';
   };
 
+  const contractWarningMeta = (warning) => {
+    const code = String((warning && warning.code) || '');
+    if (code.includes('IDENTITY') || code.includes('TENANT')) {
+      return { domain: 'ผู้เช่า', tone: 'danger', fix: 'เปิดหน้า/แท็บผู้เช่า แล้วเติมข้อมูลหรือ checkout ให้ตรงสถานะ' };
+    }
+    if (code.includes('ROOM')) {
+      return { domain: 'ห้อง', tone: 'danger', fix: 'เปิดหน้าห้องพักหรือ reconcile ห้องนี้ก่อนทำรายการต่อ' };
+    }
+    if (code.includes('RENT') || code.includes('DEPOSIT')) {
+      return { domain: 'เงิน/บิล', tone: 'danger', fix: 'ตรวจค่าเช่า มัดจำ และราคาที่ใช้กับบิลก่อน lock/ออกบิล' };
+    }
+    if (code.includes('TEMPLATE') || code.includes('SNAPSHOT') || code.includes('INVITATION')) {
+      return { domain: 'PDF/ลิงก์', tone: 'warning', fix: 'ตรวจ template, snapshot หรือออกลิงก์ใหม่ให้จบก่อนอนุมัติ' };
+    }
+    if (code.includes('END_DATE') || code.includes('EXPIRED')) {
+      return { domain: 'อายุสัญญา', tone: 'warning', fix: 'ต่อสัญญาใหม่หรือปิดสัญญาให้ตรงสถานะจริง' };
+    }
+    return { domain: 'ระบบ', tone: warning && warning.severity === 'error' ? 'danger' : 'warning', fix: warning && warning.action };
+  };
+
+  const contractReadiness = (contract) => {
+    const warnings = Array.isArray(contract.warnings) ? contract.warnings : [];
+    const hasError = warnings.some((w) => w.severity === 'error');
+    if (hasError) return { label: 'ต้องแก้ก่อนใช้', color: 'danger' };
+    if (warnings.length) return { label: 'ควรตรวจ', color: 'warning' };
+    if (contract.active_invitation_status === 'submitted') return { label: 'รอตรวจผู้เช่า', color: 'warning' };
+    if (contract.active_invitation_status === 'pending') return { label: 'รอผู้เช่ากรอก', color: 'info' };
+    if (contract.status === 'active' && contract.days_left != null && contract.days_left <= 30 && contract.days_left >= 0) {
+      return { label: 'ใกล้หมดอายุ', color: 'warning' };
+    }
+    if (contract.locked_at) return { label: 'พร้อมใช้งาน', color: 'success' };
+    return { label: 'ใช้งานได้', color: 'success' };
+  };
+
+  const contractIdentityGap = (contract) => {
+    const warning = (Array.isArray(contract && contract.warnings) ? contract.warnings : [])
+      .find((w) => w && w.code === 'CONTRACT_IDENTITY_INCOMPLETE');
+    if (!warning) return null;
+    const labels = Array.isArray(warning.missing)
+      ? warning.missing.map(contractMissingLabel).filter(Boolean)
+      : [];
+    return labels.length ? labels : ['ข้อมูลผู้เช่า/เอกสารประกอบสัญญา'];
+  };
+
   const refresh = async () => {
     setLoading(true);
     try {
-      const params = new URLSearchParams();
-      if (filter !== 'all') params.set('status', filter);
-      const d = await apiCall(`/api/contracts?${params.toString()}`);
+      const d = await apiCall('/api/contracts');
       setContracts(d.contracts || []);
     } catch (e) {
       setToast && setToast({ kind: 'danger', message: 'โหลดสัญญาล้มเหลว: ' + e.message });
@@ -86,7 +128,7 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
       setLoading(false);
     }
   };
-  useEffect(() => { refresh(); }, [filter]);
+  useEffect(() => { refresh(); }, []);
   useEffect(() => {
     const onHash = () => {
       if (!String(window.location.hash || '').replace('#', '').startsWith('contracts')) return;
@@ -122,16 +164,19 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
   }, [contracts, loading]);
 
   const filtered = useMemo(() => {
-    if (!search) return contracts;
     const q = search.toLowerCase();
-    return contracts.filter((c) =>
-      String(c.id || '').toLowerCase().includes(q) ||
-      String(c.contract_no || '').toLowerCase().includes(q) ||
-      String(c.tenant_name || '').toLowerCase().includes(q) ||
-      String(c.tenant_phone || '').includes(q) ||
-      String(c.room_id || '').toLowerCase().includes(q)
-    );
-  }, [contracts, search]);
+    return contracts.filter((c) => {
+      if (filter === 'review' && !(Array.isArray(c.warnings) && c.warnings.length)) return false;
+      if (!['all', 'review'].includes(filter) && c.status !== filter) return false;
+      if (!q) return true;
+      return String(c.id || '').toLowerCase().includes(q) ||
+        String(c.contract_no || '').toLowerCase().includes(q) ||
+        String(c.tenant_name || '').toLowerCase().includes(q) ||
+        String(c.tenant_phone || '').includes(q) ||
+        String(c.room_id || '').toLowerCase().includes(q) ||
+        String((c.warnings || []).map((w) => `${w.code} ${w.title} ${formatContractWarningDetail(w)}`).join(' ')).toLowerCase().includes(q);
+    });
+  }, [contracts, search, filter]);
 
   const STATUS_PILL = {
     active: 'success', expired: 'warning', ended: 'gray',
@@ -154,7 +199,10 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
   // Counts for the header tabs — derived from contracts but recomputed each
   // render so filter switches stay snappy without an extra fetch.
   const counts = useMemo(() => {
-    const out = { all: contracts.length, active: 0, expired: 0, ended: 0, expiring: 0, warnings: 0 };
+    const out = {
+      all: contracts.length, active: 0, expired: 0, ended: 0, expiring: 0,
+      warnings: 0, errors: 0, submitted: 0, pending: 0, ready: 0,
+    };
     for (const c of contracts) {
       out[c.status] = (out[c.status] || 0) + 1;
       if (c.status === 'active' && c.days_left != null && c.days_left <= 30 && c.days_left >= 0) {
@@ -162,10 +210,79 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
       }
       if (Array.isArray(c.warnings) && c.warnings.length) {
         out.warnings++;
+        if (c.warnings.some((w) => w.severity === 'error')) out.errors++;
       }
+      if (c.active_invitation_status === 'submitted') out.submitted++;
+      if (c.active_invitation_status === 'pending') out.pending++;
+      if (contractReadiness(c).color === 'success') out.ready++;
     }
     return out;
   }, [contracts]);
+
+  const contractIssueBuckets = useMemo(() => {
+    const buckets = new Map();
+    for (const c of contracts) {
+      for (const w of (Array.isArray(c.warnings) ? c.warnings : [])) {
+        const meta = contractWarningMeta(w);
+        const key = meta.domain;
+        const row = buckets.get(key) || { domain: key, count: 0, errors: 0, fix: meta.fix, tone: meta.tone, examples: [] };
+        row.count++;
+        if (w.severity === 'error') row.errors++;
+        if (row.examples.length < 2) row.examples.push(`${c.contract_no || c.id}: ${w.title || w.code}`);
+        buckets.set(key, row);
+      }
+    }
+    return Array.from(buckets.values())
+      .sort((a, b) => (b.errors - a.errors) || (b.count - a.count) || a.domain.localeCompare(b.domain));
+  }, [contracts]);
+
+  const ContractWarningStack = ({ contract }) => {
+    const warnings = Array.isArray(contract.warnings) ? contract.warnings : [];
+    if (!warnings.length) return null;
+    const hasError = warnings.some((w) => w.severity === 'error');
+    return (
+      <div style={{ marginTop: 8, display: 'grid', gap: 6 }}>
+        <Pill color={hasError ? 'danger' : 'warning'}>
+          ต้องตรวจ {warnings.length} จุด
+        </Pill>
+        {warnings.slice(0, 3).map((w) => {
+          const meta = contractWarningMeta(w);
+          const detail = formatContractWarningDetail(w);
+          const toneColor = meta.tone === 'danger'
+            ? (C.danger || '#b91c1c')
+            : (C.warning || '#d97706');
+          return (
+            <div key={w.code || w.title} title={w.consequence || ''}
+              style={{
+                padding: '7px 8px',
+                borderRadius: 8,
+                border: `1px solid ${toneColor}33`,
+                borderLeft: `3px solid ${toneColor}`,
+                background: meta.tone === 'danger'
+                  ? (C.dangerSoft || '#fee2e2')
+                  : (C.warningSoft || '#fff7ed'),
+                color: C.ink2,
+                fontSize: 11,
+                lineHeight: 1.45,
+                maxWidth: 360,
+              }}>
+              <div style={{ fontWeight: 700, color: C.ink }}>
+                {meta.domain}: {w.title || w.code || 'ตรวจสอบข้อมูล'}
+              </div>
+              {detail ? <div>รายละเอียด: {detail}</div> : null}
+              {w.consequence ? <div>ผลกระทบ: {w.consequence}</div> : null}
+              {meta.fix ? <div>ต้องแก้ที่: {meta.fix}</div> : null}
+            </div>
+          );
+        })}
+        {warnings.length > 3 ? (
+          <div style={{ color: C.muted, fontSize: 11 }}>
+            และอีก {warnings.length - 3} จุด กดแก้ไขหรือเปิดผู้เช่า/ห้องที่เกี่ยวข้องเพื่อตรวจต่อ
+          </div>
+        ) : null}
+      </div>
+    );
+  };
 
   return (
     <PageContainer>
@@ -177,9 +294,74 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
         }
       />
       <Card>
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))',
+          gap: 8,
+          marginBottom: 12,
+        }}>
+          {[
+            { label: 'พร้อมใช้งาน', value: counts.ready, tone: 'success' },
+            { label: 'ต้องแก้', value: counts.errors, tone: 'danger' },
+            { label: 'ต้องตรวจ', value: counts.warnings, tone: 'warning' },
+            { label: 'รอผู้เช่าส่ง', value: counts.pending, tone: 'info' },
+            { label: 'รอแอดมินตรวจ', value: counts.submitted, tone: 'warning' },
+            { label: 'ใกล้หมดอายุ', value: counts.expiring, tone: 'warning' },
+          ].map((m) => {
+            const palette = m.tone === 'danger'
+              ? { bg: C.dangerSoft || '#fee2e2', fg: C.danger || '#b91c1c', border: C.danger || '#b91c1c' }
+              : m.tone === 'warning'
+                ? { bg: C.warningSoft || '#fff7ed', fg: C.warningInk || '#92400e', border: C.warning || '#d97706' }
+                : m.tone === 'info'
+                  ? { bg: C.infoSoft || '#e0f2fe', fg: C.infoInk || '#075985', border: C.info || '#0284c7' }
+                  : { bg: C.successSoft || '#dcfce7', fg: C.success || '#15803d', border: C.success || '#15803d' };
+            return (
+              <div key={m.label} style={{
+                padding: 10,
+                borderRadius: 8,
+                border: `1px solid ${palette.border}33`,
+                background: palette.bg,
+                minHeight: 58,
+              }}>
+                <div style={{ fontSize: 11, color: palette.fg, fontWeight: 700 }}>{m.label}</div>
+                <div style={{ fontSize: 22, lineHeight: 1.2, color: C.ink, fontWeight: 800 }}>{m.value}</div>
+              </div>
+            );
+          })}
+        </div>
+        {contractIssueBuckets.length ? (
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+            gap: 8,
+            marginBottom: 12,
+          }}>
+            {contractIssueBuckets.slice(0, 4).map((b) => (
+              <div key={b.domain} style={{
+                padding: 10,
+                borderRadius: 8,
+                border: `1px solid ${(b.tone === 'danger' ? C.danger : C.warning) || '#d97706'}33`,
+                background: b.tone === 'danger' ? (C.dangerSoft || '#fee2e2') : (C.warningSoft || '#fff7ed'),
+                color: C.ink2,
+                fontSize: 12,
+                lineHeight: 1.45,
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, marginBottom: 4 }}>
+                  <b>{b.domain}</b>
+                  <span style={{ color: b.tone === 'danger' ? (C.danger || '#b91c1c') : (C.warningInk || '#92400e'), fontWeight: 700 }}>
+                    {b.count} จุด
+                  </span>
+                </div>
+                <div style={{ color: C.muted }}>{b.examples.join(' · ')}</div>
+                {b.fix ? <div style={{ marginTop: 4 }}>ต้องทำ: {b.fix}</div> : null}
+              </div>
+            ))}
+          </div>
+        ) : null}
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
           {[
             { key: 'active',  label: `มีผล (${counts.active})` },
+            { key: 'review',  label: `ต้องตรวจ (${counts.warnings})` },
             { key: 'expired', label: `หมดอายุ (${counts.expired})` },
             { key: 'ended',   label: `สิ้นสุด (${counts.ended})` },
             { key: 'all',     label: `ทั้งหมด (${counts.all})` },
@@ -214,7 +396,7 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
             border: '1px solid #f1b32d', borderRadius: 8,
             fontSize: 13, color: C.warningInk || C.ink2,
           }}>
-            <b>ต้องตรวจ {counts.warnings} สัญญา</b> — ระบบพบข้อมูลที่อาจทำให้บิล, ห้อง, ผู้เช่า หรือ PDF สัญญาไม่ตรงกัน
+            <b>ต้องตรวจ {counts.warnings} สัญญา</b> — มี {counts.errors} ฉบับที่ควรแก้ก่อน lock/ออกบิล/อนุมัติ และสามารถกดแท็บ “ต้องตรวจ” เพื่อดูเฉพาะรายการเสี่ยง
           </div>
         ) : null}
       </Card>
@@ -248,7 +430,9 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
                 </tr>
               </thead>
               <tbody>
-                {filtered.map((c) => (
+                {filtered.map((c) => {
+                  const readiness = contractReadiness(c);
+                  return (
                   <tr key={c.id} style={{ borderBottom: `1px solid ${C.border}` }}>
                     <td style={td}>{c.contract_no}</td>
                     <td style={td}>
@@ -296,6 +480,9 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
                     </td>
                     <td style={td}>
                       <Pill color={STATUS_PILL[c.status] || 'gray'}>{STATUS_TH[c.status] || c.status}</Pill>
+                      <div style={{ marginTop: 4 }}>
+                        <Pill color={readiness.color}>{readiness.label}</Pill>
+                      </div>
                       {c.locked_at ? (
                         <div style={{ marginTop: 4 }}>
                           <Pill color="warning">🔒 LOCKED</Pill>
@@ -329,24 +516,7 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
                           </a>
                         </div>
                       ) : null}
-                      {Array.isArray(c.warnings) && c.warnings.length ? (
-                        <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 4 }}>
-                          <Pill color={c.warning_severity === 'error' ? 'danger' : 'warning'}>
-                            ต้องตรวจ {c.warnings.length}
-                          </Pill>
-                          {c.warnings.slice(0, 2).map((w) => (
-                            <div key={w.code} title={w.consequence || ''}
-                              style={{ fontSize: 11, color: C.warningInk || C.ink2, lineHeight: 1.35 }}>
-                              {w.title || w.code}
-                              {formatContractWarningDetail(w) ? (
-                                <div style={{ color: C.ink2, marginTop: 2 }}>
-                                  {formatContractWarningDetail(w)}
-                                </div>
-                              ) : null}
-                            </div>
-                          ))}
-                        </div>
-                      ) : null}
+                      <ContractWarningStack contract={c} />
                     </td>
                     <td style={{ ...td, whiteSpace: 'nowrap' }}>
                       {(c.status === 'expired'
@@ -368,10 +538,17 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
                         <Btn size="sm" variant="ghost" onClick={() => setInviting(c)}
                           title="ส่งลิงก์ให้ผู้เช่ากรอกสัญญาเอง">📨</Btn>
                       ) : null}
+                      {c.status === 'active' && c.locked_at && contractIdentityGap(c) ? (
+                        <Btn size="sm" variant="ghost" disabled={true}
+                          title={`ส่งลิงก์ไม่ได้: สัญญา lock แล้วและยังขาด ${contractIdentityGap(c).join(', ')}`}>
+                          🔒 ส่งลิงก์ไม่ได้
+                        </Btn>
+                      ) : null}
                       <Btn size="sm" variant="ghost" onClick={() => setEditing(c)}>แก้ไข</Btn>
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -533,6 +710,13 @@ function InviteTenantModal({ contract, onClose, onSaved, onError }) {
   const [copied, setCopied] = useState(false);
 
   const generate = async () => {
+    if (contract.locked_at) {
+      onError && onError({
+        title: 'สร้างลิงก์ไม่ได้ — สัญญาถูก lock แล้ว',
+        description: 'ลิงก์กรอกสัญญาใช้เฉพาะก่อน approve/lock เท่านั้น ถ้าต้องเก็บข้อมูลผู้เช่าย้อนหลังให้เติมในข้อมูลผู้เช่า หรือสร้าง/ต่อสัญญาฉบับใหม่แล้วส่งลิงก์ก่อน lock',
+      });
+      return;
+    }
     setBusy(true);
     try {
       const d = await apiCall(`/api/contracts/${contract.id}/invite-tenant`, {

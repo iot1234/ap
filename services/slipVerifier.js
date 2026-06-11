@@ -588,15 +588,17 @@ async function verifyOne(providerId, buffer, expected) {
   // 7-Eleven for 4500฿, please mark my bill paid").
   // Shared with /api/tenant/payments, /api/payments/:id/verify, etc. so
   // a tightening here automatically applies everywhere. See services/billing.js.
-  const { PAYMENT_TOLERANCE_THB } = require('./billing');
+  const { paymentToleranceForTotal } = require('./billing');
   const slipAmt = Number(result.amount);
   const expAmt = Number(expected.amount);
+  const amountTolerance = paymentToleranceForTotal(expAmt);
+  const amountDiff = Math.round(Math.abs(slipAmt - expAmt) * 100) / 100;
   // A non-finite slip amount must FAIL this check, not skip it: Math.abs(NaN) >
   // tol is false, so a provider returning ok:true with a missing/garbage amount
   // would otherwise bypass the amount cross-check entirely and let an unrelated
   // slip mark a bill paid. Reject unless BOTH amounts are finite AND within tol.
   if (!Number.isFinite(slipAmt) || !Number.isFinite(expAmt)
-      || Math.abs(slipAmt - expAmt) > PAYMENT_TOLERANCE_THB) {
+      || amountDiff > amountTolerance) {
     const slipShown = Number.isFinite(slipAmt)
       ? `฿${slipAmt.toLocaleString('th-TH', { minimumFractionDigits: 2 })}`
       : '(อ่านยอดจากสลิปไม่ได้)';
@@ -846,11 +848,10 @@ async function verifyViaSlipOK(buffer, expected) {
     files: 'data:image/jpeg;base64,' + buffer.toString('base64'),
     log: true,
   };
-  // Provider-side amount matching is EXACT equality on SlipOK's side, which
-  // would hard-reject the bank-rounding drift (±0.25–1฿) that
-  // PAYMENT_TOLERANCE_THB (services/billing.js) requires every enforcement
-  // point to accept — so it's opt-in. verifyOne's local ±tolerance
-  // cross-check on the provider-read amount stays canonical.
+  // Provider-side amount matching is exact equality on SlipOK's side. Keep it
+  // opt-in so verifyOne's local dynamic tolerance stays canonical: whole-baht
+  // legacy bills retain the 1 THB rounding allowance, while satang-reference
+  // bills are checked at satang level.
   if (expected?.providerExactAmountCheck === true) bodyFields.amount = expected.amount;
   const body = JSON.stringify(bodyFields);
 
@@ -927,10 +928,9 @@ async function verifyViaEasySlip(buffer, expected) {
   if (!apiKey) throw new Error('EASYSLIP_API_KEY not configured');
   const expectedAmount = Number(expected?.amount);
   const fields = { checkDuplicate: 'true' };
-  // matchAmount is EXACT equality on EasySlip's side — opt-in only, or a
-  // slip with ordinary bank rounding (±0.25–1฿) would fail their check and
-  // hard-reject what the ±PAYMENT_TOLERANCE_THB contract (services/
-  // billing.js) accepts. verifyOne's local cross-check stays canonical.
+  // matchAmount is exact equality on EasySlip's side. Keep it opt-in so the
+  // local dynamic tolerance remains canonical across whole-baht and
+  // satang-reference bills.
   if (expected?.providerExactAmountCheck === true
       && Number.isFinite(expectedAmount) && expectedAmount > 0) {
     fields.matchAmount = String(expectedAmount);
@@ -1078,11 +1078,9 @@ async function verifyViaSlip2Go(buffer, expected) {
   await ssrfGuard.assertSafeUrlResolved(endpoint.href);
   const expectedAmount = Number(expected?.amount);
   const payload = { checkDuplicate: true };
-  // checkAmount type 'eq' is EXACT equality on Slip2Go's side (their 200402
-  // → AMOUNT_MISMATCH is a hard reject) — opt-in only, or bank-rounded
-  // slips (±0.25–1฿) would be rejected where the ±PAYMENT_TOLERANCE_THB
-  // contract (services/billing.js) accepts them. verifyOne's local
-  // cross-check stays canonical.
+  // checkAmount type 'eq' is exact equality on Slip2Go's side (their 200402
+  // maps to AMOUNT_MISMATCH, a hard reject). Keep it opt-in so verifyOne's
+  // local dynamic tolerance stays canonical.
   if (expected?.providerExactAmountCheck === true
       && Number.isFinite(expectedAmount) && expectedAmount > 0) {
     payload.checkAmount = { type: 'eq', amount: Number(expectedAmount.toFixed(2)) };

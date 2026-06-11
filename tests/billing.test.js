@@ -32,6 +32,31 @@ test('buildBill: basic line items + total', () => {
   assert.ok(bill.billNo.startsWith('INV-'));
 });
 
+test('payment reference cents: deterministic per bill and folded into subtotal/total', () => {
+  const seedA = 'INV-2026-05-201|201|2026-05|42';
+  const seedB = 'INV-2026-05-202|202|2026-05|42';
+  assert.equal(billing.paymentReferenceCents(seedA), billing.paymentReferenceCents(seedA));
+  assert.notEqual(billing.paymentReferenceCents(seedA), billing.paymentReferenceCents(seedB));
+
+  const bill = {
+    billNo: 'INV-2026-05-201',
+    roomId: '201',
+    period: '2026-05',
+    subtotal: 100,
+    vat: 0,
+    lateFee: 0,
+    total: 100,
+    items: [{ label: 'rent', amount: 100 }],
+    other: [],
+  };
+  billing.applyPaymentReferenceCents(bill, { tenantId: 42 });
+  assert.ok(bill.paymentReferenceCents > 0 && bill.paymentReferenceCents < 1);
+  assert.equal(bill.subtotal, billing.round2(100 + bill.paymentReferenceCents));
+  assert.equal(bill.total, billing.round2(100 + bill.paymentReferenceCents));
+  assert.ok(bill.items.some((it) => it.label === billing.PAYMENT_REFERENCE_CENTS_LABEL));
+  assert.ok(bill.other.some((it) => it.label === billing.PAYMENT_REFERENCE_CENTS_LABEL));
+});
+
 test('buildBill: minimum billable units floor (utilities.waterMin / elecMin)', () => {
   const flags = { lateFee: { enabled: false }, vat: { enabled: false } };
   // Tenant used only 1 water unit + 3 elec units; operator set minimums 5 / 50.
@@ -320,6 +345,14 @@ test('validatePaymentAmount: bank-rounding tolerance ±1฿', () => {
   assert.equal(billing.validatePaymentAmount({ amount: 5001.5, total: 5000, lateFee: 0 }).ok, false);
 });
 
+test('validatePaymentAmount: decimal bill totals require satang-level match', () => {
+  assert.equal(billing.paymentToleranceForTotal(100), billing.PAYMENT_TOLERANCE_THB);
+  assert.equal(billing.paymentToleranceForTotal(100.25), 0.01);
+  assert.equal(billing.validatePaymentAmount({ amount: 100.25, total: 100.25, lateFee: 0 }).ok, true);
+  assert.equal(billing.validatePaymentAmount({ amount: 100.26, total: 100.25, lateFee: 0 }).ok, true);
+  assert.equal(billing.validatePaymentAmount({ amount: 100, total: 100.25, lateFee: 0 }).ok, false);
+});
+
 test('validatePaymentAmount: when late_fee=0, principal tier collapses to exact', () => {
   // No late_fee → principal == total → only one path to match.
   const r = billing.validatePaymentAmount({ amount: 5000, total: 5000, lateFee: 0 });
@@ -367,6 +400,13 @@ test('validatePaidLedger: accepts settled ledger within payment tolerance', () =
   assert.equal(r.ok, true);
   assert.equal(r.code, 'OK');
   assert.equal(r.diff, 0.5);
+});
+
+test('validatePaidLedger: decimal bill totals reject whole-baht drift', () => {
+  const r = billing.validatePaidLedger({ paymentAmount: 100, billTotal: 100.25 });
+  assert.equal(r.ok, false);
+  assert.equal(r.code, 'PAID_LEDGER_INCONSISTENT');
+  assert.equal(r.tolerance, 0.01);
 });
 
 test('validatePaidLedger: rejects paid bill/payment drift', () => {
