@@ -2621,9 +2621,9 @@ module.exports = function buildTenantOpsRouter(ctx) {
                 `ครบกำหนดชำระ: ${dueDate}`,
                 ``,
                 `📋 ขั้นตอนถัดไป:`,
-                `   1) เข้าพอร์ทัลผู้เช่าที่ /tenant ด้วยเบอร์โทรที่ผูกกับห้อง`,
-                `   2) ผูกบัญชี LINE OA (ถ้ายังไม่ผูก)`,
-                `   3) ดูบิลทั้งหมด + ชำระผ่าน QR ที่พอร์ทัล`,
+                `   1) ดูบิลและวิธีชำระ — พิมพ์คำว่า "บิล" ในแชท LINE นี้ได้เลย`,
+                `   2) โอนเงินแล้วส่งรูปสลิปมาในแชทนี้ ระบบจะตรวจให้อัตโนมัติ`,
+                `   3) มีปัญหาอะไรพิมพ์ "help" เพื่อดูเมนู หรือติดต่อสำนักงานได้ตลอด`,
               ].join('\n'),
             }).catch((err) => {
               console.warn('[checkin] welcome notify failed:', err.message);
@@ -3304,11 +3304,11 @@ module.exports = function buildTenantOpsRouter(ctx) {
           const lines = [
             `เรียน คุณ${tenant.full_name}`,
             ``,
-            `ระบบยืนยันการ check-out เรียบร้อยแล้ว`,
+            `ยืนยันการย้ายออกเรียบร้อยแล้ว`,
           ];
           if (releaseRoomIds.length) lines.push(`ห้อง: ${releaseRoomIds.join(', ')}`);
           if (revokedCards.rowCount > 0) {
-            lines.push(`บัตรเข้า-ออกถูกเพิกถอน (${revokedCards.rowCount} ใบ)`);
+            lines.push(`บัตรผ่านประตูถูกปิดการใช้งาน (${revokedCards.rowCount} ใบ)`);
           }
           if (effectiveRefund != null && Number.isFinite(effectiveRefund)) {
             lines.push(`คืนเงินมัดจำ: ฿${Number(effectiveRefund).toLocaleString('th-TH', { minimumFractionDigits: 2 })}`);
@@ -3326,7 +3326,7 @@ module.exports = function buildTenantOpsRouter(ctx) {
               if (closingBillDetail.elec > 0) lines.push(`  ค่าไฟ: ฿${fmtB(closingBillDetail.elec)}`);
               if (closingBillDetail.wifi > 0) lines.push(`  ค่าอินเทอร์เน็ต: ฿${fmtB(closingBillDetail.wifi)}`);
               if (closingBillDetail.common > 0) lines.push(`  ค่าส่วนกลาง: ฿${fmtB(closingBillDetail.common)}`);
-              if (closingBillDetail.carriedLateFee > 0) lines.push(`  ค่าปรับค้างยกมา: ฿${fmtB(closingBillDetail.carriedLateFee)}`);
+              if (closingBillDetail.carriedLateFee > 0) lines.push(`  ค่าปรับคงค้างจากบิลก่อนหน้า: ฿${fmtB(closingBillDetail.carriedLateFee)}`);
               if (closingBillDetail.vat > 0) lines.push(`  ภาษีมูลค่าเพิ่ม: ฿${fmtB(closingBillDetail.vat)}`);
             }
             lines.push(`ยอด: ฿${Number(closingBill.total).toLocaleString('th-TH', { minimumFractionDigits: 2 })}`);
@@ -3346,7 +3346,7 @@ module.exports = function buildTenantOpsRouter(ctx) {
           notifier.notifyTenant({ pool, features: flags },
             { id: tenant.id, full_name: tenant.full_name, phone: tenant.phone, email: tenant.email,
               line_user_id: tenant.line_user_id, line_oa_id: tenant.line_oa_id, status: 'active' },
-            { subject: 'ยืนยันการ check-out', text: lines.join('\n'), force: true }
+            { subject: '✅ ยืนยันการย้ายออกเรียบร้อย', text: lines.join('\n'), force: true }
           ).catch(() => {});
         } catch { /* notify failures don't fail request */ }
 

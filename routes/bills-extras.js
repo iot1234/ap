@@ -503,12 +503,12 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       ? amount.toLocaleString('th-TH', { minimumFractionDigits: 2 })
       : '-';
     const lines = [
-      `Bill voided: ${bill.bill_no || bill.id}`,
-      `Room: ${bill.room_id || '-'}`,
-      bill.period ? `Period: ${bill.period}` : null,
-      `Amount: THB ${amountText}`,
-      reason ? `Reason: ${reason}` : null,
-      actor ? `By: ${actor}` : null,
+      `บิลที่ถูกยกเลิก: ${bill.bill_no || bill.id}`,
+      `ห้อง: ${bill.room_id || '-'}`,
+      bill.period ? `รอบบิล: ${bill.period}` : null,
+      `ยอดเงิน: ฿${amountText}`,
+      reason ? `เหตุผล: ${reason}` : null,
+      actor ? `ยกเลิกโดย: ${actor}` : null,
     ].filter(Boolean);
 
     if (bill.tenant_id) {
@@ -521,13 +521,16 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       );
       if (rows.length) {
         await notifier.notifyTenant({ pool, features: flags }, rows[0], {
-          subject: 'Bill cancelled',
+          subject: '❌ บิลถูกยกเลิก — ไม่ต้องชำระบิลฉบับนี้',
           text: [
-            `Dear ${rows[0].full_name || 'tenant'},`,
+            `เรียน คุณ${rows[0].full_name || 'ผู้เช่า'}`,
+            '',
+            'บิลด้านล่างถูกยกเลิกแล้ว ไม่ต้องชำระบิลฉบับนี้',
             '',
             ...lines,
             '',
-            'Please ignore the cancelled bill. Contact the office if you already paid or have questions.',
+            'ถ้ามีบิลฉบับใหม่แทน ระบบจะส่งให้อีกครั้ง',
+            'ถ้าคุณโอนเงินไปแล้วหรือมีข้อสงสัย กรุณาติดต่อสำนักงาน',
           ].join('\n'),
           force: true,
         });
@@ -536,7 +539,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
 
     await notifier.notifyOwner({ pool, features: flags }, {
       category: 'billing',
-      subject: 'Bill voided',
+      subject: `🗑 ยกเลิกบิล ${bill.bill_no || bill.id} — ห้อง ${bill.room_id || '-'}`,
       text: lines.join('\n'),
     });
   }
@@ -2822,17 +2825,21 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       const owner = await notifier.notifyOwner({ pool, features: flags }, {
         category: 'billing',
         subject: b.email
-          ? 'Bill send skipped: email not configured'
-          : 'Bill send skipped: no tenant channel',
+          ? `📭 ส่งบิลห้อง ${b.room_id} ไม่ได้ — ระบบส่งอีเมลยังไม่ถูกตั้งค่า`
+          : `📭 ส่งบิลห้อง ${b.room_id} ไม่ได้ — ผู้เช่าไม่มีช่องทางติดต่อ`,
         text: [
           b.email
-            ? `Bill was not sent because SMTP/email is not configured.`
-            : `Bill was not sent because the tenant has no LINE or email.`,
-          `Bill: ${b.bill_no || b.id}`,
-          `Room: ${b.room_id}`,
-          b.tenant_name ? `Tenant: ${b.tenant_name}` : null,
-          b.email ? `Email: ${b.email}` : null,
-          `Amount: THB ${Number(b.total).toLocaleString('th-TH', { minimumFractionDigits: 2 })}`,
+            ? 'บิลนี้ยังไม่ถูกส่งถึงผู้เช่า เพราะผู้เช่ามีแต่อีเมล แต่ระบบส่งอีเมลยังไม่ถูกตั้งค่า'
+            : 'บิลนี้ยังไม่ถูกส่งถึงผู้เช่า เพราะผู้เช่าไม่ได้ผูก LINE และไม่มีอีเมลในระบบ',
+          `บิล: ${b.bill_no || b.id}`,
+          `ห้อง: ${b.room_id}`,
+          b.tenant_name ? `ผู้เช่า: ${b.tenant_name}` : null,
+          b.email ? `อีเมล: ${b.email}` : null,
+          `ยอดเงิน: ฿${Number(b.total).toLocaleString('th-TH', { minimumFractionDigits: 2 })}`,
+          '',
+          b.email
+            ? '👉 วิธีแก้: ตั้งค่าการส่งอีเมลที่เมนูตั้งค่าระบบ หรือชวนผู้เช่าผูก LINE (เมนู "ผูกห้อง ↔ LINE") แล้วกดส่งบิลซ้ำ'
+            : '👉 วิธีแก้: ชวนผู้เช่าผูก LINE (เมนู "ผูกห้อง ↔ LINE" ออกรหัสให้ผู้เช่า) หรือเพิ่มอีเมลในหน้าผู้เช่า แล้วกดส่งบิลซ้ำ',
         ].filter(Boolean).join('\n'),
       });
       return {
@@ -2985,7 +2992,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         supersededLine,
         '',
         'สถานะ: ชำระแล้ว ✓',
-        'ใบเสร็จ: ดูได้ที่พอร์ทัลผู้เช่า /tenant',
+        'ดูบิลย้อนหลังได้ทุกเมื่อ — พิมพ์คำว่า "บิล" ในแชทนี้',
       ].filter(Boolean).join('\n'),
       force: true,
     });
@@ -4150,7 +4157,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
                 `จำนวน: ฿${amtStr}`,
                 `สถานะ: ชำระแล้ว ✓`,
                 ``,
-                `ใบเสร็จ: ดูได้ที่พอร์ทัลผู้เช่า /tenant`,
+                `ดูบิลย้อนหลังได้ทุกเมื่อ — พิมพ์คำว่า "บิล" ในแชทนี้`,
                 ``,
                 `${buildingName}`,
               ].join('\n');
@@ -4168,7 +4175,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
                 ``,
                 `📋 ขั้นตอนถัดไป:`,
                 `   1) ตรวจสอบสลิปและจำนวนเงินอีกครั้ง`,
-                `   2) อัปโหลดสลิปใหม่ที่พอร์ทัลผู้เช่า /tenant`,
+                `   2) ส่งรูปสลิปที่ถูกต้องมาในแชท LINE นี้ได้เลย`,
                 `   3) หากไม่แน่ใจ ติดต่อ ${buildingName}`,
               ].filter(Boolean).join('\n');
             }

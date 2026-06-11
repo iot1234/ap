@@ -567,7 +567,8 @@ module.exports = function buildWebhooksRouter(ctx) {
       if (code === 'BILL_ALREADY_PAID' || code === 'BILL_NOT_PAYABLE' || /ชำระ.*แล้ว/.test(String(message || ''))) {
         await lineSvc.replyText(oa, ev.replyToken, 'บิลนี้ชำระแล้ว ไม่ต้องส่งสลิปเพิ่มเติม');
       } else {
-        await lineSvc.replyText(oa, ev.replyToken, `อัปโหลดสลิปไม่สำเร็จ: ${message || 'โปรดลองใหม่'}`);
+        await lineSvc.replyText(oa, ev.replyToken,
+          `ระบบรับสลิปไม่สำเร็จ — กรุณาส่งรูปใหม่อีกครั้ง ถ้ายังไม่ได้ให้ติดต่อสำนักงาน${message ? `\n(สาเหตุ: ${message})` : ''}`);
       }
     }
   }

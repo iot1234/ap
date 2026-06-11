@@ -84,7 +84,7 @@ async function notifyTenantOnPayment(ctx, payment, outcome, reason) {
         `จำนวน: ฿${amtStr}`,
         `สถานะ: ชำระแล้ว ✓`,
         ``,
-        `ใบเสร็จ: ดูได้ที่พอร์ทัลผู้เช่า /tenant`,
+        `ดูบิลย้อนหลังได้ทุกเมื่อ — พิมพ์คำว่า "บิล" ในแชทนี้`,
         ``,
         `${buildingName}`,
       ];
@@ -125,7 +125,7 @@ async function notifyTenantOnPayment(ctx, payment, outcome, reason) {
         ``,
         `📋 ขั้นตอนถัดไป:`,
         `   1) ตรวจสอบสลิปและจำนวนเงินอีกครั้ง`,
-        `   2) อัปโหลดสลิปใหม่ที่พอร์ทัลผู้เช่า /tenant`,
+        `   2) ส่งรูปสลิปที่ถูกต้องมาในแชท LINE นี้ได้เลย`,
         `   3) หากไม่แน่ใจ ติดต่อ ${buildingName}`,
       ].filter(Boolean);
     }

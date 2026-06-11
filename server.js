@@ -1856,18 +1856,18 @@ app.put('/api/data/:key', sameOrigin, csrfGuard, requireAuth, requireRole('owner
           const flags = await features.load(pool).catch(() => ({}));
           await notifier.notifyOwner({ pool, features: flags }, {
             category: 'system',
-            subject: '⚠️ ระบบ sync ผู้เช่าล้มเหลว — กรุณาตรวจสอบ',
+            subject: '⚠️ บันทึกข้อมูลผู้เช่าใหม่ไม่สมบูรณ์ — กรุณาตรวจสอบ',
             text: [
-              'ระบบไม่สามารถ sync ข้อมูลผู้เช่าจากผังห้องเข้าตาราง tenants ได้',
+              'ระบบบันทึกห้องสำเร็จ แต่คัดลอกข้อมูลผู้เช่าเข้าทะเบียนผู้เช่าไม่สำเร็จ',
               '',
-              `เหตุผล: ${err.message}`,
+              `ข้อความจากระบบ: ${err.message}`,
               '',
-              '⚠️ ผลกระทบที่อาจเกิดขึ้น:',
-              '   • ผู้เช่าใหม่ login พอร์ทัลด้วยเบอร์โทรไม่ได้',
-              '   • บิลใหม่ที่ออกหาผู้เช่าไม่เจอ → orphan bill',
-              '   • LINE binding ไม่ทำงาน',
+              '⚠️ ถ้าปล่อยไว้จะเกิดอะไรขึ้น:',
+              '   • ผู้เช่าใหม่จะเข้าดูบิลของตัวเองด้วยเบอร์โทรไม่ได้',
+              '   • บิลที่ออกใหม่จะไม่ผูกกับผู้เช่า ผู้เช่าจะไม่ได้รับแจ้งเตือน',
+              '   • การผูก LINE ของห้องนี้จะยังใช้ไม่ได้',
               '',
-              '👉 ที่ต้องทำ: เปิด /admin#health ดู data integrity และกดบันทึกห้องใหม่อีกครั้ง',
+              '👉 วิธีแก้: เปิดเมนู "สถานะระบบ" (/admin#health) ดูหัวข้อความถูกต้องของข้อมูล แล้วเปิดห้องนั้นกดบันทึกซ้ำอีกครั้ง ถ้ายังไม่หายให้แจ้งผู้ดูแลระบบพร้อมข้อความด้านบน',
             ].join('\n'),
           });
         } catch (notifyErr) {
@@ -7236,8 +7236,8 @@ app.post('/api/tenant/maintenance/:id/rate', sameOrigin, csrfGuard, requireTenan
       const flags = await features.load(pool);
       notifier.notifyOwner({ pool, features: flags }, {
         category: 'maintenance',
-        subject: `⭐ ผู้เช่าให้คะแนน ${rating}/5`,
-        text: `Ticket ${rows[0].ticket_no} — ${rating}/5${comment ? `\n"${comment}"` : ''}`,
+        subject: `⭐ ผู้เช่าให้คะแนนงานซ่อม ${rating}/5`,
+        text: `งานซ่อม ${rows[0].ticket_no} ได้รับคะแนน ${rating}/5${comment ? `\nความเห็นผู้เช่า: "${comment}"` : ''}`,
       }).catch(() => {});
     } catch { /* ignore */ }
     res.json({ ok: true, ticket: rows[0] });
@@ -10076,16 +10076,16 @@ app.post('/api/bookings/:id/approve-and-assign', sameOrigin, csrfGuard, requireA
           const flags = await features.load(pool).catch(() => ({}));
           await notifier.notifyOwner({ pool, features: flags }, {
             category: 'booking',
-            subject: `⚠️ การจอง ${id} อนุมัติแล้วแต่ sync ผู้เช่าล้มเหลว`,
+            subject: `⚠️ อนุมัติการจอง ${id} แล้ว แต่บันทึกผู้เช่าไม่สมบูรณ์`,
             text: [
               `การจอง ${id} (${booking.name || '-'} · ${booking.phone || '-'}) อนุมัติแล้ว`,
               `จัดห้อง: ${assignedRoomId}`,
               '',
-              `❌ แต่ระบบ sync ผู้เช่าเข้าตาราง tenants ไม่สำเร็จ`,
-              `เหตุผล: ${err.message}`,
+              `❌ แต่ระบบสร้างข้อมูลผู้เช่าในทะเบียนผู้เช่าไม่สำเร็จ`,
+              `ข้อความจากระบบ: ${err.message}`,
               '',
-              '⚠️ ผลกระทบ: ห้องสถานะ "reserved" แต่ไม่มีผู้เช่าจริงในระบบ',
-              '👉 ที่ต้องทำ: เปิด /admin#rooms กดอนุมัติห้องใหม่ หรือทำ checkin เลย',
+              '⚠️ ถ้าปล่อยไว้: ห้องจะขึ้นว่า "จองแล้ว" แต่จะไม่มีชื่อผู้เช่าในระบบ ออกบิล/แจ้งเตือนไม่ได้',
+              '👉 วิธีแก้: เปิดหน้าห้องพัก (/admin#rooms) เลือกห้องนี้แล้วกดบันทึกซ้ำ หรือทำเช็คอินผู้เช่าจากหน้าผู้เช่าได้เลย',
             ].join('\n'),
           });
         } catch (notifyErr) {
@@ -12527,7 +12527,7 @@ app.put('/api/contracts/:id', sameOrigin, csrfGuard, requireAuth, requireRole('o
             lines.push(`ย้ายผู้เช่าออก: ${closeEffects.tenantMovedOut ? 'ใช่' : 'ไม่ใช่'}`);
             lines.push(`ปล่อยห้อง: ${closeEffects.roomFreed ? 'ใช่' : 'ไม่ใช่'}`);
             if (closeEffects.cardsRevoked) lines.push(`เพิกถอนบัตร: ${closeEffects.cardsRevoked} ใบ`);
-            if (closeEffects.recurringDeactivated) lines.push(`ปิด recurring charge: ${closeEffects.recurringDeactivated} รายการ`);
+            if (closeEffects.recurringDeactivated) lines.push(`ปิดค่าบริการรายเดือนอัตโนมัติ: ${closeEffects.recurringDeactivated} รายการ`);
             if (closeEffects.invitationsRevoked) lines.push(`ยกเลิกลิงก์สัญญาค้าง: ${closeEffects.invitationsRevoked} ลิงก์`);
             for (const w of closeEffects.warnings || []) lines.push(`คำเตือน: ${w.message}`);
           }
@@ -12724,11 +12724,10 @@ app.post('/api/contracts/:id/sign', sameOrigin, csrfGuard, requireAuth, requireR
         notifier.notifyOwner({ pool, features: flags }, {
           category: 'tenancy',
           subject: `✍️ ลงนามสัญญา ${contract.contract_no}`,
-          text: `admin ${req.session.user.username} บันทึกลายเซ็นสัญญา\n`
-            + `contract id=${id} tenantId=${contract.tenant_id}\n`
-            + `สัญญาถูก lock และ snapshot เงื่อนไขแล้ว\n`
-            + (termsVersion ? `terms version: ${termsVersion}\n` : '')
-            + (force ? '⚠️ ใช้ force=true แทนที่ลายเซ็นเดิม' : ''),
+          text: `แอดมิน ${req.session.user.username} บันทึกลายเซ็นสัญญา ${contract.contract_no} แล้ว\n`
+            + `สัญญามีผลและล็อกการแก้ไขแล้ว — เงื่อนไข ณ วันเซ็นถูกบันทึกถาวรเพื่อใช้อ้างอิง\n`
+            + (termsVersion ? `เวอร์ชันเงื่อนไขที่ใช้: ${termsVersion}\n` : '')
+            + (force ? '⚠️ เป็นการบันทึกทับลายเซ็นเดิม (ใช้สิทธิ์พิเศษ) — ตรวจสอบความถูกต้องอีกครั้ง' : ''),
         }).catch(() => {});
       } catch { /* notify failure must not break request */ }
       res.json({ ok: true, contract: rows[0], signature: { id: savedFile.id, url: savedFile.url } });
@@ -14872,7 +14871,7 @@ app.post('/api/admin/contract-invitations/:id/approve',
           contract.monthly_rent
             ? `ค่าเช่า: ฿${Number(contract.monthly_rent).toLocaleString('th-TH', { minimumFractionDigits: 2 })}/เดือน`
             : null,
-          `🔒 สัญญาถูก lock + ห้องเปลี่ยนเป็น occupied`,
+          `🔒 สัญญามีผลและล็อกการแก้ไขแล้ว · ห้องถูกบันทึกเป็น "มีผู้พัก"`,
           ``,
           `📄 ดู PDF: ${proto}://${host}/api/contracts/${contract.id}/pdf`,
         ].filter(Boolean);
@@ -15427,8 +15426,9 @@ app.post('/api/contract-fill/:token/submit', rateLimitContractFill, sameOrigin, 
       const flags = await features.load(pool);
       notifier.notifyOwner({ pool, features: flags }, {
         category: 'tenancy',
-        subject: '📥 ผู้เช่าส่งสัญญาให้ตรวจสอบ',
-        text: `invitation #${inv.id} (contract ${inv.contract_id}) — เข้าตรวจที่ /admin#contract-invitations`,
+        subject: '📥 ผู้เช่ากรอกข้อมูลสัญญาเสร็จแล้ว — รอตรวจอนุมัติ',
+        text: 'ผู้เช่ากรอกข้อมูลและเซ็นสัญญาผ่านลิงก์เรียบร้อยแล้ว\n'
+          + '👉 ขั้นต่อไป: เปิดเมนู "ใบเชิญผู้เช่ากรอก" (/admin#contract-invitations) ตรวจรูปบัตร ที่อยู่ และลายเซ็น แล้วกดอนุมัติเพื่อให้สัญญามีผล',
       }).catch(() => {});
     } catch { /* ignore */ }
     res.json({ ok: true, invitationId: inv.id, status: 'submitted' });

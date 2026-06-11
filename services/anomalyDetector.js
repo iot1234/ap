@@ -140,11 +140,11 @@ async function tick(pool, state) {
     (a) => a.recovered && a.check.status === 'ok'
   );
   const subject = alerts.some((a) => a.check.status === 'error' && !a.recovered)
-    ? '🚨 ระบบมีปัญหา (Health Alert)'
+    ? '🚨 ระบบมีปัญหา — ต้องตรวจสอบ'
     : fullyRecovered
       ? '✅ ระบบกลับมาทำงานปกติ'
       : alerts.every((a) => a.recovered)
-        ? '⚠️ ระบบดีขึ้นบางส่วน (ยังมี warn)'
+        ? '⚠️ ระบบดีขึ้นบางส่วน (ยังมีบางจุดต้องเฝ้าดู)'
         : '⚠️ ระบบมีบางส่วนผิดปกติ';
   try {
     const flags = await features.load(pool);

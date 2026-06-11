@@ -1091,8 +1091,8 @@ test('/api/bills/:id/send fails closed when tenant has no reachable channel', ()
   const helperBody = route.slice(idx, helperEnd > idx ? helperEnd : idx + 14000);
   assert.match(helperBody, /NO_TENANT_CHANNEL/,
     'bill send helper must return a no-channel code');
-  assert.match(helperBody, /Bill send skipped: no tenant channel/,
-    'bill send helper must alert owner/admin when tenant cannot be reached');
+  assert.match(helperBody, /ส่งบิลห้อง \$\{b\.room_id\} ไม่ได้ — ผู้เช่าไม่มีช่องทางติดต่อ/,
+    'bill send helper must alert owner/admin in plain Thai when tenant cannot be reached');
   const postIdx = route.indexOf("r.post('/:id/send'", helperEnd > idx ? helperEnd : idx);
   assert.ok(postIdx > 0, 'should find single bill send route');
   const postBody = route.slice(postIdx, postIdx + 2000);
@@ -3863,9 +3863,9 @@ test('access card revoke/restore notifies the affected tenant', () => {
   const body = sched.slice(start, end);
   assert.match(body, /notifier\.notifyTenant/,
     'access sync must notify tenants');
-  assert.match(body, /บัตรเข้า-ออกถูกระงับ/,
-    'revoked subject must explain status clearly');
-  assert.match(body, /บัตรเข้า-ออกกลับมาใช้ได้แล้ว/,
+  assert.match(body, /บัตรผ่านประตูถูกระงับชั่วคราว/,
+    'revoked subject must explain status clearly in plain Thai');
+  assert.match(body, /บัตรผ่านประตูกลับมาใช้ได้แล้ว/,
     'restored subject must signal recovery');
   // Earlier draft used a timestamp-based query (`ac.updated_at`) that
   // would always fail — access_cards has no updated_at column. Pin the
@@ -5175,13 +5175,13 @@ test('booking-approve notify only borrows tenant LINE for the exact assigned roo
 
 test('anomaly detector partial-recovery does not say "ระบบกลับมาทำงานปกติ"', () => {
   // error→warn is BETTER but warn condition still active — old subject
-  // was misleading. Now reads "ระบบดีขึ้นบางส่วน (ยังมี warn)".
+  // was misleading. Now reads "ระบบดีขึ้นบางส่วน (ยังมีบางจุดต้องเฝ้าดู)".
   const fs = require('node:fs');
   const path = require('node:path');
   const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'anomalyDetector.js'), 'utf8');
   assert.match(src, /fullyRecovered = alerts\.every\(\s*\(a\) => a\.recovered && a\.check\.status === 'ok'\s*\)/,
     'must distinguish full recovery (every check === ok) from partial');
-  assert.match(src, /ระบบดีขึ้นบางส่วน \(ยังมี warn\)/,
+  assert.match(src, /ระบบดีขึ้นบางส่วน \(ยังมีบางจุดต้องเฝ้าดู\)/,
     'partial-recovery subject must NOT claim full recovery');
 });
 
@@ -6590,6 +6590,47 @@ test('zombie tenants are healed automatically with a detailed owner digest', () 
   const feats = fs.readFileSync(path.join(__dirname, '..', 'services', 'features.js'), 'utf8');
   assert.match(feats, /tenantAutoCleanup/,
     'the auto-cleanup must have a kill-switch flag');
+});
+
+test('LINE messages speak plain Thai with in-chat actions, not portal paths or English', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const read = (...p) => fs.readFileSync(path.join(__dirname, '..', ...p), 'utf8');
+  const pays = read('services', 'billPayments.js');
+  const sched = read('services', 'scheduler.js');
+  const bills = read('routes', 'bills-extras.js');
+  const ops = read('routes', 'tenant-ops.js');
+  const server = read('server.js');
+
+  // Tenant messages must never point at the bare "/tenant" portal path —
+  // it is not clickable in LINE and means nothing to a non-technical
+  // person. The in-chat actions ("พิมพ์ บิล", ส่งสลิปในแชท) replace it.
+  for (const [name, src] of [['billPayments', pays], ['scheduler', sched], ['bills-extras', bills], ['tenant-ops', ops]]) {
+    assert.ok(!src.includes('พอร์ทัลผู้เช่า /tenant') && !src.includes('พอร์ทัล /tenant'),
+      `${name} must not reference the raw /tenant portal path in messages`);
+  }
+  assert.match(pays, /พิมพ์คำว่า "บิล" ในแชทนี้/,
+    'paid confirmation must teach the in-chat bill command');
+  assert.match(sched, /ส่งรูปสลิปมาในแชท LINE นี้ได้เลย/,
+    'reminders must offer the in-chat slip upload');
+
+  // Bill void notices must be Thai — tenants used to get full English.
+  assert.ok(!bills.includes('Bill voided') && !bills.includes('Bill cancelled'),
+    'bill-void notifications must not be English');
+  assert.match(bills, /ไม่ต้องชำระบิลฉบับนี้/,
+    'bill-void tenant notice must say plainly that no payment is needed');
+
+  // Checkout notice: Thai "ย้ายออก", access cards described as door passes.
+  assert.match(ops, /ยืนยันการย้ายออกเรียบร้อย/,
+    'checkout subject must be plain Thai, not "check-out"');
+  assert.match(sched, /บัตรผ่านประตู/,
+    'access-card notices must call it a door pass in plain Thai');
+
+  // Owner notices: no programmer-speak about lock/occupied enums.
+  assert.ok(!server.includes('สัญญาถูก lock + ห้องเปลี่ยนเป็น occupied'),
+    'contract-approved owner notice must not leak status enums');
+  assert.match(server, /ห้องถูกบันทึกเป็น "มีผู้พัก"/,
+    'contract-approved owner notice must describe the room state in Thai');
 });
 
 test('contract-fill HTML reads view.rejectionReason (camelCase, not snake_case)', () => {
