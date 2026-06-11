@@ -53,6 +53,26 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
     window.open(url, '_blank', 'noopener');
   };
 
+  const contractMissingLabel = (code) => ({
+    address: 'ที่อยู่ผู้เช่า',
+    emergencyContactName: 'ชื่อผู้ติดต่อฉุกเฉิน',
+    emergencyContactPhone: 'เบอร์ผู้ติดต่อฉุกเฉิน',
+    emergencyContact: 'ผู้ติดต่อฉุกเฉิน',
+    citizenId: 'เลขบัตรประชาชน 13 หลัก',
+    citizenIdFront: 'รูปบัตรประชาชนด้านหน้า',
+    citizenIdBack: 'รูปบัตรประชาชนด้านหลัง',
+  }[code] || code);
+
+  const formatContractWarningDetail = (warning) => {
+    if (!warning) return '';
+    const missing = Array.isArray(warning.missing)
+      ? warning.missing.map(contractMissingLabel).filter(Boolean)
+      : [];
+    if (missing.length) return `ขาด: ${missing.join(', ')}`;
+    if (warning.action) return `ต้องทำ: ${warning.action}`;
+    return warning.consequence || '';
+  };
+
   const refresh = async () => {
     setLoading(true);
     try {
@@ -318,6 +338,11 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
                             <div key={w.code} title={w.consequence || ''}
                               style={{ fontSize: 11, color: C.warningInk || C.ink2, lineHeight: 1.35 }}>
                               {w.title || w.code}
+                              {formatContractWarningDetail(w) ? (
+                                <div style={{ color: C.ink2, marginTop: 2 }}>
+                                  {formatContractWarningDetail(w)}
+                                </div>
+                              ) : null}
                             </div>
                           ))}
                         </div>

@@ -5070,6 +5070,43 @@ test('tenant status updates are guarded and sync room state', () => {
     'forced status changes must write the operator reason into the audit payload');
 });
 
+test('tenants: at most one active tenant per room (DB-level guard)', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const migrate = fs.readFileSync(path.join(__dirname, '..', 'db', 'migrate.js'), 'utf8');
+  const ops = fs.readFileSync(path.join(__dirname, '..', 'routes', 'tenant-ops.js'), 'utf8');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+
+  assert.match(migrate,
+    /CREATE UNIQUE INDEX uq_tenants_active_room[\s\S]{0,160}ON tenants\(current_room_id\)[\s\S]{0,220}status='active'[\s\S]{0,120}deleted_at IS NULL[\s\S]{0,160}current_room_id <> ''/,
+    'partial unique must prevent two active tenants on one room');
+  assert.match(migrate,
+    /Skipping uq_tenants_active_room because duplicate active tenants already exist/,
+    'migration must warn instead of crashing when legacy duplicate tenants exist');
+  assert.match(ops, /ACTIVE_ROOM_CONSTRAINT = 'uq_tenants_active_room'/,
+    'tenant routes must share the active-room constraint name');
+  assert.match(ops, /isActiveRoomUniqueViolation\(err\)/,
+    'tenant routes must translate DB duplicate-room races');
+  assert.match(ops, /code: 'ROOM_OCCUPIED'/,
+    'tenant duplicate-room errors must stay machine-readable');
+  assert.match(server, /constraint === 'uq_tenants_active_room'[\s\S]{0,240}code: 'ROOM_OCCUPIED'/,
+    'contract invitation approve must translate tenant active-room uniqueness races');
+});
+
+test('tenants page surfaces duplicate active room assignments clearly', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-tenants.jsx'), 'utf8');
+  assert.match(src, /duplicateActiveRoomConflicts/,
+    'tenants page must compute duplicate active room conflicts');
+  assert.match(src, /duplicateActiveRoomIds/,
+    'tenant rows must know whether their room is duplicated');
+  assert.match(src, /พบห้องที่มีผู้เช่า active ซ้ำ/,
+    'page-level warning must explain duplicate active tenants');
+  assert.match(src, /ห้องนี้มีผู้เช่าซ้ำ/,
+    'duplicated tenant rows must be marked inline');
+});
+
 test('tenant login is wired through schemas.tenantLogin', () => {
   const fs = require('node:fs');
   const path = require('node:path');
@@ -6620,6 +6657,12 @@ test('contracts page displays server-side contract warnings', () => {
   assert.match(src, /Array\.isArray\(c\.warnings\)/);
   assert.match(src, /c\.warning_severity === 'error'/);
   assert.match(src, /w\.consequence/);
+  assert.match(src, /formatContractWarningDetail\(w\)/,
+    'contracts page must render actionable warning details');
+  assert.match(src, /contractMissingLabel/,
+    'identity warning missing fields must be translated for admins');
+  assert.match(src, /ขาด: \$\{missing\.join\(', '\)\}/,
+    'identity warnings must list exactly what is missing');
 });
 
 test('contracts list warns when locked contract is missing citizen ID number', () => {

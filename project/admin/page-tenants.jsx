@@ -106,6 +106,34 @@ function PageTenants({ rooms, setRooms, config, addActivity, setToast }) {
     });
   }, [tenantRows, rooms, config]);
 
+  const duplicateActiveRoomConflicts = useMemo(() => {
+    const byRoom = new Map();
+    for (const t of tenants) {
+      if (t.tenantStatus !== 'active' || !t.currentRoomId) continue;
+      const roomId = String(t.currentRoomId);
+      if (!byRoom.has(roomId)) byRoom.set(roomId, []);
+      byRoom.get(roomId).push(t);
+    }
+    return Array.from(byRoom.entries())
+      .filter(([, rows]) => rows.length > 1)
+      .map(([roomId, rows]) => ({
+        roomId,
+        count: rows.length,
+        tenants: rows.map((t) => ({
+          id: t.dbId,
+          name: t.name,
+          phone: t.phone,
+          since: t.since,
+          contractNo: t.lastContractNo,
+        })),
+      }));
+  }, [tenants]);
+
+  const duplicateActiveRoomIds = useMemo(
+    () => new Set(duplicateActiveRoomConflicts.map((x) => x.roomId)),
+    [duplicateActiveRoomConflicts]
+  );
+
   const filtered = useMemo(() => tenants.filter(t => {
     if (filter === 'active' && t.tenantStatus !== 'active') return false;
     if (filter === 'moved_out' && t.tenantStatus !== 'moved_out') return false;
@@ -127,7 +155,8 @@ function PageTenants({ rooms, setRooms, config, addActivity, setToast }) {
     blacklist: tenants.filter(t => t.tenantStatus === 'blacklist').length,
     overdue: tenants.filter(t => t.roomStatus === 'overdue' || t.outstandingTotal > 0).length,
     aPlus: tenants.filter(t => t.score === 'A').length,
-  }), [tenants]);
+    duplicateRooms: duplicateActiveRoomConflicts.length,
+  }), [tenants, duplicateActiveRoomConflicts]);
 
   const active = activeId ? tenants.find(t =>
     t.rowKey === activeId
@@ -237,6 +266,11 @@ function PageTenants({ rooms, setRooms, config, addActivity, setToast }) {
         <div>
           <div style={{ fontSize: 13, fontWeight: 600, color: C.ink, fontFamily: 'IBM Plex Sans Thai, sans-serif' }}>{t.roomId || '-'}</div>
           <div style={{ fontSize: 11, color: C.muted }}>{t.currentRoomId ? (((ADMIN_ROOM_TYPES[t.type] || ADMIN_ROOM_TYPES.standard || {}).th) || t.type || '-') : (t.lastRoomId ? 'ห้องล่าสุด' : '-')}</div>
+          {t.currentRoomId && duplicateActiveRoomIds.has(String(t.currentRoomId)) ? (
+            <div style={{ marginTop: 3 }}>
+              <Pill color="danger" size="sm">ห้องนี้มีผู้เช่าซ้ำ</Pill>
+            </div>
+          ) : null}
         </div>
       ),
     },
@@ -308,6 +342,27 @@ function PageTenants({ rooms, setRooms, config, addActivity, setToast }) {
           <FilterChip label="ค้างชำระ" active={filter === 'overdue'} onClick={() => setFilter('overdue')} count={counts.overdue} color={C.danger} />
           <FilterChip label="เครดิต A" active={filter === 'aPlus'} onClick={() => setFilter('aPlus')} count={counts.aPlus} color={C.success} />
         </div>
+        {duplicateActiveRoomConflicts.length ? (
+          <div style={{
+            marginTop: 12, padding: 10, borderRadius: 8,
+            border: `1px solid ${C.danger || '#dc2626'}`,
+            background: C.dangerSoft || '#fee2e2',
+            color: C.dangerInk || '#7f1d1d',
+            fontSize: 12.5, lineHeight: 1.5,
+          }}>
+            <b>พบห้องที่มีผู้เช่า active ซ้ำ {duplicateActiveRoomConflicts.length} ห้อง</b>
+            {duplicateActiveRoomConflicts.slice(0, 5).map((x) => (
+              <div key={x.roomId} style={{ marginTop: 4 }}>
+                ห้อง {x.roomId}: {x.tenants.map((t) =>
+                  `${t.name || '-'}${t.phone ? ` (${t.phone})` : ''}${t.contractNo ? ` · สัญญา ${t.contractNo}` : ''}`
+                ).join(' / ')}
+              </div>
+            ))}
+            <div style={{ marginTop: 4 }}>
+              ให้เลือกผู้เช่าที่ถูกต้อง แล้ว checkout/ย้ายออกผู้เช่าที่ไม่อยู่จริงก่อนออกบิลหรืออนุมัติสัญญาใหม่
+            </div>
+          </div>
+        ) : null}
         {tenantLoadError ? (
           <div style={{ marginTop: 10, display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap' }}>
             <div style={{ fontSize: 12.5, color: C.danger, lineHeight: 1.5 }}>

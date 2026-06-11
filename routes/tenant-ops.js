@@ -42,10 +42,15 @@ const meter = require('../services/meter');
 // VALID_TENANT_STATUS + maskTenantOut were defined in server.js but used
 // only by tenant endpoints — moved here so the file is self-contained.
 const VALID_TENANT_STATUS = new Set(['active', 'moved_out', 'blacklist']);
+const ACTIVE_ROOM_CONSTRAINT = 'uq_tenants_active_room';
 const CARRIED_LATE_FEE_LABEL_PREFIX = billPayments._carriedLateFeeLabelPrefix
   || 'ค่าปรับล่าช้าค้างจากรอบ ';
 const CARRIED_LATE_FEE_NOTE_MARKER = billPayments._carriedLateFeeNoteMarker
   || '[system:late_fee_carry]';
+
+function isActiveRoomUniqueViolation(err) {
+  return err && err.code === '23505' && err.constraint === ACTIVE_ROOM_CONSTRAINT;
+}
 
 function maskTenantOut(t) {
   if (!t) return t;
@@ -736,6 +741,32 @@ module.exports = function buildTenantOpsRouter(ctx) {
         }
         return rows;
       } catch (err) {
+        if (isActiveRoomUniqueViolation(err)) {
+          if (useSavepoint) {
+            await db.query('ROLLBACK TO SAVEPOINT tenant_insert_schema').catch(() => {});
+          }
+          let occupant = null;
+          if (requestedRoomId) {
+            const occ = await db.query(
+              `SELECT id, full_name, phone, current_room_id
+                 FROM tenants
+                WHERE current_room_id=$1
+                  AND status='active'
+                  AND deleted_at IS NULL
+                ORDER BY updated_at DESC, id DESC
+                LIMIT 1`,
+              [requestedRoomId]
+            ).catch(() => ({ rows: [] }));
+            occupant = occ.rows[0] || null;
+          }
+          throw httpErr(409, 'ROOM_OCCUPIED',
+            `ห้อง ${requestedRoomId || ''} มีผู้เช่า active อยู่แล้ว`,
+            {
+              roomId: requestedRoomId,
+              occupant,
+              hint: 'ตรวจห้องนี้ในหน้า ผู้เช่า/สัญญา แล้ว checkout หรือปิดสัญญาเดิมก่อนเพิ่มผู้เช่าใหม่',
+            });
+        }
         if (err.code === '23505' && err.constraint === 'uq_tenants_citizen_id_hash_active') {
           throw httpErr(409, 'CITIZEN_ID_DUPLICATE',
             'เลขบัตรนี้ผูกกับผู้เช่ารายอื่นแล้ว (race)');
@@ -1352,6 +1383,14 @@ module.exports = function buildTenantOpsRouter(ctx) {
         warnings,
       });
     } catch (err) {
+      if (isActiveRoomUniqueViolation(err)) {
+        return res.status(409).json({
+          error: 'ห้องนี้มีผู้เช่า active อยู่แล้ว — ไม่สามารถผูกผู้เช่าซ้ำได้',
+          code: 'ROOM_OCCUPIED',
+          constraint: ACTIVE_ROOM_CONSTRAINT,
+          hint: 'เปิดหน้า ผู้เช่า แล้วตรวจห้องที่ซ้ำ จากนั้น checkout/ย้ายออกผู้เช่าเดิมก่อนบันทึกอีกครั้ง',
+        });
+      }
       console.error('tenant update error:', err);
       res.status(500).json({ error: 'internal error' });
     }
@@ -2574,6 +2613,15 @@ module.exports = function buildTenantOpsRouter(ctx) {
         });
       } catch (err) {
         await client.query('ROLLBACK').catch(() => {});
+        if (isActiveRoomUniqueViolation(err)) {
+          return res.status(409).json({
+            error: `ห้อง ${roomId} มีผู้เช่า active อยู่แล้ว — check-in ซ้ำไม่ได้`,
+            code: 'ROOM_OCCUPIED',
+            constraint: ACTIVE_ROOM_CONSTRAINT,
+            roomId,
+            hint: 'ตรวจรายชื่อผู้เช่าของห้องนี้ แล้ว checkout/ปิดสัญญาเดิมก่อน check-in ผู้เช่าใหม่',
+          });
+        }
         console.error('checkin error:', err);
         res.status(500).json({ error: 'internal error', code: 'DB_ERROR' });
       } finally {

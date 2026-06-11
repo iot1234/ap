@@ -14726,6 +14726,19 @@ app.post('/api/admin/contract-invitations/:id/approve',
       });
     } catch (err) {
       await client.query('ROLLBACK').catch(() => {});
+      if (err && err.code === '23505' && err.constraint === 'uq_tenants_active_room') {
+        return res.status(409).json({
+          error: 'ห้องนี้มีผู้เช่า active อยู่แล้ว — ไม่สามารถ approve สัญญาซ้อนห้องได้',
+          code: 'ROOM_OCCUPIED',
+          constraint: 'uq_tenants_active_room',
+          hint: 'ตรวจผู้เช่า/สัญญาของห้องนี้ แล้ว checkout หรือปิดสัญญาเดิมก่อน approve อีกครั้ง',
+          nextActions: {
+            tenantsListUrl: '/admin#tenants',
+            contractsUrl: '/admin#contracts',
+            invitationUrl: '/admin#contract-invitations',
+          },
+        });
+      }
       if (err.http) {
         // Enrich CITIZEN_ID_DUPLICATE with admin-actionable next steps —
         // they need to reconcile (find the existing tenant + decide if

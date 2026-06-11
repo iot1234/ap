@@ -100,6 +100,33 @@ async function migrate(pool, opts = {}) {
     );
     CREATE INDEX IF NOT EXISTS idx_tenants_phone ON tenants(phone) WHERE deleted_at IS NULL;
     CREATE INDEX IF NOT EXISTS idx_tenants_room ON tenants(current_room_id) WHERE deleted_at IS NULL;
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_indexes
+         WHERE schemaname='public' AND indexname='uq_tenants_active_room'
+      ) THEN
+        IF NOT EXISTS (
+          SELECT 1
+            FROM tenants
+           WHERE status='active'
+             AND deleted_at IS NULL
+             AND current_room_id IS NOT NULL
+             AND current_room_id <> ''
+           GROUP BY current_room_id
+          HAVING COUNT(*) > 1
+        ) THEN
+          CREATE UNIQUE INDEX uq_tenants_active_room
+            ON tenants(current_room_id)
+            WHERE status='active'
+              AND deleted_at IS NULL
+              AND current_room_id IS NOT NULL
+              AND current_room_id <> '';
+        ELSE
+          RAISE WARNING 'Skipping uq_tenants_active_room because duplicate active tenants already exist on at least one room';
+        END IF;
+      END IF;
+    END $$;
 
     CREATE TABLE IF NOT EXISTS contracts (
       id              BIGSERIAL PRIMARY KEY,
