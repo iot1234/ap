@@ -34,6 +34,30 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
 
   const active = activeId ? bookings.find(b => b.id === activeId) : null;
 
+  // Deep-link "#bookings?booking=<id>" (from search / the bell menu) opens
+  // that booking's drawer directly and flips to the tab that contains it.
+  // Param is stripped after applying so closing the drawer doesn't re-open.
+  React.useEffect(() => {
+    const applyBookingRoute = () => {
+      const raw = String(window.location.hash || '').replace(/^#/, '');
+      const [pathPart, queryPart = ''] = raw.split('?');
+      if (pathPart.split('/')[0] !== 'bookings') return;
+      let target = '';
+      try {
+        target = String(new URLSearchParams(queryPart).get('booking') || '').trim();
+      } catch { /* malformed query — ignore */ }
+      if (!target) return;
+      const row = bookings.find((b) => String(b.id) === target);
+      if (!row) return;
+      setTab(row.status || 'all');
+      openBookingDetail(row.id);
+      window.history.replaceState(null, '', '#bookings');
+    };
+    applyBookingRoute();
+    window.addEventListener('hashchange', applyBookingRoute);
+    return () => window.removeEventListener('hashchange', applyBookingRoute);
+  }, [bookings]);
+
   const mergeBookingRow = (current, incoming) => {
     if (!incoming) return current;
     const currentLine = current && (current.lineBinding || current.line_binding);

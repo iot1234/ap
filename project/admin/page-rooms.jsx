@@ -256,6 +256,28 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
 
   const list = useMemo(() => Object.values(rooms).sort((a, b) => a.id.localeCompare(b.id)), [rooms]);
 
+  // Deep-link "#rooms?room=X" (from search results / cross-page buttons)
+  // opens that room's edit drawer directly instead of dropping the admin on
+  // the bare table to search again. Param is stripped after applying so
+  // closing the drawer doesn't re-open it on the next hashchange.
+  React.useEffect(() => {
+    const applyRoomRoute = () => {
+      const raw = String(window.location.hash || '').replace(/^#/, '');
+      const [pathPart, queryPart = ''] = raw.split('?');
+      if (pathPart.split('/')[0] !== 'rooms') return;
+      let target = '';
+      try {
+        target = String(new URLSearchParams(queryPart).get('room') || '').trim();
+      } catch { /* malformed query — ignore */ }
+      if (!target || !rooms[target]) return;
+      setEditId(target);
+      window.history.replaceState(null, '', '#rooms');
+    };
+    applyRoomRoute();
+    window.addEventListener('hashchange', applyRoomRoute);
+    return () => window.removeEventListener('hashchange', applyRoomRoute);
+  }, [rooms]);
+
   // Derive the unique sorted list of floors actually present so the filter
   // dropdown auto-grows when admin adds floor 6, 7, …, N. Previously the
   // list was hardcoded [1,2,3,4,5] which left newly-added floors invisible

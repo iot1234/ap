@@ -2437,13 +2437,22 @@ test('phase-4 billing/onboarding fixes (closing bill, invitation welcome bill, r
   const ops = fs.readFileSync(p('routes', 'tenant-ops.js'), 'utf8');
 
   // BILL-1: carried late fee folded as PRINCIPAL (subtotal), late_fee column 0,
-  // so tickLateFee's `base = total - late_fee` can't cannibalize it.
-  assert.match(ops, /closingSubtotal = Math\.round\(\(proRatedRent \+ closingLateFee\)/,
+  // so tickLateFee's `base = total - late_fee` can't cannibalize it. The
+  // closing subtotal also carries the final-month utilities (metered water/
+  // elec from the checkout readings + prorated flat charges) so the last
+  // partial period's consumption is billed instead of silently absorbed by
+  // the next tenant's baseline.
+  assert.match(ops, /closingSubtotal = r2\(\s*proRatedRent \+ closingWater \+ closingElec \+ closingWifi \+ closingCommon \+ closingLateFee\s*\)/,
     'closing bill must fold the carried fee into subtotal, not late_fee');
-  assert.match(ops, /VALUES \(\$1,\$2,\$3,\$4,\$5,\$8,\$9,\$10,\$6,'pending',\$7::jsonb\)/,
-    'closing bill INSERT must place subtotal/late_fee(0)/total in distinct params');
-  assert.match(ops, /closingSubtotal, 0, closingTotal\]/,
+  assert.match(ops, /VALUES \(\$1,\$2,\$3,\$4,\$5,\$11,\$12,\$13,\$8,\$14,\$9,\$10,\$6,'pending',\$7::jsonb\)/,
+    'closing bill INSERT must place subtotal/vat/late_fee(0)/total in distinct params');
+  assert.match(ops, /closingSubtotal, 0, closingTotal,/,
     'closing bill must insert late_fee=0 (carried fee lives in subtotal)');
+  // Final meter readings recorded at checkout feed the closing charges.
+  assert.match(ops, /code: 'METER_END_BACKWARD'/,
+    'checkout must reject a final reading below the last recorded one');
+  assert.match(ops, /source: 'checkout'/,
+    'final readings must be recorded with the checkout source');
   // BILL-3: no duplicate 'pro-rate' other-line that double-counts the rent column.
   assert.doesNotMatch(ops, /label: 'pro-rate', amount: proRatedRent/,
     'closing bill must not add a pro-rate line duplicating the rent column');
@@ -3043,8 +3052,8 @@ test('billing preview uses server-side canonical bill calculation', () => {
   const ui = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-billing.jsx'), 'utf8');
   assert.match(bills, /r\.get\('\/preview-period'/,
     'bills router must expose a canonical preview endpoint');
-  assert.match(bills, /activeContractForRoom\(pool, roomId\)/,
-    'preview must load active contracts so locked rent matches generated bills');
+  assert.match(bills, /activeContractForRoom\(pool, roomId, parsed\.period\)/,
+    'preview must load active contracts (period-scoped, so a queued renewal cannot hijack the rent) so locked rent matches generated bills');
   assert.match(bills, /meter\.attachBillingReadingsForPeriod\(pool, room, parsed\.period\)/,
     'preview must use period-scoped meter readings');
   assert.match(bills, /billing\.buildBill\(\{/,
@@ -4690,8 +4699,8 @@ test('checkout revokes access cards + records refund + pro-rates closing bill', 
   const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'tenant-ops.js'), 'utf8');
   assert.match(src, /UPDATE access_cards[\s\S]{0,200}status='revoked'[\s\S]{0,200}auto:checkout/,
     'must auto-revoke active cards on checkout');
-  assert.match(src, /deposit_returned = CASE WHEN \$2::numeric IS NOT NULL THEN LEAST\(\$2::numeric, deposit\)/,
-    'refund must persist on contracts row (clamped to the contract deposit), not just audit_logs');
+  assert.match(src, /deposit_returned = CASE WHEN \$2::numeric IS NOT NULL AND id=\$5 THEN LEAST\(\$2::numeric, deposit\)/,
+    'refund must persist on contracts row (clamped to the contract deposit, only on the targeted contract), not just audit_logs');
   assert.match(src, /pro-rate/i,
     'closing-bill pro-rate path must exist');
   assert.match(src, /generateClosingBill !== false/,
@@ -4833,8 +4842,10 @@ test('contract admin UIs auto-calculate endDate and send it to the APIs', () => 
   const contracts = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-contracts.jsx'), 'utf8');
   const tenants = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-tenants.jsx'), 'utf8');
   const quickInvite = contracts.match(/function QuickInviteModal[\s\S]+?<\/Modal>\s*\);\s*\}/)[0];
-  assert.match(quickInvite, /endDate: addContractMonths\(initialStartDate, 12\)/,
-    'quick-invite must default endDate from 12 months');
+  // Renewal mode seeds the term from the predecessor contract, so the
+  // default is "initialTermMonths || 12" rather than a hard-coded 12.
+  assert.match(quickInvite, /endDate: addContractMonths\(initialStartDate, Number\(initialTermMonths\) \|\| 12\)/,
+    'quick-invite must default endDate from the seeded term (12 months for fresh invites)');
   assert.match(quickInvite, /const setMoveInDate = \(value\)[\s\S]{0,180}addContractMonths\(value, Number\(f\.termMonths\)\)/,
     'changing start date must recompute endDate');
   assert.match(quickInvite, /const setEndDate = \(value\)[\s\S]{0,220}estimateContractMonths\(f\.moveInDate, value, 60\)/,
@@ -6122,7 +6133,7 @@ test('contracts quick-invite uses vacant room inventory and auto-fills room pric
   const start = src.indexOf('function QuickInviteModal');
   assert.ok(start > 0, 'should find QuickInviteModal');
   const modal = src.slice(start, src.indexOf('const lbl =', start));
-  assert.match(modal, /function QuickInviteModal\(\{ rooms = \{\}, config, onClose, onSaved, onError \}\)/);
+  assert.match(modal, /function QuickInviteModal\(\{ rooms = \{\}, config, renewFrom = null, onClose, onSaved, onError \}\)/);
   assert.match(modal, /resolveRoomRent\(room, config\)/,
     'quick-invite rent must use the same formula-or-override resolver as billing');
   assert.match(modal, /const roomList = useMemo\(\(\) => Object\.values\(rooms \|\| \{\}\)/,

@@ -69,12 +69,18 @@ function buildBill({ room, contract = null, expiredContract = null, config, feat
   const elecRate  = positiveRateOrFallback(r.elecRateOverride  ?? r.elec_rate_override,  globalElecRate);
   // Wifi already had a quasi-override (room.wifi) on the client preview
   // path — make it authoritative on the server too so /admin#billing
-  // preview and the actual generated bill agree. Honor wifi=0 as a real
-  // override (free wifi for this unit), not as "use global".
-  const wifiOverrideRaw = r.wifiOverride ?? r.wifi_override ?? r.wifi;
+  // preview and the actual generated bill agree. Explicit zero ("free wifi
+  // for this unit") is honored ONLY on the dedicated override keys: the
+  // rooms API writes wifi=0 as its not-configured DEFAULT (rooms_v2.wifi_fee
+  // DEFAULT 0 → roomSync emits wifi:0 for every touched room), so legacy
+  // wifi=0 must mean "use global" — matching project/admin/shared.jsx —
+  // or the building-wide fee is silently dropped from every bill. A legacy
+  // wifi > 0 still wins as a per-room fee.
+  const wifiOverrideRaw = r.wifiOverride ?? r.wifi_override;
+  const legacyWifi = Number(r.wifi);
   const wifiFee = wifiOverrideRaw != null && wifiOverrideRaw !== '' && Number.isFinite(Number(wifiOverrideRaw))
     ? Math.max(0, Number(wifiOverrideRaw))
-    : globalWifiFee;
+    : (Number.isFinite(legacyWifi) && legacyWifi > 0 ? legacyWifi : globalWifiFee);
   // Common-area fee (ค่าส่วนกลาง: security/cleaning/garbage). Configured in
   // /admin#pricing as a per-MONTH charge and shown in the monthly-cost preview
   // total there + on the contract PDF — but it was never actually billed,
@@ -900,6 +906,12 @@ function computeLateFee({
  * @param {boolean} [opts.lateFeeEnabled]  - features.lateFee.enabled
  * @param {number} [opts.ratePctPerMonth]  - features.lateFee.ratePctPerMonth
  * @param {number} [opts.gracePeriodDays]  - features.lateFee.gracePeriodDays
+ * @param {number} [opts.consumedCarriedLateFee] - portion of this bill's late
+ *          fee that was carried forward (action:'carry') AND already consumed
+ *          by next-period bill-gen — i.e. frozen inside a later ISSUED bill
+ *          (see services/billPayments.js#findConsumedCarriedLateFees). It is
+ *          subtracted from the restored fee so the same lateness isn't owed
+ *          twice; only growth accrued since the carry stays on this bill.
  * @returns {{ status:'pending'|'overdue', principal:number, lateFee:number, total:number }}
  *          All amounts round2'd. total always equals principal + lateFee, so
  *          the chk_bills_amounts_nonnegative invariant holds by construction.
@@ -909,6 +921,7 @@ function computeRestoredBillAmounts({
   dueDate, now,
   lateFeeEnabled = false, ratePctPerMonth = 0, gracePeriodDays = 0,
   minLateFeeBaht = 0, maxLateFeeBaht = 0, maxPctOfPrincipal = 0,
+  consumedCarriedLateFee = 0,
 } = {}) {
   const priorFee = Number(lateFee) || 0;
   const subVat = round2((Number(subtotal) || 0) + (Number(vat) || 0));
@@ -944,6 +957,12 @@ function computeRestoredBillAmounts({
     });
     fee = calc.lateFee;   // may legitimately be 0 if now within the grace window
   }
+  // A carry already consumed by next-period bill-gen is frozen inside that
+  // issued bill — re-accruing it here would charge the same lateness twice
+  // (once on the restored bill, once in the next period's bill). Subtract
+  // the already-billed carried amount, clamped at 0.
+  const consumedCarry = Math.max(0, Number(consumedCarriedLateFee) || 0);
+  if (consumedCarry > 0) fee = Math.max(0, round2(fee - consumedCarry));
   const safeFee = Number.isFinite(fee) && fee > 0 ? round2(fee) : 0;
   return { status: 'overdue', principal, lateFee: safeFee, total: round2(principal + safeFee) };
 }

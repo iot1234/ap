@@ -628,12 +628,24 @@ test('buildBill: per-room elecRateOverride beats config.utilities.elecRate', () 
 
 test('buildBill: per-room wifi override honors zero (free wifi for this unit)', () => {
   const flags = { lateFee: { enabled: false }, vat: { enabled: false } };
-  const room = { ...baseRoom, wifi: 0 };  // explicit 0 = free wifi
+  // Explicit zero is honored ONLY on the dedicated override keys. The rooms
+  // API writes wifi=0 as its not-configured default (rooms_v2.wifi_fee
+  // DEFAULT 0), so a legacy room.wifi=0 must mean "use global" — otherwise
+  // every roomSync-touched room silently drops the building-wide fee.
+  const room = { ...baseRoom, wifiOverride: 0 };  // explicit 0 = free wifi
   const bill = billing.buildBill({ room, config: baseConfig, features: flags });
   assert.equal(bill.wifi, 0);
   assert.equal(bill.wifiFeeSource, 'override');
   // wifi=0 → no line item on the bill (preserves prior behaviour)
   assert.equal(bill.items.find((it) => it.label === 'ค่าอินเทอร์เน็ต'), undefined);
+});
+
+test('buildBill: legacy room.wifi=0 falls back to the global fee (not free)', () => {
+  const flags = { lateFee: { enabled: false }, vat: { enabled: false } };
+  const room = { ...baseRoom, wifi: 0 };  // rooms_v2 default — NOT an override
+  const bill = billing.buildBill({ room, config: baseConfig, features: flags });
+  assert.equal(bill.wifi, Number(baseConfig.utilities.wifi));
+  assert.equal(bill.wifiFeeSource, 'global');
 });
 
 test('buildBill: per-room wifi override accepts higher number', () => {

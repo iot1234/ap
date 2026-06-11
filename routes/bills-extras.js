@@ -253,7 +253,12 @@ module.exports = function buildBillsExtrasRouter(ctx) {
     return blobTenant || null;
   }
 
-  async function activeContractForRoom(client, roomId) {
+  async function activeContractForRoom(client, roomId, period = null) {
+    // start_date filter: a queued RENEWAL contract (created ahead of time,
+    // starting after the current one ends) must not hijack this period's
+    // rent/discount/due-day before it actually begins. Callers that don't
+    // know the period keep the legacy newest-first behavior.
+    const periodFilter = /^\d{4}-\d{2}$/.test(String(period || '')) ? String(period) : null;
     try {
       const cq = await client.query(
         // contract_due_day: the due day the tenant SIGNED (printed on the
@@ -266,8 +271,9 @@ module.exports = function buildBillsExtrasRouter(ctx) {
                 END AS contract_due_day
            FROM contracts
           WHERE room_id=$1 AND status='active' AND deleted_at IS NULL
+            AND ($2::text IS NULL OR start_date IS NULL OR to_char(start_date, 'YYYY-MM') <= $2)
           ORDER BY start_date DESC LIMIT 1`,
-        [roomId]
+        [roomId, periodFilter]
       );
       return cq.rows[0] || null;
     } catch {
@@ -619,7 +625,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       // changing /admin#pricing mid-contract doesn't break existing tenants).
       // Shared helpers keep this path's SQL identical to preview/bulk —
       // including the contract_due_day snapshot column.
-      const activeContract = await activeContractForRoom(pool, b.roomId);
+      const activeContract = await activeContractForRoom(pool, b.roomId, b.period || billing.formatPeriodNow());
       const expiredContract = activeContract
         ? null
         : await expiredContractForRoom(pool, b.roomId, tid || null);
@@ -1106,7 +1112,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           continue;
         }
         const room = { ...rawRoom, tenant };
-        const activeContract = await activeContractForRoom(pool, roomId);
+        const activeContract = await activeContractForRoom(pool, roomId, parsed.period);
         if (billing.contractStartsInPeriod(activeContract, parsed.period)) {
           issues.push(firstMonthBillingIssue(parsed.period, [{
             roomId,
@@ -1951,7 +1957,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
           //     prefers this over room.rent/formula so admin changing
           //     /admin#pricing mid-contract doesn't break existing tenants)
           // See services/pricing.js#resolveBillingRent for the priority.
-          const activeContract = await activeContractForRoom(pool, room.id);
+          const activeContract = await activeContractForRoom(pool, room.id, period);
           // Stay-on tenants past a fixed term keep their SIGNED rate + due
           // day — match the scheduler/single-bill paths (bulk previously
           // skipped this lookup and jumped a stay-on tenant's rent to the

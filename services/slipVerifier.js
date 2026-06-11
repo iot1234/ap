@@ -20,8 +20,10 @@
 //    OR { ok: false, error } so the caller can decide:
 //      - amount within ±1฿ of expected → accept
 //      - receiver account tail matches our PROMPTPAY_TARGET → accept
+//      - transaction date is recent (≤7 days old by default) → accept;
+//        an older/unreadable date PARKS in the admin queue (transient)
 //      - transRef has not been seen before (DB unique check) → accept
-//    All three must hold for auto-verify; one mismatch → reject with
+//    All of these must hold for auto-verify; one mismatch → reject with
 //    a specific reason the tenant can act on ("ยอดไม่ตรง", "บัญชีปลายทาง
 //    ไม่ใช่หอพัก", "สลิปนี้ใช้ไปแล้ว").
 //
@@ -93,6 +95,16 @@ const TRANSIENT_CODES = new Set([
   // human. A genuine payment must never be auto-rejected because a provider
   // masked the account too aggressively.
   'RECEIVER_UNREADABLE',
+  // The slip's bank-transaction date is stale (older than the freshness
+  // window), in the future, or unreadable. Transient by design: an old slip
+  // is the classic replay vector (last month's GENUINE transfer re-uploaded
+  // against this month's bill — invisible to slip_hash/transaction_ref dedup
+  // when the original was recorded at the counter without a slip), but it
+  // can also be a tenant who paid early and uploaded late. The verifier
+  // can't tell those apart, so park for a human — never auto-verify, never
+  // falsely reject. Also where Slip2Go's server-side date condition (code
+  // 200403) lands if one is ever sent.
+  'DATE_MISMATCH',
 ]);
 
 function detectImageMime(buffer) {
@@ -340,6 +352,68 @@ function matchReceiverTail({ acceptableTargets, actualAccount, strict = false })
   };
 }
 
+// === Slip transaction-date freshness ======================================
+// A provider 'ok' proves the slip maps to a REAL bank transaction — not that
+// the transaction belongs to THIS bill. Amount + receiver checks can't
+// distinguish last month's genuine 4,500฿ rent transfer from this month's,
+// and the dedup layers (slip_hash, transaction_ref) miss replays whose
+// original payment was recorded manually at the counter (no hash/ref
+// stored). The transaction date is the remaining signal: a slip older than
+// the window below (or dated in the future, or with no readable date) must
+// not auto-verify. It parks in the admin queue rather than hard-rejecting —
+// see DATE_MISMATCH in TRANSIENT_CODES for the reasoning.
+const SLIP_MAX_AGE_DAYS = 7;     // look-back window for auto-verify
+const SLIP_MAX_FUTURE_DAYS = 1;  // forward clock-skew allowance
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// Parse the timestamp shapes Thai slip providers actually return: ISO
+// ("2026-06-11T09:30:00+07:00"), "YYYY-MM-DD HH:mm:ss", bare dates, epoch
+// millis, and SlipOK's compact "20260611". Buddhist-era years (พ.ศ. 2569)
+// appear in some bank payloads — convert them so a BE date isn't read as
+// 543 years in the future. Returns a Date, or null when unparseable.
+function parseSlipTransDate(raw) {
+  if (raw instanceof Date) return Number.isNaN(raw.getTime()) ? null : raw;
+  if (typeof raw === 'number' && Number.isFinite(raw)) {
+    const d = new Date(raw);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  let s = String(raw || '').trim();
+  if (!s) return null;
+  const compact = /^(\d{4})(\d{2})(\d{2})$/.exec(s);
+  if (compact) s = `${compact[1]}-${compact[2]}-${compact[3]}`;
+  // "YYYY-MM-DD HH:mm:ss" → ISO-ish so it parses as local (Asia/Bangkok)
+  if (/^\d{4}-\d{2}-\d{2} \d/.test(s)) s = s.replace(' ', 'T');
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) return null;
+  if (d.getFullYear() >= 2400) d.setFullYear(d.getFullYear() - 543);
+  return d;
+}
+
+/**
+ * Freshness verdict on a slip's bank-transaction timestamp. Pure —
+ * exported so the window/parsing rules are unit-testable.
+ *
+ * @param {*} transDate - provider-returned timestamp (any shape)
+ * @param {Object} [opts]
+ * @param {Date}   [opts.now]           - injection point for tests
+ * @param {number} [opts.maxAgeDays]    - look-back window (default 7)
+ * @param {number} [opts.maxFutureDays] - forward skew allowance (default 1)
+ * @returns {{ outcome: 'fresh'|'stale'|'future'|'unreadable', ageDays?: number }}
+ */
+function assessSlipTransDate(transDate, { now, maxAgeDays, maxFutureDays } = {}) {
+  const parsed = parseSlipTransDate(transDate);
+  if (!parsed) return { outcome: 'unreadable' };
+  const ref = now instanceof Date ? now : new Date();
+  const back = Number.isFinite(Number(maxAgeDays)) && Number(maxAgeDays) > 0
+    ? Number(maxAgeDays) : SLIP_MAX_AGE_DAYS;
+  const fwd = Number.isFinite(Number(maxFutureDays)) && Number(maxFutureDays) >= 0
+    ? Number(maxFutureDays) : SLIP_MAX_FUTURE_DAYS;
+  const ageDays = (ref.getTime() - parsed.getTime()) / DAY_MS;
+  if (ageDays > back) return { outcome: 'stale', ageDays: Math.floor(ageDays) };
+  if (ageDays < -fwd) return { outcome: 'future', ageDays: Math.floor(ageDays) };
+  return { outcome: 'fresh', ageDays: Math.floor(ageDays) };
+}
+
 function normalizeHttpBaseUrl(raw) {
   const value = String(raw || '').trim();
   if (!value) return null;
@@ -485,7 +559,8 @@ function isConfigured(features) {
  *
  * @param {string}  providerId - 'slipok' | 'easyslip' | 'slip2go'
  * @param {Buffer}  buffer     - slip image bytes (jpg/png/webp/pdf)
- * @param {Object}  expected   - { amount, promptpayTarget, billId }
+ * @param {Object}  expected   - { amount, promptpayTarget, billId,
+ *                                 maxSlipAgeDays?, providerExactAmountCheck? }
  * @returns {Promise<VerifyResult>}
  */
 async function verifyOne(providerId, buffer, expected) {
@@ -623,6 +698,31 @@ async function verifyOne(providerId, buffer, expected) {
   if (tailCheck.outcome === 'match') {
     result.receiverMatch = tailCheck.detail;
   }
+  // Transaction-date freshness — see assessSlipTransDate. Runs LAST so the
+  // harder evidence (wrong amount / wrong account) wins the error the
+  // tenant sees. DATE_MISMATCH is TRANSIENT: the slip parks in the admin
+  // queue instead of hard-rejecting, because a stale date can be either a
+  // replayed old slip or a genuine payment uploaded late — a human decides.
+  const dateCheck = assessSlipTransDate(result.transDate, {
+    maxAgeDays: expected.maxSlipAgeDays,
+  });
+  if (dateCheck.outcome !== 'fresh') {
+    const why = dateCheck.outcome === 'stale'
+      ? `สลิปนี้เป็นรายการโอนเก่า (ประมาณ ${dateCheck.ageDays} วันก่อน)`
+      : dateCheck.outcome === 'future'
+        ? 'เวลารายการในสลิปอยู่ในอนาคต'
+        : 'อ่านเวลารายการจากสลิปไม่ได้';
+    return {
+      ok: false,
+      error: `${why} — ส่งเข้าคิวแอดมินตรวจยืนยัน`,
+      code: 'DATE_MISMATCH',
+      transRef: result.transRef,
+      amount: result.amount,
+      transDate: result.transDate,
+      raw: result.raw,
+      provider: providerId,
+    };
+  }
   return result;
 }
 
@@ -742,11 +842,17 @@ async function verifyViaSlipOK(buffer, expected) {
   // SlipOK accepts JSON with base64 image OR multipart form. JSON keeps
   // the request structure simple + matches the receipt-image bytes we
   // already have buffered.
-  const body = JSON.stringify({
+  const bodyFields = {
     files: 'data:image/jpeg;base64,' + buffer.toString('base64'),
     log: true,
-    amount: expected.amount,   // optional cross-check on their side
-  });
+  };
+  // Provider-side amount matching is EXACT equality on SlipOK's side, which
+  // would hard-reject the bank-rounding drift (±0.25–1฿) that
+  // PAYMENT_TOLERANCE_THB (services/billing.js) requires every enforcement
+  // point to accept — so it's opt-in. verifyOne's local ±tolerance
+  // cross-check on the provider-read amount stays canonical.
+  if (expected?.providerExactAmountCheck === true) bodyFields.amount = expected.amount;
+  const body = JSON.stringify(bodyFields);
 
   return new Promise((resolve, reject) => {
     const req = https.request({
@@ -821,7 +927,12 @@ async function verifyViaEasySlip(buffer, expected) {
   if (!apiKey) throw new Error('EASYSLIP_API_KEY not configured');
   const expectedAmount = Number(expected?.amount);
   const fields = { checkDuplicate: 'true' };
-  if (Number.isFinite(expectedAmount) && expectedAmount > 0) {
+  // matchAmount is EXACT equality on EasySlip's side — opt-in only, or a
+  // slip with ordinary bank rounding (±0.25–1฿) would fail their check and
+  // hard-reject what the ±PAYMENT_TOLERANCE_THB contract (services/
+  // billing.js) accepts. verifyOne's local cross-check stays canonical.
+  if (expected?.providerExactAmountCheck === true
+      && Number.isFinite(expectedAmount) && expectedAmount > 0) {
     fields.matchAmount = String(expectedAmount);
   }
   if (expected?.billId !== undefined && expected?.billId !== null) {
@@ -861,10 +972,22 @@ async function verifyViaEasySlip(buffer, expected) {
           const j = JSON.parse(buf);
           if (res.statusCode !== 200 || j.success !== true || !j.data) {
             const providerCode = j.error?.code || j.code || null;
+            // 401/403/429 are operator-side problems (expired/invalid key,
+            // plan quota, rate limit) — never evidence the tenant's slip is
+            // bad. EasySlip puts the detail in `message`, not `code`, so
+            // without this they'd fall through to EASYSLIP_REJECT: a hard
+            // reject that stops the provider fallback chain and shows the
+            // tenant a fake-slip message. Classify as PROVIDER_ERROR
+            // (transient) so the chain continues / the slip parks in the
+            // admin queue — mirrors mapSlip2GoRejectCode's 429 handling.
+            const operatorSide = res.statusCode >= 500
+              || res.statusCode === 401
+              || res.statusCode === 403
+              || res.statusCode === 429;
             resolve({
               ok: false,
               error: j.error?.message || j.message || `EasySlip HTTP ${res.statusCode}`,
-              code: res.statusCode >= 500 ? 'PROVIDER_ERROR' : (providerCode || 'EASYSLIP_REJECT'),
+              code: operatorSide ? 'PROVIDER_ERROR' : (providerCode || 'EASYSLIP_REJECT'),
               raw: j,
             });
             return;
@@ -955,7 +1078,13 @@ async function verifyViaSlip2Go(buffer, expected) {
   await ssrfGuard.assertSafeUrlResolved(endpoint.href);
   const expectedAmount = Number(expected?.amount);
   const payload = { checkDuplicate: true };
-  if (Number.isFinite(expectedAmount) && expectedAmount > 0) {
+  // checkAmount type 'eq' is EXACT equality on Slip2Go's side (their 200402
+  // → AMOUNT_MISMATCH is a hard reject) — opt-in only, or bank-rounded
+  // slips (±0.25–1฿) would be rejected where the ±PAYMENT_TOLERANCE_THB
+  // contract (services/billing.js) accepts them. verifyOne's local
+  // cross-check stays canonical.
+  if (expected?.providerExactAmountCheck === true
+      && Number.isFinite(expectedAmount) && expectedAmount > 0) {
     payload.checkAmount = { type: 'eq', amount: Number(expectedAmount.toFixed(2)) };
   }
   if (expected?.slip2goCheckReceiver === true) {
@@ -1050,6 +1179,9 @@ module.exports = {
   // (mask handling, 6-digit cap, strict weak-match downgrade) are pinned
   // without a live provider call.
   matchReceiverTail,
+  // Pure date-freshness verdict — exported for unit tests so the window,
+  // BE-year conversion, and compact-format parsing are pinned.
+  assessSlipTransDate,
   // Exported so server.js (and any future caller) can reuse the same set
   // without re-declaring it. A drift between server.js's local copy and the
   // verifier's would silently mis-classify rejections — a 'UNKNOWN_PROVIDER'

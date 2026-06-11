@@ -539,6 +539,16 @@ function TabNotify({ draft, updatePath }) {
           <Input label="แจ้งเตือนครั้งที่ 2"  type="number" suffix="วันหลังครบกำหนด" value={draft.notify.reminder2} onChange={(v) => updatePath('notify.reminder2', Number(v))} />
           <Input label="แจ้งเตือนสัญญาใกล้หมด" type="number" suffix="วัน" value={draft.notify.contractEndDays} onChange={(v) => updatePath('notify.contractEndDays', Number(v))} />
         </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 12 }}>
+          <Input label="ยกเลิกการจองค้างตรวจอัตโนมัติ" type="number" suffix="วัน (0 = ปิด)"
+            hint="การจองสถานะ รอตรวจ/กำลังตรวจ ที่ค้างเกินกำหนดจะถูกยกเลิกและปล่อยห้องอัตโนมัติ (ค่าเริ่มต้น 14)"
+            value={draft.notify.bookingStaleDays ?? ''}
+            onChange={(v) => updatePath('notify.bookingStaleDays', v === '' ? null : Number(v))} />
+          <Input label="ยกเลิกการจองอนุมัติแล้วแต่ไม่มีสัญญา" type="number" suffix="วัน (0 = ปิด)"
+            hint="การจองที่อนุมัติแล้วแต่ไม่ได้สร้างสัญญาภายในกำหนดจะถูกยกเลิกอัตโนมัติ (ค่าเริ่มต้น 30)"
+            value={draft.notify.bookingApprovedStaleDays ?? ''}
+            onChange={(v) => updatePath('notify.bookingApprovedStaleDays', v === '' ? null : Number(v))} />
+        </div>
       </Card>
 
       <Card>

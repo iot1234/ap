@@ -1,4 +1,4 @@
-const { useEffect, useMemo, useState } = React;
+const { useEffect, useMemo, useRef, useState } = React;
 const PUBLIC_PAY_REFRESH_MS = 15000;
 
 function fmt(n) {
@@ -297,6 +297,9 @@ function App() {
   const [messageKind, setMessageKind] = useState('');
   const [qrFallback, setQrFallback] = useState(null);
   const [qrCopied, setQrCopied] = useState(false);
+  // Once the tenant edits the amount, the 15s refresh must not clobber it —
+  // a ref (not state) so the interval's stale closure still sees the flag.
+  const amountEditedRef = useRef(false);
 
   async function load(silent = false) {
     if (!billId || !token) {
@@ -311,7 +314,11 @@ function App() {
       }).then(readJson);
       setData(next);
       setErr('');
-      if (next.bill) setAmount(String(next.bill.total || ''));
+      // Pre-fill only while untouched: the server matches the submitted
+      // amount against the slip (exact OR principal tier), so re-syncing a
+      // tenant-entered amount to a total that grew a late_fee after they
+      // already transferred would guarantee an AMOUNT_MISMATCH rejection.
+      if (next.bill && !amountEditedRef.current) setAmount(String(next.bill.total || ''));
     } catch (e) {
       if (!silent) setErr(userFacingError(e, 'โหลดข้อมูลชำระเงินไม่สำเร็จ กรุณาติดต่อแอดมิน'));
     } finally {
@@ -361,7 +368,7 @@ function App() {
     const n = Number(amount);
     if (!Number.isFinite(n) || n <= 0) {
       setMessageKind('error');
-      setMessage('จำนวนเงินไม่ถูกต้อง กรุณาติดต่อแอดมิน');
+      setMessage('จำนวนเงินไม่ถูกต้อง กรุณาระบุยอดที่โอนจริงตามสลิป');
       return;
     }
     if (!file) {
@@ -607,7 +614,15 @@ function App() {
             {canUpload ? (
               <div style={card}>
                 <label style={label}>จำนวนเงิน</label>
-                <input style={input} type="number" step="0.01" value={amount} readOnly />
+                <input style={input} type="number" step="0.01" min="0" inputMode="decimal" value={amount} disabled={busy}
+                  onChange={(e) => {
+                    amountEditedRef.current = true;
+                    setAmount(e.target.value);
+                  }} />
+                <div style={{ fontSize: 11.5, color: 'var(--muted)', margin: '6px 0 8px' }}>
+                  ระบบเติมยอดบิลปัจจุบันให้อัตโนมัติ — หากโอนไว้ไม่เท่ายอดนี้
+                  (เช่น โอนก่อนมีค่าปรับล่าช้า) ให้แก้เป็นยอดที่โอนจริงตามสลิป
+                </div>
                 <label style={label}>รูปสลิป</label>
                 <input key={fileInputKey} type="file" accept="image/jpeg,image/png,image/webp" disabled={busy}
                   onChange={(e) => {

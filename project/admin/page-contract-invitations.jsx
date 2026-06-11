@@ -42,6 +42,30 @@ function PageContractInvitations({ setToast, addActivity }) {
   }, [tab]);
   useEffect(() => { refresh(); }, [refresh]);
 
+  // Deep-link "#contract-invitations?open=<id>" (from the contracts page's
+  // "รอตรวจสอบ →" pill or the tenants drawer) opens that invitation's review
+  // modal directly — no second search on this page. Falls back to the
+  // pending tab once if the id isn't in the default (submitted) list.
+  useEffect(() => {
+    if (loading) return;
+    let target = '';
+    try {
+      const raw = String(window.location.hash || '');
+      const q = raw.includes('?') ? raw.slice(raw.indexOf('?') + 1) : '';
+      target = String(new URLSearchParams(q).get('open') || '').trim();
+    } catch { /* malformed hash — ignore */ }
+    if (!target) return;
+    const row = invitations.find((i) => String(i.id) === target);
+    if (row) {
+      setReviewing(row);
+      window.history.replaceState(null, '', '#contract-invitations');
+    } else if (tab === 'submitted') {
+      setTab('pending');
+    } else {
+      window.history.replaceState(null, '', '#contract-invitations');
+    }
+  }, [invitations, loading]);
+
   const STATUS_PILL = {
     submitted: 'warning', pending: 'info',
     approved: 'success', rejected: 'danger',

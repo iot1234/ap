@@ -126,6 +126,13 @@ async function latest(pool, roomId, meterType) {
 async function latestBeforePeriod(pool, roomId, meterType, period) {
   const safePeriod = normalisePeriod(period);
   const bounds = periodBangkokBounds(safePeriod);
+  // Rank candidates by observation time, NOT period-first: record() stamps
+  // every scoped row's reading_at at its period's end (periodBangkokBounds),
+  // so reading_at is comparable across scoped and unscoped rows. Sorting
+  // period-first would let an old scoped baseline permanently outrank newer
+  // unscoped readings, re-billing already-billed consumption every month.
+  // On a same-instant tie the scoped row wins — it's the billing source of
+  // truth for its month.
   const { rows } = await pool.query(
     `SELECT * FROM meter_readings
        WHERE room_id=$1 AND meter_type=$2
@@ -133,7 +140,7 @@ async function latestBeforePeriod(pool, roomId, meterType, period) {
            (period IS NOT NULL AND period < $3)
            OR (period IS NULL AND reading_at < $4::timestamptz)
          )
-       ORDER BY COALESCE(period, '0000-00') DESC, reading_at DESC
+       ORDER BY reading_at DESC, (period IS NOT NULL) DESC
        LIMIT 1`,
     [roomId, meterType, safePeriod, bounds.start.toISOString()]
   );

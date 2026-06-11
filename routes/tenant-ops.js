@@ -1750,16 +1750,12 @@ module.exports = function buildTenantOpsRouter(ctx) {
       // (2) Deposit sanity — at most depositMaxMonths × monthlyRent.
       // Catches the common "typed an extra zero" error that would otherwise
       // produce a contract claiming 50,000฿ deposit on a 5,000฿/mo room.
+      // Enforced INSIDE the transaction below against the DERIVED deposit
+      // that actually lands on the contract — the request's depositAmount is
+      // advisory once the room's own pricing resolves (same rule as
+      // monthlyRent), so validating it here would let an over-cap derived
+      // value through (or hard-block a request whose derived value is fine).
       const depositMaxMonths = Number(tenancy.depositMaxMonths ?? 3);
-      const maxDeposit = depositMaxMonths * Number(monthlyRent);
-      if (!isForced && Number(depositAmount) > maxDeposit) {
-        return res.status(400).json({
-          error: `เงินมัดจำ (${depositAmount}) มากกว่า ${depositMaxMonths} เท่าของค่าเช่ารายเดือน (สูงสุด ${maxDeposit})`,
-          code: 'DEPOSIT_TOO_LARGE',
-          monthlyRent, depositAmount, maxDeposit, depositMaxMonths,
-          hint: 'ตรวจค่าอีกครั้งหรือส่ง { force: true } ถ้าเป็น deposit พิเศษ',
-        });
-      }
 
       // (2.5) Starting meter readings — capture the room's CURRENT meter value
       // at move-in so the first real bill measures THIS tenant's consumption
@@ -2023,9 +2019,23 @@ module.exports = function buildTenantOpsRouter(ctx) {
         const effectiveMonthlyRent = Number.isFinite(resolvedCheckinRentValue) && resolvedCheckinRentValue > 0
           ? resolvedCheckinRentValue
           : Number(monthlyRent);
-        const effectiveDepositAmount = effectiveMonthlyRent > 0
-          ? effectiveMonthlyRent * 2
-          : Number(depositAmount);
+        // Deposit precedence mirrors the rent resolution above: the room's
+        // own configured deposit wins (per-room promo/special — blob
+        // `deposit`/`depositPrice`, rooms_v2 `deposit_price`), then the
+        // 2-months-of-rent convention the admin UI displays, then the
+        // request value (legacy rooms with no resolvable rent). The
+        // request's depositAmount never overrides room pricing — it used to
+        // be validated by the cap guard and then silently replaced with
+        // rent×2, so checkout could "refund" money that was never collected.
+        const roomDepositRaw = blobRoomForRent?.deposit
+          ?? blobRoomForRent?.depositPrice
+          ?? roomV2ForRent?.deposit_price;
+        const roomDepositValue = Number(roomDepositRaw);
+        const effectiveDepositAmount = Number.isFinite(roomDepositValue) && roomDepositValue > 0
+          ? roomDepositValue
+          : (effectiveMonthlyRent > 0
+            ? effectiveMonthlyRent * 2
+            : Number(depositAmount));
         const rentAssessment = pricing.assessContractRent({
           monthlyRent: effectiveMonthlyRent,
           room: blobRoomForRent || roomV2ForRent,
@@ -2044,6 +2054,22 @@ module.exports = function buildTenantOpsRouter(ctx) {
             referenceRent: rentAssessment.referenceRent,
             referenceSource: rentAssessment.referenceSource,
             hint: 'ตรวจว่าพิมพ์ตกศูนย์หรือไม่ ถ้าเป็นงาน migrate ข้อมูลเก่าจริง ๆ ให้ส่ง { force: true } และระบบจะ audit-log',
+          });
+        }
+        // (2 continued) Deposit cap on the value that will actually be
+        // stored. Refusing (instead of storing an over-cap deposit) keeps
+        // the contract honest with the operator's own configured maximum —
+        // fix the room's deposit_price / the cap, or force for specials.
+        const maxDeposit = depositMaxMonths * effectiveMonthlyRent;
+        if (!isForced && effectiveDepositAmount > maxDeposit) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({
+            error: `เงินมัดจำ (${effectiveDepositAmount}) มากกว่า ${depositMaxMonths} เท่าของค่าเช่ารายเดือน (สูงสุด ${maxDeposit})`,
+            code: 'DEPOSIT_TOO_LARGE',
+            monthlyRent: effectiveMonthlyRent,
+            depositAmount: effectiveDepositAmount,
+            maxDeposit, depositMaxMonths,
+            hint: 'ปรับมัดจำของห้อง (deposit_price) หรือเพดาน depositMaxMonths ให้สอดคล้องกัน หรือส่ง { force: true } ถ้าเป็น deposit พิเศษ',
           });
         }
 
@@ -2248,9 +2274,26 @@ module.exports = function buildTenantOpsRouter(ctx) {
         // formatYMD path scheduler/bulk-generate use, so back-dated check-ins
         // produce a due date in the move-in month rather than the current
         // calendar month.
-        const dueDate = moveInMatch
+        let dueDate = moveInMatch
           ? billing.formatYMD(Number(moveInMatch[1]), Number(moveInMatch[2]), dueDay)
           : billing.formatDueDate(dueDay);
+        // Floor: the welcome bill must never be born overdue. A move-in after
+        // the configured due day — or a back-dated check-in (allowed up to
+        // moveInPastDays) — would otherwise mint a bill that tickLateFee
+        // flips to 'overdue' + fines on its next daily tick, a penalty the
+        // tenant never had a chance to avoid. When the period's due day is
+        // already behind the later of move-in/today, give the same 7-day pay
+        // window the checkout closing bill uses.
+        const dueFloorBase = [moveInDate, billing.localTodayYmd()]
+          .filter((s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s || '')))
+          .sort()
+          .pop();
+        if (dueFloorBase && dueDate < dueFloorBase) {
+          const floored = new Date(new Date(`${dueFloorBase}T00:00:00Z`).getTime() + 7 * 86_400_000);
+          dueDate = billing.formatYMD(
+            floored.getUTCFullYear(), floored.getUTCMonth() + 1, floored.getUTCDate()
+          );
+        }
 
         // === Capture starting meter readings for THIS tenancy ================
         // A room reused from a previous tenant already shows a meter value. By
@@ -2274,6 +2317,18 @@ module.exports = function buildTenantOpsRouter(ctx) {
           let prevReading = null;
           try { prevReading = await meter.latestBeforePeriod(client, roomId, mt, period); }
           catch (err) { if (err.code !== '42P01') throw err; }
+          // Guard against the room's LAST reading, not just last-before-period:
+          // a reading already recorded in the move-in month (e.g. by the
+          // previous tenant's checkout) is invisible to latestBeforePeriod, so
+          // a too-low baseline would pass and record()'s same-period upsert
+          // would silently overwrite (destroy) it. Compare against whichever
+          // known reading is highest — meters only count up.
+          let latestReading = null;
+          try { latestReading = await meter.latest(client, roomId, mt); }
+          catch (err) { if (err.code !== '42P01') throw err; }
+          const guardReading = [prevReading, latestReading]
+            .filter((r) => r && Number.isFinite(Number(r.reading)))
+            .sort((a, b) => Number(b.reading) - Number(a.reading))[0] || null;
           if (startVal == null) {
             if (meterStartPolicy === 'required' && !isForced) {
               await client.query('ROLLBACK');
@@ -2287,13 +2342,13 @@ module.exports = function buildTenantOpsRouter(ctx) {
             meterStartResult[mt] = { skipped: 'not_provided' };
             continue;
           }
-          if (prevReading && Number(prevReading.reading) > startVal && !isForced) {
+          if (guardReading && Number(guardReading.reading) > startVal && !isForced) {
             await client.query('ROLLBACK');
             return res.status(409).json({
-              error: `เลขมิเตอร์${label}ตั้งต้น (${startVal}) น้อยกว่าเลขล่าสุดของห้อง (${prevReading.reading}) — มิเตอร์ไม่ควรถอยหลัง`,
+              error: `เลขมิเตอร์${label}ตั้งต้น (${startVal}) น้อยกว่าเลขล่าสุดของห้อง (${guardReading.reading}) — มิเตอร์ไม่ควรถอยหลัง`,
               code: 'METER_START_BACKWARD',
               meterType: mt,
-              lastReading: Number(prevReading.reading),
+              lastReading: Number(guardReading.reading),
               hint: 'ตรวจเลขที่กรอกอีกครั้ง — ถ้ามิเตอร์ถูกเปลี่ยน/รีเซ็ตจริง ส่ง force=true',
             });
           }
@@ -2365,20 +2420,63 @@ module.exports = function buildTenantOpsRouter(ctx) {
           ? [{ label: `ค่าส่วนกลาง${flatFrac < 1 ? ' (ตามวันที่อยู่)' : ''}`, amount: commonAmt }]
           : [];
         const welcomeSubtotal = r2(welcomeRent + wifiAmt + waterAmt + elecAmt + commonAmt);
+        // VAT parity with billing.buildBill (R1): rent + utilities + wifi +
+        // common fee are the vatable revenue stream, so the move-in month
+        // must carry VAT exactly like every recurring bill — otherwise a
+        // VAT-registered operator under-collects on every check-in.
+        const welcomeVat = flags?.vat?.enabled
+          ? r2(welcomeSubtotal * (Number(flags.vat.ratePct || 0) / 100))
+          : 0;
+        const welcomeTotal = r2(welcomeSubtotal + welcomeVat);
         // Skip a zero-total welcome bill (e.g. free first month) — the bills
         // CHECK requires total > 0, and there's nothing to collect anyway.
+        let welcomeBillSkipped = null;
         if (welcomeSubtotal > 0) {
-          await client.query(
-            `INSERT INTO bills
-               (bill_no, tenant_id, room_id, period, rent,
-                water_amount, elec_amount, wifi, other,
-                subtotal, vat, late_fee, total, due_date, status)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, 0, 0, $10, $11, 'pending')
-             ON CONFLICT (bill_no) DO NOTHING`,
-            [billNo, id, roomId, period, welcomeRent,
-             waterAmt, elecAmt, wifiAmt, JSON.stringify(welcomeOther),
-             welcomeSubtotal, dueDate]
+          // A same-month checkout already left this tenant a non-void bill
+          // for (room, period) — e.g. the '-X' closing bill when the tenant
+          // changes their mind and re-checks in. A fresh bill_no does NOT
+          // escape uq_bills_room_period_tenant_active (room_id, period,
+          // tenant_id), so inserting would 23505 and roll back the whole
+          // check-in. Skip the welcome bill instead — the period is already
+          // billed for this tenant — and surface that in the response.
+          const periodBill = await client.query(
+            `SELECT bill_no FROM bills
+               WHERE room_id=$1 AND period=$2 AND tenant_id=$3
+                 AND deleted_at IS NULL AND status<>'void'
+               LIMIT 1
+               FOR UPDATE`,
+            [roomId, period, id]
           );
+          if (periodBill.rows.length) {
+            welcomeBillSkipped = {
+              reason: 'period_already_billed',
+              existingBillNo: periodBill.rows[0].bill_no,
+            };
+          } else {
+            const wIns = await client.query(
+              `INSERT INTO bills
+                 (bill_no, tenant_id, room_id, period, rent,
+                  water_amount, elec_amount, wifi, other,
+                  subtotal, vat, late_fee, total, due_date, status)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, 0, $12, $13, 'pending')
+               ON CONFLICT (bill_no) DO NOTHING
+               RETURNING id`,
+              [billNo, id, roomId, period, welcomeRent,
+               waterAmt, elecAmt, wifiAmt, JSON.stringify(welcomeOther),
+               welcomeSubtotal, welcomeVat, welcomeTotal, dueDate]
+            );
+            // The period pre-check above ignores VOID bills, but a void bill
+            // still owns its bill_no — the ON CONFLICT skip would otherwise
+            // leave the tenant with NO first bill and nobody told. Surface
+            // it the same way as period_already_billed so the admin sees
+            // "ออกบิลแรกเองที่หน้า บิล" instead of assuming it exists.
+            if (wIns.rowCount === 0) {
+              welcomeBillSkipped = {
+                reason: 'bill_no_conflict',
+                existingBillNo: billNo,
+              };
+            }
+          }
         }
 
         await client.query('COMMIT');
@@ -2415,7 +2513,11 @@ module.exports = function buildTenantOpsRouter(ctx) {
             `ห้อง: ${roomId} · เข้าพัก: ${moveInDate}`,
             `ค่าเช่า: ฿${Number(effectiveMonthlyRent).toLocaleString('th-TH')}/เดือน · มัดจำ: ฿${Number(effectiveDepositAmount).toLocaleString('th-TH')}`,
             `สัญญา: ${contractNo}${endDate ? ` (ถึง ${endDate})` : ' (ไม่กำหนดวันสิ้นสุด)'}`,
-            `บิลแรก: ${billNo} รอบ ${period} ครบกำหนด ${dueDate}`,
+            welcomeBillSkipped
+              ? (welcomeBillSkipped.reason === 'bill_no_conflict'
+                ? `⚠️ บิลแรกไม่ถูกสร้าง — เลขบิล ${welcomeBillSkipped.existingBillNo} ชนกับบิลที่ถูกยกเลิก (void) ไว้ · ออกบิลเองที่ /admin#billing`
+                : `บิลแรก: ใช้บิลเดิม ${welcomeBillSkipped.existingBillNo} (รอบ ${period} ออกบิลแล้ว)`)
+              : `บิลแรก: ${billNo} รอบ ${period} ครบกำหนด ${dueDate}`,
             `ดำเนินการโดย: ${req.session.user.username}`,
           ].join('\n'),
         }).catch(() => {});
@@ -2435,7 +2537,10 @@ module.exports = function buildTenantOpsRouter(ctx) {
                FROM tenants WHERE id=$1 AND deleted_at IS NULL`,
             [id]
           );
-          if (tQ.rows.length) {
+          // Skip when no welcome bill was created (period already billed by a
+          // same-month closing bill) — don't tell the tenant a bill number
+          // that doesn't exist.
+          if (tQ.rows.length && !welcomeBillSkipped) {
             const amtStr = Number(welcomeRent).toLocaleString(
               'th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 }
             );
@@ -2465,7 +2570,11 @@ module.exports = function buildTenantOpsRouter(ctx) {
           console.warn('[checkin] welcome notify outer error:', err.message);
         }
 
-        res.json({ ok: true, tenant, contractNo, billNo });
+        res.json({
+          ok: true, tenant, contractNo,
+          billNo: welcomeBillSkipped ? null : billNo,
+          welcomeBillSkipped,
+        });
       } catch (err) {
         await client.query('ROLLBACK').catch(() => {});
         console.error('checkin error:', err);
@@ -2504,6 +2613,10 @@ module.exports = function buildTenantOpsRouter(ctx) {
       // Admin can pass generateClosingBill:false on the last-day-of-month
       // case where the regular monthly bill already covers the full period.
       const wantClosingBill = req.body.generateClosingBill !== false;
+      // Feature flags drive VAT on the closing bill (parity with buildBill).
+      let flags;
+      try { flags = await features.load(pool); }
+      catch { flags = {}; }
 
       const client = await pool.connect();
       try {
@@ -2535,21 +2648,39 @@ module.exports = function buildTenantOpsRouter(ctx) {
         // deposit_returned is CLAMPED to the contract's own deposit (LEAST) so a
         // typo'd over-refund (finalDepositReturn > deposit) can't push the
         // "deposit retained = deposit − returned" reconciliation negative.
+        // The refund lands on exactly ONE contract: force-checkin can leave a
+        // tenant with two active contracts (room migration), and stamping the
+        // same payout on every row double-counts it in deposit-retained
+        // reconciliation. Prefer the contract for the room the tenant
+        // currently occupies; fall back to the most recent tenancy.
+        const refundTargetQ = await client.query(
+          `SELECT id FROM contracts
+             WHERE tenant_id=$1 AND status='active'
+             ORDER BY (room_id = $2) DESC NULLS LAST,
+                      start_date DESC NULLS LAST, id DESC
+             LIMIT 1
+             FOR UPDATE`,
+          [id, tenantCurrentRoom]
+        );
+        const refundContractId = refundTargetQ.rows[0] ? Number(refundTargetQ.rows[0].id) : null;
         const contractRes = await client.query(
           `UPDATE contracts SET status='ended', end_date=CURRENT_DATE,
               closed_at = COALESCE(closed_at, NOW()),
               closed_by = $4,
               closed_reason = $3,
               closed_type = 'tenant_checkout',
-              deposit_returned = CASE WHEN $2::numeric IS NOT NULL THEN LEAST($2::numeric, deposit) ELSE NULL END,
-              deposit_returned_at = CASE WHEN $2::numeric IS NOT NULL THEN NOW() ELSE NULL END,
-              deposit_return_reason = $3
+              deposit_returned = CASE WHEN $2::numeric IS NOT NULL AND id=$5 THEN LEAST($2::numeric, deposit) ELSE NULL END,
+              deposit_returned_at = CASE WHEN $2::numeric IS NOT NULL AND id=$5 THEN NOW() ELSE NULL END,
+              deposit_return_reason = CASE WHEN id=$5 THEN $3 ELSE NULL END
              WHERE tenant_id=$1 AND status='active'
            RETURNING id, contract_no, room_id, start_date, monthly_rent, deposit, deposit_returned, discount_pct`,
-          [id, refund, reason, req.session.user.username]
+          [id, refund, reason, req.session.user.username, refundContractId]
         );
         const closedContracts = contractRes.rows || [];
-        const closedContract = closedContracts[0] || null;
+        // RETURNING order is unspecified — pin the refund-bearing contract as
+        // the primary one so the response/closing-bill use the right room.
+        const closedContract = closedContracts.find((c) => Number(c.id) === refundContractId)
+          || closedContracts[0] || null;
         // Report the refund that was ACTUALLY persisted (clamped, and only when
         // a contract was really closed this call) — not the raw request body. A
         // double-submitted checkout closes 0 contracts the second time, so it
@@ -2697,27 +2828,140 @@ module.exports = function buildTenantOpsRouter(ctx) {
           throw err;
         });
 
-        // Pro-rate closing bill: rent × (days_lived_this_period / days_in_month).
+        // Asia/Bangkok local-time components — checkout at 00:30 ICT
+        // (UTC 17:30 prev day) on a UTC-deployed Railway server would
+        // otherwise read the previous day, off-by-one'ing pro-rate +
+        // potentially picking the wrong period at month boundaries.
+        // The same pattern as bills (Asia/Bangkok offset +07:00 baked in).
+        // Hoisted above the meter block — final readings are stamped with
+        // the same period the closing bill uses.
+        const utc = new Date();
+        const bkk = new Date(utc.getTime() + 7 * 3600 * 1000);
+        const ty = bkk.getUTCFullYear();
+        const tm = bkk.getUTCMonth() + 1;
+        const td = bkk.getUTCDate();
+        const period = `${ty}-${String(tm).padStart(2, '0')}`;
+
+        const billingRoom = closedContract && closedContract.room_id
+          ? String(closedContract.room_id)
+          : oldRoom;
+
+        // Config + room object for utility rates / flat-mode detection. The
+        // room release above only touched status/tenant, so overrides and
+        // flat-amount fields are still intact here.
+        let cfgVal = null;
+        let billRoomObj = {};
+        if (billingRoom) {
+          try {
+            const { rows: cfgR } = await client.query(
+              `SELECT value FROM app_data WHERE key='baankarn_config_v1' LIMIT 1`
+            );
+            cfgVal = cfgR[0]?.value || null;
+          } catch { /* config blob missing — fall back to defaults */ }
+          try {
+            const { rows: roomR } = await client.query(
+              `SELECT value->$1 AS room FROM app_data WHERE key='baankarn_rooms_v1' LIMIT 1`,
+              [billingRoom]
+            );
+            billRoomObj = roomR[0]?.room || {};
+          } catch { /* rooms blob missing — treat as no overrides */ }
+        }
+        const utilCfg = (cfgVal && cfgVal.utilities) || {};
+
+        // === Final meter readings for THIS tenancy ==========================
+        // Mirror of check-in's baseline capture: the move-out reading closes
+        // the consumption window (lastReading → endReading = the units this
+        // tenant still owes). Without it the final partial period is never
+        // billed — the next tenant's move-in baseline silently absorbs it.
+        // Recorded inside the same transaction so a failed checkout doesn't
+        // leave orphan readings. Flat-mode utilities skip (not metered).
+        const allowMeterRollback = req.body.allowMeterRollback === true;
+        const meterEndInput = {
+          water: req.body.waterEndReading != null ? Number(req.body.waterEndReading) : null,
+          elec: req.body.elecEndReading != null ? Number(req.body.elecEndReading) : null,
+        };
+        const meterFinal = { water: null, elec: null };
+        const meterCharges = { water: 0, elec: 0 };
+        if (billingRoom) {
+          for (const mt of ['water', 'elec']) {
+            const label = mt === 'water' ? 'น้ำ' : 'ไฟ';
+            if (billing.isFlatUtilityConfigured(billRoomObj, mt)) {
+              meterFinal[mt] = { skipped: 'flat_mode' };
+              continue;
+            }
+            const endVal = meterEndInput[mt];
+            let prevRow = null;
+            try { prevRow = await meter.latest(client, billingRoom, mt); }
+            catch (err) { if (err.code !== '42P01') throw err; }
+            if (endVal == null) {
+              meterFinal[mt] = {
+                skipped: 'not_provided',
+                lastReading: prevRow ? Number(prevRow.reading) : null,
+              };
+              continue;
+            }
+            if (prevRow && Number(prevRow.reading) > endVal && !allowMeterRollback) {
+              await client.query('ROLLBACK');
+              return res.status(409).json({
+                error: `เลขมิเตอร์${label}สุดท้าย (${endVal}) น้อยกว่าเลขล่าสุดของห้อง (${prevRow.reading}) — มิเตอร์ไม่ควรถอยหลัง`,
+                code: 'METER_END_BACKWARD',
+                meterType: mt,
+                lastReading: Number(prevRow.reading),
+                hint: 'ตรวจเลขที่กรอกอีกครั้ง — ถ้ามิเตอร์ถูกเปลี่ยน/รีเซ็ตจริง ส่ง allowMeterRollback=true',
+              });
+            }
+            try {
+              await meter.record(client, {
+                roomId: billingRoom, meterType: mt, reading: endVal,
+                period, source: 'checkout', createdBy: req.session.user.username,
+                // Backward readings already passed the explicit guard above.
+                allowRollback: true,
+              });
+            } catch (err) {
+              await client.query('ROLLBACK');
+              console.error(`[checkout] meter end (${mt}) failed:`, err.message);
+              return res.status(500).json({
+                error: `บันทึกเลขมิเตอร์${label}สุดท้ายไม่สำเร็จ — ลองใหม่`,
+                code: 'METER_END_STORE_FAILED',
+              });
+            }
+            const prevNum = prevRow ? Number(prevRow.reading) : null;
+            const units = prevNum != null
+              ? Math.max(0, Math.round((endVal - prevNum) * 100) / 100)
+              : 0;
+            const globalRate = mt === 'water'
+              ? Number(utilCfg.waterRate ?? 18)
+              : Number(utilCfg.elecRate ?? 8);
+            const overrideRaw = mt === 'water'
+              ? (billRoomObj.waterRateOverride ?? billRoomObj.water_rate_override)
+              : (billRoomObj.elecRateOverride ?? billRoomObj.elec_rate_override);
+            const overrideNum = Number(overrideRaw);
+            const rate = Number.isFinite(overrideNum) && overrideNum > 0
+              ? overrideNum
+              : (Number.isFinite(globalRate) && globalRate > 0 ? globalRate : 0);
+            const amount = Math.round(units * rate * 100) / 100;
+            meterCharges[mt] = amount;
+            meterFinal[mt] = { reading: endVal, prev: prevNum, units, rate, amount, stored: true };
+          }
+        }
+        // Metered utilities the admin left blank — surfaced in the response,
+        // owner alert, and audit so "ลืมจดมิเตอร์" is loud instead of silent
+        // lost revenue.
+        const meterSkippedTypes = ['water', 'elec'].filter(
+          (mt) => meterFinal[mt] && meterFinal[mt].skipped === 'not_provided'
+        );
+
+        // Pro-rate closing bill: rent × (days_lived_this_period / days_in_month)
+        // + final metered consumption + prorated flat charges (wifi / common
+        // fee / flat-mode utilities), mirroring the welcome bill's treatment
+        // of flat charges so move-in and move-out months are symmetric.
         // Only generate when there's no monthly bill already covering this
         // period — the partial-unique index uq_bills_room_period_tenant_active
         // would block a duplicate anyway, but we want a clean result not
         // a 23505 error.
         let closingBill = null;
-        const billingRoom = closedContract && closedContract.room_id
-          ? String(closedContract.room_id)
-          : oldRoom;
+        let closingBillDetail = null;
         if (wantClosingBill && billingRoom && closedContract) {
-          // Asia/Bangkok local-time components — checkout at 00:30 ICT
-          // (UTC 17:30 prev day) on a UTC-deployed Railway server would
-          // otherwise read the previous day, off-by-one'ing pro-rate +
-          // potentially picking the wrong period at month boundaries.
-          // The same pattern as bills (Asia/Bangkok offset +07:00 baked in).
-          const utc = new Date();
-          const bkk = new Date(utc.getTime() + 7 * 3600 * 1000);
-          const ty = bkk.getUTCFullYear();
-          const tm = bkk.getUTCMonth() + 1;
-          const td = bkk.getUTCDate();
-          const period = `${ty}-${String(tm).padStart(2, '0')}`;
           // Skip only if this tenant already has a closing bill for the
           // room+period. Another tenant can legitimately have a bill for the
           // same room+period after a mid-month move.
@@ -2742,6 +2986,34 @@ module.exports = function buildTenantOpsRouter(ctx) {
             ) / 100;
             const billNo = billing.makeBillNo(`${billingRoom}-X`, period, { tenantId: id });
             const dueDate = billing.formatYMD(ty, tm, Math.min(daysInMonth, daysLived + 7));
+            // Utility charges for the final partial month, mirroring the
+            // welcome bill: metered water/elec use the consumption computed
+            // from the final readings above (full charge — usage is usage);
+            // flat-mode utilities + wifi + common fee are prorated by days
+            // lived so the move-out month is charged the same way the
+            // move-in month was.
+            const r2 = (n) => Math.round(n * 100) / 100;
+            const pickNum = (...vals) => {
+              for (const v of vals) {
+                const n = Number(v);
+                if (Number.isFinite(n) && n > 0) return n;
+              }
+              return 0;
+            };
+            const closingWater = billing.isFlatUtilityConfigured(billRoomObj, 'water')
+              ? r2(pickNum(billRoomObj.waterFlatAmount, billRoomObj.water_flat_amount) * fraction)
+              : meterCharges.water;
+            const closingElec = billing.isFlatUtilityConfigured(billRoomObj, 'elec')
+              ? r2(pickNum(billRoomObj.elecFlatAmount, billRoomObj.elec_flat_amount) * fraction)
+              : meterCharges.elec;
+            const closingWifi = r2(pickNum(
+              billRoomObj.wifiOverride, billRoomObj.wifi_override,
+              billRoomObj.wifi, utilCfg.wifi
+            ) * fraction);
+            const closingCommon = r2(pickNum(
+              billRoomObj.commonFeeOverride, billRoomObj.common_fee_override,
+              billRoomObj.commonFee, billRoomObj.common_fee, utilCfg.commonFee
+            ) * fraction);
             // Carried late fees are folded onto the closing bill as PRINCIPAL
             // (inside subtotal), NOT into the late_fee column. tickLateFee
             // derives its recomputable penalty from `base = total - late_fee`,
@@ -2750,12 +3022,28 @@ module.exports = function buildTenantOpsRouter(ctx) {
             // subtotal preserves it, and late_fee=0 still lets the closing bill
             // accrue its own late fee later if it goes unpaid.
             const closingLateFee = carriedLateFeeTotal > 0 ? carriedLateFeeTotal : 0;
-            const closingSubtotal = Math.round((proRatedRent + closingLateFee) * 100) / 100;
-            const closingTotal = closingSubtotal;
+            const closingSubtotal = r2(
+              proRatedRent + closingWater + closingElec + closingWifi + closingCommon + closingLateFee
+            );
+            // VAT parity with billing.buildBill (R1): the final partial month
+            // carries the same rent/utility/wifi/common VAT as every recurring
+            // bill. The carried late fee is a penalty (ค่าปรับ) — outside the
+            // Thai VAT base — even though it rides inside subtotal as principal.
+            const closingVatBase = r2(
+              proRatedRent + closingWater + closingElec + closingWifi + closingCommon
+            );
+            const closingVat = flags?.vat?.enabled
+              ? r2(closingVatBase * (Number(flags.vat.ratePct || 0) / 100))
+              : 0;
+            const closingTotal = r2(closingSubtotal + closingVat);
             // The prorated rent already lives in the rent column, so we do NOT
             // add a duplicate 'pro-rate' line (it double-counted rent in the
-            // itemised PDF). Only the carried fee gets its own display line.
+            // itemised PDF). Only charges without a dedicated column (common
+            // fee, carried late fee) get display lines.
             const otherLines = [];
+            if (closingCommon > 0) {
+              otherLines.push({ label: 'ค่าส่วนกลาง (ตามวันที่อยู่)', amount: closingCommon, daysLived, daysInMonth });
+            }
             if (closingLateFee > 0) {
               otherLines.push({ label: 'ค่าปรับล่าช้าค้างยกมา', amount: closingLateFee, daysLived, daysInMonth });
             }
@@ -2769,15 +3057,31 @@ module.exports = function buildTenantOpsRouter(ctx) {
               try {
                 const ins = await client.query(
                   `INSERT INTO bills
-                     (bill_no, tenant_id, room_id, period, rent, subtotal, late_fee, total, due_date, status,
+                     (bill_no, tenant_id, room_id, period, rent,
+                      water_amount, elec_amount, wifi,
+                      subtotal, vat, late_fee, total, due_date, status,
                       other)
-                   VALUES ($1,$2,$3,$4,$5,$8,$9,$10,$6,'pending',$7::jsonb)
+                   VALUES ($1,$2,$3,$4,$5,$11,$12,$13,$8,$14,$9,$10,$6,'pending',$7::jsonb)
                    ON CONFLICT (bill_no) DO NOTHING
                    RETURNING id, bill_no, total, due_date`,
                   [billNo, id, billingRoom, period, proRatedRent, dueDate,
-                   JSON.stringify(otherLines), closingSubtotal, 0, closingTotal]
+                   JSON.stringify(otherLines), closingSubtotal, 0, closingTotal,
+                   closingWater, closingElec, closingWifi, closingVat]
                 );
                 closingBill = ins.rows[0] || null;
+                if (closingBill) {
+                  closingBillDetail = {
+                    rent: proRatedRent,
+                    water: closingWater,
+                    elec: closingElec,
+                    wifi: closingWifi,
+                    common: closingCommon,
+                    vat: closingVat,
+                    carriedLateFee: closingLateFee,
+                    daysLived,
+                    daysInMonth,
+                  };
+                }
                 // Only deactivate the carried charges once they are safely folded
                 // into a created closing bill (don't lose them on an ON CONFLICT
                 // skip). If no closing bill was created, they stay active so admin
@@ -2839,8 +3143,22 @@ module.exports = function buildTenantOpsRouter(ctx) {
             cardsRevoked: revokedCards.rows.map((c) => c.card_id),
             recurringDeactivated: deactivatedRecurring.rows.map((rc) => rc.label),
             closingBill: closingBill ? closingBill.bill_no : null,
+            closingBillDetail,
+            meterFinal,
+            meterSkipped: meterSkippedTypes,
             outstandingTotal,
             outstandingBillCount: outstandingBills.length });
+        // Per-entity audit rows for the cascade side effects, so the access
+        // card / recurring charge histories answer "when was this revoked /
+        // stopped, and why" without digging through tenant.checkout details.
+        for (const card of revokedCards.rows) {
+          audit(req, 'access_card.revoke', 'access_card', String(card.card_id || card.id),
+            { tenantId: id, reason: 'auto:checkout' });
+        }
+        for (const rc of deactivatedRecurring.rows) {
+          audit(req, 'recurring_charge.deactivate', 'recurring_charge', String(rc.id),
+            { tenantId: id, label: rc.label, frequency: rc.frequency, reason: 'auto:checkout' });
+        }
 
         // Move-out event for the whole admin team (owner + every bound admin
         // recipient): which room freed up, deposit settlement, and whether
@@ -2860,6 +3178,18 @@ module.exports = function buildTenantOpsRouter(ctx) {
                 : 'ไม่ได้บันทึกการคืนมัดจำในระบบ',
               closingBill
                 ? `บิลปิดบัญชี: ${closingBill.bill_no} ฿${Number(closingBill.total).toLocaleString('th-TH', { minimumFractionDigits: 2 })}`
+                : null,
+              closingBillDetail && (closingBillDetail.water > 0 || closingBillDetail.elec > 0)
+                ? `  • ค่าน้ำงวดสุดท้าย ฿${Number(closingBillDetail.water).toLocaleString('th-TH')} · ค่าไฟงวดสุดท้าย ฿${Number(closingBillDetail.elec).toLocaleString('th-TH')}`
+                : null,
+              meterFinal.water && meterFinal.water.stored
+                ? `มิเตอร์น้ำสุดท้าย: ${meterFinal.water.reading} (ใช้ ${meterFinal.water.units} หน่วย)`
+                : null,
+              meterFinal.elec && meterFinal.elec.stored
+                ? `มิเตอร์ไฟสุดท้าย: ${meterFinal.elec.reading} (ใช้ ${meterFinal.elec.units} หน่วย)`
+                : null,
+              meterSkippedTypes.length > 0
+                ? `⚠️ ไม่ได้จดเลขมิเตอร์${meterSkippedTypes.map((mt) => (mt === 'water' ? 'น้ำ' : 'ไฟ')).join('/')}ตอนเช็คเอาท์ — ค่า${meterSkippedTypes.map((mt) => (mt === 'water' ? 'น้ำ' : 'ไฟ')).join('/')}งวดสุดท้ายไม่ได้เรียกเก็บ`
                 : null,
               outstandingBills.length > 0
                 ? `⚠️ ค้างชำระรวม: ฿${outstandingTotal.toLocaleString('th-TH', { minimumFractionDigits: 2 })} (${outstandingBills.length} บิล) — ติดตามเก็บก่อนคืนส่วนต่าง`
@@ -2900,6 +3230,16 @@ module.exports = function buildTenantOpsRouter(ctx) {
             }
             lines.push(``);
             lines.push(`📋 บิลปิดบัญชี: ${closingBill.bill_no}`);
+            if (closingBillDetail) {
+              const fmtB = (n) => Number(n).toLocaleString('th-TH', { minimumFractionDigits: 2 });
+              lines.push(`  ค่าเช่า (${closingBillDetail.daysLived}/${closingBillDetail.daysInMonth} วัน): ฿${fmtB(closingBillDetail.rent)}`);
+              if (closingBillDetail.water > 0) lines.push(`  ค่าน้ำ: ฿${fmtB(closingBillDetail.water)}`);
+              if (closingBillDetail.elec > 0) lines.push(`  ค่าไฟ: ฿${fmtB(closingBillDetail.elec)}`);
+              if (closingBillDetail.wifi > 0) lines.push(`  ค่าอินเทอร์เน็ต: ฿${fmtB(closingBillDetail.wifi)}`);
+              if (closingBillDetail.common > 0) lines.push(`  ค่าส่วนกลาง: ฿${fmtB(closingBillDetail.common)}`);
+              if (closingBillDetail.carriedLateFee > 0) lines.push(`  ค่าปรับค้างยกมา: ฿${fmtB(closingBillDetail.carriedLateFee)}`);
+              if (closingBillDetail.vat > 0) lines.push(`  ภาษีมูลค่าเพิ่ม: ฿${fmtB(closingBillDetail.vat)}`);
+            }
             lines.push(`ยอด: ฿${Number(closingBill.total).toLocaleString('th-TH', { minimumFractionDigits: 2 })}`);
             lines.push(`ครบกำหนด: ${closingBill.due_date}`);
           }
@@ -2929,6 +3269,9 @@ module.exports = function buildTenantOpsRouter(ctx) {
           invitationsRevoked: revokedInvitations.rowCount || 0,
           cardsRevoked: revokedCards.rowCount,
           closingBill,
+          closingBillDetail,
+          meterFinal,
+          meterSkipped: meterSkippedTypes,
           outstandingBills,
           outstandingTotal,
         });

@@ -59,6 +59,8 @@ const SCHEDULER_JOB_IMPACT = Object.freeze({
   'orphan-slip-prune': 'ไฟล์สลิปกำพร้าอาจยังไม่ถูกลบออกจาก storage',
   'payment-reminder': 'ผู้เช่าอาจไม่ได้รับ reminder ก่อนวันครบกำหนดชำระ',
   'pending-slip-alert': 'สลิปที่ค้างคิวตรวจนานอาจไม่ถูกแจ้งเตือนถึงเจ้าของ',
+  'invitation-expiry-warn': 'ผู้เช่า/แอดมินอาจไม่ได้รับเตือนว่าลิงก์กรอกสัญญาใกล้หมดอายุ',
+  'booking-stale': 'การจองที่ค้างนานอาจยังไม่ถูกยกเลิกอัตโนมัติและห้องยังถูกล็อกไว้',
   'anomaly': 'health/anomaly alert รอบนี้อาจไม่ทำงาน',
 });
 
@@ -215,7 +217,9 @@ async function tickAutoBackup(pool, flags, now, state) {
   if (!flags.autoBackup || !flags.autoBackup.enabled) return;
   const todayKey = localDateKey(now);
   if (state.lastBackup === todayKey) return;
-  if (now.getUTCHours() !== Number(flags.autoBackup.hourUtc || 19)) return;
+  // `?? 19` not `|| 19` — hourUtc=0 (midnight UTC = 07:00 ICT) is a legal
+  // configured value (features.js validates 0-23) and must not fall back.
+  if (now.getUTCHours() !== Number(flags.autoBackup.hourUtc ?? 19)) return;
   try {
     // Lazy-require the backup script as a module
     // eslint-disable-next-line global-require
@@ -340,7 +344,11 @@ async function tickLateFee(pool, flags, now, state) {
     // admin review. The validatePaymentAmount two-tier check would catch
     // this on verify, but skipping the fee here keeps bill.total stable
     // during the review window (better UX in the admin queue).
-    if (lateFeeEnabled && ratePctMonth > 0 && flipped.length) {
+    // Gate on the flag only — NOT `ratePctMonth > 0`. A global rate of 0
+    // ("no late fee by default") must not disable contract-locked rates:
+    // resolveBillRate prefers the snapshot rate per bill, and computeLateFee
+    // already returns 0 when the effective rate resolves to 0.
+    if (lateFeeEnabled && flipped.length) {
       for (const b of flipped) {
         if (Number(b.pending_slip_count) > 0) {
           // Audit the skip so admin can see WHY a bill flipped overdue
@@ -418,7 +426,9 @@ async function tickLateFee(pool, flags, now, state) {
     // prior day. Each tick recomputes from principal × monthsOver(today)
     // — idempotent and self-correcting (re-runs converge to the right
     // amount).
-    if (lateFeeEnabled && ratePctMonth > 0) {
+    // Same flag-only gate as Phase A — contract-locked rates keep accruing
+    // even when the global ratePctPerMonth is 0.
+    if (lateFeeEnabled) {
       try {
         const flippedIds = new Set(flipped.map((f) => Number(f.id)));
         // R2-followup — same FAIRNESS GUARD as Phase A: don't grow late_fee
@@ -527,6 +537,13 @@ async function tickLateFee(pool, flags, now, state) {
       // extra "another bill of yours is overdue" alert at the same hour
       // is redundant and noisy. Collect those tenant ids up front and
       // skip them in the per-bill loop below.
+      //
+      // The EXISTS clause matters: access-sync only notifies tenants whose
+      // UPDATE matched an ACTIVE card. A tenant whose cards were already
+      // revoked on a previous day (the steady state for long-delinquent
+      // tenants) — or who has no card at all — produces zero UPDATE rows
+      // there, so suppressing the per-bill alert for them means they get
+      // NEITHER message and never learn the new bill went overdue.
       const tenantsGettingAccessAlert = new Set();
       if (flags?.accessControl?.enabled && flags?.accessControl?.requirePaymentForCard) {
         const rawThr = Number(flags.accessControl.overdueDaysThreshold);
@@ -537,6 +554,11 @@ async function tickLateFee(pool, flags, now, state) {
               WHERE status='overdue' AND tenant_id IS NOT NULL
                 AND deleted_at IS NULL AND paid_at IS NULL
                 AND due_date <= CURRENT_DATE - ($1::int * INTERVAL '1 day')
+                AND EXISTS (
+                  SELECT 1 FROM access_cards ac
+                   WHERE ac.tenant_id = bills.tenant_id
+                     AND ac.status = 'active'
+                )
           `, [thr]);
           for (const r of dq.rows) tenantsGettingAccessAlert.add(Number(r.tenant_id));
         } catch { /* fall back to sending the per-bill alert */ }
@@ -647,6 +669,25 @@ async function tickRoomStatusSync(pool, _flags, now, state) {
     console.error('[scheduler] roomStatus sync failed:', err.message);
     return { error: err.message };
   }
+}
+
+// Due date for an auto-generated bill: the resolved due day in the CURRENT
+// month, rolled to the NEXT month when that day already passed ("bill on the
+// 20th, due the 1st" means the 1st of the FOLLOWING month). Without the roll
+// the bill is born overdue — the next tickLateFee flips it and charges a fee
+// computed from days before the bill even existed. Same-day (due day ==
+// generation day) stays in this month: "due today" is a valid window and the
+// payment reminder handles it. `due` is resolveBillDueDay's result (day 1-28,
+// so the rolled month always has the day); formatYMD stays the only date
+// constructor (timezone-safe — no Date→toISOString round-trip).
+function billGenDueDateFor(now, due) {
+  if (due.day < now.getDate()) {
+    let y = now.getFullYear();
+    let m = now.getMonth() + 2;            // roll into next month
+    if (m > 12) { m = 1; y += 1; }
+    return billing.formatYMD(y, m, due.day);
+  }
+  return billing.formatYMD(now.getFullYear(), now.getMonth() + 1, due.day);
 }
 
 async function tickBillGen(pool, flags, now, state) {
@@ -854,14 +895,18 @@ async function tickBillGen(pool, flags, now, state) {
         const cq = await pool.query(
           // contract_due_day: the due day the tenant SIGNED. Only locked
           // contracts carry the snapshot — drafts must not override config.
+          // start_date filter: a queued RENEWAL contract (created ahead of
+          // time, starting after the old one ends) must not hijack this
+          // period's rent/discount/due-day before it actually begins.
           `SELECT id, monthly_rent, discount_pct, status, start_date,
                   CASE WHEN locked_at IS NOT NULL
                        THEN (terms_template_snapshot->'financials'->>'dueDay')::numeric
                   END AS contract_due_day
              FROM contracts
              WHERE room_id=$1 AND status='active' AND deleted_at IS NULL
+               AND (start_date IS NULL OR to_char(start_date, 'YYYY-MM') <= $2)
              ORDER BY start_date DESC LIMIT 1`,
-          [room.id]
+          [room.id, period]
         );
         if (cq.rows[0]) {
           activeContract = cq.rows[0];
@@ -901,12 +946,13 @@ async function tickBillGen(pool, flags, now, state) {
         });
         continue;
       }
-      // Per-room due date — signed day > building config > 15.
+      // Per-room due date — signed day > building config > 15. Rolled to
+      // next month when the day already passed (see billGenDueDateFor).
       const due = billing.resolveBillDueDay({
         contractDueDay: (activeContract || expiredContract)?.contract_due_day,
         configDueDay,
       });
-      const dueDate = billing.formatYMD(now.getFullYear(), now.getMonth() + 1, due.day);
+      const dueDate = billGenDueDateFor(now, due);
       // Transactional bill insert + one_off deactivation. Reading
       // recurring INSIDE the tx with FOR UPDATE means an admin editing
       // /deleting a recurring row in another tab waits for our tx to
@@ -1133,42 +1179,50 @@ async function tickBillGen(pool, flags, now, state) {
         const emailReady = email.isConfigured(flags);
         for (const b of billsCreated) {
           if (!b.tenantId) continue;  // orphan bills: nobody to notify
-          const tQ = await pool.query(
-            `SELECT id, line_user_id, line_oa_id, email FROM tenants
-               WHERE id=$1 AND deleted_at IS NULL AND status='active'`,
-            [b.tenantId]
-          );
-          if (!tQ.rows.length) continue;
-          const t = tQ.rows[0];
-          const lineRecipients = await notifier.getTenantLineRecipients(pool, {
-            id: t.id,
-            line_user_id: t.line_user_id,
-            line_oa_id: t.line_oa_id,
-          });
-          const lineBindingCount = lineRecipients.length;
-          const subject = `💰 บิลใหม่รอบ ${b.period} — ห้อง ${b.roomId}`;
-          const body = [
-            `บิลใหม่ออกแล้ว`,
-            `เลขที่: ${b.billNo}`,
-            `ห้อง: ${b.roomId}`,
-            `รอบบิล: ${b.period}`,
-            `ยอดรวม: ฿${Number(b.total).toLocaleString('th-TH', { minimumFractionDigits: 2 })}`,
-            `ครบกำหนด: ${b.dueDate}`,
-            `LINE ที่ผูกกับห้องนี้: ${lineBindingCount} บัญชี`,
-            ``,
-            `ดูรายละเอียด + ชำระผ่าน QR ที่พอร์ทัล /tenant`,
-          ].join('\n');
-          for (const recipient of lineRecipients) {
-            await notifQueue.enqueue(pool, {
-              channel: 'line', recipient: recipient.line_user_id, subject, body,
-              payload: { oaId: recipient.line_oa_id || null, billId: b.id },
-            }).catch(() => {});
-          }
-          if (t.email && emailReady) {
-            await notifQueue.enqueue(pool, {
-              channel: 'email', recipient: t.email, subject, body,
-              payload: { billId: b.id },
-            }).catch(() => {});
+          // Per-bill guard: lastBillPeriod is already latched above and a
+          // re-run excludes rowCount=0 duplicates, so one transient lookup
+          // failure must not abort the loop — every remaining tenant would
+          // silently never get their new-bill push.
+          try {
+            const tQ = await pool.query(
+              `SELECT id, line_user_id, line_oa_id, email FROM tenants
+                 WHERE id=$1 AND deleted_at IS NULL AND status='active'`,
+              [b.tenantId]
+            );
+            if (!tQ.rows.length) continue;
+            const t = tQ.rows[0];
+            const lineRecipients = await notifier.getTenantLineRecipients(pool, {
+              id: t.id,
+              line_user_id: t.line_user_id,
+              line_oa_id: t.line_oa_id,
+            });
+            const lineBindingCount = lineRecipients.length;
+            const subject = `💰 บิลใหม่รอบ ${b.period} — ห้อง ${b.roomId}`;
+            const body = [
+              `บิลใหม่ออกแล้ว`,
+              `เลขที่: ${b.billNo}`,
+              `ห้อง: ${b.roomId}`,
+              `รอบบิล: ${b.period}`,
+              `ยอดรวม: ฿${Number(b.total).toLocaleString('th-TH', { minimumFractionDigits: 2 })}`,
+              `ครบกำหนด: ${b.dueDate}`,
+              `LINE ที่ผูกกับห้องนี้: ${lineBindingCount} บัญชี`,
+              ``,
+              `ดูรายละเอียด + ชำระผ่าน QR ที่พอร์ทัล /tenant`,
+            ].join('\n');
+            for (const recipient of lineRecipients) {
+              await notifQueue.enqueue(pool, {
+                channel: 'line', recipient: recipient.line_user_id, subject, body,
+                payload: { oaId: recipient.line_oa_id || null, billId: b.id },
+              }).catch(() => {});
+            }
+            if (t.email && emailReady) {
+              await notifQueue.enqueue(pool, {
+                channel: 'email', recipient: t.email, subject, body,
+                payload: { billId: b.id },
+              }).catch(() => {});
+            }
+          } catch (err) {
+            console.warn(`[scheduler] tenant notify enqueue failed for bill ${b.id}:`, err.message);
           }
         }
       } catch (err) {
@@ -1533,9 +1587,503 @@ async function tickAccessControlSync(pool, flags, now, state) {
         console.warn('[scheduler] access card notify lookup failed:', err.message);
       }
     }
+    // Pre-suspension warning — tenants whose oldest overdue bill crosses the
+    // threshold TOMORROW get one heads-up today, so the card stopping is
+    // never the first signal they receive. due_date equality gives a one-day
+    // window; the audit-row NOT EXISTS makes it idempotent across replicas
+    // (each replica keeps a private state file, so a latch alone can't
+    // dedupe). threshold=1 has no "tomorrow" — skip.
+    if (threshold > 1) {
+      try {
+        const warnQ = await pool.query(
+          `SELECT DISTINCT t.id, t.full_name, t.phone, t.email,
+                  t.line_user_id, t.line_oa_id, t.status
+             FROM bills b
+             JOIN tenants t ON t.id = b.tenant_id
+            WHERE b.status='overdue' AND b.deleted_at IS NULL AND b.paid_at IS NULL
+              AND b.due_date = CURRENT_DATE - ($1::int - 1)
+              AND t.deleted_at IS NULL AND t.status='active'
+              AND EXISTS (
+                SELECT 1 FROM access_cards ac
+                 WHERE ac.tenant_id = t.id AND ac.status='active'
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM audit_logs al
+                 WHERE al.action='access_card.suspension_warned'
+                   AND al.entity_type='tenant'
+                   AND al.entity_id = t.id::text
+                   AND al.created_at > NOW() - INTERVAL '3 days'
+              )`,
+          [threshold]
+        );
+        for (const t of warnQ.rows) {
+          try {
+            await pool.query(
+              `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, detail)
+               VALUES ('system:overdue-cron', 'access_card.suspension_warned', 'tenant', $1, $2::jsonb)`,
+              [String(t.id), JSON.stringify({ threshold, date: todayKey })]
+            );
+          } catch (err) {
+            if (err.code === '42P01' || err.code === '42703') break;
+            throw err;
+          }
+          notifier.notifyTenant({ pool, features: flags || {} }, t, {
+            subject: '⚠️ บัตรเข้า-ออกจะถูกระงับพรุ่งนี้ — มีบิลค้างชำระ',
+            text: [
+              `เรียน คุณ${t.full_name}`,
+              '',
+              `คุณมีบิลค้างชำระใกล้ครบ ${threshold} วัน`,
+              'หากยังไม่ชำระภายในวันนี้ ระบบจะระงับบัตรเข้า-ออกของคุณอัตโนมัติในวันพรุ่งนี้',
+              '',
+              '📋 ทางแก้ (ทำได้ทันที):',
+              '   1) ชำระบิลค้างและส่งสลิปที่พอร์ทัลผู้เช่า /tenant',
+              '   2) เมื่อการชำระผ่านการตรวจสอบ บัตรจะไม่ถูกระงับ',
+              '',
+              'หากชำระแล้วหรือมีข้อสงสัย ติดต่อสำนักงานก่อนสิ้นวันนี้',
+            ].join('\n'),
+          }).catch((err) => {
+            console.warn('[scheduler] suspension pre-warn notify failed:', err.message);
+          });
+        }
+      } catch (err) {
+        console.warn('[scheduler] suspension pre-warn failed:', err.message);
+      }
+    }
   } catch (err) {
     console.error('[scheduler] access sync failed:', err.message);
     return { error: err.message };
+  }
+}
+
+// === Contract-fill invitation expiry warning ===============================
+// A pending invitation that quietly expires strands both sides: the tenant's
+// link dies mid-fill and the admin keeps waiting for a submission that can
+// never arrive. Within 24h of expiry, nudge the tenant (finish now / ask for
+// a fresh link — the raw URL can't be re-sent, only its hash is stored) and
+// give the owner a consolidated list with the resend instruction. The
+// audit-row NOT EXISTS keeps it to one warning per invitation and makes the
+// hourly tick idempotent across replicas.
+async function tickInvitationExpiryWarn(pool, flags, now, state) {
+  let rows;
+  try {
+    const q = await pool.query(
+      `SELECT ci.id, ci.expires_at, c.contract_no, c.room_id,
+              t.id AS tenant_id, t.full_name, t.phone, t.email,
+              t.line_user_id, t.line_oa_id, t.status AS tenant_status
+         FROM contract_invitations ci
+         JOIN contracts c ON c.id = ci.contract_id
+         LEFT JOIN tenants t ON t.id = ci.tenant_id AND t.deleted_at IS NULL
+        WHERE ci.status='pending'
+          AND ci.expires_at > NOW()
+          AND ci.expires_at <= NOW() + INTERVAL '24 hours'
+          AND NOT EXISTS (
+            SELECT 1 FROM audit_logs al
+             WHERE al.action='contract.invitation_expiry_warned'
+               AND al.entity_type='contract_invitation'
+               AND al.entity_id = ci.id::text
+          )
+        ORDER BY ci.expires_at ASC
+        LIMIT 50`
+    );
+    rows = q.rows;
+  } catch (err) {
+    if (err.code === '42P01' || err.code === '42703') return;  // legacy deploy
+    return { error: err.message };
+  }
+  if (!rows.length) return;
+  const fmtExpiry = (v) => {
+    try {
+      return new Date(v).toLocaleString('th-TH', {
+        year: 'numeric', month: 'short', day: 'numeric',
+        hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Bangkok',
+      });
+    } catch { return String(v); }
+  };
+  const ownerLines = [];
+  for (const r of rows) {
+    try {
+      await pool.query(
+        `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, detail)
+         VALUES ('system:scheduler', 'contract.invitation_expiry_warned', 'contract_invitation', $1, $2::jsonb)`,
+        [String(r.id), JSON.stringify({
+          contractNo: r.contract_no, tenantId: r.tenant_id,
+          expiresAt: r.expires_at ? new Date(r.expires_at).toISOString() : null,
+        })]
+      );
+    } catch (err) {
+      console.warn('[scheduler] invitation warn audit failed:', err.message);
+      continue;  // no dedup marker written — skip the send, retry next hour
+    }
+    ownerLines.push(`  • ${r.contract_no || '-'} (ห้อง ${r.room_id || '-'}) `
+      + `${r.full_name || '-'} — หมดอายุ ${fmtExpiry(r.expires_at)}`);
+    if (r.tenant_id) {
+      // force: the invited person is exactly who this message is for, even
+      // if their tenant row hasn't flipped to active yet.
+      notifier.notifyTenant({ pool, features: flags || {} }, {
+        id: r.tenant_id, full_name: r.full_name, phone: r.phone, email: r.email,
+        line_user_id: r.line_user_id, line_oa_id: r.line_oa_id, status: 'active',
+      }, {
+        subject: '⏳ ลิงก์กรอกสัญญาใกล้หมดอายุ',
+        text: [
+          `เรียน คุณ${r.full_name || ''}`,
+          '',
+          `ลิงก์กรอกสัญญาเช่า${r.room_id ? ` (ห้อง ${r.room_id})` : ''} ของคุณ`,
+          `จะหมดอายุ ${fmtExpiry(r.expires_at)}`,
+          '',
+          '📋 สิ่งที่ต้องทำ:',
+          '   1) เปิดลิงก์ที่ได้รับ กรอกให้ครบ แล้วกด "ส่งให้ตรวจสอบ" ก่อนเวลาดังกล่าว',
+          '   2) ถ้าหาลิงก์ไม่เจอหรือลิงก์ใช้ไม่ได้ ติดต่อสำนักงานเพื่อขอลิงก์ใหม่ได้ทันที',
+        ].join('\n'),
+        force: true,
+      }).catch((err) => {
+        console.warn('[scheduler] invitation warn tenant notify failed:', err.message);
+      });
+    }
+  }
+  if (ownerLines.length) {
+    try {
+      await notifier.notifyOwner({ pool, features: flags || {} }, {
+        category: 'tenancy',
+        subject: `⏳ ลิงก์กรอกสัญญาใกล้หมดอายุ ${ownerLines.length} รายการ`,
+        text: [
+          'ลิงก์ต่อไปนี้จะหมดอายุภายใน 24 ชั่วโมง และผู้เช่ายังไม่ได้ส่งข้อมูล:',
+          ...ownerLines,
+          '',
+          '👉 ที่ต้องทำ: ถ้าผู้เช่ายังต้องการกรอก กด "สร้างลิงก์ใหม่" ที่หน้าสัญญา',
+          '(ลิงก์เก่าจะถูกยกเลิกอัตโนมัติ) — ระบบเตือนผู้เช่าให้แล้วทางช่องทางที่ผูกไว้',
+        ].join('\n'),
+      });
+    } catch (err) {
+      console.warn('[scheduler] invitation warn owner notify failed:', err.message);
+    }
+  }
+}
+
+// === Stale booking auto-cancel =============================================
+// Bookings the flow forgot: pending/reviewing requests nobody decided on, and
+// approved bookings whose contract never got created. Both keep a room
+// 'reserved' forever without this tick. Thresholds come from
+// config.notify.bookingStaleDays (pending/reviewing, default 14) and
+// config.notify.bookingApprovedStaleDays (approved, default 30); 0 disables
+// that class. The cancel cascade mirrors PUT /api/bookings/:id → 'cancelled':
+// release the room only when reservedBy still points at this booking, move
+// the pre-contract mirrored tenant out only when no active contract exists,
+// then revoke leftover LINE binding codes and notify booker + owner. An
+// approved booking whose room already carries an active contract for the
+// same phone is flipped to 'completed' instead — the work was done, only the
+// status linkage was missed.
+async function tickBookingStale(pool, flags, now, state) {
+  const todayKey = localDateKey(now);
+  if (state.lastBookingStaleAt === todayKey) return;
+  let staleDays = 14;
+  let approvedStaleDays = 30;
+  try {
+    const { rows } = await pool.query(
+      `SELECT value FROM app_data WHERE key='baankarn_config_v1' LIMIT 1`
+    );
+    const n = (rows[0] && rows[0].value && rows[0].value.notify) || {};
+    if (n.bookingStaleDays != null && Number.isFinite(Number(n.bookingStaleDays))) {
+      staleDays = Math.max(0, Math.min(365, Math.trunc(Number(n.bookingStaleDays))));
+    }
+    if (n.bookingApprovedStaleDays != null && Number.isFinite(Number(n.bookingApprovedStaleDays))) {
+      approvedStaleDays = Math.max(0, Math.min(365, Math.trunc(Number(n.bookingApprovedStaleDays))));
+    }
+  } catch { /* config missing — keep defaults */ }
+  if (staleDays === 0 && approvedStaleDays === 0) {
+    state.lastBookingStaleAt = todayKey;
+    writeState(state);
+    return;
+  }
+
+  const cancelledOut = [];
+  const completedOut = [];
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const bRes = await client.query(
+      `SELECT value FROM app_data WHERE key='baankarn_bookings_v1' FOR UPDATE`
+    );
+    const list = bRes.rows.length && Array.isArray(bRes.rows[0].value) ? bRes.rows[0].value : [];
+    if (!list.length) {
+      await client.query('ROLLBACK');
+      state.lastBookingStaleAt = todayKey;
+      writeState(state);
+      return;
+    }
+    const rRes = await client.query(
+      `SELECT value FROM app_data WHERE key='baankarn_rooms_v1' FOR UPDATE`
+    );
+    const rooms = rRes.rows.length && rRes.rows[0].value && typeof rRes.rows[0].value === 'object'
+      ? rRes.rows[0].value : {};
+    const nowMs = now.getTime();
+    const ageDays = (iso) => {
+      const t = Date.parse(iso || '');
+      return Number.isFinite(t) ? (nowMs - t) / 86_400_000 : null;
+    };
+    let roomsDirty = false;
+    for (const b of list) {
+      if (!b || typeof b !== 'object') continue;
+      const status = String(b.status || '');
+      let limit = null;
+      let baseTs = null;
+      if ((status === 'pending' || status === 'reviewing') && staleDays > 0) {
+        limit = staleDays;
+        baseTs = b.createdAt;
+      } else if (status === 'approved' && approvedStaleDays > 0) {
+        limit = approvedStaleDays;
+        baseTs = b.approvedAt || b.updatedAt || b.createdAt;
+      } else {
+        continue;
+      }
+      const age = ageDays(baseTs);
+      if (age == null || age < limit) continue;
+
+      const beforeStatus = status;
+      const roomId = String(b.assignedRoomId || b.roomId || '') || null;
+      const bookingPhone = String(b.phone || '').replace(/[\s-]/g, '').slice(0, 32);
+
+      // Approved booking whose room already has an active contract for the
+      // same phone → the contract flow happened, only the booking status
+      // linkage was missed. Close the loop as 'completed', release nothing.
+      if (beforeStatus === 'approved' && roomId) {
+        try {
+          const cQ = await client.query(
+            `SELECT c.id FROM contracts c
+               JOIN tenants t ON t.id = c.tenant_id
+              WHERE c.room_id=$1 AND c.status='active' AND c.deleted_at IS NULL
+                AND t.deleted_at IS NULL
+                AND ($2::text = '' OR replace(replace(COALESCE(t.phone,''),' ',''),'-','') = $2)
+              LIMIT 1`,
+            [roomId, bookingPhone]
+          );
+          if (cQ.rows.length) {
+            b.status = 'completed';
+            b.updatedAt = new Date(nowMs).toISOString();
+            b.updatedBy = 'system:booking-stale';
+            b.adminNotes = [
+              b.adminNotes || null,
+              '[auto] พบสัญญา active ของห้องนี้แล้ว — ปิดงานจองเป็น completed',
+            ].filter(Boolean).join('\n').slice(0, 2000);
+            completedOut.push({ id: b.id, name: b.name || '-', roomId, contractId: cQ.rows[0].id });
+            continue;
+          }
+        } catch (err) {
+          if (err.code !== '42P01') throw err;
+        }
+      }
+
+      let releasedRoomId = null;
+      let releasedTenant = null;
+      const room = roomId ? rooms[roomId] : null;
+      if (room && room.status === 'reserved' && room.reservedBy === b.id) {
+        // Pre-contract tenant cleanup — same guards as the PUT cancel path:
+        // match by phone+name and never touch a tenant who already has an
+        // active contract on this room.
+        const bookingName = String(b.name || '').trim().slice(0, 200);
+        if (bookingPhone || bookingName) {
+          const clauses = [`current_room_id=$1`, `status='active'`, `deleted_at IS NULL`];
+          const params = [roomId];
+          if (bookingPhone) { params.push(bookingPhone); clauses.push(`phone=$${params.length}`); }
+          if (bookingName) { params.push(bookingName); clauses.push(`lower(full_name)=lower($${params.length})`); }
+          try {
+            const tFind = await client.query(
+              `SELECT id, full_name, phone FROM tenants
+                WHERE ${clauses.join(' AND ')}
+                ORDER BY updated_at DESC LIMIT 1 FOR UPDATE`,
+              params
+            );
+            const tenantRow = tFind.rows[0] || null;
+            if (tenantRow) {
+              const activeContract = await client.query(
+                `SELECT id FROM contracts
+                  WHERE tenant_id=$1 AND room_id=$2 AND status='active' AND deleted_at IS NULL
+                  LIMIT 1`,
+                [tenantRow.id, roomId]
+              ).catch((err) => {
+                if (err.code === '42P01') return { rows: [] };
+                throw err;
+              });
+              if (!activeContract.rows.length) {
+                const tUpd = await client.query(
+                  `UPDATE tenants
+                      SET status='moved_out', current_room_id=NULL, updated_at=NOW(),
+                          notes=trim(BOTH E'\n' FROM COALESCE(notes || E'\n', '') || $2)
+                    WHERE id=$1 AND status='active'
+                    RETURNING id, full_name, phone`,
+                  [tenantRow.id,
+                    `[auto] booking ${b.id} stale-cancelled: released pre-contract reservation ${roomId}`]
+                );
+                if (tUpd.rows.length) {
+                  releasedTenant = { id: tUpd.rows[0].id, fullName: tUpd.rows[0].full_name };
+                }
+              }
+            }
+          } catch (err) {
+            if (err.code !== '42P01') throw err;
+          }
+        }
+        const { tenant, reservedBy, reservedAt, ...rest } = room;
+        rooms[roomId] = { ...rest, status: 'vacant' };
+        roomsDirty = true;
+        releasedRoomId = roomId;
+        try {
+          await client.query(
+            `UPDATE rooms_v2 SET status='vacant', updated_at=NOW()
+              WHERE room_code=$1 AND status='reserved' AND deleted_at IS NULL`,
+            [roomId]
+          );
+        } catch (err) {
+          if (err.code !== '42P01') throw err;
+        }
+      }
+      b.status = 'cancelled';
+      b.updatedAt = new Date(nowMs).toISOString();
+      b.updatedBy = 'system:booking-stale';
+      b.adminNotes = [
+        b.adminNotes || null,
+        `[auto] ยกเลิกอัตโนมัติ: ค้างสถานะ "${beforeStatus}" เกิน ${limit} วัน`,
+      ].filter(Boolean).join('\n').slice(0, 2000);
+      cancelledOut.push({
+        id: b.id, name: b.name || '-', phone: b.phone || null, email: b.email || null,
+        beforeStatus, limit, releasedRoomId, releasedTenant, roomId,
+      });
+      if (cancelledOut.length >= 25) break;  // bound the daily batch
+    }
+    if (!cancelledOut.length && !completedOut.length) {
+      await client.query('ROLLBACK');
+      state.lastBookingStaleAt = todayKey;
+      writeState(state);
+      return;
+    }
+    await client.query(
+      `INSERT INTO app_data (key, value, updated_by) VALUES ($1, $2, $3)
+         ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW(), updated_by=EXCLUDED.updated_by`,
+      ['baankarn_bookings_v1', JSON.stringify(list), 'system:booking-stale']
+    );
+    if (roomsDirty) {
+      await client.query(
+        `INSERT INTO app_data (key, value, updated_by) VALUES ($1, $2, $3)
+           ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW(), updated_by=EXCLUDED.updated_by`,
+        ['baankarn_rooms_v1', JSON.stringify(rooms), 'system:booking-stale']
+      );
+    }
+    for (const c of cancelledOut) {
+      try {
+        await client.query(
+          `UPDATE bookings SET status='cancelled', updated_at=NOW() WHERE external_id=$1`,
+          [c.id]
+        );
+      } catch (err) {
+        console.warn('[scheduler] booking-stale relational sync skipped:', err.message);
+      }
+    }
+    for (const c of completedOut) {
+      try {
+        await client.query(
+          `UPDATE bookings SET status='completed', updated_at=NOW() WHERE external_id=$1`,
+          [c.id]
+        );
+      } catch (err) {
+        console.warn('[scheduler] booking-stale relational sync skipped:', err.message);
+      }
+    }
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('[scheduler] booking stale failed:', err.message);
+    return { error: err.message };
+  } finally {
+    client.release();
+  }
+
+  state.lastBookingStaleAt = todayKey;
+  writeState(state);
+
+  // Post-commit: LINE binding cleanup + audit + notifications. Best-effort,
+  // mirroring the PUT cancel path's after-commit section.
+  let lineBindingMod = null;
+  try { lineBindingMod = require('./lineBinding'); } catch { /* optional */ }
+  const ownerLines = [];
+  for (const c of completedOut) {
+    try {
+      await pool.query(
+        `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, detail)
+         VALUES ('system:booking-stale', 'booking.stale_complete', 'booking', $1, $2::jsonb)`,
+        [String(c.id), JSON.stringify({ roomId: c.roomId, contractId: c.contractId })]
+      );
+    } catch (err) {
+      if (err.code !== '42P01' && err.code !== '42703') {
+        console.warn('[scheduler] booking-stale audit failed:', err.message);
+      }
+    }
+    ownerLines.push(`  • ${c.id} ${c.name} — มีสัญญาแล้ว ปิดเป็น completed (ห้อง ${c.roomId || '-'})`);
+  }
+  for (const c of cancelledOut) {
+    if (lineBindingMod) {
+      try { await lineBindingMod.revokeBookingBindings(pool, { bookingId: c.id }); }
+      catch (err) { console.warn('[scheduler] booking-stale binding revoke failed:', err.message); }
+    }
+    try {
+      await pool.query(
+        `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, detail)
+         VALUES ('system:booking-stale', 'booking.stale_cancel', 'booking', $1, $2::jsonb)`,
+        [String(c.id), JSON.stringify({
+          from: c.beforeStatus, to: 'cancelled', staleLimitDays: c.limit,
+          releasedRoomId: c.releasedRoomId,
+          releasedTenantId: c.releasedTenant ? c.releasedTenant.id : null,
+        })]
+      );
+    } catch (err) {
+      if (err.code !== '42P01' && err.code !== '42703') {
+        console.warn('[scheduler] booking-stale audit failed:', err.message);
+      }
+    }
+    // Booker notification — the booking's own LINE bindings first; the
+    // notifier falls back to email/SMS from the same info object.
+    try {
+      const tenantInfo = {
+        full_name: c.name, email: c.email, phone: c.phone,
+        line_user_id: null, line_oa_id: null, lineRecipients: [],
+        status: 'active',
+      };
+      if (lineBindingMod) {
+        try { tenantInfo.lineRecipients = await lineBindingMod.listBookingRecipients(pool, c.id); }
+        catch { /* no binding — email/SMS path still works */ }
+      }
+      if (tenantInfo.lineRecipients.length || tenantInfo.email || tenantInfo.phone) {
+        await notifier.notifyTenant({ pool, features: flags || {} }, tenantInfo, {
+          subject: 'การจองถูกยกเลิกอัตโนมัติ',
+          text: [
+            `🚫 การจอง${c.roomId ? ` ห้อง ${c.roomId}` : ''}ของคุณถูกยกเลิกอัตโนมัติ`,
+            `เหตุผล: ไม่มีการดำเนินการต่อภายใน ${c.limit} วัน`,
+            '',
+            'หากยังต้องการเช่าห้อง สามารถจองใหม่ได้ที่หน้าจองห้อง หรือติดต่อสำนักงานได้ทันที',
+          ].join('\n'),
+        });
+      }
+    } catch (err) {
+      console.warn('[scheduler] booking-stale booker notify failed:', err.message);
+    }
+    ownerLines.push(`  • ${c.id} ${c.name} (${c.phone || '-'}) — ค้าง "${c.beforeStatus}" เกิน ${c.limit} วัน`
+      + (c.releasedRoomId ? ` · ปล่อยห้อง ${c.releasedRoomId} แล้ว` : ''));
+  }
+  if (ownerLines.length) {
+    try {
+      await notifier.notifyOwner({ pool, features: flags || {} }, {
+        category: 'booking',
+        subject: `🧹 จัดการการจองค้างอัตโนมัติ ${ownerLines.length} รายการ`,
+        text: [
+          'การจองต่อไปนี้ค้างเกินกำหนดและถูกจัดการอัตโนมัติ:',
+          ...ownerLines,
+          '',
+          `เกณฑ์: pending/reviewing > ${staleDays || '-'} วัน · approved (ยังไม่มีสัญญา) > ${approvedStaleDays || '-'} วัน`,
+          'ปรับเกณฑ์ได้ที่ตั้งค่า notify.bookingStaleDays / notify.bookingApprovedStaleDays (0 = ปิด)',
+          'ระบบแจ้งผู้จองที่ถูกยกเลิกให้แล้วทางช่องทางที่ติดต่อได้',
+        ].join('\n'),
+      });
+    } catch (err) {
+      console.warn('[scheduler] booking-stale owner notify failed:', err.message);
+    }
   }
 }
 
@@ -2007,7 +2555,7 @@ function _lockKeyFor(name) {
   // Clamp to positive int32
   return (h >>> 0) & 0x7fffffff;
 }
-async function _withAdvisoryLock(pool, name, fn) {
+async function _withAdvisoryLock(pool, name, fn, { dbLatch = false } = {}) {
   // Try-lock so a hung peer can never wedge us — scheduler ticks are idempotent
   // anyway; missing one tick is preferable to blocking subsequent ticks.
   let acquired = false;
@@ -2020,7 +2568,43 @@ async function _withAdvisoryLock(pool, name, fn) {
     );
     acquired = r.rows[0] && r.rows[0].got === true;
     if (!acquired) return { skipped: true, reason: 'lock-held' };
-    return await fn(client);
+    // dbLatch — cross-replica once-per-key guard. The advisory lock is a
+    // MUTEX, not a memory: a replica ticking a minute after a peer released
+    // the lock acquires it freely, and the per-container state file can't
+    // see what the other replica already sent (staggered 2x deploys double-
+    // sent every daily digest). For jobs whose side effects are pure
+    // notifications (no DB idempotency guard of their own), persist a shared
+    // "already ran" marker keyed by the date/hour-suffixed lock name —
+    // checked AND written while holding the lock so two replicas can never
+    // both pass. Written only after fn() succeeds, so a failed run is still
+    // retried on the next tick. Latch read/write failures degrade to the old
+    // run-anyway behavior rather than dropping the job. Rows are pruned
+    // after 7 days by tickPruneFailedNotifications.
+    const latchKey = `sched_done:${name}`;
+    if (dbLatch) {
+      try {
+        const seen = await client.query(
+          'SELECT 1 FROM app_data WHERE key=$1 LIMIT 1', [latchKey]
+        );
+        if (seen.rows.length) return { skipped: true, reason: 'db-latch' };
+      } catch (err) {
+        console.warn(`[scheduler] db-latch read(${name}) failed:`, err.message);
+      }
+    }
+    const result = await fn(client);
+    if (dbLatch && !(result && result.error)) {
+      try {
+        await client.query(
+          `INSERT INTO app_data (key, value, updated_by)
+             VALUES ($1, $2::jsonb, 'system:scheduler')
+           ON CONFLICT (key) DO NOTHING`,
+          [latchKey, JSON.stringify({ at: new Date().toISOString() })]
+        );
+      } catch (err) {
+        console.warn(`[scheduler] db-latch write(${name}) failed:`, err.message);
+      }
+    }
+    return result;
   } catch (err) {
     console.error(`[scheduler] advisory-lock(${name}) error:`, err.message);
     return { error: err.message };
@@ -2302,6 +2886,19 @@ async function tickPruneFailedNotifications(pool, _flags, now, state) {
     if (r.rowCount > 0) {
       console.log(`[scheduler] pruned ${r.rowCount} failed notification(s) older than 30 days`);
     }
+    // Also prune the cross-replica scheduler run latches (see
+    // _withAdvisoryLock dbLatch) — keys are date/hour-suffixed and only
+    // matter for the day they were written; 7 days keeps a short forensic
+    // window without growing app_data unbounded.
+    try {
+      await pool.query(`
+        DELETE FROM app_data
+          WHERE key LIKE 'sched_done:%'
+            AND updated_at < NOW() - INTERVAL '7 days'
+      `);
+    } catch (latchErr) {
+      console.warn('[scheduler] sched_done latch prune failed:', latchErr.message);
+    }
     state.lastNotifQueuePruneAt = todayKey;
     writeState(state);
   } catch (err) {
@@ -2505,10 +3102,16 @@ async function _runTick(pool) {
   }
 
   // Wrap the daily ticks in an advisory lock so multi-replica deployments
-  // (Railway 2x replica common) don't fan out duplicate notifications. Each
-  // tick is internally idempotent (UPDATE with ON CONFLICT, state-file latch),
-  // but the `notifier.notifyOwner` calls inside the ticks ARE NOT — without
-  // the lock both replicas send the same daily summary to the owner.
+  // (Railway 2x replica common) don't run the same job CONCURRENTLY. The
+  // lock alone is NOT enough for once-per-day semantics — it's a mutex with
+  // no memory, and staggered replicas (boot+30s then hourly) rarely overlap,
+  // so a peer ticking minutes later acquires the same key freely. Jobs whose
+  // side effects are DB-guarded (ON CONFLICT inserts, UPDATE..RETURNING
+  // flips, last_reminded_at stamps) are safe anyway; jobs that only send
+  // notifications (digest, contract warnings, slip alerts, reconcile
+  // report) additionally pass { dbLatch: true } so the "already ran today"
+  // marker is shared across replicas via app_data instead of each
+  // container's private state file.
   //
   // The advisory lock is held only for the duration of one tick cycle; the
   // state-file latch still blocks repeats within the same instance.
@@ -2527,26 +3130,44 @@ async function _runTick(pool) {
     await notifySchedulerFailure(pool, flags, state, 'access-sync', err);
   }
 
+  // Bill-gen's promise is shared so payment-reminder can chain off it below
+  // — Promise.allSettled alone gives no ordering, and the two jobs hold
+  // DIFFERENT advisory locks so they'd otherwise run fully concurrently.
+  const billGenPromise = _withAdvisoryLock(pool, `billGen-${todayKey}`, () => tickBillGen(pool, flags, now, state));
   const jobs = [
     { job: 'auto-backup', promise: _withAdvisoryLock(pool, `autoBackup-${todayKey}`, () => tickAutoBackup(pool, flags, now, state)) },
-    { job: 'bill-gen', promise: _withAdvisoryLock(pool, `billGen-${todayKey}`, () => tickBillGen(pool, flags, now, state)) },
+    { job: 'bill-gen', promise: billGenPromise },
     { job: 'meter-sim', promise: _withAdvisoryLock(pool, `meterSim-${localHourKey(now)}`, () => tickMeterSimulator(pool, flags, now, state)) },
-    { job: 'contract-expiry', promise: _withAdvisoryLock(pool, `contractExpiry-${todayKey}`, () => tickContractExpiry(pool, flags, now, state)) },
-    { job: 'overdue-digest', promise: _withAdvisoryLock(pool, `overdueDigest-${todayKey}`, () => tickOverdueDigest(pool, flags, now, state)) },
-    { job: 'auto-reconcile', promise: _withAdvisoryLock(pool, `autoReconcile-${todayKey}`, () => tickAutoReconcileRooms(pool, flags, now, state)) },
+    { job: 'contract-expiry', promise: _withAdvisoryLock(pool, `contractExpiry-${todayKey}`, () => tickContractExpiry(pool, flags, now, state), { dbLatch: true }) },
+    { job: 'overdue-digest', promise: _withAdvisoryLock(pool, `overdueDigest-${todayKey}`, () => tickOverdueDigest(pool, flags, now, state), { dbLatch: true }) },
+    { job: 'auto-reconcile', promise: _withAdvisoryLock(pool, `autoReconcile-${todayKey}`, () => tickAutoReconcileRooms(pool, flags, now, state), { dbLatch: true }) },
     { job: 'room-status-sync', promise: _withAdvisoryLock(pool, `roomStatusSync-${todayKey}`, () => tickRoomStatusSync(pool, flags, now, state)) },
     { job: 'notif-prune', promise: _withAdvisoryLock(pool, `notifQueuePrune-${todayKey}`, () => tickPruneFailedNotifications(pool, flags, now, state)) },
     { job: 'orphan-slip-prune', promise: _withAdvisoryLock(pool, `orphanSlipPrune-${todayKey}`, () => tickPruneOrphanSlips(pool, flags, now, state)) },
-    // R7 — pre-due payment reminder. Runs after bill-gen so newly-issued
-    // bills with a same-day due date (rare but possible when admin sets
-    // dueOnDay = bill-gen day) get the "ครบกำหนดวันนี้" alert immediately.
+    // R7 — pre-due payment reminder. Chained AFTER bill-gen settles so
+    // newly-issued bills with a same-day due date (possible when admin sets
+    // dueOnDay = bill-gen day) are committed before the reminder's
+    // due_date = CURRENT_DATE query runs — otherwise those tenants miss the
+    // "ครบกำหนดวันนี้" alert and the daily latch never retries it.
     // Daily idempotent via state.lastPaymentReminderAt + bills.last_reminded_at.
-    { job: 'payment-reminder', promise: _withAdvisoryLock(pool, `paymentReminder-${todayKey}`, () => tickPaymentReminder(pool, flags, now, state)) },
+    {
+      job: 'payment-reminder',
+      promise: billGenPromise.catch(() => {}).then(
+        () => _withAdvisoryLock(pool, `paymentReminder-${todayKey}`, () => tickPaymentReminder(pool, flags, now, state))
+      ),
+    },
     // Hourly (not daily-latched): a slip crossing the aging threshold at
     // 14:00 shouldn't wait for tomorrow's tick. Per-payment latch inside
-    // makes repeat fires no-ops; the hour-scoped advisory lock stops
-    // multi-replica double-sends within the same hour.
-    { job: 'pending-slip-alert', promise: _withAdvisoryLock(pool, `pendingSlipAlert-${localHourKey(now)}`, () => tickPendingSlipAlert(pool, flags, now, state)) },
+    // makes repeat fires no-ops; the hour-scoped advisory lock + dbLatch
+    // stop multi-replica double-sends within the same hour.
+    { job: 'pending-slip-alert', promise: _withAdvisoryLock(pool, `pendingSlipAlert-${localHourKey(now)}`, () => tickPendingSlipAlert(pool, flags, now, state), { dbLatch: true }) },
+    // Hourly: a contract-fill link entering its last 24h gets one tenant +
+    // owner warning. Idempotent via the audit-row marker inside the tick;
+    // the hour lock just stops replicas racing within the same hour.
+    { job: 'invitation-expiry-warn', promise: _withAdvisoryLock(pool, `invitationExpiryWarn-${localHourKey(now)}`, () => tickInvitationExpiryWarn(pool, flags, now, state), { dbLatch: true }) },
+    // Daily: cancel stale bookings (pending/reviewing or approved-without-
+    // contract past their configured age) and release their rooms.
+    { job: 'booking-stale', promise: _withAdvisoryLock(pool, `bookingStale-${todayKey}`, () => tickBookingStale(pool, flags, now, state), { dbLatch: true }) },
   ];
   const results = await Promise.allSettled(jobs.map((j) => j.promise));
   for (const [i, r] of results.entries()) {
@@ -2599,4 +3220,11 @@ module.exports = {
   // "deploy is missing a persistent volume" warning when the scheduler
   // state file is on ephemeral storage.
   isStateFilePersistent,
+  // Exposed for tests (tests/fix-scheduler.test.js): the pure due-date
+  // helper, the lock + cross-replica latch wrapper, and the ticks that are
+  // exercised with fake pools.
+  billGenDueDateFor,
+  _withAdvisoryLock,
+  tickLateFee,
+  tickAutoBackup,
 };

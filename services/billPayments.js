@@ -12,6 +12,11 @@ const notifier = require('./notifier');
 
 const CARRIED_LATE_FEE_LABEL_PREFIX = 'ค่าปรับล่าช้าค้างจากรอบ ';
 const CARRIED_LATE_FEE_NOTE_MARKER = '[system:late_fee_carry]';
+// Stamped onto a carry's notes when WE deactivate it during a void/unmark
+// reversal — distinguishes "reversed before billing" from "consumed by
+// bill-gen" (both end up active=FALSE, but only consumed ones live inside
+// an issued bill). findConsumedCarriedLateFees filters on this.
+const CARRIED_LATE_FEE_REVERSED_MARKER = '[system:late_fee_carry_reversed]';
 
 // Small cached helper — building name shows up in every tenant-facing
 // notification so they know who's writing. Lookup the building config
@@ -196,15 +201,11 @@ async function carryLateFeeToNextBill(client, { tenantId, roomId, amount, fromPe
   return ins.rows[0]?.id || null;
 }
 
-/**
- * Reverse a carried-forward late fee when its source bill is voided or
- * unmark-paid before next month bill-gen consumes it. Every carry path
- * audit-logs action=bill.late_fee_carried_forward_on_principal_payment with
- * carriedChargeId in detail; we look those up and deactivate any STILL-ACTIVE
- * one_off (already-consumed carries are active=false, left untouched).
- * MUST run inside the reversal transaction (pass the tx client).
- */
-async function deactivateCarriedLateFees(client, billId) {
+// Every carry path audit-logs action=bill.late_fee_carried_forward_on_
+// principal_payment with carriedChargeId in detail — this resolves the set
+// of carry charge ids ever created for a bill. Shared by the reversal
+// (deactivate) and the consumed-carry report below.
+async function carriedChargeIdsForBill(client, billId) {
   const audit = await client.query(
     `SELECT DISTINCT (detail->>'carriedChargeId') AS cid
        FROM audit_logs
@@ -215,18 +216,67 @@ async function deactivateCarriedLateFees(client, billId) {
         AND detail->>'carriedChargeId' IS NOT NULL`,
     [String(billId)]
   );
-  const ids = audit.rows.map((r) => Number(r.cid)).filter((n) => Number.isInteger(n) && n > 0);
+  return audit.rows.map((r) => Number(r.cid)).filter((n) => Number.isInteger(n) && n > 0);
+}
+
+/**
+ * Reverse a carried-forward late fee when its source bill is voided or
+ * unmark-paid before next month bill-gen consumes it. We look up the bill's
+ * carry charge ids and deactivate any STILL-ACTIVE one_off (already-consumed
+ * carries are active=false, left untouched — see findConsumedCarriedLateFees
+ * for surfacing those). Reversed rows get CARRIED_LATE_FEE_REVERSED_MARKER
+ * stamped into notes so a later reversal can't mistake them for consumed.
+ * MUST run inside the reversal transaction (pass the tx client).
+ */
+async function deactivateCarriedLateFees(client, billId) {
+  const ids = await carriedChargeIdsForBill(client, billId);
   if (!ids.length) return [];
   const upd = await client.query(
     `UPDATE recurring_charges
-        SET active=FALSE, updated_at=NOW()
+        SET active=FALSE,
+            notes=TRIM(COALESCE(notes,'') || ' ' || $2),
+            updated_at=NOW()
       WHERE id = ANY($1::bigint[])
         AND frequency='one_off'
         AND active=TRUE
     RETURNING id`,
-    [ids]
+    [ids, CARRIED_LATE_FEE_REVERSED_MARKER]
   );
   return upd.rows.map((r) => Number(r.id));
+}
+
+/**
+ * Report a bill's carried late fees that were ALREADY consumed by next-period
+ * bill-gen (active=FALSE after being snapshotted into the new bill's items —
+ * the amount is frozen inside an ISSUED bill and can't be silently reversed).
+ * Reversal callers (void / unmark-paid) need this to
+ *   a) avoid re-accruing the same fee on the restored bill (pass the summed
+ *      amount as consumedCarriedLateFee to billing.computeRestoredBillAmounts)
+ *   b) warn the admin that the next period's bill still carries the line so
+ *      they can adjust it — failing toward review, never a silent double-charge.
+ * Carries we reversed ourselves (marker in notes) are excluded — they were
+ * never billed. Call BEFORE deactivateCarriedLateFees in the same transaction.
+ *
+ * @returns {Promise<Array<{id:number, amount:number, label:string, startAt:string|null}>>}
+ */
+async function findConsumedCarriedLateFees(client, billId) {
+  const ids = await carriedChargeIdsForBill(client, billId);
+  if (!ids.length) return [];
+  const { rows } = await client.query(
+    `SELECT id, amount, label, start_at
+       FROM recurring_charges
+      WHERE id = ANY($1::bigint[])
+        AND frequency='one_off'
+        AND active=FALSE
+        AND POSITION($2 IN COALESCE(notes,'')) = 0`,
+    [ids, CARRIED_LATE_FEE_REVERSED_MARKER]
+  );
+  return rows.map((r) => ({
+    id: Number(r.id),
+    amount: Math.round(Number(r.amount) * 100) / 100,
+    label: r.label || '',
+    startAt: r.start_at || null,
+  }));
 }
 
 // Owner/admin-side "เงินเข้า" alert — fired post-commit from EVERY path that
@@ -287,8 +337,10 @@ module.exports = {
   notifyOwnerPaymentReceived,
   carryLateFeeToNextBill,
   deactivateCarriedLateFees,
+  findConsumedCarriedLateFees,
   _carriedLateFeeLabelPrefix: CARRIED_LATE_FEE_LABEL_PREFIX,
   _carriedLateFeeNoteMarker: CARRIED_LATE_FEE_NOTE_MARKER,
+  _carriedLateFeeReversedMarker: CARRIED_LATE_FEE_REVERSED_MARKER,
   _carriedLateFeeLabel: carriedLateFeeLabel,
   _nextPeriodStartDate: nextPeriodStartDate,
 };

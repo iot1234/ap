@@ -169,6 +169,25 @@ async function syncRoom(dbOrClient, roomId, opts = {}) {
     if (changed && !shouldPatchBlob) {
       console.log(`[roomStatus] ${roomId}: ${before || '(empty)'} -> ${after}${opts.reason ? ` (${opts.reason})` : ''}`);
     }
+    // Durable audit row (not just stdout) so "เมื่อไหร่ห้องนี้เปลี่ยนสถานะ"
+    // is answerable from the admin history views, like every other lifecycle
+    // mutation. Only on a REAL status flip — tenant-snapshot refreshes would
+    // otherwise flood the log. Best-effort: a legacy deploy without
+    // audit_logs must not break the sync.
+    if (before !== after) {
+      try {
+        await client.query(
+          `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, detail)
+           VALUES ($1, $2, $3, $4, $5::jsonb)`,
+          ['auto:room-sync', 'room.status_sync', 'room', String(roomId),
+            JSON.stringify({ before: before || null, after, reason: opts.reason || null })]
+        );
+      } catch (err) {
+        if (err.code !== '42P01' && err.code !== '42703') {
+          console.warn('[roomStatus] audit write failed:', err.message);
+        }
+      }
+    }
     if (ownClient) await client.query('COMMIT');
     return { roomId, before, after, changed };
   } catch (err) {

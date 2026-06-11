@@ -711,6 +711,104 @@ function exportFullBackup(rooms, config, bookings, activities) {
 // Print helper — opens print dialog (browser will save to PDF)
 function printPage() { try { window.print(); return true; } catch (e) { return false; } }
 
+// --- Audit log Thai labels --------------------------------------------------
+// audit_logs.action keys are machine strings ('tenant.checkin'). History
+// views render them through this map so admins read events in Thai instead
+// of decoding API verbs. Unknown keys fall back to the raw string — never
+// hide an event just because it isn't mapped yet.
+const AUDIT_ACTION_TH = {
+  'booking.public_create': 'ผู้สนใจส่งคำขอจองจากหน้าเว็บ',
+  'booking.hold_create': 'ล็อกห้องระหว่างชำระค่าจอง',
+  'booking.hold_release': 'ปล่อยห้องที่ล็อกไว้',
+  'booking.create': 'แอดมินสร้างการจอง',
+  'booking.approve': 'อนุมัติการจอง + จัดห้อง',
+  'booking.update': 'เปลี่ยนสถานะ/แก้ไขการจอง',
+  'booking.stale_cancel': 'ระบบยกเลิกการจองค้างอัตโนมัติ',
+  'booking.stale_complete': 'ระบบปิดการจองเป็นเสร็จสิ้น (มีสัญญาแล้ว)',
+  'access_card.suspension_warned': 'เตือนผู้เช่าก่อนระงับบัตร 1 วัน',
+  'contract.invitation_expiry_warned': 'เตือนลิงก์กรอกสัญญาใกล้หมดอายุ',
+  'access_card.bulk_sync': 'ระบบระงับ/คืนสิทธิ์บัตรตามยอดค้าง (รายวัน)',
+  'booking_deposit_settings.update': 'แก้ตั้งค่าค่าจอง/มัดจำ',
+  'contract.quick_invite': 'สร้างสัญญา + ส่งลิงก์ให้ผู้เช่ากรอก',
+  'contract.invite_tenant': 'ส่งลิงก์กรอกสัญญา',
+  'contract.invitation_approve': 'อนุมัติสัญญาที่ผู้เช่ากรอก (lock)',
+  'contract.invitation_reject': 'ส่งสัญญากลับให้ผู้เช่าแก้',
+  'contract.invitation_revoke': 'ยกเลิกลิงก์กรอกสัญญา',
+  'contract.sign': 'ลงนามสัญญา',
+  'contract.update': 'แก้ไขสัญญา',
+  'contract.cancel': 'ปิด/ยกเลิกสัญญา',
+  'contract.template_create': 'สร้างเทมเพลตสัญญา',
+  'contract.template_update': 'แก้ไขเทมเพลตสัญญา',
+  'contract.template_delete': 'ลบเทมเพลตสัญญา',
+  'contract.template_set_default': 'ตั้งเทมเพลตสัญญาเริ่มต้น',
+  'contract.template_assign': 'ผูกเทมเพลตกับสัญญา',
+  'contract.terms_update': 'แก้ข้อกำหนดสัญญากลาง',
+  'contract.terms_reset': 'รีเซ็ตข้อกำหนดสัญญากลาง',
+  'contract.pdf_view': 'เปิดดู PDF สัญญา',
+  'tenant.create': 'สร้างผู้เช่า',
+  'tenant.update': 'แก้ไขข้อมูลผู้เช่า',
+  'tenant.delete': 'ลบผู้เช่า',
+  'tenant.identity': 'บันทึกบัตรประชาชน',
+  'tenant.notify': 'ส่งข้อความถึงผู้เช่า',
+  'tenant.login': 'ผู้เช่าเข้าสู่ระบบ',
+  'tenant.login_failed': 'ผู้เช่าเข้าสู่ระบบไม่สำเร็จ',
+  'tenant.login_blocked_ambiguous_phone': 'ระบบกันล็อกอิน (เบอร์ซ้ำหลายคน)',
+  'tenant.login_blocked_inactive': 'ระบบกันล็อกอิน (ผู้เช่าไม่ active)',
+  'tenant.profile_update': 'ผู้เช่าแก้โปรไฟล์',
+  'tenant.slip_upload': 'ผู้เช่าส่งสลิปชำระเงิน',
+  'tenant.checkin': 'เช็คอิน/ย้ายเข้า',
+  'tenant.checkout': 'เช็คเอาท์/ย้ายออก',
+  'bill.create': 'ออกบิล',
+  'bill.void': 'ยกเลิกบิล',
+  'bill.unmark_paid': 'ถอนสถานะชำระแล้วของบิล',
+  'payment.verify': 'ยืนยันการชำระเงิน',
+  'payment.reject': 'ปฏิเสธสลิป',
+  'room.update': 'แก้ไขห้อง',
+  'room.delete': 'ลบห้อง',
+  'room.reconcile': 'ปรับสถานะห้อง (reconcile)',
+  'room.status_sync': 'ระบบปรับสถานะห้องอัตโนมัติ',
+  'access_card.revoke': 'เพิกถอนบัตรเข้าออก',
+  'recurring_charge.deactivate': 'หยุดค่าใช้จ่ายประจำ',
+  'user.create': 'สร้างผู้ใช้แอดมิน',
+  'user.update': 'แก้ไขผู้ใช้แอดมิน',
+  'user.delete': 'ลบผู้ใช้แอดมิน',
+  'setting.update': 'แก้ตั้งค่าระบบ',
+  'setting.reset': 'รีเซ็ตตั้งค่าระบบ',
+};
+
+function auditActionTH(action) {
+  const key = String(action || '');
+  if (!key) return '-';
+  if (AUDIT_ACTION_TH[key]) return AUDIT_ACTION_TH[key];
+  if (key.startsWith('bill.late_fee')) return 'ปรับปรุงค่าปรับล่าช้า';
+  return key;
+}
+
+// One-line human summary of audit_logs.detail (JSONB → object). Pulls the
+// fields admins actually ask about (room, contract, amounts, reason, state
+// transition) and ignores the machine bookkeeping keys.
+function describeAuditDetail(entry) {
+  const d = entry && typeof entry.detail === 'object' && entry.detail ? entry.detail : {};
+  const money = (v) => `฿${Number(v).toLocaleString('th-TH')}`;
+  const parts = [];
+  if (d.roomId) parts.push(`ห้อง ${d.roomId}`);
+  else if (d.oldRoom) parts.push(`ห้อง ${d.oldRoom}`);
+  else if (d.assignedRoomId) parts.push(`ห้อง ${d.assignedRoomId}`);
+  if (d.contractNo) parts.push(`สัญญา ${d.contractNo}`);
+  if (d.before != null && d.after != null) parts.push(`${d.before || '-'} → ${d.after}`);
+  else if (d.from != null && d.to != null) parts.push(`${d.from || '-'} → ${d.to}`);
+  if (d.monthlyRent != null) parts.push(`ค่าเช่า ${money(d.monthlyRent)}`);
+  if (d.depositAmount != null) parts.push(`มัดจำ ${money(d.depositAmount)}`);
+  if (d.refund != null) parts.push(`คืนมัดจำ ${money(d.refund)}`);
+  if (d.amount != null) parts.push(money(d.amount));
+  if (d.closingBill) parts.push(`บิลปิดยอด ${d.closingBill}`);
+  if (d.label) parts.push(String(d.label).slice(0, 60));
+  const reasonText = d.reason || d.closeReason || d.rejection_reason;
+  if (reasonText) parts.push(`เหตุผล: ${String(reasonText).slice(0, 80)}`);
+  if (d.forced === true || d.force === true) parts.push('⚠️ ใช้ force ข้ามการตรวจ');
+  return parts.join(' · ');
+}
+
 // --- Expose to window -----------------------------------------------------
 // ADMIN_TENANTS used to live here but was removed when tenants moved into
 // the relational `tenants` table. The reference left in this exposure list
@@ -734,4 +832,5 @@ Object.assign(window, {
   downloadFile, exportCSV, exportJSON, importJSON,
   exportRoomsCSV, exportTenantsCSV, exportBookingsCSV, exportBillsCSV, exportFullBackup,
   printPage,
+  AUDIT_ACTION_TH, auditActionTH, describeAuditDetail,
 });

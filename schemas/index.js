@@ -112,6 +112,16 @@ schemas.checkOut = z.object({
   // default .strip() removes it and `req.body.generateClosingBill !== false`
   // is always true — the opt-out becomes dead code.
   generateClosingBill: z.boolean().optional(),
+  // Final meter readings at move-out. Metered water/elec consumption since
+  // the last recorded reading is charged on the closing bill; without these
+  // the final partial period's usage is never billed (the next tenant's
+  // baseline absorbs it). Flat-mode utilities ignore them.
+  waterEndReading: z.coerce.number().nonnegative().max(9_999_999).optional(),
+  elecEndReading: z.coerce.number().nonnegative().max(9_999_999).optional(),
+  // Escape hatch mirroring check-in's force path: a reading BELOW the last
+  // recorded one is rejected (METER_END_BACKWARD) unless the admin confirms
+  // the meter was physically replaced/reset.
+  allowMeterRollback: z.boolean().optional(),
 });
 
 // --- rooms ----------------------------------------------------------------

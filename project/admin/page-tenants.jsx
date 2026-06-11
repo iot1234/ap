@@ -1424,6 +1424,14 @@ function TabContract({ t, routeBookingId = '', config, setToast, addActivity, se
         if (fdr != null && Number.isFinite(Number(fdr)) && Number(fdr) >= 0) {
           body.finalDepositReturn = Number(fdr);
         }
+        // Final meter readings — server records them + bills the last
+        // partial period's consumption on the closing bill.
+        if (opts && opts.waterEndReading != null && Number.isFinite(Number(opts.waterEndReading))) {
+          body.waterEndReading = Number(opts.waterEndReading);
+        }
+        if (opts && opts.elecEndReading != null && Number.isFinite(Number(opts.elecEndReading))) {
+          body.elecEndReading = Number(opts.elecEndReading);
+        }
         checkoutResult = await apiCall(`/api/tenants/${tenantDbId}/checkout`, {
           method: 'POST',
           body: JSON.stringify(body),
@@ -1448,22 +1456,45 @@ function TabContract({ t, routeBookingId = '', config, setToast, addActivity, se
       const baseMsg = contract
         ? `ยกเลิกสัญญา ${closedContractNo} แล้ว — ห้อง ${closedRoomId} ว่าง`
         : `เช็คเอาท์ ${t.name} จากห้อง ${closedRoomId} แล้ว`;
+      const closingBillInfo = checkoutResult && checkoutResult.closingBill;
+      const meterSkipped = (checkoutResult && Array.isArray(checkoutResult.meterSkipped))
+        ? checkoutResult.meterSkipped : [];
+      const meterSkipNote = meterSkipped.length > 0
+        ? `⚠️ ไม่ได้จดมิเตอร์${meterSkipped.map((mt) => (mt === 'water' ? 'น้ำ' : 'ไฟ')).join('/')} — ค่างวดสุดท้ายไม่ได้เรียกเก็บ`
+        : null;
+      const closingNote = closingBillInfo
+        ? `ออกบิลปิดยอด ${closingBillInfo.bill_no} ${fmtCurrency(closingBillInfo.total)} แล้ว`
+        : null;
       if (outstandingTotal > 0) {
         setToast && setToast({
           kind: 'warning',
           message: {
             title: baseMsg,
             description: [
-              `⚠️ ยังมีบิลค้างชำระ ${outstandingCount} ใบ รวม ${fmtCurrency(outstandingTotal)} — ติดตามเก็บที่ /admin#billing`,
+              `⚠️ ยังมีบิลค้างชำระ ${outstandingCount} ใบ รวม ${fmtCurrency(outstandingTotal)}`,
+              closingNote,
               refundRecorded != null ? `บันทึกคืนมัดจำ ${fmtCurrency(refundRecorded)} แล้ว` : null,
+              meterSkipNote,
             ].filter(Boolean).join('\n'),
+            // Continue the flow: jump straight to this tenant's open bills
+            // instead of leaving the admin to find them in /admin#billing.
+            action: {
+              label: 'ดูบิลค้างของผู้เช่า →',
+              onClick: () => { window.location.hash = '#billing'; },
+            },
           },
         });
       } else {
+        const successLines = [
+          refundRecorded != null ? `บันทึกคืนมัดจำ ${fmtCurrency(refundRecorded)} แล้ว` : null,
+          closingNote,
+          'ไม่มีบิลค้างชำระ',
+          meterSkipNote,
+        ].filter(Boolean);
         setToast && setToast({
           kind: 'success',
-          message: refundRecorded != null
-            ? { title: baseMsg, description: `บันทึกคืนมัดจำ ${fmtCurrency(refundRecorded)} แล้ว · ไม่มีบิลค้างชำระ` }
+          message: successLines.length
+            ? { title: baseMsg, description: successLines.join('\n') }
             : baseMsg,
         });
       }
@@ -1699,6 +1730,8 @@ function TabContract({ t, routeBookingId = '', config, setToast, addActivity, se
             contract={null}
             tenant={t}
             tenantDbId={tenantDbId}
+            room={t.room}
+            config={config}
             reason={cancelReason}
             setReason={setCancelReason}
             busy={busy}
@@ -1793,6 +1826,24 @@ function TabContract({ t, routeBookingId = '', config, setToast, addActivity, se
             onClick={() => window.open(`/api/contracts/${contract.id}/pdf`, '_blank', 'noopener')}>
             ดู PDF
           </Btn>
+          {(() => {
+            // Renewal entry point — appears when the active contract is within
+            // 60 days of its end (or already past it). Deep-links to the
+            // contracts page which opens the prefilled renew modal.
+            if (contract.status !== 'active' || !contract.end_date) return null;
+            let dl = null;
+            try {
+              const e = new Date(String(contract.end_date).slice(0, 10) + 'T00:00:00');
+              dl = Math.ceil((e.getTime() - Date.now()) / 86400000);
+            } catch { /* unparsable end date */ }
+            if (dl == null || dl > 60) return null;
+            return (
+              <Btn variant="primary" size="sm" icon="🔄"
+                onClick={() => { window.location.hash = `#contracts?renew=${encodeURIComponent(contract.id)}`; }}>
+                ต่อสัญญา{dl >= 0 ? ` (เหลือ ${dl} วัน)` : ' (เลยกำหนดแล้ว)'}
+              </Btn>
+            );
+          })()}
           {!isLocked && !invStatus ? (
             <Btn variant="primary" size="sm" icon="📨"
               onClick={sendInviteForExistingContract} disabled={busy}>
@@ -1829,6 +1880,8 @@ function TabContract({ t, routeBookingId = '', config, setToast, addActivity, se
           contract={contract}
           tenant={t}
           tenantDbId={tenantDbId}
+          room={t.room}
+          config={config}
           reason={cancelReason}
           setReason={setCancelReason}
           busy={busy}
@@ -1845,7 +1898,7 @@ function TabContract({ t, routeBookingId = '', config, setToast, addActivity, se
 // audit log captures WHY the lease was terminated — admin support cases
 // later asking "who cancelled this and why?" should be answerable from
 // the audit_log entry without DB forensics.
-function CancelContractModal({ contract, tenant, tenantDbId, reason, setReason, busy, onClose, onConfirm, C }) {
+function CancelContractModal({ contract, tenant, tenantDbId, room, config, reason, setReason, busy, onClose, onConfirm, C }) {
   const { Modal, Btn, fmtCurrency } = window;
   const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
   const roomId = contract ? contract.room_id : (tenant && (tenant.currentRoomId || tenant.roomId)) || '-';
@@ -1860,6 +1913,11 @@ function CancelContractModal({ contract, tenant, tenantDbId, reason, setReason, 
   // contracts.deposit_returned — if admin skips it here it can't be
   // recorded later, so the field lives in this modal.
   const [depositReturn, setDepositReturn] = React.useState('');
+  // Final meter readings — metered rooms only. Empty = admin chose to skip
+  // (server then won't bill the last partial period's usage, and warns).
+  const [waterEnd, setWaterEnd] = React.useState('');
+  const [elecEnd, setElecEnd] = React.useState('');
+  const [lastReadings, setLastReadings] = React.useState({ water: null, elec: null });
   React.useEffect(() => {
     if (!tenantDbId || !apiCall) return;
     let cancelled = false;
@@ -1872,13 +1930,94 @@ function CancelContractModal({ contract, tenant, tenantDbId, reason, setReason, 
     }).catch(() => { if (!cancelled) setOutstanding(undefined); });
     return () => { cancelled = true; };
   }, [tenantDbId]);
+  const roomObj = room || (tenant && tenant.room) || {};
+  // Client-side mirror of billing.isFlatUtilityConfigured — flat-mode
+  // utilities aren't metered, so their inputs are hidden.
+  const isFlat = (p) => {
+    const mode = String(roomObj[`${p}Mode`] ?? roomObj[`${p}_mode`] ?? '').toLowerCase();
+    const amt = Number(roomObj[`${p}FlatAmount`] ?? roomObj[`${p}_flat_amount`]);
+    return mode === 'flat' && Number.isFinite(amt) && amt > 0;
+  };
+  const metered = { water: !isFlat('water'), elec: !isFlat('elec') };
+  const realRoomId = roomId && roomId !== '-' ? String(roomId) : '';
+  const showMeterSection = !!(tenantDbId && realRoomId && (metered.water || metered.elec));
+  React.useEffect(() => {
+    if (!showMeterSection || !apiCall) return;
+    let cancelled = false;
+    ['water', 'elec'].forEach((mt) => {
+      if (!metered[mt]) return;
+      apiCall(`/api/meters/${encodeURIComponent(realRoomId)}/readings?type=${mt}`)
+        .then((d) => {
+          if (cancelled) return;
+          const latest = d && Array.isArray(d.readings) && d.readings[0]
+            ? Number(d.readings[0].reading) : null;
+          if (Number.isFinite(latest)) {
+            setLastReadings((prev) => ({ ...prev, [mt]: latest }));
+          }
+        })
+        .catch(() => {
+          // meterIot feature off / legacy deploy — fall back to room blob hint.
+          if (cancelled) return;
+          const blobVal = Number(roomObj[`${mt}CurrentReading`]);
+          if (Number.isFinite(blobVal)) {
+            setLastReadings((prev) => ({ ...prev, [mt]: blobVal }));
+          }
+        });
+    });
+    return () => { cancelled = true; };
+  }, [showMeterSection, realRoomId]);
   const outstandingTotal = Array.isArray(outstanding)
     ? Math.round(outstanding.reduce((s, b) => s + (Number(b.total) || 0), 0) * 100) / 100
     : 0;
+  const util = (config && config.utilities) || {};
+  const rateFor = (p) => {
+    const o = Number(roomObj[`${p}RateOverride`] ?? roomObj[`${p}_rate_override`]);
+    if (Number.isFinite(o) && o > 0) return o;
+    const g = Number(p === 'water' ? (util.waterRate ?? 18) : (util.elecRate ?? 8));
+    return Number.isFinite(g) && g > 0 ? g : 0;
+  };
+  const meterPreview = (p) => {
+    const raw = p === 'water' ? waterEnd : elecEnd;
+    if (raw === '') return null;
+    const v = Number(raw);
+    if (!Number.isFinite(v) || v < 0) return { invalid: true, msg: 'ต้องเป็นตัวเลข 0 ขึ้นไป' };
+    const last = lastReadings[p];
+    if (last != null && v < last) {
+      return { invalid: true, msg: `น้อยกว่าเลขล่าสุด (${last}) — มิเตอร์ไม่ควรถอยหลัง` };
+    }
+    const units = last != null ? Math.round((v - last) * 100) / 100 : 0;
+    const amount = Math.round(units * rateFor(p) * 100) / 100;
+    return { invalid: false, units, amount, rate: rateFor(p) };
+  };
+  const waterPreview = meterPreview('water');
+  const elecPreview = meterPreview('elec');
+  const meterInvalid = !!((waterPreview && waterPreview.invalid) || (elecPreview && elecPreview.invalid));
+  // Closing-bill estimate (client-side, "โดยประมาณ") feeding the suggested
+  // refund: prorated rent for days lived this month + entered meter charges.
+  // The server computes the authoritative bill — this is decision support.
+  const today = new Date();
+  const dim = new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate();
+  const frac = Math.min(1, Math.max(0, today.getDate() / dim));
+  const discountPct = contract ? Number(contract.discount_pct) || 0 : 0;
+  const estRent = contract
+    ? Math.round((Number(monthlyRent) || 0) * frac * (1 - discountPct / 100) * 100) / 100
+    : 0;
+  const estMeter = (waterPreview && !waterPreview.invalid ? waterPreview.amount : 0)
+    + (elecPreview && !elecPreview.invalid ? elecPreview.amount : 0);
+  const estClosing = Math.round((estRent + estMeter) * 100) / 100;
+  const suggestedRefund = (contract && Array.isArray(outstanding))
+    ? Math.max(0, Math.round(((Number(deposit) || 0) - outstandingTotal - estClosing) * 100) / 100)
+    : null;
   const depositNum = depositReturn === '' ? null : Number(depositReturn);
   const depositInvalid = depositReturn !== ''
     && (!Number.isFinite(depositNum) || depositNum < 0 || depositNum > Number(deposit || 0));
-  const confirm = () => onConfirm({ finalDepositReturn: depositReturn === '' ? null : depositNum });
+  const confirm = () => onConfirm({
+    finalDepositReturn: depositReturn === '' ? null : depositNum,
+    waterEndReading: showMeterSection && metered.water && waterEnd !== '' && !(waterPreview && waterPreview.invalid)
+      ? Number(waterEnd) : null,
+    elecEndReading: showMeterSection && metered.elec && elecEnd !== '' && !(elecPreview && elecPreview.invalid)
+      ? Number(elecEnd) : null,
+  });
   return (
     <Modal
       open={true}
@@ -1888,7 +2027,7 @@ function CancelContractModal({ contract, tenant, tenantDbId, reason, setReason, 
       footer={
         <>
           <Btn variant="ghost" onClick={onClose} disabled={busy}>ปิด</Btn>
-          <Btn variant="danger" onClick={confirm} disabled={busy || reason.trim().length < 5 || depositInvalid}>
+          <Btn variant="danger" onClick={confirm} disabled={busy || reason.trim().length < 5 || depositInvalid || meterInvalid}>
             {busy ? (contract ? 'กำลังยกเลิก…' : 'กำลังเช็คเอาท์…') : (contract ? 'ยืนยันยกเลิก' : 'ยืนยันเช็คเอาท์')}
           </Btn>
         </>
@@ -1953,11 +2092,72 @@ function CancelContractModal({ contract, tenant, tenantDbId, reason, setReason, 
         </div>
       )}
 
+      {showMeterSection ? (
+        <div style={{
+          padding: 10, background: '#eef6f0', border: '1px solid #bcd9c2',
+          borderRadius: 8, marginBottom: 12,
+        }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: '#1f5b2e', marginBottom: 6 }}>
+            ⚡ จดเลขมิเตอร์ครั้งสุดท้าย — ระบบจะคิดค่าน้ำ/ไฟงวดสุดท้ายลงบิลปิดยอดให้
+          </div>
+          {['water', 'elec'].map((mt) => {
+            if (!metered[mt]) return null;
+            const label = mt === 'water' ? 'น้ำ' : 'ไฟ';
+            const val = mt === 'water' ? waterEnd : elecEnd;
+            const setVal = mt === 'water' ? setWaterEnd : setElecEnd;
+            const preview = mt === 'water' ? waterPreview : elecPreview;
+            const last = lastReadings[mt];
+            return (
+              <div key={mt} style={{ marginBottom: 8 }}>
+                <label style={{ display: 'block', fontSize: 11, color: '#406a4c', marginBottom: 2 }}>
+                  มิเตอร์{label}{last != null ? ` (เลขล่าสุด ${last})` : ''}
+                </label>
+                <input type="number" min="0" step="0.01" value={val}
+                  placeholder={last != null ? `≥ ${last}` : 'เลขที่อ่านได้หน้าห้อง'}
+                  onChange={(e) => setVal(e.target.value)}
+                  style={{
+                    width: '100%', padding: '7px 10px', borderRadius: 6, fontSize: 13,
+                    boxSizing: 'border-box', fontFamily: 'inherit',
+                    border: `1px solid ${preview && preview.invalid ? '#e57373' : '#bcd9c2'}`,
+                  }} />
+                {preview ? (
+                  <div style={{ fontSize: 11, marginTop: 2, color: preview.invalid ? '#c0392b' : '#1f5b2e' }}>
+                    {preview.invalid
+                      ? preview.msg
+                      : `ใช้ไป ${preview.units} หน่วย × ฿${preview.rate} = ฿${Number(preview.amount).toLocaleString('th-TH')}`}
+                  </div>
+                ) : (
+                  <div style={{ fontSize: 11, marginTop: 2, color: '#a3623b' }}>
+                    ⚠️ ถ้าเว้นว่าง ระบบจะไม่เรียกเก็บค่า{label}งวดสุดท้าย
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+
       {tenantDbId && contract ? (
         <div style={{ marginBottom: 12 }}>
           <label style={{ display: 'block', fontSize: 12, marginBottom: 4, color: '#5b4f40', fontWeight: 500 }}>
             คืนเงินมัดจำให้ผู้เช่า (บาท)
           </label>
+          {suggestedRefund != null ? (
+            <div style={{
+              display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap',
+              fontSize: 11, color: C.muted, margin: '0 0 6px', lineHeight: 1.5,
+            }}>
+              <span>
+                ยอดแนะนำ: มัดจำ {fmtCurrency(deposit)} − ค้างชำระ {fmtCurrency(outstandingTotal)}
+                {estClosing > 0 ? ` − บิลปิดยอด (ประมาณ) ${fmtCurrency(estClosing)}` : ''} ={' '}
+                <b style={{ color: C.ink }}>{fmtCurrency(suggestedRefund)}</b>
+              </span>
+              <Btn variant="soft" size="sm" disabled={busy}
+                onClick={() => setDepositReturn(String(suggestedRefund))}>
+                ใช้ยอดแนะนำ
+              </Btn>
+            </div>
+          ) : null}
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <input type="number" min="0" max={Number(deposit) || 0} step="0.01"
               placeholder="เว้นว่าง = ยังไม่บันทึกการคืน"
@@ -3034,7 +3234,23 @@ function TabHistory({ t }) {
   ];
   const auditCols = [
     { key: 'created_at', label: 'เวลา', minWidth: 130, render: a => String(a.created_at || '').slice(0, 19).replace('T', ' ') },
-    { key: 'action', label: 'เหตุการณ์', minWidth: 160 },
+    {
+      key: 'action', label: 'เหตุการณ์', minWidth: 200,
+      // Thai label + a one-line detail summary (room/contract/amounts/reason)
+      // so the history reads as events, not API verbs hiding JSON.
+      render: (a) => {
+        const label = window.auditActionTH ? window.auditActionTH(a.action) : (a.action || '-');
+        const detail = window.describeAuditDetail ? window.describeAuditDetail(a) : '';
+        return (
+          <div>
+            <div>{label}</div>
+            {detail ? (
+              <div style={{ fontSize: 11, color: C.muted, marginTop: 2, lineHeight: 1.4 }}>{detail}</div>
+            ) : null}
+          </div>
+        );
+      },
+    },
     { key: 'user_id', label: 'ผู้ทำรายการ', minWidth: 100, render: a => a.user_id || '-' },
   ];
   const paymentCols = [

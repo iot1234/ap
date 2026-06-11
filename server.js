@@ -11619,6 +11619,12 @@ app.get('/api/contracts', requireAuth, async (req, res) => {
                    WHERE i.contract_id = c.id
                      AND i.status IN ('pending','submitted')
                    ORDER BY i.created_at DESC LIMIT 1) AS active_invitation_expires_at,
+                -- id too, so the UI's "รอตรวจสอบ →" pill can deep-link
+                -- straight into that invitation's review modal.
+                (SELECT i.id FROM contract_invitations i
+                   WHERE i.contract_id = c.id
+                     AND i.status IN ('pending','submitted')
+                   ORDER BY i.created_at DESC LIMIT 1) AS active_invitation_id,
                 EXISTS (
                   SELECT 1 FROM contract_templates tpl
                    WHERE tpl.deleted_at IS NULL
@@ -12799,6 +12805,13 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
     const discountPct = b.discountPct != null ? Number(b.discountPct) : 0;
     const expiresInHours = Number(b.expiresInHours) || 168;
     const bookingIdForRoom = b.bookingId ? String(b.bookingId).slice(0, 64) : null;
+    // Renewal mode: the new contract continues an existing locked contract on
+    // the SAME room + tenant. Identifying the predecessor lets the same-tenant
+    // duplicate-contract guard below allow exactly this case (new start must
+    // be after the old end_date, so the two never overlap a billing day).
+    const renewOfContractId = b.renewOfContractId != null && Number.isInteger(Number(b.renewOfContractId))
+      ? Number(b.renewOfContractId)
+      : null;
     if (termMonths != null && (!Number.isInteger(termMonths) || termMonths < 1 || termMonths > 60)) {
       return res.status(400).json({ error: 'termMonths must be 1-60', code: 'INVALID_TERM' });
     }
@@ -13047,7 +13060,7 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
       }
 
       const sameTenantRoomContract = await client.query(
-        `SELECT c.id, c.contract_no, c.locked_at
+        `SELECT c.id, c.contract_no, c.locked_at, c.end_date
            FROM contracts c
           WHERE c.room_id=$1 AND c.tenant_id=$2
             AND c.status='active' AND c.deleted_at IS NULL
@@ -13056,25 +13069,49 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
           FOR UPDATE OF c`,
         [roomId, tenantId]
       );
-      if (sameTenantRoomContract.rows.length
-          && (sameTenantRoomContract.rows[0].locked_at || !isForced)) {
+      if (sameTenantRoomContract.rows.length) {
         const conflict = sameTenantRoomContract.rows[0];
-        await client.query('ROLLBACK');
-        return res.status(409).json({
-          error: conflict.locked_at
-            ? 'ผู้เช่ารายนี้มีสัญญา active ของห้องนี้อยู่แล้ว'
-            : `ผู้เช่ารายนี้มีสัญญารอลงนามอยู่แล้ว (${conflict.contract_no})`,
-          code: conflict.locked_at ? 'TENANT_ROOM_CONTRACT_EXISTS' : 'DRAFT_CONTRACT_EXISTS',
-          conflict,
-          hint: conflict.locked_at
-            ? 'ใช้สัญญาเดิม หรือปิดสัญญาเดิมก่อนสร้างฉบับใหม่'
-            : 'ส่งลิงก์ใหม่จากสัญญาเดิมที่ /admin#contracts หรือส่ง { force: true } เพื่อสร้างใหม่ (audit-logged)',
-          nextActions: {
-            contractsUrl: `/admin#contracts?room=${encodeURIComponent(roomId)}&contract=${encodeURIComponent(conflict.id)}`,
-            pdfUrl: `/api/contracts/${encodeURIComponent(conflict.id)}/pdf`,
-            hint: 'ใช้รายการสัญญาเดิมนี้ต่อ ไม่ต้องสร้างซ้ำ',
-          },
-        });
+        const conflictEnd = conflict.end_date ? String(conflict.end_date).slice(0, 10) : null;
+        // Renewal path: caller explicitly names THIS contract as the one
+        // being renewed. Allowed only when the new start date is strictly
+        // after the old end date — the old contract keeps running to its
+        // end_date (auto-expired by the scheduler), the renewal takes over
+        // from the next day, and no billing day is covered twice. tickBillGen
+        // ignores contracts that start after the billed period, so the
+        // queued renewal can't hijack rent/due-day before it begins.
+        const isRenewalOfConflict = renewOfContractId != null
+          && Number(conflict.id) === renewOfContractId;
+        if (isRenewalOfConflict && (!conflictEnd || moveInDate <= conflictEnd)) {
+          await client.query('ROLLBACK');
+          return res.status(409).json({
+            error: conflictEnd
+              ? `วันเริ่มสัญญาใหม่ (${moveInDate}) ต้องอยู่หลังวันสิ้นสุดสัญญาเดิม (${conflictEnd})`
+              : `สัญญาเดิม ${conflict.contract_no} ไม่มีวันสิ้นสุด (เปิด-ไม่จำกัด) — ปิดสัญญาเดิมก่อนจึงต่อสัญญาได้`,
+            code: 'RENEWAL_START_OVERLAPS',
+            conflict,
+            hint: conflictEnd
+              ? `เลือกวันเริ่มตั้งแต่วันถัดจาก ${conflictEnd} เป็นต้นไป`
+              : 'กำหนดวันสิ้นสุดให้สัญญาเดิม หรือปิดสัญญาเดิม แล้วลองใหม่',
+          });
+        }
+        if (!isRenewalOfConflict && (conflict.locked_at || !isForced)) {
+          await client.query('ROLLBACK');
+          return res.status(409).json({
+            error: conflict.locked_at
+              ? 'ผู้เช่ารายนี้มีสัญญา active ของห้องนี้อยู่แล้ว'
+              : `ผู้เช่ารายนี้มีสัญญารอลงนามอยู่แล้ว (${conflict.contract_no})`,
+            code: conflict.locked_at ? 'TENANT_ROOM_CONTRACT_EXISTS' : 'DRAFT_CONTRACT_EXISTS',
+            conflict,
+            hint: conflict.locked_at
+              ? 'ใช้สัญญาเดิม หรือปิดสัญญาเดิมก่อนสร้างฉบับใหม่ — ถ้าต้องการต่อสัญญา ใช้ปุ่ม "ต่อสัญญา" ที่หน้า /admin#contracts'
+              : 'ส่งลิงก์ใหม่จากสัญญาเดิมที่ /admin#contracts หรือส่ง { force: true } เพื่อสร้างใหม่ (audit-logged)',
+            nextActions: {
+              contractsUrl: `/admin#contracts?room=${encodeURIComponent(roomId)}&contract=${encodeURIComponent(conflict.id)}`,
+              pdfUrl: `/api/contracts/${encodeURIComponent(conflict.id)}/pdf`,
+              hint: 'ใช้รายการสัญญาเดิมนี้ต่อ ไม่ต้องสร้างซ้ำ',
+            },
+          });
+        }
       }
 
       let bookingCarryoverList = null;
@@ -13493,7 +13530,8 @@ app.post('/api/contracts/quick-invite', sameOrigin, csrfGuard, requireAuth, requ
       );
 
       audit(req, 'contract.quick_invite', 'contract', String(contract.id),
-        { contractNo: contract.contract_no, tenantId, invitationId: invitation.id, delivery, lineBindingCarryover });
+        { contractNo: contract.contract_no, tenantId, invitationId: invitation.id, delivery, lineBindingCarryover,
+          renewOfContractId: renewOfContractId || undefined });
 
       res.json({
         ok: true,

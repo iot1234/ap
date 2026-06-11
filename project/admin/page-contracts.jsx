@@ -32,6 +32,7 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
   const [assigning, setAssigning] = useState(null); // contract for template assignment
   const [inviting, setInviting] = useState(null);   // contract for self-fill invite
   const [quickCreating, setQuickCreating] = useState(false);  // "+ สร้างสัญญา + ส่งลิงก์"
+  const [renewing, setRenewing] = useState(null);   // contract being renewed (prefilled quick-invite)
   const [templates, setTemplates] = useState([]);   // for assignment dropdown
 
   // Pre-load templates list for the assign-template modal. Cheap call,
@@ -75,6 +76,30 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
+
+  // Deep-link "#contracts?renew=<id>" (from the tenants page / expiry alert)
+  // opens the prefilled renewal modal as soon as the contract list has the
+  // row. An expired contract isn't in the default 'active' filter — widen to
+  // 'all' once and let this effect re-run after the refetch.
+  useEffect(() => {
+    if (loading) return;
+    let renewId = '';
+    try {
+      const raw = String(window.location.hash || '');
+      const q = raw.includes('?') ? raw.slice(raw.indexOf('?') + 1) : '';
+      renewId = String(new URLSearchParams(q).get('renew') || '').trim();
+    } catch { /* malformed hash — ignore */ }
+    if (!renewId) return;
+    const target = contracts.find((c) =>
+      String(c.id) === renewId || String(c.contract_no) === renewId);
+    if (target) {
+      setRenewing(target);
+      // Strip the param so closing the modal doesn't re-open it.
+      window.history.replaceState(null, '', '#contracts');
+    } else if (filter !== 'all') {
+      setFilter('all');
+    }
+  }, [contracts, loading]);
 
   const filtered = useMemo(() => {
     if (!search) return contracts;
@@ -159,7 +184,8 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
             border: '1px solid #f1b32d', borderRadius: 8,
             fontSize: 13, color: C.ink2,
           }}>
-            ⏰ <b>{counts.expiring}</b> สัญญาจะหมดอายุภายใน 30 วัน — แนะนำติดต่อผู้เช่าเพื่อต่อสัญญา
+            ⏰ <b>{counts.expiring}</b> สัญญาจะหมดอายุภายใน 30 วัน — กดปุ่ม
+            "🔄 ต่อสัญญา" ท้ายแถวเพื่อสร้างสัญญาใหม่จากเงื่อนไขเดิม + ส่งลิงก์ให้ผู้เช่าได้เลย
           </div>
         ) : null}
         {counts.warnings > 0 ? (
@@ -179,7 +205,12 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
             {window.SkeletonRows ? <window.SkeletonRows count={5} lineHeight={36} /> : <div style={{ padding: 30, textAlign: 'center', color: C.muted }}>กำลังโหลด…</div>}
           </div>
         ) : filtered.length === 0 ? (
-          <div style={{ padding: 30, textAlign: 'center', color: C.muted }}>ไม่มีสัญญา</div>
+          window.EmptyState ? (
+            <window.EmptyState icon="📜" title="ไม่มีสัญญาในมุมมองนี้"
+              description='สร้างสัญญาใหม่ได้จากปุ่ม "+ สร้างสัญญา" ด้านบน หรือจากการจองที่อนุมัติแล้ว' />
+          ) : (
+            <div style={{ padding: 30, textAlign: 'center', color: C.muted }}>ไม่มีสัญญา</div>
+          )
         ) : (
           <div style={{ overflowX: 'auto' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
@@ -201,10 +232,29 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
                   <tr key={c.id} style={{ borderBottom: `1px solid ${C.border}` }}>
                     <td style={td}>{c.contract_no}</td>
                     <td style={td}>
-                      <div style={{ fontWeight: 500 }}>{c.tenant_name || '-'}</div>
+                      {/* Cross-link: jump straight to this tenant's drawer
+                          (tenants page routes by tenantId/room) instead of
+                          re-searching there by hand. */}
+                      {c.tenant_id ? (
+                        <a href={`#tenants?tenantId=${encodeURIComponent(c.tenant_id)}`}
+                          title="เปิดหน้าผู้เช่ารายนี้"
+                          style={{ textDecoration: 'none', color: 'inherit' }}>
+                          <div style={{ fontWeight: 500, color: C.accent }}>{c.tenant_name || '-'} →</div>
+                        </a>
+                      ) : (
+                        <div style={{ fontWeight: 500 }}>{c.tenant_name || '-'}</div>
+                      )}
                       <div style={{ color: C.muted, fontSize: 11 }}>{c.tenant_phone || '-'}</div>
                     </td>
-                    <td style={td}>{c.room_id || '-'}</td>
+                    <td style={td}>
+                      {c.room_id ? (
+                        <a href={`#rooms?room=${encodeURIComponent(c.room_id)}`}
+                          title="เปิดห้องนี้ในหน้าห้องพัก"
+                          style={{ textDecoration: 'none', color: C.accent }}>
+                          {c.room_id} →
+                        </a>
+                      ) : '-'}
+                    </td>
                     <td style={td}>{fmtDate(c.start_date)}</td>
                     <td style={td}>
                       {fmtDate(c.end_date)}
@@ -251,7 +301,9 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
                         </div>
                       ) : c.active_invitation_status === 'submitted' ? (
                         <div style={{ marginTop: 4 }}>
-                          <a href="#contract-invitations"
+                          <a href={c.active_invitation_id
+                            ? `#contract-invitations?open=${encodeURIComponent(c.active_invitation_id)}`
+                            : '#contract-invitations'}
                             style={{ display: 'inline-block', textDecoration: 'none' }}>
                             <Pill color="warning">✓ รอตรวจสอบ →</Pill>
                           </a>
@@ -272,6 +324,11 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
                       ) : null}
                     </td>
                     <td style={{ ...td, whiteSpace: 'nowrap' }}>
+                      {(c.status === 'expired'
+                        || (c.status === 'active' && c.days_left != null && c.days_left <= 60)) ? (
+                        <Btn size="sm" variant="soft" onClick={() => setRenewing(c)}
+                          title="สร้างสัญญาใหม่จากเงื่อนไขเดิม + ส่งลิงก์ให้ผู้เช่ายืนยัน">🔄 ต่อสัญญา</Btn>
+                      ) : null}
                       <Btn size="sm" variant="ghost" onClick={() => openPdf(c)}
                         title="ดู PDF (ใช้ template ที่ผูกไว้ หรือ default)">📄 PDF</Btn>
                       <Btn size="sm" variant="ghost" onClick={() => openPdf(c, { download: 1 })}
@@ -353,6 +410,29 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
               message: `สร้างสัญญา ${payload.contract.contract_no} + ส่งลิงก์เรียบร้อย` });
             addActivity && addActivity({ icon: '✨',
               text: `สร้างสัญญา + ส่งลิงก์ให้ ${payload.tenant.fullName}`,
+              type: 'system' });
+            refresh();
+          }}
+          onError={(msg) => setToast && setToast({ kind: 'danger', message: msg })}
+        />
+      ) : null}
+
+      {renewing ? (
+        <QuickInviteModal
+          rooms={rooms}
+          config={config}
+          renewFrom={renewing}
+          onClose={() => setRenewing(null)}
+          onSaved={(payload) => {
+            const oldNo = renewing.contract_no;
+            setRenewing(null);
+            setToast && setToast({ kind: 'success',
+              message: {
+                title: `ต่อสัญญาเรียบร้อย — สัญญาใหม่ ${payload.contract.contract_no}`,
+                description: 'ส่งลิงก์ให้ผู้เช่ายืนยัน+เซ็นแล้ว เมื่อผู้เช่าส่งกลับ ตรวจและอนุมัติได้ที่ "ใบเชิญผู้เช่ากรอก" — สัญญาเดิมจะสิ้นสุดตามกำหนดเดิม',
+              } });
+            addActivity && addActivity({ icon: '🔄',
+              text: `ต่อสัญญา ${oldNo} → ${payload.contract.contract_no}`,
               type: 'system' });
             refresh();
           }}
@@ -1110,7 +1190,7 @@ function ContractEditModal({ contract, onClose, onSaved, onError }) {
 // must know up-front (room, rent, deposit, dates) plus the tenant's name
 // + phone so the link can be addressed correctly. Everything else (address,
 // emergency contact, ID photos, signature) the TENANT fills via the link.
-function QuickInviteModal({ rooms = {}, config, onClose, onSaved, onError }) {
+function QuickInviteModal({ rooms = {}, config, renewFrom = null, onClose, onSaved, onError }) {
   const C = window.ADMIN_C;
   const { Modal, Btn } = window;
   const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
@@ -1119,7 +1199,22 @@ function QuickInviteModal({ rooms = {}, config, onClose, onSaved, onError }) {
   const addContractMonths = window.addContractMonths || (() => '');
   const estimateContractMonths = window.estimateContractMonths || (() => null);
   const contractDateSummary = window.contractDateSummary || (() => '');
-  const initialStartDate = contractTodayYmd();
+  // Renewal mode: continue an existing contract — same tenant/room/terms,
+  // start = the day after the old end_date (or today when that's already
+  // past, so the server's move-in window check doesn't reject it).
+  const renewStartDate = (c) => {
+    const today = contractTodayYmd();
+    const end = String((c && c.end_date) || '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(end)) return today;
+    const d = new Date(end + 'T00:00:00Z');
+    d.setUTCDate(d.getUTCDate() + 1);
+    const next = d.toISOString().slice(0, 10);
+    return next > today ? next : today;
+  };
+  const initialStartDate = renewFrom ? renewStartDate(renewFrom) : contractTodayYmd();
+  const initialTermMonths = renewFrom
+    ? String(Number(renewFrom.term_months) > 0 ? Number(renewFrom.term_months) : 12)
+    : '12';
   const roomList = useMemo(() => Object.values(rooms || {})
     .filter(Boolean)
     .sort((a, b) => String(a.id || '').localeCompare(String(b.id || ''), undefined, {
@@ -1131,16 +1226,18 @@ function QuickInviteModal({ rooms = {}, config, onClose, onSaved, onError }) {
   ), [roomList]);
   const hasRoomInventory = roomList.length > 0;
   const [form, setForm] = useState({
-    tenantName: '',
-    tenantPhone: '',
+    tenantName: renewFrom ? String(renewFrom.tenant_name || '') : '',
+    tenantPhone: renewFrom ? String(renewFrom.tenant_phone || '') : '',
     tenantEmail: '',
-    roomId: '',
-    monthlyRent: '',
-    deposit: '',
+    roomId: renewFrom ? String(renewFrom.room_id || '') : '',
+    monthlyRent: renewFrom && Number(renewFrom.monthly_rent) > 0
+      ? String(Number(renewFrom.monthly_rent)) : '',
+    deposit: renewFrom && Number(renewFrom.deposit) >= 0
+      ? String(Number(renewFrom.deposit)) : '',
     moveInDate: initialStartDate,
-    termMonths: '12',
-    endDate: addContractMonths(initialStartDate, 12),
-    discountPct: '0',
+    termMonths: initialTermMonths,
+    endDate: addContractMonths(initialStartDate, Number(initialTermMonths) || 12),
+    discountPct: renewFrom ? String(Number(renewFrom.discount_pct) || 0) : '0',
     expiresInHours: 168,
   });
   const [busy, setBusy] = useState(false);
@@ -1217,6 +1314,7 @@ function QuickInviteModal({ rooms = {}, config, onClose, onSaved, onError }) {
           endDate: form.endDate || null,
           discountPct: Number(form.discountPct) || 0,
           expiresInHours: Number(form.expiresInHours) || 168,
+          renewOfContractId: renewFrom ? Number(renewFrom.id) : undefined,
         }),
       });
       setResult(d);
@@ -1245,9 +1343,17 @@ function QuickInviteModal({ rooms = {}, config, onClose, onSaved, onError }) {
     }
   };
 
-  const roomAvailable = !hasRoomInventory || availableRooms.some((r) =>
+  // Renewal keeps the tenant's own (occupied) room — the server allows that
+  // exact case, so the vacant-room check must not block it.
+  const renewSameRoom = !!(renewFrom
+    && String(form.roomId).trim() === String(renewFrom.room_id || '').trim());
+  const roomAvailable = renewSameRoom || !hasRoomInventory || availableRooms.some((r) =>
     String(r.id) === String(form.roomId).trim()
   );
+  // Renewal must start after the old contract ends (server enforces too).
+  const renewEndYmd = renewFrom ? String(renewFrom.end_date || '').slice(0, 10) : '';
+  const renewStartTooEarly = !!(renewFrom && renewEndYmd
+    && form.moveInDate && form.moveInDate <= renewEndYmd);
   const termNumber = Number(form.termMonths);
   const termValid = form.termMonths === ''
     || (Number.isInteger(termNumber) && termNumber >= 1 && termNumber <= 60);
@@ -1265,6 +1371,7 @@ function QuickInviteModal({ rooms = {}, config, onClose, onSaved, onError }) {
     && /^[\d+\s-]{8,20}$/.test(form.tenantPhone.trim())
     && form.roomId.trim()
     && roomAvailable
+    && !renewStartTooEarly
     && Number(form.monthlyRent) > 0
     && /^\d{4}-\d{2}-\d{2}$/.test(form.moveInDate)
     && termValid
@@ -1275,7 +1382,9 @@ function QuickInviteModal({ rooms = {}, config, onClose, onSaved, onError }) {
       open={true}
       onClose={() => { if (result) onSaved(result); else onClose(); }}
       width={620}
-      title="สร้างสัญญา + ส่งลิงก์ให้ผู้เช่ากรอกเอง"
+      title={renewFrom
+        ? `🔄 ต่อสัญญา ${renewFrom.contract_no} — สร้างสัญญาใหม่จากเงื่อนไขเดิม`
+        : 'สร้างสัญญา + ส่งลิงก์ให้ผู้เช่ากรอกเอง'}
       footer={
         result ? (
           <Btn variant="primary" onClick={() => onSaved(result)}>เสร็จสิ้น</Btn>
@@ -1291,6 +1400,16 @@ function QuickInviteModal({ rooms = {}, config, onClose, onSaved, onError }) {
     >
       {!result ? (
         <div>
+          {renewFrom ? (
+            <div style={{
+              padding: 10, background: C.infoSoft || '#e8f1f8', borderRadius: 8,
+              marginBottom: 12, fontSize: 12, color: C.infoInk || C.ink2, lineHeight: 1.6,
+            }}>
+              เงื่อนไขเดิม (ผู้เช่า/ห้อง/ค่าเช่า/มัดจำ/ส่วนลด/ระยะเวลา) ถูกดึงมาให้แล้ว —
+              แก้ไขได้ก่อนส่ง · สัญญาเดิมจะสิ้นสุดตามกำหนดเดิม ({renewEndYmd || 'ไม่ระบุ'})
+              แล้วสัญญาใหม่เริ่มต่อทันที · ผู้เช่ายืนยัน+เซ็นผ่านลิงก์เหมือนสัญญาแรก
+            </div>
+          ) : null}
           <div style={{ fontSize: 13, color: C.muted, lineHeight: 1.6, marginBottom: 16 }}>
             กรอกแค่ข้อมูลสัญญา (ห้อง/ค่าเช่า/มัดจำ/วันเริ่ม) — ส่วนที่เหลือ (ที่อยู่
             ผู้ติดต่อฉุกเฉิน บัตรประชาชน ลายเซ็น) ผู้เช่าจะกรอกเองผ่านลิงก์ที่ระบบ
@@ -1329,7 +1448,14 @@ function QuickInviteModal({ rooms = {}, config, onClose, onSaved, onError }) {
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
             <div>
               <label style={lbl}>ห้องเลขที่ *</label>
-              {hasRoomInventory ? (
+              {renewFrom ? (
+                <>
+                  <input style={{ ...inp, background: C.surfaceAlt }} value={form.roomId} readOnly />
+                  <div style={{ marginTop: 4, fontSize: 11, color: C.muted }}>
+                    ต่อสัญญาในห้องเดิมของผู้เช่า
+                  </div>
+                </>
+              ) : hasRoomInventory ? (
                 <select style={inp} value={form.roomId}
                   onChange={(e) => setRoomId(e.target.value)}>
                   <option value="">{availableRooms.length ? 'เลือกห้องว่าง' : 'ไม่มีห้องว่าง'}</option>
@@ -1344,7 +1470,7 @@ function QuickInviteModal({ rooms = {}, config, onClose, onSaved, onError }) {
                   value={form.roomId}
                   onChange={(e) => setForm({ ...form, roomId: e.target.value })} />
               )}
-              {hasRoomInventory ? (
+              {!renewFrom && hasRoomInventory ? (
                 <div style={{ marginTop: 4, fontSize: 11, color: roomAvailable ? C.muted : (C.danger || C.danger) }}>
                   {availableRooms.length
                     ? `เลือกได้ ${availableRooms.length} ห้องว่างจากระบบ`
@@ -1397,16 +1523,18 @@ function QuickInviteModal({ rooms = {}, config, onClose, onSaved, onError }) {
           <div style={{
             marginTop: 8,
             padding: 10,
-            background: endDateValid ? C.infoSoft : C.dangerSoft,
-            border: `1px solid ${endDateValid ? C.border : '#f5c0b4'}`,
+            background: (endDateValid && !renewStartTooEarly) ? C.infoSoft : C.dangerSoft,
+            border: `1px solid ${(endDateValid && !renewStartTooEarly) ? C.border : '#f5c0b4'}`,
             borderRadius: 6,
             fontSize: 12,
-            color: endDateValid ? (C.infoInk || C.ink2) : (C.dangerInk || '#8a2f2b'),
+            color: (endDateValid && !renewStartTooEarly) ? (C.infoInk || C.ink2) : (C.dangerInk || '#8a2f2b'),
             lineHeight: 1.5,
           }}>
-            {endDateValid
-              ? contractDateSummary(form.moveInDate, form.termMonths, form.endDate)
-              : `${endDateErrorText} ระบบจะยังไม่ให้สร้างสัญญา`}
+            {renewStartTooEarly
+              ? `วันเริ่มสัญญาใหม่ต้องอยู่หลังวันสิ้นสุดสัญญาเดิม (${renewEndYmd}) ระบบจะยังไม่ให้สร้างสัญญา`
+              : endDateValid
+                ? contractDateSummary(form.moveInDate, form.termMonths, form.endDate)
+                : `${endDateErrorText} ระบบจะยังไม่ให้สร้างสัญญา`}
           </div>
 
           <div style={{ marginTop: 16 }}>

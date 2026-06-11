@@ -1026,6 +1026,44 @@ function App() {
     return () => { cancel = true; clearInterval(t); };
   }, []);
 
+  // Cross-tab/page freshness: the rooms blob is hydrated once at boot, so
+  // changes made elsewhere (another admin, a checkout cascade, the
+  // scheduler's room-sync) stayed invisible until a full reload — admins saw
+  // contradictory statuses when hopping between pages/tabs. Re-pull on
+  // window focus / tab-visible, at most every 10s. The _firstSave latch is
+  // re-armed so the refresh itself doesn't echo a no-op PUT to the server.
+  const _lastFocusRefresh = React.useRef(0);
+  useEffect(() => {
+    const refreshRoomsOnFocus = async () => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      const nowTs = Date.now();
+      if (nowTs - _lastFocusRefresh.current < 10_000) return;
+      _lastFocusRefresh.current = nowTs;
+      try {
+        const res = await fetch('/api/data/baankarn_rooms_v1', { credentials: 'include' });
+        if (!res.ok) return;
+        const d = await res.json();
+        if (!d || !d.value || typeof d.value !== 'object') return;
+        if (d.updatedAt && window.AP?.setBaseVersion) {
+          window.AP.setBaseVersion('baankarn_rooms_v1', d.updatedAt);
+        }
+        setRooms((prev) => {
+          try {
+            if (JSON.stringify(prev) === JSON.stringify(d.value)) return prev;
+          } catch { /* stringify failure — fall through to replace */ }
+          _firstSave.current.rooms = true;   // skip the save echo for this refresh
+          return d.value;
+        });
+      } catch { /* offline — keep what we have */ }
+    };
+    window.addEventListener('focus', refreshRoomsOnFocus);
+    document.addEventListener('visibilitychange', refreshRoomsOnFocus);
+    return () => {
+      window.removeEventListener('focus', refreshRoomsOnFocus);
+      document.removeEventListener('visibilitychange', refreshRoomsOnFocus);
+    };
+  }, []);
+
   // --- Auth: load current user info for the sidebar ---
   // Auth is already enforced before this component mounts (see __bootAdmin
   // at the bottom of this file), so this just fetches the user object for
@@ -1195,7 +1233,7 @@ function App() {
         kind: 'booking', icon: '📋',
         title: `การจองใหม่ ${b.id}`,
         subtitle: `${b.name} · ${ADMIN_ROOM_TYPES[b.wantType]?.th || b.wantType}`,
-        target: { page: 'bookings' },
+        target: { page: 'bookings', params: { booking: b.id } },
       });
     });
     // Open + assigned tickets surface as notifications until completed.
@@ -1228,7 +1266,7 @@ function App() {
           icon: '🏠',
           title: `ห้อง ${r.id} · ${ADMIN_ROOM_TYPES[r.type]?.th}`,
           subtitle: r.tenant ? r.tenant.name : 'ห้องว่าง',
-          target: { page: 'rooms' },
+          target: { page: 'rooms', params: { room: r.id } },
         });
         if (results.length >= 8) break;
       }
@@ -1243,7 +1281,7 @@ function App() {
           icon: '👤',
           title: r.tenant.name,
           subtitle: `ห้อง ${r.id} · ${r.tenant.phone}`,
-          target: { page: 'tenants' },
+          target: { page: 'tenants', params: { room: r.id } },
         });
         if (results.length >= 12) break;
       }
@@ -1257,7 +1295,7 @@ function App() {
           icon: '📋',
           title: b.name,
           subtitle: `${b.id} · ${b.phone}`,
-          target: { page: 'bookings' },
+          target: { page: 'bookings', params: { booking: b.id } },
         });
         if (results.length >= 14) break;
       }
@@ -1279,8 +1317,21 @@ function App() {
     return results.slice(0, 18);
   }, [search, rooms, bookings, tickets]);
 
-  const handleNotifClick = (n) => { if (n?.target?.page) setPage(n.target.page); };
-  const handleSelectResult = (r) => { if (r?.target?.page) setPage(r.target.page); };
+  // Land on the RECORD, not just the page: targets that carry params write
+  // them into the hash so the destination page's deep-link router opens the
+  // exact room/booking/tenant drawer (1 click instead of search-again).
+  const gotoTarget = (target) => {
+    if (!target?.page) return;
+    const params = target.params && typeof target.params === 'object' ? target.params : null;
+    let qs = '';
+    if (params) {
+      try { qs = new URLSearchParams(params).toString(); } catch { qs = ''; }
+    }
+    window.location.hash = `#${target.page}${qs ? '?' + qs : ''}`;
+    setPage(target.page);
+  };
+  const handleNotifClick = (n) => gotoTarget(n && n.target);
+  const handleSelectResult = (r) => gotoTarget(r && r.target);
 
   const pageProps = {
     rooms, setRooms,
