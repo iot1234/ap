@@ -6569,6 +6569,29 @@ test('auto-expired contracts reconcile tenant and room state', () => {
     'expiry cascade must resync the freed room');
 });
 
+test('zombie tenants are healed automatically with a detailed owner digest', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const sched = fs.readFileSync(path.join(__dirname, '..', 'services', 'scheduler.js'), 'utf8');
+  assert.match(sched, /async function tickTenantStateReconcile/,
+    'a daily tick must heal active-no-room-no-contract tenants without manual clicks');
+  assert.match(sched, /INTERVAL '48 hours'/,
+    'a grace period must protect tenants an admin is actively working on');
+  assert.match(sched, /รายเพราะมีบิลค้างชำระ — ระบบไม่ซ่อนลูกหนี้อัตโนมัติ/,
+    'debt-carrying tenants must be reported for manual decision, never auto-hidden');
+  assert.match(sched, /clean\.slice\(0, 25\)/,
+    'per-run write cap must bound the blast radius of a systemic bug');
+  assert.match(sched, /AND NOT EXISTS \(\s*SELECT 1 FROM contracts c3/,
+    'the UPDATE must re-verify the zombie condition, not trust the survey query');
+  assert.match(sched, /tenantCleanup-\$\{todayKey\}/,
+    'the tick must be registered in the daily batch with an advisory lock');
+  assert.match(sched, /tenant\.auto_cleanup/,
+    'every auto-heal must leave an audit trail');
+  const feats = fs.readFileSync(path.join(__dirname, '..', 'services', 'features.js'), 'utf8');
+  assert.match(feats, /tenantAutoCleanup/,
+    'the auto-cleanup must have a kill-switch flag');
+});
+
 test('contract-fill HTML reads view.rejectionReason (camelCase, not snake_case)', () => {
   // Server's buildPublicView returns rejectionReason; the HTML used to read
   // view.rejection_reason → reject reason was invisible to the tenant.

@@ -176,6 +176,15 @@ const DEFAULTS = Object.freeze({
   autoReconcileRooms: {
     enabled: false,
   },
+  // Daily auto-cleanup of "zombie" tenants — status='active' but holding no
+  // room AND no active contract (e.g. an unsigned contract cancelled before
+  // the close-cascade fix, or legacy data). Detection + the detailed owner
+  // digest ALWAYS run; this flag gates only the write. The write itself is
+  // hard-guarded: 48h grace on the tenant row, debt-carrying tenants are
+  // never auto-touched, and at most 25 rows change per run.
+  tenantAutoCleanup: {
+    enabled: true,
+  },
   billAutoGenerate: {
     enabled: false,
     dayOfMonth: 1,               // run on the 1st of each month

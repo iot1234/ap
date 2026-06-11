@@ -2944,6 +2944,148 @@ async function tickPaymentReminder(pool, flags, now, state) {
   }
 }
 
+// === Tenant-state auto cleanup ==========================================
+// "Zombie" tenants — status='active' but holding NO room and NO active
+// contract — used to be manufactured by several contract-close paths (now
+// fixed at the source) and can still arrive via legacy data or manual
+// edits. This daily tick heals them WITHOUT the admin clicking anything:
+//   - detection + the detailed owner digest ALWAYS run
+//   - the WRITE is gated on features.tenantAutoCleanup (default ON) and
+//     hard-guarded: 48h grace on tenants.updated_at (never races an admin
+//     mid-flow), tenants with unpaid bills are NEVER auto-touched (hiding
+//     a debtor from the reminder jobs would bury the debt — they are
+//     reported for a manual decision instead), and at most 25 rows change
+//     per run (a systemic bug cannot mass-rewrite the tenant table).
+async function tickTenantStateReconcile(pool, flags, now, state) {
+  const todayKey = localDateKey(now);
+  if (state.lastTenantCleanupAt === todayKey) return;
+  try {
+    const { rows: zombies } = await pool.query(`
+      SELECT t.id, t.full_name, t.phone,
+             lc.contract_no AS last_contract_no,
+             lc.room_id     AS last_room_id,
+             lc.closed_type AS last_closed_type,
+             ub.n           AS unpaid_count,
+             ub.total       AS unpaid_total
+        FROM tenants t
+        LEFT JOIN LATERAL (
+          SELECT c.contract_no, c.room_id, c.closed_type
+            FROM contracts c
+           WHERE c.tenant_id = t.id AND c.deleted_at IS NULL
+           ORDER BY c.created_at DESC
+           LIMIT 1
+        ) lc ON TRUE
+        LEFT JOIN LATERAL (
+          SELECT COUNT(*)::int AS n, COALESCE(SUM(b.total), 0)::numeric AS total
+            FROM bills b
+           WHERE b.tenant_id = t.id AND b.deleted_at IS NULL
+             AND b.paid_at IS NULL AND b.status IN ('pending', 'overdue')
+        ) ub ON TRUE
+       WHERE t.status = 'active'
+         AND t.deleted_at IS NULL
+         AND (t.current_room_id IS NULL OR t.current_room_id = '')
+         AND t.updated_at < NOW() - INTERVAL '48 hours'
+         AND NOT EXISTS (
+           SELECT 1 FROM contracts c2
+            WHERE c2.tenant_id = t.id AND c2.status = 'active' AND c2.deleted_at IS NULL
+         )
+       ORDER BY t.updated_at ASC
+       LIMIT 60
+    `);
+    if (zombies.length === 0) {
+      state.lastTenantCleanupAt = todayKey;
+      writeState(state);
+      return;
+    }
+    const autoEnabled = !(flags?.tenantAutoCleanup && flags.tenantAutoCleanup.enabled === false);
+    const withDebt = zombies.filter((z) => Number(z.unpaid_count) > 0);
+    const clean = zombies.filter((z) => Number(z.unpaid_count) === 0);
+    const cleaned = [];
+    if (autoEnabled) {
+      for (const z of clean.slice(0, 25)) {
+        try {
+          // Re-guard inside the UPDATE — the daily query above is not a lock.
+          const upd = await pool.query(
+            `UPDATE tenants
+                SET status='moved_out', updated_at=NOW(),
+                    notes = COALESCE(notes,'')
+                          || E'\n[auto] เคลียร์สถานะอัตโนมัติ: ใช้งานแต่ไม่มีห้อง/สัญญา active'
+                          || CASE WHEN $2::text IS NOT NULL THEN ' (สัญญาล่าสุด ' || $2 || ')' ELSE '' END
+              WHERE id=$1 AND status='active' AND deleted_at IS NULL
+                AND (current_room_id IS NULL OR current_room_id='')
+                AND NOT EXISTS (
+                  SELECT 1 FROM contracts c3
+                   WHERE c3.tenant_id = tenants.id AND c3.status='active' AND c3.deleted_at IS NULL
+                )
+              RETURNING id`,
+            [z.id, z.last_contract_no || null]
+          );
+          if (!upd.rowCount) continue;
+          await pool.query(`DELETE FROM tenant_sessions WHERE tenant_id=$1`, [z.id])
+            .catch(() => { /* best-effort */ });
+          await pool.query(
+            `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, detail)
+             VALUES ($1, $2, $3, $4, $5::jsonb)`,
+            ['system:scheduler', 'tenant.auto_cleanup', 'tenant', String(z.id),
+             JSON.stringify({
+               reason: 'active tenant with no room and no active contract',
+               lastContractNo: z.last_contract_no || null,
+               lastRoomId: z.last_room_id || null,
+             })]
+          ).catch(() => { /* audit best-effort */ });
+          cleaned.push(z);
+        } catch (err) {
+          console.warn(`[scheduler] tenant cleanup failed for tenant ${z.id}:`, err.message);
+        }
+      }
+    }
+    // Detailed owner digest — always sent when anything was found, listing
+    // WHO was cleaned, WHO was skipped and WHY, and how to undo.
+    const line = (z, i) =>
+      `${i + 1}. ${z.full_name || '?'} (${z.phone || '-'}) · ห้องล่าสุด ${z.last_room_id || '-'}`
+      + ` · สัญญาล่าสุด ${z.last_contract_no || '-'}${z.last_closed_type ? ` (ปิดแบบ ${z.last_closed_type})` : ''}`;
+    const lines = [];
+    if (cleaned.length) {
+      lines.push(`✅ เคลียร์เป็น "ย้ายออก" อัตโนมัติ ${cleaned.length} ราย:`);
+      cleaned.forEach((z, i) => lines.push(line(z, i)));
+    }
+    const leftover = autoEnabled ? clean.slice(25) : clean;
+    if (!autoEnabled && clean.length) {
+      lines.push('', `⏸ พบ ${clean.length} รายที่เคลียร์ได้ แต่ระบบเคลียร์อัตโนมัติถูกปิดอยู่`
+        + ' — เปิดที่ /admin#features → tenantAutoCleanup หรือใช้ปุ่ม "ตั้งเป็นย้ายออก" ในหน้าผู้เช่า:');
+      clean.forEach((z, i) => lines.push(line(z, i)));
+    } else if (leftover.length) {
+      lines.push('', `⏭ เกินโควต้ารอบนี้ ${leftover.length} ราย — ระบบจะเคลียร์ต่อในรอบพรุ่งนี้อัตโนมัติ`);
+    }
+    if (withDebt.length) {
+      lines.push('', `⚠️ ข้าม ${withDebt.length} รายเพราะมีบิลค้างชำระ — ระบบไม่ซ่อนลูกหนี้อัตโนมัติ`
+        + ' ให้ตัดสินใจเอง (ตามหนี้ / void บิล / เช็คเอาท์) ที่ /admin#tenants:');
+      withDebt.forEach((z, i) => lines.push(
+        `${i + 1}. ${z.full_name || '?'} (${z.phone || '-'}) ค้าง ${Number(z.unpaid_total) || 0} บาท · ${z.unpaid_count} ใบ`
+      ));
+    }
+    lines.push('', 'ที่มา: ผู้เช่าเหล่านี้สถานะ "ใช้งาน" แต่ไม่มีห้องและไม่มีสัญญา active (เช่น ยกเลิกสัญญาก่อนเข้าพัก)',
+      'การเคลียร์ = ตั้งเป็น "ย้ายออก" + ปิด session เท่านั้น (ไม่แตะบิล/ห้อง) — ย้อนกลับได้โดยเช็คอินหรือส่งลิงก์สัญญาใหม่');
+    try {
+      await notifier.notifyOwner({ pool, features: flags || {} }, {
+        category: 'system',
+        subject: `🧹 เคลียร์สถานะผู้เช่าค้างอัตโนมัติ ${cleaned.length}/${zombies.length} ราย`,
+        text: lines.join('\n'),
+      });
+    } catch (err) {
+      console.warn('[scheduler] tenant cleanup digest failed:', err.message);
+    }
+    if (cleaned.length) {
+      console.log(`[scheduler] tenant auto-cleanup: ${cleaned.length}/${zombies.length} zombie tenant(s) moved out`);
+    }
+    state.lastTenantCleanupAt = todayKey;
+    writeState(state);
+  } catch (err) {
+    console.error('[scheduler] tenant cleanup failed:', err.message);
+    return { error: err.message };
+  }
+}
+
 // === Janitor: prune old failed notifications ============================
 // notifications_queue rows with status='failed' linger forever — there
 // was no TTL or cleanup before this. Over months the table accumulates
@@ -3218,6 +3360,10 @@ async function _runTick(pool) {
     { job: 'contract-expiry', promise: _withAdvisoryLock(pool, `contractExpiry-${todayKey}`, () => tickContractExpiry(pool, flags, now, state), { dbLatch: true }) },
     { job: 'overdue-digest', promise: _withAdvisoryLock(pool, `overdueDigest-${todayKey}`, () => tickOverdueDigest(pool, flags, now, state), { dbLatch: true }) },
     { job: 'auto-reconcile', promise: _withAdvisoryLock(pool, `autoReconcile-${todayKey}`, () => tickAutoReconcileRooms(pool, flags, now, state), { dbLatch: true }) },
+    // Heals "zombie" tenants (active, no room, no live contract) daily —
+    // runs AFTER contract-expiry in the same batch so today's expiries are
+    // reconciled by their own cascade first, not double-reported here.
+    { job: 'tenant-cleanup', promise: _withAdvisoryLock(pool, `tenantCleanup-${todayKey}`, () => tickTenantStateReconcile(pool, flags, now, state), { dbLatch: true }) },
     { job: 'room-status-sync', promise: _withAdvisoryLock(pool, `roomStatusSync-${todayKey}`, () => tickRoomStatusSync(pool, flags, now, state)) },
     { job: 'notif-prune', promise: _withAdvisoryLock(pool, `notifQueuePrune-${todayKey}`, () => tickPruneFailedNotifications(pool, flags, now, state)) },
     { job: 'orphan-slip-prune', promise: _withAdvisoryLock(pool, `orphanSlipPrune-${todayKey}`, () => tickPruneOrphanSlips(pool, flags, now, state)) },
