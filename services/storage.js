@@ -9,6 +9,16 @@ const path = require('path');
 const crypto = require('crypto');
 const secrets = require('./secrets');
 const ssrfGuard = require('./ssrfGuard');
+const encryption = require('./encryption');
+
+// Encrypt every uploaded file at rest (AES-256-GCM, see services/encryption.js
+// buffer format). Citizen-ID scans, payment slips, and signatures must not be
+// readable by anyone holding the raw disk / S3 bucket — DB role-gating on
+// /files/:id protects the HTTP path, this protects the storage itself.
+// Default ON; FILE_ENCRYPTION=off opts out (e.g. while debugging). Files
+// written before this landed stay readable: decryptBuffer passes plaintext
+// (non-magic) buffers through unchanged.
+const FILE_ENCRYPTION_OFF = String(process.env.FILE_ENCRYPTION || '').toLowerCase() === 'off';
 
 // Lazy-loaded S3 client, only created when R2 credentials are present.
 // Re-using the client across uploads avoids paying connection setup per file.
@@ -73,6 +83,7 @@ function storageStatus() {
     hasExplicitUploadDir,
     productionLike,
     localUploadMayBeEphemeral: !usingS3 && productionLike && !hasExplicitUploadDir,
+    fileEncryption: FILE_ENCRYPTION_OFF ? 'off' : 'on',
   };
 }
 
@@ -172,6 +183,17 @@ async function saveBase64({
   const safeCategory = String(category || 'misc').replace(/[^a-z_]/gi, '_').slice(0, 32);
   const filename = `${Date.now().toString(36)}-${fileId}.${ext}`;
 
+  // Encrypt-at-rest. Validation (mime sniff, size) ran on the plaintext
+  // above; only the stored bytes are wrapped. If encryption is unavailable
+  // (no key material at all), refuse rather than silently writing PII in
+  // the clear — the operator opts out explicitly with FILE_ENCRYPTION=off.
+  let storedBuffer = parsed.buffer;
+  let encryptedAtRest = false;
+  if (!FILE_ENCRYPTION_OFF) {
+    storedBuffer = encryption.encryptBuffer(parsed.buffer);
+    encryptedAtRest = true;
+  }
+
   // Decide storage backend at write time. R2 is preferred when configured
   // because local disk on Railway is ephemeral (resets on redeploy) — slips
   // and citizen-ID images would vanish on the next push.
@@ -187,8 +209,11 @@ async function saveBase64({
         await client.send(new client._lib.PutObjectCommand({
           Bucket: bucket,
           Key: s3Key,
-          Body: parsed.buffer,
-          ContentType: mime,
+          Body: storedBuffer,
+          // Encrypted bodies are not the declared image/pdf any more —
+          // label them opaque so bucket tooling can't mis-render them.
+          // The real mime stays in file_uploads.mime_type for serving.
+          ContentType: encryptedAtRest ? 'application/octet-stream' : mime,
         }));
         storageMode = 's3';
       } catch (err) {
@@ -202,7 +227,7 @@ async function saveBase64({
     const dir = path.join(UPLOAD_ROOT, safeCategory);
     ensureDir(dir);
     const fullPath = path.join(dir, filename);
-    fs.writeFileSync(fullPath, parsed.buffer);
+    fs.writeFileSync(fullPath, storedBuffer);
     // R2 was configured + failed → alert the owner. Without this the slip
     // ends up on Railway's ephemeral disk and is lost at next redeploy
     // with no signal to anyone. Fire-and-forget so a notify outage can't
@@ -322,6 +347,24 @@ async function readFile(rec) {
   return fs.readFileSync(fp);
 }
 
+// Transparent decrypt for both backends: files written after encryption-at-
+// rest landed carry the APENC1 magic and are unwrapped here; older plaintext
+// files pass through untouched. Kept as a wrapper so every consumer of
+// readFile (the /files/:id proxy, slip auto-verify, PDF embedding) gets the
+// plaintext bytes it always got.
+const _readRaw = readFile;
+async function readFileDecrypted(rec) {
+  const buf = await _readRaw(rec);
+  if (!buf) return buf;
+  try {
+    return encryption.decryptBuffer(buf);
+  } catch (err) {
+    // Wrong/missing key — surface a precise error instead of streaming
+    // ciphertext garbage to the admin's browser.
+    throw new Error(`stored file is encrypted but cannot be decrypted (${err.message}) — check ENCRYPTION_KEY_V*/CITIZEN_ID_KEY/SESSION_SECRET`);
+  }
+}
+
 /**
  * Delete a file row + its on-disk file. Best-effort: missing files are not fatal.
  */
@@ -359,7 +402,10 @@ function rootPath() { return UPLOAD_ROOT; }
 module.exports = {
   saveBase64,
   remove,
-  readFile,
+  // Every consumer gets transparently-decrypted bytes; the raw variant is
+  // for diagnostics only (e.g. checking whether a stored file is encrypted).
+  readFile: readFileDecrypted,
+  readFileRaw: _readRaw,
   rootPath,
   parseBase64,
   detectMime,

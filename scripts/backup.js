@@ -19,6 +19,48 @@ const fs = require('fs');
 const path = require('path');
 const { Pool } = require('pg');
 
+// Encrypt backups at rest — the dump contains every tenant row, phone number,
+// and notification body, making the JSON file the largest single PII artifact
+// in the system. AES-256-GCM via services/encryption.js (APENC1 buffer
+// format; key = ENCRYPTION_KEY_V* or the legacy CITIZEN_ID_KEY /
+// SESSION_SECRET-derived key). BACKUP_ENCRYPTION=off opts out. If no key
+// material exists at all we warn loudly and write plaintext rather than fail
+// — a missing backup is worse than a plaintext one.
+const _encryption = (() => {
+  try { return require('../services/encryption'); } catch { return null; }
+})();
+
+function encodeBackup(backupObj) {
+  const json = JSON.stringify(backupObj, null, 2);
+  const wantPlain = String(process.env.BACKUP_ENCRYPTION || '').toLowerCase() === 'off';
+  if (wantPlain || !_encryption) {
+    return { body: Buffer.from(json, 'utf8'), ext: '.json', encrypted: false };
+  }
+  try {
+    return {
+      body: _encryption.encryptBuffer(Buffer.from(json, 'utf8')),
+      ext: '.json.enc',
+      encrypted: true,
+    };
+  } catch (err) {
+    console.warn(`[backup] encryption unavailable (${err.message}) — writing PLAINTEXT backup`);
+    return { body: Buffer.from(json, 'utf8'), ext: '.json', encrypted: false };
+  }
+}
+
+// Decrypt-aware reader — works for both plaintext .json and encrypted
+// .json.enc files, so verify/restore handle either format.
+function readBackupFile(filePath) {
+  let raw = fs.readFileSync(filePath);
+  if (_encryption && _encryption.isEncryptedBuffer(raw)) {
+    raw = _encryption.decryptBuffer(raw);
+  }
+  return JSON.parse(raw.toString('utf8'));
+}
+
+const _isBackupName = (f) => f.startsWith('backup-')
+  && (f.endsWith('.json') || f.endsWith('.json.enc'));
+
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) {
   console.error('FATAL: DATABASE_URL not set');
@@ -134,13 +176,14 @@ async function main() {
 
   const outDir = path.join(__dirname, '..', 'backups');
   fs.mkdirSync(outDir, { recursive: true });
-  const file = path.join(outDir, `backup-${stamp}.json`);
-  fs.writeFileSync(file, JSON.stringify(backup, null, 2));
-  console.log(`[backup] wrote ${file} (${(fs.statSync(file).size / 1024).toFixed(1)} KB)`);
+  const enc = encodeBackup(backup);
+  const file = path.join(outDir, `backup-${stamp}${enc.ext}`);
+  fs.writeFileSync(file, enc.body);
+  console.log(`[backup] wrote ${file} (${(fs.statSync(file).size / 1024).toFixed(1)} KB${enc.encrypted ? ', encrypted' : ', PLAINTEXT'})`);
 
   // Optional: rotate — keep last 30 local files
   const files = fs.readdirSync(outDir)
-    .filter((f) => f.startsWith('backup-') && f.endsWith('.json'))
+    .filter(_isBackupName)
     .sort();
   while (files.length > 30) {
     const old = files.shift();
@@ -181,11 +224,11 @@ async function main() {
       });
       await client.send(new PutObjectCommand({
         Bucket: _r2.bucket,
-        Key: `backup-${stamp}.json`,
+        Key: `backup-${stamp}${enc.ext}`,
         Body: fs.readFileSync(file),
-        ContentType: 'application/json',
+        ContentType: enc.encrypted ? 'application/octet-stream' : 'application/json',
       }));
-      console.log(`[backup] uploaded to ${_r2.bucket}/backup-${stamp}.json`);
+      console.log(`[backup] uploaded to ${_r2.bucket}/backup-${stamp}${enc.ext}`);
     } catch (err) {
       console.error('[backup] upload failed:', err.message);
     }
@@ -231,12 +274,13 @@ async function run({ pool: externalPool, retainDays }) {
 
   const outDir = path.join(__dirname, '..', 'backups');
   fs.mkdirSync(outDir, { recursive: true });
-  const file = path.join(outDir, `backup-${stamp}.json`);
-  fs.writeFileSync(file, JSON.stringify(backup, null, 2));
+  const enc = encodeBackup(backup);
+  const file = path.join(outDir, `backup-${stamp}${enc.ext}`);
+  fs.writeFileSync(file, enc.body);
   // Rotate
   const keep = Number(retainDays) || 30;
   const files = fs.readdirSync(outDir)
-    .filter((f) => f.startsWith('backup-') && f.endsWith('.json')).sort();
+    .filter(_isBackupName).sort();
   while (files.length > keep) {
     const old = files.shift();
     try { fs.unlinkSync(path.join(outDir, old)); } catch {}
@@ -255,8 +299,7 @@ async function run({ pool: externalPool, retainDays }) {
  */
 function verify(filePath) {
   try {
-    const raw = fs.readFileSync(filePath, 'utf8');
-    const obj = JSON.parse(raw);
+    const obj = readBackupFile(filePath);
     if (!obj || !obj.integrity || obj.integrity.algorithm !== 'sha256') {
       return { ok: false, error: 'no integrity block (older backup format)' };
     }
@@ -274,7 +317,7 @@ function verify(filePath) {
   }
 }
 
-module.exports = { run, verify };
+module.exports = { run, verify, readBackupFile };
 
 // CLI mode: only execute when invoked directly (node scripts/backup.js)
 if (require.main === module) {

@@ -203,9 +203,65 @@ async function validateCanary(pool) {
   }
 }
 
+// --- Binary (file) encryption -----------------------------------------------
+// AES-256-GCM over raw bytes — used for uploaded files (citizen-ID images,
+// payment slips, signatures) and database backups at rest. Same key registry
+// as encryptString: versioned ENCRYPTION_KEY_V* when configured, else the
+// legacy single key (CITIZEN_ID_KEY / SESSION_SECRET-derived).
+//
+// On-disk format:
+//   'APENC1' (6 bytes) || keyVersion uint8 (0 = legacy key) ||
+//   iv (12) || authTag (16) || ciphertext
+//
+// decryptBuffer passes non-magic buffers through unchanged so files written
+// before encryption landed keep being readable with zero migration.
+const FILE_MAGIC = Buffer.from('APENC1', 'ascii');
+
+function _bufferKey(ver) {
+  loadKeys();
+  if (ver === 0) return legacyCrypto._getKey();
+  const key = _keys.get(ver);
+  if (!key) throw new Error(`encryption key v${ver} not loaded`);
+  return key;
+}
+
+function isEncryptedBuffer(buf) {
+  return Buffer.isBuffer(buf)
+    && buf.length > FILE_MAGIC.length + 1 + 12 + 16
+    && buf.subarray(0, FILE_MAGIC.length).equals(FILE_MAGIC);
+}
+
+function encryptBuffer(buf) {
+  if (!Buffer.isBuffer(buf)) throw new Error('encryptBuffer expects a Buffer');
+  loadKeys();
+  const ver = _current || 0;   // 0 → legacy single-key path
+  const key = _bufferKey(ver);
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const ct = Buffer.concat([cipher.update(buf), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return Buffer.concat([FILE_MAGIC, Buffer.from([ver & 0xff]), iv, tag, ct]);
+}
+
+function decryptBuffer(buf) {
+  if (!isEncryptedBuffer(buf)) return buf;   // legacy plaintext passthrough
+  const ver = buf[FILE_MAGIC.length];
+  const off = FILE_MAGIC.length + 1;
+  const iv = buf.subarray(off, off + 12);
+  const tag = buf.subarray(off + 12, off + 28);
+  const ct = buf.subarray(off + 28);
+  const key = _bufferKey(ver);
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+  decipher.setAuthTag(tag);
+  return Buffer.concat([decipher.update(ct), decipher.final()]);
+}
+
 module.exports = {
   encryptString,
   decryptString,
+  encryptBuffer,
+  decryptBuffer,
+  isEncryptedBuffer,
   currentVersion,
   loadedVersions,
   validateAtBoot,

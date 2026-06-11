@@ -110,4 +110,10 @@ function hmac(s) {
   return crypto.createHmac('sha256', key).update(String(s)).digest('hex');
 }
 
-module.exports = { encryptString, decryptString, maskTail, hmac };
+module.exports = {
+  encryptString, decryptString, maskTail, hmac,
+  // Internal: exposes the resolved 32-byte master key so services/encryption.js
+  // can encrypt BINARY payloads (files, backups) with the same legacy key when
+  // no versioned ENCRYPTION_KEY_V* is configured. Not for general use.
+  _getKey: getKey,
+};

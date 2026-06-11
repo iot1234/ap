@@ -497,14 +497,24 @@ test('backup.run + verify: integrity hash matches', async () => {
   assert.equal(v.ok, true);
   assert.deepEqual(Object.keys(v.counts).sort(), Object.keys(out.rowCounts).sort());
 
-  // Tamper with the file → verify must reject.
-  const raw = fs.readFileSync(out.file, 'utf8');
-  const obj = JSON.parse(raw);
+  // Backups are now encrypted at rest (APENC1) — the decrypt-aware reader
+  // must round-trip the dump, and the raw bytes must NOT be readable JSON.
+  const obj = backup.readBackupFile(out.file);
+  assert.ok(obj && obj.tables, 'readBackupFile must decrypt + parse the dump');
+  if (String(out.file).endsWith('.json.enc')) {
+    assert.throws(() => JSON.parse(fs.readFileSync(out.file, 'utf8')),
+      'encrypted backup must not be plaintext JSON on disk');
+  }
+
+  // Tamper with the file → verify must reject. Re-write as PLAINTEXT json
+  // (verify reads both formats) with a mutated table so the hash mismatches.
   obj.tables.bills = [{ id: 999, evil: 'mutation' }];
-  fs.writeFileSync(out.file, JSON.stringify(obj, null, 2));
-  const tampered = backup.verify(out.file);
+  const tamperedPath = out.file.replace(/\.json(\.enc)?$/, '.json');
+  fs.writeFileSync(tamperedPath, JSON.stringify(obj, null, 2));
+  const tampered = backup.verify(tamperedPath);
   assert.equal(tampered.ok, false);
   assert.match(tampered.error, /hash mismatch|tamper/i);
+  if (tamperedPath !== out.file) { try { fs.unlinkSync(tamperedPath); } catch {} }
 
   // Cleanup
   try { fs.unlinkSync(out.file); } catch {}

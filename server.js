@@ -15743,7 +15743,7 @@ app.get('/api/contracts/:id/pdf', requireAuth, requireRole('owner', 'manager'),
 // where ISO chars `:` and `.` are replaced with `-`. We allow-list filenames
 // to that exact shape to defeat path traversal. path.basename() before any
 // fs op is belt-and-braces.
-const BACKUP_FILENAME_RE = /^backup-[A-Za-z0-9-]+\.json$/;
+const BACKUP_FILENAME_RE = /^backup-[A-Za-z0-9-]+\.json(\.enc)?$/;
 function backupFile(filename) {
   // Reject anything with a slash, dot-segment, etc. before touching disk.
   if (!BACKUP_FILENAME_RE.test(filename)) return null;
@@ -15808,7 +15808,9 @@ app.get('/api/admin/backup/download/:filename', requireAuth, requireRole('owner'
     const fs = require('fs');
     if (!fs.existsSync(fp)) return res.status(404).json({ error: 'not found' });
     audit(req, 'backup.download', 'backup', req.params.filename).catch(() => {});
-    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Content-Type', req.params.filename.endsWith('.enc')
+      ? 'application/octet-stream'   // encrypted backup — opaque bytes
+      : 'application/json');
     res.setHeader(
       'Content-Disposition',
       `attachment; filename="${req.params.filename}"`
@@ -15858,9 +15860,16 @@ app.post('/api/admin/restore', restoreBodyParser, sameOrigin, csrfGuard, require
       const fs = require('fs');
       if (!fs.existsSync(fp)) return res.status(404).json({ error: 'backup file not found' });
       try {
-        backup = JSON.parse(fs.readFileSync(fp, 'utf8'));
+        // Decrypt-aware: encrypted backups (.json.enc, APENC1 format) are
+        // unwrapped with the same key registry that wrote them; plaintext
+        // .json files parse as before.
+        backup = require('./scripts/backup').readBackupFile(fp);
       } catch (err) {
-        return res.status(400).json({ error: 'backup file is not valid JSON' });
+        return res.status(400).json({
+          error: /key|decrypt|auth/i.test(String(err.message))
+            ? `backup file is encrypted but cannot be decrypted: ${err.message}`
+            : 'backup file is not valid JSON',
+        });
       }
     } else if (b.backup && typeof b.backup === 'object') {
       backup = b.backup;

@@ -2982,8 +2982,10 @@ test('SQL backup endpoints exist + restore is gated by confirm: true', () => {
   // POST could obliterate the production DB.
   assert.match(server, /confirm !== true[\s\S]{0,200}CONFIRM_REQUIRED/,
     'restore must require confirm: true');
-  // Filename allow-list must defeat path traversal.
-  assert.match(server, /BACKUP_FILENAME_RE\s*=\s*\/\^backup-\[A-Za-z0-9-\]\+\\\.json\$\//,
+  // Filename allow-list must defeat path traversal. `.json.enc` is the
+  // encrypted-at-rest variant (scripts/backup.js encodeBackup) — still a
+  // fixed-shape name with no traversal characters.
+  assert.match(server, /BACKUP_FILENAME_RE\s*=\s*\/\^backup-\[A-Za-z0-9-\]\+\\\.json\(\\\.enc\)\?\$\//,
     'backup filename regex must reject path-traversal payloads');
   // Restore must verify integrity hash when present.
   assert.match(server, /backup\.integrity\?\.algorithm === 'sha256'[\s\S]{0,800}INTEGRITY_FAILED/,
