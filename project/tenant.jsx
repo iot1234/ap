@@ -2815,17 +2815,40 @@ function RateTicket({ ticketId, locale, onDone }) {
 }
 
 // ============================================================== ParcelsView =
+// ปุ่มรูปย่อของพัสดุ — กดแล้วเปิดป็อพอัพในแอป ไม่เปิดแท็บ/หน้าใหม่
+function ParcelPhotoThumb({ url, label, onOpen }) {
+  return (
+    <button type="button" onClick={onOpen} title={label} style={{
+      width: 74, padding: 0, border: '1px solid var(--line)', borderRadius: 10,
+      overflow: 'hidden', cursor: 'zoom-in', background: 'var(--surface-2)',
+      flex: '0 0 auto', fontFamily: 'inherit', display: 'block',
+    }}>
+      <img src={url} alt={label} loading="lazy" style={{
+        width: '100%', height: 60, objectFit: 'cover', display: 'block',
+      }} />
+      <span style={{
+        display: 'block', fontSize: 10, color: 'var(--muted)', padding: '2px 4px',
+        whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+      }}>{label}</span>
+    </button>
+  );
+}
+
 function ParcelsView({ locale, parcels }) {
   const t = (k) => tr(locale, k);
   const [tab, setTab] = useState('waiting');
+  // ป็อพอัพดูรูปพัสดุ/หลักฐานการรับ: { url, title, detail, broken }
+  const [photoView, setPhotoView] = useState(null);
   const waiting = parcels.filter((x) => x.status === 'waiting_pickup');
   const closed = parcels.filter((x) => x.status !== 'waiting_pickup');
   const filtered = tab === 'waiting' ? waiting : tab === 'closed' ? closed : parcels;
+  // แยกโทนสีต่อสถานะให้ต่างกันชัดเจน: รอรับ=เหลือง รับแล้ว=เขียว
+  // คืนผู้ส่ง=ฟ้า ยกเลิก=แดง — ผู้เช่าแยกได้โดยไม่ต้องอ่านข้อความ
   const statusTone = {
     waiting_pickup: 'amber',
     picked_up: 'green',
-    returned: 'muted',
-    cancelled: 'muted',
+    returned: 'blue',
+    cancelled: 'red',
   };
   const th = locale === 'th';
   return (
@@ -2870,28 +2893,41 @@ function ParcelsView({ locale, parcels }) {
             const tracking = p.tracking_no || p.trackingNo || '';
             const shelf = p.shelf_location || p.shelfLocation || '';
             const photoUrl = p.photo_url || p.photoUrl || '';
+            const proofUrl = p.pickup_proof_url || p.pickupProofUrl || '';
             const created = p.created_at || p.createdAt;
             const pickedAt = p.picked_up_at || p.pickedUpAt;
+            const pickedBy = p.picked_up_by || p.pickedUpBy || '';
             return (
               <Card key={p.id} hoverable>
                 <div style={{ display: 'flex', alignItems: 'flex-start', gap: 14, flexWrap: 'wrap' }}>
-                  {photoUrl ? (
-                    <a href={photoUrl} target="_blank" rel="noreferrer" style={{
-                      width: 74,
-                      height: 74,
-                      borderRadius: 10,
-                      overflow: 'hidden',
-                      border: '1px solid var(--line)',
-                      flex: '0 0 auto',
-                      background: 'var(--surface-2)',
-                    }}>
-                      <img src={photoUrl} alt={th ? 'รูปพัสดุ' : 'Parcel photo'} style={{
-                        width: '100%',
-                        height: '100%',
-                        objectFit: 'cover',
-                        display: 'block',
-                      }} />
-                    </a>
+                  {photoUrl || (p.status === 'picked_up' && proofUrl) ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, flex: '0 0 auto' }}>
+                      {photoUrl ? (
+                        <ParcelPhotoThumb
+                          url={photoUrl}
+                          label={th ? 'รูปพัสดุ' : 'Parcel photo'}
+                          onOpen={() => setPhotoView({
+                            url: photoUrl,
+                            title: th ? `รูปพัสดุ ${parcelNo}` : `Parcel photo ${parcelNo}`,
+                            detail: th ? 'ถ่ายตอนพัสดุมาถึงสำนักงาน' : 'Taken when the parcel arrived at the office',
+                          })}
+                        />
+                      ) : null}
+                      {p.status === 'picked_up' && proofUrl ? (
+                        <ParcelPhotoThumb
+                          url={proofUrl}
+                          label={th ? 'หลักฐานรับ' : 'Pickup proof'}
+                          onOpen={() => setPhotoView({
+                            url: proofUrl,
+                            title: th ? `หลักฐานการรับ ${parcelNo}` : `Pickup proof ${parcelNo}`,
+                            detail: [
+                              pickedAt ? (th ? `รับเมื่อ ${fmtDate(pickedAt, locale)}` : `Picked up ${fmtDate(pickedAt, locale)}`) : null,
+                              pickedBy ? (th ? `ผู้บันทึก ${pickedBy}` : `Recorded by ${pickedBy}`) : null,
+                            ].filter(Boolean).join(' · '),
+                          })}
+                        />
+                      ) : null}
+                    </div>
                   ) : null}
                   <div style={{
                     width: 48, height: 48, borderRadius: 12,
@@ -2911,8 +2947,16 @@ function ParcelsView({ locale, parcels }) {
                     <div style={{ color: 'var(--muted)', fontSize: 12.5, lineHeight: 1.55, marginTop: 6 }}>
                       <span>{th ? 'จุดรับ' : 'Pickup'}: {shelf || (th ? 'ติดต่อสำนักงาน' : 'Contact office')}</span>
                       {created ? <span> · {th ? 'บันทึก' : 'Recorded'} {fmtDate(created, locale)}</span> : null}
-                      {pickedAt ? <span> · {th ? 'รับเมื่อ' : 'Picked up'} {fmtDate(pickedAt, locale)}</span> : null}
                     </div>
+                    {p.status === 'picked_up' && (pickedAt || pickedBy) ? (
+                      <div style={{ color: 'var(--green)', fontSize: 12.5, lineHeight: 1.55, marginTop: 4 }}>
+                        {pickedAt ? <span>{th ? 'รับเมื่อ' : 'Picked up'} {fmtDate(pickedAt, locale)}</span> : null}
+                        {pickedBy ? <span> · {th ? 'ผู้บันทึก' : 'By'} {pickedBy}</span> : null}
+                        {proofUrl
+                          ? <span> · {th ? 'มีหลักฐานการรับ' : 'Proof attached'}</span>
+                          : null}
+                      </div>
+                    ) : null}
                     {p.note ? (
                       <div style={{
                         marginTop: 8, padding: '8px 10px', borderRadius: 10,
@@ -2927,6 +2971,46 @@ function ParcelsView({ locale, parcels }) {
           })}
         </div>
       )}
+
+      {/* ป็อพอัพดูรูป — เปิดในแอปเลย ไม่พาออกไปแท็บใหม่ และมีข้อความ
+          fallback เมื่อรูปโหลดไม่ได้ (ไฟล์ถูกย้าย/ลบ) */}
+      <Modal
+        open={!!photoView}
+        onClose={() => setPhotoView(null)}
+        title={(photoView && photoView.title) || (th ? 'รูปพัสดุ' : 'Parcel photo')}
+        size="lg"
+      >
+        {photoView ? (
+          <div style={{ display: 'grid', gap: 10 }}>
+            {photoView.broken ? (
+              <div style={{
+                padding: 28, textAlign: 'center', color: 'var(--muted)',
+                border: '1px dashed var(--line-2)', borderRadius: 12, lineHeight: 1.6,
+              }}>
+                {th
+                  ? 'เปิดรูปไม่สำเร็จ ไฟล์อาจถูกย้ายหรือลบไปแล้ว — ลองรีเฟรชหน้านี้ หรือติดต่อสำนักงาน'
+                  : 'Could not load the photo. It may have been moved or deleted — refresh or contact the office.'}
+              </div>
+            ) : (
+              <img
+                src={photoView.url}
+                alt={photoView.title || (th ? 'รูปพัสดุ' : 'Parcel photo')}
+                onError={() => setPhotoView((prev) => (prev ? { ...prev, broken: true } : prev))}
+                style={{
+                  maxWidth: '100%', maxHeight: '62vh', margin: '0 auto',
+                  objectFit: 'contain', display: 'block', borderRadius: 12,
+                  border: '1px solid var(--line)', background: 'var(--surface-2)',
+                }}
+              />
+            )}
+            {photoView.detail ? (
+              <div style={{ color: 'var(--muted)', fontSize: 12.5, textAlign: 'center', lineHeight: 1.5 }}>
+                {photoView.detail}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+      </Modal>
     </div>
   );
 }

@@ -36,6 +36,22 @@ test('parcel request schemas normalize optional strings and reject bad status', 
   }).photo.startsWith('data:image/png;base64,'));
 });
 
+test('pickup schema allows proof to be attached or omitted, never junk', () => {
+  const { schemas } = require('../schemas');
+  // ไม่แนบหลักฐานก็บันทึกรับได้
+  assert.deepEqual(schemas.pickupParcel.parse({}), {});
+  // แนบหลักฐาน + ระบุผู้มารับ
+  const withProof = schemas.pickupParcel.parse({
+    pickedUpBy: ' คุณนิค ',
+    proof: 'data:image/jpeg;base64,' + Buffer.from('fake-proof-image').toString('base64'),
+  });
+  assert.equal(withProof.pickedUpBy, 'คุณนิค');
+  assert.ok(withProof.proof.startsWith('data:image/jpeg;base64,'));
+  // ของแปลกปลอมต้องถูกปฏิเสธ: ไฟล์ไม่ใช่รูป, คีย์เกิน, สถานะแอบยัด
+  assert.throws(() => schemas.pickupParcel.parse({ proof: 'data:application/pdf;base64,AAAA' }));
+  assert.throws(() => schemas.pickupParcel.parse({ status: 'picked_up' }));
+});
+
 test('validation errors hide technical unrecognized-key wording and include a fix', () => {
   const { z } = require('../schemas');
   const { formatZodError } = require('../middleware/validate');
@@ -60,9 +76,12 @@ test('parcel routes are mounted behind feature gates and tenant isolation', () =
   const route = read('routes', 'parcels.js');
   assert.match(route, /admin\.get\('\/rooms'/);
   assert.match(route, /admin\.get\('\/options'/);
+  assert.match(route, /admin\.get\('\/stats'/);
   assert.match(route, /admin\.delete\('\/:id'/);
   assert.match(route, /admin\.post\('\/:id\/photo'/);
+  assert.match(route, /admin\.post\('\/:id\/pickup'/);
   assert.match(route, /schemas\.parcelPhoto/);
+  assert.match(route, /schemas\.pickupParcel/);
   assert.match(route, /storage\.saveBase64/);
   assert.match(route, /PARCEL_PHOTO_INVALID/);
   assert.match(route, /features\.requireFeature\('parcelNotifications'\)/);
@@ -81,6 +100,26 @@ test('parcel routes are mounted behind feature gates and tenant isolation', () =
   assert.match(route, /req\.tenant\.tenant_id/);
 });
 
+test('pickup endpoint closes the parcel atomically with optional proof', () => {
+  const route = read('routes', 'parcels.js');
+  // ล็อกแถวก่อนตรวจ/อัปเดต — กันสองแอดมินกดรับพร้อมกัน
+  assert.match(route, /SELECT \* FROM parcels WHERE id=\$1 AND deleted_at IS NULL FOR UPDATE/);
+  // กดรับซ้ำต้องเจอ 409 พร้อมบอกว่าใครรับไปเมื่อไหร่ ไม่ใช่เขียนทับเงียบ ๆ
+  assert.match(route, /PARCEL_ALREADY_PICKED/);
+  // รูปหลักฐานพังต้องไม่เปลี่ยนสถานะ (ROLLBACK ก่อนตอบ 400)
+  assert.match(route, /PICKUP_PROOF_INVALID/);
+  assert.match(route, /dataUrl: req\.body\.proof/);
+  // เก็บหลักฐานลงคอลัมน์เฉพาะ และอัปเดตได้เฉพาะตอนยัง waiting_pickup เท่านั้น
+  assert.match(route, /pickup_proof_file_id=COALESCE/);
+  assert.match(route, /AND status='waiting_pickup'/);
+  assert.match(route, /PARCEL_STATE_CHANGED/);
+  // ปิดงานไม่สำเร็จ = ต้องเก็บกวาดไฟล์หลักฐานกำพร้า
+  assert.match(route, /if \(!committed && proofFile\?\.id\)/);
+  assert.match(route, /audit\(req, 'parcel\.pickup'/);
+  // ฝั่งรายการ/ผู้เช่าต้องได้เห็น URL หลักฐาน
+  assert.match(route, /pickupProofUrl: row\.pickup_proof_url \|\| null/);
+});
+
 test('parcel table is migrated, backed up, and restored', () => {
   const migration = read('db', 'migrate.js');
   assert.match(migration, /CREATE TABLE IF NOT EXISTS parcels/);
@@ -90,6 +129,8 @@ test('parcel table is migrated, backed up, and restored', () => {
   assert.match(migration, /notify_channels\s+TEXT\[\] NOT NULL DEFAULT '\{\}'::TEXT\[\]/);
   assert.match(migration, /photo_file_id\s+BIGINT/);
   assert.match(migration, /photo_url\s+TEXT/);
+  assert.match(migration, /pickup_proof_file_id BIGINT/);
+  assert.match(migration, /pickup_proof_url TEXT/);
   assert.match(migration, /idx_parcels_tenant/);
   assert.match(migration, /chk_parcels_status_valid/);
 
@@ -112,6 +153,7 @@ test('admin and tenant UIs expose parcels only through the feature-aware paths',
   assert.match(adminPage, /\/api\/parcels/);
   assert.match(adminPage, /\/api\/parcels\/rooms/);
   assert.match(adminPage, /\/api\/parcels\/options/);
+  assert.match(adminPage, /\/api\/parcels\/stats/);
   assert.match(adminPage, /PARCEL_OPTION_STORAGE_KEY/);
   assert.match(adminPage, /DEFAULT_PARCEL_CARRIERS/);
   assert.match(adminPage, /Kerry Express/);
@@ -139,4 +181,46 @@ test('admin and tenant UIs expose parcels only through the feature-aware paths',
   assert.match(tenant, /tenantNavItems\(features\)\.filter/);
   assert.match(tenant, /parcelEnabled \? api\('\/api\/tenant\/parcels'\) : Promise\.resolve\(\{ parcels: \[\] \}\)/);
   assert.match(tenant, /page === 'parcels' && features\?\.parcelNotifications\?\.enabled !== true/);
+});
+
+test('parcel photos open in an in-app popup, never a new tab', () => {
+  const adminPage = read('project', 'admin', 'page-parcels.jsx');
+  // ป็อพอัพดูรูป (lightbox) ทั้งรูปพัสดุและหลักฐานการรับ
+  assert.match(adminPage, /function ParcelPhotoLightbox/);
+  assert.match(adminPage, /ParcelThumb/);
+  assert.match(adminPage, /onShowPhoto/);
+  // ห้ามมีลิงก์เปิดแท็บใหม่เหลือในหน้าพัสดุแอดมิน
+  assert.doesNotMatch(adminPage, /target="_blank"/);
+  // fallback เมื่อรูปโหลดไม่ได้ ต้องมีข้อความ ไม่ใช่รูปแตกเปล่า ๆ
+  assert.match(adminPage, /onError=\{\(\) => setBroken\(true\)\}/);
+
+  const tenant = read('project', 'tenant.jsx');
+  assert.match(tenant, /function ParcelPhotoThumb/);
+  assert.match(tenant, /setPhotoView/);
+  // รูปพัสดุฝั่งผู้เช่าต้องไม่ใช่ <a target="_blank"> อีกต่อไป
+  assert.doesNotMatch(tenant, /href=\{photoUrl\}/);
+});
+
+test('admin pickup flow records proof (camera or file) and guards mistakes', () => {
+  const adminPage = read('project', 'admin', 'page-parcels.jsx');
+  assert.match(adminPage, /function ParcelPickupModal/);
+  // เรียก endpoint atomic — ไม่แยกเปลี่ยนสถานะ/อัปโหลดรูปเป็น 2 จังหวะ
+  assert.match(adminPage, /\/api\/parcels\/\$\{pickup\.id\}\/pickup/);
+  // แนบหลักฐานได้สองทาง: ถ่ายจากกล้อง (capture) หรือเลือกไฟล์ และไม่แนบก็ได้
+  assert.match(adminPage, /capture="environment"/);
+  assert.match(adminPage, /แนบหรือไม่แนบก็ได้/);
+  // รูปใหญ่ต้องถูกย่ออัตโนมัติ ไม่ reject ผู้ใช้ทิ้ง
+  assert.match(adminPage, /async function prepareParcelPhoto/);
+  assert.match(adminPage, /canvas\.toDataURL\('image\/jpeg', quality\)/);
+  // กล่องยืนยันแบบ modal แทน window.confirm ทั้งหมด (คืน/ยกเลิก/ลบ)
+  assert.match(adminPage, /function ParcelActionConfirmModal/);
+  assert.doesNotMatch(adminPage, /window\.confirm/);
+  // จอค้างสถานะเก่าต้องกู้คืนเอง: เจอ 409/404 แล้วรีโหลดรายการ
+  assert.match(adminPage, /STALE_PARCEL_CODES/);
+  assert.match(adminPage, /PICKUP_PROOF_INVALID/);
+
+  // ฝั่งผู้เช่าเห็นหลักฐานการรับ + ผู้บันทึก เพื่อความโปร่งใส
+  const tenant = read('project', 'tenant.jsx');
+  assert.match(tenant, /pickupProofUrl/);
+  assert.match(tenant, /หลักฐานการรับ/);
 });

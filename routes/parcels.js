@@ -5,10 +5,12 @@
 //   GET    /api/parcels
 //   GET    /api/parcels/rooms
 //   GET    /api/parcels/options
+//   GET    /api/parcels/stats
 //   POST   /api/parcels
 //   PUT    /api/parcels/:id
 //   DELETE /api/parcels/:id
 //   POST   /api/parcels/:id/photo
+//   POST   /api/parcels/:id/pickup
 //   POST   /api/parcels/:id/notify
 //
 // Tenant:
@@ -66,6 +68,8 @@ function publicParcel(row) {
     notifyChannels: Array.isArray(row.notify_channels) ? row.notify_channels : [],
     photoFileId: row.photo_file_id == null ? null : Number(row.photo_file_id),
     photoUrl: row.photo_url || null,
+    pickupProofFileId: row.pickup_proof_file_id == null ? null : Number(row.pickup_proof_file_id),
+    pickupProofUrl: row.pickup_proof_url || null,
     notifiedAt: row.notified_at,
     pickedUpAt: row.picked_up_at,
     pickedUpBy: row.picked_up_by,
@@ -441,6 +445,37 @@ module.exports = function buildParcelsRouter(ctx) {
     }
   });
 
+  // นับจำนวนจริงต่อสถานะจากฐานข้อมูล — ตัวเลขบนหัวเพจ/ตัวกรองต้องไม่ขึ้นกับ
+  // รายการที่ถูกกรองอยู่บนจอ (ไม่อย่างนั้นเลือกดู "รับแล้ว" จะเห็น "รอรับ 0" ทั้งที่มีของค้าง)
+  admin.get('/stats', async (_req, res) => {
+    try {
+      const { rows } = await pool.query(
+        `SELECT status,
+                COUNT(*)::int AS count,
+                COUNT(*) FILTER (
+                  WHERE status='waiting_pickup'
+                    AND created_at < NOW() - INTERVAL '7 days'
+                )::int AS aging_count
+           FROM parcels
+          WHERE deleted_at IS NULL
+          GROUP BY status`
+      );
+      const counts = { waiting_pickup: 0, picked_up: 0, returned: 0, cancelled: 0 };
+      let agingWaiting = 0;
+      for (const r of rows) {
+        if (Object.prototype.hasOwnProperty.call(counts, r.status)) {
+          counts[r.status] = Number(r.count || 0);
+        }
+        if (r.status === 'waiting_pickup') agingWaiting = Number(r.aging_count || 0);
+      }
+      const all = counts.waiting_pickup + counts.picked_up + counts.returned + counts.cancelled;
+      res.json({ ok: true, counts: { ...counts, all }, agingWaiting });
+    } catch (err) {
+      console.error('parcel stats error:', err);
+      res.status(500).json(errBody('โหลดสถิติพัสดุไม่สำเร็จ', 'DB_ERROR'));
+    }
+  });
+
   admin.post('/', sameOrigin, csrfGuard, validateBody(schemas.createParcel), async (req, res) => {
     const b = req.body;
     const roomId = b.roomId.trim();
@@ -688,6 +723,142 @@ module.exports = function buildParcelsRouter(ctx) {
         'DB_ERROR',
         'รายการพัสดุยังอยู่ในระบบ ให้ลองเลือกรูปและอัปโหลดอีกครั้งภายหลัง'
       ));
+    }
+  });
+
+  // ปิดงานรับพัสดุ + แนบหลักฐาน (ถ้ามี) ใน "คำขอเดียว" — ห้ามแยกเป็น 2 ขั้น
+  // (เปลี่ยนสถานะก่อนแล้วค่อยอัปโหลดรูป) เพราะถ้ารูปพังจะได้สถานะที่ปิดไปแล้ว
+  // โดยไม่มีหลักฐาน ย้อนกลับไม่ได้ ลำดับที่ปลอดภัยคือ:
+  //   ล็อกแถว → ตรวจว่ายังรอรับ → เซฟรูป (ถ้าแนบ) → UPDATE → COMMIT
+  // พลาดขั้นไหนก็ ROLLBACK ทั้งก้อน สถานะเดิมไม่ถูกแตะ และรูปกำพร้าถูกลบทิ้ง
+  admin.post('/:id/pickup', sameOrigin, csrfGuard, validateBody(schemas.pickupParcel), async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id < 1) {
+      return res.status(400).json(errBody('รหัสพัสดุไม่ถูกต้อง', 'INVALID_ID'));
+    }
+    const client = await pool.connect();
+    let proofFile = null;
+    let committed = false;
+    try {
+      await client.query('BEGIN');
+      // FOR UPDATE: กันแอดมิน 2 เครื่องกด "รับแล้ว" พร้อมกัน — เครื่องที่สอง
+      // จะรอแถวปลดล็อกแล้วเจอสถานะ picked_up พร้อมข้อความบอกว่าใครรับไปแล้ว
+      const prevQ = await client.query(
+        `SELECT * FROM parcels WHERE id=$1 AND deleted_at IS NULL FOR UPDATE`,
+        [id]
+      );
+      if (!prevQ.rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(404).json(errBody(
+          'ไม่พบพัสดุรายการนี้ หรือถูกลบไปแล้ว',
+          'PARCEL_NOT_FOUND',
+          'กดรีเฟรชรายการพัสดุ แล้วตรวจรายการที่ยังอยู่ในระบบอีกครั้ง'
+        ));
+      }
+      const prev = prevQ.rows[0];
+      if (prev.status === 'picked_up') {
+        await client.query('ROLLBACK');
+        const when = prev.picked_up_at ? new Date(prev.picked_up_at).toLocaleString('th-TH') : '-';
+        return res.status(409).json(errBody(
+          'พัสดุรายการนี้ถูกบันทึกรับไปแล้ว',
+          'PARCEL_ALREADY_PICKED',
+          `บันทึกรับเมื่อ ${when} โดย ${prev.picked_up_by || '-'} — ถ้ากดซ้ำเพราะหน้าจอไม่อัปเดต ให้รีเฟรชรายการ`,
+          { pickedUpAt: prev.picked_up_at, pickedUpBy: prev.picked_up_by || null }
+        ));
+      }
+      if (CLOSED_STATUS.has(prev.status)) {
+        await client.query('ROLLBACK');
+        return res.status(409).json(errBody(
+          'พัสดุรายการนี้ปิดงานแล้ว ไม่สามารถบันทึกรับได้',
+          'PARCEL_TERMINAL',
+          'รายการที่คืนผู้ส่งหรือยกเลิกไปแล้วจะเปลี่ยนกลับมารับไม่ได้ ถ้าของกลับมาจริงให้สร้างรายการใหม่'
+        ));
+      }
+      if (req.body.proof) {
+        try {
+          // ใช้ category 'parcel_photo' เดิม: กติกาเข้าถึงไฟล์ใน server.js
+          // (แอดมินทุก role + ผู้เช่าเจ้าของพัสดุ) คุ้มครองหลักฐานชุดนี้ให้อัตโนมัติ
+          proofFile = await storage.saveBase64({
+            pool,
+            category: 'parcel_photo',
+            dataUrl: req.body.proof,
+            refId: String(id),
+            uploadedBy: adminName(req),
+            maxBytes: PARCEL_PHOTO_MAX_BYTES,
+            allowedMimes: PARCEL_PHOTO_MIMES,
+          });
+        } catch (err) {
+          await client.query('ROLLBACK');
+          return res.status(400).json(errBody(
+            'บันทึกหลักฐานการรับไม่สำเร็จ — ยังไม่ได้เปลี่ยนสถานะพัสดุ',
+            'PICKUP_PROOF_INVALID',
+            'เลือกรูป JPG, PNG หรือ WebP ขนาดไม่เกินประมาณ 1.5 MB แล้วกดบันทึกรับใหม่ หรือบันทึกรับโดยไม่แนบรูปก็ได้',
+            { detail: err?.message || 'invalid pickup proof' }
+          ));
+        }
+      }
+      const { rows } = await client.query(
+        `UPDATE parcels
+            SET status='picked_up',
+                picked_up_at=COALESCE(picked_up_at, NOW()),
+                picked_up_by=$2,
+                pickup_proof_file_id=COALESCE($3, pickup_proof_file_id),
+                pickup_proof_url=COALESCE($4, pickup_proof_url),
+                updated_at=NOW()
+          WHERE id=$1 AND deleted_at IS NULL AND status='waiting_pickup'
+          RETURNING *`,
+        [
+          id,
+          cleanNullable(req.body.pickedUpBy) || adminName(req),
+          proofFile ? proofFile.id : null,
+          proofFile ? proofFile.url : null,
+        ]
+      );
+      if (!rows.length) {
+        // ตาข่ายชั้นสุดท้าย — ปกติมาไม่ถึงเพราะล็อกแถวไว้แล้ว
+        await client.query('ROLLBACK');
+        return res.status(409).json(errBody(
+          'สถานะพัสดุเปลี่ยนไประหว่างบันทึก กรุณารีเฟรชแล้วตรวจอีกครั้ง',
+          'PARCEL_STATE_CHANGED'
+        ));
+      }
+      await client.query('COMMIT');
+      committed = true;
+      audit(req, 'parcel.pickup', 'parcel', String(id), {
+        parcelNo: prev.parcel_no,
+        roomId: prev.room_id,
+        tenantId: prev.tenant_id == null ? null : Number(prev.tenant_id),
+        pickedUpBy: rows[0].picked_up_by,
+        proofFileId: proofFile ? Number(proofFile.id) : null,
+        proofAttached: !!proofFile,
+      });
+      res.json({
+        ok: true,
+        parcel: publicParcel(rows[0]),
+        notice: {
+          kind: 'success',
+          title: 'บันทึกรับพัสดุแล้ว',
+          message: proofFile
+            ? `ปิดงาน ${prev.parcel_no} พร้อมหลักฐานการรับเรียบร้อย ผู้เช่าจะเห็นสถานะและรูปหลักฐานในหน้าพัสดุ`
+            : `ปิดงาน ${prev.parcel_no} เรียบร้อย (ไม่ได้แนบหลักฐาน) ผู้เช่าจะเห็นสถานะรับแล้วในหน้าพัสดุ`,
+        },
+      });
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      console.error('parcel pickup error:', err);
+      res.status(500).json(errBody(
+        'บันทึกรับพัสดุไม่สำเร็จ',
+        'DB_ERROR',
+        'สถานะยังเป็นรอรับเหมือนเดิม ลองใหม่อีกครั้ง ถ้ายังไม่ได้ให้ตรวจการเชื่อมต่อฐานข้อมูล'
+      ));
+    } finally {
+      // รูปถูกเซฟผ่าน pool (นอกทรานแซกชัน) — ถ้าปิดงานไม่สำเร็จ ต้องลบไฟล์กำพร้าทิ้ง
+      if (!committed && proofFile?.id) {
+        storage.remove(pool, proofFile.id).catch((e) => {
+          console.warn('parcel pickup proof orphan cleanup failed:', e.message);
+        });
+      }
+      client.release();
     }
   });
 

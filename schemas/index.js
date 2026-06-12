@@ -368,6 +368,13 @@ schemas.parcelPhoto = z.object({
   photo: parcelPhotoDataUrl,
 }).strict();
 
+// รับพัสดุ: แนบหลักฐาน (รูปถ่าย) หรือไม่แนบก็ได้ — ช่องทางเดียวที่อนุญาต
+// ให้ปิดงานเป็น picked_up พร้อมหลักฐานแบบ atomic ในคำขอเดียว
+schemas.pickupParcel = z.object({
+  pickedUpBy: optionalTrimmed(120),
+  proof: parcelPhotoDataUrl.optional(),
+}).strict();
+
 // --- meters ---------------------------------------------------------------
 schemas.recordMeter = z.object({
   meterType: z.enum(['water', 'elec']),
