@@ -1950,8 +1950,9 @@ function TabContract({ t, routeBookingId = '', config, setToast, addActivity, se
         />
         <div style={{ marginTop: 14, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           <Btn variant="secondary" size="sm" icon="📄"
+            title="เปิด PDF ผ่านเว็บ (แท็บใหม่) — ดูหรือกดพิมพ์ได้ทันที ไม่ดาวน์โหลดลงเครื่อง"
             onClick={() => window.open(`/api/contracts/${contract.id}/pdf`, '_blank', 'noopener')}>
-            ดู PDF
+            ดู PDF (เปิดผ่านเว็บ)
           </Btn>
           {(() => {
             // Renewal entry point — appears when the active contract is within

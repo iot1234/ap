@@ -533,9 +533,9 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
                           title="สร้างสัญญาใหม่จากเงื่อนไขเดิม + ส่งลิงก์ให้ผู้เช่ายืนยัน">🔄 ต่อสัญญา</Btn>
                       ) : null}
                       <Btn size="sm" variant="ghost" onClick={() => openPdf(c)}
-                        title="ดู PDF (ใช้ template ที่ผูกไว้ หรือ default)">📄 PDF</Btn>
+                        title="เปิด PDF ผ่านเว็บ (แท็บใหม่) — ดูหรือกดพิมพ์ได้ทันที ใช้ template ที่ผูกไว้">📄 เปิด PDF</Btn>
                       <Btn size="sm" variant="ghost" onClick={() => openPdf(c, { download: 1 })}
-                        title="ดาวน์โหลด PDF เพื่อ print">⬇</Btn>
+                        title="ดาวน์โหลดไฟล์ PDF ลงเครื่อง — เก็บไว้หรือพิมพ์ภายหลัง">⬇ ดาวน์โหลด</Btn>
                       <Btn size="sm" variant="ghost" onClick={() => setDocsFor(c)}
                         title="ดูเอกสารประกอบสัญญา — รูปบัตรประชาชนหน้า/หลัง และลายเซ็น">📇 เอกสาร</Btn>
                       {c.status === 'active' && !c.signed_at && !c.locked_at ? (
@@ -814,14 +814,14 @@ function ContractDocsModal({ contract, gap, onClose }) {
         <>
           <Btn variant="ghost" onClick={onClose}>ปิด</Btn>
           <Btn variant="ghost"
-            title="ดาวน์โหลด PDF ชุดเดียวกันเก็บไว้/ส่งต่อ"
+            title="บันทึกไฟล์ PDF ลงเครื่อง (เข้าโฟลเดอร์ดาวน์โหลด) — เก็บไว้หรือส่งต่อ"
             onClick={() => window.open(`/api/contracts/${contract.id}/pdf?docs=1&download=1`, '_blank', 'noopener')}>
-            ⬇ PDF ชุดเซ็น
+            ⬇ ดาวน์โหลดไฟล์ PDF — ชุดเซ็น
           </Btn>
           <Btn variant={complete ? 'primary' : 'secondary'}
-            title="เปิด PDF สัญญาเต็ม + หน้าสำเนาบัตรหน้า/หลัง พร้อมช่องเซ็น 'รับรองสำเนาถูกต้อง' — สั่งพิมพ์แล้วให้ผู้เช่าเซ็นบนกระดาษได้ทันที"
+            title="เปิดในแท็บใหม่ของเบราว์เซอร์ — ดูก่อนแล้วกดพิมพ์ได้ทันที (Ctrl+P) มีสัญญาเต็ม + สำเนาบัตรหน้า/หลัง พร้อมช่องเซ็น 'รับรองสำเนาถูกต้อง'"
             onClick={() => window.open(`/api/contracts/${contract.id}/pdf?docs=1`, '_blank', 'noopener')}>
-            🖨 พิมพ์ชุดเซ็น (สัญญา + สำเนาบัตร)
+            🖨 เปิดผ่านเว็บเพื่อพิมพ์ — ชุดเซ็น (สัญญา + สำเนาบัตร)
           </Btn>
           {contract.tenant_id ? (
             <Btn variant={complete ? 'secondary' : 'primary'}

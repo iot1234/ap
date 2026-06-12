@@ -6696,8 +6696,14 @@ test('contract PDF can append sign-ready certified copies of the ID card', () =>
   const page = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-contracts.jsx'), 'utf8');
   assert.match(page, /pdf\?docs=1/,
     'the docs modal must link to the sign-ready PDF');
-  assert.match(page, /พิมพ์ชุดเซ็น \(สัญญา \+ สำเนาบัตร\)/,
-    'the print action must say what the pack contains');
+  assert.match(page, /เปิดผ่านเว็บเพื่อพิมพ์ — ชุดเซ็น \(สัญญา \+ สำเนาบัตร\)/,
+    'the open-in-browser action must say so explicitly AND what the pack contains');
+  assert.match(page, /ดาวน์โหลดไฟล์ PDF — ชุดเซ็น/,
+    'the download action must say explicitly that it saves a file');
+  assert.match(page, /📄 เปิด PDF/,
+    'the row PDF action must say it opens in the browser');
+  assert.match(page, /⬇ ดาวน์โหลด/,
+    'the row download action must be labelled, not a bare icon');
 });
 
 test('pricing page lists per-room overrides with a clear-back-to-formula action', () => {
