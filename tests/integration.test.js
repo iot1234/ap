@@ -6676,6 +6676,30 @@ test('contracts page shows tenant ID-card documents with explicit failure states
     'every contract row must offer the documents view');
 });
 
+test('contract PDF can append sign-ready certified copies of the ID card', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const pdf = fs.readFileSync(path.join(__dirname, '..', 'services', 'contractPdf.js'), 'utf8');
+  assert.match(pdf, /เอกสารแนบท้ายสัญญา/,
+    'renderer must support an identity-documents appendix page');
+  assert.match(pdf, /รับรองสำเนาถูกต้อง {2}ลงชื่อ/,
+    'each ID-card side must carry a certified-true-copy signature line');
+  assert.match(pdf, /ไม่มีรูปด้านนี้ในระบบ ณ วันที่พิมพ์/,
+    'a missing side must degrade to a clear note, not break the render');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(server, /req\.query\.docs === '1'/,
+    'admin contract PDF must accept the docs flag');
+  assert.match(server, /โหลดรูป\$\{label\}ไม่สำเร็จ — โปรดแนบสำเนากระดาษแทน/,
+    'image load failures must surface as in-PDF guidance, never a 500');
+  assert.match(server, /identityDocs,/,
+    'the loaded documents must be passed into the renderer');
+  const page = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-contracts.jsx'), 'utf8');
+  assert.match(page, /pdf\?docs=1/,
+    'the docs modal must link to the sign-ready PDF');
+  assert.match(page, /พิมพ์ชุดเซ็น \(สัญญา \+ สำเนาบัตร\)/,
+    'the print action must say what the pack contains');
+});
+
 test('pricing page lists per-room overrides with a clear-back-to-formula action', () => {
   const fs = require('node:fs');
   const path = require('node:path');

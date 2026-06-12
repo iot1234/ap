@@ -784,6 +784,69 @@ async function renderContractPdf(contract, tenant, room, building, options, stre
   // === Page footers (page numbers + contract no) ========================
   // Add to every page after content is placed. PDFKit exposes an internal
   // bufferedPageRange so we can iterate all pages.
+  // ============== Appendix: identity documents (optional) ===============
+  // opts.identityDocs = { front: Buffer|null, back: Buffer|null, note: string|null }
+  // A separate page styled like Thai certified-copy paperwork — each ID-card
+  // side gets its own "รับรองสำเนาถูกต้อง" signature line, so the printed
+  // pack (contract + ID copies) is sign-ready in one go. Missing/broken
+  // images degrade to an in-PDF note ("แนบสำเนาด้วยตนเอง") instead of
+  // failing the whole render.
+  const idDocs = opts.identityDocs;
+  if (idDocs && (idDocs.front || idDocs.back || idDocs.note)) {
+    doc.addPage();
+    doc.y = CONTENT_TOP;
+    doc.font(FONT_B).fontSize(14).fillColor(C.ink)
+      .text(`เอกสารแนบท้ายสัญญา ${contract.contractNo || ''}`,
+            MARGIN, doc.y, { width: CONTENT_W, align: 'center' });
+    doc.moveDown(0.3);
+    doc.font(FONT).fontSize(10).fillColor(C.muted)
+      .text('สำเนาบัตรประจำตัวประชาชนของผู้เช่า — ใช้ประกอบการลงนามสัญญาเช่า',
+            MARGIN, doc.y, { width: CONTENT_W, align: 'center' });
+    doc.moveDown(0.8);
+
+    const drawCardSide = (label, buf) => {
+      const boxH = 220;
+      ensureRoom(boxH + 80);
+      doc.font(FONT_B).fontSize(10.5).fillColor(C.ink).text(label, MARGIN, doc.y);
+      const imgY = doc.y + 4;
+      const boxW = Math.min(CONTENT_W, 380);
+      const boxX = MARGIN + (CONTENT_W - boxW) / 2;
+      doc.roundedRect(boxX, imgY, boxW, boxH, 8).lineWidth(0.8).strokeColor(C.border).stroke();
+      if (buf) {
+        try {
+          doc.image(buf, boxX + 6, imgY + 6,
+            { fit: [boxW - 12, boxH - 12], align: 'center', valign: 'center' });
+        } catch (err) {
+          console.warn('[contractPdf] embed identity image failed:', err.message);
+          doc.font(FONT).fontSize(10).fillColor(C.muted)
+            .text('ไม่สามารถฝังรูปลงเอกสารได้ (ไฟล์อาจเสียหาย) — โปรดแนบสำเนากระดาษแทน',
+                  boxX + 10, imgY + boxH / 2 - 6, { width: boxW - 20, align: 'center' });
+        }
+      } else {
+        doc.font(FONT).fontSize(10).fillColor(C.muted)
+          .text('ไม่มีรูปด้านนี้ในระบบ ณ วันที่พิมพ์ — โปรดแนบสำเนากระดาษแทน',
+                boxX + 10, imgY + boxH / 2 - 6, { width: boxW - 20, align: 'center' });
+      }
+      // Certified-true-copy line (Thai paperwork convention) under each side.
+      const lineY = imgY + boxH + 14;
+      doc.font(FONT).fontSize(10).fillColor(C.ink)
+        .text('รับรองสำเนาถูกต้อง  ลงชื่อ ........................................................',
+              MARGIN, lineY, { width: CONTENT_W, align: 'center' });
+      doc.font(FONT).fontSize(9.5).fillColor(C.muted)
+        .text(`(${truncateText((tenant && tenant.fullName) || 'ผู้เช่า', 58)})`,
+              MARGIN, lineY + 16, { width: CONTENT_W, align: 'center' });
+      doc.y = lineY + 36;
+    };
+
+    drawCardSide('ด้านหน้าบัตร', idDocs.front || null);
+    drawCardSide('ด้านหลังบัตร', idDocs.back || null);
+    if (idDocs.note) {
+      ensureRoom(30);
+      doc.font(FONT).fontSize(9.5).fillColor(C.muted)
+        .text(`หมายเหตุจากระบบ: ${idDocs.note}`, MARGIN, doc.y, { width: CONTENT_W });
+    }
+  }
+
   const range = doc.bufferedPageRange();
   for (let i = 0; i < range.count; i++) {
     doc.switchToPage(range.start + i);

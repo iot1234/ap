@@ -15859,9 +15859,52 @@ app.get('/api/contracts/:id/pdf', requireAuth, requireRole('owner', 'manager'),
         emergencyContactRelation: contract.emergency_contact_relation || null,
       };
 
+      // Optional ?docs=1 — append certified-copy pages with the tenant's
+      // ID-card images so the printed pack is sign-ready on paper. Image
+      // problems NEVER block the contract render: each missing/broken image
+      // degrades to an in-PDF note telling the admin to attach a paper copy.
+      let identityDocs = null;
+      if (req.query.docs === '1') {
+        identityDocs = { front: null, back: null, note: null };
+        const addNote = (msg) => {
+          identityDocs.note = identityDocs.note ? `${identityDocs.note} · ${msg}` : msg;
+        };
+        try {
+          const tQ = contract.tenant_id ? await pool.query(
+            `SELECT citizen_id_image_front_id, citizen_id_image_back_id
+               FROM tenants WHERE id=$1 AND deleted_at IS NULL`,
+            [contract.tenant_id]
+          ) : { rows: [] };
+          const ids = tQ.rows[0] || {};
+          const loadImg = async (fid, label) => {
+            if (!fid) return null;
+            try {
+              const fQ = await pool.query('SELECT * FROM file_uploads WHERE id=$1 LIMIT 1', [fid]);
+              if (!fQ.rows.length) throw new Error('ไม่พบไฟล์ในระบบ');
+              return await storage.readFile(fQ.rows[0]);
+            } catch (err) {
+              console.warn(`[contract pdf] identity ${label} load failed:`, err.message);
+              addNote(`โหลดรูป${label}ไม่สำเร็จ — โปรดแนบสำเนากระดาษแทน`);
+              return null;
+            }
+          };
+          identityDocs.front = await loadImg(ids.citizen_id_image_front_id, 'ด้านหน้าบัตร');
+          identityDocs.back = await loadImg(ids.citizen_id_image_back_id, 'ด้านหลังบัตร');
+          if (!ids.citizen_id_image_front_id && !ids.citizen_id_image_back_id) {
+            addNote('ผู้เช่ายังไม่มีรูปบัตรในระบบ — เติมได้ที่หน้าผู้เช่า ปุ่ม "เติมข้อมูล/อัปโหลดเอกสาร"');
+          }
+        } catch (err) {
+          console.warn('[contract pdf] identity docs lookup failed:', err.message);
+          addNote('ดึงข้อมูลรูปบัตรจากระบบไม่สำเร็จ — โปรดแนบสำเนากระดาษแทน');
+        }
+      }
+
       audit(req, 'contract.pdf_view', 'contract', String(id), {
         contractNo: contract.contract_no, hasSignature: !!tenantSigBuf,
         download: req.query.download === '1',
+        identityDocs: identityDocs
+          ? { front: !!identityDocs.front, back: !!identityDocs.back, note: identityDocs.note || null }
+          : null,
         templateId: explicitId, roomSource: room.source || 'minimal',
       });
 
@@ -15893,6 +15936,7 @@ app.get('/api/contracts/:id/pdf', requireAuth, requireRole('owner', 'manager'),
         {
           termsTemplate: template,
           signatures: { tenantBuf: tenantSigBuf },
+          identityDocs,
           lateFeeRate, dueDay,
         },
         res

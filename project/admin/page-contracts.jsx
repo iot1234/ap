@@ -813,6 +813,16 @@ function ContractDocsModal({ contract, gap, onClose }) {
       footer={
         <>
           <Btn variant="ghost" onClick={onClose}>ปิด</Btn>
+          <Btn variant="ghost"
+            title="ดาวน์โหลด PDF ชุดเดียวกันเก็บไว้/ส่งต่อ"
+            onClick={() => window.open(`/api/contracts/${contract.id}/pdf?docs=1&download=1`, '_blank', 'noopener')}>
+            ⬇ PDF ชุดเซ็น
+          </Btn>
+          <Btn variant={complete ? 'primary' : 'secondary'}
+            title="เปิด PDF สัญญาเต็ม + หน้าสำเนาบัตรหน้า/หลัง พร้อมช่องเซ็น 'รับรองสำเนาถูกต้อง' — สั่งพิมพ์แล้วให้ผู้เช่าเซ็นบนกระดาษได้ทันที"
+            onClick={() => window.open(`/api/contracts/${contract.id}/pdf?docs=1`, '_blank', 'noopener')}>
+            🖨 พิมพ์ชุดเซ็น (สัญญา + สำเนาบัตร)
+          </Btn>
           {contract.tenant_id ? (
             <Btn variant={complete ? 'secondary' : 'primary'}
               onClick={() => { window.location.hash = `#tenants?tenantId=${encodeURIComponent(contract.tenant_id)}`; }}>
