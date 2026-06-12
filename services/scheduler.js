@@ -3085,6 +3085,46 @@ async function tickTenantStateReconcile(pool, flags, now, state) {
   }
 }
 
+// === Local-file rescue ===================================================
+// Files saved while R2/S3 was down (or before it was configured) sit on the
+// container's EPHEMERAL disk — the next redeploy deletes them permanently.
+// Every hour, when S3 is reachable again, push them back up and tell the
+// owner what was rescued / what was already lost. Detection alone (the
+// health counter) wasn't enough: nobody redeploys less often than they
+// read the health page.
+async function tickLocalFileRescue(pool, flags, now, state) {
+  try {
+    const storage = require('./storage');
+    const result = await storage.migrateLocalToS3(pool, { limit: 100 });
+    if (result.skipped) return;                       // S3 not configured — nothing to rescue into
+    if (!result.migrated && !result.failed) return;   // nothing was stranded
+    const lines = [];
+    if (result.migrated > 0) {
+      lines.push(`✅ กู้ไฟล์จากดิสก์ชั่วคราวขึ้น R2/S3 สำเร็จ ${result.migrated} ไฟล์ — ปลอดภัยจากการ redeploy แล้ว`);
+    }
+    if (result.failed > 0) {
+      lines.push('', `⚠️ กู้ไม่สำเร็จ ${result.failed} ไฟล์:`);
+      for (const f of result.failures) lines.push(`  • ${f}`);
+      lines.push('', 'ไฟล์ที่ "หายจากดิสก์แล้ว" = ถูก redeploy ลบไปก่อนหน้านี้ ต้องขอผู้เช่า/แอดมินอัปโหลดใหม่',
+        'ไฟล์ที่ขึ้น R2 ไม่ได้ = ตรวจการตั้งค่า R2/S3 ที่ /admin#secrets แล้วระบบจะลองใหม่ชั่วโมงถัดไป');
+    }
+    if (result.remaining > 0) {
+      lines.push('', `เหลือบนดิสก์ชั่วคราวอีก ${result.remaining} ไฟล์ — ระบบจะทยอยกู้ต่ออัตโนมัติทุกชั่วโมง`);
+    }
+    await notifier.notifyOwner({ pool, features: flags || {} }, {
+      category: 'system',
+      subject: result.failed > 0
+        ? `📦 กู้ไฟล์ขึ้น R2/S3: สำเร็จ ${result.migrated} · ติดปัญหา ${result.failed}`
+        : `📦 กู้ไฟล์จากดิสก์ชั่วคราวขึ้น R2/S3 แล้ว ${result.migrated} ไฟล์`,
+      text: lines.join('\n'),
+    }).catch((err) => console.warn('[scheduler] file-rescue digest failed:', err.message));
+    console.log(`[scheduler] local-file rescue: migrated=${result.migrated} failed=${result.failed} remaining=${result.remaining}`);
+  } catch (err) {
+    console.error('[scheduler] local-file rescue failed:', err.message);
+    return { error: err.message };
+  }
+}
+
 // === Janitor: prune old failed notifications ============================
 // notifications_queue rows with status='failed' linger forever — there
 // was no TTL or cleanup before this. Over months the table accumulates
@@ -3366,6 +3406,9 @@ async function _runTick(pool) {
     { job: 'room-status-sync', promise: _withAdvisoryLock(pool, `roomStatusSync-${todayKey}`, () => tickRoomStatusSync(pool, flags, now, state)) },
     { job: 'notif-prune', promise: _withAdvisoryLock(pool, `notifQueuePrune-${todayKey}`, () => tickPruneFailedNotifications(pool, flags, now, state)) },
     { job: 'orphan-slip-prune', promise: _withAdvisoryLock(pool, `orphanSlipPrune-${todayKey}`, () => tickPruneOrphanSlips(pool, flags, now, state)) },
+    // Hourly: push files stranded on the ephemeral disk (R2 outage window)
+    // back up to R2/S3 before a redeploy can delete them.
+    { job: 'local-file-rescue', promise: _withAdvisoryLock(pool, `localFileRescue-${localHourKey(now)}`, () => tickLocalFileRescue(pool, flags, now, state), { dbLatch: true }) },
     // R7 — pre-due payment reminder. Chained AFTER bill-gen settles so
     // newly-issued bills with a same-day due date (possible when admin sets
     // dueOnDay = bill-gen day) are committed before the reminder's

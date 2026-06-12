@@ -6730,6 +6730,27 @@ test('every admin/tenant JSX file parses cleanly', () => {
   }
 });
 
+test('files stranded on the ephemeral disk are rescued to S3 automatically', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const storage = fs.readFileSync(path.join(__dirname, '..', 'services', 'storage.js'), 'utf8');
+  assert.match(storage, /async function migrateLocalToS3/,
+    'storage must expose a local→S3 migration for outage-stranded files');
+  assert.match(storage, /WHERE id=\$1 AND storage='local'/,
+    'the row flip must re-verify storage=local (never blindly mark s3)');
+  assert.match(storage, /ไฟล์หายจากดิสก์แล้ว/,
+    'files already wiped by a redeploy must be reported, not silently marked migrated');
+  assert.match(storage, /migrateLocalToS3,\n\};/,
+    'migration must be exported');
+  const sched = fs.readFileSync(path.join(__dirname, '..', 'services', 'scheduler.js'), 'utf8');
+  assert.match(sched, /localFileRescue-\$\{localHourKey\(now\)\}/,
+    'rescue must run hourly with an advisory lock + db latch');
+  assert.match(sched, /ปลอดภัยจากการ redeploy แล้ว/,
+    'the owner digest must say the rescued files are now redeploy-safe');
+  assert.match(sched, /ระบบจะทยอยกู้ต่ออัตโนมัติทุกชั่วโมง/,
+    'the digest must explain the hourly retry for remaining files');
+});
+
 test('contract templates: typo-proof variables, enabled-state consistency', () => {
   const fs = require('node:fs');
   const path = require('node:path');

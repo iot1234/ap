@@ -299,6 +299,70 @@ async function saveBase64({
   return { id, url, filename, size: parsed.buffer.length, mime, buffer: parsed.buffer, storage: storageMode };
 }
 
+// Re-upload files that fell back to the ephemeral local disk (R2 outage,
+// or R2 configured after the fact) into S3 — closes the "saved during an
+// outage, lost on the next redeploy" window. Copies the RAW stored bytes
+// verbatim (already encrypted at rest when FILE_ENCRYPTION is on), so the
+// /files/:id read path behaves identically before and after the move.
+async function migrateLocalToS3(pool, { limit = 50 } = {}) {
+  if (!s3Configured()) {
+    return { skipped: true, reason: 's3-not-configured', migrated: 0, failed: 0, remaining: 0, failures: [] };
+  }
+  const client = getS3Client();
+  const bucket = secrets.get('R2_BUCKET');
+  if (!client || !bucket) {
+    return { skipped: true, reason: 's3-client-unavailable', migrated: 0, failed: 0, remaining: 0, failures: [] };
+  }
+  const cap = Math.max(1, Math.min(200, Number(limit) || 50));
+  const { rows } = await pool.query(
+    `SELECT id, category, filename FROM file_uploads
+      WHERE storage='local'
+      ORDER BY id ASC
+      LIMIT $1`,
+    [cap]
+  );
+  let migrated = 0;
+  let failed = 0;
+  const failures = [];
+  for (const f of rows) {
+    try {
+      const fullPath = _safeLocalPath(f.category, f.filename);
+      if (!fs.existsSync(fullPath)) {
+        // Row says local but the disk copy is already gone (most likely a
+        // redeploy wiped it before this rescue ran). Don't mark it s3 —
+        // report it so the operator knows that file needs re-uploading.
+        failed++;
+        failures.push(`${f.category}/${f.filename}: ไฟล์หายจากดิสก์แล้ว (อาจถูก redeploy ลบไปก่อนกู้)`);
+        continue;
+      }
+      const body = fs.readFileSync(fullPath);
+      await client.send(new client._lib.PutObjectCommand({
+        Bucket: bucket,
+        Key: `${f.category}/${f.filename}`,
+        Body: body,
+        // Raw stored bytes are opaque (usually encrypted) — real mime stays
+        // in file_uploads.mime_type for serving, same as normal s3 saves.
+        ContentType: 'application/octet-stream',
+      }));
+      await pool.query(
+        `UPDATE file_uploads SET storage='s3' WHERE id=$1 AND storage='local'`,
+        [f.id]
+      );
+      migrated++;
+      try { fs.unlinkSync(fullPath); } catch { /* freeing disk is best-effort */ }
+    } catch (err) {
+      failed++;
+      failures.push(`${f.category}/${f.filename}: ${err.message}`);
+    }
+  }
+  let remaining = 0;
+  try {
+    const rem = await pool.query(`SELECT COUNT(*)::int AS n FROM file_uploads WHERE storage='local'`);
+    remaining = Number(rem.rows[0]?.n) || 0;
+  } catch { /* count is informational */ }
+  return { migrated, failed, failures: failures.slice(0, 10), remaining };
+}
+
 // Defense-in-depth: defend against a tampered DB row whose `category` or
 // `filename` contains "../" or backslashes that path.join would happily
 // resolve OUTSIDE UPLOAD_ROOT. The write-time sanitiser at saveBase64
@@ -427,4 +491,5 @@ module.exports = {
   s3Configured,
   storageStatus,
   localFileExists,
+  migrateLocalToS3,
 };
