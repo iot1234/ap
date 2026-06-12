@@ -41,9 +41,12 @@ test('parcel routes are mounted behind feature gates and tenant isolation', () =
 
   const route = read('routes', 'parcels.js');
   assert.match(route, /admin\.get\('\/rooms'/);
+  assert.match(route, /admin\.get\('\/options'/);
   assert.match(route, /admin\.delete\('\/:id'/);
   assert.match(route, /features\.requireFeature\('parcelNotifications'\)/);
   assert.match(route, /notifier\.notifyTenant/);
+  assert.match(route, /safeSendParcelNotification/);
+  assert.match(route, /safeUpdateNotifyState/);
   assert.match(route, /notify_attempt_count/);
   assert.match(route, /notify_success_count/);
   assert.match(route, /notify_channels/);
@@ -82,6 +85,10 @@ test('admin and tenant UIs expose parcels only through the feature-aware paths',
   const adminPage = read('project', 'admin', 'page-parcels.jsx');
   assert.match(adminPage, /\/api\/parcels/);
   assert.match(adminPage, /\/api\/parcels\/rooms/);
+  assert.match(adminPage, /\/api\/parcels\/options/);
+  assert.match(adminPage, /PARCEL_OPTION_STORAGE_KEY/);
+  assert.match(adminPage, /parcel-carrier-options/);
+  assert.match(adminPage, /parcel-shelf-options/);
   assert.match(adminPage, /method: 'DELETE'/);
   assert.match(adminPage, /notifySummary/);
   assert.match(adminPage, /roomOptions\.map/);

@@ -24,6 +24,38 @@ const PARCEL_NOTIFY_LABEL = {
   disabled: 'ปิดช่องทาง',
   skipped: 'ไม่ได้ส่ง',
 };
+const PARCEL_OPTION_STORAGE_KEY = 'baankarn.parcelOptions.v1';
+
+function readParcelOptionMemory() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(PARCEL_OPTION_STORAGE_KEY) || '{}');
+    return {
+      carriers: Array.isArray(raw.carriers) ? raw.carriers.filter(Boolean).slice(0, 30) : [],
+      shelfLocations: Array.isArray(raw.shelfLocations) ? raw.shelfLocations.filter(Boolean).slice(0, 30) : [],
+      lastCarrier: raw.lastCarrier || '',
+      lastShelfLocation: raw.lastShelfLocation || '',
+    };
+  } catch {
+    return { carriers: [], shelfLocations: [], lastCarrier: '', lastShelfLocation: '' };
+  }
+}
+
+function mergeOptionValues(...lists) {
+  const seen = new Set();
+  const out = [];
+  for (const list of lists) {
+    for (const raw of Array.isArray(list) ? list : []) {
+      const value = typeof raw === 'string' ? raw : raw && raw.value;
+      const s = String(value || '').trim();
+      const key = s.toLowerCase();
+      if (!s || seen.has(key)) continue;
+      seen.add(key);
+      out.push(s);
+      if (out.length >= 50) return out;
+    }
+  }
+  return out;
+}
 
 function notifyCount(item, key, fallbackKey) {
   return Number(item?.[key] ?? item?.[fallbackKey] ?? 0) || 0;
@@ -77,6 +109,20 @@ function PageParcels({ setToast }) {
   const [roomConflicts, setRoomConflicts] = useState([]);
   const [roomsLoading, setRoomsLoading] = useState(false);
   const [roomsErr, setRoomsErr] = useState('');
+  const [parcelOptions, setParcelOptions] = useState(() => {
+    const memory = readParcelOptionMemory();
+    return {
+      carriers: memory.carriers,
+      shelfLocations: memory.shelfLocations,
+    };
+  });
+  const [lastParcelDefaults, setLastParcelDefaults] = useState(() => {
+    const memory = readParcelOptionMemory();
+    return {
+      carrier: memory.lastCarrier || '',
+      shelfLocation: memory.lastShelfLocation || '',
+    };
+  });
 
   function textFromError(e, fallback) {
     const raw = e && (e.error || e.message || e.hint) || fallback;
@@ -123,12 +169,56 @@ function PageParcels({ setToast }) {
     }
   }
 
+  async function loadParcelOptions() {
+    const memory = readParcelOptionMemory();
+    try {
+      const d = await apiCall('/api/parcels/options', { timeoutMs: 12000 });
+      setParcelOptions({
+        carriers: mergeOptionValues(memory.carriers, d.carriers),
+        shelfLocations: mergeOptionValues(memory.shelfLocations, d.shelfLocations),
+      });
+      setLastParcelDefaults({
+        carrier: memory.lastCarrier || '',
+        shelfLocation: memory.lastShelfLocation || '',
+      });
+    } catch {
+      setParcelOptions({
+        carriers: mergeOptionValues(memory.carriers),
+        shelfLocations: mergeOptionValues(memory.shelfLocations),
+      });
+    }
+  }
+
+  function rememberParcelOptions(payload) {
+    const carrier = String(payload?.carrier || '').trim();
+    const shelfLocation = String(payload?.shelfLocation || '').trim();
+    if (!carrier && !shelfLocation) return;
+    setParcelOptions((prev) => {
+      const next = {
+        carriers: mergeOptionValues(carrier ? [carrier] : [], prev.carriers),
+        shelfLocations: mergeOptionValues(shelfLocation ? [shelfLocation] : [], prev.shelfLocations),
+      };
+      const memory = {
+        carriers: next.carriers.slice(0, 30),
+        shelfLocations: next.shelfLocations.slice(0, 30),
+        lastCarrier: carrier || lastParcelDefaults.carrier || '',
+        lastShelfLocation: shelfLocation || lastParcelDefaults.shelfLocation || '',
+      };
+      try { localStorage.setItem(PARCEL_OPTION_STORAGE_KEY, JSON.stringify(memory)); } catch {}
+      setLastParcelDefaults({
+        carrier: memory.lastCarrier,
+        shelfLocation: memory.lastShelfLocation,
+      });
+      return next;
+    });
+  }
+
   useEffect(() => {
     const timer = setTimeout(load, q.trim() ? 300 : 0);
     return () => clearTimeout(timer);
   }, [status, q]);
 
-  useEffect(() => { loadRooms(); }, []);
+  useEffect(() => { loadRooms(); loadParcelOptions(); }, []);
 
   const stats = useMemo(() => ({
     total: items.length,
@@ -146,6 +236,7 @@ function PageParcels({ setToast }) {
         body: JSON.stringify(payload),
         timeoutMs: 15000,
       });
+      rememberParcelOptions(payload);
       setForm(null);
       toastNotice(d.notice, isUpdate ? 'บันทึกพัสดุแล้ว' : 'เพิ่มพัสดุแล้ว');
       await load();
@@ -159,8 +250,13 @@ function PageParcels({ setToast }) {
   }
 
   function openCreate() {
-    setForm({ notify: true });
+    setForm({
+      notify: true,
+      carrier: lastParcelDefaults.carrier || '',
+      shelfLocation: lastParcelDefaults.shelfLocation || '',
+    });
     if (!roomOptions.length && !roomsLoading) loadRooms();
+    if (!parcelOptions.carriers.length && !parcelOptions.shelfLocations.length) loadParcelOptions();
   }
 
   async function deleteParcel(item) {
@@ -357,6 +453,7 @@ function PageParcels({ setToast }) {
           roomConflicts={roomConflicts}
           roomsLoading={roomsLoading}
           roomsErr={roomsErr}
+          parcelOptions={parcelOptions}
           onReloadRooms={loadRooms}
           onCancel={() => setForm(null)}
           onSave={save}
@@ -441,6 +538,7 @@ function ParcelForm({
   roomConflicts = [],
   roomsLoading = false,
   roomsErr = '',
+  parcelOptions = { carriers: [], shelfLocations: [] },
   onReloadRooms,
   onCancel,
   onSave,
@@ -554,7 +652,11 @@ function ParcelForm({
           <div>
             <label style={lbl}>ขนส่ง</label>
             <input value={form.carrier} onChange={(e) => setForm({ ...form, carrier: e.target.value })}
-              maxLength={80} placeholder="Kerry / Flash / ไปรษณีย์" style={inp} />
+              list="parcel-carrier-options" maxLength={80}
+              placeholder="เลือกจากประวัติหรือพิมพ์เอง" style={inp} />
+            <datalist id="parcel-carrier-options">
+              {parcelOptions.carriers.map((x) => <option key={x} value={x} />)}
+            </datalist>
           </div>
         </div>
 
@@ -564,7 +666,11 @@ function ParcelForm({
 
         <label style={lbl}>จุดรับ / ชั้นวาง</label>
         <input value={form.shelfLocation} onChange={(e) => setForm({ ...form, shelfLocation: e.target.value })}
-          maxLength={120} placeholder="เช่น ชั้น A-03 / เคาน์เตอร์หน้าออฟฟิศ" style={inp} />
+          list="parcel-shelf-options" maxLength={120}
+          placeholder="เลือกจากประวัติหรือพิมพ์เอง" style={inp} />
+        <datalist id="parcel-shelf-options">
+          {parcelOptions.shelfLocations.map((x) => <option key={x} value={x} />)}
+        </datalist>
 
         <label style={lbl}>หมายเหตุ</label>
         <textarea value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })}

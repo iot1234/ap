@@ -190,6 +190,24 @@ async function sendParcelNotification(pool, flags, parcel, tenant, customMessage
   return notifyOutcome(result);
 }
 
+async function safeSendParcelNotification(pool, flags, parcel, tenant, customMessage) {
+  try {
+    return await sendParcelNotification(pool, flags, parcel, tenant, customMessage);
+  } catch (err) {
+    console.error('parcel notification dispatch error:', err);
+    return {
+      status: 'failed',
+      channel: 'none',
+      error: err?.message || 'notification dispatch failed',
+      notice: {
+        kind: 'warning',
+        title: 'บันทึกพัสดุแล้ว แต่ยังส่งแจ้งเตือนไม่สำเร็จ',
+        message: 'ระบบบันทึกรายการไว้แล้ว สามารถกดส่งแจ้งซ้ำได้จากแถวพัสดุ',
+      },
+    };
+  }
+}
+
 function publicParcelRoom(row) {
   return {
     roomId: row.current_room_id,
@@ -226,6 +244,15 @@ async function updateNotifyState(pool, parcelId, outcome, opts = {}) {
     [parcelId, outcome.status, outcome.channel || null, outcome.error || null, attempted]
   );
   return rows[0] || null;
+}
+
+async function safeUpdateNotifyState(pool, parcelId, outcome, opts) {
+  try {
+    return await updateNotifyState(pool, parcelId, outcome, opts);
+  } catch (err) {
+    console.error('parcel notify state update error:', err);
+    return null;
+  }
 }
 
 module.exports = function buildParcelsRouter(ctx) {
@@ -330,6 +357,37 @@ module.exports = function buildParcelsRouter(ctx) {
     }
   });
 
+  admin.get('/options', async (_req, res) => {
+    try {
+      const { rows: carrierRows } = await pool.query(
+        `SELECT carrier AS value, COUNT(*)::int AS count
+           FROM parcels
+          WHERE deleted_at IS NULL
+            AND COALESCE(TRIM(carrier), '') <> ''
+          GROUP BY carrier
+          ORDER BY COUNT(*) DESC, carrier
+          LIMIT 100`
+      );
+      const { rows: shelfRows } = await pool.query(
+        `SELECT shelf_location AS value, COUNT(*)::int AS count
+           FROM parcels
+          WHERE deleted_at IS NULL
+            AND COALESCE(TRIM(shelf_location), '') <> ''
+          GROUP BY shelf_location
+          ORDER BY COUNT(*) DESC, shelf_location
+          LIMIT 100`
+      );
+      res.json({
+        ok: true,
+        carriers: carrierRows.map((r) => ({ value: r.value, count: Number(r.count || 0) })),
+        shelfLocations: shelfRows.map((r) => ({ value: r.value, count: Number(r.count || 0) })),
+      });
+    } catch (err) {
+      console.error('parcel options list error:', err);
+      res.status(500).json(errBody('โหลดตัวเลือกขนส่ง/จุดรับพัสดุไม่สำเร็จ', 'DB_ERROR'));
+    }
+  });
+
   admin.post('/', sameOrigin, csrfGuard, validateBody(schemas.createParcel), async (req, res) => {
     const b = req.body;
     const roomId = b.roomId.trim();
@@ -381,8 +439,8 @@ module.exports = function buildParcelsRouter(ctx) {
         message: 'ยังไม่ได้ส่งแจ้งเตือนตามตัวเลือกที่ปิดไว้',
       };
       if (b.notify !== false) {
-        const outcome = await sendParcelNotification(pool, req.features, inserted, t, null);
-        row = await updateNotifyState(pool, inserted.id, outcome) || inserted;
+        const outcome = await safeSendParcelNotification(pool, req.features, inserted, t, null);
+        row = await safeUpdateNotifyState(pool, inserted.id, outcome) || inserted;
         notice = outcome.notice;
         audit(req, 'parcel.notify', 'parcel', String(inserted.id), {
           status: outcome.status,
@@ -390,7 +448,7 @@ module.exports = function buildParcelsRouter(ctx) {
           error: outcome.error,
         });
       } else {
-        row = await updateNotifyState(pool, inserted.id, {
+        row = await safeUpdateNotifyState(pool, inserted.id, {
           status: 'skipped',
           channel: 'none',
           error: 'notify disabled by admin on create',
@@ -576,8 +634,8 @@ module.exports = function buildParcelsRouter(ctx) {
         status: row.tenant_status,
         deleted_at: row.tenant_deleted_at,
       };
-      const outcome = await sendParcelNotification(pool, req.features, row, tenantRow, req.body.message || null);
-      const updated = await updateNotifyState(pool, row.id, outcome) || row;
+      const outcome = await safeSendParcelNotification(pool, req.features, row, tenantRow, req.body.message || null);
+      const updated = await safeUpdateNotifyState(pool, row.id, outcome) || row;
       audit(req, 'parcel.notify', 'parcel', String(row.id), {
         status: outcome.status,
         channel: outcome.channel,
