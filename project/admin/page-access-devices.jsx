@@ -10,6 +10,7 @@
 // ===========================================================================
 
 const { useState, useEffect } = React;
+const ACCESS_DEVICE_API_TIMEOUT_MS = 15_000;
 
 // `embedded` prop lets PageAccess host this as a tab without rendering its
 // own PageContainer + PageHeader. Standalone /admin#access-devices still
@@ -46,17 +47,65 @@ function PageAccessDevices({ setToast, embedded = false }) {
   const [showNew, setShowNew] = useState(false);
   const [form, setForm] = useState({ deviceId: '', description: '' });
   const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [deletingId, setDeletingId] = useState(null);
   const [revealed, setRevealed] = useState(null);   // { token, deviceId }
 
-  async function load() {
+  function showError(err, action) {
+    if (window.toastError) window.toastError(setToast, err, { action });
+    else setToast && setToast({ kind: 'error', message: err?.message || `${action}ไม่สำเร็จ` });
+  }
+
+  async function fetchJsonWithTimeout(url, opts = {}) {
+    let ctrl;
+    let timer;
+    let signal = opts.signal;
+    if (!signal && typeof AbortController !== 'undefined') {
+      ctrl = new AbortController();
+      signal = ctrl.signal;
+      timer = setTimeout(() => ctrl.abort(), ACCESS_DEVICE_API_TIMEOUT_MS);
+    }
     try {
-      const r = await fetch('/api/admin/access-devices', { credentials: 'same-origin' });
-      const d = await r.json();
-      if (!r.ok) throw new Error(d.error || 'load failed');
+      const r = await fetch(url, {
+        credentials: 'same-origin',
+        ...opts,
+        ...(signal ? { signal } : {}),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      return d;
+    } catch (err) {
+      if (err.name === 'AbortError') {
+        const e = new Error('คำขอใช้เวลานานเกินกำหนด — โปรดลองใหม่');
+        e.code = 'TIMEOUT';
+        throw e;
+      }
+      throw err;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  async function load() {
+    setLoading(true);
+    try {
+      let d;
+      if (window.apiCall || window.requireApiCall) {
+        const call = window.requireApiCall ? window.requireApiCall() : window.apiCall;
+        d = await call('/api/admin/access-devices', { timeoutMs: ACCESS_DEVICE_API_TIMEOUT_MS });
+      } else if (apiFetch) {
+        const r = await apiFetch('/api/admin/access-devices', {
+          timeoutMs: ACCESS_DEVICE_API_TIMEOUT_MS,
+        });
+        d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error || 'load failed');
+      } else {
+        d = await fetchJsonWithTimeout('/api/admin/access-devices');
+      }
       setDevices(d.devices || []);
     } catch (e) {
-      setToast && setToast({ kind: 'error', message: e.message });
-    }
+      showError(e, 'โหลด API Tokens');
+    } finally { setLoading(false); }
   }
   useEffect(() => { load(); }, []);
 
@@ -66,33 +115,63 @@ function PageAccessDevices({ setToast, embedded = false }) {
       setToast && setToast({ kind: 'error', message: 'device id ต้องเป็น a-z 0-9 _.- (2-64 ตัว)' });
       return;
     }
+    if (!apiFetch && !window.apiCall && !window.requireApiCall) {
+      setToast && setToast({ kind: 'error', message: 'ระบบยังไม่พร้อม — กรุณารีเฟรชหน้า' });
+      return;
+    }
     setBusy(true);
     try {
-      const r = await apiFetch('/api/admin/access-devices', {
-        method: 'POST', body: JSON.stringify(form),
-      });
-      const d = await r.json();
-      if (!r.ok) throw new Error(d.error || 'create failed');
+      let d;
+      if (window.apiCall || window.requireApiCall) {
+        const call = window.requireApiCall ? window.requireApiCall() : window.apiCall;
+        d = await call('/api/admin/access-devices', {
+          method: 'POST',
+          body: JSON.stringify(form),
+          timeoutMs: ACCESS_DEVICE_API_TIMEOUT_MS,
+        });
+      } else {
+        const r = await apiFetch('/api/admin/access-devices', {
+          method: 'POST',
+          body: JSON.stringify(form),
+          timeoutMs: ACCESS_DEVICE_API_TIMEOUT_MS,
+        });
+        d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error || 'create failed');
+      }
       setRevealed({ token: d.token, deviceId: d.device.device_id });
       setShowNew(false);
       setForm({ deviceId: '', description: '' });
       load();
     } catch (e) {
-      setToast && setToast({ kind: 'error', message: e.message });
+      showError(e, 'สร้าง API Token');
     } finally { setBusy(false); }
   }
 
   async function remove(id) {
     if (!window.confirm('ลบ device นี้? hardware ที่ใช้ token เก่าจะไม่สามารถ POST log ได้อีก')) return;
+    if (deletingId) return;
+    if (!apiFetch && !window.apiCall && !window.requireApiCall) {
+      setToast && setToast({ kind: 'error', message: 'ระบบยังไม่พร้อม — กรุณารีเฟรชหน้า' });
+      return;
+    }
+    setDeletingId(id);
     try {
-      const r = await apiFetch(`/api/admin/access-devices/${id}`, { method: 'DELETE' });
-      const d = await r.json();
-      if (!r.ok) throw new Error(d.error || 'delete failed');
+      if (window.apiCall || window.requireApiCall) {
+        const call = window.requireApiCall ? window.requireApiCall() : window.apiCall;
+        await call(`/api/admin/access-devices/${id}`, { method: 'DELETE', timeoutMs: ACCESS_DEVICE_API_TIMEOUT_MS });
+      } else {
+        const r = await apiFetch(`/api/admin/access-devices/${id}`, {
+          method: 'DELETE',
+          timeoutMs: ACCESS_DEVICE_API_TIMEOUT_MS,
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error || 'delete failed');
+      }
       setToast && setToast({ kind: 'success', message: 'ลบแล้ว' });
       load();
     } catch (e) {
-      setToast && setToast({ kind: 'error', message: e.message });
-    }
+      showError(e, 'ลบ API Token');
+    } finally { setDeletingId(null); }
   }
 
   function copyToken() {
@@ -106,7 +185,7 @@ function PageAccessDevices({ setToast, embedded = false }) {
       <Header title="API Tokens สำหรับ Hardware"
         subtitle="ออก Bearer token ให้ RFID reader / ESP32 ใช้ POST /api/access/log โดยไม่ต้องมี session"
         actions={
-          <Btn variant="primary" onClick={() => setShowNew(true)}>+ ออก token ใหม่</Btn>
+          <Btn variant="primary" onClick={() => setShowNew(true)} disabled={busy || loading}>+ ออก token ใหม่</Btn>
         } />
 
       <Card style={{ background: C.warningSoft || C.warningSoft, borderLeft: `4px solid ${C.warning || C.warning}` }}>
@@ -118,7 +197,11 @@ function PageAccessDevices({ setToast, embedded = false }) {
       </Card>
 
       <Card>
-        {devices.length === 0 ? <EmptyState title="ยังไม่มี device — กดปุ่ม '+' ด้านบนเพื่อออก token แรก" /> : (
+        {loading ? (
+          <div role="status" style={{ padding: 24, textAlign: 'center', color: C.muted, fontSize: 13 }}>
+            กำลังโหลด API Tokens...
+          </div>
+        ) : devices.length === 0 ? <EmptyState title="ยังไม่มี device — กดปุ่ม '+' ด้านบนเพื่อออก token แรก" /> : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 1, background: C.border, borderRadius: 8, overflow: 'hidden' }}>
             {devices.map((d) => (
               <div key={d.id} style={{
@@ -134,7 +217,10 @@ function PageAccessDevices({ setToast, embedded = false }) {
                   {d.last_seen && <><br/>ใช้งานล่าสุด {new Date(d.last_seen).toLocaleString('th-TH')}</>}
                 </div>
                 <Pill color={d.enabled ? C.success : C.muted}>{d.enabled ? 'ใช้งาน' : 'ปิด'}</Pill>
-                <Btn size="sm" variant="danger" onClick={() => remove(d.id)}>ลบ</Btn>
+                <Btn size="sm" variant="danger" disabled={deletingId === d.id || busy}
+                  onClick={() => remove(d.id)}>
+                  {deletingId === d.id ? 'กำลังลบ...' : 'ลบ'}
+                </Btn>
               </div>
             ))}
           </div>
@@ -165,7 +251,7 @@ function PageAccessDevices({ setToast, embedded = false }) {
           </label>
           <div style={{ display: 'flex', gap: 8 }}>
             <Btn type="submit" variant="primary" disabled={busy} style={{ flex: 1 }}>
-              {busy ? '…' : 'สร้าง'}
+              {busy ? 'กำลังสร้าง...' : 'สร้าง'}
             </Btn>
             <Btn type="button" variant="ghost" onClick={() => setShowNew(false)}>ยกเลิก</Btn>
           </div>

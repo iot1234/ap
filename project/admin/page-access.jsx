@@ -6,6 +6,7 @@
 
 (function () {
 const { useState, useEffect, useRef } = React;
+const ACCESS_API_TIMEOUT_MS = 15_000;
 
 function PageAccess({ setToast }) {
   // Diagnostic: confirm the component mounted. See page-payments.jsx for context.
@@ -44,12 +45,13 @@ function PageAccess({ setToast }) {
   const [list, setList] = useState([]);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState(null);
+  const [saving, setSaving] = useState(false);
   const [form, setForm] = useState({ device: 'main_door', method: 'manual', result: 'granted', roomId: '', cardId: '', reason: '' });
   const abortRef = useRef(null);
 
   async function load() {
     if (abortRef.current) abortRef.current.abort();
-    const req = makeAbortableRequest(15_000);
+    const req = makeAbortableRequest(ACCESS_API_TIMEOUT_MS);
     abortRef.current = req;
     setLoading(true);
     setLoadError(null);
@@ -66,14 +68,19 @@ function PageAccess({ setToast }) {
         setList(d.logs || []);
       }
     } catch (err) {
-      if (err.name !== 'AbortError') {
+      if (err.name === 'AbortError' && req.timedOut) {
+        setLoadError('โหลด log ใช้เวลานานเกินกำหนด กรุณาลองใหม่อีกครั้ง');
+        setList([]);
+      } else if (err.name !== 'AbortError') {
         setLoadError(err.message || 'network error');
         setList([]);
       }
     } finally {
       req.done();
-      if (abortRef.current === req) abortRef.current = null;
-      setLoading(false);
+      if (abortRef.current === req) {
+        abortRef.current = null;
+        setLoading(false);
+      }
     }
   }
   useEffect(() => {
@@ -83,23 +90,53 @@ function PageAccess({ setToast }) {
 
   async function submit(e) {
     e.preventDefault();
-    if (!window.apiFetch) {
+    if (saving) return;
+    if (!window.apiCall && !window.requireApiCall && !window.apiFetch && !window.requireApiFetch) {
       setToast && setToast({ kind: 'error', message: 'ระบบยังไม่พร้อม — กรุณารีเฟรชหน้า' });
       return;
     }
-    try {
-      const apiFetch = window.requireApiFetch ? window.requireApiFetch() : window.apiFetch;
-      const r = await apiFetch('/api/access/log', {
-        method: 'POST',
-        body: JSON.stringify(form),
+    const clean = {
+      ...form,
+      device: String(form.device || '').trim(),
+      roomId: String(form.roomId || '').trim(),
+      cardId: String(form.cardId || '').trim(),
+      reason: String(form.reason || '').trim(),
+    };
+    if (!clean.device) {
+      setToast && setToast({
+        kind: 'warning',
+        message: { title: 'ยังไม่ได้ระบุอุปกรณ์', description: 'กรุณากรอกชื่อ device เช่น main_door ก่อนบันทึก log เข้า-ออก' },
       });
-      const d = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      return;
+    }
+    setSaving(true);
+    try {
+      if (window.apiCall || window.requireApiCall) {
+        const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
+        await apiCall('/api/access/log', {
+          method: 'POST',
+          body: JSON.stringify(clean),
+          timeoutMs: ACCESS_API_TIMEOUT_MS,
+        });
+      } else {
+        const apiFetch = window.requireApiFetch ? window.requireApiFetch() : window.apiFetch;
+        const r = await apiFetch('/api/access/log', {
+          method: 'POST',
+          body: JSON.stringify(clean),
+          timeoutMs: ACCESS_API_TIMEOUT_MS,
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw Object.assign(new Error(d.error || `HTTP ${r.status}`), { status: r.status, code: d.code, raw: d });
+      }
       setForm({ ...form, cardId: '', reason: '' });
       setToast && setToast({ kind: 'success', message: 'บันทึกแล้ว' });
       load();
     } catch (e2) {
-      setToast && setToast({ kind: 'error', message: e2.message || 'บันทึกไม่สำเร็จ' });
+      window.toastError
+        ? window.toastError(setToast, e2, { action: 'บันทึก log เข้า-ออก' })
+        : setToast && setToast({ kind: 'error', message: e2.message || 'บันทึกไม่สำเร็จ' });
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -157,8 +194,20 @@ function PageAccess({ setToast }) {
           <Field label="cardId">
             <input value={form.cardId} onChange={(e) => setForm({ ...form, cardId: e.target.value })} style={inp(C)} />
           </Field>
-          <Btn type="submit" variant="primary">บันทึก</Btn>
+          <Btn type="submit" variant="primary" disabled={saving || loading}>
+            {saving ? 'กำลังบันทึก...' : 'บันทึก'}
+          </Btn>
         </form>
+        {saving ? (
+          <div role="status" style={{
+            padding: 10, borderRadius: 8,
+            background: C.infoSoft || '#eef6ff',
+            color: C.infoInk || C.ink2,
+            fontSize: 12.5,
+          }}>
+            กำลังส่งข้อมูลเข้า-ออกไปยังเซิร์ฟเวอร์ ถ้าไม่ตอบกลับใน {Math.round(ACCESS_API_TIMEOUT_MS / 1000)} วินาที ระบบจะหยุดรอและแจ้งให้ลองใหม่
+          </div>
+        ) : null}
       </Card>
       <Card>
         {loadError && (
@@ -215,14 +264,19 @@ function inp(C) {
 
 function makeAbortableRequest(ms) {
   if (typeof AbortController === 'undefined') {
-    return { signal: null, abort() {}, done() {} };
+    return { signal: null, abort() {}, done() {}, timedOut: false };
   }
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), ms);
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    ctrl.abort();
+  }, ms);
   return {
     signal: ctrl.signal,
     abort: () => ctrl.abort(),
     done: () => clearTimeout(timer),
+    get timedOut() { return timedOut; },
   };
 }
 
