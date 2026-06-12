@@ -6652,6 +6652,30 @@ test('room creation defaults to central pricing; overrides require an explicit r
     'the modal must declare which price mode the admin chose');
 });
 
+test('contracts page shows tenant ID-card documents with explicit failure states', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-contracts.jsx'), 'utf8');
+  assert.match(src, /function ContractDocsModal\(\{ contract, gap, onClose \}\)/,
+    'contracts page must have a documents modal for ID card + signature');
+  assert.match(src, /บัตรประชาชน — ด้านหน้า/,
+    'docs modal must show the ID card front');
+  assert.match(src, /บัตรประชาชน — ด้านหลัง/,
+    'docs modal must show the ID card back');
+  assert.match(src, /signature_image_id/,
+    'docs modal must show the locked contract signature when present');
+  assert.match(src, /ยังไม่มีรูปนี้ในระบบ — เติมได้ที่หน้าผู้เช่า/,
+    'missing documents must say where to backfill, not show a broken image');
+  assert.match(src, /onError=\{\(\) => setFailed\(true\)\}/,
+    'image load failures must be caught explicitly');
+  assert.match(src, /ลองโหลดใหม่/,
+    'failed loads must offer a retry');
+  assert.match(src, /ต้องเป็น owner\/manager/,
+    'load-failure guidance must mention the sensitive-file role gate');
+  assert.match(src, /setDocsFor\(c\)/,
+    'every contract row must offer the documents view');
+});
+
 test('pricing page lists per-room overrides with a clear-back-to-formula action', () => {
   const fs = require('node:fs');
   const path = require('node:path');

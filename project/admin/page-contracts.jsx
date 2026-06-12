@@ -33,6 +33,7 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
   const [inviting, setInviting] = useState(null);   // contract for self-fill invite
   const [quickCreating, setQuickCreating] = useState(false);  // "+ สร้างสัญญา + ส่งลิงก์"
   const [renewing, setRenewing] = useState(null);   // contract being renewed (prefilled quick-invite)
+  const [docsFor, setDocsFor] = useState(null);     // contract whose ID-card/signature docs are open
   const [templates, setTemplates] = useState([]);   // for assignment dropdown
 
   // Pre-load templates list for the assign-template modal. Cheap call,
@@ -535,6 +536,8 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
                         title="ดู PDF (ใช้ template ที่ผูกไว้ หรือ default)">📄 PDF</Btn>
                       <Btn size="sm" variant="ghost" onClick={() => openPdf(c, { download: 1 })}
                         title="ดาวน์โหลด PDF เพื่อ print">⬇</Btn>
+                      <Btn size="sm" variant="ghost" onClick={() => setDocsFor(c)}
+                        title="ดูเอกสารประกอบสัญญา — รูปบัตรประชาชนหน้า/หลัง และลายเซ็น">📇 เอกสาร</Btn>
                       {c.status === 'active' && !c.signed_at && !c.locked_at ? (
                         <Btn size="sm" variant="ghost" onClick={() => setSigning(c)}
                           title="ลงนามออนไลน์">✍️ เซ็น</Btn>
@@ -563,6 +566,11 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
           </div>
         )}
       </Card>
+
+      {docsFor ? (
+        <ContractDocsModal contract={docsFor} gap={contractIdentityGap(docsFor)}
+          onClose={() => setDocsFor(null)} />
+      ) : null}
 
       {editing ? (
         <ContractEditModal
@@ -728,6 +736,150 @@ function inviteErrorMessage(prefix, err) {
     title: prefix,
     description: Array.from(new Set(parts.filter(Boolean))).join('\n') || 'กรุณารีเฟรชข้อมูลแล้วลองใหม่อีกครั้ง',
   };
+}
+
+// --- ContractDocsModal -------------------------------------------------------
+// "เอกสารประกอบสัญญา" — the back-office view of the tenant's ID card
+// (front/back) and the contract signature, opened straight from the
+// contracts table. Every state is explicit, never a broken-image icon:
+//   no file   → dashed placeholder + WHERE to backfill
+//   loading   → progress note
+//   load fail → likely causes (file deleted / storage down / sensitive-file
+//               role gate needs owner-manager) + retry
+function SecureDocImage({ label, fileId }) {
+  const C = window.ADMIN_C;
+  const { Btn } = window;
+  const [failed, setFailed] = React.useState(false);
+  const [loaded, setLoaded] = React.useState(false);
+  const [attempt, setAttempt] = React.useState(0);
+  React.useEffect(() => { setFailed(false); setLoaded(false); }, [fileId, attempt]);
+  if (!fileId) {
+    return (
+      <div style={{
+        border: `1.5px dashed ${C.border}`, borderRadius: 10, padding: 14,
+        textAlign: 'center', background: C.surfaceAlt,
+      }}>
+        <div style={{ fontSize: 12, fontWeight: 600, color: C.ink2, marginBottom: 4 }}>{label}</div>
+        <div style={{ fontSize: 26, marginBottom: 4 }}>🪪</div>
+        <div style={{ fontSize: 11.5, color: C.muted, lineHeight: 1.5 }}>
+          ยังไม่มีรูปนี้ในระบบ — เติมได้ที่หน้าผู้เช่า ปุ่ม "เติมข้อมูล/อัปโหลดเอกสาร"
+        </div>
+      </div>
+    );
+  }
+  const url = `/files/${encodeURIComponent(fileId)}${attempt ? `?retry=${attempt}` : ''}`;
+  return (
+    <div style={{ textAlign: 'center' }}>
+      <div style={{ fontSize: 12, fontWeight: 600, color: C.ink2, marginBottom: 6 }}>{label}</div>
+      {failed ? (
+        <div style={{
+          border: `1px solid ${(C.danger || '#c0392b')}55`,
+          background: C.dangerSoft || '#fdecea', borderRadius: 10, padding: 12,
+        }}>
+          <div style={{ fontSize: 11.5, color: C.dangerInk || '#9f2d20', lineHeight: 1.6, marginBottom: 8 }}>
+            เปิดรูปไม่ได้ — สาเหตุที่พบบ่อย: ไฟล์ถูกลบ, ระบบจัดเก็บไฟล์ (R2/S3) มีปัญหาชั่วคราว
+            หรือบัญชีของคุณไม่มีสิทธิ์ดูเอกสารอ่อนไหว (ต้องเป็น owner/manager)
+          </div>
+          <Btn size="sm" variant="secondary" onClick={() => setAttempt((a) => a + 1)}>ลองโหลดใหม่</Btn>
+        </div>
+      ) : (
+        <>
+          <a href={url} target="_blank" rel="noopener noreferrer"
+             title="คลิกเพื่อเปิด/ดาวน์โหลดรูปเต็ม (ไฟล์อ่อนไหวระบบจะให้ดาวน์โหลดแทนการแสดงในแท็บ)">
+            <img src={url} alt={label}
+              onLoad={() => setLoaded(true)}
+              onError={() => setFailed(true)}
+              style={{
+                maxWidth: '100%', maxHeight: 220, borderRadius: 10,
+                border: `1px solid ${C.border}`, cursor: 'zoom-in', background: '#fff',
+              }} />
+          </a>
+          {!loaded ? (
+            <div style={{ fontSize: 11, color: C.muted, marginTop: 4 }}>กำลังโหลดรูป…</div>
+          ) : null}
+        </>
+      )}
+    </div>
+  );
+}
+
+function ContractDocsModal({ contract, gap, onClose }) {
+  const C = window.ADMIN_C;
+  const { Modal, Btn, Pill } = window;
+  const complete = !gap;
+  return (
+    <Modal open onClose={onClose} width={680}
+      title={`📇 เอกสารประกอบสัญญา ${contract.contract_no || ''}`}
+      footer={
+        <>
+          <Btn variant="ghost" onClick={onClose}>ปิด</Btn>
+          {contract.tenant_id ? (
+            <Btn variant={complete ? 'secondary' : 'primary'}
+              onClick={() => { window.location.hash = `#tenants?tenantId=${encodeURIComponent(contract.tenant_id)}`; }}>
+              เปิดหน้าผู้เช่า{complete ? '' : ' (เติมเอกสารที่ขาด)'}
+            </Btn>
+          ) : null}
+        </>
+      }>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
+          padding: '10px 12px', background: C.surfaceAlt, borderRadius: 10,
+        }}>
+          <div style={{ fontSize: 13, color: C.ink }}>
+            🏠 ห้อง <b>{contract.room_id || '-'}</b>
+            {' '}· 👤 {contract.tenant_name || 'ไม่พบชื่อผู้เช่า'}
+            {' '}· 🪪 {contract.citizen_id_tail
+              ? `เลขบัตรลงท้าย ${contract.citizen_id_tail} (ฉบับเต็มถูกเข้ารหัสไว้)`
+              : 'ยังไม่มีเลขบัตรในระบบ'}
+          </div>
+          <Pill color={complete ? 'success' : 'danger'} size="sm">
+            {complete ? '✓ เอกสารครบ' : `ขาด ${gap.length} รายการ`}
+          </Pill>
+        </div>
+
+        {!complete ? (
+          <div style={{
+            padding: '10px 12px', borderRadius: 10,
+            background: C.dangerSoft || '#fdecea',
+            border: `1px solid ${(C.danger || '#c0392b')}44`,
+            fontSize: 12.5, color: C.dangerInk || '#9f2d20', lineHeight: 1.6,
+          }}>
+            ยังขาด: <b>{gap.join(', ')}</b>
+            <br />วิธีเติม: กดปุ่ม "เปิดหน้าผู้เช่า" ด้านล่าง → แท็บสัญญา → ปุ่ม "เติมข้อมูล/อัปโหลดเอกสาร"
+            — บันทึกแล้วป้าย "ต้องตรวจ" จะหายเอง
+          </div>
+        ) : null}
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+          <SecureDocImage label="บัตรประชาชน — ด้านหน้า" fileId={contract.citizen_id_image_front_id} />
+          <SecureDocImage label="บัตรประชาชน — ด้านหลัง" fileId={contract.citizen_id_image_back_id} />
+        </div>
+
+        <div>
+          <div style={{ fontSize: 12.5, fontWeight: 700, color: C.ink, marginBottom: 6 }}>ลายเซ็นในสัญญา</div>
+          {contract.signature_image_id ? (
+            <SecureDocImage label="ลายเซ็นผู้เช่า (ฉบับที่ใช้ lock สัญญา)" fileId={contract.signature_image_id} />
+          ) : (
+            <div style={{
+              border: `1.5px dashed ${C.border}`, borderRadius: 10, padding: 12,
+              fontSize: 11.5, color: C.muted, lineHeight: 1.6, background: C.surfaceAlt,
+            }}>
+              ยังไม่มีลายเซ็นแนบในสัญญาฉบับนี้ — ถ้าผู้เช่ากรอกผ่านลิงก์ ลายเซ็นจะอยู่ในใบเชิญ
+              (เมนู "ใบเชิญผู้เช่ากรอก") และจะถูกผูกเข้าสัญญาเมื่อแอดมินอนุมัติ
+              หรือใช้ปุ่ม "✍️ เซ็น" ในตารางเพื่อลงนามออนไลน์
+            </div>
+          )}
+        </div>
+
+        <div style={{ fontSize: 11, color: C.muted, lineHeight: 1.5 }}>
+          🔐 เอกสารเหล่านี้เป็นข้อมูลอ่อนไหว — เปิดดูได้เฉพาะบัญชีระดับ owner/manager,
+          ไฟล์ถูกเข้ารหัสในพื้นที่จัดเก็บ, เบราว์เซอร์ไม่แคชรูป และความพยายามเข้าถึงโดยไม่มีสิทธิ์
+          ถูกบันทึกเป็นเหตุการณ์ความปลอดภัย
+        </div>
+      </div>
+    </Modal>
+  );
 }
 
 function InviteTenantModal({ contract, onClose, onSaved, onError }) {
