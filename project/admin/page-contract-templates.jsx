@@ -460,6 +460,12 @@ function TemplateEditor({ template, defaultClauses, systemVariables = [], onClos
   }));
   const [tab, setTab] = useState('basic');     // basic | clauses | sections | variables
   const [busy, setBusy] = useState(false);
+  // Dirty tracking — the PDF preview renders the last SAVED version, so the
+  // editor must say so loudly while unsaved edits exist (otherwise admin
+  // "reviews" stale text and believes the new wording was checked).
+  const initialJsonRef = React.useRef(null);
+  if (initialJsonRef.current === null) initialJsonRef.current = JSON.stringify(form);
+  const dirty = JSON.stringify(form) !== initialJsonRef.current;
   const defaultCount = defaultClauses.length || 0;
   const existingVariableKeys = useMemo(() => new Set(
     form.variables.map((v) => cleanVariableKey(v.key)).filter(Boolean)
@@ -530,7 +536,10 @@ function TemplateEditor({ template, defaultClauses, systemVariables = [], onClos
       });
       onSaved && onSaved(d.template);
     } catch (err) {
-      onError && onError('บันทึกล้มเหลว: ' + err.message);
+      // Surface the server's hint too — TEMPLATE_UNKNOWN_VARIABLES lists the
+      // exact typo'd {{placeholders}} and how to fix them.
+      const hint = err && err.raw && err.raw.hint ? `\n${err.raw.hint}` : '';
+      onError && onError('บันทึกล้มเหลว: ' + err.message + hint);
     } finally {
       setBusy(false);
     }
@@ -568,6 +577,14 @@ function TemplateEditor({ template, defaultClauses, systemVariables = [], onClos
       title={isNew ? 'สร้าง Template ใหม่' : `แก้ไข: ${template.name}`}
       footer={
         <>
+          {dirty ? (
+            <span style={{
+              fontSize: 11.5, color: C.warningInk || C.warning,
+              marginRight: 'auto', alignSelf: 'center', lineHeight: 1.4,
+            }}>
+              ⚠️ มีการแก้ไขที่ยังไม่บันทึก — ปุ่ม "ดูตัวอย่าง PDF" จะแสดงฉบับที่บันทึกล่าสุดเท่านั้น
+            </span>
+          ) : null}
           <Btn variant="ghost" onClick={onClose} disabled={busy}>ยกเลิก</Btn>
           <Btn variant="primary" onClick={submit} disabled={busy}>
             {busy ? 'กำลังบันทึก…' : (isNew ? 'สร้าง' : 'บันทึก')}

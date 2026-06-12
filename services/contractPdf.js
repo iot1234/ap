@@ -268,6 +268,35 @@ function resolveClauses(template) {
 }
 
 /**
+ * Scan every {{placeholder}} in the template's clauses + section texts and
+ * return the ones that are neither a SYSTEM_VARIABLE nor defined in the
+ * template's own `variables`. A typo'd {{monthlyRen}} silently prints as
+ * "—" in a LEGAL document — save paths reject with this list so the admin
+ * fixes the spelling (or defines the custom variable) before anything can
+ * print.
+ */
+function findUnknownVariables(template) {
+  if (!template || typeof template !== 'object') return [];
+  const known = new Set(SYSTEM_VARIABLES.map((v) => v.key));
+  for (const k of Object.keys(template.variables || {})) known.add(k);
+  const unknown = new Set();
+  const scan = (text) => {
+    String(text || '').replace(/\{\{(\w+)\}\}/g, (m, k) => {
+      if (!known.has(k)) unknown.add(k);
+      return m;
+    });
+  };
+  for (const c of (Array.isArray(template.clauses) ? template.clauses : [])) {
+    if (c && typeof c === 'object') { scan(c.title); scan(c.body); }
+  }
+  const sections = (template.sections && typeof template.sections === 'object')
+    ? template.sections : {};
+  scan(sections.acknowledgmentText);
+  scan(sections.headerNote);
+  return Array.from(unknown);
+}
+
+/**
  * Render the contract.
  *
  * @param {object} contract - {
@@ -878,6 +907,7 @@ async function renderContractPdf(contract, tenant, room, building, options, stre
 module.exports = {
   renderContractPdf,
   resolveClauses,
+  findUnknownVariables,
   DEFAULT_CLAUSES,
   SYSTEM_VARIABLES,
 };

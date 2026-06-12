@@ -6802,9 +6802,11 @@ app.get('/api/tenant/contract/:id/pdf', requireTenant, async (req, res) => {
     }
     if (!template && contract.template_id) {
       try {
+        // enabled=TRUE: a disabled template must not keep printing just
+        // because a contract still points at it — fall through to default.
         const t = await pool.query(
           `SELECT mode, clauses, sections, variables FROM contract_templates
-            WHERE id=$1 AND deleted_at IS NULL LIMIT 1`,
+            WHERE id=$1 AND deleted_at IS NULL AND enabled=TRUE LIMIT 1`,
           [contract.template_id]
         );
         if (t.rows.length) template = t.rows[0];
@@ -6814,7 +6816,7 @@ app.get('/api/tenant/contract/:id/pdf', requireTenant, async (req, res) => {
       try {
         const t = await pool.query(
           `SELECT mode, clauses, sections, variables FROM contract_templates
-            WHERE is_default=TRUE AND deleted_at IS NULL LIMIT 1`
+            WHERE is_default=TRUE AND deleted_at IS NULL AND enabled=TRUE LIMIT 1`
         );
         if (t.rows.length) template = t.rows[0];
       } catch { /* pre-migration */ }
@@ -12893,12 +12895,42 @@ app.get('/api/admin/contract-templates/:id', requireAuth, requireRole('owner', '
     }
   });
 
+// Shared save-time guards for template POST/PUT. Returns a response body
+// (to send as 400) or null when the payload is safe.
+function _templateGuardError(p) {
+  // Typo'd {{variables}} render as "—" in a LEGAL document — reject with
+  // the exact list so the admin fixes the spelling (or defines the custom
+  // variable) before anything can print.
+  const contractPdf = require('./services/contractPdf');
+  const unknown = contractPdf.findUnknownVariables(p);
+  if (unknown.length) {
+    return {
+      error: `พบตัวแปรที่ระบบไม่รู้จัก ${unknown.length} ตัว: ${unknown.map((k) => `{{${k}}}`).join(', ')}`,
+      code: 'TEMPLATE_UNKNOWN_VARIABLES',
+      unknownVariables: unknown,
+      hint: 'ตรวจการสะกดให้ตรงกับรายการตัวแปรระบบ หรือถ้าตั้งใจใช้ตัวแปรใหม่ ให้เพิ่มในแท็บ "ตัวแปร" ก่อนบันทึก — ไม่อย่างนั้นตำแหน่งนั้นจะพิมพ์เป็น "—" ในสัญญาจริง',
+    };
+  }
+  // The default template is what every contract falls back to — a disabled
+  // default means "no default" to the warning system but the old lookup
+  // still printed it. Forbid the contradictory state outright.
+  if (p.isDefault && !p.enabled) {
+    return {
+      error: 'เทมเพลต default ต้องเปิดใช้งานเสมอ — ถ้าต้องการปิดตัวนี้ ให้ตั้งเทมเพลตอื่นเป็น default ก่อน',
+      code: 'DEFAULT_MUST_BE_ENABLED',
+    };
+  }
+  return null;
+}
+
 // POST /api/admin/contract-templates — create a new template (owner only).
 app.post('/api/admin/contract-templates', sameOrigin, csrfGuard, requireAuth, requireRole('owner'),
   async (req, res) => {
     let p;
     try { p = _validateTemplatePayload(req.body); }
     catch (err) { return res.status(400).json({ error: err.message, code: err.code }); }
+    const guardErr = _templateGuardError(p);
+    if (guardErr) return res.status(400).json(guardErr);
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
@@ -12945,6 +12977,8 @@ app.put('/api/admin/contract-templates/:id', sameOrigin, csrfGuard, requireAuth,
     let p;
     try { p = _validateTemplatePayload(req.body); }
     catch (err) { return res.status(400).json({ error: err.message, code: err.code }); }
+    const guardErr = _templateGuardError(p);
+    if (guardErr) return res.status(400).json(guardErr);
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
@@ -15764,11 +15798,19 @@ app.get('/api/contracts/:id/pdf', requireAuth, requireRole('owner', 'manager'),
         template = contract.terms_template_snapshot;
       }
       if (!template && explicitId) {
+        // ?templateId=N (admin preview from the templates page) may render a
+        // DISABLED template on purpose — that's how admin reviews it before
+        // re-enabling. A template merely ASSIGNED to the contract must be
+        // enabled, otherwise fall through to the default like the warning
+        // system assumes.
+        const fromQueryPreview = Number.isInteger(queryTemplateId) && queryTemplateId > 0;
         try {
           const t = await pool.query(
             `SELECT mode, clauses, sections, variables FROM contract_templates
-              WHERE id=$1 AND deleted_at IS NULL LIMIT 1`,
-            [explicitId]
+              WHERE id=$1 AND deleted_at IS NULL
+                AND (enabled = TRUE OR $2::boolean)
+              LIMIT 1`,
+            [explicitId, fromQueryPreview]
           );
           if (t.rows.length) template = t.rows[0];
         } catch (err) {
@@ -15780,7 +15822,7 @@ app.get('/api/contracts/:id/pdf', requireAuth, requireRole('owner', 'manager'),
         try {
           const t = await pool.query(
             `SELECT mode, clauses, sections, variables FROM contract_templates
-              WHERE is_default=TRUE AND deleted_at IS NULL LIMIT 1`
+              WHERE is_default=TRUE AND deleted_at IS NULL AND enabled=TRUE LIMIT 1`
           );
           if (t.rows.length) template = t.rows[0];
         } catch { /* pre-migration */ }

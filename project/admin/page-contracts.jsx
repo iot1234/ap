@@ -1303,11 +1303,19 @@ function AssignTemplateModal({ contract, templates, onClose, onSaved, onError, o
             </div>
           </div>
         </label>
-        {templates.map((t) => (
+        {/* Disabled templates are hidden — picking one would silently fall
+            back to the default at print time. The one already assigned to
+            THIS contract stays visible with a loud warning so admin can see
+            (and fix) the current state. */}
+        {templates
+          .filter((t) => t.enabled !== false
+            || String(t.id) === String(contract.template_id || ''))
+          .map((t) => (
           <label key={t.id} style={{
             display: 'flex', gap: 10, alignItems: 'flex-start', padding: 10,
             border: `1px solid ${tid === String(t.id) || tid === t.id ? C.accent : C.border}`,
             borderRadius: 6, cursor: 'pointer',
+            opacity: t.enabled === false ? 0.75 : 1,
             background: tid === String(t.id) || tid === t.id ? C.surfaceAlt : 'transparent',
           }}>
             <input type="radio" checked={tid === String(t.id) || tid === t.id}
@@ -1320,6 +1328,12 @@ function AssignTemplateModal({ contract, templates, onClose, onSaved, onError, o
               </div>
               {t.description ? (
                 <div style={{ fontSize: 11, color: C.muted }}>{t.description}</div>
+              ) : null}
+              {t.enabled === false ? (
+                <div style={{ fontSize: 11, color: C.warningInk || C.warning, marginTop: 2 }}>
+                  ⚠️ เทมเพลตนี้ถูกปิดใช้งานอยู่ — ตอนพิมพ์จริงระบบจะใช้ default แทน
+                  เปิดใช้งานได้ที่เมนู "เทมเพลตสัญญา"
+                </div>
               ) : null}
             </div>
             <Btn size="sm" variant="ghost"

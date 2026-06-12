@@ -6730,6 +6730,44 @@ test('every admin/tenant JSX file parses cleanly', () => {
   }
 });
 
+test('contract templates: typo-proof variables, enabled-state consistency', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  // Unit: unknown {{vars}} are detected against system + custom variables.
+  const contractPdf = require('../services/contractPdf');
+  const bad = contractPdf.findUnknownVariables({
+    clauses: [{ title: 'ค่าเช่า {{monthlyRen}}', body: 'จ่ายภายในวันที่ {{dueDay}} รหัส {{wifi_password}}' }],
+    sections: { headerNote: 'หมายเหตุ {{tenantNam}}' },
+    variables: { wifi_password: '1234' },
+  });
+  assert.deepEqual(bad.sort(), ['monthlyRen', 'tenantNam'],
+    'typo\'d placeholders must be caught; system + custom variables must pass');
+  assert.deepEqual(contractPdf.findUnknownVariables({
+    clauses: [{ title: 'x', body: 'ค่าเช่า {{monthlyRent}}' }],
+  }), [], 'valid system variables must not be flagged');
+
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(server, /TEMPLATE_UNKNOWN_VARIABLES/,
+    'template save must reject unknown variables with a machine-readable code');
+  assert.match(server, /DEFAULT_MUST_BE_ENABLED/,
+    'the default template must never be saved as disabled');
+  // Every non-preview template lookup must respect the enabled flag —
+  // count the enforced lookups (tenant explicit, tenant default, admin
+  // default) + the preview-aware admin explicit lookup.
+  const enabledLookups = (server.match(/deleted_at IS NULL AND enabled=TRUE LIMIT 1/g) || []).length;
+  assert.ok(enabledLookups >= 3,
+    `expected >=3 enabled-enforced template lookups, found ${enabledLookups}`);
+  assert.match(server, /\(enabled = TRUE OR \$2::boolean\)/,
+    'admin explicit lookup must allow disabled templates ONLY for ?templateId preview');
+
+  const tmplPage = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-contract-templates.jsx'), 'utf8');
+  assert.match(tmplPage, /ปุ่ม "ดูตัวอย่าง PDF" จะแสดงฉบับที่บันทึกล่าสุดเท่านั้น/,
+    'editor must warn that previews exclude unsaved edits');
+  const contractsPage = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-contracts.jsx'), 'utf8');
+  assert.match(contractsPage, /เทมเพลตนี้ถูกปิดใช้งานอยู่ — ตอนพิมพ์จริงระบบจะใช้ default แทน/,
+    'assign modal must explain what a disabled template means at print time');
+});
+
 test('contracts table stays readable at every width', () => {
   const fs = require('node:fs');
   const path = require('node:path');
