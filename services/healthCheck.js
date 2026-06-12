@@ -526,7 +526,11 @@ async function checkBootConfig() {
       issues.push(
         'Citizen-ID PII has no dedicated key (CITIZEN_ID_KEY unset) — it is derived from '
         + 'SESSION_SECRET via HKDF. Rotating SESSION_SECRET will make all stored citizen IDs '
-        + 'undecryptable. Set CITIZEN_ID_KEY (32-byte base64). '
+        + 'undecryptable. With EXISTING data, do NOT generate a random key (same key also feeds '
+        + 'the dedup HMACs; there is no multi-key fallback) — pin the CURRENT derived key instead: '
+        + 'node -e "const c=require(\'crypto\');console.log(Buffer.from(c.hkdfSync(\'sha256\','
+        + 'Buffer.from(process.env.S),Buffer.alloc(0),\'baankarn-pii-v1\',32)).toString(\'base64\'))" '
+        + '(run with S=<current SESSION_SECRET>), then set the output as CITIZEN_ID_KEY. '
         + 'NOTE: ENCRYPTION_KEY_V* does NOT protect citizen IDs — it only covers the secrets/OA-token store.'
       );
     }
@@ -906,8 +910,11 @@ async function checkFeatureDependencies(features, pool) {
   if (features?.citizenIdEncryption?.enabled && !process.env.CITIZEN_ID_KEY) {
     warnings.push({
       flag: 'citizenIdEncryption',
-      issue: 'citizenIdEncryption เปิด แต่ไม่ได้ตั้ง CITIZEN_ID_KEY — ใช้คีย์ที่ derive จาก SESSION_SECRET ถ้าเปลี่ยน SESSION_SECRET ภายหลัง ข้อมูลบัตรเดิมจะถอดรหัสไม่ได้ (กู้คืนไม่ได้)',
-      fix: 'ตั้ง CITIZEN_ID_KEY (base64 32 ไบต์) ใน env ของ deploy',
+      issue: 'citizenIdEncryption เปิด แต่ไม่ได้ตั้ง CITIZEN_ID_KEY — ใช้คีย์ที่ derive จาก SESSION_SECRET ถ้าเปลี่ยน SESSION_SECRET ภายหลัง ข้อมูลบัตรเดิมจะถอดรหัสไม่ได้ (กู้คืนไม่ได้) — หมายเหตุ: ENCRYPTION_KEY_V1 เป็นคนละระบบ ไม่ครอบคลุมข้อมูลบัตร',
+      // IMPORTANT: if citizen IDs already exist, a RANDOM new key bricks
+      // them all (decrypt + dedup HMACs use this same key, no multi-key
+      // fallback). The safe move is to pin the CURRENT derived key.
+      fix: 'ระบบมีข้อมูลบัตรอยู่แล้ว → ห้ามสุ่มคีย์ใหม่ ให้ตั้ง CITIZEN_ID_KEY เป็น "คีย์เดิมที่ derive อยู่" : รันในเครื่อง node -e "const c=require(\'crypto\');console.log(Buffer.from(c.hkdfSync(\'sha256\',Buffer.from(process.env.S),Buffer.alloc(0),\'baankarn-pii-v1\',32)).toString(\'base64\'))" โดยตั้งตัวแปร S เป็น SESSION_SECRET ปัจจุบันก่อนรัน แล้วนำผลลัพธ์ไปตั้งเป็น CITIZEN_ID_KEY ใน env ของ deploy (ข้อมูลเดิมอ่านได้ต่อเนื่อง และเปลี่ยน SESSION_SECRET ภายหลังได้ปลอดภัย) · ระบบใหม่ที่ยังไม่มีข้อมูลบัตร → สุ่มได้เลย: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64\'))"',
     });
   }
 

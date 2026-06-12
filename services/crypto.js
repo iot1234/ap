@@ -52,7 +52,11 @@ function getKey() {
     console.warn(
       `[crypto] ${where}: no CITIZEN_ID_KEY set — deriving from SESSION_SECRET via HKDF. ` +
       `Encrypted data will become unreadable if SESSION_SECRET is rotated. ` +
-      `Set CITIZEN_ID_KEY (32-byte base64) to silence this and protect rotation safety.`
+      `With EXISTING data do NOT set a random key (decrypt + dedup HMACs share this key, ` +
+      `no fallback) — pin the current derived key instead: ` +
+      `node -e "const c=require('crypto');console.log(Buffer.from(c.hkdfSync('sha256',` +
+      `Buffer.from(process.env.S),Buffer.alloc(0),'baankarn-pii-v1',32)).toString('base64'))" ` +
+      `(run with S=<current SESSION_SECRET>), then set the output as CITIZEN_ID_KEY.`
     );
   }
   _key = crypto.hkdfSync('sha256', Buffer.from(secret), Buffer.alloc(0), 'baankarn-pii-v1', 32);
