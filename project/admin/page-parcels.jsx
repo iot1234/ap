@@ -177,6 +177,61 @@ async function prepareParcelPhoto(file) {
 }
 
 // จำนวนวันที่พัสดุค้างรอรับ — ใช้เตือนของค้างนาน (null = ไม่รู้/ข้อมูลเพี้ยน)
+function ParcelFeatureDisabledPanel({ onOpenFeatures }) {
+  const C = window.ADMIN_C;
+  const { Btn, Pill, Card } = window;
+  return (
+    <Card style={{
+      border: '1px solid ' + C.warning,
+      background: `linear-gradient(135deg, ${C.warningSoft || '#fff7ed'} 0%, ${C.surface || '#fff'} 68%)`,
+      color: C.warningInk || C.ink,
+      padding: 24,
+    }}>
+      <div style={{
+        display: 'flex',
+        gap: 16,
+        alignItems: 'flex-start',
+        flexWrap: 'wrap',
+      }}>
+        <div aria-hidden="true" style={{
+          width: 48, height: 48, borderRadius: 12,
+          display: 'grid', placeItems: 'center',
+          background: C.surface,
+          border: '1px solid ' + C.warning,
+          fontSize: 24,
+        }}>📦</div>
+        <div style={{ minWidth: 220, flex: '1 1 360px' }}>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 6 }}>
+            <h2 style={{ margin: 0, fontSize: 18, lineHeight: 1.35, color: C.warningInk || C.ink }}>
+              ฟีเจอร์พัสดุปิดอยู่
+            </h2>
+            <Pill color="warning" size="sm">ปิดการใช้งาน</Pill>
+          </div>
+          <p style={{ margin: '0 0 10px 0', color: C.ink2, fontSize: 14, lineHeight: 1.65 }}>
+            ตอนนี้ระบบบันทึกพัสดุและส่งแจ้งเตือนให้ผู้เช่าถูกปิดไว้ หน้านี้จึงไม่สามารถเพิ่ม แก้ไข ลบ ส่งแจ้งเตือน หรือบันทึกรับพัสดุได้
+          </p>
+          <div style={{
+            display: 'grid',
+            gap: 6,
+            color: C.muted,
+            fontSize: 13,
+            lineHeight: 1.55,
+          }}>
+            <div>• ข้อมูลเดิมยังอยู่ในระบบ แต่ API จะตอบว่า FEATURE_DISABLED จนกว่าจะเปิดฟีเจอร์</div>
+            <div>• ฝั่งผู้เช่าจะไม่เห็นปุ่มพัสดุในพอร์ทัลระหว่างที่ปิดฟีเจอร์นี้</div>
+          </div>
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, flex: '0 1 220px' }}>
+          <Btn variant="primary" onClick={onOpenFeatures}>ไปเปิดฟีเจอร์</Btn>
+          <div style={{ color: C.muted, fontSize: 12, lineHeight: 1.4, textAlign: 'center' }}>
+            เปิดที่ Features → parcelNotifications
+          </div>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
 function daysWaiting(item) {
   const created = item?.created_at || item?.createdAt;
   if (!created) return null;
@@ -221,6 +276,17 @@ function PageParcels({ setToast }) {
     };
   });
 
+  useEffect(() => {
+    if (!featureDisabled) return;
+    setItems([]);
+    setServerStats(null);
+    setForm(null);
+    setPickup(null);
+    setPickupErr('');
+    setConfirmAction(null);
+    setLightbox(null);
+  }, [featureDisabled]);
+
   function textFromError(e, fallback) {
     const raw = e && (e.error || e.message || e.hint) || fallback;
     return window.humanizeAdminErrorText ? window.humanizeAdminErrorText(raw, e || {}) : raw;
@@ -230,6 +296,14 @@ function PageParcels({ setToast }) {
     const n = notice || {};
     const message = n.title && n.message ? `${n.title}: ${n.message}` : (n.message || n.title || fallback);
     setToast && setToast({ kind: n.kind || 'success', message });
+  }
+
+  function noteFeatureDisabled(e) {
+    if (e && e.code === 'FEATURE_DISABLED') {
+      setFeatureDisabled(true);
+      return true;
+    }
+    return false;
   }
 
   async function load() {
@@ -243,9 +317,10 @@ function PageParcels({ setToast }) {
       setFeatureDisabled(false);
       setItems(Array.isArray(d.parcels) ? d.parcels : []);
     } catch (e) {
-      if (e && e.code === 'FEATURE_DISABLED') setFeatureDisabled(true);
+      noteFeatureDisabled(e);
+      // แสดง error ชั้นเดียว: แบนเนอร์ inline (มีปุ่ม "ลองใหม่") เท่านั้น —
+      // เดิมยิง toast ซ้อนอีกชั้นทำให้ผู้ใช้เห็นข้อความเดียวกันซ้ำ 2 ที่
       setErr(textFromError(e, 'โหลดรายการพัสดุไม่สำเร็จ'));
-      if (window.toastError) window.toastError(setToast, e, { action: 'โหลดรายการพัสดุ' });
     } finally {
       setLoading(false);
     }
@@ -259,7 +334,7 @@ function PageParcels({ setToast }) {
       setRoomOptions(Array.isArray(d.rooms) ? d.rooms : []);
       setRoomConflicts(Array.isArray(d.conflicts) ? d.conflicts : []);
     } catch (e) {
-      if (e && e.code === 'FEATURE_DISABLED') setFeatureDisabled(true);
+      noteFeatureDisabled(e);
       setRoomsErr(textFromError(e, 'โหลดรายการห้องไม่สำเร็จ'));
     } finally {
       setRoomsLoading(false);
@@ -278,7 +353,8 @@ function PageParcels({ setToast }) {
         carrier: memory.lastCarrier || '',
         shelfLocation: memory.lastShelfLocation || '',
       });
-    } catch {
+    } catch (e) {
+      noteFeatureDisabled(e);
       setParcelOptions({
         carriers: mergeOptionValues(DEFAULT_PARCEL_CARRIERS, memory.carriers),
         shelfLocations: mergeOptionValues(memory.shelfLocations),
@@ -292,7 +368,8 @@ function PageParcels({ setToast }) {
       if (d && d.counts) {
         setServerStats({ counts: d.counts, agingWaiting: Number(d.agingWaiting || 0) });
       }
-    } catch {
+    } catch (e) {
+      noteFeatureDisabled(e);
       // ตัวเลขสรุปเป็นข้อมูลเสริม — โหลดไม่ได้ไม่ต้องบล็อกหน้า (ใช้ตัวเลขจากรายการแทน)
     }
   }
@@ -342,7 +419,7 @@ function PageParcels({ setToast }) {
   const agingWaiting = serverStats ? serverStats.agingWaiting : 0;
 
   async function save(payload) {
-    if (busy) return;
+    if (featureDisabled || busy) return;
     setBusy(true);
     try {
       const isUpdate = !!payload.id;
@@ -384,6 +461,7 @@ function PageParcels({ setToast }) {
       await load();
       loadStats();
     } catch (e) {
+      if (noteFeatureDisabled(e)) return;
       window.toastError
         ? window.toastError(setToast, e, { action: payload.id ? 'บันทึกพัสดุ' : 'เพิ่มพัสดุ' })
         : setToast && setToast({ kind: 'danger', message: textFromError(e, 'บันทึกพัสดุไม่สำเร็จ') });
@@ -393,6 +471,7 @@ function PageParcels({ setToast }) {
   }
 
   function openCreate() {
+    if (featureDisabled) return;
     setForm({
       notify: true,
       carrier: lastParcelDefaults.carrier || '',
@@ -418,7 +497,7 @@ function PageParcels({ setToast }) {
   }
 
   async function deleteParcel(item) {
-    if (!item || busy) return;
+    if (featureDisabled || !item || busy) return;
     setBusy(true);
     try {
       const d = await apiCall(`/api/parcels/${item.id}`, {
@@ -430,6 +509,7 @@ function PageParcels({ setToast }) {
       toastNotice(d.notice, 'ลบรายการพัสดุแล้ว');
       loadStats();
     } catch (e) {
+      if (noteFeatureDisabled(e)) return;
       await recoverFromStaleParcel(e);
       window.toastError
         ? window.toastError(setToast, e, { action: 'ลบพัสดุ' })
@@ -443,7 +523,7 @@ function PageParcels({ setToast }) {
   // ส่วน "รับแล้ว" ต้องผ่าน confirmPickup (POST /pickup) เท่านั้น
   // เพื่อให้แนบหลักฐานได้และกันรับซ้ำแบบ atomic ที่เซิร์ฟเวอร์
   async function updateStatus(item, nextStatus) {
-    if (!item || item.status !== 'waiting_pickup' || busy) return;
+    if (featureDisabled || !item || item.status !== 'waiting_pickup' || busy) return;
     if (nextStatus !== 'returned' && nextStatus !== 'cancelled') return;
     const label = PARCEL_STATUS_LABEL[nextStatus] || nextStatus;
     setBusy(true);
@@ -458,6 +538,7 @@ function PageParcels({ setToast }) {
       setToast && setToast({ kind: 'success', message: `อัปเดตเป็น "${label}" แล้ว` });
       loadStats();
     } catch (e) {
+      if (noteFeatureDisabled(e)) return;
       await recoverFromStaleParcel(e);
       window.toastError
         ? window.toastError(setToast, e, { action: 'เปลี่ยนสถานะพัสดุ' })
@@ -469,7 +550,7 @@ function PageParcels({ setToast }) {
 
   // บันทึกรับพัสดุ: สถานะ + หลักฐาน (ถ้าแนบ) ไปด้วยกันในคำขอเดียว
   async function confirmPickup(payload) {
-    if (!pickup || busy) return;
+    if (featureDisabled || !pickup || busy) return;
     setBusy(true);
     setPickupErr('');
     try {
@@ -483,6 +564,7 @@ function PageParcels({ setToast }) {
       toastNotice(d.notice, 'บันทึกรับพัสดุแล้ว');
       loadStats();
     } catch (e) {
+      if (noteFeatureDisabled(e)) return;
       if (e && e.code === 'PICKUP_PROOF_INVALID') {
         // เซิร์ฟเวอร์ยังไม่เปลี่ยนสถานะ — เปิดกล่องค้างไว้ให้แก้รูป
         // หรือกดบันทึกแบบไม่แนบหลักฐานแทน
@@ -502,7 +584,7 @@ function PageParcels({ setToast }) {
   }
 
   async function notify(item) {
-    if (!item || item.status !== 'waiting_pickup') return;
+    if (featureDisabled || !item || item.status !== 'waiting_pickup') return;
     setBusy(true);
     try {
       const d = await apiCall(`/api/parcels/${item.id}/notify`, {
@@ -513,6 +595,7 @@ function PageParcels({ setToast }) {
       setItems((prev) => prev.map((x) => x.id === item.id ? d.parcel : x));
       toastNotice(d.notice, 'ส่งแจ้งเตือนแล้ว');
     } catch (e) {
+      if (noteFeatureDisabled(e)) return;
       await recoverFromStaleParcel(e);
       window.toastError
         ? window.toastError(setToast, e, { action: 'ส่งแจ้งเตือนพัสดุ' })
@@ -520,6 +603,27 @@ function PageParcels({ setToast }) {
     } finally {
       setBusy(false);
     }
+  }
+
+  function openFeatureSettings() {
+    window.location.hash = '#features';
+  }
+
+  if (featureDisabled) {
+    return (
+      <PageContainer>
+        <PageHeader
+          title="พัสดุ"
+          subtitle="ลงทะเบียนพัสดุเข้า แจ้งเตือนผู้เช่า และบันทึกการรับพร้อมหลักฐาน"
+          actions={
+            <Btn variant="primary" onClick={openFeatureSettings}>
+              ไปเปิดฟีเจอร์
+            </Btn>
+          }
+        />
+        <ParcelFeatureDisabledPanel onOpenFeatures={openFeatureSettings} />
+      </PageContainer>
+    );
   }
 
   return (
@@ -532,7 +636,7 @@ function PageParcels({ setToast }) {
         actions={
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             <Btn variant="secondary" onClick={() => { load(); loadStats(); }} disabled={loading || busy}>รีเฟรช</Btn>
-            <Btn variant="primary" icon="+" onClick={openCreate} disabled={featureDisabled || busy}>
+            <Btn variant="primary" icon="+" onClick={openCreate} disabled={loading || busy}>
               เพิ่มพัสดุ
             </Btn>
           </div>
@@ -546,25 +650,6 @@ function PageParcels({ setToast }) {
         }}>
           มีพัสดุค้างรอรับเกิน 7 วันอยู่ {agingWaiting} รายการ —
           แนะนำกด "ส่งแจ้งซ้ำ" หรือติดต่อผู้เช่าโดยตรง ก่อนตัดสินใจคืนผู้ส่ง
-        </Card>
-      ) : null}
-
-      {featureDisabled ? (
-        <Card style={{
-          background: C.warningSoft, color: C.warningInk,
-          border: '1px solid ' + C.warning,
-          display: 'flex', gap: 12, alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap',
-        }}>
-          <div>
-            <div style={{ fontWeight: 700 }}>ฟีเจอร์แจ้งเตือนพัสดุยังปิดอยู่</div>
-            <div style={{ marginTop: 4, fontSize: 13, lineHeight: 1.5 }}>
-              หน้านี้จะไม่สร้างหรือส่งแจ้งเตือนพัสดุจนกว่าจะเปิด `parcelNotifications`
-              และฝั่งผู้เช่าจะไม่เห็นปุ่มพัสดุเมื่อปิดฟีเจอร์
-            </div>
-          </div>
-          <Btn variant="secondary" onClick={() => { window.location.hash = '#features'; }}>
-            ไปเปิดใน Features
-          </Btn>
         </Card>
       ) : null}
 

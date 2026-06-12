@@ -168,6 +168,12 @@ test('admin and tenant UIs expose parcels only through the feature-aware paths',
   assert.match(adminPage, /notifySummary/);
   assert.match(adminPage, /roomOptions\.map/);
   assert.match(adminPage, /FEATURE_DISABLED/);
+  assert.match(adminPage, /function ParcelFeatureDisabledPanel/);
+  assert.match(adminPage, /ฟีเจอร์พัสดุปิดอยู่/);
+  assert.match(adminPage, /หน้านี้จึงไม่สามารถเพิ่ม แก้ไข ลบ ส่งแจ้งเตือน หรือบันทึกรับพัสดุได้/);
+  assert.match(adminPage, /if \(featureDisabled\)/);
+  assert.match(adminPage, /ไปเปิดฟีเจอร์/);
+  assert.match(adminPage, /window\.location\.hash = '#features'/);
   assert.match(adminPage, /window\.PageParcels = PageParcels/);
 
   const featurePage = read('project', 'admin', 'page-features.jsx');
