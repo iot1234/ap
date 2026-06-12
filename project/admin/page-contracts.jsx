@@ -423,15 +423,20 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
           )
         ) : (
           <div style={{ overflowX: 'auto' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+            {/* minWidth keeps every column intact: on a normal screen the
+                table fits with NO horizontal scroll (the actions cell wraps
+                its buttons instead of forcing width); on a genuinely narrow
+                screen the container scrolls while columns stay readable —
+                no more per-character wrapping of contract numbers. */}
+            <table style={{ width: '100%', minWidth: 940, borderCollapse: 'collapse', fontSize: 13 }}>
               <thead style={{ background: C.surfaceAlt }}>
                 <tr>
-                  <th style={th}>เลขสัญญา</th>
-                  <th style={th}>ผู้เช่า</th>
+                  <th style={{ ...th, whiteSpace: 'nowrap' }}>เลขสัญญา</th>
+                  <th style={{ ...th, minWidth: 110 }}>ผู้เช่า</th>
                   <th style={th}>ห้อง</th>
-                  <th style={th}>เริ่ม</th>
-                  <th style={th}>สิ้นสุด</th>
-                  <th style={{ ...th, textAlign: 'right' }}>ค่าเช่า/เดือน</th>
+                  <th style={{ ...th, whiteSpace: 'nowrap' }}>เริ่ม</th>
+                  <th style={{ ...th, whiteSpace: 'nowrap' }}>สิ้นสุด</th>
+                  <th style={{ ...th, textAlign: 'right', whiteSpace: 'nowrap' }}>ค่าเช่า/เดือน</th>
                   <th style={{ ...th, textAlign: 'right' }}>ส่วนลด</th>
                   <th style={th}>สถานะ</th>
                   <th style={th}></th>
@@ -442,7 +447,9 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
                   const readiness = contractReadiness(c);
                   return (
                   <tr key={c.id} style={{ borderBottom: `1px solid ${C.border}` }}>
-                    <td style={td}>{c.contract_no}</td>
+                    <td style={{ ...td, whiteSpace: 'nowrap', fontFamily: 'monospace', fontSize: 12 }}>
+                      {c.contract_no}
+                    </td>
                     <td style={td}>
                       {/* Cross-link: jump straight to this tenant's drawer
                           (tenants page routes by tenantId/room) instead of
@@ -467,8 +474,8 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
                         </a>
                       ) : '-'}
                     </td>
-                    <td style={td}>{fmtDate(c.start_date)}</td>
-                    <td style={td}>
+                    <td style={{ ...td, whiteSpace: 'nowrap' }}>{fmtDate(c.start_date)}</td>
+                    <td style={{ ...td, whiteSpace: 'nowrap' }}>
                       {fmtDate(c.end_date)}
                       {c.status === 'active' && c.days_left != null && c.days_left <= 30 && c.days_left >= 0 ? (
                         <div style={{ fontSize: 11, color: C.accent }}>
@@ -476,7 +483,7 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
                         </div>
                       ) : null}
                     </td>
-                    <td style={{ ...td, textAlign: 'right', fontFamily: 'monospace' }}>
+                    <td style={{ ...td, textAlign: 'right', fontFamily: 'monospace', whiteSpace: 'nowrap' }}>
                       ฿{fmtCurrency(c.monthly_rent)}
                     </td>
                     <td style={{ ...td, textAlign: 'right' }}>
@@ -526,7 +533,14 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
                       ) : null}
                       <ContractWarningStack contract={c} />
                     </td>
-                    <td style={{ ...td, whiteSpace: 'nowrap' }}>
+                    <td style={{ ...td, minWidth: 235, maxWidth: 280 }}>
+                      {/* flex-wrap: actions fold into 2-3 tidy rows inside a
+                          fixed-width cell instead of one endless nowrap line
+                          that forced the whole table off-screen. */}
+                      <div style={{
+                        display: 'flex', flexWrap: 'wrap', gap: 4,
+                        justifyContent: 'flex-end', alignItems: 'center',
+                      }}>
                       {(c.status === 'expired'
                         || (c.status === 'active' && c.days_left != null && c.days_left <= 60)) ? (
                         <Btn size="sm" variant="soft" onClick={() => setRenewing(c)}
@@ -557,6 +571,7 @@ function PageContracts({ setToast, addActivity, rooms = {}, config }) {
                         </Btn>
                       ) : null}
                       <Btn size="sm" variant="ghost" onClick={() => setEditing(c)}>แก้ไข</Btn>
+                      </div>
                     </td>
                   </tr>
                   );

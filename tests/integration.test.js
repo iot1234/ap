@@ -6706,6 +6706,42 @@ test('contract PDF can append sign-ready certified copies of the ID card', () =>
     'the row download action must be labelled, not a bare icon');
 });
 
+test('every admin/tenant JSX file parses cleanly', () => {
+  // The browser compiles these files with Babel at page load — a syntax
+  // error ships as a WHITE SCREEN, not a build failure. Parse everything
+  // here so it fails in CI instead of in the operator's face.
+  let parser;
+  try { parser = require('@babel/parser'); } catch { return; /* dep missing on minimal installs */ }
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const adminDir = path.join(__dirname, '..', 'project', 'admin');
+  const files = fs.readdirSync(adminDir)
+    .filter((f) => f.endsWith('.jsx'))
+    .map((f) => path.join(adminDir, f));
+  const tenantJsx = path.join(__dirname, '..', 'project', 'tenant.jsx');
+  if (fs.existsSync(tenantJsx)) files.push(tenantJsx);
+  assert.ok(files.length > 10, 'expected the admin JSX bundle to be found');
+  for (const f of files) {
+    try {
+      parser.parse(fs.readFileSync(f, 'utf8'), { sourceType: 'unambiguous', plugins: ['jsx'] });
+    } catch (e) {
+      assert.fail(`${path.basename(f)} does not parse: ${e.message}`);
+    }
+  }
+});
+
+test('contracts table stays readable at every width', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-contracts.jsx'), 'utf8');
+  assert.match(src, /minWidth: 940, borderCollapse/,
+    'table needs a min width so columns never crush into per-character wrapping');
+  assert.match(src, /whiteSpace: 'nowrap', fontFamily: 'monospace', fontSize: 12 \}\}>\s*\{c\.contract_no\}/,
+    'contract numbers must never wrap character-by-character');
+  assert.match(src, /flexWrap: 'wrap', gap: 4,\s*\n\s*justifyContent: 'flex-end'/,
+    'row actions must wrap inside their cell instead of forcing table width');
+});
+
 test('pricing page lists per-room overrides with a clear-back-to-formula action', () => {
   const fs = require('node:fs');
   const path = require('node:path');
