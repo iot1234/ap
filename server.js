@@ -16184,7 +16184,7 @@ app.post('/api/admin/restore', restoreBodyParser, sameOrigin, csrfGuard, require
       // FK is satisfied during a fresh restore.
       'contract_templates',
       'contracts', 'bills', 'recurring_charges',
-      'payments', 'access_cards', 'line_bindings',
+      'payments', 'parcels', 'access_cards', 'line_bindings',
       'meter_readings',
       'maintenance_tickets',
       'access_logs',

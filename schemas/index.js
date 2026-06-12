@@ -328,6 +328,37 @@ schemas.rateTicket = z.object({
   phone: phoneStr,
 });
 
+// --- parcels --------------------------------------------------------------
+const optionalTrimmed = (max) => z.preprocess(
+  (v) => (typeof v === 'string' && v.trim() === '' ? undefined : v),
+  z.string().trim().max(max).optional(),
+);
+const parcelStatus = z.enum(['waiting_pickup', 'picked_up', 'returned', 'cancelled']);
+
+schemas.createParcel = z.object({
+  roomId: z.string().trim().min(1).max(32),
+  recipientName: optionalTrimmed(120),
+  carrier: optionalTrimmed(80),
+  trackingNo: optionalTrimmed(120),
+  shelfLocation: optionalTrimmed(120),
+  note: optionalTrimmed(500),
+  notify: z.boolean().optional(),
+}).strict();
+
+schemas.updateParcel = z.object({
+  status: parcelStatus.optional(),
+  recipientName: optionalTrimmed(120),
+  carrier: optionalTrimmed(80),
+  trackingNo: optionalTrimmed(120),
+  shelfLocation: optionalTrimmed(120),
+  note: optionalTrimmed(500),
+  pickedUpBy: optionalTrimmed(120),
+}).strict();
+
+schemas.notifyParcel = z.object({
+  message: optionalTrimmed(500),
+}).strict();
+
 // --- meters ---------------------------------------------------------------
 schemas.recordMeter = z.object({
   meterType: z.enum(['water', 'elec']),

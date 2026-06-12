@@ -112,6 +112,7 @@ const NAV_GROUPS = [
     title: 'บริการ', tone: 'service',
     items: [
       { id: 'maintenance',     label: 'แจ้งซ่อม',          icon: '🛠' },
+      { id: 'parcels',         label: 'พัสดุ',             icon: '📦' },
       { id: 'meters',          label: 'มิเตอร์',           icon: '⚡' },
       // เข้า-ออก + Hardware tokens รวมเป็น "เข้า-ออก" หน้าเดียวพร้อม
       // top-level tabs (logs/devices). Legacy hash /admin#access-devices
@@ -160,6 +161,7 @@ const PAGE_TITLES = {
   'line-bindings': 'ผูกห้อง ↔ LINE',
   'line-oas':      'จัดการ LINE OA',
   maintenance: 'แจ้งซ่อม',
+  parcels:     'พัสดุ',
   billing:     'บิล/ใบแจ้งหนี้',
   payments:    'สลิปชำระเงิน',
   'slip-verify': 'ตั้งค่าตรวจสลิปอัตโนมัติ',
@@ -1354,6 +1356,7 @@ function App() {
     'line-bindings': window.PageLineBindings,
     'line-oas':      window.PageLineOas,
     maintenance: window.PageMaintenance,
+    parcels:    window.PageParcels,
     billing:     PageBilling,
     payments:    window.PagePayments,
     'slip-verify': window.PageSlipVerify,

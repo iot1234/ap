@@ -81,7 +81,7 @@ const TABLES = [
   'app_data', 'auth_users', 'maintenance_tickets', 'audit_logs',
   // v2 — financial / tenancy
   'tenants', 'contracts', 'bills', 'payments',
-  'recurring_charges',
+  'recurring_charges', 'parcels',
   // v2 — IoT / hardware / access
   'meter_readings', 'access_logs', 'access_cards', 'access_devices',
   // v2 — notifications + LINE multi-OA + bindings
@@ -111,7 +111,7 @@ function _validateTableName(name) {
 const PAGINATABLE_BY_ID = new Set([
   'audit_logs', 'meter_readings', 'access_logs',
   'notifications_log', 'notifications_queue',
-  'bills', 'payments', 'maintenance_tickets', 'file_uploads',
+  'bills', 'payments', 'maintenance_tickets', 'parcels', 'file_uploads',
 ]);
 
 const PAGE_SIZE = 5000;

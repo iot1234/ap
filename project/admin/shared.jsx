@@ -76,7 +76,7 @@ const PAGE_TONE = {
   pricing: 'finance', recurring: 'finance', 'recurring-charges': 'finance',
   reports: 'finance', 'reports-v2': 'finance',
   // Service
-  maintenance: 'service', meters: 'service',
+  maintenance: 'service', parcels: 'service', meters: 'service',
   access: 'service', 'access-devices': 'service',
   // System
   notifications: 'system', 'notifications-queue': 'system',

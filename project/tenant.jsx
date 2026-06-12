@@ -39,7 +39,7 @@ const TR = {
     welcome: 'สวัสดี', loading: 'กำลังโหลด…', save: 'บันทึก', close: 'ปิด',
     cancel: 'ยกเลิก', submit: 'ส่ง', nothingHere: 'ไม่มีรายการ',
     home: 'หน้าหลัก', bills: 'บิล', payments: 'การชำระเงิน',
-    contract: 'สัญญา', maintenance: 'แจ้งซ่อม', profile: 'โปรไฟล์',
+    contract: 'สัญญา', maintenance: 'แจ้งซ่อม', parcels: 'พัสดุ', profile: 'โปรไฟล์',
     backHome: '← กลับหน้าหลัก', contactStaff: 'ติดต่อเจ้าหน้าที่',
     portalDisabled: 'พอร์ทัลผู้เช่ายังปิดอยู่ — กรุณาติดต่อเจ้าหน้าที่',
     invalidLogin: 'เบอร์นี้ไม่ได้ผูกกับผู้เช่าปัจจุบัน',
@@ -155,6 +155,8 @@ const TR = {
     guideContractText: 'ตรวจระยะสัญญา ค่าเช่า เงินมัดจำ เปิดดู PDF ในเว็บ หรือดาวน์โหลดเมื่อสัญญาพร้อมใช้งาน',
     guideMaintenanceTitle: 'แจ้งซ่อมและติดตามงาน',
     guideMaintenanceText: 'แจ้งปัญหาพร้อมรายละเอียด แล้วติดตามสถานะงานซ่อมได้ในหน้าเดียว',
+    guideParcelsTitle: 'ติดตามพัสดุที่มาถึง',
+    guideParcelsText: 'ดูพัสดุที่รอรับ จุดรับ และสถานะรับของล่าสุดจากสำนักงาน',
     guideProfileTitle: 'ข้อมูลผู้เช่าและการติดต่อ',
     guideProfileText: 'จัดการภาษา โหมดสี และช่องทางติดต่อหอพักจากโปรไฟล์ของคุณ',
 
@@ -164,6 +166,9 @@ const TR = {
     assigned: 'มอบหมายแล้ว', in_progress: 'กำลังดำเนินการ',
     awaiting_parts: 'รออะไหล่', completed: 'เสร็จสิ้น', cancelled: 'ยกเลิก',
     active: 'มีผลบังคับใช้',
+    waiting_pickup: 'รอรับ',
+    picked_up: 'รับแล้ว',
+    returned: 'คืนผู้ส่ง',
 
     // category labels
     cat_electrical: 'ไฟฟ้า', cat_plumbing: 'ประปา', cat_aircon: 'แอร์',
@@ -179,7 +184,7 @@ const TR = {
     welcome: 'Hello', loading: 'Loading…', save: 'Save', close: 'Close',
     cancel: 'Cancel', submit: 'Submit', nothingHere: 'Nothing here',
     home: 'Home', bills: 'Bills', payments: 'Payments',
-    contract: 'Contract', maintenance: 'Maintenance', profile: 'Profile',
+    contract: 'Contract', maintenance: 'Maintenance', parcels: 'Parcels', profile: 'Profile',
     backHome: '← Back to site', contactStaff: 'Contact staff',
     portalDisabled: 'Tenant portal is currently disabled — please contact admin',
     invalidLogin: 'This phone is not linked to a current tenant',
@@ -289,6 +294,8 @@ const TR = {
     guideContractText: 'Review term dates, rent, deposit, open the PDF in your browser, or download it when the lease is ready.',
     guideMaintenanceTitle: 'Report and track repairs',
     guideMaintenanceText: 'Send the issue details and follow repair status in one place.',
+    guideParcelsTitle: 'Track arrived parcels',
+    guideParcelsText: 'See parcels waiting for pickup, pickup location, and latest status from the office.',
     guideProfileTitle: 'Profile and dorm contact',
     guideProfileText: 'Manage language, theme and dorm contact channels from your profile.',
 
@@ -297,6 +304,9 @@ const TR = {
     assigned: 'assigned', in_progress: 'in progress',
     awaiting_parts: 'awaiting parts', completed: 'completed', cancelled: 'cancelled',
     active: 'active',
+    waiting_pickup: 'waiting pickup',
+    picked_up: 'picked up',
+    returned: 'returned',
 
     cat_electrical: 'Electrical', cat_plumbing: 'Plumbing', cat_aircon: 'A/C',
     cat_furniture: 'Furniture', cat_appliance: 'Appliance',
@@ -694,6 +704,7 @@ function Icon({ name, size = 20, stroke = 1.6, className = '', style }) {
     case 'home':     return <svg {...common}><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/><path d="M10 21v-6h4v6"/></svg>;
     case 'bills':    return <svg {...common}><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 8h6M9 12h6M9 16h4"/></svg>;
     case 'payments': return <svg {...common}><rect x="3" y="6" width="18" height="13" rx="2"/><path d="M3 10h18"/><path d="M7 15h3"/></svg>;
+    case 'parcel':   return <svg {...common}><path d="m21 8-9-5-9 5 9 5 9-5Z"/><path d="M3 8v8l9 5 9-5V8"/><path d="M12 13v8"/><path d="m7.5 5.5 9 5"/></svg>;
     case 'contract': return <svg {...common}><path d="M7 3h7l4 4v14a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z"/><path d="M14 3v4h4"/><path d="M9 13h6M9 17h4"/></svg>;
     case 'maint':    return <svg {...common}><path d="M14.7 6.3a4 4 0 0 1 5.2 5.2L13 18.4 5.6 19l.6-7.4 8.5-5.3Z"/><path d="m9 14 1 1"/><path d="m14 6 4 4"/></svg>;
     case 'profile':  return <svg {...common}><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>;
@@ -1377,16 +1388,17 @@ function LoginView({ locale, setLocale, onLoggedIn, portalEnabled, building }) {
 }
 
 // ============================================================== HomeView =
-function HomeView({ tenant, locale, bills, tickets, contract, goto }) {
+function HomeView({ tenant, locale, bills, tickets, parcels, parcelEnabled, contract, goto }) {
   const t = (k) => tr(locale, k);
   const unpaid = bills.find((b) => b.status === 'pending' || b.status === 'overdue');
   const openTickets = tickets.filter((x) => !['completed', 'cancelled'].includes(x.status));
+  const waitingParcels = Array.isArray(parcels) ? parcels.filter((x) => x.status === 'waiting_pickup') : [];
   const floor = deriveFloor(tenant.roomId);
   // Render the room + tickets summary cards regardless of whether there is
   // a current outstanding bill — keeps the dashboard useful for paid-up
   // tenants too, instead of leaving them with just an empty-state banner.
   const summaryCards = (
-    <div style={{ display: 'grid', gap: 'var(--sp-3)', gridTemplateRows: 'auto auto' }}>
+    <div style={{ display: 'grid', gap: 'var(--sp-3)', gridTemplateRows: parcelEnabled ? 'auto auto auto' : 'auto auto' }}>
       <Card hoverable onClick={() => goto('contract')}>
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between' }}>
           <div>
@@ -1445,6 +1457,41 @@ function HomeView({ tenant, locale, bills, tickets, contract, goto }) {
           <Icon name="chevron" size={12} />
         </div>
       </Card>
+      {parcelEnabled ? (
+        <Card hoverable onClick={() => goto('parcels')}>
+          <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between' }}>
+            <div>
+              <div style={{ color: 'var(--muted)', fontSize: 'var(--fs-sm)' }}>
+                {locale === 'th' ? 'พัสดุรอรับ' : 'Parcels waiting'}
+              </div>
+              <div style={{
+                fontFamily: 'var(--font-display)', fontWeight: 600,
+                fontSize: 'var(--fs-stat)', marginTop: 4, lineHeight: 1.1,
+              }}>
+                {waitingParcels.length} <span style={{ fontSize: 'var(--fs-base)', color: 'var(--muted)', fontWeight: 500 }}>
+                  {locale === 'th' ? 'รายการ' : 'items'}
+                </span>
+              </div>
+              {waitingParcels[0] ? (
+                <div style={{ color: 'var(--ink-2)', fontSize: 13.5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {waitingParcels[0].carrier || waitingParcels[0].tracking_no || waitingParcels[0].parcel_no}
+                </div>
+              ) : null}
+            </div>
+            <div style={{
+              width: 44, height: 44, borderRadius: 12, background: 'var(--amber-soft)',
+              color: 'var(--amber)', display: 'grid', placeItems: 'center',
+            }}><Icon name="parcel" size={22} /></div>
+          </div>
+          <div style={{
+            marginTop: 14, display: 'flex', justifyContent: 'space-between',
+            fontSize: 12.5, color: 'var(--muted)',
+          }}>
+            <span>{t('viewAll')}</span>
+            <Icon name="chevron" size={12} />
+          </div>
+        </Card>
+      ) : null}
     </div>
   );
 
@@ -2767,6 +2814,104 @@ function RateTicket({ ticketId, locale, onDone }) {
   );
 }
 
+// ============================================================== ParcelsView =
+function ParcelsView({ locale, parcels }) {
+  const t = (k) => tr(locale, k);
+  const [tab, setTab] = useState('waiting');
+  const waiting = parcels.filter((x) => x.status === 'waiting_pickup');
+  const closed = parcels.filter((x) => x.status !== 'waiting_pickup');
+  const filtered = tab === 'waiting' ? waiting : tab === 'closed' ? closed : parcels;
+  const statusTone = {
+    waiting_pickup: 'amber',
+    picked_up: 'green',
+    returned: 'muted',
+    cancelled: 'muted',
+  };
+  const th = locale === 'th';
+  return (
+    <div className="anim-in">
+      <SectionHeader
+        title={t('parcels')}
+        subtitle={th
+          ? `รอรับ ${waiting.length} รายการ · ทั้งหมด ${parcels.length}`
+          : `${waiting.length} waiting · ${parcels.length} total`}
+      />
+      <PageGuide type="welcome" title={t('guideParcelsTitle')} text={t('guideParcelsText')} />
+      <div className="filter-chips" style={{ display: 'flex', gap: 8, marginBottom: 'var(--sp-4)', flexWrap: 'wrap' }}>
+        {[
+          { id: 'waiting', label: th ? 'รอรับ' : 'Waiting', count: waiting.length },
+          { id: 'closed',  label: th ? 'ปิดงานแล้ว' : 'Closed', count: closed.length },
+          { id: 'all',     label: t('filterAll'), count: parcels.length },
+        ].map((f) => (
+          <button key={f.id} onClick={() => setTab(f.id)} style={{
+            padding: '8px 14px', borderRadius: 999, fontFamily: 'inherit',
+            border: '1px solid ' + (tab === f.id ? 'var(--ink)' : 'var(--line-2)'),
+            background: tab === f.id ? 'var(--ink)' : 'var(--surface)',
+            color: tab === f.id ? 'var(--bg)' : 'var(--ink-2)',
+            fontSize: 'var(--fs-sm)', fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap',
+          }}>{f.label} <span style={{ opacity: 0.6, marginLeft: 4 }}>{f.count}</span></button>
+        ))}
+      </div>
+
+      {filtered.length === 0 ? (
+        <Empty
+          icon="parcel"
+          title={tab === 'waiting'
+            ? (th ? 'ยังไม่มีพัสดุรอรับ' : 'No parcels waiting')
+            : (th ? 'ยังไม่มีรายการพัสดุ' : 'No parcel records')}
+          hint={th
+            ? 'เมื่อสำนักงานบันทึกพัสดุที่มาถึง รายการจะแสดงที่นี่'
+            : 'When the office records an arrived parcel, it will show here.'}
+        />
+      ) : (
+        <div style={{ display: 'grid', gap: 'var(--sp-3)' }}>
+          {filtered.map((p) => {
+            const parcelNo = p.parcel_no || p.parcelNo || `#${p.id}`;
+            const tracking = p.tracking_no || p.trackingNo || '';
+            const shelf = p.shelf_location || p.shelfLocation || '';
+            const created = p.created_at || p.createdAt;
+            const pickedAt = p.picked_up_at || p.pickedUpAt;
+            return (
+              <Card key={p.id} hoverable>
+                <div style={{ display: 'flex', alignItems: 'flex-start', gap: 14, flexWrap: 'wrap' }}>
+                  <div style={{
+                    width: 48, height: 48, borderRadius: 12,
+                    background: p.status === 'waiting_pickup' ? 'var(--amber-soft)' : 'var(--surface-2)',
+                    color: p.status === 'waiting_pickup' ? 'var(--amber)' : 'var(--muted)',
+                    display: 'grid', placeItems: 'center', flex: '0 0 auto',
+                  }}><Icon name="parcel" size={24} /></div>
+                  <div style={{ flex: '1 1 260px', minWidth: 0 }}>
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                      <div style={{ fontWeight: 700, fontSize: 15 }}>{parcelNo}</div>
+                      <Pill tone={statusTone[p.status] || 'muted'}>{t(p.status)}</Pill>
+                    </div>
+                    <div style={{ color: 'var(--ink-2)', fontSize: 13.5, lineHeight: 1.6, marginTop: 6 }}>
+                      {p.carrier ? <span>{p.carrier}</span> : <span>{th ? 'ไม่ระบุขนส่ง' : 'Carrier not specified'}</span>}
+                      {tracking ? <span> · {tracking}</span> : null}
+                    </div>
+                    <div style={{ color: 'var(--muted)', fontSize: 12.5, lineHeight: 1.55, marginTop: 6 }}>
+                      <span>{th ? 'จุดรับ' : 'Pickup'}: {shelf || (th ? 'ติดต่อสำนักงาน' : 'Contact office')}</span>
+                      {created ? <span> · {th ? 'บันทึก' : 'Recorded'} {fmtDate(created, locale)}</span> : null}
+                      {pickedAt ? <span> · {th ? 'รับเมื่อ' : 'Picked up'} {fmtDate(pickedAt, locale)}</span> : null}
+                    </div>
+                    {p.note ? (
+                      <div style={{
+                        marginTop: 8, padding: '8px 10px', borderRadius: 10,
+                        background: 'var(--surface-2)', color: 'var(--ink-2)',
+                        fontSize: 13, lineHeight: 1.55,
+                      }}>{p.note}</div>
+                    ) : null}
+                  </div>
+                </div>
+              </Card>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // =========================================================== ProfileView =
 function ProfileView({ tenant, locale, setLocale, theme, setTheme, onLogout, features, contract, building }) {
   const t = (k) => tr(locale, k);
@@ -2911,10 +3056,15 @@ const NAV = [
   { id: "payments",    label: 'payments',    icon: 'payments' },
   { id: 'contract',    label: 'contract',    icon: 'contract' },
   { id: 'maintenance', label: 'maintenance', icon: 'maint' },
+  { id: 'parcels',     label: 'parcels',     icon: 'parcel', feature: 'parcelNotifications' },
   { id: 'profile',     label: 'profile',     icon: 'profile' },
 ];
 
-function Sidebar({ page, setPage, locale, unpaidCount, tenant, onLogout, building }) {
+function tenantNavItems(features) {
+  return NAV.filter((n) => !n.feature || features?.[n.feature]?.enabled === true);
+}
+
+function Sidebar({ page, setPage, locale, unpaidCount, parcelCount, tenant, onLogout, building, features }) {
   const t = (k) => tr(locale, k);
   const buildingName = buildingNameOf(building);
   return (
@@ -2939,7 +3089,7 @@ function Sidebar({ page, setPage, locale, unpaidCount, tenant, onLogout, buildin
         </div>
       </div>
       <nav style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-        {NAV.map((n) => {
+        {tenantNavItems(features).map((n) => {
           const active = n.id === page;
           return (
             <button key={n.id} onClick={() => setPage(n.id)} style={{
@@ -2959,6 +3109,12 @@ function Sidebar({ page, setPage, locale, unpaidCount, tenant, onLogout, buildin
                   background: 'var(--accent)', color: '#fff', borderRadius: 999,
                   padding: '2px 8px', fontSize: 11, fontWeight: 700,
                 }}>{unpaidCount}</span>
+              ) : null}
+              {n.id === 'parcels' && parcelCount > 0 ? (
+                <span style={{
+                  background: 'var(--accent)', color: '#fff', borderRadius: 999,
+                  padding: '2px 8px', fontSize: 11, fontWeight: 700,
+                }}>{parcelCount}</span>
               ) : null}
             </button>
           );
@@ -2987,9 +3143,9 @@ function Sidebar({ page, setPage, locale, unpaidCount, tenant, onLogout, buildin
   );
 }
 
-function TopBar({ page, locale, tenant, openMenu, unpaidCount, openTickets, onBellClick }) {
+function TopBar({ page, locale, tenant, openMenu, unpaidCount, openTickets, parcelCount, onBellClick }) {
   const t = (k) => tr(locale, k);
-  const hasAlert = (unpaidCount + openTickets) > 0;
+  const hasAlert = (unpaidCount + openTickets + parcelCount) > 0;
   return (
     <header style={{
       position: 'sticky', top: 0, zIndex: 10,
@@ -3034,7 +3190,7 @@ function TopBar({ page, locale, tenant, openMenu, unpaidCount, openTickets, onBe
   );
 }
 
-function BottomNav({ page, setPage, locale, unpaidCount }) {
+function BottomNav({ page, setPage, locale, unpaidCount, parcelCount, features }) {
   const t = (k) => tr(locale, k);
   return (
     <nav className="bottom-nav" style={{
@@ -3045,9 +3201,10 @@ function BottomNav({ page, setPage, locale, unpaidCount }) {
       display: 'none', padding: '8px 6px calc(env(safe-area-inset-bottom,0px) + 8px)',
       justifyContent: 'space-around',
     }}>
-      {NAV.filter((n) => n.id !== 'payments').map((n) => {
+      {tenantNavItems(features).filter((n) => n.id !== 'payments').map((n) => {
         const active = n.id === page;
-        const badge = n.id === 'bills' && unpaidCount > 0;
+        const badgeValue = n.id === 'bills' ? unpaidCount : n.id === 'parcels' ? parcelCount : 0;
+        const badge = badgeValue > 0;
         return (
           <button key={n.id} onClick={() => setPage(n.id)} style={{
             flex: 1, border: 0, background: 'transparent', cursor: 'pointer', padding: '6px 4px',
@@ -3065,7 +3222,7 @@ function BottomNav({ page, setPage, locale, unpaidCount }) {
                 position: 'absolute', top: 2, right: 4, minWidth: 16, height: 16, padding: '0 4px',
                 borderRadius: 999, background: 'var(--accent)', color: '#fff',
                 fontSize: 10, fontWeight: 700, display: 'grid', placeItems: 'center',
-              }}>{unpaidCount}</span> : null}
+              }}>{badgeValue}</span> : null}
             </div>
             <span>{t(n.label)}</span>
           </button>
@@ -3075,7 +3232,7 @@ function BottomNav({ page, setPage, locale, unpaidCount }) {
   );
 }
 
-function DrawerNav({ open, onClose, page, setPage, locale, onLogout, unpaidCount, building }) {
+function DrawerNav({ open, onClose, page, setPage, locale, onLogout, unpaidCount, parcelCount, building, features }) {
   const t = (k) => tr(locale, k);
   const panelRef = useRef(null);
   const previouslyFocused = useRef(null);
@@ -3157,7 +3314,7 @@ function DrawerNav({ open, onClose, page, setPage, locale, onLogout, unpaidCount
           }}><Icon name="close" size={16} /></button>
         </div>
         <nav style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: '0 0 auto' }}>
-          {NAV.map((n) => {
+          {tenantNavItems(features).map((n) => {
             const active = n.id === page;
             return (
               <button key={n.id} onClick={() => { setPage(n.id); onClose(); }} style={{
@@ -3174,6 +3331,12 @@ function DrawerNav({ open, onClose, page, setPage, locale, onLogout, unpaidCount
                     background: 'var(--accent)', color: '#fff', borderRadius: 999,
                     padding: '2px 8px', fontSize: 'var(--fs-xs)', fontWeight: 700,
                   }}>{unpaidCount}</span>
+                ) : null}
+                {n.id === 'parcels' && parcelCount > 0 ? (
+                  <span style={{
+                    background: 'var(--accent)', color: '#fff', borderRadius: 999,
+                    padding: '2px 8px', fontSize: 'var(--fs-xs)', fontWeight: 700,
+                  }}>{parcelCount}</span>
                 ) : null}
               </button>
             );
@@ -3213,6 +3376,7 @@ function App() {
   const [bills, setBills] = useState([]);
   const [payments, setPayments] = useState([]);
   const [tickets, setTickets] = useState([]);
+  const [parcels, setParcels] = useState([]);
   const [contract, setContract] = useState(null);
   const [building, setBuilding] = useState(null);
   const [publicBuilding, setPublicBuilding] = useState(storedPublicBuilding);
@@ -3267,7 +3431,7 @@ function App() {
 
   useEffect(() => onAuthExpired(() => {
     refreshSeq.current++;
-    setTenant(null); setBills([]); setPayments([]); setTickets([]); setContract(null);
+    setTenant(null); setBills([]); setPayments([]); setTickets([]); setParcels([]); setContract(null);
     setBuilding(null); setSyncErrors([]); setPage('home');
   }), []);
 
@@ -3284,7 +3448,7 @@ function App() {
           if (me.tenant.locale && ALLOWED_LOCALES.includes(me.tenant.locale)) {
             setLocaleRaw(me.tenant.locale);
           }
-          await refresh(me.tenant);
+          await refresh(me.tenant, f.features || {});
         }
       } finally { setLoading(false); }
     })();
@@ -3295,15 +3459,18 @@ function App() {
   // this the BillsView polling useEffect clears and restarts its 20s
   // interval on every parent render (cosmetic, but a real waste of timers
   // and one cause of flaky deep-link auto-open).
-  const refresh = useCallback(async (currentTenant) => {
+  const refresh = useCallback(async (currentTenant, featureSnapshot) => {
     const t = currentTenant || tenant;
     if (!t) return;
+    const featureMap = featureSnapshot || features || {};
+    const parcelEnabled = featureMap?.parcelNotifications?.enabled === true;
     const seq = ++refreshSeq.current;
     setSyncing(true);
     const labels = {
       bills: locale === 'th' ? 'บิล' : 'Bills',
       payments: locale === 'th' ? 'ประวัติชำระเงิน' : 'Payments',
       tickets: locale === 'th' ? 'แจ้งซ่อม' : 'Maintenance',
+      parcels: locale === 'th' ? 'พัสดุ' : 'Parcels',
       contract: locale === 'th' ? 'สัญญา' : 'Contract',
       paymentInfo: locale === 'th' ? 'ข้อมูลหอพัก/ช่องทางชำระเงิน' : 'Building/payment info',
     };
@@ -3316,6 +3483,7 @@ function App() {
         // Building info is used by Profile contact cards. /api/tenant/payment-info
         // is the cheapest endpoint that returns it.
         api('/api/tenant/payment-info'),
+        parcelEnabled ? api('/api/tenant/parcels') : Promise.resolve({ parcels: [] }),
       ]);
       if (seq !== refreshSeq.current) return;
       const errors = [];
@@ -3336,11 +3504,12 @@ function App() {
       applyResult(2, 'tickets', (d) => setTickets(Array.isArray(d.tickets) ? d.tickets : []));
       applyResult(3, 'contract', (d) => setContract(d.contract || null));
       applyResult(4, 'paymentInfo', (d) => setBuilding(d.building || null));
+      applyResult(5, 'parcels', (d) => setParcels(Array.isArray(d.parcels) ? d.parcels : []));
       setSyncErrors(errors);
     } finally {
       if (seq === refreshSeq.current) setSyncing(false);
     }
-  }, [tenant, locale]);
+  }, [tenant, locale, features]);
   const triggerRefresh = useCallback(() => refresh(tenant), [refresh, tenant]);
   const effectiveBuilding = {
     ...(publicBuilding || {}),
@@ -3355,19 +3524,29 @@ function App() {
     }
   }, [locale, effectiveBuildingName]);
 
+  useEffect(() => {
+    if (page === 'parcels' && features?.parcelNotifications?.enabled !== true) {
+      setPage('home');
+    }
+  }, [page, features?.parcelNotifications?.enabled]);
+
   async function onLoggedIn() {
-    const me = await fetch('/api/tenant/me', { credentials: 'same-origin' }).then((r) => r.json());
+    const [me, f] = await Promise.all([
+      fetch('/api/tenant/me', { credentials: 'same-origin' }).then((r) => r.json()),
+      fetch('/api/features', { credentials: 'same-origin' }).then((r) => r.json()).catch(() => ({ features: features || {} })),
+    ]);
     if (!me.tenant) throw new Error(locale === 'th' ? 'ไม่สามารถโหลดข้อมูลผู้เช่าได้' : 'Could not load tenant profile');
+    setFeatures(f.features || features || {});
     setTenant(me.tenant);
     if (me.tenant?.locale && ALLOWED_LOCALES.includes(me.tenant.locale)) setLocaleRaw(me.tenant.locale);
-    await refresh(me.tenant);
+    await refresh(me.tenant, f.features || features || {});
     setPage('home');
   }
 
   async function onLogout() {
     try { await api('/api/tenant/logout', { method: 'POST' }); } catch {}
     refreshSeq.current++;
-    setTenant(null); setBills([]); setPayments([]); setTickets([]); setContract(null);
+    setTenant(null); setBills([]); setPayments([]); setTickets([]); setParcels([]); setContract(null);
     setBuilding(null); setSyncErrors([]); setPage('home');
   }
 
@@ -3389,6 +3568,10 @@ function App() {
 
   const unpaidCount = bills.filter((b) => b.status === 'pending' || b.status === 'overdue').length;
   const openTickets = tickets.filter((x) => !['completed', 'cancelled'].includes(x.status)).length;
+  const parcelEnabled = features?.parcelNotifications?.enabled === true;
+  const waitingParcels = parcelEnabled
+    ? parcels.filter((x) => x.status === 'waiting_pickup').length
+    : 0;
 
   return (
     <>
@@ -3404,11 +3587,12 @@ function App() {
         height: '100vh', overflow: 'hidden', background: 'var(--bg)',
       }}>
         <Sidebar page={page} setPage={setPage} locale={locale} unpaidCount={unpaidCount}
-          tenant={tenant} onLogout={onLogout} building={effectiveBuilding} />
+          parcelCount={waitingParcels} tenant={tenant} onLogout={onLogout}
+          building={effectiveBuilding} features={features} />
         <div style={{ minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
           <TopBar page={page} locale={locale} tenant={tenant} openMenu={() => setDrawer(true)}
-            unpaidCount={unpaidCount} openTickets={openTickets}
-            onBellClick={() => setPage(unpaidCount > 0 ? 'bills' : openTickets > 0 ? 'maintenance' : 'bills')} />
+            unpaidCount={unpaidCount} openTickets={openTickets} parcelCount={waitingParcels}
+            onBellClick={() => setPage(unpaidCount > 0 ? 'bills' : openTickets > 0 ? 'maintenance' : waitingParcels > 0 ? 'parcels' : 'bills')} />
           <div className="tenant-scroll" style={{
             flex: 1, minHeight: 0,
             overflowY: 'auto', overflowX: 'hidden',
@@ -3422,7 +3606,8 @@ function App() {
               <SyncBanner errors={syncErrors} syncing={syncing}
                 onRetry={triggerRefresh} locale={locale} />
               {page === 'home'        && <HomeView tenant={tenant} locale={locale} bills={bills}
-                tickets={tickets} contract={contract} goto={goto} />}
+                tickets={tickets} parcels={parcels} parcelEnabled={parcelEnabled}
+                contract={contract} goto={goto} />}
               {page === 'bills'       && <BillsView locale={locale} bills={bills}
                 refresh={triggerRefresh} slipFeature={features?.slipUpload}
                 openId={openBillId} setOpenId={setOpenBillId} />}
@@ -3432,6 +3617,7 @@ function App() {
                 contract={contract} />}
               {page === 'maintenance' && <MaintenanceView locale={locale} tenant={tenant}
                 tickets={tickets} refresh={triggerRefresh} />}
+              {parcelEnabled && page === 'parcels' && <ParcelsView locale={locale} parcels={parcels} />}
               {page === 'profile'     && <ProfileView tenant={tenant} locale={locale} setLocale={setLocale}
                 theme={theme} setTheme={setTheme} onLogout={onLogout} features={features}
                 contract={contract} building={effectiveBuilding} />}
@@ -3439,10 +3625,11 @@ function App() {
           </div>
         </div>
       </div>
-      <BottomNav page={page} setPage={setPage} locale={locale} unpaidCount={unpaidCount} />
+      <BottomNav page={page} setPage={setPage} locale={locale} unpaidCount={unpaidCount}
+        parcelCount={waitingParcels} features={features} />
       <DrawerNav open={drawer} onClose={() => setDrawer(false)} page={page} setPage={setPage}
-        locale={locale} unpaidCount={unpaidCount}
-        building={effectiveBuilding}
+        locale={locale} unpaidCount={unpaidCount} parcelCount={waitingParcels}
+        building={effectiveBuilding} features={features}
         onLogout={() => { setDrawer(false); onLogout(); }} />
       <style>{`
         /* Canonical breakpoints used across the whole portal:

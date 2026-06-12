@@ -69,6 +69,14 @@ test('checkFeatureDependencies: slipUpload without tenantPortal is CRITICAL', as
   assert.ok(w.issue && w.fix, 'must carry a clear issue + fix');
 });
 
+test('checkFeatureDependencies: parcelNotifications without tenantPortal is CRITICAL', async () => {
+  const d = await hc.checkFeatureDependencies({ parcelNotifications: { enabled: true }, tenantPortal: { enabled: false } });
+  const w = d.detail.warnings.find((x) => x.flag === 'parcelNotifications');
+  assert.ok(w && w.severity === 'critical', 'tenant-side parcel list must be critical without portal');
+  assert.match(w.issue, /parcelNotifications/);
+  assert.match(w.issue, /tenantPortal/);
+});
+
 test('checkFeatureDependencies: new vat / lateFee zero-rate checks fire', async () => {
   const dv = await hc.checkFeatureDependencies({ vat: { enabled: true, ratePct: 0 } });
   assert.ok(dv.detail.warnings.some((w) => w.flag === 'vat'), 'vat rate 0 warned');

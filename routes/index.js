@@ -14,6 +14,7 @@ module.exports = function mountRoutes(app, ctx) {
   const adminLineBindings = require('./admin-line-bindings')(ctx);
   const adminLineOas = require('./admin-line-oas')(ctx);
   const recurring = require('./recurring-charges')(ctx);
+  const parcels = require('./parcels')(ctx);
 
   // Run any per-router bootstrap (e.g. table creation for rooms_v2)
   const bootstraps = [rooms.bootstrap].filter(Boolean);
@@ -24,6 +25,8 @@ module.exports = function mountRoutes(app, ctx) {
   app.use('/api/tenants', tenantOps);
   app.use('/api/bills', billsExtras);
   app.use('/api/recurring-charges', recurring);
+  app.use('/api/parcels', parcels.admin);
+  app.use('/api/tenant/parcels', parcels.tenant);
   app.use('/api/admin/secrets', adminSecrets);
   app.use('/api/admin/line-bindings', adminLineBindings);
   app.use('/api/admin/line-oas', adminLineOas);

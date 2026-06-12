@@ -588,6 +588,17 @@ async function checkFeatureDependencies(features, pool) {
     });
   }
 
+  // Parcel notifications have a tenant-facing list/button. If the tenant
+  // portal is off, admin can still record parcels but tenants cannot open the
+  // stored parcel list from their web account.
+  if (features?.parcelNotifications?.enabled && !features?.tenantPortal?.enabled) {
+    warnings.push({
+      flag: 'parcelNotifications',
+      issue: 'parcelNotifications เปิด แต่ tenantPortal ปิด — ผู้เช่าจะไม่เห็นปุ่มพัสดุและเปิดรายการพัสดุของตัวเองไม่ได้',
+      fix: 'เปิด tenantPortal ในหน้า Features หรือปิด parcelNotifications ถ้ายังไม่ต้องการให้ผู้เช่าใช้งาน',
+    });
+  }
+
   if (features?.slipUpload?.enabled) {
     if (features.slipUpload.allowUnverifiedAutoApprove === true) {
       warnings.push({
@@ -937,6 +948,7 @@ async function checkFeatureDependencies(features, pool) {
   const CRITICAL_FLAGS = new Set([
     'slipUpload',                            // tenants literally can't upload (no portal)
     'slipUpload.allowUnverifiedAutoApprove', // bills paid with zero verification
+    'parcelNotifications',                   // tenant-side parcel list cannot open
     'roomBooking.depositAmount',             // deposit flow cannot collect a valid amount
     'roomBooking.requireDeposit',            // public booking deposits block at payment setup
     'paymentReminder',                       // configured channels cannot deliver reminders

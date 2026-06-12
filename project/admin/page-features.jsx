@@ -14,6 +14,10 @@ const FEATURE_HELP = {
     'เปิดแล้วผู้เช่าเข้า /tenant ได้ ดูบิล แจ้งซ่อม และอัปโหลดสลิปตามสิทธิ์ที่เกี่ยวข้อง',
     'ปิดแล้ว endpoint ฝั่ง tenant จะตอบ 503 และฟีเจอร์ที่พึ่งพา tenant portal เช่น slip upload จะใช้ไม่ได้',
   ],
+  parcelNotifications: [
+    'เปิดแล้ว admin บันทึกพัสดุถึงห้องและส่งแจ้งเตือนไปยังผู้เช่าผ่านช่องทางที่ตั้งไว้ได้',
+    'ปิดแล้ว API จะตอบ FEATURE_DISABLED และฝั่งผู้เช่าจะไม่เห็นเมนู/ปุ่มพัสดุ',
+  ],
   photoUpload: [
     'ใช้กับรูปห้อง ลายเซ็น สัญญา และเอกสารยืนยันตัวตน',
     'ปิดแล้วไฟล์เดิมยังอยู่ แต่ admin/tenant จะอัปโหลดเพิ่มไม่ได้',
@@ -488,6 +492,9 @@ function PageFeatures({ setToast, embedded = false, currentUser = null }) {
           desc="ผู้เช่า login ด้วยเบอร์โทรที่ผูกกับห้อง เพื่อดูบิล แจ้งซ่อม อัปโหลดสลิป">
           <Field id="tenantPortal" field="sessionDays" label="อายุ session (วัน)" type="number" />
         </Row>
+        <Row id="parcelNotifications"
+          title="แจ้งเตือนพัสดุ"
+          desc="แอดมินบันทึกพัสดุที่มาถึงห้อง ส่งแจ้งเตือนผู้เช่า และให้ผู้เช่าดูรายการพัสดุของตัวเองใน /tenant" />
         {/* slipUpload inline toggles used to live here, duplicating the
             dedicated wizard at /admin#slip-verify. Operators kept enabling
             autoVerify without setting an API key and then debugging across

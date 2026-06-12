@@ -96,6 +96,9 @@ const DEFAULTS = Object.freeze({
     enabled: false,              // parking, internet, etc. line items per tenant
     autoIncludeOnBillGen: true,  // when true, scheduler/manual bill includes active rows
   },
+  parcelNotifications: {
+    enabled: false,              // admin records parcel arrivals + notifies tenants
+  },
   lateFee: {
     enabled: true,
     ratePctPerMonth: 1.5,
@@ -343,6 +346,7 @@ function disabledPayload(name, req) {
     meterIot: 'Meter readings',
     accessControl: 'Access control',
     recurringCharges: 'Recurring charges',
+    parcelNotifications: 'Parcel notifications',
   }[name] || name;
   const out = {
     error: `feature ${name} is disabled`,

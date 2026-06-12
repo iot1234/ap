@@ -440,6 +440,45 @@ async function migrate(pool, opts = {}) {
     );
     CREATE INDEX IF NOT EXISTS idx_notifq_due ON notifications_queue(status, next_attempt_at);
 
+    CREATE TABLE IF NOT EXISTS parcels (
+      id                 BIGSERIAL PRIMARY KEY,
+      parcel_no          TEXT UNIQUE NOT NULL,
+      room_id            TEXT NOT NULL,
+      tenant_id          BIGINT REFERENCES tenants(id),
+      recipient_name     TEXT,
+      recipient_phone    TEXT,
+      carrier            TEXT,
+      tracking_no        TEXT,
+      shelf_location     TEXT,
+      note               TEXT,
+      status             TEXT NOT NULL DEFAULT 'waiting_pickup',
+      notified_at        TIMESTAMPTZ,
+      last_notify_status TEXT,
+      last_notify_channel TEXT,
+      last_notify_error  TEXT,
+      picked_up_at       TIMESTAMPTZ,
+      picked_up_by       TEXT,
+      created_by         TEXT,
+      created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      deleted_at         TIMESTAMPTZ
+    );
+    CREATE INDEX IF NOT EXISTS idx_parcels_tenant
+      ON parcels(tenant_id) WHERE deleted_at IS NULL;
+    CREATE INDEX IF NOT EXISTS idx_parcels_room
+      ON parcels(room_id) WHERE deleted_at IS NULL;
+    CREATE INDEX IF NOT EXISTS idx_parcels_status_created
+      ON parcels(status, created_at DESC) WHERE deleted_at IS NULL;
+    CREATE INDEX IF NOT EXISTS idx_parcels_tracking
+      ON parcels(tracking_no) WHERE tracking_no IS NOT NULL AND deleted_at IS NULL;
+    DO $$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_parcels_status_valid') THEN
+        ALTER TABLE parcels ADD CONSTRAINT chk_parcels_status_valid
+          CHECK (status IN ('waiting_pickup','picked_up','returned','cancelled')) NOT VALID;
+      END IF;
+    END $$;
+
     CREATE TABLE IF NOT EXISTS file_uploads (
       id            BIGSERIAL PRIMARY KEY,
       category      TEXT NOT NULL,
