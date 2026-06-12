@@ -25,6 +25,42 @@ const PARCEL_NOTIFY_LABEL = {
   skipped: 'ไม่ได้ส่ง',
 };
 
+function notifyCount(item, key, fallbackKey) {
+  return Number(item?.[key] ?? item?.[fallbackKey] ?? 0) || 0;
+}
+
+function notifyChannels(item) {
+  const raw = item?.notify_channels || item?.notifyChannels || [];
+  const arr = Array.isArray(raw) ? raw : [];
+  const last = item?.last_notify_channel || item?.lastNotifyChannel || '';
+  return [...new Set([...arr, last].filter((x) => x && !['none', 'unknown'].includes(String(x))))];
+}
+
+function notifySummary(item) {
+  const attempts = notifyCount(item, 'notify_attempt_count', 'notifyAttemptCount');
+  const success = notifyCount(item, 'notify_success_count', 'notifySuccessCount');
+  const status = item?.last_notify_status || item?.lastNotifyStatus || '';
+  const channels = notifyChannels(item);
+  if (attempts <= 0) {
+    return {
+      attempts,
+      success,
+      channels,
+      label: 'ยังไม่เคยส่งแจ้งเตือน',
+      detail: status === 'skipped' ? 'บันทึกไว้โดยไม่ส่งแจ้งเตือน' : 'ยังไม่มีประวัติการส่งถึงผู้เช่า',
+      tone: 'neutral',
+    };
+  }
+  return {
+    attempts,
+    success,
+    channels,
+    label: `แจ้งเตือน ${attempts} รอบ`,
+    detail: `สำเร็จ/เข้าคิว ${success} รอบ · ช่องทาง ${channels.length ? channels.join(', ') : '-'}`,
+    tone: success > 0 ? 'success' : 'warning',
+  };
+}
+
 function PageParcels({ setToast }) {
   const C = window.ADMIN_C;
   const { Card, Btn, Pill, PageContainer, PageHeader, EmptyState } = window;
@@ -37,6 +73,10 @@ function PageParcels({ setToast }) {
   const [err, setErr] = useState('');
   const [featureDisabled, setFeatureDisabled] = useState(false);
   const [form, setForm] = useState(null);
+  const [roomOptions, setRoomOptions] = useState([]);
+  const [roomConflicts, setRoomConflicts] = useState([]);
+  const [roomsLoading, setRoomsLoading] = useState(false);
+  const [roomsErr, setRoomsErr] = useState('');
 
   function textFromError(e, fallback) {
     const raw = e && (e.error || e.message || e.hint) || fallback;
@@ -68,10 +108,27 @@ function PageParcels({ setToast }) {
     }
   }
 
+  async function loadRooms() {
+    setRoomsLoading(true);
+    setRoomsErr('');
+    try {
+      const d = await apiCall('/api/parcels/rooms', { timeoutMs: 12000 });
+      setRoomOptions(Array.isArray(d.rooms) ? d.rooms : []);
+      setRoomConflicts(Array.isArray(d.conflicts) ? d.conflicts : []);
+    } catch (e) {
+      if (e && e.code === 'FEATURE_DISABLED') setFeatureDisabled(true);
+      setRoomsErr(textFromError(e, 'โหลดรายการห้องไม่สำเร็จ'));
+    } finally {
+      setRoomsLoading(false);
+    }
+  }
+
   useEffect(() => {
     const timer = setTimeout(load, q.trim() ? 300 : 0);
     return () => clearTimeout(timer);
   }, [status, q]);
+
+  useEffect(() => { loadRooms(); }, []);
 
   const stats = useMemo(() => ({
     total: items.length,
@@ -96,6 +153,44 @@ function PageParcels({ setToast }) {
       window.toastError
         ? window.toastError(setToast, e, { action: payload.id ? 'บันทึกพัสดุ' : 'เพิ่มพัสดุ' })
         : setToast && setToast({ kind: 'danger', message: textFromError(e, 'บันทึกพัสดุไม่สำเร็จ') });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function openCreate() {
+    setForm({ notify: true });
+    if (!roomOptions.length && !roomsLoading) loadRooms();
+  }
+
+  async function deleteParcel(item) {
+    if (!item) return;
+    const summary = notifySummary(item);
+    const lines = [
+      `ลบรายการพัสดุ ${item.parcel_no || item.parcelNo || item.id}?`,
+      '',
+      `ห้อง: ${item.room_id || item.roomId || '-'}`,
+      `ผู้รับ: ${item.recipient_name || item.recipientName || item.tenant_name || '-'}`,
+      `แจ้งเตือน: ${summary.label}`,
+      summary.detail,
+      '',
+      summary.attempts > 0
+        ? 'รายการนี้เคยมีการส่ง/พยายามส่งแจ้งเตือนแล้ว ระบบจะลบแบบซ่อนรายการและเก็บ audit ไว้ตรวจย้อนหลัง'
+        : 'รายการนี้จะถูกซ่อนจากหน้าแอดมินและผู้เช่า แต่ยังมี audit ไว้ตรวจย้อนหลัง',
+    ];
+    if (!window.confirm(lines.join('\n'))) return;
+    setBusy(true);
+    try {
+      const d = await apiCall(`/api/parcels/${item.id}`, {
+        method: 'DELETE',
+        timeoutMs: 12000,
+      });
+      setItems((prev) => prev.filter((x) => x.id !== item.id));
+      toastNotice(d.notice, 'ลบรายการพัสดุแล้ว');
+    } catch (e) {
+      window.toastError
+        ? window.toastError(setToast, e, { action: 'ลบพัสดุ' })
+        : setToast && setToast({ kind: 'danger', message: textFromError(e, 'ลบพัสดุไม่สำเร็จ') });
     } finally {
       setBusy(false);
     }
@@ -161,7 +256,7 @@ function PageParcels({ setToast }) {
         actions={
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             <Btn variant="secondary" onClick={load} disabled={loading || busy}>รีเฟรช</Btn>
-            <Btn variant="primary" icon="+" onClick={() => setForm({ notify: true })} disabled={featureDisabled || busy}>
+            <Btn variant="primary" icon="+" onClick={openCreate} disabled={featureDisabled || busy}>
               เพิ่มพัสดุ
             </Btn>
           </div>
@@ -247,6 +342,7 @@ function PageParcels({ setToast }) {
                 onPicked={() => updateStatus(item, 'picked_up')}
                 onReturned={() => updateStatus(item, 'returned')}
                 onCancelled={() => updateStatus(item, 'cancelled')}
+                onDelete={() => deleteParcel(item)}
               />
             ))}
           </div>
@@ -257,6 +353,11 @@ function PageParcels({ setToast }) {
         <ParcelForm
           initial={form}
           busy={busy}
+          roomOptions={roomOptions}
+          roomConflicts={roomConflicts}
+          roomsLoading={roomsLoading}
+          roomsErr={roomsErr}
+          onReloadRooms={loadRooms}
           onCancel={() => setForm(null)}
           onSave={save}
         />
@@ -265,7 +366,7 @@ function PageParcels({ setToast }) {
   );
 }
 
-function ParcelRow({ item, busy, onEdit, onNotify, onPicked, onReturned, onCancelled }) {
+function ParcelRow({ item, busy, onEdit, onNotify, onPicked, onReturned, onCancelled, onDelete }) {
   const C = window.ADMIN_C;
   const { Btn, Pill } = window;
   const status = item.status || 'waiting_pickup';
@@ -274,6 +375,7 @@ function ParcelRow({ item, busy, onEdit, onNotify, onPicked, onReturned, onCance
   const tenantName = item.tenant_name || item.recipient_name || item.recipientName || '-';
   const tracking = item.tracking_no || item.trackingNo || '';
   const notifyStatus = item.last_notify_status || item.lastNotifyStatus || '';
+  const notification = notifySummary(item);
   const created = item.created_at || item.createdAt;
   return (
     <div style={{
@@ -293,6 +395,9 @@ function ParcelRow({ item, busy, onEdit, onNotify, onPicked, onReturned, onCance
               แจ้งเตือน: {PARCEL_NOTIFY_LABEL[notifyStatus] || notifyStatus}
             </Pill>
           ) : null}
+          <Pill color={notification.tone} size="sm">
+            {notification.label}
+          </Pill>
         </div>
         <div style={{ color: C.ink2, fontSize: 13.5, lineHeight: 1.6 }}>
           <b>ห้อง {roomId}</b> · ผู้รับ {tenantName}
@@ -303,6 +408,10 @@ function ParcelRow({ item, busy, onEdit, onNotify, onPicked, onReturned, onCance
           {item.shelf_location || item.shelfLocation ? `จุดรับ: ${item.shelf_location || item.shelfLocation}` : 'ยังไม่ระบุจุดรับ'}
           {item.note ? ` · หมายเหตุ: ${item.note}` : ''}
           {created ? ` · บันทึกเมื่อ ${new Date(created).toLocaleString('th-TH')}` : ''}
+        </div>
+        <div style={{ color: C.ink2, fontSize: 12.5, marginTop: 4, lineHeight: 1.5 }}>
+          {notification.detail}
+          {item.notified_at || item.notifiedAt ? ` · ล่าสุด ${new Date(item.notified_at || item.notifiedAt).toLocaleString('th-TH')}` : ''}
         </div>
         {item.last_notify_error || item.lastNotifyError ? (
           <div style={{ marginTop: 6, color: C.warningInk || C.warning, fontSize: 12.5 }}>
@@ -319,12 +428,23 @@ function ParcelRow({ item, busy, onEdit, onNotify, onPicked, onReturned, onCance
         <Btn size="sm" variant="primary" onClick={onPicked} disabled={busy || !canAct}>รับแล้ว</Btn>
         <Btn size="sm" variant="ghost" onClick={onReturned} disabled={busy || !canAct}>คืนผู้ส่ง</Btn>
         <Btn size="sm" variant="danger" onClick={onCancelled} disabled={busy || !canAct}>ยกเลิก</Btn>
+        <Btn size="sm" variant="danger" onClick={onDelete} disabled={busy}>ลบ</Btn>
       </div>
     </div>
   );
 }
 
-function ParcelForm({ initial, busy, onCancel, onSave }) {
+function ParcelForm({
+  initial,
+  busy,
+  roomOptions = [],
+  roomConflicts = [],
+  roomsLoading = false,
+  roomsErr = '',
+  onReloadRooms,
+  onCancel,
+  onSave,
+}) {
   const C = window.ADMIN_C;
   const { Modal, Btn } = window;
   const isUpdate = !!initial.id;
@@ -337,6 +457,7 @@ function ParcelForm({ initial, busy, onCancel, onSave }) {
     note: initial.note || '',
     notify: initial.notify !== false,
   });
+  const selectedRoom = roomOptions.find((r) => String(r.roomId) === String(form.roomId)) || null;
   const lbl = { display: 'block', fontSize: 12.5, color: C.muted, margin: '10px 0 4px' };
   const inp = {
     width: '100%', padding: '9px 10px', borderRadius: 7,
@@ -344,6 +465,15 @@ function ParcelForm({ initial, busy, onCancel, onSave }) {
     color: C.ink, fontFamily: 'inherit', fontSize: 13.5,
     boxSizing: 'border-box',
   };
+
+  function selectRoom(roomId) {
+    const room = roomOptions.find((r) => String(r.roomId) === String(roomId));
+    setForm({
+      ...form,
+      roomId,
+      recipientName: room ? (room.tenantName || '') : '',
+    });
+  }
 
   function submit(e) {
     e.preventDefault();
@@ -369,8 +499,39 @@ function ParcelForm({ initial, busy, onCancel, onSave }) {
         {!isUpdate ? (
           <React.Fragment>
             <label style={lbl}>ห้อง</label>
-            <input value={form.roomId} onChange={(e) => setForm({ ...form, roomId: e.target.value })}
-              maxLength={32} required placeholder="เช่น 101" style={inp} />
+            <select value={form.roomId} onChange={(e) => selectRoom(e.target.value)}
+              required disabled={roomsLoading || roomOptions.length === 0} style={inp}>
+              <option value="">{roomsLoading ? 'กำลังโหลดห้อง...' : 'เลือกห้องที่มีผู้เช่า active'}</option>
+              {roomOptions.map((r) => (
+                <option key={r.roomId} value={r.roomId}>
+                  {r.label || `ห้อง ${r.roomId} · ${r.tenantName || '-'}`}
+                </option>
+              ))}
+            </select>
+            {selectedRoom ? (
+              <div style={{
+                marginTop: 8, padding: 10, borderRadius: 8,
+                background: C.surfaceAlt, color: C.ink2, fontSize: 13, lineHeight: 1.5,
+              }}>
+                ดึงข้อมูลแล้ว: ห้อง {selectedRoom.roomId} · ผู้เช่า {selectedRoom.tenantName || '-'}
+                {selectedRoom.phone ? ` · ${selectedRoom.phone}` : ''}
+              </div>
+            ) : null}
+            {roomsErr ? (
+              <div style={{ marginTop: 8, color: C.danger, fontSize: 12.5 }}>
+                {roomsErr} <button type="button" onClick={onReloadRooms} style={{ marginLeft: 6 }}>ลองใหม่</button>
+              </div>
+            ) : null}
+            {!roomsLoading && roomOptions.length === 0 && !roomsErr ? (
+              <div style={{ marginTop: 8, color: C.warningInk || C.warning, fontSize: 12.5 }}>
+                ยังไม่มีห้องที่มีผู้เช่า active แบบชัดเจนให้เลือก กรุณาผูกผู้เช่าเข้าห้องก่อนเพิ่มพัสดุ
+              </div>
+            ) : null}
+            {roomConflicts.length ? (
+              <div style={{ marginTop: 8, color: C.warningInk || C.warning, fontSize: 12.5 }}>
+                มี {roomConflicts.length} ห้องที่มีผู้เช่า active ซ้ำ จึงถูกซ่อนจากตัวเลือกเพื่อกันส่งผิดห้อง
+              </div>
+            ) : null}
             <div style={{ color: C.muted, fontSize: 12, marginTop: 4 }}>
               ระบบจะตรวจว่าห้องนี้มีผู้เช่า active แค่ 1 รายก่อนบันทึก เพื่อกันส่งแจ้งผิดห้อง
             </div>

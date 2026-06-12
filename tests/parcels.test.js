@@ -40,12 +40,18 @@ test('parcel routes are mounted behind feature gates and tenant isolation', () =
   assert.match(index, /app\.use\('\/api\/tenant\/parcels', parcels\.tenant\)/);
 
   const route = read('routes', 'parcels.js');
+  assert.match(route, /admin\.get\('\/rooms'/);
+  assert.match(route, /admin\.delete\('\/:id'/);
   assert.match(route, /features\.requireFeature\('parcelNotifications'\)/);
   assert.match(route, /notifier\.notifyTenant/);
+  assert.match(route, /notify_attempt_count/);
+  assert.match(route, /notify_success_count/);
+  assert.match(route, /notify_channels/);
   assert.match(route, /ACTIVE_TENANT_NOT_FOUND/);
   assert.match(route, /AMBIGUOUS_ACTIVE_TENANT/);
   assert.match(route, /PARCEL_TERMINAL/);
   assert.match(route, /PARCEL_ALREADY_CLOSED/);
+  assert.match(route, /parcel\.delete/);
   assert.match(route, /p\.tenant_id=\$1/);
   assert.match(route, /req\.tenant\.tenant_id/);
 });
@@ -54,6 +60,9 @@ test('parcel table is migrated, backed up, and restored', () => {
   const migration = read('db', 'migrate.js');
   assert.match(migration, /CREATE TABLE IF NOT EXISTS parcels/);
   assert.match(migration, /parcel_no\s+TEXT UNIQUE NOT NULL/);
+  assert.match(migration, /notify_attempt_count INT NOT NULL DEFAULT 0/);
+  assert.match(migration, /notify_success_count INT NOT NULL DEFAULT 0/);
+  assert.match(migration, /notify_channels\s+TEXT\[\] NOT NULL DEFAULT '\{\}'::TEXT\[\]/);
   assert.match(migration, /idx_parcels_tenant/);
   assert.match(migration, /chk_parcels_status_valid/);
 
@@ -72,6 +81,10 @@ test('admin and tenant UIs expose parcels only through the feature-aware paths',
 
   const adminPage = read('project', 'admin', 'page-parcels.jsx');
   assert.match(adminPage, /\/api\/parcels/);
+  assert.match(adminPage, /\/api\/parcels\/rooms/);
+  assert.match(adminPage, /method: 'DELETE'/);
+  assert.match(adminPage, /notifySummary/);
+  assert.match(adminPage, /roomOptions\.map/);
   assert.match(adminPage, /FEATURE_DISABLED/);
   assert.match(adminPage, /window\.PageParcels = PageParcels/);
 

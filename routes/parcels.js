@@ -3,8 +3,10 @@
 //
 // Admin:
 //   GET    /api/parcels
+//   GET    /api/parcels/rooms
 //   POST   /api/parcels
 //   PUT    /api/parcels/:id
+//   DELETE /api/parcels/:id
 //   POST   /api/parcels/:id/notify
 //
 // Tenant:
@@ -54,6 +56,9 @@ function publicParcel(row) {
     lastNotifyStatus: row.last_notify_status,
     lastNotifyChannel: row.last_notify_channel,
     lastNotifyError: row.last_notify_error,
+    notifyAttemptCount: Number(row.notify_attempt_count || 0),
+    notifySuccessCount: Number(row.notify_success_count || 0),
+    notifyChannels: Array.isArray(row.notify_channels) ? row.notify_channels : [],
     notifiedAt: row.notified_at,
     pickedUpAt: row.picked_up_at,
     pickedUpBy: row.picked_up_by,
@@ -185,17 +190,40 @@ async function sendParcelNotification(pool, flags, parcel, tenant, customMessage
   return notifyOutcome(result);
 }
 
-async function updateNotifyState(pool, parcelId, outcome) {
+function publicParcelRoom(row) {
+  return {
+    roomId: row.current_room_id,
+    tenantId: Number(row.tenant_id),
+    tenantName: row.full_name || '',
+    phone: row.phone || '',
+    email: row.email || '',
+    label: `ห้อง ${row.current_room_id} · ${row.full_name || '-'}`,
+  };
+}
+
+async function updateNotifyState(pool, parcelId, outcome, opts = {}) {
+  const attempted = opts.attempted !== false;
   const { rows } = await pool.query(
     `UPDATE parcels
         SET notified_at = CASE WHEN $2 IN ('sent','queued') THEN NOW() ELSE notified_at END,
             last_notify_status = $2,
             last_notify_channel = $3,
             last_notify_error = $4,
+            notify_attempt_count = COALESCE(notify_attempt_count, 0) + CASE WHEN $5::boolean THEN 1 ELSE 0 END,
+            notify_success_count = COALESCE(notify_success_count, 0) + CASE WHEN $5::boolean AND $2 IN ('sent','queued') THEN 1 ELSE 0 END,
+            notify_channels = CASE
+              WHEN $5::boolean
+                AND $3 IS NOT NULL
+                AND $3 <> ''
+                AND $3 NOT IN ('none','unknown')
+                AND NOT ($3 = ANY(COALESCE(notify_channels, '{}'::TEXT[])))
+              THEN array_append(COALESCE(notify_channels, '{}'::TEXT[]), $3)
+              ELSE COALESCE(notify_channels, '{}'::TEXT[])
+            END,
             updated_at = NOW()
       WHERE id=$1 AND deleted_at IS NULL
       RETURNING *`,
-    [parcelId, outcome.status, outcome.channel || null, outcome.error || null]
+    [parcelId, outcome.status, outcome.channel || null, outcome.error || null, attempted]
   );
   return rows[0] || null;
 }
@@ -252,6 +280,53 @@ module.exports = function buildParcelsRouter(ctx) {
     } catch (err) {
       console.error('parcels list error:', err);
       res.status(500).json(errBody('โหลดรายการพัสดุไม่สำเร็จ', 'DB_ERROR'));
+    }
+  });
+
+  admin.get('/rooms', async (_req, res) => {
+    try {
+      const { rows } = await pool.query(
+        `WITH active_rooms AS (
+           SELECT current_room_id, COUNT(*)::int AS active_count
+             FROM tenants
+            WHERE deleted_at IS NULL
+              AND status='active'
+              AND COALESCE(TRIM(current_room_id), '') <> ''
+            GROUP BY current_room_id
+         )
+         SELECT t.id AS tenant_id, t.full_name, t.phone, t.email, t.current_room_id
+           FROM tenants t
+           JOIN active_rooms ar ON ar.current_room_id = t.current_room_id
+          WHERE t.deleted_at IS NULL
+            AND t.status='active'
+            AND ar.active_count = 1
+          ORDER BY t.current_room_id`
+      );
+      const conflictQ = await pool.query(
+        `SELECT current_room_id AS room_id,
+                COUNT(*)::int AS active_count,
+                ARRAY_AGG(full_name ORDER BY id) AS tenant_names
+           FROM tenants
+          WHERE deleted_at IS NULL
+            AND status='active'
+            AND COALESCE(TRIM(current_room_id), '') <> ''
+          GROUP BY current_room_id
+         HAVING COUNT(*) > 1
+          ORDER BY current_room_id
+          LIMIT 50`
+      );
+      res.json({
+        ok: true,
+        rooms: rows.map(publicParcelRoom),
+        conflicts: conflictQ.rows.map((r) => ({
+          roomId: r.room_id,
+          activeCount: Number(r.active_count || 0),
+          tenantNames: Array.isArray(r.tenant_names) ? r.tenant_names : [],
+        })),
+      });
+    } catch (err) {
+      console.error('parcel rooms list error:', err);
+      res.status(500).json(errBody('โหลดรายการห้องสำหรับพัสดุไม่สำเร็จ', 'DB_ERROR'));
     }
   });
 
@@ -319,7 +394,7 @@ module.exports = function buildParcelsRouter(ctx) {
           status: 'skipped',
           channel: 'none',
           error: 'notify disabled by admin on create',
-        }) || inserted;
+        }, { attempted: false }) || inserted;
       }
       res.status(201).json({ ok: true, parcel: publicParcel(row), notice });
     } catch (err) {
@@ -403,6 +478,57 @@ module.exports = function buildParcelsRouter(ctx) {
       await client.query('ROLLBACK').catch(() => {});
       console.error('parcels update error:', err);
       res.status(500).json(errBody('อัปเดตพัสดุไม่สำเร็จ', 'DB_ERROR'));
+    } finally {
+      client.release();
+    }
+  });
+
+  admin.delete('/:id', sameOrigin, csrfGuard, async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id < 1) {
+      return res.status(400).json(errBody('รหัสพัสดุไม่ถูกต้อง', 'INVALID_ID'));
+    }
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const prevQ = await client.query(
+        `SELECT * FROM parcels WHERE id=$1 AND deleted_at IS NULL FOR UPDATE`,
+        [id]
+      );
+      if (!prevQ.rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(404).json(errBody('ไม่พบพัสดุรายการนี้ หรือถูกลบไปแล้ว', 'PARCEL_NOT_FOUND'));
+      }
+      const prev = prevQ.rows[0];
+      const { rows } = await client.query(
+        `UPDATE parcels
+            SET deleted_at=NOW(), updated_at=NOW()
+          WHERE id=$1 AND deleted_at IS NULL
+          RETURNING *`,
+        [id]
+      );
+      await client.query('COMMIT');
+      audit(req, 'parcel.delete', 'parcel', String(id), {
+        parcelNo: prev.parcel_no,
+        roomId: prev.room_id,
+        tenantId: prev.tenant_id == null ? null : Number(prev.tenant_id),
+        notifyAttemptCount: Number(prev.notify_attempt_count || 0),
+        lastNotifyStatus: prev.last_notify_status || null,
+        lastNotifyChannel: prev.last_notify_channel || null,
+      });
+      res.json({
+        ok: true,
+        parcel: publicParcel(rows[0]),
+        notice: {
+          kind: 'success',
+          title: 'ลบรายการพัสดุแล้ว',
+          message: 'รายการนี้ถูกซ่อนจากหน้าแอดมินและผู้เช่าแล้ว แต่ยังมี audit สำหรับตรวจย้อนหลัง',
+        },
+      });
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      console.error('parcels delete error:', err);
+      res.status(500).json(errBody('ลบพัสดุไม่สำเร็จ', 'DB_ERROR'));
     } finally {
       client.release();
     }
