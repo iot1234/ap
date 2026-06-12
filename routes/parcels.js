@@ -4,9 +4,11 @@
 // Admin:
 //   GET    /api/parcels
 //   GET    /api/parcels/rooms
+//   GET    /api/parcels/options
 //   POST   /api/parcels
 //   PUT    /api/parcels/:id
 //   DELETE /api/parcels/:id
+//   POST   /api/parcels/:id/photo
 //   POST   /api/parcels/:id/notify
 //
 // Tenant:
@@ -19,9 +21,12 @@ const { validateBody } = require('../middleware/validate');
 const features = require('../services/features');
 const notifier = require('../services/notifier');
 const billing = require('../services/billing');
+const storage = require('../services/storage');
 
 const STATUS = new Set(['waiting_pickup', 'picked_up', 'returned', 'cancelled']);
 const CLOSED_STATUS = new Set(['picked_up', 'returned', 'cancelled']);
+const PARCEL_PHOTO_MIMES = ['image/jpeg', 'image/png', 'image/webp'];
+const PARCEL_PHOTO_MAX_BYTES = 1_500_000;
 
 function adminName(req) {
   return req.session?.user?.username || req.session?.user?.id || 'admin';
@@ -59,6 +64,8 @@ function publicParcel(row) {
     notifyAttemptCount: Number(row.notify_attempt_count || 0),
     notifySuccessCount: Number(row.notify_success_count || 0),
     notifyChannels: Array.isArray(row.notify_channels) ? row.notify_channels : [],
+    photoFileId: row.photo_file_id == null ? null : Number(row.photo_file_id),
+    photoUrl: row.photo_url || null,
     notifiedAt: row.notified_at,
     pickedUpAt: row.picked_up_at,
     pickedUpBy: row.picked_up_by,
@@ -252,6 +259,52 @@ async function safeUpdateNotifyState(pool, parcelId, outcome, opts) {
   } catch (err) {
     console.error('parcel notify state update error:', err);
     return null;
+  }
+}
+
+async function saveParcelPhoto(pool, parcelId, photoDataUrl, uploadedBy) {
+  const prevQ = await pool.query(
+    `SELECT id, photo_file_id
+       FROM parcels
+      WHERE id=$1 AND deleted_at IS NULL
+      LIMIT 1`,
+    [parcelId]
+  );
+  if (!prevQ.rows.length) return { missing: true };
+  let saved = null;
+  try {
+    saved = await storage.saveBase64({
+      pool,
+      category: 'parcel_photo',
+      dataUrl: photoDataUrl,
+      refId: String(parcelId),
+      uploadedBy,
+      maxBytes: PARCEL_PHOTO_MAX_BYTES,
+      allowedMimes: PARCEL_PHOTO_MIMES,
+    });
+  } catch (err) {
+    return { invalid: true, error: err?.message || 'invalid parcel photo' };
+  }
+  try {
+    const { rows } = await pool.query(
+      `UPDATE parcels
+          SET photo_file_id=$2,
+              photo_url=$3,
+              updated_at=NOW()
+        WHERE id=$1 AND deleted_at IS NULL
+        RETURNING *`,
+      [parcelId, saved.id, saved.url]
+    );
+    const previousFileId = Number(prevQ.rows[0].photo_file_id || 0);
+    if (previousFileId && previousFileId !== Number(saved.id)) {
+      storage.remove(pool, previousFileId).catch((err) => {
+        console.warn('parcel old photo cleanup failed:', err.message);
+      });
+    }
+    return { parcel: rows[0] || null, file: saved };
+  } catch (err) {
+    if (saved?.id) storage.remove(pool, saved.id).catch(() => {});
+    throw err;
   }
 }
 
@@ -589,6 +642,52 @@ module.exports = function buildParcelsRouter(ctx) {
       res.status(500).json(errBody('ลบพัสดุไม่สำเร็จ', 'DB_ERROR'));
     } finally {
       client.release();
+    }
+  });
+
+  admin.post('/:id/photo', sameOrigin, csrfGuard, validateBody(schemas.parcelPhoto), async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id < 1) {
+      return res.status(400).json(errBody('รหัสพัสดุไม่ถูกต้อง', 'INVALID_ID'));
+    }
+    try {
+      const result = await saveParcelPhoto(pool, id, req.body.photo, adminName(req));
+      if (result.missing) {
+        return res.status(404).json(errBody(
+          'ไม่พบพัสดุรายการนี้ หรือถูกลบไปแล้ว',
+          'PARCEL_NOT_FOUND',
+          'กดรีเฟรชรายการพัสดุ แล้วเลือกรายการที่ยังอยู่ในระบบอีกครั้ง'
+        ));
+      }
+      if (result.invalid) {
+        return res.status(400).json(errBody(
+          'อัปโหลดรูปพัสดุไม่สำเร็จ',
+          'PARCEL_PHOTO_INVALID',
+          'เลือกรูป JPG, PNG หรือ WebP และย่อไฟล์ให้ไม่เกินประมาณ 1.5 MB',
+          { detail: result.error }
+        ));
+      }
+      audit(req, 'parcel.photo.upload', 'parcel', String(id), {
+        fileId: result.file?.id || null,
+        size: result.file?.size || null,
+        mime: result.file?.mime || null,
+      });
+      res.json({
+        ok: true,
+        parcel: publicParcel(result.parcel),
+        notice: {
+          kind: 'success',
+          title: 'บันทึกรูปพัสดุแล้ว',
+          message: 'รูปนี้จะแสดงพร้อมรายการพัสดุในหน้าแอดมินและหน้าผู้เช่า',
+        },
+      });
+    } catch (err) {
+      console.error('parcel photo upload error:', err);
+      res.status(500).json(errBody(
+        'อัปโหลดรูปพัสดุไม่สำเร็จ',
+        'DB_ERROR',
+        'รายการพัสดุยังอยู่ในระบบ ให้ลองเลือกรูปและอัปโหลดอีกครั้งภายหลัง'
+      ));
     }
   });
 

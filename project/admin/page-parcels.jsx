@@ -25,6 +25,21 @@ const PARCEL_NOTIFY_LABEL = {
   skipped: 'ไม่ได้ส่ง',
 };
 const PARCEL_OPTION_STORAGE_KEY = 'baankarn.parcelOptions.v1';
+const DEFAULT_PARCEL_CARRIERS = [
+  'Kerry Express',
+  'KEX Express',
+  'Flash Express',
+  'ไปรษณีย์ไทย',
+  'J&T Express',
+  'Shopee Express',
+  'Lazada Logistics',
+  'DHL',
+  'Best Express',
+  'Ninja Van',
+  'SCG Express',
+  'GrabExpress',
+  'Lalamove',
+];
 
 function readParcelOptionMemory() {
   try {
@@ -112,7 +127,7 @@ function PageParcels({ setToast }) {
   const [parcelOptions, setParcelOptions] = useState(() => {
     const memory = readParcelOptionMemory();
     return {
-      carriers: memory.carriers,
+      carriers: mergeOptionValues(DEFAULT_PARCEL_CARRIERS, memory.carriers),
       shelfLocations: memory.shelfLocations,
     };
   });
@@ -174,7 +189,7 @@ function PageParcels({ setToast }) {
     try {
       const d = await apiCall('/api/parcels/options', { timeoutMs: 12000 });
       setParcelOptions({
-        carriers: mergeOptionValues(memory.carriers, d.carriers),
+        carriers: mergeOptionValues(DEFAULT_PARCEL_CARRIERS, memory.carriers, d.carriers),
         shelfLocations: mergeOptionValues(memory.shelfLocations, d.shelfLocations),
       });
       setLastParcelDefaults({
@@ -183,7 +198,7 @@ function PageParcels({ setToast }) {
       });
     } catch {
       setParcelOptions({
-        carriers: mergeOptionValues(memory.carriers),
+        carriers: mergeOptionValues(DEFAULT_PARCEL_CARRIERS, memory.carriers),
         shelfLocations: mergeOptionValues(memory.shelfLocations),
       });
     }
@@ -231,14 +246,41 @@ function PageParcels({ setToast }) {
     setBusy(true);
     try {
       const isUpdate = !!payload.id;
-      const d = await apiCall(isUpdate ? `/api/parcels/${payload.id}` : '/api/parcels', {
+      const { id, photo, ...body } = payload;
+      const d = await apiCall(isUpdate ? `/api/parcels/${id}` : '/api/parcels', {
         method: isUpdate ? 'PUT' : 'POST',
-        body: JSON.stringify(payload),
+        body: JSON.stringify(body),
         timeoutMs: 15000,
       });
-      rememberParcelOptions(payload);
+      let savedParcel = d.parcel || null;
+      let photoNotice = null;
+      if (photo && savedParcel && savedParcel.id) {
+        try {
+          const pd = await apiCall(`/api/parcels/${savedParcel.id}/photo`, {
+            method: 'POST',
+            body: JSON.stringify({ photo }),
+            timeoutMs: 20000,
+          });
+          savedParcel = pd.parcel || savedParcel;
+          photoNotice = pd.notice || null;
+        } catch (photoErr) {
+          photoNotice = {
+            kind: 'warning',
+            title: 'บันทึกพัสดุแล้ว แต่รูปยังไม่สำเร็จ',
+            message: textFromError(photoErr, 'เลือกรูป JPG, PNG หรือ WebP ขนาดไม่เกินประมาณ 1.5 MB แล้วลองอัปโหลดใหม่'),
+          };
+        }
+      }
+      rememberParcelOptions(body);
       setForm(null);
-      toastNotice(d.notice, isUpdate ? 'บันทึกพัสดุแล้ว' : 'เพิ่มพัสดุแล้ว');
+      const finalNotice = d.notice && photoNotice
+        ? {
+            kind: d.notice.kind === 'success' ? photoNotice.kind : d.notice.kind,
+            title: d.notice.title,
+            message: [d.notice.message, `${photoNotice.title}: ${photoNotice.message}`].filter(Boolean).join('\n'),
+          }
+        : (photoNotice || d.notice);
+      toastNotice(finalNotice, isUpdate ? 'บันทึกพัสดุแล้ว' : 'เพิ่มพัสดุแล้ว');
       await load();
     } catch (e) {
       window.toastError
@@ -471,6 +513,7 @@ function ParcelRow({ item, busy, onEdit, onNotify, onPicked, onReturned, onCance
   const roomId = item.room_id || item.roomId || '-';
   const tenantName = item.tenant_name || item.recipient_name || item.recipientName || '-';
   const tracking = item.tracking_no || item.trackingNo || '';
+  const photoUrl = item.photo_url || item.photoUrl || '';
   const notifyStatus = item.last_notify_status || item.lastNotifyStatus || '';
   const notification = notifySummary(item);
   const created = item.created_at || item.createdAt;
@@ -481,6 +524,25 @@ function ParcelRow({ item, busy, onEdit, onNotify, onPicked, onReturned, onCance
       display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between',
       gap: 12, flexWrap: 'wrap',
     }}>
+      {photoUrl ? (
+        <a href={photoUrl} target="_blank" rel="noreferrer" title="เปิดรูปพัสดุ" style={{
+          flex: '0 0 auto',
+          width: 76,
+          height: 76,
+          borderRadius: 8,
+          overflow: 'hidden',
+          border: '1px solid ' + C.border,
+          background: C.surfaceAlt,
+          display: 'block',
+        }}>
+          <img src={photoUrl} alt="รูปพัสดุ" style={{
+            width: '100%',
+            height: '100%',
+            objectFit: 'cover',
+            display: 'block',
+          }} />
+        </a>
+      ) : null}
       <div style={{ minWidth: 0, flex: '1 1 300px' }}>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginBottom: 6 }}>
           <span style={{ fontWeight: 700, fontSize: 15 }}>{item.parcel_no || item.parcelNo}</span>
@@ -546,6 +608,7 @@ function ParcelForm({
   const C = window.ADMIN_C;
   const { Modal, Btn } = window;
   const isUpdate = !!initial.id;
+  const initialPhotoUrl = initial.photo_url || initial.photoUrl || '';
   const [form, setForm] = useState({
     roomId: initial.room_id || initial.roomId || '',
     recipientName: initial.recipient_name || initial.recipientName || '',
@@ -555,6 +618,9 @@ function ParcelForm({
     note: initial.note || '',
     notify: initial.notify !== false,
   });
+  const [photoDataUrl, setPhotoDataUrl] = useState('');
+  const [photoPreview, setPhotoPreview] = useState(initialPhotoUrl);
+  const [photoError, setPhotoError] = useState('');
   const selectedRoom = roomOptions.find((r) => String(r.roomId) === String(form.roomId)) || null;
   const lbl = { display: 'block', fontSize: 12.5, color: C.muted, margin: '10px 0 4px' };
   const inp = {
@@ -573,8 +639,42 @@ function ParcelForm({
     });
   }
 
+  function choosePhoto(file) {
+    setPhotoError('');
+    setPhotoDataUrl('');
+    if (!file) {
+      setPhotoPreview(initialPhotoUrl);
+      return;
+    }
+    const allowed = ['image/jpeg', 'image/png', 'image/webp'];
+    if (!allowed.includes(file.type)) {
+      setPhotoPreview(initialPhotoUrl);
+      setPhotoError('รองรับเฉพาะรูป JPG, PNG หรือ WebP');
+      return;
+    }
+    if (file.size > 1_500_000) {
+      setPhotoPreview(initialPhotoUrl);
+      setPhotoError('รูปใหญ่เกินไป กรุณาย่อรูปให้ไม่เกินประมาณ 1.5 MB');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = String(reader.result || '');
+      setPhotoDataUrl(dataUrl);
+      setPhotoPreview(dataUrl);
+    };
+    reader.onerror = () => {
+      setPhotoError('อ่านรูปไม่สำเร็จ กรุณาเลือกรูปใหม่');
+    };
+    reader.readAsDataURL(file);
+  }
+
   function submit(e) {
     e.preventDefault();
+    if (photoError) {
+      alert(photoError);
+      return;
+    }
     if (!isUpdate && !form.roomId.trim()) {
       alert('กรุณาระบุห้องที่รับพัสดุ');
       return;
@@ -587,8 +687,8 @@ function ParcelForm({
       note: form.note.trim() || undefined,
     };
     onSave(isUpdate
-      ? { id: initial.id, ...base }
-      : { roomId: form.roomId.trim(), ...base, notify: form.notify });
+      ? { id: initial.id, ...base, ...(photoDataUrl ? { photo: photoDataUrl } : {}) }
+      : { roomId: form.roomId.trim(), ...base, notify: form.notify, ...(photoDataUrl ? { photo: photoDataUrl } : {}) });
   }
 
   return (
@@ -675,6 +775,61 @@ function ParcelForm({
         <label style={lbl}>หมายเหตุ</label>
         <textarea value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })}
           maxLength={500} rows={3} style={{ ...inp, resize: 'vertical' }} />
+
+        <label style={lbl}>รูปพัสดุ (ถ้ามี)</label>
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: '96px minmax(0, 1fr)',
+          gap: 12,
+          alignItems: 'center',
+        }}>
+          <div style={{
+            width: 96,
+            height: 96,
+            borderRadius: 8,
+            border: '1px dashed ' + C.borderStrong,
+            background: C.surfaceAlt,
+            overflow: 'hidden',
+            display: 'grid',
+            placeItems: 'center',
+            color: C.muted,
+            fontSize: 12,
+            textAlign: 'center',
+          }}>
+            {photoPreview ? (
+              <img src={photoPreview} alt="รูปพัสดุ" style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+            ) : 'ไม่มีรูป'}
+          </div>
+          <div style={{ minWidth: 0 }}>
+            <input
+              type="file"
+              accept="image/jpeg,image/png,image/webp"
+              onChange={(e) => choosePhoto(e.target.files && e.target.files[0])}
+              style={{ ...inp, padding: 7 }}
+            />
+            <div style={{ color: photoError ? (C.dangerInk || C.danger) : C.muted, fontSize: 12, marginTop: 6, lineHeight: 1.5 }}>
+              {photoError || 'รองรับ JPG, PNG, WebP ขนาดไม่เกินประมาณ 1.5 MB จะเว้นว่างไว้ก็ได้'}
+            </div>
+            {photoDataUrl ? (
+              <button
+                type="button"
+                onClick={() => { setPhotoDataUrl(''); setPhotoPreview(initialPhotoUrl); setPhotoError(''); }}
+                style={{
+                  marginTop: 6,
+                  border: 0,
+                  background: 'transparent',
+                  color: C.danger,
+                  padding: 0,
+                  cursor: 'pointer',
+                  fontFamily: 'inherit',
+                  fontSize: 12.5,
+                }}
+              >
+                ล้างรูปที่เลือก
+              </button>
+            ) : null}
+          </div>
+        </div>
 
         {!isUpdate ? (
           <label style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 12, color: C.ink2, fontSize: 13 }}>

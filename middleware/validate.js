@@ -8,15 +8,32 @@
 //   const { validateBody } = require('../middleware/validate');
 //   app.post('/api/x', validateBody(schemas.createTenant), handler);
 
+function formatZodIssue(issue) {
+  const path = issue.path.join('.');
+  if (issue.code === 'unrecognized_keys') {
+    const keys = Array.isArray(issue.keys) ? issue.keys : [];
+    const keyText = keys.length ? keys.join(', ') : 'ฟิลด์ส่วนเกิน';
+    return {
+      path: path || 'ข้อมูล',
+      message: `มีข้อมูลส่วนเกินที่ระบบไม่รับ: ${keyText}`,
+      code: issue.code,
+      keys,
+      fix: 'รีเฟรชหน้าเว็บแล้วลองบันทึกใหม่ หากยังขึ้นซ้ำให้ตรวจว่าหน้านี้เป็นเวอร์ชันล่าสุด',
+    };
+  }
+  return {
+    path,
+    message: issue.message,
+    code: issue.code,
+  };
+}
+
 function formatZodError(err) {
   return {
-    error: 'ข้อมูลไม่ถูกต้อง',
+    error: 'ข้อมูลที่กรอกไม่ถูกต้อง',
     code: 'VALIDATION_ERROR',
-    issues: err.issues.map((i) => ({
-      path: i.path.join('.'),
-      message: i.message,
-      code: i.code,
-    })),
+    hint: 'ตรวจช่องที่ระบบแจ้ง แล้วลองบันทึกอีกครั้ง',
+    issues: err.issues.map(formatZodIssue),
   };
 }
 

@@ -459,6 +459,8 @@ async function migrate(pool, opts = {}) {
       notify_attempt_count INT NOT NULL DEFAULT 0,
       notify_success_count INT NOT NULL DEFAULT 0,
       notify_channels    TEXT[] NOT NULL DEFAULT '{}'::TEXT[],
+      photo_file_id      BIGINT,
+      photo_url          TEXT,
       picked_up_at       TIMESTAMPTZ,
       picked_up_by       TEXT,
       created_by         TEXT,
@@ -479,6 +481,8 @@ async function migrate(pool, opts = {}) {
       ALTER TABLE parcels ADD COLUMN IF NOT EXISTS notify_attempt_count INT NOT NULL DEFAULT 0;
       ALTER TABLE parcels ADD COLUMN IF NOT EXISTS notify_success_count INT NOT NULL DEFAULT 0;
       ALTER TABLE parcels ADD COLUMN IF NOT EXISTS notify_channels TEXT[] NOT NULL DEFAULT '{}'::TEXT[];
+      ALTER TABLE parcels ADD COLUMN IF NOT EXISTS photo_file_id BIGINT;
+      ALTER TABLE parcels ADD COLUMN IF NOT EXISTS photo_url TEXT;
       IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_parcels_status_valid') THEN
         ALTER TABLE parcels ADD CONSTRAINT chk_parcels_status_valid
           CHECK (status IN ('waiting_pickup','picked_up','returned','cancelled')) NOT VALID;

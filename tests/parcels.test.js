@@ -31,6 +31,24 @@ test('parcel request schemas normalize optional strings and reject bad status', 
   assert.throws(() => schemas.createParcel.parse({ roomId: '' }));
   assert.throws(() => schemas.updateParcel.parse({ status: 'waiting' }));
   assert.equal(schemas.updateParcel.parse({ status: 'picked_up' }).status, 'picked_up');
+  assert.ok(schemas.parcelPhoto.parse({
+    photo: 'data:image/png;base64,' + Buffer.from('fake-image').toString('base64'),
+  }).photo.startsWith('data:image/png;base64,'));
+});
+
+test('validation errors hide technical unrecognized-key wording and include a fix', () => {
+  const { z } = require('../schemas');
+  const { formatZodError } = require('../middleware/validate');
+  const parsed = z.object({ status: z.string() }).strict().safeParse({ id: 1, status: 'ok' });
+  assert.equal(parsed.success, false);
+  const body = formatZodError(parsed.error);
+  assert.equal(body.code, 'VALIDATION_ERROR');
+  assert.equal(body.error, 'ข้อมูลที่กรอกไม่ถูกต้อง');
+  assert.match(body.hint, /ตรวจช่อง/);
+  assert.match(body.issues[0].message, /ข้อมูลส่วนเกิน/);
+  assert.doesNotMatch(body.issues[0].message, /Unrecognized key/);
+  assert.deepEqual(body.issues[0].keys, ['id']);
+  assert.match(body.issues[0].fix, /รีเฟรช/);
 });
 
 test('parcel routes are mounted behind feature gates and tenant isolation', () => {
@@ -43,6 +61,10 @@ test('parcel routes are mounted behind feature gates and tenant isolation', () =
   assert.match(route, /admin\.get\('\/rooms'/);
   assert.match(route, /admin\.get\('\/options'/);
   assert.match(route, /admin\.delete\('\/:id'/);
+  assert.match(route, /admin\.post\('\/:id\/photo'/);
+  assert.match(route, /schemas\.parcelPhoto/);
+  assert.match(route, /storage\.saveBase64/);
+  assert.match(route, /PARCEL_PHOTO_INVALID/);
   assert.match(route, /features\.requireFeature\('parcelNotifications'\)/);
   assert.match(route, /notifier\.notifyTenant/);
   assert.match(route, /safeSendParcelNotification/);
@@ -66,6 +88,8 @@ test('parcel table is migrated, backed up, and restored', () => {
   assert.match(migration, /notify_attempt_count INT NOT NULL DEFAULT 0/);
   assert.match(migration, /notify_success_count INT NOT NULL DEFAULT 0/);
   assert.match(migration, /notify_channels\s+TEXT\[\] NOT NULL DEFAULT '\{\}'::TEXT\[\]/);
+  assert.match(migration, /photo_file_id\s+BIGINT/);
+  assert.match(migration, /photo_url\s+TEXT/);
   assert.match(migration, /idx_parcels_tenant/);
   assert.match(migration, /chk_parcels_status_valid/);
 
@@ -75,6 +99,8 @@ test('parcel table is migrated, backed up, and restored', () => {
 
   const server = read('server.js');
   assert.match(server, /'payments', 'parcels', 'access_cards'/);
+  assert.match(server, /f\.category === 'parcel_photo'/);
+  assert.match(server, /tenant_id=\$2/);
 });
 
 test('admin and tenant UIs expose parcels only through the feature-aware paths', () => {
@@ -87,8 +113,15 @@ test('admin and tenant UIs expose parcels only through the feature-aware paths',
   assert.match(adminPage, /\/api\/parcels\/rooms/);
   assert.match(adminPage, /\/api\/parcels\/options/);
   assert.match(adminPage, /PARCEL_OPTION_STORAGE_KEY/);
+  assert.match(adminPage, /DEFAULT_PARCEL_CARRIERS/);
+  assert.match(adminPage, /Kerry Express/);
+  assert.match(adminPage, /Flash Express/);
+  assert.match(adminPage, /ไปรษณีย์ไทย/);
   assert.match(adminPage, /parcel-carrier-options/);
   assert.match(adminPage, /parcel-shelf-options/);
+  assert.match(adminPage, /type="file"/);
+  assert.match(adminPage, /\/api\/parcels\/\$\{savedParcel\.id\}\/photo/);
+  assert.match(adminPage, /const \{ id, photo, \.\.\.body \} = payload/);
   assert.match(adminPage, /method: 'DELETE'/);
   assert.match(adminPage, /notifySummary/);
   assert.match(adminPage, /roomOptions\.map/);
@@ -100,6 +133,7 @@ test('admin and tenant UIs expose parcels only through the feature-aware paths',
 
   const tenant = read('project', 'tenant.jsx');
   assert.match(tenant, /feature: 'parcelNotifications'/);
+  assert.match(tenant, /photoUrl/);
   assert.match(tenant, /function tenantNavItems\(features\)/);
   assert.match(tenant, /tenantNavItems\(features\)\.map/);
   assert.match(tenant, /tenantNavItems\(features\)\.filter/);

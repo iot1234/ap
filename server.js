@@ -16827,7 +16827,7 @@ app.get('/files/:id', rateLimitFileAccess, async (req, res) => {
   }
   try {
     const { rows } = await pool.query(
-      'SELECT category, filename, mime_type, uploaded_by, storage FROM file_uploads WHERE id=$1',
+      'SELECT category, ref_id, filename, mime_type, uploaded_by, storage FROM file_uploads WHERE id=$1',
       [id]
     );
     if (!rows.length) {
@@ -16852,6 +16852,22 @@ app.get('/files/:id', rateLimitFileAccess, async (req, res) => {
     const isManagerPlus = (ROLE_RANK[sessionRole] || 0) >= ROLE_RANK.manager;
     let allowed = isPublicRoomPhoto || (isAdmin && (!sensitive || isManagerPlus));
     let tSession = null;
+    if (!allowed && f.category === 'parcel_photo') {
+      tSession = await tenantSessionLookup(req);
+      const parcelRefId = Number(f.ref_id);
+      if (tSession && Number.isInteger(parcelRefId) && parcelRefId > 0) {
+        const ownParcel = await pool.query(
+          `SELECT 1
+             FROM parcels
+            WHERE id=$1
+              AND tenant_id=$2
+              AND deleted_at IS NULL
+            LIMIT 1`,
+          [parcelRefId, tSession.tenant_id]
+        );
+        if (ownParcel.rows.length) allowed = true;
+      }
+    }
     if (!allowed) {
       // Tenant: allow only own uploads (uploaded_by === 'tenant:<id>')
       tSession = await tenantSessionLookup(req);

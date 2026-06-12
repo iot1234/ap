@@ -571,7 +571,12 @@
         // Show up to 3 field errors so the toast doesn't grow huge; "+N more"
         // for the rest. Field path looks like "phone" or "tenant.fullName".
         const top = e.issues.slice(0, 3)
-          .map((it) => `• ${it.path || 'ฟิลด์'}: ${it.message}`).join('\n');
+          .map((it) => {
+            const field = it.path || (Array.isArray(it.keys) && it.keys.length ? it.keys.join(', ') : 'ฟิลด์');
+            const message = humanizeAdminErrorText(it.message || '');
+            const fix = it.fix ? `\n  วิธีแก้: ${humanizeAdminErrorText(it.fix)}` : '';
+            return `• ${field}: ${message}${fix}`;
+          }).join('\n');
         const more = e.issues.length > 3 ? `\n• …และอีก ${e.issues.length - 3} จุด` : '';
         return top + more;
       },
@@ -922,6 +927,10 @@
       title: 'รายการนี้ยังไม่ผูกผู้เช่า',
       description: (e) => e.hint || 'ออก invitation ใหม่จากสัญญาที่ผูก tenant ถูกต้อง',
     },
+    PARCEL_PHOTO_INVALID: {
+      title: 'รูปพัสดุใช้ไม่ได้',
+      description: (e) => e.hint || 'เลือกรูป JPG, PNG หรือ WebP และย่อไฟล์ให้ไม่เกินประมาณ 1.5 MB แล้วลองอีกครั้ง',
+    },
     // === Service availability ==========================================
     BUSY: { title: 'ระบบกำลังประมวลผลอยู่', description: 'ลองใหม่ในอีกครู่' },
     DB_ERROR: { title: 'ฐานข้อมูลขัดข้อง', description: 'ทีมงานได้รับแจ้งแล้ว — ลองอีกครั้งภายหลัง' },
@@ -961,6 +970,9 @@
         : 'เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ กรุณาลองใหม่ในอีกสักครู่';
     }
     if (/aborterror|timeout/i.test(s)) return 'คำขอใช้เวลานานเกินกำหนด กรุณาลองใหม่อีกครั้ง';
+    if (/unrecognized key/i.test(s)) {
+      return 'มีข้อมูลส่วนเกินที่ระบบไม่รับ กรุณารีเฟรชหน้าเว็บแล้วลองบันทึกใหม่ หากยังขึ้นซ้ำให้ตรวจว่าหน้านี้เป็นเวอร์ชันล่าสุด';
+    }
 
     const exact = [
       [/^load failed$/i, 'โหลดข้อมูลไม่สำเร็จ กรุณารีเฟรชหน้าแล้วลองใหม่'],

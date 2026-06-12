@@ -334,6 +334,11 @@ const optionalTrimmed = (max) => z.preprocess(
   z.string().trim().max(max).optional(),
 );
 const parcelStatus = z.enum(['waiting_pickup', 'picked_up', 'returned', 'cancelled']);
+const parcelPhotoDataUrl = z.string()
+  .trim()
+  .min(20, 'กรุณาเลือกรูปภาพพัสดุ')
+  .max(2_200_000, 'รูปพัสดุใหญ่เกินไป กรุณาย่อรูปให้ไม่เกินประมาณ 1.5 MB')
+  .regex(/^data:image\/(png|jpe?g|webp);base64,[A-Za-z0-9+/=]+$/, 'รองรับเฉพาะรูป JPG, PNG หรือ WebP');
 
 schemas.createParcel = z.object({
   roomId: z.string().trim().min(1).max(32),
@@ -357,6 +362,10 @@ schemas.updateParcel = z.object({
 
 schemas.notifyParcel = z.object({
   message: optionalTrimmed(500),
+}).strict();
+
+schemas.parcelPhoto = z.object({
+  photo: parcelPhotoDataUrl,
 }).strict();
 
 // --- meters ---------------------------------------------------------------

@@ -2869,11 +2869,30 @@ function ParcelsView({ locale, parcels }) {
             const parcelNo = p.parcel_no || p.parcelNo || `#${p.id}`;
             const tracking = p.tracking_no || p.trackingNo || '';
             const shelf = p.shelf_location || p.shelfLocation || '';
+            const photoUrl = p.photo_url || p.photoUrl || '';
             const created = p.created_at || p.createdAt;
             const pickedAt = p.picked_up_at || p.pickedUpAt;
             return (
               <Card key={p.id} hoverable>
                 <div style={{ display: 'flex', alignItems: 'flex-start', gap: 14, flexWrap: 'wrap' }}>
+                  {photoUrl ? (
+                    <a href={photoUrl} target="_blank" rel="noreferrer" style={{
+                      width: 74,
+                      height: 74,
+                      borderRadius: 10,
+                      overflow: 'hidden',
+                      border: '1px solid var(--line)',
+                      flex: '0 0 auto',
+                      background: 'var(--surface-2)',
+                    }}>
+                      <img src={photoUrl} alt={th ? 'รูปพัสดุ' : 'Parcel photo'} style={{
+                        width: '100%',
+                        height: '100%',
+                        objectFit: 'cover',
+                        display: 'block',
+                      }} />
+                    </a>
+                  ) : null}
                   <div style={{
                     width: 48, height: 48, borderRadius: 12,
                     background: p.status === 'waiting_pickup' ? 'var(--amber-soft)' : 'var(--surface-2)',
