@@ -15472,6 +15472,263 @@ app.post('/api/contract-fill/:token/submit', rateLimitContractFill, sameOrigin, 
   }
 });
 
+// GET /api/contract-fill/:token/pdf — tenant self-serves the APPROVED signed
+// contract PDF straight from the fill-page success screen. Right after
+// approval the tenant usually has no portal session yet, so the invitation
+// token (the same credential that protected the whole fill flow) gates this.
+//
+// Security model:
+//   - per-IP rate limit (rateLimitContractFill) against token cycling
+//   - approved-only: pending/submitted must NOT leak a draft PDF whose terms
+//     aren't final yet (mirrors the portal's locked_at gate)
+//   - expires_at is honored even though 'approved' is terminal — a forwarded
+//     LINE message must not stay a forever-credential to a PII document.
+//     Submit already extends the window +60 days; after that the tenant
+//     portal (phone login) serves the same PDF at /api/tenant/contract/:id/pdf.
+//   - NO certified ID-card appendix (unlike the admin sign-ready pack): the
+//     tenant's own copy is the contract body + signature. Keeps ID-card
+//     images out of the weakest-credential path.
+app.get('/api/contract-fill/:token/pdf', rateLimitContractFill, async (req, res) => {
+  const token = String(req.params.token).slice(0, 80);
+  const contractInvitation = require('./services/contractInvitation');
+  let acquired = false;
+  try {
+    const raw = await contractInvitation.inspectByToken(pool, token);
+    if (!raw) {
+      return res.status(404).json({ error: 'ลิงก์นี้ใช้ไม่ได้ — ติดต่อเจ้าของหอพัก', code: 'TOKEN_INVALID' });
+    }
+    if (raw.status === 'revoked') {
+      return res.status(410).json({ error: 'ลิงก์ถูกยกเลิกโดยเจ้าของหอพัก', code: 'REVOKED' });
+    }
+    if (raw.status === 'expired') {
+      return res.status(410).json({ error: 'ลิงก์หมดอายุแล้ว', code: 'EXPIRED' });
+    }
+    if (raw.status !== 'approved') {
+      return res.status(409).json({
+        error: 'สัญญายังไม่ได้รับการอนุมัติ — ดาวน์โหลด PDF ได้หลังเจ้าของหอพักอนุมัติ',
+        code: 'PDF_NOT_READY',
+        status: raw.status,
+      });
+    }
+    if (raw.expires_at && new Date(raw.expires_at).getTime() < Date.now()) {
+      return res.status(410).json({
+        error: 'ลิงก์หมดอายุแล้ว — เข้าสู่ Tenant Portal (ล็อกอินด้วยเบอร์โทร) เพื่อดาวน์โหลดสัญญา',
+        code: 'EXPIRED',
+      });
+    }
+    const fillContractId = Number(raw.contract_id);
+    if (!Number.isInteger(fillContractId) || fillContractId < 1) {
+      return res.status(404).json({ error: 'ไม่พบสัญญาของลิงก์นี้', code: 'CONTRACT_NOT_FOUND' });
+    }
+
+    // Same SELECT shape as /api/tenant/contract/:id/pdf so the renderer gets
+    // the fields it expects; 42703 fallback for pre-migration deploys. The
+    // WHERE c.id = invitation.contract_id IS the ownership check — the token
+    // can only ever reach the one contract it was issued for.
+    let contract;
+    try {
+      const cQ = await pool.query(
+        `SELECT c.*, t.full_name AS tenant_name, t.phone AS tenant_phone,
+                t.email AS tenant_email, t.citizen_id_tail, t.address AS tenant_address,
+                t.emergency_contact_name, t.emergency_contact_phone,
+                t.emergency_contact_relation
+           FROM contracts c
+           LEFT JOIN tenants t ON t.id = c.tenant_id AND t.deleted_at IS NULL
+           WHERE c.id=$1 AND c.deleted_at IS NULL`,
+        [fillContractId]
+      );
+      contract = cQ.rows[0] || null;
+    } catch (err) {
+      if (err.code !== '42703') throw err;
+      const cQ = await pool.query(
+        `SELECT c.*, t.full_name AS tenant_name, t.phone AS tenant_phone,
+                t.email AS tenant_email, t.citizen_id_tail
+           FROM contracts c
+           LEFT JOIN tenants t ON t.id = c.tenant_id AND t.deleted_at IS NULL
+           WHERE c.id=$1 AND c.deleted_at IS NULL`,
+        [fillContractId]
+      );
+      contract = cQ.rows[0] || null;
+    }
+    if (!contract) {
+      return res.status(404).json({ error: 'ไม่พบสัญญาของลิงก์นี้', code: 'CONTRACT_NOT_FOUND' });
+    }
+    // Approval locks the contract; an unlocked row here means the approval
+    // didn't complete — don't serve a PDF whose terms aren't final.
+    if (!contract.locked_at) {
+      return res.status(409).json({
+        error: 'สัญญายังไม่ถูกล็อกเป็นฉบับจริง — ติดต่อเจ้าของหอพัก',
+        code: 'NOT_LOCKED',
+      });
+    }
+
+    // Building info
+    let building = { name: 'ที่พักของคุณ' };
+    try {
+      const cfgQ = await pool.query(
+        `SELECT value FROM app_data WHERE key='baankarn_config_v1' LIMIT 1`
+      );
+      const cfg = cfgQ.rows[0]?.value || {};
+      if (cfg.building) building = { ...building, ...cfg.building };
+    } catch { /* keep default */ }
+
+    // Room enrichment (rooms_v2 → minimal fallback) — same as the portal path.
+    let room = { id: contract.room_id };
+    if (contract.room_id) {
+      try {
+        const rv2 = await pool.query(
+          `SELECT room_code, room_type, floor, room_no,
+                  wifi_fee, view_type, has_balcony, has_parking, has_kitchen, has_ac,
+                  size_sqm, bed_count
+             FROM rooms_v2 WHERE room_code=$1 AND deleted_at IS NULL LIMIT 1`,
+          [contract.room_id]
+        );
+        if (rv2.rows.length) {
+          const r = rv2.rows[0];
+          const amenities = [];
+          if (r.has_ac)      amenities.push('แอร์');
+          if (r.has_balcony) amenities.push('ระเบียง');
+          if (r.has_kitchen) amenities.push('ห้องครัว');
+          if (r.has_parking) amenities.push('ที่จอดรถ');
+          room = {
+            id: r.room_code, type: r.room_type, floor: r.floor, roomNo: r.room_no,
+            size: r.size_sqm, bedCount: r.bed_count, view: r.view_type,
+            amenities, wifiFee: Number(r.wifi_fee || 0),
+          };
+        }
+      } catch (err) {
+        if (err.code !== '42P01') console.warn('[fill contract pdf] rooms_v2:', err.message);
+      }
+    }
+
+    // Template — the locked signing snapshot wins (the PDF must reflect what
+    // the tenant agreed to), then the bound template, then the default.
+    let template = contract.terms_template_snapshot || null;
+    if (!template && contract.template_id) {
+      try {
+        const t = await pool.query(
+          `SELECT mode, clauses, sections, variables FROM contract_templates
+            WHERE id=$1 AND deleted_at IS NULL AND enabled=TRUE LIMIT 1`,
+          [contract.template_id]
+        );
+        if (t.rows.length) template = t.rows[0];
+      } catch { /* fall through */ }
+    }
+    if (!template) {
+      try {
+        const t = await pool.query(
+          `SELECT mode, clauses, sections, variables FROM contract_templates
+            WHERE is_default=TRUE AND deleted_at IS NULL AND enabled=TRUE LIMIT 1`
+        );
+        if (t.rows.length) template = t.rows[0];
+      } catch { /* pre-migration */ }
+    }
+
+    // Online signature embed
+    let tenantSigBuf = null;
+    if (contract.signature_image_id) {
+      try {
+        const fQ = await pool.query(
+          'SELECT * FROM file_uploads WHERE id=$1 LIMIT 1',
+          [contract.signature_image_id]
+        );
+        if (fQ.rows.length) tenantSigBuf = await storage.readFile(fQ.rows[0]);
+      } catch (err) {
+        console.warn('[fill contract pdf] sig load failed:', err.message);
+      }
+    }
+
+    // Financial terms: signing snapshot wins; live config is legacy fallback
+    // for v1 snapshots without financials.
+    let lateFeeRate = 1.5;
+    let dueDay = 15;
+    try {
+      const flags = await features.load(pool);
+      if (Number.isFinite(Number(flags?.lateFee?.ratePctPerMonth))) {
+        lateFeeRate = Number(flags.lateFee.ratePctPerMonth);
+      }
+      const cfgRow = await pool.query(`SELECT value FROM app_data WHERE key='baankarn_config_v1'`);
+      const cfg = cfgRow.rows[0]?.value || {};
+      if (Number.isFinite(Number(cfg?.notify?.dueOnDay))) {
+        dueDay = Number(cfg.notify.dueOnDay);
+      }
+    } catch { /* keep defaults */ }
+    const snapFin = contract.terms_template_snapshot
+      && contract.terms_template_snapshot.financials;
+    if (snapFin) {
+      const snapDueDay = Number(snapFin.dueDay);
+      const snapLateFeeRate = Number(snapFin.lateFeeRate);
+      if (Number.isFinite(snapDueDay) && snapDueDay >= 1 && snapDueDay <= 28) {
+        dueDay = Math.floor(snapDueDay);
+      }
+      if (Number.isFinite(snapLateFeeRate) && snapLateFeeRate >= 0) {
+        lateFeeRate = snapLateFeeRate;
+      }
+    }
+
+    const contractPdf = require('./services/contractPdf');
+    const tenant = {
+      fullName: contract.tenant_name,
+      phone: contract.tenant_phone,
+      email: contract.tenant_email,
+      citizenIdMasked: contract.citizen_id_tail ? `***-***-${contract.citizen_id_tail}` : null,
+      address: contract.tenant_address || null,
+      emergencyContactName: contract.emergency_contact_name || null,
+      emergencyContactPhone: contract.emergency_contact_phone || null,
+      emergencyContactRelation: contract.emergency_contact_relation || null,
+    };
+
+    audit(req, 'contract.pdf_view', 'contract', String(contract.id), {
+      contractNo: contract.contract_no,
+      via: 'contract-fill-token',
+      invitationId: raw.id,
+      hasSignature: !!tenantSigBuf,
+      download: req.query.download === '1',
+    }, 'public').catch(() => {});
+
+    await acquirePdfSlot();
+    acquired = true;
+    const filename = `contract-${contract.contract_no || contract.id}.pdf`;
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader(
+      'Content-Disposition',
+      `${req.query.download === '1' ? 'attachment' : 'inline'}; filename="${filename}"`
+    );
+    await contractPdf.renderContractPdf(
+      {
+        contractNo: contract.contract_no,
+        startDate: contract.start_date,
+        endDate: contract.end_date,
+        monthlyRent: contract.monthly_rent,
+        deposit: contract.deposit,
+        discountPct: contract.discount_pct,
+        termMonths: contract.term_months,
+        signedAt: contract.signed_at,
+        agreedTermsVersion: contract.agreed_terms_version,
+        status: contract.status,
+      },
+      tenant, room, building,
+      {
+        termsTemplate: template,
+        signatures: { tenantBuf: tenantSigBuf },
+        lateFeeRate, dueDay,
+      },
+      res
+    );
+  } catch (err) {
+    console.error('contract-fill pdf error:', err);
+    if (!res.headersSent) {
+      const code = String(err.message || '').includes('PDF queue timeout') ? 503 : 500;
+      res.status(code).json({ error: 'internal error', code: code === 503 ? 'BUSY' : 'PDF_ERROR' });
+    } else {
+      res.end();
+    }
+  } finally {
+    if (acquired) releasePdfSlot();
+  }
+});
+
 // === Legacy single-template alias (backwards compat) =======================
 // /api/admin/contract-terms still works — it operates on the default
 // contract_templates row. New code should use /api/admin/contract-templates.

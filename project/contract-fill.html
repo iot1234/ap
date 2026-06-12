@@ -3,570 +3,899 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
+<meta name="theme-color" content="#f6f0e4"/>
+<meta name="robots" content="noindex,nofollow"/>
 <title>กรอกสัญญาเช่า</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous"/>
 <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700&family=IBM+Plex+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet"/>
-<link rel="stylesheet" href="/tenant-pages.css"/>
 <style>
-  * { box-sizing: border-box; }
-  html, body { margin: 0; padding: 0; min-height: 100%; }
-  body {
-    font-family: "IBM Plex Sans Thai", "Sora", system-ui, sans-serif;
-    background: #f5efe3;
-    color: #2c241b;
-    -webkit-font-smoothing: antialiased;
-    line-height: 1.55;
-  }
-  .wrap { max-width: 720px; margin: 0 auto; padding: 24px 16px 80px; }
-  .card { background: #fff; border: 1px solid #ece4d4; border-radius: 14px;
-          padding: 22px; margin-bottom: 16px;
-          box-shadow: 0 2px 6px -1px rgba(30,20,10,0.05); }
-  h1 { font-family: 'Sora', sans-serif; font-size: 22px; margin: 0 0 4px; }
-  h2 { font-family: 'Sora', sans-serif; font-size: 16px; margin: 0 0 14px;
-       color: #c46a3e; }
-  .muted { color: #8a7d6b; font-size: 13px; }
-  label { display: block; font-size: 12px; color: #5b4f40; margin-bottom: 4px; font-weight: 500; }
-  input, textarea, select {
-    width: 100%; padding: 10px 12px; font: inherit; font-size: 14px;
-    border: 1px solid #ece4d4; border-radius: 8px; background: #fff;
-    color: #2c241b;
-  }
-  input:focus, textarea:focus { outline: none; border-color: #c46a3e; }
-  textarea { resize: vertical; min-height: 60px; }
-  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
-  .row.single { grid-template-columns: 1fr; }
-  @media (max-width: 540px) { .row { grid-template-columns: 1fr; } }
-  .btn {
-    padding: 11px 18px; border-radius: 9px; font: inherit; font-weight: 500;
-    border: 1px solid transparent; cursor: pointer; font-size: 14px;
-  }
-  .btn-primary { background: #c46a3e; color: #fff; }
-  .btn-primary:hover { background: #a4542d; }
-  .btn-primary:disabled { background: #d8c0ad; cursor: not-allowed; }
-  .btn-ghost { background: transparent; border-color: #ece4d4; color: #5b4f40; }
-  .btn-ghost:hover { background: #faf6ee; }
-  .btn-danger { background: #c0392b; color: #fff; }
-  .step-bar { display: flex; gap: 6px; margin-bottom: 20px; }
-  .step-pill { flex: 1; padding: 8px; text-align: center; border-radius: 8px;
-               background: #ece4d4; color: #8a7d6b; font-size: 12px; font-weight: 500; }
-  .step-pill.active { background: #c46a3e; color: #fff; }
-  .step-pill.done { background: #c5e6c4; color: #2d5a2c; }
-  .alert { padding: 12px 14px; border-radius: 8px; margin-bottom: 16px;
-           font-size: 14px; line-height: 1.5; }
-  .alert-info { background: #e8f1f8; border: 1px solid #b6d2e6; color: #234c66; }
-  .alert-warn { background: #fff7e0; border: 1px solid #f1b32d; color: #6b4d10; }
-  .alert-danger { background: #ffe6e3; border: 1px solid #c0392b; color: #7a1d10; }
-  .alert-success { background: #e8f5e8; border: 1px solid #4a8b4a; color: #2d5a2c; }
-  .upload-box {
-    border: 2px dashed #ece4d4; border-radius: 10px; padding: 24px 12px;
-    text-align: center; cursor: pointer; background: #faf6ee;
-  }
-  .upload-box:hover { border-color: #c46a3e; }
-  .upload-box img { max-width: 100%; max-height: 180px; border-radius: 8px; }
-  .signature-canvas {
-    width: 100%; max-width: 600px; aspect-ratio: 3/1; min-height: 160px;
-    background: #fff; border: 2px dashed #ece4d4; border-radius: 8px;
-    cursor: crosshair; touch-action: none; display: block;
-  }
-  .info-list { list-style: none; padding: 0; margin: 0; }
-  .info-list li {
-    display: flex; justify-content: space-between; padding: 6px 0;
-    border-bottom: 1px solid #f5efe3; font-size: 14px;
-  }
-  .info-list li:last-child { border-bottom: 0; }
-  .info-list .k { color: #8a7d6b; }
-  .info-list .v { font-weight: 500; }
-  .terms-box {
-    max-height: 200px; overflow-y: auto; padding: 12px;
-    background: #faf6ee; border: 1px solid #ece4d4; border-radius: 8px;
-    font-size: 13px; line-height: 1.6;
-  }
+/* ============================================================
+   สัญญาเช่า — Tenant contract-fill flow (production)
+   Visual language ported 1:1 from the design handoff; tokens
+   deliberately match project/tenant-pages.css (cream + terracotta
+   + teal) so this page sits next to the other tenant pages.
+   ============================================================ */
+:root {
+  --bg: #f6f0e4;
+  --surface: #ffffff;
+  --surface-2: #fdf9f1;
+  --ink: #2b2218;
+  --muted: #857662;
+  --faint: #a99a84;
+  --line: #e9dfcb;
+  --line-2: #dccfb6;
+
+  --acc: #c46a3e;
+  --acc-deep: #a4542d;
+  --acc-soft: #f7e4d7;
+  --acc-ring: rgba(196, 106, 62, 0.22);
+
+  --teal: #1f7a7a;
+  --teal-soft: #e2f1ec;
+  --green: #2f8f5b;
+  --green-soft: #e3f2e7;
+  --amber: #a87718;
+  --amber-soft: #fdf3da;
+  --red: #b3473f;
+  --red-soft: #fbe7e3;
+
+  --r-sm: 10px;
+  --r: 14px;
+  --r-lg: 22px;
+
+  --shadow-card: 0 1px 2px rgba(53, 38, 23, 0.05), 0 14px 36px -26px rgba(53, 38, 23, 0.35);
+  --shadow-pop: 0 28px 64px -36px rgba(53, 38, 23, 0.45);
+
+  --font-head: "Sora", "IBM Plex Sans Thai", system-ui, sans-serif;
+  --font-body: "IBM Plex Sans Thai", "Sora", system-ui, sans-serif;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; min-height: 100%; }
+
+body {
+  font-family: var(--font-body);
+  background:
+    radial-gradient(900px 420px at 85% -120px, rgba(196, 106, 62, 0.10), transparent 70%),
+    radial-gradient(700px 380px at -10% 0%, rgba(31, 122, 122, 0.07), transparent 70%),
+    var(--bg);
+  color: var(--ink);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---------- Shell ---------- */
+.shell {
+  width: min(100% - 32px, 680px);
+  margin: 0 auto;
+  padding: 22px 0 96px;
+}
+
+/* ---------- Top bar ---------- */
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  background: rgba(246, 240, 228, 0.86);
+  border-bottom: 1px solid rgba(53, 38, 23, 0.07);
+}
+.topbar-in {
+  width: min(100% - 32px, 960px);
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 0;
+}
+.brand-mark {
+  width: 38px; height: 38px; flex: 0 0 auto;
+  border-radius: 12px;
+  background: linear-gradient(140deg, var(--acc) 0%, var(--teal) 115%);
+  box-shadow: 0 8px 18px -10px rgba(164, 84, 45, 0.7);
+  display: grid; place-items: center;
+  color: #fff; font-family: var(--font-head); font-weight: 700; font-size: 17px;
+}
+.brand-text { min-width: 0; line-height: 1.25; flex: 1; }
+.brand-name {
+  font-family: var(--font-head); font-weight: 700; font-size: 14.5px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.brand-sub { font-size: 12px; color: var(--muted); }
+.topbar-spacer { flex: 1; }
+
+.save-chip {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 6px 12px; border-radius: 999px;
+  background: var(--surface); border: 1px solid var(--line);
+  font-size: 12px; color: var(--muted); white-space: nowrap;
+}
+.save-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--green);
+}
+.save-chip.saving .save-dot { background: var(--amber); animation: pulse-dot 1s infinite; }
+.save-chip.err .save-dot { background: var(--red); }
+@keyframes pulse-dot { 50% { opacity: 0.35; } }
+
+/* ---------- Stepper ---------- */
+.stepper {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  margin: 22px 0 20px;
+  position: relative;
+}
+.step-item {
+  display: flex; flex-direction: column; align-items: center; gap: 7px;
+  position: relative;
+  color: var(--faint);
+  font-size: 12.5px; font-weight: 600;
+  text-align: center;
+}
+.step-item .step-label { white-space: nowrap; }
+.step-item::before, .step-item::after {
+  content: ""; position: absolute; top: 17px; height: 2px;
+  background: var(--line-2); width: calc(50% - 26px);
+}
+.step-item::before { left: 0; }
+.step-item::after { right: 0; }
+.step-item:first-child::before, .step-item:last-child::after { display: none; }
+.step-item.done::before, .step-item.done::after,
+.step-item.active::before { background: var(--acc); }
+
+.step-dot {
+  width: 34px; height: 34px; border-radius: 50%;
+  display: grid; place-items: center;
+  font-family: var(--font-head); font-weight: 700; font-size: 14px;
+  background: var(--surface); border: 2px solid var(--line-2);
+  color: var(--faint);
+  transition: all 0.25s ease;
+}
+.step-item.active { color: var(--ink); }
+.step-item.active .step-dot {
+  border-color: var(--acc); color: var(--acc);
+  box-shadow: 0 0 0 5px var(--acc-ring);
+}
+.step-item.done { color: var(--muted); }
+.step-item.done .step-dot {
+  background: var(--acc); border-color: var(--acc); color: #fff;
+}
+
+/* ---------- Cards ---------- */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  padding: clamp(20px, 3.5vw, 30px);
+  box-shadow: var(--shadow-card);
+  margin-bottom: 16px;
+}
+.card.card-soft { background: var(--surface-2); box-shadow: none; }
+
+.eyebrow {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-size: 11.5px; font-weight: 700; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--acc-deep);
+  margin-bottom: 8px;
+  white-space: nowrap;
+}
+.eyebrow::before {
+  content: ""; width: 18px; height: 2px; border-radius: 2px; background: var(--acc);
+}
+h1.title {
+  font-family: var(--font-head);
+  font-size: clamp(23px, 4vw, 30px);
+  font-weight: 700; line-height: 1.2;
+  margin: 0 0 6px;
+  text-wrap: pretty;
+}
+h2.section-title {
+  font-family: var(--font-head);
+  font-size: 17px; font-weight: 700;
+  margin: 0 0 4px;
+}
+.section-desc { font-size: 13.5px; color: var(--muted); margin: 0 0 16px; }
+.muted { color: var(--muted); font-size: 13px; }
+
+/* ---------- Forms ---------- */
+.field { margin-bottom: 14px; }
+.field > label {
+  display: block; font-size: 13px; font-weight: 600;
+  color: #5c4f3e; margin-bottom: 6px;
+}
+.field .req { color: var(--acc); }
+.field .hint { font-size: 12px; color: var(--faint); margin-top: 5px; }
+.field .hint.bad { color: var(--red); font-weight: 600; }
+
+input[type="text"], input[type="tel"], textarea, select {
+  width: 100%;
+  min-height: 46px;
+  padding: 11px 14px;
+  font: inherit; font-size: 14.5px;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1.5px solid var(--line-2);
+  border-radius: 12px;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+textarea { resize: vertical; min-height: 92px; line-height: 1.55; }
+input:focus, textarea:focus, select:focus {
+  outline: none;
+  border-color: var(--acc);
+  box-shadow: 0 0 0 4px var(--acc-ring);
+}
+input::placeholder, textarea::placeholder { color: #c0b29c; }
+
+.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.form-grid > .field { margin-bottom: 0; }
+@media (max-width: 560px) { .form-grid { grid-template-columns: 1fr; } }
+
+/* ---------- Buttons ---------- */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  min-height: 48px;
+  padding: 12px 22px;
+  border-radius: 13px;
+  font: inherit; font-size: 15px; font-weight: 600;
+  border: 1.5px solid transparent;
+  cursor: pointer;
+  transition: transform 0.1s ease, background 0.15s, box-shadow 0.15s;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.btn:active { transform: translateY(1px); }
+.btn:focus-visible { outline: none; box-shadow: 0 0 0 4px var(--acc-ring); }
+.btn-primary {
+  background: linear-gradient(180deg, var(--acc) 0%, var(--acc-deep) 130%);
+  color: #fff;
+  box-shadow: 0 10px 22px -12px rgba(164, 84, 45, 0.65);
+}
+.btn-primary:hover:not(:disabled) { filter: brightness(1.06); }
+.btn-primary:disabled {
+  background: #ddcdb9; color: #fffaf2;
+  box-shadow: none; cursor: not-allowed;
+}
+.btn-ghost {
+  background: var(--surface);
+  border-color: var(--line-2);
+  color: #5c4f3e;
+}
+.btn-ghost:hover:not(:disabled) { background: var(--surface-2); border-color: var(--acc); color: var(--acc-deep); }
+.btn-ghost:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-block { width: 100%; }
+.btn-sm { min-height: 38px; padding: 8px 14px; font-size: 13.5px; border-radius: 10px; }
+
+.footer-nav { display: flex; gap: 10px; margin-top: 22px; }
+.footer-nav .btn-primary { flex: 1; }
+
+/* ---------- Chips, alerts, info ---------- */
+.chip-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.chip {
+  display: inline-flex; align-items: center; gap: 7px;
+  min-height: 34px; padding: 6px 13px;
+  border-radius: 999px;
+  background: var(--teal-soft); color: var(--teal);
+  border: 1px solid rgba(31, 122, 122, 0.18);
+  font-size: 12.5px; font-weight: 600;
+  white-space: nowrap;
+}
+
+.alert {
+  display: flex; gap: 10px;
+  padding: 13px 15px; border-radius: var(--r);
+  font-size: 14px; line-height: 1.55;
+  margin-bottom: 16px;
+  border: 1px solid;
+}
+.alert-info  { background: var(--teal-soft);  border-color: rgba(31,122,122,0.25); color: #155e5e; }
+.alert-warn  { background: var(--amber-soft); border-color: rgba(168,119,24,0.3);  color: #7a5610; }
+.alert-danger{ background: var(--red-soft);   border-color: rgba(179,71,63,0.3);   color: #8c322b; }
+.alert-success{ background: var(--green-soft);border-color: rgba(47,143,91,0.3);   color: #20663f; }
+
+.info-grid { display: grid; gap: 0; }
+.info-row {
+  display: flex; justify-content: space-between; align-items: baseline; gap: 16px;
+  padding: 10px 2px;
+  border-bottom: 1px dashed var(--line);
+  font-size: 14.5px;
+}
+.info-row:last-child { border-bottom: 0; }
+.info-row .k { color: var(--muted); font-size: 13.5px; flex: 0 0 auto; white-space: nowrap; }
+.info-row .v { font-weight: 600; text-align: right; overflow-wrap: anywhere; }
+.info-row .v.acc { color: var(--acc-deep); font-family: var(--font-head); }
+
+/* ---------- Upload box ---------- */
+.upload-box {
+  border: 2px dashed var(--line-2);
+  border-radius: var(--r);
+  background: var(--surface-2);
+  min-height: 148px;
+  display: grid; place-items: center;
+  text-align: center;
+  cursor: pointer;
+  padding: 14px;
+  transition: border-color 0.15s, background 0.15s;
+  position: relative;
+  overflow: hidden;
+}
+.upload-box:hover { border-color: var(--acc); background: var(--acc-soft); }
+.upload-box:focus-visible { outline: none; border-color: var(--acc); box-shadow: 0 0 0 4px var(--acc-ring); }
+.upload-box.is-busy { pointer-events: none; opacity: 0.72; }
+.upload-box img {
+  max-width: 100%; max-height: 150px;
+  border-radius: 8px; display: block;
+}
+.upload-glyph { font-size: 26px; line-height: 1; margin-bottom: 6px; }
+.upload-ok {
+  position: absolute; top: 8px; right: 8px;
+  background: var(--green); color: #fff;
+  font-size: 11px; font-weight: 700;
+  padding: 3px 9px; border-radius: 999px;
+}
+.upload-busy-tag {
+  position: absolute; top: 8px; right: 8px;
+  background: var(--amber); color: #fff;
+  font-size: 11px; font-weight: 700;
+  padding: 3px 9px; border-radius: 999px;
+}
+
+/* ---------- Signature ---------- */
+.signature-wrap { position: relative; }
+.signature-canvas {
+  width: 100%; aspect-ratio: 3 / 1; min-height: 170px;
+  display: block;
+  background: var(--surface);
+  border: 2px dashed var(--line-2);
+  border-radius: var(--r);
+  cursor: crosshair; touch-action: none;
+}
+.signature-hint {
+  position: absolute; inset: 0;
+  display: grid; place-items: center;
+  color: #cfc1a9; font-size: 14px;
+  pointer-events: none;
+  padding: 0 14px; text-align: center;
+}
+.signature-line {
+  position: absolute; left: 12%; right: 12%; bottom: 26%;
+  border-bottom: 1.5px solid var(--line-2);
+  pointer-events: none;
+}
+
+/* ---------- Terms ---------- */
+.terms-box {
+  max-height: 220px; overflow-y: auto;
+  padding: 14px 16px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  font-size: 13.5px; line-height: 1.7;
+}
+.terms-box ol { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
+
+.consent {
+  display: flex; gap: 11px; align-items: flex-start;
+  margin-top: 14px; padding: 13px 14px;
+  border: 1.5px solid var(--line);
+  border-radius: var(--r);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+  font-size: 14px;
+}
+.consent:hover { border-color: var(--acc); }
+.consent.checked { border-color: var(--acc); background: var(--acc-soft); }
+.consent input { width: 19px; height: 19px; margin: 2px 0 0; accent-color: var(--acc); flex: 0 0 auto; }
+
+/* ---------- Review (step 3) ---------- */
+.review-group { margin-bottom: 18px; }
+.review-group-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 6px;
+}
+.review-group-head h3 {
+  margin: 0; font-size: 13px; font-weight: 700;
+  color: var(--muted); letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+.review-edit {
+  background: none; border: none; padding: 2px 4px;
+  font: inherit; font-size: 12.5px; font-weight: 600;
+  color: var(--teal); cursor: pointer; text-decoration: underline;
+}
+.review-thumbs { display: flex; gap: 10px; flex-wrap: wrap; }
+.review-thumbs img {
+  width: 96px; height: 62px; object-fit: cover;
+  border-radius: 8px; border: 1px solid var(--line);
+}
+.review-thumb-chip {
+  width: 96px; height: 62px;
+  display: grid; place-items: center;
+  border-radius: 8px; border: 1px solid var(--line);
+  background: var(--surface-2);
+  font-size: 11.5px; font-weight: 600; color: var(--green);
+  text-align: center; padding: 4px;
+}
+
+/* ---------- Status: timeline ---------- */
+.timeline { display: grid; gap: 0; margin: 6px 0; }
+.tl-item { display: grid; grid-template-columns: 38px 1fr; gap: 0 14px; }
+.tl-rail { display: flex; flex-direction: column; align-items: center; }
+.tl-dot {
+  width: 30px; height: 30px; border-radius: 50%; flex: 0 0 auto;
+  display: grid; place-items: center;
+  font-size: 14px; font-weight: 700;
+  background: var(--surface-2); border: 2px solid var(--line-2); color: var(--faint);
+  z-index: 1;
+}
+.tl-line { width: 2px; flex: 1; background: var(--line-2); min-height: 26px; }
+.tl-item.done .tl-dot { background: var(--green); border-color: var(--green); color: #fff; }
+.tl-item.done .tl-line { background: var(--green); }
+.tl-item.current .tl-dot {
+  background: var(--surface); border-color: var(--acc); color: var(--acc);
+  box-shadow: 0 0 0 5px var(--acc-ring);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .tl-item.current .tl-dot { animation: tl-pulse 1.8s ease-in-out infinite; }
+}
+@keyframes tl-pulse {
+  0%, 100% { box-shadow: 0 0 0 4px var(--acc-ring); }
+  50% { box-shadow: 0 0 0 9px rgba(196, 106, 62, 0.08); }
+}
+.tl-body { padding-bottom: 22px; }
+.tl-item:last-child .tl-body { padding-bottom: 4px; }
+.tl-item:last-child .tl-line { display: none; }
+.tl-title { font-weight: 700; font-size: 15px; }
+.tl-item.pending .tl-title { color: var(--faint); font-weight: 600; }
+.tl-meta { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+.tl-badge {
+  display: inline-block; margin-left: 8px;
+  font-size: 11px; font-weight: 700;
+  background: var(--acc-soft); color: var(--acc-deep);
+  padding: 2px 9px; border-radius: 999px;
+  vertical-align: 2px;
+}
+
+/* ---------- Status: medallion ---------- */
+.medallion-wrap { display: grid; place-items: center; padding: 6px 0 2px; }
+.medallion {
+  width: 92px; height: 92px; border-radius: 50%;
+  display: grid; place-items: center;
+  font-size: 40px; line-height: 1;
+  position: relative;
+}
+.medallion::before, .medallion::after {
+  content: ""; position: absolute; inset: 0; border-radius: 50%;
+}
+.medallion::before { inset: -14px; border: 1.5px solid; opacity: 0.25; }
+.medallion::after { inset: -28px; border: 1.5px solid; opacity: 0.12; }
+.medallion.tone-green  { background: var(--green-soft); color: var(--green); }
+.medallion.tone-green::before, .medallion.tone-green::after { border-color: var(--green); }
+.medallion.tone-amber  { background: var(--amber-soft); color: var(--amber); }
+.medallion.tone-amber::before, .medallion.tone-amber::after { border-color: var(--amber); }
+.medallion.tone-red    { background: var(--red-soft); color: var(--red); }
+.medallion.tone-red::before, .medallion.tone-red::after { border-color: var(--red); }
+.medallion.tone-neutral{ background: var(--surface-2); color: var(--faint); }
+.medallion.tone-neutral::before, .medallion.tone-neutral::after { border-color: var(--line-2); }
+.medallion.tone-acc    { background: var(--acc-soft); color: var(--acc); }
+.medallion.tone-acc::before, .medallion.tone-acc::after { border-color: var(--acc); }
+
+.medallion svg { width: 46px; height: 46px; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .pop-in { animation: pop-in 0.5s cubic-bezier(0.2, 1.4, 0.4, 1); }
+}
+@keyframes pop-in {
+  from { transform: scale(0.4); }
+}
+
+.status-center { text-align: center; }
+.status-center .title { margin-top: 14px; }
+.status-lead { color: var(--muted); font-size: 14.5px; max-width: 440px; margin: 0 auto; text-wrap: pretty; }
+
+/* ---------- Contact card ---------- */
+.contact-card {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+}
+.contact-avatar {
+  width: 46px; height: 46px; border-radius: 50%; flex: 0 0 auto;
+  background: linear-gradient(140deg, var(--acc) 0%, var(--teal) 115%);
+  display: grid; place-items: center;
+  color: #fff; font-family: var(--font-head); font-weight: 700; font-size: 18px;
+}
+.contact-body { flex: 1; min-width: 140px; line-height: 1.4; }
+.contact-name { font-weight: 700; font-size: 14.5px; }
+.contact-sub { font-size: 12.5px; color: var(--muted); }
+.contact-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* ---------- Next steps ---------- */
+.next-steps { display: grid; gap: 10px; margin-top: 4px; }
+.next-step {
+  display: flex; gap: 13px; align-items: flex-start;
+  padding: 13px 15px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+}
+.next-step-num {
+  width: 28px; height: 28px; border-radius: 50%; flex: 0 0 auto;
+  display: grid; place-items: center;
+  background: var(--acc-soft); color: var(--acc-deep);
+  font-family: var(--font-head); font-weight: 700; font-size: 13px;
+}
+.next-step-title { font-weight: 700; font-size: 14.5px; }
+.next-step-desc { font-size: 13px; color: var(--muted); margin-top: 1px; }
+
+/* ---------- Welcome hero ---------- */
+.welcome-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 200px;
+  gap: 20px;
+  align-items: center;
+}
+.welcome-mascot { justify-self: center; }
+.welcome-mascot img {
+  width: 180px; height: 170px; object-fit: contain;
+  filter: drop-shadow(0 20px 18px rgba(60, 39, 22, 0.16));
+  user-select: none; pointer-events: none;
+}
+@media (max-width: 620px) {
+  .welcome-hero { grid-template-columns: 1fr; }
+  .welcome-mascot { order: -1; }
+}
+
+/* ---------- Screen transitions ---------- */
+@media (prefers-reduced-motion: no-preference) {
+  .screen-enter { animation: screen-enter 0.35s ease; }
+}
+@keyframes screen-enter {
+  from { transform: translateY(10px); opacity: 0; }
+}
+
+/* ---------- Confetti ---------- */
+.confetti-layer {
+  position: fixed; inset: 0; pointer-events: none; z-index: 80; overflow: hidden;
+}
+.confetti-piece {
+  position: absolute; top: -16px;
+  width: 9px; height: 14px;
+  border-radius: 2px;
+  animation: confetti-fall linear forwards;
+}
+@keyframes confetti-fall {
+  to { transform: translateY(105vh) rotate(720deg); opacity: 0.7; }
+}
+
+/* ---------- Mobile ---------- */
+@media (max-width: 560px) {
+  .shell { padding-top: 16px; }
+  .stepper { margin: 18px 0 16px; }
+  .step-item { font-size: 11px; }
+  .step-item .step-label { white-space: normal; max-width: 96px; }
+  .footer-nav .btn-ghost { min-width: 110px; }
+}
 </style>
 </head>
-<body class="tenant-public-page tenant-contract-page">
-<div class="wrap" id="root">
-  <div class="card"><div class="muted">กำลังโหลด...</div></div>
+<body>
+<div id="root">
+  <main class="shell">
+    <section class="card"><div class="muted">กำลังโหลด…</div></section>
+  </main>
 </div>
+<noscript>
+  <main class="shell">
+    <section class="card">เปิดหน้านี้ไม่ได้เพราะเบราว์เซอร์ปิด JavaScript — กรุณาเปิด JavaScript แล้วโหลดหน้าใหม่</section>
+  </main>
+</noscript>
 
-<!-- React 18 + Babel standalone for in-browser JSX (matches the rest of the app) -->
-<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<!-- React 18 + Babel standalone, pinned versions (matches the rest of the app's
+     no-build-step pattern; pinning prevents a surprise CDN major-version bump). -->
+<script crossorigin="anonymous" src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+<script crossorigin="anonymous" src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js"></script>
 
 <script type="text/babel">
 'use strict';
 const { useState, useEffect, useRef, useMemo, useCallback } = React;
 
-// ============== Helpers ==============
-const apiBase = '';   // same-origin
+/* ============== Helpers ============== */
+const cx = (...a) => a.filter(Boolean).join(' ');
+
+function fmtTHB(n) {
+  return Number(n || 0).toLocaleString('th-TH', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+}
+function fmtThaiDate(s) {
+  if (!s) return '—';
+  try {
+    const d = new Date(s);
+    if (!Number.isFinite(d.getTime())) return String(s);
+    return d.toLocaleDateString('th-TH', { year: 'numeric', month: 'long', day: 'numeric' });
+  } catch { return String(s); }
+}
+function fmtThaiTime(d) {
+  try { return d.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' }); } catch { return ''; }
+}
+const digitsOnly = (v) => String(v || '').replace(/[^0-9]/g, '');
+
+// Live re-format to X-XXXX-XXXXX-XX-X, capped at 13 digits.
+function formatCitizenId(raw) {
+  const d = digitsOnly(raw).slice(0, 13);
+  const parts = [d.slice(0, 1), d.slice(1, 5), d.slice(5, 10), d.slice(10, 12), d.slice(12, 13)];
+  return parts.filter(Boolean).join('-');
+}
+
+// Thai national ID mod-11 checksum — the server validates this on submit
+// (services/thaiId), so checking client-side prevents a dead-end INCOMPLETE
+// after the tenant has already drawn their signature.
+function isValidThaiId(raw) {
+  const d = digitsOnly(raw);
+  if (d.length !== 13) return false;
+  let sum = 0;
+  for (let i = 0; i < 12; i += 1) sum += Number(d[i]) * (13 - i);
+  return (11 - (sum % 11)) % 10 === Number(d[12]);
+}
+
+// Token comes from the path /contract/fill/<token>. Never persisted anywhere
+// else (no localStorage / cookies) — it IS the credential for this page.
 const tokenFromUrl = (() => {
-  // /contract/fill/<token>
   const m = window.location.pathname.match(/\/contract\/fill\/([A-Za-z0-9_-]+)/);
   return m ? m[1] : '';
 })();
 
+const FATAL_CODES = new Set(['TOKEN_INVALID', 'REVOKED', 'EXPIRED', 'ALREADY_APPROVED']);
+
 async function api(path, opts = {}) {
-  const init = {
-    method: opts.method || 'GET',
-    headers: { 'Content-Type': 'application/json' },
-    body: opts.body != null ? JSON.stringify(opts.body) : undefined,
-  };
-  const r = await fetch(apiBase + path, init);
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 25_000);
+  let r;
+  try {
+    r = await fetch(path, {
+      method: opts.method || 'GET',
+      headers: { 'Content-Type': 'application/json' },
+      body: opts.body != null ? JSON.stringify(opts.body) : undefined,
+      signal: ctrl.signal,
+      keepalive: opts.keepalive === true,
+    });
+  } catch (e) {
+    clearTimeout(timer);
+    const err = new Error('NETWORK');
+    err.code = e && e.name === 'AbortError' ? 'TIMEOUT' : 'NETWORK';
+    throw err;
+  }
+  clearTimeout(timer);
   let j = null;
-  try { j = await r.json(); } catch {}
+  try { j = await r.json(); } catch { /* non-JSON body */ }
   if (!r.ok) {
     const err = new Error((j && j.error) || `HTTP ${r.status}`);
     err.status = r.status;
-    err.code = j && j.code;
+    err.code = (j && j.code) || (r.status === 429 ? 'RATE_LIMITED' : null);
     err.body = j;
     throw err;
   }
   return j;
 }
 
-function fmtTHB(n) {
-  return Number(n || 0).toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-}
-function fmtThaiDate(s) {
-  if (!s) return '—';
-  try {
-    const d = new Date(s);
-    return d.toLocaleDateString('th-TH', { year: 'numeric', month: 'long', day: 'numeric' });
-  } catch { return s; }
-}
-
-// Debounced auto-save (typing → save 800ms after last edit). On terminal
-// failure (link revoked / expired / approved while filling), surface
-// a banner via onFatal — without it the tenant fills the whole form, hits
-// submit, and only THEN learns the link is dead. The auto-save failing
-// is the earliest signal we have that something changed server-side.
-function useDebouncedSave(token, draft, status, onSaved, onFatal) {
-  const lastJSONRef = useRef('');
-  useEffect(() => {
-    if (status !== 'pending') return;
-    const json = JSON.stringify(draft);
-    if (json === lastJSONRef.current) return;
-    const t = setTimeout(async () => {
-      try {
-        await api(`/api/contract-fill/${token}`, { method: 'PUT', body: draft });
-        lastJSONRef.current = json;
-        onSaved && onSaved();
-      } catch (err) {
-        console.warn('auto-save failed:', err.message);
-        // Terminal codes mean the link is dead. Surface to the parent so
-        // it can show a banner and stop the tenant wasting time.
-        if (err.code === 'REVOKED' || err.code === 'EXPIRED'
-            || err.code === 'ALREADY_APPROVED' || err.code === 'TOKEN_INVALID') {
-          onFatal && onFatal(err);
-        }
-      }
-    }, 800);
-    return () => clearTimeout(t);
-  }, [token, draft, status]);
-}
-
-// Map server error codes → friendly Thai messages with the right "what
-// can the tenant do next" copy. Falls back to the raw message for codes
-// we haven't mapped yet so dev tooling still surfaces the underlying
-// reason instead of hiding it.
 function friendlyErrorText(err) {
-  const code = err && err.code;
   const map = {
     REVOKED: 'ลิงก์นี้ถูกยกเลิกโดยเจ้าของหอพัก — กรุณาติดต่อเจ้าของหอพักเพื่อขอลิงก์ใหม่',
     EXPIRED: 'ลิงก์หมดอายุแล้ว — กรุณาติดต่อเจ้าของหอพักเพื่อขอลิงก์ใหม่',
     ALREADY_APPROVED: 'สัญญาได้รับการอนุมัติแล้ว — คุณไม่ต้องดำเนินการต่อ',
     TOKEN_INVALID: 'ลิงก์นี้ใช้ไม่ได้ — กรุณาติดต่อเจ้าของหอพัก',
     NOT_EDITABLE: 'ส่งสัญญาให้ตรวจสอบแล้ว — รอเจ้าของหอพักรีวิว',
+    RATE_LIMITED: 'มีการเรียกใช้งานถี่เกินไป — กรุณารอสักครู่แล้วลองใหม่',
+    TIMEOUT: 'เชื่อมต่อช้าผิดปกติ — ตรวจอินเทอร์เน็ตแล้วลองใหม่อีกครั้ง',
+    NETWORK: 'เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ — ตรวจอินเทอร์เน็ตแล้วลองใหม่อีกครั้ง',
   };
-  return map[code] || (err && err.message) || 'เกิดข้อผิดพลาด';
+  return map[err && err.code] || (err && err.message) || 'เกิดข้อผิดพลาด';
 }
 
-// ============== Main app ==============
-function App() {
-  const [view, setView] = useState(null);    // server payload
-  const [draft, setDraft] = useState({});
-  const [step, setStep] = useState(1);        // 1..4
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState(null);
-  const [errorCode, setErrorCode] = useState(null);
-  const [savedAt, setSavedAt] = useState(null);
-  const [submitted, setSubmitted] = useState(false);
+// Thai field names for the server's INCOMPLETE `missing` list + which step
+// fixes each one, so the error sends the tenant to the right screen.
+const MISSING_FIELD_INFO = {
+  address:               { label: 'ที่อยู่ปัจจุบัน', step: 1 },
+  emergencyContactName:  { label: 'ชื่อผู้ติดต่อฉุกเฉิน', step: 1 },
+  emergencyContactPhone: { label: 'เบอร์ผู้ติดต่อฉุกเฉิน', step: 1 },
+  citizenId:             { label: 'เลขบัตรประชาชน', step: 2 },
+  citizenIdFront:        { label: 'ภาพหน้าบัตร', step: 2 },
+  citizenIdBack:         { label: 'ภาพหลังบัตร', step: 2 },
+  signature:             { label: 'ลายเซ็น', step: 3 },
+};
 
-  // Load on mount
-  useEffect(() => {
-    if (!tokenFromUrl) {
-      setError('ลิงก์ไม่ถูกต้อง');
-      setErrorCode('TOKEN_INVALID');
-      return;
-    }
-    api(`/api/contract-fill/${tokenFromUrl}`)
-      .then((d) => {
-        setView(d.view);
-        setDraft(d.view.draft || {});
-        if (d.view.status === 'submitted') setSubmitted(true);
-      })
-      .catch((err) => {
-        setError(friendlyErrorText(err));
-        setErrorCode(err.code || null);
-      });
-  }, []);
-
-  useEffect(() => {
-    const name = String(view?.building?.name || '').trim() || 'ที่พักของคุณ';
-    document.title = `กรอกสัญญาเช่า · ${name}`;
-  }, [view?.building?.name]);
-
-  // When the auto-save discovers the link is dead, abort the form.
-  const handleFatalAutoSave = (err) => {
-    setError(friendlyErrorText(err));
-    setErrorCode(err.code || null);
-  };
-
-  useDebouncedSave(tokenFromUrl, draft,
-    view ? view.status : 'pending',
-    () => setSavedAt(new Date()),
-    handleFatalAutoSave);
-
-  const fatalErrorCodes = new Set(['TOKEN_INVALID', 'REVOKED', 'EXPIRED', 'ALREADY_APPROVED']);
-  if (view && (view.status === 'submitted' || submitted || errorCode === 'NOT_EDITABLE')) {
-    return <SubmittedView view={view} />;
-  }
-
-  if (error && (!view || fatalErrorCodes.has(errorCode))) {
-    // Tailor the alert text by error code — generic "หมดอายุ/ถูกอนุมัติ/
-    // ถูกยกเลิก" was the original bug that hid which one actually happened.
-    const alertText = (() => {
-      switch (errorCode) {
-        case 'ALREADY_APPROVED':
-          return <>✅ สัญญาของคุณได้รับการอนุมัติเรียบร้อยแล้ว<br/>
-            กรุณาติดต่อเจ้าของหอพักเพื่อรับสำเนา PDF</>;
-        case 'REVOKED':
-          return <>เจ้าของหอพักได้ยกเลิกลิงก์นี้แล้ว<br/>
-            กรุณาติดต่อเจ้าของหอพักเพื่อขอลิงก์ใหม่</>;
-        case 'EXPIRED':
-          return <>ลิงก์นี้หมดอายุแล้ว<br/>
-            กรุณาติดต่อเจ้าของหอพักเพื่อขอต่ออายุหรือลิงก์ใหม่</>;
-        default:
-          return <>ลิงก์อาจหมดอายุ ถูกอนุมัติแล้ว หรือถูกยกเลิก<br/>
-            กรุณาติดต่อเจ้าของหอพักเพื่อขอลิงก์ใหม่</>;
-      }
-    })();
-    const isApproved = errorCode === 'ALREADY_APPROVED';
-    return (
-      <div className="card">
-        <h1>{isApproved ? '✅ ' : '⚠ '}{isApproved ? 'สัญญาเสร็จสมบูรณ์แล้ว' : 'ลิงก์นี้ใช้ไม่ได้'}</h1>
-        <div className="muted" style={{ marginTop: 8 }}>{error}</div>
-        <div className={`alert ${isApproved ? 'alert-success' : 'alert-info'}`} style={{ marginTop: 16 }}>
-          {alertText}
-        </div>
-      </div>
-    );
-  }
-  if (!view) {
-    return <div className="card"><div className="muted">กำลังโหลด...</div></div>;
-  }
-
-  if (view.status === 'submitted' || submitted) {
-    return <SubmittedView view={view} />;
-  }
-
-  const setField = (k, v) => setDraft((d) => ({ ...d, [k]: v }));
-  const goNext = () => setStep((s) => Math.min(4, s + 1));
-  const goBack = () => setStep((s) => Math.max(1, s - 1));
-  const showFormError = (message, code = null) => {
-    setError(message);
-    setErrorCode(code || null);
-    if (code === 'NOT_EDITABLE') setSubmitted(true);
-  };
-
-  const submit = async (draftOverride = null) => {
-    setBusy(true);
-    setError(null);
-    setErrorCode(null);
-    try {
-      const result = await api(`/api/contract-fill/${tokenFromUrl}/submit`, {
-        method: 'POST', body: draftOverride || draft,
-      });
-      // Idempotent: server returns ok:true even on already-submitted.
-      // Either way the data is captured — show SubmittedView.
-      setSubmitted(true);
-      window.scrollTo(0, 0);
-    } catch (err) {
-      // INCOMPLETE has its own structure — keep the field-specific hint.
-      // Terminal codes (REVOKED/EXPIRED/ALREADY_APPROVED) take over the
-      // whole page via the error block; setting errorCode triggers the
-      // tailored copy above.
-      if (err.code === 'INCOMPLETE' && err.body && err.body.missing) {
-        setError(err.message + ` (ขาด: ${err.body.missing.join(', ')})`);
-      } else if (err.code === 'NOT_EDITABLE') {
-        setSubmitted(true);
-      } else {
-        setError(friendlyErrorText(err));
-        setErrorCode(err.code || null);
-      }
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <>
-      <Header view={view} savedAt={savedAt} />
-      <StepBar step={step} />
-      {view.rejectionReason ? (
-        <div className="alert alert-warn">
-          <b>เจ้าของหอพักขอให้แก้ไข:</b><br/>
-          {view.rejectionReason}
-        </div>
-      ) : null}
-      {error ? <div className="alert alert-danger">{error}</div> : null}
-
-      {step === 1 ? <Step1Welcome view={view} onNext={goNext} /> : null}
-      {step === 2 ? (
-        <Step2Personal draft={draft} setField={setField}
-          onBack={goBack} onNext={goNext} />
-      ) : null}
-      {step === 3 ? (
-        <Step3Identity draft={draft} setField={setField}
-          token={tokenFromUrl} onBack={goBack} onNext={goNext}
-          onError={showFormError} />
-      ) : null}
-      {step === 4 ? (
-        <Step4Sign draft={draft} setField={setField}
-          token={tokenFromUrl}
-          view={view}
-          busy={busy}
-          onBack={goBack}
-          onSubmit={submit}
-          onError={showFormError} />
-      ) : null}
-    </>
-  );
+// Which fill step a "ขอให้แก้ไข" reason most likely points at.
+function guessFixStep(reason) {
+  const t = String(reason || '');
+  if (/ลายเซ็น|เซ็น|ลงนาม/.test(t)) return 3;
+  if (/บัตร|รูป|ภาพ|ถ่าย|id/i.test(t)) return 2;
+  return 1;
 }
 
-function Header({ view, savedAt }) {
+// Draft payload sent to PUT/submit — exactly the keys the server sanitises
+// (services/contractInvitation.sanitiseDraft). Citizen ID goes as digits.
+function draftPayload(d) {
+  return {
+    address: d.address || '',
+    emergencyContactName: d.emergencyContactName || '',
+    emergencyContactPhone: d.emergencyContactPhone || '',
+    emergencyContactRelation: d.emergencyContactRelation || '',
+    citizenId: digitsOnly(d.citizenId),
+    citizenIdImageFrontId: d.citizenIdImageFrontId || null,
+    citizenIdImageBackId: d.citizenIdImageBackId || null,
+    signatureFileId: d.signatureFileId || null,
+    agreedTermsVersion: d.agreedTermsVersion || 'tenant-fill-v1',
+  };
+}
+
+/* ============== Chrome ============== */
+function TopBar({ view, savedAt, saving, saveErr, showSave }) {
+  const name = (view && view.building && view.building.name) || 'สัญญาเช่าออนไลน์';
+  const roomId = view && view.contract && view.contract.roomId;
   return (
-    <section className="tenant-public-hero">
-      <div>
-        <div className="tenant-public-eyebrow">Contract fill</div>
-        <h1>📝 สัญญาเช่าห้องพัก</h1>
-        <div className="tenant-public-lead">
-          {view.building?.name || 'ที่พักของคุณ'} · ห้อง {view.contract.roomId || '—'}
+    <header className="topbar">
+      <div className="topbar-in">
+        <div className="brand-mark" aria-hidden="true">{String(name).trim().charAt(0) || 'บ'}</div>
+        <div className="brand-text">
+          <div className="brand-name">{name}</div>
+          <div className="brand-sub">{roomId ? `สัญญาเช่า · ห้อง ${roomId}` : 'สัญญาเช่าห้องพัก'}</div>
         </div>
-        <div className="tenant-guide-list" aria-label="ขั้นตอนกรอกสัญญา">
-          <span className="tenant-guide-chip">ตรวจข้อมูลสัญญา</span>
-          <span className="tenant-guide-chip">อัปโหลดบัตร</span>
-          <span className="tenant-guide-chip">ลงนามส่งตรวจ</span>
-        </div>
-        {savedAt ? (
-          <div className="muted" style={{ fontSize: 12, marginTop: 10 }}>
-            ✓ บันทึกอัตโนมัติเมื่อ {savedAt.toLocaleTimeString('th-TH')}
+        <div className="topbar-spacer"></div>
+        {showSave ? (
+          <div className={cx('save-chip', saving && 'saving', saveErr && 'err')} role="status">
+            <span className="save-dot"></span>
+            {saving ? 'กำลังบันทึก…'
+              : saveErr ? 'ยังไม่ได้บันทึก — จะลองใหม่'
+              : savedAt ? `บันทึกแล้ว ${fmtThaiTime(savedAt)}` : 'บันทึกอัตโนมัติ'}
           </div>
         ) : null}
       </div>
-      <img className="tenant-public-art" src="/assets/tenant/mascot-contract.png" alt="" loading="eager"/>
-    </section>
+    </header>
   );
 }
 
-function StepBar({ step }) {
-  const steps = ['ภาพรวม', 'ข้อมูลส่วนตัว', 'บัตรประชาชน', 'ลงนาม'];
+const STEP_LABELS = ['ข้อมูลส่วนตัว', 'ยืนยันตัวตน', 'ตรวจทาน & ลงนาม'];
+
+function Stepper({ step }) {
   return (
-    <div className="step-bar">
-      {steps.map((s, i) => (
-        <div key={i} className={`step-pill ${i + 1 === step ? 'active' : (i + 1 < step ? 'done' : '')}`}>
-          {i + 1 < step ? '✓' : (i + 1)}. {s}
+    <nav className="stepper" aria-label="ขั้นตอนการกรอกสัญญา">
+      {STEP_LABELS.map((label, i) => {
+        const n = i + 1;
+        const state = n < step ? 'done' : n === step ? 'active' : '';
+        return (
+          <div key={n} className={cx('step-item', state)}>
+            <div className="step-dot">{n < step ? '✓' : n}</div>
+            <div className="step-label">{label}</div>
+          </div>
+        );
+      })}
+    </nav>
+  );
+}
+
+/* ============== Primitives ============== */
+function Card({ className, children }) {
+  return <section className={cx('card', className)}>{children}</section>;
+}
+
+function SectionHead({ eyebrow, title, desc }) {
+  return (
+    <div>
+      {eyebrow ? <div className="eyebrow">{eyebrow}</div> : null}
+      {title ? <h2 className="section-title">{title}</h2> : null}
+      {desc ? <p className="section-desc">{desc}</p> : null}
+    </div>
+  );
+}
+
+function Field({ label, required, hint, hintBad, children }) {
+  return (
+    <div className="field">
+      <label>{label}{required ? <span className="req"> *</span> : null}</label>
+      {children}
+      {hint ? <div className={cx('hint', hintBad && 'bad')}>{hint}</div> : null}
+    </div>
+  );
+}
+
+function Btn({ variant = 'primary', block, sm, className, children, ...rest }) {
+  return (
+    <button type="button"
+      className={cx('btn', `btn-${variant}`, block && 'btn-block', sm && 'btn-sm', className)} {...rest}>
+      {children}
+    </button>
+  );
+}
+
+function Alert({ tone = 'info', children }) {
+  return (
+    <div className={`alert alert-${tone}`} role={tone === 'danger' ? 'alert' : 'status'}>
+      <div style={{ flex: 1 }}>{children}</div>
+    </div>
+  );
+}
+
+function InfoGrid({ items }) {
+  return (
+    <div className="info-grid">
+      {items.filter(Boolean).map(([k, v, acc], i) => (
+        <div className="info-row" key={i}>
+          <span className="k">{k}</span>
+          <span className={cx('v', acc && 'acc')}>{v}</span>
         </div>
       ))}
     </div>
   );
 }
 
-function Step1Welcome({ view, onNext }) {
+function FooterNav({ onBack, onNext, nextLabel = 'ถัดไป →', nextDisabled, busy }) {
   return (
-    <div className="card">
-      <h2>สรุปสัญญา</h2>
-      <ul className="info-list">
-        <li><span className="k">เลขที่สัญญา</span><span className="v">{view.contract.contractNo || '—'}</span></li>
-        <li><span className="k">ห้องเลขที่</span><span className="v">{view.contract.roomId || '—'}</span></li>
-        <li><span className="k">ค่าเช่ารายเดือน</span><span className="v">฿ {fmtTHB(view.contract.monthlyRent)}</span></li>
-        <li><span className="k">เงินมัดจำ</span><span className="v">฿ {fmtTHB(view.contract.deposit)}</span></li>
-        <li><span className="k">วันเริ่มเช่า</span><span className="v">{fmtThaiDate(view.contract.startDate)}</span></li>
-        {view.contract.endDate ? (
-          <li><span className="k">วันสิ้นสุด</span><span className="v">{fmtThaiDate(view.contract.endDate)}</span></li>
-        ) : null}
-        {view.contract.termMonths ? (
-          <li><span className="k">ระยะเวลา</span><span className="v">{view.contract.termMonths} เดือน</span></li>
-        ) : null}
-      </ul>
-      <div className="alert alert-info" style={{ marginTop: 16 }}>
-        ขั้นตอนต่อไปคุณจะกรอก:<br/>
-        1️⃣ ที่อยู่และผู้ติดต่อฉุกเฉิน<br/>
-        2️⃣ ถ่ายภาพบัตรประชาชน หน้าและหลัง<br/>
-        3️⃣ ลงนาม (เซ็นด้วยนิ้วบนมือถือ หรือเมาส์บนคอมฯ)<br/>
-        4️⃣ ส่งให้เจ้าของหอพักตรวจสอบ
-      </div>
-      <button className="btn btn-primary" style={{ width: '100%', marginTop: 16 }} onClick={onNext}>
-        เริ่มกรอก →
-      </button>
+    <div className="footer-nav">
+      {onBack ? <Btn variant="ghost" onClick={onBack} disabled={busy}>← ย้อนกลับ</Btn> : null}
+      <Btn onClick={onNext} disabled={nextDisabled || busy}>{busy ? 'กำลังส่ง…' : nextLabel}</Btn>
     </div>
   );
 }
 
-function Step2Personal({ draft, setField, onBack, onNext }) {
-  return (
-    <div className="card">
-      <h2>ข้อมูลส่วนตัว</h2>
-      <div className="row single">
-        <div>
-          <label>ที่อยู่ปัจจุบัน *</label>
-          <textarea rows={3} maxLength={500}
-            placeholder="เลขที่ ถนน แขวง/ตำบล เขต/อำเภอ จังหวัด รหัสไปรษณีย์"
-            value={draft.address || ''}
-            onChange={(e) => setField('address', e.target.value)} />
-        </div>
-      </div>
-      <h2 style={{ marginTop: 20 }}>ผู้ติดต่อฉุกเฉิน</h2>
-      <div className="muted" style={{ marginBottom: 12, fontSize: 12 }}>
-        บุคคลที่หอพักจะติดต่อเมื่อเกิดเหตุฉุกเฉินหรือติดต่อคุณไม่ได้
-      </div>
-      <div className="row">
-        <div>
-          <label>ชื่อ-นามสกุล *</label>
-          <input maxLength={200}
-            value={draft.emergencyContactName || ''}
-            onChange={(e) => setField('emergencyContactName', e.target.value)} />
-        </div>
-        <div>
-          <label>เบอร์โทร *</label>
-          <input maxLength={20} placeholder="0812345678"
-            value={draft.emergencyContactPhone || ''}
-            onChange={(e) => setField('emergencyContactPhone', e.target.value)} />
-        </div>
-      </div>
-      <div className="row single">
-        <div>
-          <label>ความสัมพันธ์ (ทางเลือก)</label>
-          <input maxLength={64} placeholder="แม่ / พ่อ / พี่ / เพื่อน / สามี"
-            value={draft.emergencyContactRelation || ''}
-            onChange={(e) => setField('emergencyContactRelation', e.target.value)} />
-        </div>
-      </div>
-      <div style={{ display: 'flex', gap: 8, marginTop: 20 }}>
-        <button className="btn btn-ghost" onClick={onBack}>← ย้อนกลับ</button>
-        <button className="btn btn-primary" style={{ flex: 1 }}
-          disabled={!draft.address || !draft.emergencyContactName || !draft.emergencyContactPhone}
-          onClick={onNext}>ถัดไป →</button>
-      </div>
-    </div>
-  );
-}
-
-function Step3Identity({ draft, setField, token, onBack, onNext, onError }) {
-  const upload = async (kind, file) => {
-    if (!file) return;
-    if (file.size > 1_500_000) {
-      onError('ไฟล์ใหญ่เกิน 1.5MB — ลองถ่ายใหม่ในความละเอียดต่ำลง');
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = async (ev) => {
-      try {
-        const out = await api(`/api/contract-fill/${token}/upload`, {
-          method: 'POST',
-          body: { kind, dataUrl: ev.target.result },
-        });
-        setField(
-          kind === 'front' ? 'citizenIdImageFrontId' : 'citizenIdImageBackId',
-          out.file.id
-        );
-      } catch (err) {
-        onError('อัปโหลดล้มเหลว: ' + friendlyErrorText(err), err.code || null);
-      }
-    };
-    reader.readAsDataURL(file);
-  };
-
-  return (
-    <div className="card">
-      <h2>เลขบัตรประชาชน + ภาพถ่าย</h2>
-      <div className="row single">
-        <div>
-          <label>เลขบัตรประชาชน 13 หลัก *</label>
-          <input inputMode="numeric" maxLength={17} placeholder="X-XXXX-XXXXX-XX-X"
-            value={draft.citizenId || ''}
-            onChange={(e) => setField('citizenId', e.target.value)} />
-        </div>
-      </div>
-      <div className="row">
-        <UploadBox label="หน้าบัตร *" kind="front"
-          fileId={draft.citizenIdImageFrontId}
-          onPick={(f) => upload('front', f)} />
-        <UploadBox label="หลังบัตร *" kind="back"
-          fileId={draft.citizenIdImageBackId}
-          onPick={(f) => upload('back', f)} />
-      </div>
-      <div className="alert alert-info" style={{ marginTop: 12, fontSize: 13 }}>
-        💡 ตรวจให้ภาพคมชัด มองเห็นเลขบัตรครบทุกหลัก ไฟล์ละไม่เกิน 1.5MB
-      </div>
-      <div style={{ display: 'flex', gap: 8, marginTop: 20 }}>
-        <button className="btn btn-ghost" onClick={onBack}>← ย้อนกลับ</button>
-        <button className="btn btn-primary" style={{ flex: 1 }}
-          disabled={!draft.citizenIdImageFrontId || !draft.citizenIdImageBackId
-                    || !draft.citizenId || draft.citizenId.replace(/[^0-9]/g, '').length !== 13}
-          onClick={onNext}>ถัดไป →</button>
-      </div>
-    </div>
-  );
-}
-
-function UploadBox({ label, kind, fileId, onPick }) {
+/* ============== Upload box (wired to the real upload endpoint) ============== */
+function UploadBox({ label, required, preview, attached, busy, errText, onPickFile }) {
   const inputRef = useRef(null);
-  const [preview, setPreview] = useState(null);
+  const open = () => { if (!busy && inputRef.current) inputRef.current.click(); };
   const onFile = (e) => {
     const f = e.target.files && e.target.files[0];
-    if (!f) return;
-    const reader = new FileReader();
-    reader.onload = (ev) => setPreview(ev.target.result);
-    reader.readAsDataURL(f);
-    onPick(f);
+    e.target.value = '';   // allow re-picking the same file after a failure
+    if (f) onPickFile(f);
   };
   return (
-    <div>
-      <label>{label}</label>
-      <div className="upload-box" onClick={() => inputRef.current && inputRef.current.click()}>
+    <div className="field">
+      <label>{label}{required ? <span className="req"> *</span> : null}</label>
+      <div className={cx('upload-box', busy && 'is-busy')} onClick={open}
+        role="button" tabIndex={0} aria-label={label}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } }}>
         {preview ? (
-          <img src={preview} alt={label} />
-        ) : fileId ? (
-          <div>✓ อัปโหลดแล้ว · กดเพื่อเปลี่ยน</div>
+          <>
+            <img src={preview} alt={label} />
+            {busy
+              ? <span className="upload-busy-tag">กำลังอัปโหลด…</span>
+              : <span className="upload-ok">✓ แนบแล้ว</span>}
+          </>
+        ) : attached ? (
+          <div>
+            <div className="upload-glyph">🪪</div>
+            <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--green)' }}>✓ แนบไว้แล้วจากครั้งก่อน</div>
+            <div className="muted" style={{ fontSize: 12 }}>กดเพื่อถ่าย / เลือกรูปใหม่แทนที่</div>
+          </div>
         ) : (
-          <>📷<br/><span className="muted">กดเพื่อถ่าย / เลือกรูป</span></>
+          <div>
+            <div className="upload-glyph">📷</div>
+            <div style={{ fontSize: 13.5, fontWeight: 600, color: '#5c4f3e' }}>
+              {busy ? 'กำลังอัปโหลด…' : 'กดเพื่อถ่าย / เลือกรูป'}
+            </div>
+            <div className="muted" style={{ fontSize: 12 }}>JPG, PNG, WebP ไม่เกิน 1.5MB</div>
+          </div>
         )}
-        <input ref={inputRef} type="file"
-          accept="image/jpeg,image/png,image/webp" capture="environment"
-          style={{ display: 'none' }} onChange={onFile} />
+        <input ref={inputRef} type="file" accept="image/jpeg,image/png,image/webp"
+          capture="environment" style={{ display: 'none' }} onChange={onFile} />
       </div>
+      {errText ? <div className="hint bad">{errText}</div> : null}
     </div>
   );
 }
 
-function Step4Sign({ draft, setField, token, view, busy, onBack, onSubmit, onError }) {
+/* ============== Signature pad ============== */
+function SignaturePad({ onInkChange, padRef }) {
   const canvasRef = useRef(null);
   const [hasInk, setHasInk] = useState(false);
-  const [agreed, setAgreed] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
 
-  // Canvas drawing setup
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    canvas.width = 600; canvas.height = 200;
+    canvas.width = 660; canvas.height = 220;
     const ctx = canvas.getContext('2d');
+    // White background (not transparent) so the exported PNG renders the
+    // same on the contract PDF regardless of what it's composited onto.
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.strokeStyle = '#1a1208';
-    ctx.lineWidth = 2.5; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    ctx.strokeStyle = '#241b13';
+    ctx.lineWidth = 2.6; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
     let drawing = false, lastX = 0, lastY = 0;
     const pos = (e) => {
       const rect = canvas.getBoundingClientRect();
@@ -588,7 +917,7 @@ function Step4Sign({ draft, setField, token, view, busy, onBack, onSubmit, onErr
     const end = () => { drawing = false; };
     canvas.addEventListener('mousedown', start);
     canvas.addEventListener('mousemove', move);
-    canvas.addEventListener('mouseup', end);
+    window.addEventListener('mouseup', end);
     canvas.addEventListener('mouseleave', end);
     canvas.addEventListener('touchstart', start, { passive: false });
     canvas.addEventListener('touchmove', move, { passive: false });
@@ -596,7 +925,7 @@ function Step4Sign({ draft, setField, token, view, busy, onBack, onSubmit, onErr
     return () => {
       canvas.removeEventListener('mousedown', start);
       canvas.removeEventListener('mousemove', move);
-      canvas.removeEventListener('mouseup', end);
+      window.removeEventListener('mouseup', end);
       canvas.removeEventListener('mouseleave', end);
       canvas.removeEventListener('touchstart', start);
       canvas.removeEventListener('touchmove', move);
@@ -604,122 +933,952 @@ function Step4Sign({ draft, setField, token, view, busy, onBack, onSubmit, onErr
     };
   }, []);
 
-  const clearCanvas = () => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    setHasInk(false);
-  };
+  useEffect(() => { if (onInkChange) onInkChange(hasInk); }, [hasInk]);
 
-  const saveSignature = async () => {
-    const canvas = canvasRef.current;
-    if (!canvas || !hasInk) return null;
-    const dataUrl = canvas.toDataURL('image/png');
-    try {
-      const out = await api(`/api/contract-fill/${token}/upload`, {
-        method: 'POST',
-        body: { kind: 'signature', dataUrl },
-      });
-      setField('signatureFileId', out.file.id);
-      return out.file.id;
-    } catch (err) {
-      onError('บันทึกลายเซ็นล้มเหลว: ' + friendlyErrorText(err), err.code || null);
-      return null;
-    }
-  };
-
-  const submitWithSignature = async () => {
-    if (busy || submitting) return;
-    if (!agreed) {
-      onError('กรุณาติ๊กยืนยันการอ่านสัญญาก่อน');
-      return;
-    }
-    if (!hasInk && !draft.signatureFileId) {
-      onError('กรุณาเซ็นชื่อก่อน');
-      return;
-    }
-    setSubmitting(true);
-    try {
-      let sigId = draft.signatureFileId;
-      if (hasInk) {
-        sigId = await saveSignature();
-        if (!sigId) return;
-      }
-      await onSubmit({
-        ...draft,
-        signatureFileId: sigId,
-        agreedTermsVersion: draft.agreedTermsVersion || 'tenant-fill-v1',
-      });
-    } finally {
-      setSubmitting(false);
-    }
-  };
+  useEffect(() => {
+    if (!padRef) return;
+    padRef.current = {
+      clear() {
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        setHasInk(false);
+      },
+      toDataURL() {
+        return hasInk && canvasRef.current ? canvasRef.current.toDataURL('image/png') : null;
+      },
+    };
+  }, [hasInk, padRef]);
 
   return (
-    <div className="card">
-      <h2>ลงนาม</h2>
-      <div className="muted" style={{ marginBottom: 12, fontSize: 13 }}>
-        เซ็นด้วยนิ้วบนมือถือ หรือเมาส์บนคอมพิวเตอร์
-      </div>
-      <canvas ref={canvasRef} className="signature-canvas" />
-      <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 8 }}>
-        <button className="btn btn-ghost" onClick={clearCanvas} disabled={!hasInk}>
-          ล้าง
-        </button>
-      </div>
+    <div className="signature-wrap">
+      <canvas ref={canvasRef} className="signature-canvas" aria-label="พื้นที่ลงลายมือชื่อ"></canvas>
+      <div className="signature-line"></div>
+      {!hasInk ? <div className="signature-hint">✍️ เซ็นด้วยนิ้วบนมือถือ หรือเมาส์บนคอมพิวเตอร์</div> : null}
+    </div>
+  );
+}
 
-      <div style={{ marginTop: 20 }}>
-        <h2>ข้อตกลงและกฎข้อบังคับ</h2>
-        <div className="terms-box">
-          1. ผู้เช่าตกลงเช่าห้องพักตามรายละเอียดในสัญญาฉบับนี้<br/>
-          2. ค่าเช่ารายเดือน {fmtTHB(view.contract.monthlyRent)} บาท
-             ชำระภายในวันที่ {view.contract.dueDay || 15} ของทุกเดือน หากชำระล่าช้าจะคิดค่าปรับ {view.contract.lateFeeRate != null ? view.contract.lateFeeRate : 1.5}% ต่อเดือนของยอดค้างชำระ<br/>
-          3. ผู้เช่าวางเงินมัดจำ {fmtTHB(view.contract.deposit)} บาท<br/>
-          4. ผู้เช่าใช้ห้องพักเพื่ออยู่อาศัย ห้ามใช้ประกอบกิจการผิดกฎหมาย
-             ห้ามดัดแปลงโครงสร้าง ห้ามสูบบุหรี่ในห้อง<br/>
-          5. รายละเอียดข้อบังคับเพิ่มเติมจะปรากฏในไฟล์ PDF เต็มที่
-             เจ้าของหอพักจะมอบให้หลังการอนุมัติ
+/* ============== Status pieces ============== */
+function Medallion({ tone = 'green', children, pop }) {
+  return (
+    <div className="medallion-wrap">
+      <div className={cx('medallion', `tone-${tone}`, pop && 'pop-in')}>{children}</div>
+    </div>
+  );
+}
+
+function CheckGlyph() {
+  return (
+    <svg viewBox="0 0 48 48" fill="none" aria-hidden="true">
+      <path d="M10 25 L20 35 L38 14" stroke="currentColor" strokeWidth="5"
+        strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function StatusTimeline({ stage, submittedAt }) {
+  const items = [
+    {
+      title: 'ส่งข้อมูลเรียบร้อย',
+      meta: submittedAt
+        ? `เมื่อ ${fmtThaiDate(submittedAt)} · ${fmtThaiTime(new Date(submittedAt))} น.`
+        : 'ระบบได้รับข้อมูลของคุณแล้ว',
+    },
+    {
+      title: 'เจ้าของหอพักกำลังตรวจสอบ',
+      meta: 'โดยทั่วไปใช้เวลาไม่เกิน 24 ชั่วโมง',
+      badge: 'ขั้นตอนปัจจุบัน',
+    },
+    {
+      title: 'อนุมัติสัญญา',
+      meta: 'คุณจะได้รับการแจ้งเตือนทาง LINE / SMS',
+    },
+  ];
+  return (
+    <div className="timeline">
+      {items.map((it, i) => {
+        const n = i + 1;
+        const state = n < stage ? 'done' : n === stage ? 'current' : 'pending';
+        return (
+          <div key={i} className={cx('tl-item', state)}>
+            <div className="tl-rail">
+              <div className="tl-dot">{n < stage ? '✓' : n}</div>
+              <div className="tl-line"></div>
+            </div>
+            <div className="tl-body">
+              <div className="tl-title">
+                {it.title}
+                {state === 'current' && it.badge ? <span className="tl-badge">{it.badge}</span> : null}
+              </div>
+              <div className="tl-meta">{it.meta}</div>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// The real payload exposes building { name, address, phone } only (no owner
+// name / LINE id), so the contact card degrades gracefully per field.
+function ContactCard({ building, title }) {
+  const name = building && building.name;
+  const phone = building && building.phone ? String(building.phone) : '';
+  const phoneHref = phone.replace(/[^0-9+]/g, '');
+  return (
+    <Card className="card-soft">
+      <div className="contact-card">
+        <div className="contact-avatar" aria-hidden="true">{(name || 'บ').trim().charAt(0)}</div>
+        <div className="contact-body">
+          <div className="contact-name">{title || 'ติดต่อเจ้าของหอพัก'}</div>
+          <div className="contact-sub">
+            {name ? `${name} · ` : ''}ติดต่อผ่านช่องทางที่คุณได้รับลิงก์นี้ (LINE / โทร)
+          </div>
         </div>
-        <label style={{ display: 'flex', gap: 8, marginTop: 12, cursor: 'pointer' }}>
-          <input type="checkbox" checked={agreed} onChange={(e) => setAgreed(e.target.checked)} />
-          <span style={{ fontSize: 14 }}>
-            ข้าพเจ้าได้อ่านและเข้าใจข้อตกลงและกฎข้อบังคับของหอพักโดยตลอดแล้ว
-            และยินยอมปฏิบัติตามทุกประการ
-          </span>
-        </label>
+        {phone && phoneHref ? (
+          <div className="contact-actions">
+            <a className="btn btn-ghost btn-sm" href={`tel:${phoneHref}`}>☎ {phone}</a>
+          </div>
+        ) : null}
       </div>
+    </Card>
+  );
+}
 
-      <div style={{ display: 'flex', gap: 8, marginTop: 20 }}>
-        <button className="btn btn-ghost" onClick={onBack} disabled={busy || submitting}>← ย้อนกลับ</button>
-        <button className="btn btn-primary" style={{ flex: 1 }}
-          disabled={busy || submitting || (!hasInk && !draft.signatureFileId) || !agreed}
-          onClick={submitWithSignature}>
-          {busy || submitting ? 'กำลังส่ง...' : 'ส่งให้ตรวจสอบ ✓'}
-        </button>
+function Confetti({ fire }) {
+  const [pieces, setPieces] = useState([]);
+  useEffect(() => {
+    if (!fire) return;
+    if (!window.matchMedia('(prefers-reduced-motion: no-preference)').matches) return;
+    const colors = ['#c46a3e', '#1f7a7a', '#e3b23c', '#2f8f5b', '#b3473f', '#7a5ae0'];
+    const arr = Array.from({ length: 90 }, (_, i) => ({
+      id: i,
+      left: Math.random() * 100,
+      delay: Math.random() * 0.9,
+      dur: 2.6 + Math.random() * 2.2,
+      color: colors[i % colors.length],
+      w: 6 + Math.random() * 6,
+      h: 10 + Math.random() * 8,
+    }));
+    setPieces(arr);
+    const t = setTimeout(() => setPieces([]), 6200);
+    return () => clearTimeout(t);
+  }, [fire]);
+  if (!pieces.length) return null;
+  return (
+    <div className="confetti-layer" aria-hidden="true">
+      {pieces.map((p) => (
+        <span key={p.id} className="confetti-piece" style={{
+          left: `${p.left}%`,
+          width: p.w, height: p.h,
+          background: p.color,
+          animationDuration: `${p.dur}s`,
+          animationDelay: `${p.delay}s`,
+        }}></span>
+      ))}
+    </div>
+  );
+}
+
+/* ============== Screens: welcome + fill steps ============== */
+function WelcomeScreen({ view, onStart }) {
+  const tenantName = (view.tenant && view.tenant.fullName) || 'ผู้เช่า';
+  const c = view.contract || {};
+  const [mascotOk, setMascotOk] = useState(true);
+  return (
+    <div className="screen-enter">
+      <Card>
+        <div className="welcome-hero">
+          <div>
+            <div className="eyebrow">สัญญาเช่าห้องพัก</div>
+            <h1 className="title">สวัสดีคุณ{tenantName} 👋</h1>
+            <p className="section-desc" style={{ marginBottom: 0 }}>
+              เจ้าของ{view.building?.name || 'ที่พักของคุณ'}ส่งลิงก์นี้ให้คุณ
+              เพื่อกรอกข้อมูลและลงนามสัญญาเช่า <b>ห้อง {c.roomId || '—'}</b> ทางออนไลน์
+              — ใช้เวลาประมาณ 3 นาที
+            </p>
+            <div className="chip-row">
+              <span className="chip">⏱ ประมาณ 3 นาที</span>
+              <span className="chip">🪪 เตรียมบัตรประชาชน</span>
+              <span className="chip">✍️ เซ็นบนหน้าจอได้เลย</span>
+            </div>
+          </div>
+          {mascotOk ? (
+            <div className="welcome-mascot">
+              <img src="/assets/tenant/mascot-contract.png" alt="" loading="eager"
+                onError={() => setMascotOk(false)} />
+            </div>
+          ) : null}
+        </div>
+      </Card>
+
+      <Card>
+        <SectionHead eyebrow="สรุปสัญญา" title="เงื่อนไขที่เจ้าของหอพักเตรียมไว้ให้คุณ"
+          desc="ตรวจตัวเลขให้ตรงกับที่ตกลงกันไว้ — หากไม่ตรง ติดต่อเจ้าของหอพักก่อนกรอก" />
+        <InfoGrid items={[
+          ['เลขที่สัญญา', c.contractNo || '—'],
+          ['ห้องเลขที่', c.roomId || '—'],
+          ['ค่าเช่ารายเดือน', `฿ ${fmtTHB(c.monthlyRent)}`, true],
+          Number(c.discountPct) > 0 ? ['ส่วนลดค่าเช่า', `${Number(c.discountPct)}%`] : null,
+          ['เงินมัดจำ', `฿ ${fmtTHB(c.deposit)}`, true],
+          ['วันเริ่มเช่า', fmtThaiDate(c.startDate)],
+          c.endDate ? ['วันสิ้นสุดสัญญา', fmtThaiDate(c.endDate)] : null,
+          c.termMonths ? ['ระยะเวลาเช่า', `${c.termMonths} เดือน`] : null,
+          ['ชำระค่าเช่าภายใน', `วันที่ ${c.dueDay || 15} ของทุกเดือน`],
+        ]} />
+        <Btn block style={{ marginTop: 20 }} onClick={onStart}>เริ่มกรอกข้อมูล →</Btn>
+        <p className="muted" style={{ textAlign: 'center', marginTop: 12, marginBottom: 0 }}>
+          🔒 ข้อมูลของคุณถูกเข้ารหัส และระบบบันทึกร่างให้อัตโนมัติทุกครั้งที่พิมพ์
+          {view.expiresAt ? <><br/>ลิงก์นี้ใช้ได้ถึง {fmtThaiDate(view.expiresAt)}</> : null}
+        </p>
+      </Card>
+    </div>
+  );
+}
+
+function StepPersonal({ draft, setField, onBack, onNext }) {
+  const ok = String(draft.address || '').trim()
+    && String(draft.emergencyContactName || '').trim()
+    && String(draft.emergencyContactPhone || '').trim();
+  const phoneDigits = digitsOnly(draft.emergencyContactPhone);
+  return (
+    <div className="screen-enter">
+      <Card>
+        <SectionHead eyebrow="ขั้นตอนที่ 1 จาก 3" title="ข้อมูลส่วนตัว"
+          desc="ใช้สำหรับระบุตัวตนผู้เช่าในสัญญา และติดต่อกรณีฉุกเฉิน" />
+        <Field label="ที่อยู่ปัจจุบัน (ตามทะเบียนบ้าน)" required>
+          <textarea rows={3} maxLength={500}
+            placeholder="เลขที่ ถนน แขวง/ตำบล เขต/อำเภอ จังหวัด รหัสไปรษณีย์"
+            value={draft.address || ''}
+            onChange={(e) => setField('address', e.target.value)}></textarea>
+        </Field>
+
+        <h2 className="section-title" style={{ marginTop: 22 }}>ผู้ติดต่อฉุกเฉิน</h2>
+        <p className="section-desc">บุคคลที่หอพักจะติดต่อเมื่อเกิดเหตุฉุกเฉิน หรือติดต่อคุณไม่ได้</p>
+        <div className="form-grid">
+          <Field label="ชื่อ-นามสกุล" required>
+            <input type="text" maxLength={200} autoComplete="off"
+              value={draft.emergencyContactName || ''}
+              onChange={(e) => setField('emergencyContactName', e.target.value)} />
+          </Field>
+          <Field label="เบอร์โทรศัพท์" required
+            hint={phoneDigits && phoneDigits.length < 9 ? 'เบอร์โทรสั้นผิดปกติ — ตรวจอีกครั้ง' : null}
+            hintBad={!!(phoneDigits && phoneDigits.length < 9)}>
+            <input type="tel" maxLength={20} placeholder="081-234-5678" inputMode="tel" autoComplete="off"
+              value={draft.emergencyContactPhone || ''}
+              onChange={(e) => setField('emergencyContactPhone', e.target.value)} />
+          </Field>
+        </div>
+        <Field label="ความสัมพันธ์ (ไม่บังคับ)">
+          <input type="text" maxLength={64} placeholder="เช่น มารดา / บิดา / พี่ / เพื่อน"
+            value={draft.emergencyContactRelation || ''}
+            onChange={(e) => setField('emergencyContactRelation', e.target.value)} />
+        </Field>
+        <FooterNav onBack={onBack} onNext={onNext} nextDisabled={!ok} />
+      </Card>
+    </div>
+  );
+}
+
+function StepIdentity({ draft, setField, uploads, onUpload, onBack, onNext }) {
+  const digits = digitsOnly(draft.citizenId);
+  const idComplete = digits.length === 13;
+  const idValid = idComplete && isValidThaiId(digits);
+  const ok = idValid && draft.citizenIdImageFrontId && draft.citizenIdImageBackId
+    && !uploads.front.busy && !uploads.back.busy;
+  return (
+    <div className="screen-enter">
+      <Card>
+        <SectionHead eyebrow="ขั้นตอนที่ 2 จาก 3" title="ยืนยันตัวตน"
+          desc="เลขบัตรประชาชนถูกเข้ารหัส (AES-256) ก่อนจัดเก็บ และใช้เพื่อทำสัญญาเท่านั้น" />
+        <Field label="เลขบัตรประชาชน 13 หลัก" required
+          hint={
+            digits.length > 0 && digits.length < 13 ? `กรอกแล้ว ${digits.length}/13 หลัก`
+            : idComplete && !idValid ? 'เลขบัตรไม่ถูกต้อง (ตรวจเลขหลักท้ายอีกครั้ง)'
+            : null
+          }
+          hintBad={idComplete && !idValid}>
+          <input type="text" inputMode="numeric" maxLength={17} placeholder="X-XXXX-XXXXX-XX-X"
+            autoComplete="off"
+            value={draft.citizenId || ''}
+            onChange={(e) => setField('citizenId', formatCitizenId(e.target.value))} />
+        </Field>
+        <div className="form-grid" style={{ marginTop: 6 }}>
+          <UploadBox label="ภาพถ่ายหน้าบัตร" required
+            preview={uploads.front.preview}
+            attached={!!draft.citizenIdImageFrontId}
+            busy={uploads.front.busy}
+            errText={uploads.front.err}
+            onPickFile={(f) => onUpload('front', f)} />
+          <UploadBox label="ภาพถ่ายหลังบัตร" required
+            preview={uploads.back.preview}
+            attached={!!draft.citizenIdImageBackId}
+            busy={uploads.back.busy}
+            errText={uploads.back.err}
+            onPickFile={(f) => onUpload('back', f)} />
+        </div>
+        <Alert tone="info">
+          💡 ถ่ายในที่สว่าง ให้เห็นเลขบัตรครบทุกหลัก ไม่มีแสงสะท้อน — ไฟล์ละไม่เกิน 1.5MB
+        </Alert>
+        <FooterNav onBack={onBack} onNext={onNext} nextDisabled={!ok} />
+      </Card>
+    </div>
+  );
+}
+
+function StepReviewSign({ view, draft, setField, uploads, onBack, onSubmit, busy, gotoStep, padRef, hasInk, setHasInk, agreed, setAgreed }) {
+  const c = view.contract || {};
+  const canSubmit = agreed && (hasInk || draft.signatureFileId) && !busy;
+  return (
+    <div className="screen-enter">
+      <Card>
+        <SectionHead eyebrow="ขั้นตอนที่ 3 จาก 3" title="ตรวจทานข้อมูล"
+          desc={'ตรวจอีกครั้งก่อนลงนาม — กด "แก้ไข" เพื่อย้อนกลับไปขั้นตอนนั้น'} />
+
+        <div className="review-group">
+          <div className="review-group-head">
+            <h3>สัญญาเช่า</h3>
+          </div>
+          <InfoGrid items={[
+            ['เลขที่สัญญา', c.contractNo || '—'],
+            ['ห้อง / ค่าเช่า', `${c.roomId || '—'} · ฿ ${fmtTHB(c.monthlyRent)}/เดือน`],
+            ['มัดจำ / เริ่มเช่า', `฿ ${fmtTHB(c.deposit)} · ${fmtThaiDate(c.startDate)}`],
+          ]} />
+        </div>
+
+        <div className="review-group">
+          <div className="review-group-head">
+            <h3>ข้อมูลส่วนตัว</h3>
+            <button type="button" className="review-edit" onClick={() => gotoStep(1)}>แก้ไข</button>
+          </div>
+          <InfoGrid items={[
+            ['ที่อยู่ปัจจุบัน', draft.address || '—'],
+            ['ผู้ติดต่อฉุกเฉิน', draft.emergencyContactName
+              ? `${draft.emergencyContactName} (${draft.emergencyContactRelation || 'ไม่ระบุ'}) · ${draft.emergencyContactPhone || '—'}`
+              : '—'],
+          ]} />
+        </div>
+
+        <div className="review-group">
+          <div className="review-group-head">
+            <h3>เอกสารยืนยันตัวตน</h3>
+            <button type="button" className="review-edit" onClick={() => gotoStep(2)}>แก้ไข</button>
+          </div>
+          <InfoGrid items={[['เลขบัตรประชาชน', draft.citizenId ? formatCitizenId(draft.citizenId) : '—']]} />
+          <div className="review-thumbs" style={{ marginTop: 8 }}>
+            {uploads.front.preview
+              ? <img src={uploads.front.preview} alt="หน้าบัตร" />
+              : draft.citizenIdImageFrontId ? <div className="review-thumb-chip">✓ หน้าบัตร<br/>แนบแล้ว</div> : null}
+            {uploads.back.preview
+              ? <img src={uploads.back.preview} alt="หลังบัตร" />
+              : draft.citizenIdImageBackId ? <div className="review-thumb-chip">✓ หลังบัตร<br/>แนบแล้ว</div> : null}
+          </div>
+        </div>
+      </Card>
+
+      <Card>
+        <SectionHead title="ข้อตกลงและกฎข้อบังคับ" />
+        <div className="terms-box" tabIndex={0}>
+          <ol>
+            <li>ผู้เช่าตกลงเช่าห้องพักตามรายละเอียดในสัญญาฉบับนี้</li>
+            <li>ค่าเช่ารายเดือน {fmtTHB(c.monthlyRent)} บาท ชำระภายในวันที่ {view.contract.dueDay || 15} ของทุกเดือน
+              หากชำระล่าช้าคิดค่าปรับ {view.contract.lateFeeRate != null ? view.contract.lateFeeRate : 1.5}% ต่อเดือนของยอดค้างชำระ</li>
+            <li>ผู้เช่าวางเงินมัดจำ {fmtTHB(c.deposit)} บาท คืนเมื่อสิ้นสุดสัญญาหลังหักค่าเสียหาย (ถ้ามี)</li>
+            <li>ผู้เช่าใช้ห้องพักเพื่ออยู่อาศัยเท่านั้น ห้ามประกอบกิจการผิดกฎหมาย ห้ามดัดแปลงโครงสร้าง และห้ามสูบบุหรี่ภายในห้อง</li>
+            <li>รายละเอียดข้อบังคับฉบับเต็มจะปรากฏในไฟล์ PDF ที่เจ้าของหอพักมอบให้หลังการอนุมัติ</li>
+          </ol>
+        </div>
+        <label className={cx('consent', agreed && 'checked')}>
+          <input type="checkbox" checked={agreed}
+            onChange={(e) => setAgreed(e.target.checked)} />
+          <span>ข้าพเจ้าได้อ่านและเข้าใจข้อตกลงและกฎข้อบังคับของหอพักโดยตลอดแล้ว และยินยอมปฏิบัติตามทุกประการ</span>
+        </label>
+      </Card>
+
+      <Card>
+        <SectionHead title="ลงลายมือชื่อผู้เช่า" desc="ลายเซ็นนี้จะปรากฏในสัญญาฉบับ PDF" />
+        <SignaturePad padRef={padRef} onInkChange={setHasInk} />
+        {draft.signatureFileId && !hasInk ? (
+          <p className="muted" style={{ marginTop: 8, marginBottom: 0 }}>
+            ✓ มีลายเซ็นที่บันทึกไว้แล้วจากครั้งก่อน — เซ็นใหม่ในกรอบเพื่อแทนที่ หรือส่งได้เลย
+          </p>
+        ) : null}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 10 }}>
+          <Btn variant="ghost" sm disabled={!hasInk}
+            onClick={() => padRef.current && padRef.current.clear()}>ล้างลายเซ็น</Btn>
+        </div>
+        <FooterNav onBack={onBack} onNext={onSubmit} busy={busy}
+          nextLabel="ส่งให้เจ้าของหอพักตรวจสอบ ✓" nextDisabled={!canSubmit} />
+        {!canSubmit && !busy ? (
+          <p className="muted" style={{ textAlign: 'center', marginTop: 10, marginBottom: 0 }}>
+            {!agreed ? 'ติ๊กยอมรับข้อตกลง' : 'เซ็นชื่อในกรอบ'}ก่อนจึงจะส่งได้
+          </p>
+        ) : null}
+      </Card>
+    </div>
+  );
+}
+
+/* ============== Screens: status ============== */
+function WaitingScreen({ view, draft, submittedAt }) {
+  const tenantName = (view && view.tenant && view.tenant.fullName) || 'ผู้เช่า';
+  const c = (view && view.contract) || {};
+  const attachCount = (draft.citizenIdImageFrontId ? 1 : 0) + (draft.citizenIdImageBackId ? 1 : 0);
+  return (
+    <div className="screen-enter">
+      <Card className="status-center">
+        <Medallion tone="acc" pop>⏳</Medallion>
+        <h1 className="title">ส่งสัญญาเรียบร้อยแล้ว</h1>
+        <p className="status-lead">
+          ขอบคุณคุณ{tenantName} — ข้อมูลของคุณถึงเจ้าของหอพักแล้ว
+          ระหว่างนี้ไม่ต้องทำอะไรเพิ่ม ระบบจะแจ้งเตือนทันทีที่มีความคืบหน้า
+        </p>
+      </Card>
+
+      <Card>
+        <SectionHead eyebrow="สถานะการตรวจสอบ" title="ตอนนี้อยู่ขั้นตอนไหน?" />
+        <StatusTimeline stage={2} submittedAt={submittedAt} />
+      </Card>
+
+      <Card>
+        <SectionHead eyebrow="ข้อมูลที่ส่งไป" title={`สัญญา ${c.contractNo || '—'}`} />
+        <InfoGrid items={[
+          ['ห้อง / ค่าเช่า', `${c.roomId || '—'} · ฿ ${fmtTHB(c.monthlyRent)}/เดือน`],
+          ['ผู้ติดต่อฉุกเฉิน', draft.emergencyContactName
+            ? `${draft.emergencyContactName} · ${draft.emergencyContactPhone || '—'}` : '—'],
+          ['เอกสารแนบ', `บัตรประชาชน ${attachCount} รูป · ลายเซ็น ${draft.signatureFileId ? '✓' : '—'}`],
+        ]} />
+        <Alert tone="info">
+          💡 หากเจ้าของหอพักพบจุดที่ต้องแก้ไข ลิงก์นี้จะเปิดให้แก้อีกครั้งพร้อมระบุเหตุผล
+          — เมื่ออนุมัติแล้ว สัญญาจะถูกล็อกและแก้ไขไม่ได้
+        </Alert>
+      </Card>
+
+      {view && view.building ? <ContactCard building={view.building} title="มีคำถามระหว่างรอ?" /> : null}
+    </div>
+  );
+}
+
+function SuccessScreen({ view }) {
+  const tenantName = (view && view.tenant && view.tenant.fullName) || null;
+  const c = (view && view.contract) || null;
+  return (
+    <div className="screen-enter">
+      <Confetti fire />
+      <Card className="status-center">
+        <Medallion tone="green" pop><CheckGlyph /></Medallion>
+        <h1 className="title">สัญญาเสร็จสมบูรณ์ 🎉</h1>
+        <p className="status-lead">
+          เจ้าของหอพักอนุมัติสัญญาของคุณแล้ว
+          {view && view.building && view.building.name ? ` — ยินดีต้อนรับสู่${view.building.name}` : ''}
+          {c && c.roomId ? ` ห้อง ${c.roomId}` : ''}
+          {c && c.startDate ? ` เริ่มเข้าพักได้ตั้งแต่ ${fmtThaiDate(c.startDate)}` : ''}
+        </p>
+        <div style={{ display: 'flex', gap: 10, justifyContent: 'center', flexWrap: 'wrap', marginTop: 20 }}>
+          <a className="btn btn-primary"
+            href={`/api/contract-fill/${tokenFromUrl}/pdf?download=1`}>⬇ ดาวน์โหลดสัญญา PDF</a>
+          <a className="btn btn-ghost" target="_blank" rel="noopener"
+            href={`/api/contract-fill/${tokenFromUrl}/pdf`}>เปิดดูในเบราว์เซอร์</a>
+          <a className="btn btn-ghost" href="/tenant">เข้าสู่ Tenant Portal →</a>
+        </div>
+        <div style={{ marginTop: 14, textAlign: 'left' }}>
+          <Alert tone="info">
+            📄 ไฟล์ PDF พร้อมลายเซ็นของคุณดาวน์โหลดได้จากปุ่มด้านบน — ลิงก์นี้ใช้ได้ช่วงหนึ่งหลังอนุมัติ
+            หลังจากนั้นเข้าดูได้ตลอดเวลาใน Tenant Portal (ล็อกอินด้วยเบอร์โทรของคุณ)
+          </Alert>
+        </div>
+      </Card>
+
+      {c ? (
+        <Card>
+          <SectionHead eyebrow="สรุปสัญญา" title={`สัญญา ${c.contractNo || '—'}`} />
+          <InfoGrid items={[
+            tenantName ? ['ผู้เช่า', `คุณ${tenantName}`] : null,
+            ['ห้องเลขที่', c.roomId || '—'],
+            ['ค่าเช่ารายเดือน', `฿ ${fmtTHB(c.monthlyRent)}`, true],
+            ['เงินมัดจำ', `฿ ${fmtTHB(c.deposit)}`, true],
+            c.termMonths
+              ? ['ระยะเวลาเช่า', `${c.termMonths} เดือน · เริ่ม ${fmtThaiDate(c.startDate)}`]
+              : ['วันเริ่มเช่า', fmtThaiDate(c.startDate)],
+          ]} />
+        </Card>
+      ) : null}
+
+      {c ? (
+        <Card>
+          <SectionHead eyebrow="ขั้นตอนถัดไป" title="เตรียมตัวก่อนย้ายเข้า" />
+          <div className="next-steps">
+            <div className="next-step">
+              <div className="next-step-num">1</div>
+              <div>
+                <div className="next-step-title">ชำระเงินมัดจำ ฿ {fmtTHB(c.deposit)}</div>
+                <div className="next-step-desc">ตามช่องทางที่เจ้าของหอพักแจ้ง — โดยทั่วไปผ่าน PromptPay พร้อมแนบสลิปในระบบ</div>
+              </div>
+            </div>
+            <div className="next-step">
+              <div className="next-step-num">2</div>
+              <div>
+                <div className="next-step-title">นัดรับกุญแจและย้ายเข้า</div>
+                <div className="next-step-desc">{c.startDate ? `ตั้งแต่ ${fmtThaiDate(c.startDate)} — ` : ''}นัดหมายเวลากับเจ้าของหอพักล่วงหน้า</div>
+              </div>
+            </div>
+            <div className="next-step">
+              <div className="next-step-num">3</div>
+              <div>
+                <div className="next-step-title">เข้าใช้ Tenant Portal</div>
+                <div className="next-step-desc">ดูบิลค่าเช่า อัปโหลดสลิป และแจ้งซ่อมออนไลน์ — ล็อกอินด้วยเบอร์โทรของคุณ</div>
+              </div>
+            </div>
+          </div>
+        </Card>
+      ) : null}
+
+      {view && view.building ? <ContactCard building={view.building} /> : null}
+    </div>
+  );
+}
+
+function FixBanner({ reason, onGoFix }) {
+  return (
+    <div className="alert alert-warn" role="alert">
+      <div style={{ flex: 1 }}>
+        <b>เจ้าของหอพักขอให้แก้ไขข้อมูลบางส่วน</b><br />
+        “{reason}”
+        <div style={{ marginTop: 8 }}>
+          <Btn variant="ghost" sm onClick={onGoFix}>ไปแก้ไขเลย →</Btn>
+        </div>
       </div>
     </div>
   );
 }
 
-function SubmittedView({ view }) {
+const DEAD_LINK_COPY = {
+  expired: {
+    tone: 'amber', glyph: '⏳', title: 'ลิงก์นี้หมดอายุแล้ว',
+    lead: 'เพื่อความปลอดภัย ลิงก์กรอกสัญญามีอายุจำกัด ข้อมูลที่คุณกรอกค้างไว้ยังถูกเก็บรักษาไว้ครบถ้วน',
+    note: 'ติดต่อเจ้าของหอพักเพื่อขอต่ออายุลิงก์ หรือรับลิงก์ใหม่ — กรอกต่อจากเดิมได้ทันที ไม่ต้องเริ่มใหม่',
+  },
+  revoked: {
+    tone: 'red', glyph: '✕', title: 'ลิงก์นี้ถูกยกเลิกแล้ว',
+    lead: 'เจ้าของหอพักได้ยกเลิกลิงก์นี้ อาจเป็นเพราะมีการออกลิงก์ใหม่ หรือรายละเอียดสัญญามีการเปลี่ยนแปลง',
+    note: 'ติดต่อเจ้าของหอพักเพื่อสอบถามและขอรับลิงก์ฉบับล่าสุด',
+  },
+  invalid: {
+    tone: 'neutral', glyph: '?', title: 'ไม่พบลิงก์นี้ในระบบ',
+    lead: 'ลิงก์อาจถูกพิมพ์ผิด หรือคัดลอกมาไม่ครบ ลองเปิดจากข้อความที่ได้รับอีกครั้ง',
+    note: 'หากยังเปิดไม่ได้ ติดต่อเจ้าของหอพักเพื่อขอลิงก์ใหม่',
+  },
+};
+
+function DeadLinkScreen({ kind, view }) {
+  const c = DEAD_LINK_COPY[kind] || DEAD_LINK_COPY.invalid;
   return (
-    <div className="card">
-      <h1>✅ ส่งสัญญาเรียบร้อย</h1>
-      <div className="alert alert-success" style={{ marginTop: 12 }}>
-        ระบบได้รับข้อมูลของคุณแล้ว — ขอเวลาเจ้าของหอพักตรวจสอบและอนุมัติ
-      </div>
-      <ul className="info-list" style={{ marginTop: 16 }}>
-        <li><span className="k">สัญญา</span><span className="v">{view.contract.contractNo || '—'}</span></li>
-        <li><span className="k">ห้อง</span><span className="v">{view.contract.roomId || '—'}</span></li>
-        <li><span className="k">สถานะ</span><span className="v">รอการตรวจสอบจากเจ้าของหอพัก</span></li>
-      </ul>
-      <div className="alert alert-info" style={{ marginTop: 16, fontSize: 13 }}>
-        💡 หลังจากเจ้าของหอพักอนุมัติแล้ว สัญญาจะถูก lock และคุณจะไม่สามารถแก้ไขได้
-        — ติดต่อเจ้าของหอพักหากต้องการแก้ไขใดๆ
-      </div>
+    <div className="screen-enter">
+      <Card className="status-center">
+        <Medallion tone={c.tone} pop>{c.glyph}</Medallion>
+        <h1 className="title">{c.title}</h1>
+        <p className="status-lead">{c.lead}</p>
+        <div style={{ maxWidth: 440, margin: '16px auto 0', textAlign: 'left' }}>
+          <Alert tone="info">{c.note}</Alert>
+        </div>
+      </Card>
+      <ContactCard building={view && view.building} title="ขอลิงก์ใหม่ / สอบถาม" />
     </div>
+  );
+}
+
+/* ============== Main app — state machine wired to the real API ============== */
+// phase: 'loading' | 'welcome' | 'fill' | 'waiting' | 'success' | 'dead'
+function App() {
+  const [phase, setPhase] = useState('loading');
+  const [deadKind, setDeadKind] = useState(null);       // 'expired'|'revoked'|'invalid'
+  const [view, setView] = useState(null);
+  const [step, setStep] = useState(1);
+  const [draft, setDraft] = useState({});
+  const [submittedAt, setSubmittedAt] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [savedAt, setSavedAt] = useState(null);
+  const [saveErr, setSaveErr] = useState(false);
+  const [formError, setFormError] = useState(null);
+  const [uploads, setUploads] = useState({
+    front: { preview: null, busy: false, err: null },
+    back: { preview: null, busy: false, err: null },
+  });
+
+  // Step-3 signing state lives here so step navigation doesn't lose it.
+  const padRef = useRef(null);
+  const [hasInk, setHasInk] = useState(false);
+  const [agreed, setAgreed] = useState(false);
+
+  // Latest draft snapshot for the unload flush (avoids stale closure).
+  const draftRef = useRef(draft);
+  useEffect(() => { draftRef.current = draft; }, [draft]);
+  const phaseRef = useRef(phase);
+  useEffect(() => { phaseRef.current = phase; }, [phase]);
+  const lastSavedJSONRef = useRef('');
+
+  const scrollTop = () => window.scrollTo({ top: 0 });
+  const gotoStep = (n) => { setStep(n); setFormError(null); scrollTop(); };
+
+  // Terminal server codes → which screen. Returns true when handled.
+  const routeFatal = useCallback((err) => {
+    switch (err && err.code) {
+      case 'ALREADY_APPROVED': setPhase('success'); scrollTop(); return true;
+      case 'REVOKED': setDeadKind('revoked'); setPhase('dead'); scrollTop(); return true;
+      case 'EXPIRED': setDeadKind('expired'); setPhase('dead'); scrollTop(); return true;
+      case 'TOKEN_INVALID': setDeadKind('invalid'); setPhase('dead'); scrollTop(); return true;
+      case 'NOT_EDITABLE': setPhase('waiting'); scrollTop(); return true;
+      default: return false;
+    }
+  }, []);
+
+  // Adopt a server view payload: prefill draft + decide the screen.
+  const adoptView = useCallback((v) => {
+    setView(v);
+    const d = v.draft || {};
+    setDraft({
+      ...d,
+      citizenId: d.citizenId ? formatCitizenId(d.citizenId) : (d.citizenId || ''),
+    });
+    lastSavedJSONRef.current = '';   // recompute dirty-state against fresh data
+    if (v.status === 'submitted') {
+      setPhase('waiting');
+    } else if (v.rejectionReason) {
+      // Admin requested changes (status flipped back to pending + reason).
+      setPhase('fill');
+      setStep(guessFixStep(v.rejectionReason));
+    } else {
+      setPhase('welcome');
+    }
+  }, []);
+
+  // Initial load
+  useEffect(() => {
+    if (!tokenFromUrl) {
+      setDeadKind('invalid');
+      setPhase('dead');
+      return;
+    }
+    let alive = true;
+    api(`/api/contract-fill/${tokenFromUrl}`)
+      .then((res) => { if (alive) adoptView(res.view); })
+      .catch((err) => {
+        if (!alive) return;
+        if (!routeFatal(err)) {
+          // Network/5xx on first load — no data to show; treat as invalid
+          // with a retry hint rather than a blank page.
+          setFormError(friendlyErrorText(err));
+          setDeadKind('invalid');
+          setPhase('dead');
+        }
+      });
+    return () => { alive = false; };
+  }, [adoptView, routeFatal]);
+
+  // Page title follows the building name (never put the token in the title).
+  useEffect(() => {
+    const name = String(view?.building?.name || '').trim() || 'ที่พักของคุณ';
+    document.title = `กรอกสัญญาเช่า · ${name}`;
+  }, [view]);
+
+  /* ---- Auto-save (debounced 800ms, PUT /api/contract-fill/:token) ---- */
+  const firstSaveRun = useRef(true);
+  useEffect(() => {
+    if (phase !== 'welcome' && phase !== 'fill') return;
+    if (!view || view.status !== 'pending') return;
+    const payload = draftPayload(draft);
+    const json = JSON.stringify(payload);
+    if (firstSaveRun.current) {
+      // First render after adopt: record the baseline, don't PUT untouched data.
+      firstSaveRun.current = false;
+      lastSavedJSONRef.current = json;
+      return;
+    }
+    if (json === lastSavedJSONRef.current) return;
+    setSaving(true);
+    const t = setTimeout(async () => {
+      try {
+        await api(`/api/contract-fill/${tokenFromUrl}`, { method: 'PUT', body: payload });
+        lastSavedJSONRef.current = json;
+        setSavedAt(new Date());
+        setSaveErr(false);
+      } catch (err) {
+        // Terminal failure = the link died under us — reroute immediately
+        // instead of letting the tenant keep typing into a dead form.
+        if (!routeFatal(err)) setSaveErr(true);
+      } finally {
+        setSaving(false);
+      }
+    }, 800);
+    return () => clearTimeout(t);
+  }, [draft, phase, view, routeFatal]);
+
+  // Flush unsaved edits when the tab is hidden/closed (keepalive fetch).
+  useEffect(() => {
+    const flush = () => {
+      if (phaseRef.current !== 'welcome' && phaseRef.current !== 'fill') return;
+      const payload = draftPayload(draftRef.current);
+      const json = JSON.stringify(payload);
+      if (json === lastSavedJSONRef.current) return;
+      // Mark saved only on confirmed success — if the keepalive PUT dies,
+      // the next edit / 'online' event retries instead of losing the edits.
+      api(`/api/contract-fill/${tokenFromUrl}`, { method: 'PUT', body: payload, keepalive: true })
+        .then(() => { lastSavedJSONRef.current = json; })
+        .catch(() => {});
+    };
+    const onHide = () => { if (document.visibilityState === 'hidden') flush(); };
+    document.addEventListener('visibilitychange', onHide);
+    window.addEventListener('pagehide', flush);
+    return () => {
+      document.removeEventListener('visibilitychange', onHide);
+      window.removeEventListener('pagehide', flush);
+    };
+  }, []);
+
+  // Retry a failed auto-save when connectivity returns.
+  useEffect(() => {
+    const onOnline = () => {
+      if (saveErr) {
+        lastSavedJSONRef.current = '';
+        setDraft((d) => ({ ...d }));   // re-trigger the save effect
+      }
+    };
+    window.addEventListener('online', onOnline);
+    return () => window.removeEventListener('online', onOnline);
+  }, [saveErr]);
+
+  /* ---- Waiting-phase polling: auto-advance on approve / reopen on reject ---- */
+  useEffect(() => {
+    if (phase !== 'waiting' || !tokenFromUrl) return;
+    let stopped = false;
+    const check = async () => {
+      try {
+        const res = await api(`/api/contract-fill/${tokenFromUrl}`);
+        if (stopped) return;
+        if (res.view && res.view.status === 'pending') {
+          // Admin rejected with a reason — reopen the form in fix mode.
+          adoptView(res.view);
+          scrollTop();
+        }
+      } catch (err) {
+        if (stopped) return;
+        if (err.code === 'ALREADY_APPROVED') {
+          // Keep the rich view we already have → full success screen.
+          setPhase('success');
+          scrollTop();
+        } else if (err.code === 'REVOKED') {
+          setDeadKind('revoked'); setPhase('dead'); scrollTop();
+        }
+        // Network blips / rate limits: stay silent, try again next tick.
+      }
+    };
+    const iv = setInterval(check, 30_000);
+    const onVis = () => { if (document.visibilityState === 'visible') check(); };
+    document.addEventListener('visibilitychange', onVis);
+    return () => {
+      stopped = true;
+      clearInterval(iv);
+      document.removeEventListener('visibilitychange', onVis);
+    };
+  }, [phase, adoptView]);
+
+  /* ---- Field + upload handlers ---- */
+  const setField = (k, v) => setDraft((d) => ({ ...d, [k]: v }));
+
+  const setUploadState = (kind, patch) =>
+    setUploads((u) => ({ ...u, [kind]: { ...u[kind], ...patch } }));
+
+  const handleUpload = async (kind, file) => {
+    setFormError(null);
+    setUploadState(kind, { err: null });
+    if (!/^image\/(jpeg|png|webp)$/.test(file.type || '')) {
+      setUploadState(kind, { err: 'รองรับเฉพาะไฟล์รูป JPG, PNG หรือ WebP' });
+      return;
+    }
+    if (file.size > 1_500_000) {
+      setUploadState(kind, { err: 'ไฟล์ใหญ่เกิน 1.5MB — ถ่ายใหม่หรือลดความละเอียดลง' });
+      return;
+    }
+    const dataUrl = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (ev) => resolve(ev.target.result);
+      reader.onerror = () => reject(new Error('READ_FAILED'));
+      reader.readAsDataURL(file);
+    }).catch(() => null);
+    if (!dataUrl) {
+      setUploadState(kind, { err: 'อ่านไฟล์ไม่สำเร็จ — ลองเลือกรูปอีกครั้ง' });
+      return;
+    }
+    const prevPreview = uploads[kind].preview;
+    setUploadState(kind, { preview: dataUrl, busy: true });
+    try {
+      const out = await api(`/api/contract-fill/${tokenFromUrl}/upload`, {
+        method: 'POST', body: { kind, dataUrl },
+      });
+      // The server already persisted the file id into the draft (closes the
+      // upload-then-submit-before-autosave race) — mirror it locally.
+      const key = kind === 'front' ? 'citizenIdImageFrontId' : 'citizenIdImageBackId';
+      setField(key, out.file.id);
+      setUploadState(kind, { busy: false, err: null });
+    } catch (err) {
+      setUploadState(kind, { preview: prevPreview, busy: false });
+      if (!routeFatal(err)) {
+        setUploadState(kind, {
+          err: err.code === 'RATE_LIMITED' || err.code === 'TIMEOUT' || err.code === 'NETWORK'
+            ? friendlyErrorText(err)
+            : `อัปโหลดไม่สำเร็จ: ${err.message || 'ลองใหม่อีกครั้ง'}`,
+        });
+      }
+    }
+  };
+
+  /* ---- Submit pipeline ---- */
+  const validateBeforeSubmit = () => {
+    if (!String(draft.address || '').trim()) return { msg: 'กรุณากรอกที่อยู่ปัจจุบัน', step: 1 };
+    if (!String(draft.emergencyContactName || '').trim()
+      || !String(draft.emergencyContactPhone || '').trim()) {
+      return { msg: 'กรุณากรอกข้อมูลผู้ติดต่อฉุกเฉินให้ครบ', step: 1 };
+    }
+    if (!isValidThaiId(draft.citizenId)) return { msg: 'เลขบัตรประชาชนไม่ถูกต้อง — ตรวจอีกครั้ง', step: 2 };
+    if (!draft.citizenIdImageFrontId || !draft.citizenIdImageBackId) {
+      return { msg: 'กรุณาแนบภาพบัตรประชาชนทั้งหน้าและหลัง', step: 2 };
+    }
+    if (!agreed) return { msg: 'กรุณาติ๊กยอมรับข้อตกลงก่อนส่ง', step: 3 };
+    if (!hasInk && !draft.signatureFileId) return { msg: 'กรุณาเซ็นชื่อในกรอบก่อนส่ง', step: 3 };
+    return null;
+  };
+
+  const submit = async () => {
+    if (busy) return;
+    setFormError(null);
+    const bad = validateBeforeSubmit();
+    if (bad) {
+      gotoStep(bad.step);
+      setFormError(bad.msg);   // gotoStep clears formError — set after navigating
+      return;
+    }
+    setBusy(true);
+    try {
+      // 1) Upload fresh ink (if any) — otherwise reuse the saved signature.
+      let signatureFileId = draft.signatureFileId || null;
+      if (hasInk && padRef.current) {
+        const sigDataUrl = padRef.current.toDataURL();
+        if (sigDataUrl) {
+          const out = await api(`/api/contract-fill/${tokenFromUrl}/upload`, {
+            method: 'POST', body: { kind: 'signature', dataUrl: sigDataUrl },
+          });
+          signatureFileId = out.file.id;
+          setField('signatureFileId', signatureFileId);
+        }
+      }
+      if (!signatureFileId) {
+        setFormError('บันทึกลายเซ็นไม่สำเร็จ — เซ็นใหม่แล้วลองอีกครั้ง');
+        return;
+      }
+      // 2) Submit with the final draft as a one-shot payload (the server
+      //    merges it as a last save before flipping to submitted).
+      const payload = { ...draftPayload(draft), signatureFileId };
+      await api(`/api/contract-fill/${tokenFromUrl}/submit`, { method: 'POST', body: payload });
+      setDraft((d) => ({ ...d, signatureFileId }));
+      setSubmittedAt(new Date().toISOString());
+      setPhase('waiting');
+      scrollTop();
+    } catch (err) {
+      if (err.code === 'INCOMPLETE' && err.body && Array.isArray(err.body.missing)) {
+        const infos = err.body.missing.map((k) => MISSING_FIELD_INFO[k]).filter(Boolean);
+        const labels = infos.map((i) => i.label);
+        const firstStep = infos.length ? Math.min(...infos.map((i) => i.step)) : 1;
+        setStep(firstStep);
+        scrollTop();
+        setFormError(`ข้อมูลยังไม่ครบ — ขาด: ${labels.length ? labels.join(', ') : err.body.missing.join(', ')}`);
+      } else if (err.code === 'INVALID_UPLOADS') {
+        // Server says the attached files don't belong to this invitation —
+        // wipe them and force re-upload from this page.
+        setDraft((d) => ({
+          ...d, citizenIdImageFrontId: null, citizenIdImageBackId: null, signatureFileId: null,
+        }));
+        setUploads({
+          front: { preview: null, busy: false, err: null },
+          back: { preview: null, busy: false, err: null },
+        });
+        if (padRef.current) padRef.current.clear();
+        setStep(2);
+        scrollTop();
+        setFormError('ไฟล์แนบไม่ตรงกับลิงก์สัญญานี้ — กรุณาอัปโหลดรูปบัตรและเซ็นใหม่อีกครั้ง');
+      } else if (!routeFatal(err)) {
+        setFormError(friendlyErrorText(err));
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /* ---- Render ---- */
+  const inFill = phase === 'welcome' || phase === 'fill';
+  const showSaveChip = inFill && view && view.status === 'pending';
+
+  let content = null;
+  if (phase === 'loading') {
+    content = <Card><div className="muted">กำลังโหลดข้อมูลสัญญา…</div></Card>;
+  } else if (phase === 'dead') {
+    content = <DeadLinkScreen kind={deadKind || 'invalid'} view={view} />;
+  } else if (phase === 'success') {
+    content = <SuccessScreen view={view} />;
+  } else if (phase === 'waiting') {
+    content = <WaitingScreen view={view} draft={draft} submittedAt={submittedAt} />;
+  } else if (phase === 'welcome') {
+    content = (
+      <>
+        {view.rejectionReason ? (
+          <FixBanner reason={view.rejectionReason}
+            onGoFix={() => { setPhase('fill'); gotoStep(guessFixStep(view.rejectionReason)); }} />
+        ) : null}
+        <WelcomeScreen view={view}
+          onStart={() => { setPhase('fill'); setStep(1); scrollTop(); }} />
+      </>
+    );
+  } else {
+    content = (
+      <>
+        {view.rejectionReason ? (
+          <FixBanner reason={view.rejectionReason}
+            onGoFix={() => gotoStep(guessFixStep(view.rejectionReason))} />
+        ) : null}
+        {formError ? <Alert tone="danger">{formError}</Alert> : null}
+        <Stepper step={step} />
+        {step === 1 ? (
+          <StepPersonal draft={draft} setField={setField}
+            onBack={() => { setPhase('welcome'); scrollTop(); }}
+            onNext={() => gotoStep(2)} />
+        ) : null}
+        {step === 2 ? (
+          <StepIdentity draft={draft} setField={setField}
+            uploads={uploads} onUpload={handleUpload}
+            onBack={() => gotoStep(1)} onNext={() => gotoStep(3)} />
+        ) : null}
+        {step === 3 ? (
+          <StepReviewSign view={view} draft={draft} setField={setField}
+            uploads={uploads}
+            onBack={() => gotoStep(2)} onSubmit={submit} busy={busy} gotoStep={gotoStep}
+            padRef={padRef} hasInk={hasInk} setHasInk={setHasInk}
+            agreed={agreed} setAgreed={setAgreed} />
+        ) : null}
+      </>
+    );
+  }
+
+  return (
+    <>
+      <TopBar view={view} savedAt={savedAt} saving={saving} saveErr={saveErr}
+        showSave={showSaveChip && phase === 'fill'} />
+      <main className="shell">
+        {content}
+      </main>
+    </>
   );
 }
 

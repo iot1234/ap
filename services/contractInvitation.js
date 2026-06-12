@@ -128,7 +128,7 @@ async function inspectByToken(pool, token) {
   const hash = hashToken(token);
   if (!hash) return null;
   const { rows } = await pool.query(
-    `SELECT id, status, rejection_reason, expires_at
+    `SELECT id, status, rejection_reason, expires_at, contract_id, tenant_id
        FROM contract_invitations WHERE token_hash = $1 LIMIT 1`,
     [hash]
   );

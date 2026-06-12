@@ -7346,13 +7346,17 @@ test('public contract-fill HTML page exists + has expected steps', () => {
   const fs = require('node:fs');
   const path = require('node:path');
   const html = fs.readFileSync(path.join(__dirname, '..', 'project', 'contract-fill.html'), 'utf8');
-  // Multi-step wizard
-  assert.match(html, /Step1Welcome/);
-  assert.match(html, /Step2Personal/);
-  assert.match(html, /Step3Identity/);
-  assert.match(html, /Step4Sign/);
-  // Auto-save draft
-  assert.match(html, /useDebouncedSave/);
+  // Welcome + 3-step wizard + post-submit status screens (redesigned flow)
+  assert.match(html, /WelcomeScreen/);
+  assert.match(html, /StepPersonal/);
+  assert.match(html, /StepIdentity/);
+  assert.match(html, /StepReviewSign/);
+  assert.match(html, /WaitingScreen/);
+  assert.match(html, /SuccessScreen/);
+  assert.match(html, /DeadLinkScreen/);
+  // Auto-save draft (debounced PUT + visible save chip)
+  assert.match(html, /method: 'PUT', body: payload/);
+  assert.match(html, /save-chip/);
   // Token extracted from URL path
   assert.match(html, /\\\/contract\\\/fill\\\//);
   // Submit endpoint — uses `${tokenFromUrl}` template literal in this file.
@@ -7367,42 +7371,84 @@ test('public contract-fill submit sends the just-uploaded signature id', () => {
   const fs = require('node:fs');
   const path = require('node:path');
   const html = fs.readFileSync(path.join(__dirname, '..', 'project', 'contract-fill.html'), 'utf8');
-  assert.match(html, /const submit = async \(draftOverride = null\)/,
-    'submit must accept an override draft from the signature step');
-  assert.match(html, /body: draftOverride \|\| draft/,
-    'submit must post the override draft when supplied');
-  assert.match(html, /if \(hasInk\)[\s\S]{0,120}saveSignature\(\)/,
+  assert.match(html, /if \(hasInk && padRef\.current\)/,
     'redrawing the signature must upload a fresh signature even when an old id exists');
-  assert.match(html, /signatureFileId: sigId/,
-    'submit override must carry the newly uploaded signature id');
-  assert.match(html, /agreedTermsVersion: draft\.agreedTermsVersion \|\| 'tenant-fill-v1'/,
-    'submit override must carry a durable terms version');
-  assert.match(html, /\(!hasInk && !draft\.signatureFileId\)/,
+  assert.match(html, /kind: 'signature', dataUrl: sigDataUrl/,
+    'the signature must go through the real upload endpoint');
+  assert.match(html, /signatureFileId = out\.file\.id/,
+    'the just-uploaded signature id must be captured for the submit payload');
+  assert.match(html, /\{ \.\.\.draftPayload\(draft\), signatureFileId \}/,
+    'submit must post the final draft with the fresh signature id (not rely on autosave timing)');
+  assert.match(html, /agreedTermsVersion: d\.agreedTermsVersion \|\| 'tenant-fill-v1'/,
+    'the submit payload must carry a durable terms version');
+  assert.match(html, /hasInk \|\| draft\.signatureFileId/,
     'existing saved signatures must allow submit after page reload');
-  assert.match(html, /const \[submitting, setSubmitting\] = useState\(false\)/,
-    'signature submit must use a local in-flight lock');
-  assert.match(html, /if \(busy \|\| submitting\) return/,
+  assert.match(html, /if \(busy\) return;/,
     'double taps must not start a second signature upload/submit');
-  assert.match(html, /await onSubmit\(/,
-    'signature step must wait for the final submit before unlocking');
-  assert.match(html, /disabled=\{busy \|\| submitting \|\| \(!hasInk && !draft\.signatureFileId\) \|\| !agreed\}/,
-    'submit button must stay disabled while signature submit is in flight');
-  assert.match(html, /friendlyErrorText\(err\), err\.code \|\| null/,
-    'upload errors must preserve API error codes for submitted/locked-state handling');
+  assert.match(html, /nextDisabled=\{!canSubmit\}/,
+    'the submit button must stay disabled while submit is in flight');
+  assert.match(html, /routeFatal\(err\)/,
+    'API error codes must drive the terminal screens (approved/revoked/expired/not-editable)');
 });
 
 test('public contract-fill keeps submitted state ahead of stale edit errors', () => {
   const fs = require('node:fs');
   const path = require('node:path');
   const html = fs.readFileSync(path.join(__dirname, '..', 'project', 'contract-fill.html'), 'utf8');
-  const submittedFirst = html.indexOf("view.status === 'submitted' || submitted || errorCode === 'NOT_EDITABLE'");
-  const fatalErrorBlock = html.indexOf("if (error && (!view || fatalErrorCodes.has(errorCode)))");
-  assert.ok(submittedFirst !== -1 && fatalErrorBlock > submittedFirst,
-    'submitted/NOT_EDITABLE state must render SubmittedView before the invalid-link error card');
-  assert.match(html, /fatalErrorCodes = new Set\(\['TOKEN_INVALID', 'REVOKED', 'EXPIRED', 'ALREADY_APPROVED'\]\)/,
-    'NOT_EDITABLE must not be classified as a dead-link fatal code');
-  assert.match(html, /if \(code === 'NOT_EDITABLE'\) setSubmitted\(true\)/,
-    'upload/signature NOT_EDITABLE responses must switch the UI to the submitted view');
+  assert.match(html, /case 'NOT_EDITABLE': setPhase\('waiting'\)/,
+    'NOT_EDITABLE must switch the UI to the submitted/waiting view, not a dead-link card');
+  assert.match(html, /case 'ALREADY_APPROVED': setPhase\('success'\)/,
+    'an approved contract must render the success screen, not an error card');
+  assert.match(html, /v\.status === 'submitted'[\s\S]{0,80}setPhase\('waiting'\)/,
+    'a submitted invitation must open on the waiting screen');
+  assert.match(html, /case 'REVOKED': setDeadKind\('revoked'\)/,
+    'revoked links must render the revoked dead-link screen with recovery copy');
+  assert.match(html, /case 'EXPIRED': setDeadKind\('expired'\)/,
+    'expired links must render the expired dead-link screen with recovery copy');
+});
+
+test('public contract-fill PDF: token-gated, approved-only, no ID-card appendix', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const html = fs.readFileSync(path.join(__dirname, '..', 'project', 'contract-fill.html'), 'utf8');
+  const ci = fs.readFileSync(path.join(__dirname, '..', 'services', 'contractInvitation.js'), 'utf8');
+
+  // Endpoint exists, rate-limited, and token is the only credential.
+  assert.match(server, /app\.get\('\/api\/contract-fill\/:token\/pdf', rateLimitContractFill/,
+    'tenant PDF endpoint must exist and be rate-limited');
+  const block = server.match(/app\.get\('\/api\/contract-fill\/:token\/pdf'[\s\S]+?releasePdfSlot\(\);\s*\}\s*\}\);/);
+  assert.ok(block, 'PDF handler block must be findable');
+  assert.ok(!/requireAuth|requireTenant/.test(block[0]),
+    'token link must not require admin/portal auth');
+
+  // Approved-only: a pending/submitted invitation must not leak a draft PDF,
+  // and the underlying contract must be locked (final terms).
+  assert.match(block[0], /'PDF_NOT_READY'/,
+    'non-approved invitations must get a clear not-ready error');
+  assert.match(block[0], /locked_at/,
+    'unlocked contracts must not be downloadable');
+  // The token must not become a forever-credential to a PII document.
+  assert.match(block[0], /raw\.expires_at[\s\S]{0,300}code: 'EXPIRED'/,
+    'expired approved links must refuse the PDF and point at the portal');
+  // Ownership: the token can only reach the contract it was issued for.
+  assert.match(block[0], /raw\.contract_id/,
+    'the contract must come from the invitation row, not a client-supplied id');
+  // PII hardening: no certified ID-card appendix on the token path.
+  assert.ok(!/identityDocs/.test(block[0]),
+    'token-gated PDF must not embed the certified ID-card appendix');
+
+  // inspectByToken must expose the linked contract for the gate above.
+  assert.match(ci, /contract_id, tenant_id/,
+    'inspectByToken must return contract_id');
+
+  // Success screen offers both labelled actions (download vs open-in-browser).
+  assert.match(html, /\/api\/contract-fill\/\$\{tokenFromUrl\}\/pdf\?download=1/,
+    'success screen must offer the explicit download');
+  assert.match(html, /ดาวน์โหลดสัญญา PDF/,
+    'download action must be labelled');
+  assert.match(html, /เปิดดูในเบราว์เซอร์/,
+    'open-in-browser action must be labelled');
 });
 
 test('checkOut schema declares generateClosingBill (zod must not strip the opt-out)', () => {
