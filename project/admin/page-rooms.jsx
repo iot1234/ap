@@ -594,12 +594,19 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
     const formulaRent = computeRoomRent
       ? computeRoomRent(data.type, Number(data.floor), data.view, features, config)
       : Number(data.rent);
-    const rent = Number(data.rent) || formulaRent || t.baseRent;
+    // priceMode 'formula' (default) pins the room to the central pricing —
+    // the typed rent is ignored entirely so a stale form value can never
+    // become an accidental override. Only the explicit 'custom' mode (which
+    // required a reason in the modal) records a per-room override.
+    const usingFormula = data.priceMode !== 'custom';
+    const rent = usingFormula
+      ? (formulaRent || t.baseRent)
+      : (Number(data.rent) || formulaRent || t.baseRent);
     const depositInfo = resolveRoomDeposit
       ? resolveRoomDeposit({ type: data.type }, config, rent)
       : { deposit: rent * 2 };
     const deposit = Number(depositInfo.deposit);
-    const rentIsOverride = Math.abs(Number(rent) - Number(formulaRent || 0)) >= 0.01;
+    const rentIsOverride = !usingFormula && Math.abs(Number(rent) - Number(formulaRent || 0)) >= 0.01;
     const newRoom = {
       id: data.id, floor: Number(data.floor), no: Number(data.no || 1),
       type: data.type, status: 'vacant',
@@ -610,7 +617,8 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
       view: data.view, ac: !!data.ac,
       balcony: !!data.balcony, parking: !!data.parking, kitchen: !!data.kitchen,
       rentOverride: rentIsOverride ? rent : null,
-      rentOverrideReason: rentIsOverride ? 'manual room price on create' : null,
+      rentOverrideReason: rentIsOverride
+        ? (String(data.overrideReason || '').trim() || 'ราคาพิเศษตอนสร้างห้อง') : null,
       rentOverrideAt: rentIsOverride ? new Date().toISOString() : null,
       rentOverrideBy: rentIsOverride ? 'admin-ui' : null,
       lastCleaned: window.fmtDateTH(new Date()),
@@ -647,12 +655,17 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
     const formulaRent = computeRoomRent
       ? computeRoomRent(data.type, f, data.view, features, config)
       : Number(data.rent);
-    const rent = Number(data.rent) || formulaRent || t.baseRent;
+    // Same contract as handleAddRoom: formula mode ignores the typed rent
+    // so every bulk-created room follows central pricing automatically.
+    const usingFormula = data.priceMode !== 'custom';
+    const rent = usingFormula
+      ? (formulaRent || t.baseRent)
+      : (Number(data.rent) || formulaRent || t.baseRent);
     const depositInfo = resolveRoomDeposit
       ? resolveRoomDeposit({ type: data.type }, config, rent)
       : { deposit: rent * 2 };
     const deposit = Number(depositInfo.deposit);
-    const rentIsOverride = Math.abs(Number(rent) - Number(formulaRent || 0)) >= 0.01;
+    const rentIsOverride = !usingFormula && Math.abs(Number(rent) - Number(formulaRent || 0)) >= 0.01;
     let added = 0, skipped = 0;
     setRooms(prev => {
       const next = { ...prev };
@@ -671,7 +684,8 @@ function PageRooms({ rooms, setRooms, config, addActivity, setToast }) {
           ac: !!data.ac,
           balcony: !!data.balcony, parking: !!data.parking, kitchen: !!data.kitchen,
           rentOverride: rentIsOverride ? rent : null,
-          rentOverrideReason: rentIsOverride ? 'manual room price on bulk create' : null,
+          rentOverrideReason: rentIsOverride
+            ? (String(data.overrideReason || '').trim() || 'ราคาพิเศษตอนสร้างทั้งชั้น') : null,
           rentOverrideAt: rentIsOverride ? new Date().toISOString() : null,
           rentOverrideBy: rentIsOverride ? 'admin-ui' : null,
           lastCleaned: window.fmtDateTH(new Date()),
@@ -1027,6 +1041,7 @@ function BulkAddFloorModal({ open, onClose, onAdd, existingFloors, config, setTo
     balcony: false, parking: false, kitchen: false,
   });
   const [manualRent, setManualRent] = React.useState(false);
+  const [overrideReason, setOverrideReason] = React.useState('');
   React.useEffect(() => {
     if (open) {
       setForm({
@@ -1040,6 +1055,7 @@ function BulkAddFloorModal({ open, onClose, onAdd, existingFloors, config, setTo
         balcony: false, parking: false, kitchen: false,
       });
       setManualRent(false);
+      setOverrideReason('');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
@@ -1078,6 +1094,9 @@ function BulkAddFloorModal({ open, onClose, onAdd, existingFloors, config, setTo
   const bulkIssues = [];
   if (!Number.isFinite(Number(form.rent))) bulkIssues.push('ค่าเช่าต้องเป็นตัวเลข');
   else if (Number(form.rent) > 0 && Number(form.rent) < 100) bulkIssues.push('ค่าเช่าต่ำกว่า 100 บาท ผิดปกติสำหรับการออกสัญญา/บิล');
+  if (manualRent && rentDiffersFromFormula && String(overrideReason).trim().length < 5) {
+    bulkIssues.push('ต้องระบุเหตุผลราคาพิเศษอย่างน้อย 5 ตัวอักษร (เช่น โปรโมชั่นเปิดชั้นใหม่)');
+  }
   if (tooMany) bulkIssues.push(`เลขห้องสุดท้ายเกิน 99 (${lastNo})`);
   const submit = () => {
     if (bulkIssues.length) {
@@ -1087,14 +1106,14 @@ function BulkAddFloorModal({ open, onClose, onAdd, existingFloors, config, setTo
       });
       return;
     }
-    if (rentDiffersFromFormula || floorExists) {
+    if ((manualRent && rentDiffersFromFormula) || floorExists) {
       const ok = window.confirm(
         `ตรวจสอบก่อนเพิ่มชั้น ${form.floor}\n\n` +
         `ช่วงห้อง: ${firstId} ถึง ${lastId}\n` +
-        `ราคาตามสูตร Pricing: ${fmtCurrency(formulaRent)}\n` +
-        `ราคาที่จะบันทึก: ${fmtCurrency(form.rent)}\n\n` +
-        (rentDiffersFromFormula
-          ? 'ราคาที่จะบันทึกไม่ตรงสูตร ระบบจะเก็บเป็นราคาพิเศษของห้องที่สร้างใหม่\n'
+        `ราคาตามสูตรกลาง: ${fmtCurrency(formulaRent)}\n` +
+        `ราคาที่จะบันทึก: ${fmtCurrency(manualRent ? form.rent : formulaRent)}\n\n` +
+        (manualRent && rentDiffersFromFormula
+          ? `ทุกห้องที่สร้างจะใช้ราคาพิเศษ (เหตุผล: ${String(overrideReason).trim()}) และไม่ตามสูตรกลางจนกว่าจะล้าง\n`
           : '') +
         (floorExists
           ? 'ชั้นนี้มีห้องอยู่แล้ว ห้องที่เลขซ้ำจะถูกข้าม\n'
@@ -1103,7 +1122,11 @@ function BulkAddFloorModal({ open, onClose, onAdd, existingFloors, config, setTo
       );
       if (!ok) return;
     }
-    onAdd(form);
+    onAdd({
+      ...form,
+      priceMode: manualRent ? 'custom' : 'formula',
+      overrideReason: manualRent ? String(overrideReason).trim() : null,
+    });
   };
 
   return (
@@ -1152,18 +1175,47 @@ function BulkAddFloorModal({ open, onClose, onAdd, existingFloors, config, setTo
                   options={ADMIN_VIEWS} />
         </div>
 
-        <Input label="ค่าเช่า/เดือน (ทุกห้อง)" type="number" suffix="บาท"
-               value={form.rent}
-               onChange={(v) => { setManualRent(true); update('rent', Number(v)); }}
-               error={bulkIssues.find((x) => x.includes('ค่าเช่า')) || null}
-               hint={`ราคาตามสูตร Pricing: ${fmtCurrency(formulaRent)}${rentDiffersFromFormula ? ' · ราคาที่กรอกจะเป็นราคาพิเศษของห้องที่สร้างใหม่' : ''}`} />
-        {rentDiffersFromFormula ? (
-          <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: -4 }}>
-            <Btn variant="ghost" size="sm" onClick={() => { setManualRent(false); update('rent', formulaRent); }}>
-              ใช้ราคาตามสูตร
-            </Btn>
+        <div style={{ padding: 12, background: C.surfaceAlt, borderRadius: 8 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+            <div style={{ fontSize: 12.5, fontWeight: 700, color: C.ink }}>ค่าเช่า/เดือน (ทุกห้อง)</div>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <Btn size="sm" variant={!manualRent ? 'primary' : 'ghost'}
+                   onClick={() => { setManualRent(false); setOverrideReason(''); update('rent', formulaRent); }}>
+                ตามสูตรกลาง (แนะนำ)
+              </Btn>
+              <Btn size="sm" variant={manualRent ? 'primary' : 'ghost'}
+                   onClick={() => setManualRent(true)}>
+                กำหนดราคาพิเศษ
+              </Btn>
+            </div>
           </div>
-        ) : null}
+          {!manualRent ? (
+            <>
+              <div style={{ fontSize: 22, fontWeight: 800, color: C.ink }}>
+                {fmtCurrency(formulaRent)} <span style={{ fontSize: 12, fontWeight: 400, color: C.muted }}>/เดือน/ห้อง</span>
+              </div>
+              <div style={{ fontSize: 11.5, color: C.muted, marginTop: 6 }}>
+                ทุกห้องที่สร้างจะผูกกับเมนู "ตั้งราคา" — แก้ราคากลางเมื่อไหร่ ห้องอัปเดตตามอัตโนมัติ
+              </div>
+            </>
+          ) : (
+            <>
+              <Input label="ราคาพิเศษ (ทุกห้องที่สร้าง)" type="number" suffix="บาท"
+                     value={form.rent}
+                     onChange={(v) => update('rent', Number(v))}
+                     error={bulkIssues.find((x) => x.includes('ค่าเช่า')) || null}
+                     hint={`ราคาตามสูตรกลาง: ${fmtCurrency(formulaRent)}`} />
+              <Input label="เหตุผลราคาพิเศษ (จำเป็น)"
+                     value={overrideReason}
+                     onChange={setOverrideReason}
+                     placeholder="เช่น โปรโมชั่นเปิดชั้นใหม่"
+                     error={bulkIssues.find((x) => x.includes('เหตุผลราคาพิเศษ')) || null} />
+              <div style={{ fontSize: 11.5, color: C.warningInk || C.warning, marginTop: 4, lineHeight: 1.5 }}>
+                ⚠️ ทุกห้องที่สร้างจะ "ไม่ตามสูตรกลาง" จนกว่าจะล้างราคาพิเศษ (ดู/ล้างได้ที่เมนูตั้งราคา)
+              </div>
+            </>
+          )}
+        </div>
 
         <div style={{ padding: 12, background: C.surfaceAlt, borderRadius: 8 }}>
           <div style={{ fontSize: 12, color: C.muted, marginBottom: 8 }}>
@@ -1301,6 +1353,7 @@ function AddRoomModal({ open, onClose, onAdd, existingIds, config, setToast }) {
     balcony: false, parking: false, kitchen: false,
   });
   const [manualRent, setManualRent] = React.useState(false);
+  const [overrideReason, setOverrideReason] = React.useState('');
   const [photoFiles, setPhotoFiles] = React.useState([]);
   const [uploadingPhotos, setUploadingPhotos] = React.useState(false);
   const addPhotoInputRef = React.useRef(null);
@@ -1309,6 +1362,7 @@ function AddRoomModal({ open, onClose, onAdd, existingIds, config, setToast }) {
     if (!open) return;
     setPhotoFiles([]);
     setUploadingPhotos(false);
+    setOverrideReason('');
   }, [open]);
 
   // Suggest the next-available room id based on what's ALREADY in the
@@ -1418,6 +1472,9 @@ function AddRoomModal({ open, onClose, onAdd, existingIds, config, setToast }) {
   if (!Number.isFinite(Number(form.no)) || Number(form.no) < 1 || Number(form.no) > 99) addIssues.push('ลำดับห้องต้องอยู่ระหว่าง 1-99');
   if (!Number.isFinite(Number(form.rent))) addIssues.push('ค่าเช่าต้องเป็นตัวเลข');
   else if (Number(form.rent) > 0 && Number(form.rent) < 100) addIssues.push('ค่าเช่าต่ำกว่า 100 บาท ผิดปกติสำหรับการออกสัญญา/บิล');
+  if (manualRent && rentDiffersFromFormula && String(overrideReason).trim().length < 5) {
+    addIssues.push('ต้องระบุเหตุผลราคาพิเศษอย่างน้อย 5 ตัวอักษร (เช่น ห้องชำรุด, โปรโมชั่น)');
+  }
   const addPendingPhotos = (fileList) => {
     const { accepted, issues } = splitRoomPhotoFiles(fileList, ROOM_PHOTO_MAX_COUNT - photoFiles.length);
     if (issues.length) {
@@ -1442,22 +1499,28 @@ function AddRoomModal({ open, onClose, onAdd, existingIds, config, setToast }) {
       });
       return;
     }
-    if (rentDiffersFromFormula) {
+    if (manualRent && rentDiffersFromFormula) {
       const ok = window.confirm(
         `ตรวจสอบก่อนเพิ่มห้อง ${form.id}\n\n` +
-        `ราคาตามสูตร Pricing: ${fmtCurrency(formulaRent)}\n` +
-        `ราคาที่จะบันทึก: ${fmtCurrency(form.rent)}\n\n` +
-        `ราคาที่จะบันทึกไม่ตรงสูตร ระบบจะเก็บเป็นราคาพิเศษของห้องนี้จนกว่าจะล้างราคาพิเศษ\n\n` +
+        `ราคาตามสูตรกลาง: ${fmtCurrency(formulaRent)}\n` +
+        `ราคาพิเศษที่จะบันทึก: ${fmtCurrency(form.rent)}\n` +
+        `เหตุผล: ${String(overrideReason).trim()}\n\n` +
+        `ห้องนี้จะไม่ตามสูตรกลางจนกว่าจะล้างราคาพิเศษ (ทำได้ที่เมนูตั้งราคา)\n\n` +
         `ยืนยันเพิ่มห้องหรือไม่?`
       );
       if (!ok) return;
     }
+    const payload = {
+      ...form,
+      priceMode: manualRent ? 'custom' : 'formula',
+      overrideReason: manualRent ? String(overrideReason).trim() : null,
+    };
     setUploadingPhotos(true);
     try {
       const uploadResult = photoFiles.length
         ? await uploadRoomPhotoFiles(apiFetch, form.id, photoFiles)
         : { urls: [], storageModes: [] };
-      const ok = onAdd({ ...form, photos: uploadResult.urls });
+      const ok = onAdd({ ...payload, photos: uploadResult.urls });
       if (ok !== false) {
         setPhotoFiles([]);
         if (uploadResult.urls.length) {
@@ -1470,7 +1533,7 @@ function AddRoomModal({ open, onClose, onAdd, existingIds, config, setToast }) {
     } catch (err) {
       const partialPhotos = normaliseRoomPhotos(err.uploaded || []);
       if (partialPhotos.length) {
-        const ok = onAdd({ ...form, photos: partialPhotos });
+        const ok = onAdd({ ...payload, photos: partialPhotos });
         if (ok !== false) {
           setPhotoFiles([]);
           notify && notify({
@@ -1485,7 +1548,7 @@ function AddRoomModal({ open, onClose, onAdd, existingIds, config, setToast }) {
         }
         return;
       }
-      const ok = onAdd({ ...form, photos: [] });
+      const ok = onAdd({ ...payload, photos: [] });
       if (ok !== false) {
         setPhotoFiles([]);
         notify && notify({
@@ -1542,18 +1605,63 @@ function AddRoomModal({ open, onClose, onAdd, existingIds, config, setToast }) {
                   onChange={(v) => update('view', v)}
                   options={ADMIN_VIEWS} />
         </div>
-        <Input label="ค่าเช่า/เดือน" type="number" suffix="บาท"
-               value={form.rent}
-               onChange={(v) => { setManualRent(true); update('rent', Number(v)); }}
-               error={addIssues.find((x) => x.includes('ค่าเช่า')) || null}
-               hint={`ราคาตามสูตร Pricing: ${fmtCurrency(formulaRent)}${rentDiffersFromFormula ? ' · ราคาที่กรอกจะเป็นราคาพิเศษของห้องนี้' : ''}`} />
-        {rentDiffersFromFormula ? (
-          <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: -4 }}>
-            <Btn variant="ghost" size="sm" onClick={() => { setManualRent(false); update('rent', formulaRent); }}>
-              ใช้ราคาตามสูตร
-            </Btn>
+        {/* ราคา: สูตรกลางเป็นค่าเริ่มต้น (อ่านอย่างเดียว) — ราคาพิเศษต้องเลือก
+            เองและใส่เหตุผล จะได้ไม่มี override เกิดจากการเผลอพิมพ์ทับ */}
+        <div style={{ padding: 12, background: C.surfaceAlt, borderRadius: 8 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+            <div style={{ fontSize: 12.5, fontWeight: 700, color: C.ink }}>ค่าเช่า/เดือน</div>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <Btn size="sm" variant={!manualRent ? 'primary' : 'ghost'}
+                   onClick={() => { setManualRent(false); setOverrideReason(''); update('rent', formulaRent); }}>
+                ตามสูตรกลาง (แนะนำ)
+              </Btn>
+              <Btn size="sm" variant={manualRent ? 'primary' : 'ghost'}
+                   onClick={() => setManualRent(true)}>
+                กำหนดราคาพิเศษ
+              </Btn>
+            </div>
           </div>
-        ) : null}
+          {!manualRent ? (
+            <>
+              <div style={{ fontSize: 22, fontWeight: 800, color: C.ink }}>
+                {fmtCurrency(formulaRent)} <span style={{ fontSize: 12, fontWeight: 400, color: C.muted }}>/เดือน</span>
+              </div>
+              <div style={{ fontSize: 11.5, color: C.muted, marginTop: 4, lineHeight: 1.5 }}>
+                {(() => {
+                  const base = Number(((config?.rates || {})[form.type] || {}).rent
+                    ?? ADMIN_ROOM_TYPES[form.type]?.baseRent ?? 0);
+                  const fp = Number((config?.floorPremium || {})[Number(form.floor)] || 0);
+                  const vp = Number((config?.viewPremium || {})[form.view] || 0);
+                  const featSum = featureRows.reduce((s, it) => s + (addFeatures[it.key] ? it.premium : 0), 0);
+                  return ['ฐาน ' + fmtCurrency(base),
+                    fp ? `ชั้น +${fmtCurrency(fp)}` : null,
+                    vp ? `วิว +${fmtCurrency(vp)}` : null,
+                    featSum ? `คุณสมบัติ +${fmtCurrency(featSum)}` : null,
+                  ].filter(Boolean).join(' · ');
+                })()}
+              </div>
+              <div style={{ fontSize: 11.5, color: C.muted, marginTop: 6 }}>
+                ราคานี้ผูกกับเมนู "ตั้งราคา" — แก้ราคากลางเมื่อไหร่ ห้องนี้อัปเดตตามอัตโนมัติ
+              </div>
+            </>
+          ) : (
+            <>
+              <Input label="ราคาพิเศษของห้องนี้" type="number" suffix="บาท"
+                     value={form.rent}
+                     onChange={(v) => update('rent', Number(v))}
+                     error={addIssues.find((x) => x.includes('ค่าเช่า')) || null}
+                     hint={`ราคาตามสูตรกลาง: ${fmtCurrency(formulaRent)}`} />
+              <Input label="เหตุผลราคาพิเศษ (จำเป็น)"
+                     value={overrideReason}
+                     onChange={setOverrideReason}
+                     placeholder="เช่น ห้องชำรุดรอซ่อม / โปรโมชั่นเปิดตึก / ตกลงราคากับผู้เช่าเดิม"
+                     error={addIssues.find((x) => x.includes('เหตุผลราคาพิเศษ')) || null} />
+              <div style={{ fontSize: 11.5, color: C.warningInk || C.warning, marginTop: 4, lineHeight: 1.5 }}>
+                ⚠️ ห้องนี้จะ "ไม่ตามสูตรกลาง" จนกว่าจะล้างราคาพิเศษ (ดู/ล้างได้ที่เมนูตั้งราคา)
+              </div>
+            </>
+          )}
+        </div>
         <div style={{ padding: 12, background: C.surfaceAlt, borderRadius: 8 }}>
           <div style={{ fontSize: 12, color: C.muted, marginBottom: 8 }}>
             คุณสมบัติพิเศษ (กดเพื่อเปิด/ปิด — มีผลกับสูตรราคาห้องนี้)
@@ -1853,7 +1961,7 @@ function RoomEditForm({ room, originalRoom, onUpdate, onServerPatch, config, set
       const patch = {
         rent: n,
         rentOverride: n,
-        rentOverrideReason: room.rentOverrideReason || 'manual room price',
+        rentOverrideReason: room.rentOverrideReason || 'ราคาพิเศษรายห้อง (ตั้งจากหน้าห้องพัก)',
         rentOverrideAt: new Date().toISOString(),
         rentOverrideBy: 'admin-ui',
       };

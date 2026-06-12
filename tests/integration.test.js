@@ -2856,7 +2856,7 @@ test('admin room photos use storage URLs and public feeds expose only safe room-
     'edit-room photo changes must be committed through the parent room state');
   assert.match(roomsPage, /onServerPatch \? onServerPatch\(\{ photos: nextPhotos \}\) : false/,
     'edit-room uploaded photos must persist immediately instead of waiting on another draft save');
-  assert.match(roomsPage, /onAdd\(\{ \.\.\.form, photos: \[\] \}\)/,
+  assert.match(roomsPage, /onAdd\(\{ \.\.\.payload, photos: \[\] \}\)/,
     'add-room must still create the room when every selected photo upload fails');
   assert.match(roomsPage, /เพิ่มห้อง \$\{form\.id\} แล้ว แต่รูปห้องยังไม่ถูกบันทึก/,
     'add-room must warn clearly when it creates the room without failed photos');
@@ -6631,6 +6631,39 @@ test('LINE messages speak plain Thai with in-chat actions, not portal paths or E
     'contract-approved owner notice must not leak status enums');
   assert.match(server, /ห้องถูกบันทึกเป็น "มีผู้พัก"/,
     'contract-approved owner notice must describe the room state in Thai');
+});
+
+test('room creation defaults to central pricing; overrides require an explicit reason', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-rooms.jsx'), 'utf8');
+  assert.match(src, /ตามสูตรกลาง \(แนะนำ\)/,
+    'formula mode must be the labelled default in the add-room price section');
+  assert.match(src, /กำหนดราคาพิเศษ/,
+    'custom pricing must be an explicit opt-in mode, not a free-typed field');
+  assert.match(src, /เหตุผลราคาพิเศษ \(จำเป็น\)/,
+    'custom pricing must collect a reason');
+  assert.match(src, /ต้องระบุเหตุผลราคาพิเศษอย่างน้อย 5 ตัวอักษร/,
+    'a missing override reason must block the create');
+  const usingFormulaCount = (src.match(/const usingFormula = data\.priceMode !== 'custom'/g) || []).length;
+  assert.ok(usingFormulaCount >= 2,
+    'both single-add and bulk-add must ignore the typed rent in formula mode');
+  assert.match(src, /priceMode: manualRent \? 'custom' : 'formula'/,
+    'the modal must declare which price mode the admin chose');
+});
+
+test('pricing page lists per-room overrides with a clear-back-to-formula action', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-pricing.jsx'), 'utf8');
+  assert.match(src, /function PagePricing\(\{ config, setConfig, rooms, setRooms,/,
+    'pricing page must receive setRooms to manage overrides centrally');
+  assert.match(src, /ห้องที่ใช้ราคาพิเศษ \(ไม่ตามสูตรกลาง\)/,
+    'pricing page must list every override room, not just count them');
+  assert.match(src, /ล้างกลับไปใช้สูตร/,
+    'each override row must offer a one-click return to the formula');
+  assert.match(src, /สัญญา active เดิมไม่กระทบ/,
+    'the clear confirmation must state that locked contracts are unaffected');
 });
 
 test('contract-fill HTML reads view.rejectionReason (camelCase, not snake_case)', () => {

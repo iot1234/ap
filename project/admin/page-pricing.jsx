@@ -136,7 +136,7 @@ function buildPricingReview(draft, current, rooms) {
 // "ตั้งราคา" tab without duplicating the outer PageContainer + PageHeader
 // chrome. The standalone route /admin#pricing keeps working for legacy
 // bookmarks / direct links.
-function PagePricing({ config, setConfig, rooms, addActivity, setToast, embedded = false, currentUser = null }) {
+function PagePricing({ config, setConfig, rooms, setRooms, addActivity, setToast, embedded = false, currentUser = null }) {
   const C = window.ADMIN_C;
   const ADMIN_ROOM_TYPES = window.ADMIN_ROOM_TYPES;
   const ADMIN_ROOM_TYPE_KEYS = window.ADMIN_ROOM_TYPE_KEYS;
@@ -424,6 +424,95 @@ function PagePricing({ config, setConfig, rooms, addActivity, setToast, embedded
           </div>
         </div>
       </Card>
+
+      {/* ห้องที่ใช้ราคาพิเศษ — ข้อยกเว้นจากสูตรกลางทั้งหมดต้องมองเห็นและ
+          จัดการได้จากหน้านี้ ไม่ใช่ตัวเลขนับเฉยๆ ที่ต้องไล่เปิดทีละห้อง */}
+      {(() => {
+        const resolveRent = window.resolveRoomRent;
+        const overrideRooms = Object.values(rooms || {})
+          .map((room) => {
+            const info = resolveRent ? resolveRent(room, config) : null;
+            if (!info || info.source !== 'override') return null;
+            return {
+              id: room.id,
+              override: Number(info.rent) || 0,
+              formula: Number(info.formula) || 0,
+              reason: room.rentOverrideReason || room.rent_override_reason || '-',
+              at: room.rentOverrideAt || room.rent_override_at || null,
+            };
+          })
+          .filter(Boolean)
+          .sort((a, b) => String(a.id).localeCompare(String(b.id)));
+        if (!overrideRooms.length) return null;
+        const clearOverride = (entry) => {
+          if (!setRooms) {
+            setToast && setToast({ kind: 'warning', message: 'หน้านี้แก้ข้อมูลห้องไม่ได้ — เปิดหน้าห้องพักเพื่อล้างราคาพิเศษ' });
+            return;
+          }
+          const ok = window.confirm(
+            `ล้างราคาพิเศษของห้อง ${entry.id}?\n\n` +
+            `ราคาพิเศษปัจจุบัน: ${fmtMoney(entry.override)}\n` +
+            `ราคาตามสูตรกลางที่จะใช้แทน: ${fmtMoney(entry.formula)}\n\n` +
+            `สัญญา active เดิมไม่กระทบ (ยังใช้ยอดที่ล็อกไว้) — มีผลกับสัญญา/บิลใหม่เท่านั้น`
+          );
+          if (!ok) return;
+          setRooms((prev) => {
+            const room = prev[entry.id];
+            if (!room) return prev;
+            return {
+              ...prev,
+              [entry.id]: {
+                ...room,
+                rentOverride: null, rentOverrideReason: null,
+                rentOverrideAt: null, rentOverrideBy: null,
+                rent: entry.formula || room.rent,
+              },
+            };
+          });
+          addActivity && addActivity({ icon: '🧹', text: `ล้างราคาพิเศษห้อง ${entry.id} → กลับไปใช้สูตรกลาง ${fmtMoney(entry.formula)}`, type: 'system' });
+          setToast && setToast({
+            kind: 'success',
+            message: {
+              title: `ห้อง ${entry.id} กลับมาใช้สูตรกลางแล้ว`,
+              description: `ราคาปัจจุบัน ${fmtMoney(entry.formula)} — ต่อจากนี้แก้ราคากลางที่หน้านี้ ห้องจะอัปเดตตามอัตโนมัติ`,
+            },
+          });
+        };
+        return (
+          <Card style={{ marginBottom: 16 }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: C.ink, marginBottom: 4 }}>
+              ห้องที่ใช้ราคาพิเศษ (ไม่ตามสูตรกลาง) — {overrideRooms.length} ห้อง
+            </div>
+            <div style={{ fontSize: 12, color: C.muted, marginBottom: 10, lineHeight: 1.5 }}>
+              ห้องเหล่านี้จะไม่ขยับตามเมนูตั้งราคา จนกว่าจะล้างราคาพิเศษ — ตรวจว่ายังตั้งใจให้เป็นแบบนี้อยู่หรือไม่
+            </div>
+            <div style={{ display: 'grid', gap: 6 }}>
+              {overrideRooms.map((entry) => (
+                <div key={entry.id} style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'minmax(48px, auto) 1fr auto',
+                  gap: 10, alignItems: 'center',
+                  padding: '8px 10px',
+                  border: `1px solid ${C.borderSoft}`,
+                  borderRadius: 8,
+                  background: C.surface,
+                }}>
+                  <div style={{ fontWeight: 700, color: C.ink }}>ห้อง {entry.id}</div>
+                  <div style={{ fontSize: 12, color: C.ink2, lineHeight: 1.5, minWidth: 0 }}>
+                    ราคาพิเศษ <b>{fmtMoney(entry.override)}</b>
+                    {' '}· ตามสูตรควรเป็น {fmtMoney(entry.formula)}
+                    {' '}({entry.override - entry.formula >= 0 ? '+' : ''}{fmtMoney(entry.override - entry.formula)})
+                    <br />เหตุผล: {entry.reason}{entry.at ? ` · ตั้งเมื่อ ${new Date(entry.at).toLocaleDateString('th-TH')}` : ''}
+                  </div>
+                  <Btn variant="ghost" size="sm" onClick={() => clearOverride(entry)}>
+                    ล้างกลับไปใช้สูตร
+                  </Btn>
+                </div>
+              ))}
+            </div>
+          </Card>
+        );
+      })()}
 
       {dirty && (
         <div style={{
