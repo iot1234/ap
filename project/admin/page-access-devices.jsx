@@ -11,6 +11,14 @@
 
 const { useState, useEffect } = React;
 const ACCESS_DEVICE_API_TIMEOUT_MS = 15_000;
+const ACCESS_DEVICE_RESPONSE_MAX_BYTES = 512 * 1024;
+
+function readAccessDeviceJson(res, label) {
+  if (window.readJsonWithByteLimit) {
+    return window.readJsonWithByteLimit(res, ACCESS_DEVICE_RESPONSE_MAX_BYTES, label || 'access devices response');
+  }
+  return res.json();
+}
 
 // `embedded` prop lets PageAccess host this as a tab without rendering its
 // own PageContainer + PageHeader. Standalone /admin#access-devices still
@@ -71,7 +79,7 @@ function PageAccessDevices({ setToast, embedded = false }) {
         ...opts,
         ...(signal ? { signal } : {}),
       });
-      const d = await r.json().catch(() => ({}));
+      const d = await readAccessDeviceJson(r, url).catch(() => ({}));
       if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
       return d;
     } catch (err) {
@@ -92,12 +100,15 @@ function PageAccessDevices({ setToast, embedded = false }) {
       let d;
       if (window.apiCall || window.requireApiCall) {
         const call = window.requireApiCall ? window.requireApiCall() : window.apiCall;
-        d = await call('/api/admin/access-devices', { timeoutMs: ACCESS_DEVICE_API_TIMEOUT_MS });
+        d = await call('/api/admin/access-devices', {
+          timeoutMs: ACCESS_DEVICE_API_TIMEOUT_MS,
+          maxResponseBytes: ACCESS_DEVICE_RESPONSE_MAX_BYTES,
+        });
       } else if (apiFetch) {
         const r = await apiFetch('/api/admin/access-devices', {
           timeoutMs: ACCESS_DEVICE_API_TIMEOUT_MS,
         });
-        d = await r.json().catch(() => ({}));
+        d = await readAccessDeviceJson(r, '/api/admin/access-devices').catch(() => ({}));
         if (!r.ok) throw new Error(d.error || 'load failed');
       } else {
         d = await fetchJsonWithTimeout('/api/admin/access-devices');
@@ -128,6 +139,7 @@ function PageAccessDevices({ setToast, embedded = false }) {
           method: 'POST',
           body: JSON.stringify(form),
           timeoutMs: ACCESS_DEVICE_API_TIMEOUT_MS,
+          maxResponseBytes: ACCESS_DEVICE_RESPONSE_MAX_BYTES,
         });
       } else {
         const r = await apiFetch('/api/admin/access-devices', {
@@ -135,7 +147,7 @@ function PageAccessDevices({ setToast, embedded = false }) {
           body: JSON.stringify(form),
           timeoutMs: ACCESS_DEVICE_API_TIMEOUT_MS,
         });
-        d = await r.json().catch(() => ({}));
+        d = await readAccessDeviceJson(r, '/api/admin/access-devices').catch(() => ({}));
         if (!r.ok) throw new Error(d.error || 'create failed');
       }
       setRevealed({ token: d.token, deviceId: d.device.device_id });
@@ -158,13 +170,17 @@ function PageAccessDevices({ setToast, embedded = false }) {
     try {
       if (window.apiCall || window.requireApiCall) {
         const call = window.requireApiCall ? window.requireApiCall() : window.apiCall;
-        await call(`/api/admin/access-devices/${id}`, { method: 'DELETE', timeoutMs: ACCESS_DEVICE_API_TIMEOUT_MS });
+        await call(`/api/admin/access-devices/${id}`, {
+          method: 'DELETE',
+          timeoutMs: ACCESS_DEVICE_API_TIMEOUT_MS,
+          maxResponseBytes: ACCESS_DEVICE_RESPONSE_MAX_BYTES,
+        });
       } else {
         const r = await apiFetch(`/api/admin/access-devices/${id}`, {
           method: 'DELETE',
           timeoutMs: ACCESS_DEVICE_API_TIMEOUT_MS,
         });
-        const d = await r.json().catch(() => ({}));
+        const d = await readAccessDeviceJson(r, `/api/admin/access-devices/${id}`).catch(() => ({}));
         if (!r.ok) throw new Error(d.error || 'delete failed');
       }
       setToast && setToast({ kind: 'success', message: 'ลบแล้ว' });

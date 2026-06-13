@@ -11039,7 +11039,15 @@ app.get('/api/access/logs', requireAuth, requireRole('owner', 'manager'), featur
   const limit = Math.min(Math.max(Number(req.query.limit) || 100, 1), 500);
   try {
     const { rows } = await pool.query(
-      `SELECT id, room_id, tenant_id, device, method, card_id, result, reason, occurred_at
+      `SELECT id,
+              NULLIF(left(COALESCE(room_id, ''), 32), '') AS room_id,
+              tenant_id,
+              left(COALESCE(device, ''), 64) AS device,
+              left(COALESCE(method, ''), 16) AS method,
+              NULLIF(left(COALESCE(card_id, ''), 64), '') AS card_id,
+              left(COALESCE(result, ''), 16) AS result,
+              NULLIF(left(COALESCE(reason, ''), 200), '') AS reason,
+              occurred_at
          FROM access_logs ORDER BY occurred_at DESC LIMIT $1`,
       [limit]
     );
@@ -11479,8 +11487,13 @@ app.get('/api/admin/security-events', requireAuth, requireRole('owner', 'manager
 app.get('/api/admin/access-devices', requireAuth, requireRole('owner', 'manager'), async (_req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT id, device_id, enabled, description, last_seen, created_at
-         FROM access_devices ORDER BY created_at DESC`
+      `SELECT id,
+              left(COALESCE(device_id, ''), 64) AS device_id,
+              enabled,
+              NULLIF(left(COALESCE(description, ''), 200), '') AS description,
+              last_seen,
+              created_at
+         FROM access_devices ORDER BY created_at DESC LIMIT 500`
     );
     res.json({ ok: true, devices: rows });
   } catch (err) {

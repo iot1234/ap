@@ -7,6 +7,14 @@
 (function () {
 const { useState, useEffect, useRef } = React;
 const ACCESS_API_TIMEOUT_MS = 15_000;
+const ACCESS_RESPONSE_MAX_BYTES = 1 * 1024 * 1024;
+
+function readAccessJson(res, label) {
+  if (window.readJsonWithByteLimit) {
+    return window.readJsonWithByteLimit(res, ACCESS_RESPONSE_MAX_BYTES, label || 'access response');
+  }
+  return res.json();
+}
 
 function PageAccess({ setToast }) {
   // Guard window globals so a partial CDN load doesn't throw a destructure
@@ -54,7 +62,7 @@ function PageAccess({ setToast }) {
         credentials: 'same-origin',
         ...(req.signal ? { signal: req.signal } : {}),
       });
-      const d = await r.json().catch(() => ({}));
+      const d = await readAccessJson(r, '/api/access/logs');
       if (!r.ok) {
         if (r.status !== 503) setLoadError(d.error || `HTTP ${r.status}`);
         setList([]);
@@ -111,6 +119,7 @@ function PageAccess({ setToast }) {
           method: 'POST',
           body: JSON.stringify(clean),
           timeoutMs: ACCESS_API_TIMEOUT_MS,
+          maxResponseBytes: ACCESS_RESPONSE_MAX_BYTES,
         });
       } else {
         const apiFetch = window.requireApiFetch ? window.requireApiFetch() : window.apiFetch;
@@ -119,7 +128,7 @@ function PageAccess({ setToast }) {
           body: JSON.stringify(clean),
           timeoutMs: ACCESS_API_TIMEOUT_MS,
         });
-        const d = await r.json().catch(() => ({}));
+        const d = await readAccessJson(r, '/api/access/log').catch(() => ({}));
         if (!r.ok) throw Object.assign(new Error(d.error || `HTTP ${r.status}`), { status: r.status, code: d.code, raw: d });
       }
       setForm({ ...form, cardId: '', reason: '' });

@@ -928,6 +928,11 @@ function App() {
     PageBookings, PageBilling, PageReports, PageSettings,
     Toast,
   } = window;
+  const readShellJson = (res, label) => (
+    window.readJsonWithByteLimit
+      ? window.readJsonWithByteLimit(res, 8 * 1024 * 1024, label || 'shell response')
+      : res.json()
+  );
 
   // --- State (persisted to localStorage) ---
   const [rooms,      setRooms]      = useState(loadRooms);
@@ -979,7 +984,7 @@ function App() {
           });
         }
         if (bRes.ok) {
-          const bd = await bRes.json();
+          const bd = await readShellJson(bRes, '/api/data/baankarn_bookings_v1');
           // Re-base the optimistic lock on the version we just saw: the
           // merge below triggers saveBookings → PUT, and without the fresh
           // base every new public booking would false-conflict the echo.
@@ -1005,7 +1010,7 @@ function App() {
           }
         }
         if (tRes.ok) {
-          const td = await tRes.json();
+          const td = await readShellJson(tRes, '/api/maintenance');
           if (Array.isArray(td?.tickets)) setTickets(td.tickets);
         }
         if (bRes.ok && tRes.ok) {
@@ -1044,7 +1049,7 @@ function App() {
       try {
         const res = await fetch('/api/data/baankarn_rooms_v1', { credentials: 'include' });
         if (!res.ok) return;
-        const d = await res.json();
+        const d = await readShellJson(res, '/api/data/baankarn_rooms_v1');
         if (!d || !d.value || typeof d.value !== 'object') return;
         if (d.updatedAt && window.AP?.setBaseVersion) {
           window.AP.setBaseVersion('baankarn_rooms_v1', d.updatedAt);

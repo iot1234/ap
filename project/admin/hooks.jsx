@@ -16,6 +16,52 @@
   let _inflight = null;
   const TTL_MS = 60_000;
   const FETCH_TIMEOUT_MS = 8_000;
+  const JSON_RESPONSE_MAX_BYTES = 8 * 1024 * 1024;
+
+  async function readJsonWithByteLimit(res, maxBytes = JSON_RESPONSE_MAX_BYTES, label = 'response') {
+    const len = Number(res.headers && res.headers.get ? res.headers.get('content-length') : 0);
+    if (Number.isFinite(len) && len > maxBytes) {
+      try { if (res.body && res.body.cancel) await res.body.cancel(); } catch {}
+      const e = new Error(`${label} too large (${len} bytes)`);
+      e.code = 'RESPONSE_TOO_LARGE';
+      e.bytes = len;
+      e.maxBytes = maxBytes;
+      throw e;
+    }
+    if (!res.body || !res.body.getReader || typeof TextDecoder === 'undefined') {
+      return res.json();
+    }
+    const reader = res.body.getReader();
+    const chunks = [];
+    let total = 0;
+    try {
+      while (true) {
+        const part = await reader.read();
+        if (part.done) break;
+        const value = part.value || new Uint8Array();
+        total += value.byteLength || value.length || 0;
+        if (total > maxBytes) {
+          try { await reader.cancel(); } catch {}
+          const e = new Error(`${label} too large (${total} bytes)`);
+          e.code = 'RESPONSE_TOO_LARGE';
+          e.bytes = total;
+          e.maxBytes = maxBytes;
+          throw e;
+        }
+        chunks.push(value);
+      }
+    } finally {
+      try { reader.releaseLock && reader.releaseLock(); } catch {}
+    }
+    const body = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      body.set(chunk, offset);
+      offset += chunk.byteLength || chunk.length || 0;
+    }
+    const text = new TextDecoder('utf-8').decode(body);
+    return text ? JSON.parse(text) : {};
+  }
 
   async function loadFeatures(force) {
     if (!force && _cache && Date.now() - _cacheAt < TTL_MS) return _cache;
@@ -80,7 +126,7 @@
       setError(null);
       fetch(url, { credentials: 'same-origin', ...(opts || {}) })
         .then(async (r) => {
-          const j = await r.json().catch(() => ({}));
+          const j = await readJsonWithByteLimit(r, JSON_RESPONSE_MAX_BYTES, url).catch(() => ({}));
           if (!r.ok) throw Object.assign(new Error(j.error || `HTTP ${r.status}`), { status: r.status, code: j.code });
           return j;
         })
@@ -312,7 +358,13 @@
     let body = null;
     const ct = res.headers.get('content-type') || '';
     if (ct.includes('application/json')) {
-      try { body = await res.json(); } catch { body = null; }
+      try {
+        body = await readJsonWithByteLimit(
+          res,
+          opts.maxResponseBytes || JSON_RESPONSE_MAX_BYTES,
+          url
+        );
+      } catch { body = null; }
     }
     if (!res.ok) {
       throw new ApiError({
@@ -1142,6 +1194,7 @@
   // page-recurring-charges, etc.) need the same CSRF-aware fetch the hook
   // uses internally. Expose it as a global so non-hook callers can reuse it.
   window.apiFetch = apiFetch;
+  window.readJsonWithByteLimit = readJsonWithByteLimit;
   window.getCsrfToken = getCsrfToken;
   window.requireApiFetch = requireApiFetch;
   window.requireApiCall = requireApiCall;
