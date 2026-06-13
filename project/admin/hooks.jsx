@@ -17,11 +17,34 @@
   const TTL_MS = 60_000;
   const FETCH_TIMEOUT_MS = 8_000;
   const JSON_RESPONSE_MAX_BYTES = 8 * 1024 * 1024;
+  const DIAGNOSTIC_STORAGE_KEY = '__admin_last_diagnostic_v1';
+
+  function emitDiagnostic(payload) {
+    const detail = {
+      kind: payload.kind || 'warning',
+      title: payload.title || 'ระบบพบปัญหา',
+      message: payload.message || payload.error || 'เกิดข้อผิดพลาดที่หน้าเว็บ',
+      url: payload.url || (typeof location !== 'undefined' ? location.href : ''),
+      page: payload.page || (typeof window !== 'undefined' ? window.__adminPage : null),
+      at: new Date().toISOString(),
+      ...payload,
+    };
+    try { sessionStorage.setItem(DIAGNOSTIC_STORAGE_KEY, JSON.stringify(detail)); } catch {}
+    try { window.dispatchEvent(new CustomEvent('ap:diagnostic', { detail })); } catch {}
+  }
 
   async function readJsonWithByteLimit(res, maxBytes = JSON_RESPONSE_MAX_BYTES, label = 'response') {
     const len = Number(res.headers && res.headers.get ? res.headers.get('content-length') : 0);
     if (Number.isFinite(len) && len > maxBytes) {
       try { if (res.body && res.body.cancel) await res.body.cancel(); } catch {}
+      emitDiagnostic({
+        kind: 'danger',
+        title: 'ข้อมูลตอบกลับใหญ่เกินไป',
+        message: `${label} ส่งข้อมูล ${len.toLocaleString()} bytes เกินขีดจำกัด ${maxBytes.toLocaleString()} bytes`,
+        code: 'RESPONSE_TOO_LARGE',
+        bytes: len,
+        maxBytes,
+      });
       const e = new Error(`${label} too large (${len} bytes)`);
       e.code = 'RESPONSE_TOO_LARGE';
       e.bytes = len;
@@ -42,6 +65,14 @@
         total += value.byteLength || value.length || 0;
         if (total > maxBytes) {
           try { await reader.cancel(); } catch {}
+          emitDiagnostic({
+            kind: 'danger',
+            title: 'ข้อมูลตอบกลับใหญ่เกินไป',
+            message: `${label} ส่งข้อมูลอย่างน้อย ${total.toLocaleString()} bytes เกินขีดจำกัด ${maxBytes.toLocaleString()} bytes`,
+            code: 'RESPONSE_TOO_LARGE',
+            bytes: total,
+            maxBytes,
+          });
           const e = new Error(`${label} too large (${total} bytes)`);
           e.code = 'RESPONSE_TOO_LARGE';
           e.bytes = total;
@@ -60,7 +91,17 @@
       offset += chunk.byteLength || chunk.length || 0;
     }
     const text = new TextDecoder('utf-8').decode(body);
-    return text ? JSON.parse(text) : {};
+    try {
+      return text ? JSON.parse(text) : {};
+    } catch (err) {
+      emitDiagnostic({
+        kind: 'danger',
+        title: 'อ่านข้อมูลจากเซิร์ฟเวอร์ไม่สำเร็จ',
+        message: `${label} JSON parse failed: ${err && err.message ? err.message : err}`,
+        code: 'JSON_PARSE_FAILED',
+      });
+      throw err;
+    }
   }
 
   async function loadFeatures(force) {
@@ -1195,6 +1236,7 @@
   // uses internally. Expose it as a global so non-hook callers can reuse it.
   window.apiFetch = apiFetch;
   window.readJsonWithByteLimit = readJsonWithByteLimit;
+  window.emitAdminDiagnostic = emitDiagnostic;
   window.getCsrfToken = getCsrfToken;
   window.requireApiFetch = requireApiFetch;
   window.requireApiCall = requireApiCall;

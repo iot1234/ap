@@ -36,9 +36,18 @@ test('admin JSON readers cap large access responses before parsing', () => {
   assert.match(hooks, /total > maxBytes/);
   assert.match(hooks, /opts\.maxResponseBytes \|\| JSON_RESPONSE_MAX_BYTES/);
   assert.match(hooks, /window\.readJsonWithByteLimit = readJsonWithByteLimit/);
+  assert.match(hooks, /function emitDiagnostic\(payload\)/);
+  assert.match(hooks, /new CustomEvent\('ap:diagnostic'/);
   assert.match(access, /window\.readJsonWithByteLimit\(res, ACCESS_RESPONSE_MAX_BYTES/);
   assert.match(devices, /const ACCESS_DEVICE_RESPONSE_MAX_BYTES = 512 \* 1024/);
   assert.match(devices, /window\.readJsonWithByteLimit\(res, ACCESS_DEVICE_RESPONSE_MAX_BYTES/);
+  assert.match(shell, /function DiagnosticBanner\(\{ diagnostic, onDismiss \}\)/);
+  assert.match(shell, /const CRASH_MARKER_KEY = '__admin_alive_marker_v1'/);
+  assert.match(shell, /window\.addEventListener\('ap:diagnostic', onDiagnostic\)/);
+  assert.match(shell, /code: 'MEMORY_PRESSURE'/);
+  assert.match(shell, /if \(isLowWorkRoute\(\)\) return/);
+  assert.match(shell, /const isLowWorkPage = page === 'access' \|\| page === 'access-devices'/);
+  assert.match(shell, /if \(isLowWorkPage\) return \[\]/);
   assert.match(shell, /readShellJson\(bRes, '\/api\/data\/baankarn_bookings_v1'\)/);
   assert.match(shell, /readShellJson\(res, '\/api\/data\/baankarn_rooms_v1'\)/);
 });

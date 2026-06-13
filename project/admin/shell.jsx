@@ -4,6 +4,75 @@
 // ===========================================================================
 
 const { useState, useEffect, useMemo, useRef, useCallback } = React;
+const DIAGNOSTIC_STORAGE_KEY = '__admin_last_diagnostic_v1';
+const CRASH_MARKER_KEY = '__admin_alive_marker_v1';
+
+function parseSessionJson(key) {
+  try {
+    const raw = sessionStorage.getItem(key);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function formatBytes(n) {
+  const v = Number(n) || 0;
+  if (v >= 1024 * 1024) return `${Math.round(v / 1024 / 1024)} MB`;
+  if (v >= 1024) return `${Math.round(v / 1024)} KB`;
+  return `${v} bytes`;
+}
+
+function DiagnosticBanner({ diagnostic, onDismiss }) {
+  if (!diagnostic) return null;
+  const C = window.ADMIN_C || {};
+  const kind = diagnostic.kind === 'danger' ? 'danger' : 'warning';
+  const rail = kind === 'danger' ? (C.danger || '#EF4444') : (C.warning || '#F59E0B');
+  const soft = kind === 'danger' ? (C.dangerSoft || '#FCE7E7') : (C.warningSoft || '#FCEFDB');
+  const ink = kind === 'danger' ? (C.dangerInk || '#7F1D1D') : (C.warningInk || '#78350F');
+  const meta = [
+    diagnostic.page ? `หน้า: ${diagnostic.page}` : null,
+    diagnostic.code ? `รหัส: ${diagnostic.code}` : null,
+    diagnostic.heapUsed ? `memory: ${formatBytes(diagnostic.heapUsed)}` : null,
+    diagnostic.at ? `เวลา: ${new Date(diagnostic.at).toLocaleString('th-TH')}` : null,
+  ].filter(Boolean).join(' · ');
+  return (
+    <div role="alert" style={{
+      margin: '14px 24px 0',
+      background: soft,
+      color: ink,
+      border: `1px solid ${rail}33`,
+      borderRadius: 10,
+      overflow: 'hidden',
+      display: 'flex',
+      boxShadow: '0 10px 24px rgba(15,23,42,0.08)',
+    }}>
+      <div style={{ width: 4, background: rail, flexShrink: 0 }} />
+      <div style={{ padding: '12px 14px', flex: 1, minWidth: 0 }}>
+        <div style={{ fontWeight: 700, fontSize: 13.5, marginBottom: 4 }}>
+          {diagnostic.title || 'ระบบพบปัญหา'}
+        </div>
+        <div style={{ fontSize: 12.5, lineHeight: 1.55, overflowWrap: 'anywhere' }}>
+          {diagnostic.message || diagnostic.error || 'เกิดข้อผิดพลาดที่หน้าเว็บ'}
+        </div>
+        {meta && <div style={{ marginTop: 5, fontSize: 11.5, opacity: 0.8 }}>{meta}</div>}
+      </div>
+      <button
+        onClick={onDismiss}
+        aria-label="ปิด"
+        style={{
+          alignSelf: 'flex-start',
+          margin: 8,
+          border: 0,
+          background: 'transparent',
+          color: ink,
+          fontSize: 18,
+          cursor: 'pointer',
+          fontFamily: 'inherit',
+        }}>×</button>
+    </div>
+  );
+}
 
 // ---------- PageBoundary --------------------------------------------------
 // Stable wrapper that delegates to window.ErrorBoundary if available, else
@@ -960,7 +1029,14 @@ function App() {
     let cancel = false;
     let warned401 = false;
     let warnedLiveError = false;
+    const isLowWorkRoute = () => {
+      const raw = String(location.hash || '').replace('#', '');
+      const base = raw.split('?')[0].split('/')[0];
+      const current = canonicalPageId(base);
+      return current === 'access' || current === 'access-devices';
+    };
     const refresh = async () => {
+      if (isLowWorkRoute()) return;
       if (typeof document !== 'undefined' && document.hidden) return;
       try {
         const [bRes, tRes] = await Promise.all([
@@ -1042,6 +1118,10 @@ function App() {
   const _lastFocusRefresh = React.useRef(0);
   useEffect(() => {
     const refreshRoomsOnFocus = async () => {
+      const raw = String(location.hash || '').replace('#', '');
+      const base = raw.split('?')[0].split('/')[0];
+      const current = canonicalPageId(base);
+      if (current === 'access' || current === 'access-devices') return;
       if (typeof document !== 'undefined' && document.hidden) return;
       const nowTs = Date.now();
       if (nowTs - _lastFocusRefresh.current < 10_000) return;
@@ -1092,6 +1172,32 @@ function App() {
   };
   const [page, setPageState] = useState(pageFromHash);
   const setPage = (next) => setPageState(canonicalPageId(next));
+  const isLowWorkPage = page === 'access' || page === 'access-devices';
+  const memoryWarningShownRef = useRef(false);
+  const [diagnostic, setDiagnostic] = useState(() => {
+    const now = Date.now();
+    const marker = parseSessionJson(CRASH_MARKER_KEY);
+    if (marker && !marker.closedAt) {
+      const ageMs = now - Date.parse(marker.at || 0);
+      if (Number.isFinite(ageMs) && ageMs < 10 * 60_000) {
+        return {
+          kind: 'danger',
+          title: 'แท็บรอบก่อนหน้าปิดตัวกะทันหัน',
+          message: `ครั้งล่าสุดอยู่ที่หน้า ${marker.page || '-'} ก่อนหน้าเว็บหยุดทำงาน อาจเกิดจากข้อมูลใหญ่หรือหน่วยความจำไม่พอ`,
+          page: marker.page,
+          at: marker.at,
+          heapUsed: marker.heapUsed,
+          code: 'PREVIOUS_RENDERER_CRASH',
+        };
+      }
+    }
+    const stored = parseSessionJson(DIAGNOSTIC_STORAGE_KEY);
+    if (stored) {
+      const ageMs = now - Date.parse(stored.at || 0);
+      if (Number.isFinite(ageMs) && ageMs < 10 * 60_000) return stored;
+    }
+    return null;
+  });
   useEffect(() => {
     if (pageFromHash() !== page) location.hash = page;
     // Expose current page so PageHeader (and any other deep component)
@@ -1107,6 +1213,80 @@ function App() {
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
+
+  useEffect(() => {
+    const onDiagnostic = (ev) => {
+      const d = ev && ev.detail ? ev.detail : {};
+      setDiagnostic({
+        kind: d.kind || 'warning',
+        title: d.title || 'ระบบพบปัญหา',
+        message: d.message || d.error || 'เกิดข้อผิดพลาดที่หน้าเว็บ',
+        page: d.page || page,
+        at: d.at || new Date().toISOString(),
+        ...d,
+      });
+    };
+    window.addEventListener('ap:diagnostic', onDiagnostic);
+    return () => window.removeEventListener('ap:diagnostic', onDiagnostic);
+  }, [page]);
+
+  useEffect(() => {
+    const writeMarker = () => {
+      const mem = typeof performance !== 'undefined' && performance.memory ? performance.memory : null;
+      const payload = {
+        page,
+        at: new Date().toISOString(),
+        heapUsed: mem ? mem.usedJSHeapSize : null,
+        heapLimit: mem ? mem.jsHeapSizeLimit : null,
+      };
+      try { sessionStorage.setItem(CRASH_MARKER_KEY, JSON.stringify(payload)); } catch {}
+    };
+    writeMarker();
+    const timer = setInterval(writeMarker, 2000);
+    const markClosed = () => {
+      const current = parseSessionJson(CRASH_MARKER_KEY) || {};
+      try {
+        sessionStorage.setItem(CRASH_MARKER_KEY, JSON.stringify({
+          ...current,
+          closedAt: new Date().toISOString(),
+        }));
+      } catch {}
+    };
+    window.addEventListener('beforeunload', markClosed);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener('beforeunload', markClosed);
+    };
+  }, [page]);
+
+  useEffect(() => {
+    if (!isLowWorkPage || typeof performance === 'undefined' || !performance.memory) return undefined;
+    memoryWarningShownRef.current = false;
+    const check = () => {
+      const mem = performance.memory;
+      const used = Number(mem.usedJSHeapSize) || 0;
+      const limit = Number(mem.jsHeapSizeLimit) || 0;
+      const ratio = limit ? used / limit : 0;
+      if (!memoryWarningShownRef.current && (used > 384 * 1024 * 1024 || ratio > 0.65)) {
+        memoryWarningShownRef.current = true;
+        const detail = {
+          kind: 'danger',
+          title: 'หน่วยความจำของหน้านี้สูงผิดปกติ',
+          message: `Chrome ใช้ memory ${formatBytes(used)}${limit ? ` จาก ${formatBytes(limit)}` : ''} ถ้ายังเพิ่มต่อหน้าเว็บอาจล่ม`,
+          page,
+          at: new Date().toISOString(),
+          heapUsed: used,
+          heapLimit: limit,
+          code: 'MEMORY_PRESSURE',
+        };
+        try { sessionStorage.setItem(DIAGNOSTIC_STORAGE_KEY, JSON.stringify(detail)); } catch {}
+        setDiagnostic(detail);
+      }
+    };
+    check();
+    const timer = setInterval(check, 1500);
+    return () => clearInterval(timer);
+  }, [isLowWorkPage, page]);
 
   const buildingName = String(config?.building?.name || '').trim() || 'ที่พักของคุณ';
   useEffect(() => {
@@ -1194,11 +1374,12 @@ function App() {
   //   - ≥10 activities in the feed (real audit history accumulated)
   // Operator can still wipe via psql if they really need to.
   const hasRealData = useMemo(() => {
+    if (isLowWorkPage) return true;
     const tenantCount = Object.values(rooms || {}).filter((r) => r && r.tenant).length;
     const bookingCount = (bookings || []).length;
     const activityCount = (activities || []).length;
     return tenantCount > 0 || bookingCount > 0 || activityCount >= 10;
-  }, [rooms, bookings, activities]);
+  }, [isLowWorkPage, rooms, bookings, activities]);
 
   const handleResetData = () => {
     if (hasRealData) {
@@ -1220,12 +1401,13 @@ function App() {
 
   const ADMIN_ROOM_TYPES = window.ADMIN_ROOM_TYPES;
 
-  const pendingBookings = bookings.filter(b => b.status === 'pending').length;
-  const overdueRooms = Object.values(rooms).filter(r => r.status === 'overdue');
+  const pendingBookings = isLowWorkPage ? 0 : bookings.filter(b => b.status === 'pending').length;
+  const overdueRooms = isLowWorkPage ? [] : Object.values(rooms).filter(r => r.status === 'overdue');
   const overdueRoomCount = overdueRooms.length;
 
   // Build notification items
   const notifItems = useMemo(() => {
+    if (isLowWorkPage) return [];
     const items = [];
     overdueRooms.forEach(r => {
       items.push({
@@ -1256,11 +1438,12 @@ function App() {
         });
       });
     return items;
-  }, [rooms, bookings, tickets]);
+  }, [isLowWorkPage, rooms, bookings, tickets]);
   const notifCount = notifItems.length;
 
   // Build search results
   const searchResults = useMemo(() => {
+    if (isLowWorkPage) return [];
     const q = (search || '').trim().toLowerCase();
     if (!q) return [];
     const results = [];
@@ -1322,7 +1505,7 @@ function App() {
       }
     }
     return results.slice(0, 18);
-  }, [search, rooms, bookings, tickets]);
+  }, [isLowWorkPage, search, rooms, bookings, tickets]);
 
   // Land on the RECORD, not just the page: targets that carry params write
   // them into the hash so the destination page's deep-link router opens the
@@ -1448,6 +1631,13 @@ function App() {
           searchResults={searchResults}
           onSelectResult={handleSelectResult}
           onResetData={handleResetData}
+        />
+        <DiagnosticBanner
+          diagnostic={diagnostic}
+          onDismiss={() => {
+            setDiagnostic(null);
+            try { sessionStorage.removeItem(DIAGNOSTIC_STORAGE_KEY); } catch {}
+          }}
         />
         <div style={{ flex: 1, minWidth: 0 }}>
           {/* Module-scoped PageBoundary keeps a stable component type so
