@@ -21,6 +21,41 @@ test('access log page is resilient to hung save/load requests', () => {
   assert.match(src, /if \(abortRef\.current === req\)[\s\S]{0,120}setLoading\(false\)/);
 });
 
+test('admin hydrate is protected from oversized app_data payloads before JSON parse', () => {
+  const client = read('project', 'api-client.js');
+  assert.match(client, /const HYDRATE_RESPONSE_MAX_BYTES = 8 \* 1024 \* 1024/);
+  assert.match(client, /async function readJsonWithByteLimit\(res, maxBytes, label\)/);
+  assert.match(client, /headers\.get\('content-length'\)/);
+  assert.match(client, /res\.body\.getReader\(\)/);
+  assert.match(client, /total > maxBytes/);
+  assert.match(client, /readJsonWithByteLimit\(res, HYDRATE_RESPONSE_MAX_BYTES, '\/api\/data hydrate'\)/);
+  assert.match(client, /const metaOmitted = \(data\.__meta && data\.__meta\.omitted\) \|\| \{\}/);
+});
+
+test('server omits oversized app_data values before returning admin hydrate data', () => {
+  const server = read('server.js');
+  assert.match(server, /const APP_DATA_RESPONSE_VALUE_MAX_BYTES = 5 \* 1024 \* 1024/);
+  assert.match(server, /SELECT updated_at, octet_length\(value::text\) AS payload_bytes FROM app_data WHERE key=\$1/);
+  assert.match(server, /if \(oversizedAppDataPayload\(sizeQ\.rows\[0\]\)\)[\s\S]{0,360}value: null/);
+  assert.match(server, /SELECT key, updated_at, octet_length\(value::text\) AS payload_bytes FROM app_data WHERE key = ANY\(\$1\)/);
+  assert.match(server, /const safeKeys = sizeRows\.rows[\s\S]{0,160}!oversizedAppDataPayload\(r\)/);
+  assert.match(server, /SELECT key, value, updated_at FROM app_data WHERE key = ANY\(\$1\)/);
+  assert.match(server, /meta\.omitted\[sizeRow\.key\] = info/);
+  assert.match(server, /releaseExpiredPublicBookingHolds\(pool, \{ skipOversized: true \}\)/);
+  const helperStart = server.indexOf('async function releaseExpiredPublicBookingHolds');
+  const helperEnd = server.indexOf('async function publicBookingDepositInfo', helperStart);
+  assert.ok(helperStart > 0);
+  assert.ok(helperEnd > helperStart);
+  const helperBlock = server.slice(helperStart, helperEnd);
+  assert.match(helperBlock, /opts\.skipOversized/);
+  assert.match(helperBlock, /SELECT octet_length\(value::text\) AS payload_bytes FROM app_data WHERE key='baankarn_rooms_v1'/);
+  assert.match(helperBlock, /SELECT value FROM app_data WHERE key='baankarn_rooms_v1' FOR UPDATE/);
+  assert.ok(
+    helperBlock.indexOf('opts.skipOversized') <
+    helperBlock.indexOf("SELECT value FROM app_data WHERE key='baankarn_rooms_v1' FOR UPDATE")
+  );
+});
+
 test('access device token page uses timeout-aware API helpers and busy states', () => {
   const src = read('project', 'admin', 'page-access-devices.jsx');
   assert.match(src, /const ACCESS_DEVICE_API_TIMEOUT_MS = 15_000/);

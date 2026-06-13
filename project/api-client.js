@@ -20,6 +20,7 @@
   ];
 
   const DEBOUNCE_MS = 250;
+  const HYDRATE_RESPONSE_MAX_BYTES = 8 * 1024 * 1024;
   const pendingTimers = new Map();
   const inflight = new Set();
   let isHydrating = false;        // suppress monkey-patch during hydration
@@ -101,6 +102,51 @@
     }
   }
 
+  async function readJsonWithByteLimit(res, maxBytes, label) {
+    const len = Number(res.headers && res.headers.get ? res.headers.get('content-length') : 0);
+    if (Number.isFinite(len) && len > maxBytes) {
+      try { if (res.body && res.body.cancel) await res.body.cancel(); } catch {}
+      const e = new Error(`${label || 'response'} too large (${len} bytes)`);
+      e.code = 'RESPONSE_TOO_LARGE';
+      e.bytes = len;
+      e.maxBytes = maxBytes;
+      throw e;
+    }
+    if (!res.body || !res.body.getReader || typeof TextDecoder === 'undefined') {
+      return res.json();
+    }
+    const reader = res.body.getReader();
+    const chunks = [];
+    let total = 0;
+    try {
+      while (true) {
+        const part = await reader.read();
+        if (part.done) break;
+        const value = part.value || new Uint8Array();
+        total += value.byteLength || value.length || 0;
+        if (total > maxBytes) {
+          try { await reader.cancel(); } catch {}
+          const e = new Error(`${label || 'response'} too large (${total} bytes)`);
+          e.code = 'RESPONSE_TOO_LARGE';
+          e.bytes = total;
+          e.maxBytes = maxBytes;
+          throw e;
+        }
+        chunks.push(value);
+      }
+    } finally {
+      try { reader.releaseLock && reader.releaseLock(); } catch {}
+    }
+    const body = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      body.set(chunk, offset);
+      offset += chunk.byteLength || chunk.length || 0;
+    }
+    const text = new TextDecoder('utf-8').decode(body);
+    return text ? JSON.parse(text) : {};
+  }
+
   async function hydrate() {
     isHydrating = true;
     try {
@@ -133,12 +179,21 @@
         console.warn('[api-client] hydrate failed', res.status);
         return;
       }
-      const data = await res.json();
+      const data = await readJsonWithByteLimit(res, HYDRATE_RESPONSE_MAX_BYTES, '/api/data hydrate');
       // Per-key row versions for the optimistic-lock handshake.
       const metaUpdatedAt = (data.__meta && data.__meta.updatedAt) || {};
+      const metaOmitted = (data.__meta && data.__meta.omitted) || {};
       let count = 0;
       for (const key of SYNCED_KEYS) {
         if (metaUpdatedAt[key]) baseVersions.set(key, metaUpdatedAt[key]);
+        if (metaOmitted[key]) {
+          console.warn(
+            `[api-client] server omitted oversized ${key} ` +
+            `(${Number(metaOmitted[key].bytes || 0).toLocaleString()} bytes) — ` +
+            `using existing local cache. Run the cleanup script on the server.`
+          );
+          continue;
+        }
         if (data[key] !== undefined && data[key] !== null) {
           const serialised = JSON.stringify(data[key]);
           // Reject oversized server values too. If somehow the DB still has
@@ -151,7 +206,6 @@
               `(${serialised.length.toLocaleString()} bytes) — discarding ` +
               `to protect the renderer. Run scripts/strip-rooms-photos.js on the server.`
             );
-            origRemoveItem(key);
             continue;
           }
           // Use the ORIGINAL setItem so we don't trigger a PUT back to server

@@ -962,10 +962,32 @@ const ALLOWED_KEYS = new Set([
   'baankarn_bookings_v1',
   'baankarn_activities_v1',
 ]);
+// Maximum raw JSON text we'll send back for a single app_data value. PUT has a
+// 6 MB hard cap below; this read-side cap protects browsers from legacy rows
+// that were already bloated before that guard shipped.
+const APP_DATA_RESPONSE_VALUE_MAX_BYTES = 5 * 1024 * 1024;
 // Keys that are safe to read while unauthenticated. Everything else returns
 // 401. `baankarn_rooms_v1` is allowed but the value is run through
 // `maskRoomsPublic` first.
 const PUBLIC_KEYS = new Set(['baankarn_rooms_v1', 'baankarn_config_v1']);
+
+function appDataPayloadBytes(row) {
+  return Number(row && (row.payload_bytes || row.bytes || row.n)) || 0;
+}
+
+function oversizedAppDataPayload(row) {
+  const bytes = appDataPayloadBytes(row);
+  return bytes > APP_DATA_RESPONSE_VALUE_MAX_BYTES;
+}
+
+function oversizedAppDataInfo(row) {
+  return {
+    omitted: true,
+    code: 'DATA_TOO_LARGE',
+    bytes: appDataPayloadBytes(row),
+    maxBytes: APP_DATA_RESPONSE_VALUE_MAX_BYTES,
+  };
+}
 
 // Strip every tenant-PII field from a rooms object. The home page needs
 // status/floor/type/rent plus non-sensitive room-photo URLs to render the
@@ -1321,7 +1343,24 @@ app.get('/api/data/:key', async (req, res) => {
   }
   try {
     if (key === 'baankarn_rooms_v1') {
-      await releaseExpiredPublicBookingHolds(pool);
+      await releaseExpiredPublicBookingHolds(pool, { skipOversized: true });
+    }
+    const sizeQ = await pool.query(
+      'SELECT updated_at, octet_length(value::text) AS payload_bytes FROM app_data WHERE key=$1',
+      [key]
+    );
+    if (!sizeQ.rows.length) {
+      return res.json({ key, value: null, updatedAt: null });
+    }
+    if (oversizedAppDataPayload(sizeQ.rows[0])) {
+      const info = oversizedAppDataInfo(sizeQ.rows[0]);
+      console.warn(`[data] omitting oversized GET for ${key} (${info.bytes} bytes)`);
+      return res.json({
+        key,
+        value: null,
+        updatedAt: sizeQ.rows[0].updated_at,
+        ...info,
+      });
     }
     const { rows } = await pool.query('SELECT value, updated_at FROM app_data WHERE key=$1', [key]);
     let value = rows.length ? rows[0].value : null;
@@ -1351,30 +1390,50 @@ app.get('/api/data', async (req, res) => {
   try {
     const keys = isAuth ? Array.from(ALLOWED_KEYS) : Array.from(PUBLIC_KEYS);
     if (keys.includes('baankarn_rooms_v1')) {
-      await releaseExpiredPublicBookingHolds(pool);
+      await releaseExpiredPublicBookingHolds(pool, { skipOversized: true });
     }
-    const { rows } = await pool.query(
-      'SELECT key, value, updated_at FROM app_data WHERE key = ANY($1)',
+    const sizeRows = await pool.query(
+      'SELECT key, updated_at, octet_length(value::text) AS payload_bytes FROM app_data WHERE key = ANY($1)',
       [keys]
     );
+    const safeKeys = sizeRows.rows
+      .filter((r) => !oversizedAppDataPayload(r))
+      .map((r) => r.key);
+    const { rows } = safeKeys.length
+      ? await pool.query(
+          'SELECT key, value, updated_at FROM app_data WHERE key = ANY($1)',
+          [safeKeys]
+        )
+      : { rows: [] };
+    const valueRowsByKey = new Map(rows.map((r) => [r.key, r]));
     const out = {};
     // For unauth callers we need to mask rooms AGAINST the (also-masked)
     // config so the public rent runs through the same formula resolver as
     // the admin bill engine. Pre-resolve the raw config row before iterating.
     const rawConfigRow = !isAuth
-      ? rows.find((x) => x.key === 'baankarn_config_v1')
+      ? valueRowsByKey.get('baankarn_config_v1')
       : null;
     const rawConfigForRooms = rawConfigRow ? rawConfigRow.value : null;
     // Per-key row versions for the optimistic-lock handshake (PUT
     // baseUpdatedAt). Tucked under `__meta` so existing consumers that
     // iterate known keys (api-client SYNCED_KEYS) are unaffected.
-    const meta = { updatedAt: {} };
-    for (const r of rows) {
+    const meta = { updatedAt: {}, bytes: {}, omitted: {} };
+    for (const sizeRow of sizeRows.rows) {
+      meta.updatedAt[sizeRow.key] = sizeRow.updated_at;
+      meta.bytes[sizeRow.key] = appDataPayloadBytes(sizeRow);
+      if (oversizedAppDataPayload(sizeRow)) {
+        const info = oversizedAppDataInfo(sizeRow);
+        console.warn(`[data] omitting oversized GET-all value for ${sizeRow.key} (${info.bytes} bytes)`);
+        out[sizeRow.key] = null;
+        meta.omitted[sizeRow.key] = info;
+        continue;
+      }
+      const r = valueRowsByKey.get(sizeRow.key);
+      if (!r) continue;
       let v = r.value;
       if (!isAuth && r.key === 'baankarn_rooms_v1')  v = maskRoomsPublic(v, rawConfigForRooms);
       if (!isAuth && r.key === 'baankarn_config_v1') v = maskConfigPublic(v);
       out[r.key] = v;
-      meta.updatedAt[r.key] = r.updated_at;
     }
     out.__meta = meta;
     res.json(out);
@@ -2478,13 +2537,24 @@ function releaseHoldShape(room) {
   return { ...rest, status: 'vacant' };
 }
 
-async function releaseExpiredPublicBookingHolds(dbOrClient) {
+async function releaseExpiredPublicBookingHolds(dbOrClient, opts = {}) {
   const ownClient = typeof dbOrClient.connect === 'function'
     && typeof dbOrClient.release !== 'function';
   const client = ownClient ? await dbOrClient.connect() : dbOrClient;
   const released = [];
   try {
     if (ownClient) await client.query('BEGIN');
+    if (opts.skipOversized) {
+      const sizeRes = await client.query(
+        `SELECT octet_length(value::text) AS payload_bytes FROM app_data WHERE key='baankarn_rooms_v1'`
+      );
+      if (sizeRes.rows.length && oversizedAppDataPayload(sizeRes.rows[0])) {
+        const info = oversizedAppDataInfo(sizeRes.rows[0]);
+        console.warn(`[booking-hold] skipped expired-hold sweep because rooms blob is oversized (${info.bytes} bytes)`);
+        if (ownClient) await client.query('COMMIT');
+        return { released, skipped: 'rooms_blob_oversized', bytes: info.bytes };
+      }
+    }
     const rRes = await client.query(
       `SELECT value FROM app_data WHERE key='baankarn_rooms_v1' FOR UPDATE`
     );
