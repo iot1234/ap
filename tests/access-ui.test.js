@@ -129,6 +129,15 @@ test('access device token page uses timeout-aware API helpers and busy states', 
   assert.match(src, /กำลังสร้าง\.\.\./);
 });
 
+test('access device token modal keeps stable component identity while typing', () => {
+  const src = read('project', 'admin', 'page-access-devices.jsx');
+  assert.doesNotMatch(src, /const Wrapper = embedded/);
+  assert.doesNotMatch(src, /const Header = embedded/);
+  assert.doesNotMatch(src, /function EmbeddedHeader/);
+  assert.match(src, /const content = \(\s*<>/);
+  assert.match(src, /return embedded \? <div>\{content\}<\/div> : <PageContainer>\{content\}<\/PageContainer>/);
+});
+
 test('access page embeds the raw API token tab and reports a missing module', () => {
   const src = read('project', 'admin', 'page-access.jsx');
   assert.match(src, /const AccessDevicesPage = window\.PageAccessDevicesInner \|\| window\.PageAccessDevices/);

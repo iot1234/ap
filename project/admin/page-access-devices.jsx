@@ -102,21 +102,9 @@ function PageAccessDevices({ setToast, embedded = false }) {
       },
     }, message);
   }
-  const Wrapper = embedded
-    ? ({ children }) => <div>{children}</div>
-    : ({ children }) => <PageContainer>{children}</PageContainer>;
-  // When embedded, the parent (PageAccess) already renders the title/subtitle
-  // in its own PageHeader — we only need to surface the action button.
-  const Header = embedded
-    ? function EmbeddedHeader({ actions }) {
-        if (!actions) return null;
-        return (
-          <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
-            {actions}
-          </div>
-        );
-      }
-    : function StandaloneHeader(props) { return <PageHeader {...props} />; };
+  // Keep the root/header as plain elements. Defining wrapper components inside
+  // render gives React a new component type on every keystroke, which remounts
+  // the modal and makes inputs lose focus after each character.
   // Resolve apiFetch defensively. requireApiFetch() THROWS if hooks.jsx
   // hasn't registered window.apiFetch yet; calling it unguarded at render
   // crashed the page to the ErrorBoundary on a slow/partial script load.
@@ -285,13 +273,20 @@ function PageAccessDevices({ setToast, embedded = false }) {
     setToast && setToast({ kind: 'success', message: 'คัดลอกแล้ว' });
   }
 
-  return (
-    <Wrapper>
-      <Header title="API Tokens สำหรับ Hardware"
-        subtitle="ออก Bearer token ให้ RFID reader / ESP32 ใช้ POST /api/access/log โดยไม่ต้องมี session"
-        actions={
-          <Btn variant="primary" onClick={() => setShowNew(true)} disabled={busy || loading}>+ ออก token ใหม่</Btn>
-        } />
+  const newTokenAction = (
+    <Btn variant="primary" onClick={() => setShowNew(true)} disabled={busy || loading}>+ ออก token ใหม่</Btn>
+  );
+  const content = (
+    <>
+      {embedded ? (
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
+          {newTokenAction}
+        </div>
+      ) : (
+        <PageHeader title="API Tokens สำหรับ Hardware"
+          subtitle="ออก Bearer token ให้ RFID reader / ESP32 ใช้ POST /api/access/log โดยไม่ต้องมี session"
+          actions={newTokenAction} />
+      )}
 
       <Card style={{ background: C.warningSoft || '#fff7e0', borderLeft: `4px solid ${C.warning || '#d97706'}` }}>
         <div style={{ fontSize: 13, lineHeight: 1.6, color: C.ink2 || C.ink }}>
@@ -411,8 +406,9 @@ function PageAccessDevices({ setToast, embedded = false }) {
           </div>
         )}
       </Modal>
-    </Wrapper>
+    </>
   );
+  return embedded ? <div>{content}</div> : <PageContainer>{content}</PageContainer>;
 }
 
 // Gate the standalone deep-link (/admin#access-devices) on the accessControl
