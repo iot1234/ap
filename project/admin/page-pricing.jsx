@@ -143,12 +143,6 @@ function PagePricing({ config, setConfig, rooms, setRooms, addActivity, setToast
   const ADMIN_VIEWS = window.ADMIN_VIEWS;
   const { Card, Btn, Input, Select, Toggle, Tabs, Pill, SectionHeading,
           PageContainer, PageHeader, DefList, Modal } = window;
-  const Wrapper = embedded
-    ? ({ children }) => <div>{children}</div>
-    : ({ children }) => <PageContainer>{children}</PageContainer>;
-  const Header = embedded
-    ? () => null
-    : (props) => <PageHeader {...props} />;
   const fmtMoney = window.fmtCurrency || ((v) => Number(v || 0).toLocaleString());
 
   const [tab, setTab] = useState('rates');
@@ -355,21 +349,23 @@ function PagePricing({ config, setConfig, rooms, setRooms, addActivity, setToast
     return `${n >= 0 ? '+' : '-'}${fmtMoney(Math.abs(n))}`;
   };
 
-  return (
-    <Wrapper>
-      <Header
+  const pageActions = (
+    <>
+      <Btn variant="ghost" onClick={() => setConfirmReset(true)} disabled={saving}>↺ รีเซ็ต</Btn>
+      <Btn variant="secondary" onClick={() => setDraft(config)} disabled={saving || !dirty}>ยกเลิกการแก้ไข</Btn>
+      <Btn variant="primary" tone="finance" icon="✓" onClick={handleSave} disabled={saving || !dirty || review.issues.length > 0}>
+        {saving ? 'กำลังบันทึก...' : dirty ? 'บันทึกการเปลี่ยนแปลง' : 'บันทึกแล้ว'}
+      </Btn>
+    </>
+  );
+
+  const content = (
+    <>
+      {!embedded ? <PageHeader
         title="ตั้งราคาห้องพัก"
         subtitle="กำหนดราคาฐาน, ค่าน้ำ-ไฟ, ส่วนลด และค่าธรรมเนียมต่างๆ อย่างครบถ้วน"
-        actions={
-          <>
-            <Btn variant="ghost" onClick={() => setConfirmReset(true)} disabled={saving}>↺ รีเซ็ต</Btn>
-            <Btn variant="secondary" onClick={() => setDraft(config)} disabled={saving || !dirty}>ยกเลิกการแก้ไข</Btn>
-            <Btn variant="primary" tone="finance" icon="✓" onClick={handleSave} disabled={saving || !dirty || review.issues.length > 0}>
-              {saving ? 'กำลังบันทึก...' : dirty ? 'บันทึกการเปลี่ยนแปลง' : 'บันทึกแล้ว'}
-            </Btn>
-          </>
-        }
-      />
+        actions={pageActions}
+      /> : null}
       {/* When embedded inside Settings, show an inline action bar at top
           since the parent Settings header doesn't carry pricing-specific
           actions (Reset / Cancel / Save). Without this, admin opens the
@@ -379,11 +375,7 @@ function PagePricing({ config, setConfig, rooms, setRooms, addActivity, setToast
           display: 'flex', alignItems: 'center', gap: 8,
           flexWrap: 'wrap', marginBottom: 14,
         }}>
-          <Btn variant="ghost" size="sm" onClick={() => setConfirmReset(true)} disabled={saving}>↺ รีเซ็ต</Btn>
-          <Btn variant="secondary" size="sm" onClick={() => setDraft(config)} disabled={saving || !dirty}>ยกเลิกการแก้ไข</Btn>
-          <Btn variant="primary" tone="finance" size="sm" icon="✓" onClick={handleSave} disabled={saving || !dirty || review.issues.length > 0}>
-            {saving ? 'กำลังบันทึก...' : dirty ? 'บันทึกการเปลี่ยนแปลง' : 'บันทึกแล้ว'}
-          </Btn>
+          {pageActions}
         </div>
       )}
 
@@ -723,8 +715,9 @@ function PagePricing({ config, setConfig, rooms, setRooms, addActivity, setToast
           คุณแน่ใจหรือไม่?
         </div>
       </Modal>
-    </Wrapper>
+    </>
   );
+  return embedded ? <div>{content}</div> : <PageContainer>{content}</PageContainer>;
 }
 
 // ============================================================

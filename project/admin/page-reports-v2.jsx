@@ -14,12 +14,6 @@ const { useState, useEffect, useMemo } = React;
 function PageReportsV2({ setToast, embedded = false }) {
   const C = window.ADMIN_C;
   const { Card, PageContainer, PageHeader, EmptyState, Btn, Tabs } = window;
-  const Wrapper = embedded
-    ? ({ children }) => <div>{children}</div>
-    : ({ children }) => <PageContainer>{children}</PageContainer>;
-  const Header = embedded
-    ? () => null
-    : (props) => <PageHeader {...props} />;
   const [tab, setTab] = useState('revenue');
   const [year, setYear] = useState(new Date().getFullYear());
   const [data, setData] = useState({ rows: [], stats: null });
@@ -59,9 +53,9 @@ function PageReportsV2({ setToast, embedded = false }) {
     window.open(url, '_blank', 'noopener');
   }
 
-  return (
-    <Wrapper>
-      <Header title="รายงานจริง (จากฐานข้อมูล)"
+  const content = (
+    <>
+      {!embedded ? <PageHeader title="รายงานจริง (จากฐานข้อมูล)"
         subtitle="ตัวเลขจริงจากตาราง bills / tenants / maintenance — ไม่ใช่ข้อมูลตัวอย่าง"
         actions={
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
@@ -77,7 +71,7 @@ function PageReportsV2({ setToast, embedded = false }) {
             <Btn size="sm" onClick={() => exportAs('csv')}>CSV</Btn>
             <Btn size="sm" onClick={() => exportAs('xlsx')}>Excel</Btn>
           </div>
-        } />
+        } /> : null}
 
       <Card>
         <div style={{ display: 'flex', gap: 4, borderBottom: '1px solid ' + C.border, marginBottom: 16 }}>
@@ -106,8 +100,9 @@ function PageReportsV2({ setToast, embedded = false }) {
         {!busy && tab === 'maintenance' && <MaintenanceView stats={data.stats} C={C} />}
         {!busy && tab === 'cashflow' && <CashflowView rows={data.rows} C={C} />}
       </Card>
-    </Wrapper>
+    </>
   );
+  return embedded ? <div>{content}</div> : <PageContainer>{content}</PageContainer>;
 }
 
 function fmtBaht(n) {

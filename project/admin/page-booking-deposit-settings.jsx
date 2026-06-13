@@ -90,12 +90,6 @@ function PageBookingDepositSettings({ setToast, embedded = false, currentUser = 
     try { return window.requireApiFetch ? window.requireApiFetch() : window.apiFetch; }
     catch { return window.apiFetch; }
   })();
-  const Wrapper = embedded
-    ? ({ children }) => <div>{children}</div>
-    : ({ children }) => <PageContainer>{children}</PageContainer>;
-  const Header = embedded
-    ? () => null
-    : (props) => <PageHeader {...props} tone="rooms" />;
 
   const [draft, setDraft] = useState(null);
   const [saved, setSaved] = useState(null);
@@ -225,14 +219,15 @@ function PageBookingDepositSettings({ setToast, embedded = false, currentUser = 
   }
 
   if (!draft) {
-    return (
-      <Wrapper>
-        <Header title="ตั้งค่าจอง/มัดจำ" subtitle="กำลังโหลดค่าปัจจุบัน..." />
+    const content = (
+      <>
+        {!embedded ? <PageHeader title="ตั้งค่าจอง/มัดจำ" subtitle="กำลังโหลดค่าปัจจุบัน..." tone="rooms" /> : null}
         <Card>
           <div style={{ color: C.muted, fontSize: 14 }}>กำลังโหลดการตั้งค่า</div>
         </Card>
-      </Wrapper>
+      </>
     );
+    return embedded ? <div>{content}</div> : <PageContainer>{content}</PageContainer>;
   }
 
   const warnings = [];
@@ -284,13 +279,14 @@ function PageBookingDepositSettings({ setToast, embedded = false, currentUser = 
     </>
   );
 
-  return (
-    <Wrapper>
-      <Header
+  const content = (
+    <>
+      {!embedded ? <PageHeader
         title="ตั้งค่าจอง/มัดจำ"
         subtitle="กำหนดค่าจอง ล็อกห้อง สลิป และการหักเงินจองกับมัดจำสัญญาในที่เดียว"
         actions={saveActions}
-      />
+        tone="rooms"
+      /> : null}
 
       {embedded ? (
         <Card>
@@ -485,8 +481,9 @@ function PageBookingDepositSettings({ setToast, embedded = false, currentUser = 
           )}
         </div>
       </div>
-    </Wrapper>
+    </>
   );
+  return embedded ? <div>{content}</div> : <PageContainer>{content}</PageContainer>;
 }
 
 function BookingDepositNotice({ color = 'info', title, children, C }) {

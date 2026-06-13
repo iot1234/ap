@@ -95,14 +95,6 @@ const FEATURE_HELP = {
 function PageFeatures({ setToast, embedded = false, currentUser = null }) {
   const C = window.ADMIN_C;
   const { Card, SectionHeading, Btn, Pill, PageContainer, PageHeader } = window;
-  // Wrap with PageContainer/PageHeader only when NOT embedded. Inside a
-  // tab the parent already provides the page chrome.
-  const Wrapper = embedded
-    ? ({ children }) => <div>{children}</div>
-    : ({ children }) => <PageContainer>{children}</PageContainer>;
-  const Header = embedded
-    ? () => null
-    : (props) => <PageHeader {...props} />;
   // apiFetch attaches the CSRF token + handles 401 redirects. Without it the
   // PUT to /api/admin/features 403s with "invalid CSRF token", and every
   // toggle on this page silently fails.
@@ -332,12 +324,13 @@ function PageFeatures({ setToast, embedded = false, currentUser = null }) {
   }, [features, serverWarnings]);
 
   if (!features) {
-    return (
-      <Wrapper>
-        <Header title="ฟีเจอร์ระบบ" subtitle="เปิด/ปิดฟีเจอร์ของระบบ" />
+    const content = (
+      <>
+        {!embedded ? <PageHeader title="ฟีเจอร์ระบบ" subtitle="เปิด/ปิดฟีเจอร์ของระบบ" /> : null}
         <Card>{err || (window.SkeletonRows ? <window.SkeletonRows count={6} /> : 'กำลังโหลด…')}</Card>
-      </Wrapper>
+      </>
     );
+    return embedded ? <div>{content}</div> : <PageContainer>{content}</PageContainer>;
   }
 
   const readOnlyReason = canEdit ? '' : `บัญชี ${viewerRole || 'ปัจจุบัน'} ดูค่าได้เท่านั้น ต้องใช้ role owner เพื่อบันทึก`;
@@ -416,10 +409,12 @@ function PageFeatures({ setToast, embedded = false, currentUser = null }) {
     );
   };
 
-  return (
-    <Wrapper>
-      <Header title="ฟีเจอร์ระบบ"
-        subtitle="เปิด/ปิดฟีเจอร์ของระบบ — รายการที่ปิดจะถูกบล็อกที่ฝั่ง server (503)" />
+  const content = (
+    <>
+      {!embedded ? (
+        <PageHeader title="ฟีเจอร์ระบบ"
+          subtitle="เปิด/ปิดฟีเจอร์ของระบบ — รายการที่ปิดจะถูกบล็อกที่ฝั่ง server (503)" />
+      ) : null}
       {err ? <Card style={{ color: C.danger }}>{err}</Card> : null}
       {!canEdit ? (
         <Card style={{
@@ -698,8 +693,9 @@ function PageFeatures({ setToast, embedded = false, currentUser = null }) {
           </div>
         </div>
       </Card>
-    </Wrapper>
+    </>
   );
+  return embedded ? <div>{content}</div> : <PageContainer>{content}</PageContainer>;
 }
 
 // Local switch used by this page only. Named distinctly from window.Toggle

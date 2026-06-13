@@ -29,12 +29,6 @@ const GROUP_META = {
 function PageSecrets({ setToast, embedded = false }) {
   const C = window.ADMIN_C;
   const { Card, SectionHeading, Btn, Pill, PageContainer, PageHeader, Modal } = window;
-  const Wrapper = embedded
-    ? ({ children }) => <div>{children}</div>
-    : ({ children }) => <PageContainer>{children}</PageContainer>;
-  const Header = embedded
-    ? () => null
-    : (props) => <PageHeader {...props} />;
   const apiFetch = window.requireApiFetch ? window.requireApiFetch() : window.apiFetch;
   const [groups, setGroups] = useState({});
   const [editing, setEditing] = useState({});
@@ -177,10 +171,12 @@ function PageSecrets({ setToast, embedded = false }) {
     return () => { cancelled = true; clearInterval(interval); };
   }, [ownerClaim?.id]);
 
-  return (
-    <Wrapper>
-      <Header title="ตั้งค่า API & Secrets"
-        subtitle="ทุกค่าเข้ารหัสด้วย AES-256-GCM ใน DB · env วาง override ได้ตามต้องการ" />
+  const content = (
+    <>
+      {!embedded ? (
+        <PageHeader title="ตั้งค่า API & Secrets"
+          subtitle="ทุกค่าเข้ารหัสด้วย AES-256-GCM ใน DB · env วาง override ได้ตามต้องการ" />
+      ) : null}
 
       <Card style={{ background: C.warningSoft || '#fff7e0', borderLeft: `4px solid ${C.warning || '#c08a2a'}` }}>
         <div style={{ fontSize: 13, color: C.ink2 || C.ink, lineHeight: 1.6 }}>
@@ -267,8 +263,9 @@ function PageSecrets({ setToast, embedded = false }) {
           <OwnerClaimBody token={ownerClaim} status={claimStatus} C={C} />
         )}
       </Modal>
-    </Wrapper>
+    </>
   );
+  return embedded ? <div>{content}</div> : <PageContainer>{content}</PageContainer>;
 }
 
 // OwnerClaimBody — renders the 3-step claim flow + live status indicator.

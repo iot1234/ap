@@ -26,6 +26,33 @@ const SLIP_PROVIDERS = [
 const SLIP_PROVIDER_LABEL = Object.fromEntries(SLIP_PROVIDERS.map((p) => [p.id, p.label]));
 const slipProviderLabel = (id) => SLIP_PROVIDER_LABEL[id] || id || 'Provider';
 
+function SlipVerifyStepHeader({ n, done, title, hint, children, C }) {
+  return React.createElement('div', {
+    style: {
+      padding: '14px 16px',
+      background: done ? '#f0f9f0' : C.bg,
+      borderRadius: 8, marginBottom: 10,
+      border: `1px solid ${done ? '#bce0bc' : C.border}`,
+    },
+  },
+    React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 10 } },
+      React.createElement('span', {
+        style: {
+          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+          width: 28, height: 28, borderRadius: '50%',
+          background: done ? '#2f8f5b' : C.muted, color: '#fff',
+          fontWeight: 700, fontSize: 13, flexShrink: 0,
+        },
+      }, done ? '✓' : n),
+      React.createElement('div', { style: { flex: 1 } },
+        React.createElement('div', { style: { fontFamily: 'IBM Plex Sans Thai', fontWeight: 600, fontSize: 14.5 } }, title),
+        hint ? React.createElement('div', { style: { color: C.muted, fontSize: 12.5, marginTop: 2 } }, hint) : null,
+      ),
+    ),
+    children ? React.createElement('div', { style: { marginTop: 12, marginLeft: 38 } }, children) : null
+  );
+}
+
 function PageSlipVerify({ setToast }) {
   const C = window.ADMIN_C;
   const { Card, SectionHeading, Btn, Pill, PageContainer, PageHeader } = window;
@@ -309,33 +336,6 @@ function PageSlipVerify({ setToast }) {
   const sevIcon = (sev) =>
     sev === 'high' ? '🔴' : sev === 'med' ? '🟡' : sev === 'low' ? '⚪' : 'ℹ️';
 
-  function StepHeader({ n, done, title, hint, children }) {
-    return React.createElement('div', {
-      style: {
-        padding: '14px 16px',
-        background: done ? '#f0f9f0' : C.bg,
-        borderRadius: 8, marginBottom: 10,
-        border: `1px solid ${done ? '#bce0bc' : C.border}`,
-      },
-    },
-      React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 10 } },
-        React.createElement('span', {
-          style: {
-            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-            width: 28, height: 28, borderRadius: '50%',
-            background: done ? '#2f8f5b' : C.muted, color: '#fff',
-            fontWeight: 700, fontSize: 13, flexShrink: 0,
-          },
-        }, done ? '✓' : n),
-        React.createElement('div', { style: { flex: 1 } },
-          React.createElement('div', { style: { fontFamily: 'IBM Plex Sans Thai', fontWeight: 600, fontSize: 14.5 } }, title),
-          hint ? React.createElement('div', { style: { color: C.muted, fontSize: 12.5, marginTop: 2 } }, hint) : null,
-        ),
-      ),
-      children ? React.createElement('div', { style: { marginTop: 12, marginLeft: 38 } }, children) : null
-    );
-  }
-
   // ── Render ────────────────────────────────────────────────────────────
   return React.createElement(PageContainer, null,
     React.createElement(PageHeader, {
@@ -456,7 +456,8 @@ function PageSlipVerify({ setToast }) {
       React.createElement(SectionHeading, null, 'ขั้นตอนตั้งค่า'),
 
       // Step 1: enable slipUpload
-      React.createElement(StepHeader, {
+      React.createElement(SlipVerifyStepHeader, {
+        C,
         n: 1,
         done: status.step1Done,
         title: 'เปิดฟีเจอร์อัปโหลดสลิป',
@@ -480,7 +481,8 @@ function PageSlipVerify({ setToast }) {
       ),
 
       // Step 2: enable autoVerify
-      React.createElement(StepHeader, {
+      React.createElement(SlipVerifyStepHeader, {
+        C,
         n: 2,
         done: status.step2Done,
         title: 'เปิดการตรวจสลิปอัตโนมัติ (autoVerify)',
@@ -499,7 +501,8 @@ function PageSlipVerify({ setToast }) {
 
       // Step 3: choose PRIMARY provider (system tries this first; falls
       // through to ready fallback providers on transient failures)
-      React.createElement(StepHeader, {
+      React.createElement(SlipVerifyStepHeader, {
+        C,
         n: 3,
         done: status.step3Done && status.step2Done,
         title: `Provider หลัก — ตอนนี้: ${slipProviderLabel(status.primary)}`,
@@ -564,7 +567,8 @@ function PageSlipVerify({ setToast }) {
       // The previous version only rendered the selected provider's key,
       // which made it impossible to save EasySlip then later set SlipOK
       // without re-clicking the dropdown each time.
-      React.createElement(StepHeader, {
+      React.createElement(SlipVerifyStepHeader, {
+        C,
         n: 4,
         done: status.step4Done,
         title: 'API keys (ตั้งหลาย provider → auto-failover พร้อม)',
@@ -685,7 +689,8 @@ function PageSlipVerify({ setToast }) {
       ),
 
       // Step 5: test
-      React.createElement(StepHeader, {
+      React.createElement(SlipVerifyStepHeader, {
+        C,
         n: 5,
         done: status.step5Done,
         title: 'ทดสอบการเชื่อมต่อ',
