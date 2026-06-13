@@ -11484,7 +11484,8 @@ app.get('/api/admin/security-events', requireAuth, requireRole('owner', 'manager
 });
 
 // === v2: Access devices (B2) — manage hardware Bearer tokens ===============
-app.get('/api/admin/access-devices', requireAuth, requireRole('owner', 'manager'), async (_req, res) => {
+app.get('/api/admin/access-devices', requireAuth, requireRole('owner', 'manager'), async (req, res) => {
+  const limit = Math.min(Math.max(Number(req.query.limit) || 100, 1), 100);
   try {
     const { rows } = await pool.query(
       `SELECT id,
@@ -11493,7 +11494,8 @@ app.get('/api/admin/access-devices', requireAuth, requireRole('owner', 'manager'
               NULLIF(left(COALESCE(description, ''), 200), '') AS description,
               last_seen,
               created_at
-         FROM access_devices ORDER BY created_at DESC LIMIT 500`
+         FROM access_devices ORDER BY created_at DESC LIMIT $1`,
+      [limit]
     );
     res.json({ ok: true, devices: rows });
   } catch (err) {

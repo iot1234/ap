@@ -40,7 +40,11 @@ test('admin JSON readers cap large access responses before parsing', () => {
   assert.match(hooks, /new CustomEvent\('ap:diagnostic'/);
   assert.match(access, /window\.readJsonWithByteLimit\(res, ACCESS_RESPONSE_MAX_BYTES/);
   assert.match(devices, /const ACCESS_DEVICE_RESPONSE_MAX_BYTES = 512 \* 1024/);
+  assert.match(devices, /const ACCESS_DEVICE_RENDER_LIMIT = 100/);
   assert.match(devices, /window\.readJsonWithByteLimit\(res, ACCESS_DEVICE_RESPONSE_MAX_BYTES/);
+  assert.match(devices, /function normaliseAccessDevices\(rows\)/);
+  assert.match(devices, /function emitAccessDeviceDiagnostic\(payload\)/);
+  assert.match(devices, /window\.PageAccessDevicesInner = PageAccessDevices/);
   assert.match(shell, /function DiagnosticBanner\(\{ diagnostic, onDismiss \}\)/);
   assert.match(shell, /const CRASH_MARKER_KEY = '__admin_alive_marker_v1'/);
   assert.match(shell, /window\.addEventListener\('ap:diagnostic', onDiagnostic\)/);
@@ -97,22 +101,37 @@ test('server truncates legacy access text before returning list responses', () =
   assert.match(server, /FROM access_logs ORDER BY occurred_at DESC LIMIT \$1/);
   assert.match(server, /left\(COALESCE\(device_id, ''\), 64\) AS device_id/);
   assert.match(server, /NULLIF\(left\(COALESCE\(description, ''\), 200\), ''\) AS description/);
-  assert.match(server, /FROM access_devices ORDER BY created_at DESC LIMIT 500/);
+  assert.match(server, /const limit = Math\.min\(Math\.max\(Number\(req\.query\.limit\) \|\| 100, 1\), 100\)/);
+  assert.match(server, /FROM access_devices ORDER BY created_at DESC LIMIT \$1/);
+  assert.match(server, /\[limit\]/);
 });
 
 test('access device token page uses timeout-aware API helpers and busy states', () => {
   const src = read('project', 'admin', 'page-access-devices.jsx');
   assert.match(src, /const ACCESS_DEVICE_API_TIMEOUT_MS = 15_000/);
+  assert.match(src, /const ACCESS_DEVICE_RENDER_LIMIT = 100/);
   assert.match(src, /const \[loading, setLoading\] = useState\(false\)/);
+  assert.match(src, /const \[loadError, setLoadError\] = useState\(null\)/);
   assert.match(src, /const \[deletingId, setDeletingId\] = useState\(null\)/);
   assert.match(src, /window\.toastError\(setToast, err, \{ action \}\)/);
   assert.match(src, /async function fetchJsonWithTimeout/);
   assert.match(src, /e\.code = 'TIMEOUT'/);
   assert.match(src, /timeoutMs: ACCESS_DEVICE_API_TIMEOUT_MS/);
-  assert.match(src, /apiFetch\('\/api\/admin\/access-devices', \{\s*timeoutMs: ACCESS_DEVICE_API_TIMEOUT_MS,\s*\}\)/);
-  assert.match(src, /d = await fetchJsonWithTimeout\('\/api\/admin\/access-devices'\)/);
+  assert.match(src, /const endpoint = `\/api\/admin\/access-devices\?limit=\$\{ACCESS_DEVICE_RENDER_LIMIT\}`/);
+  assert.match(src, /apiFetch\(endpoint, \{\s*timeoutMs: ACCESS_DEVICE_API_TIMEOUT_MS,\s*\}\)/);
+  assert.match(src, /d = await fetchJsonWithTimeout\(endpoint\)/);
+  assert.match(src, /setDevices\(normaliseAccessDevices\(d\.devices\)\)/);
+  assert.match(src, /setLoadError\(message\)/);
+  assert.match(src, /emitAccessDeviceDiagnostic\(\{/);
   assert.match(src, /กำลังโหลด API Tokens/);
   assert.match(src, /disabled=\{deletingId === d\.id \|\| busy\}/);
   assert.match(src, /กำลังลบ\.\.\./);
   assert.match(src, /กำลังสร้าง\.\.\./);
+});
+
+test('access page embeds the raw API token tab and reports a missing module', () => {
+  const src = read('project', 'admin', 'page-access.jsx');
+  assert.match(src, /const AccessDevicesPage = window\.PageAccessDevicesInner \|\| window\.PageAccessDevices/);
+  assert.match(src, /code: 'ACCESS_DEVICES_MODULE_MISSING'/);
+  assert.match(src, /<AccessDevicesPage setToast=\{setToast\} embedded \/>/);
 });

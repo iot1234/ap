@@ -12,6 +12,7 @@
 const { useState, useEffect } = React;
 const ACCESS_DEVICE_API_TIMEOUT_MS = 15_000;
 const ACCESS_DEVICE_RESPONSE_MAX_BYTES = 512 * 1024;
+const ACCESS_DEVICE_RENDER_LIMIT = 100;
 
 function readAccessDeviceJson(res, label) {
   if (window.readJsonWithByteLimit) {
@@ -20,12 +21,87 @@ function readAccessDeviceJson(res, label) {
   return res.json();
 }
 
+async function readAccessDevicePayload(res, label) {
+  try {
+    return await readAccessDeviceJson(res, label);
+  } catch (err) {
+    if (res && !res.ok) return {};
+    throw err;
+  }
+}
+
+function accessDeviceText(value, max = 200) {
+  return String(value == null ? '' : value).slice(0, max);
+}
+
+function normaliseAccessDevices(rows) {
+  if (!Array.isArray(rows)) return [];
+  return rows.slice(0, ACCESS_DEVICE_RENDER_LIMIT).map((row) => {
+    const id = Number(row && row.id);
+    return {
+      id: Number.isInteger(id) && id > 0 ? id : 0,
+      device_id: accessDeviceText(row && row.device_id, 64),
+      description: accessDeviceText(row && row.description, 200),
+      enabled: !!(row && row.enabled),
+      last_seen: row && row.last_seen ? accessDeviceText(row.last_seen, 64) : null,
+      created_at: row && row.created_at ? accessDeviceText(row.created_at, 64) : null,
+    };
+  }).filter((row) => row.id && row.device_id);
+}
+
+function formatAccessDeviceDate(value, mode = 'date') {
+  const ts = Date.parse(value || '');
+  if (!Number.isFinite(ts)) return '-';
+  const d = new Date(ts);
+  return mode === 'datetime' ? d.toLocaleString('th-TH') : d.toLocaleDateString('th-TH');
+}
+
+function emitAccessDeviceDiagnostic(payload) {
+  if (!window.emitAdminDiagnostic) return;
+  window.emitAdminDiagnostic({
+    page: 'access-devices',
+    code: 'ACCESS_DEVICES_TAB_ERROR',
+    title: 'API Tokens มีปัญหา',
+    ...payload,
+  });
+}
+
 // `embedded` prop lets PageAccess host this as a tab without rendering its
 // own PageContainer + PageHeader. Standalone /admin#access-devices still
 // works for legacy URLs / bookmarks.
 function PageAccessDevices({ setToast, embedded = false }) {
-  const C = window.ADMIN_C;
-  const { Card, Pill, PageContainer, PageHeader, EmptyState, Btn, Modal } = window;
+  const C = window.ADMIN_C || {};
+  const Card = window.Card;
+  const Pill = window.Pill;
+  const PageContainer = window.PageContainer;
+  const PageHeader = window.PageHeader;
+  const EmptyState = window.EmptyState;
+  const Btn = window.Btn;
+  const Modal = window.Modal;
+  const missingGlobals = [
+    !Card && 'Card',
+    !Pill && 'Pill',
+    !EmptyState && 'EmptyState',
+    !Btn && 'Btn',
+    !Modal && 'Modal',
+    !embedded && !PageContainer && 'PageContainer',
+    !embedded && !PageHeader && 'PageHeader',
+  ].filter(Boolean);
+  if (missingGlobals.length > 0) {
+    const message = `รอโหลดส่วนประกอบหน้า API Tokens: ${missingGlobals.join(', ')}`;
+    setTimeout(() => emitAccessDeviceDiagnostic({ kind: 'warning', message, missingGlobals }), 0);
+    return React.createElement('div', {
+      style: {
+        padding: 16,
+        marginBottom: 12,
+        borderRadius: 8,
+        background: '#fff7e0',
+        border: '1px solid #f6d08c',
+        color: '#6b4a00',
+        fontSize: 13,
+      },
+    }, message);
+  }
   const Wrapper = embedded
     ? ({ children }) => <div>{children}</div>
     : ({ children }) => <PageContainer>{children}</PageContainer>;
@@ -56,6 +132,7 @@ function PageAccessDevices({ setToast, embedded = false }) {
   const [form, setForm] = useState({ deviceId: '', description: '' });
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState(null);
   const [deletingId, setDeletingId] = useState(null);
   const [revealed, setRevealed] = useState(null);   // { token, deviceId }
 
@@ -79,7 +156,7 @@ function PageAccessDevices({ setToast, embedded = false }) {
         ...opts,
         ...(signal ? { signal } : {}),
       });
-      const d = await readAccessDeviceJson(r, url).catch(() => ({}));
+      const d = await readAccessDevicePayload(r, url);
       if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
       return d;
     } catch (err) {
@@ -96,25 +173,37 @@ function PageAccessDevices({ setToast, embedded = false }) {
 
   async function load() {
     setLoading(true);
+    setLoadError(null);
+    const endpoint = `/api/admin/access-devices?limit=${ACCESS_DEVICE_RENDER_LIMIT}`;
     try {
       let d;
       if (window.apiCall || window.requireApiCall) {
         const call = window.requireApiCall ? window.requireApiCall() : window.apiCall;
-        d = await call('/api/admin/access-devices', {
+        d = await call(endpoint, {
           timeoutMs: ACCESS_DEVICE_API_TIMEOUT_MS,
           maxResponseBytes: ACCESS_DEVICE_RESPONSE_MAX_BYTES,
         });
       } else if (apiFetch) {
-        const r = await apiFetch('/api/admin/access-devices', {
+        const r = await apiFetch(endpoint, {
           timeoutMs: ACCESS_DEVICE_API_TIMEOUT_MS,
         });
-        d = await readAccessDeviceJson(r, '/api/admin/access-devices').catch(() => ({}));
+        d = await readAccessDevicePayload(r, endpoint);
         if (!r.ok) throw new Error(d.error || 'load failed');
       } else {
-        d = await fetchJsonWithTimeout('/api/admin/access-devices');
+        d = await fetchJsonWithTimeout(endpoint);
       }
-      setDevices(d.devices || []);
+      setDevices(normaliseAccessDevices(d.devices));
     } catch (e) {
+      const message = e?.message || 'โหลด API Tokens ไม่สำเร็จ';
+      setLoadError(message);
+      setDevices([]);
+      emitAccessDeviceDiagnostic({
+        kind: 'danger',
+        message,
+        error: message,
+        action: 'โหลด API Tokens',
+        endpoint,
+      });
       showError(e, 'โหลด API Tokens');
     } finally { setLoading(false); }
   }
@@ -147,7 +236,7 @@ function PageAccessDevices({ setToast, embedded = false }) {
           body: JSON.stringify(form),
           timeoutMs: ACCESS_DEVICE_API_TIMEOUT_MS,
         });
-        d = await readAccessDeviceJson(r, '/api/admin/access-devices').catch(() => ({}));
+        d = await readAccessDevicePayload(r, '/api/admin/access-devices');
         if (!r.ok) throw new Error(d.error || 'create failed');
       }
       setRevealed({ token: d.token, deviceId: d.device.device_id });
@@ -180,7 +269,7 @@ function PageAccessDevices({ setToast, embedded = false }) {
           method: 'DELETE',
           timeoutMs: ACCESS_DEVICE_API_TIMEOUT_MS,
         });
-        const d = await readAccessDeviceJson(r, `/api/admin/access-devices/${id}`).catch(() => ({}));
+        const d = await readAccessDevicePayload(r, `/api/admin/access-devices/${id}`);
         if (!r.ok) throw new Error(d.error || 'delete failed');
       }
       setToast && setToast({ kind: 'success', message: 'ลบแล้ว' });
@@ -204,7 +293,7 @@ function PageAccessDevices({ setToast, embedded = false }) {
           <Btn variant="primary" onClick={() => setShowNew(true)} disabled={busy || loading}>+ ออก token ใหม่</Btn>
         } />
 
-      <Card style={{ background: C.warningSoft || C.warningSoft, borderLeft: `4px solid ${C.warning || C.warning}` }}>
+      <Card style={{ background: C.warningSoft || '#fff7e0', borderLeft: `4px solid ${C.warning || '#d97706'}` }}>
         <div style={{ fontSize: 13, lineHeight: 1.6, color: C.ink2 || C.ink }}>
           🔐 <b>ความปลอดภัย:</b> token ใหม่จะแสดงเพียงครั้งเดียวเท่านั้น — ระบบเก็บแค่ SHA-256 hash<br/>
           📡 <b>Hardware ใช้:</b> ส่ง <code>Authorization: Bearer &lt;token&gt;</code> ทุก request<br/>
@@ -213,6 +302,31 @@ function PageAccessDevices({ setToast, embedded = false }) {
       </Card>
 
       <Card>
+        {loadError ? (
+          <div style={{
+            padding: 12,
+            marginBottom: 12,
+            borderRadius: 8,
+            background: C.dangerSoft || '#fff5f4',
+            color: C.dangerInk || C.danger || '#9f1d1d',
+            border: `1px solid ${C.danger || '#f3c2bf'}`,
+            fontSize: 13,
+            lineHeight: 1.5,
+          }}>
+            <b>โหลด API Tokens ไม่สำเร็จ</b>: {loadError}
+            {' '}
+            <button type="button" onClick={load} style={{
+              border: 0,
+              padding: 0,
+              background: 'transparent',
+              color: 'inherit',
+              textDecoration: 'underline',
+              cursor: 'pointer',
+              fontFamily: 'inherit',
+              fontWeight: 600,
+            }}>ลองใหม่</button>
+          </div>
+        ) : null}
         {loading ? (
           <div role="status" style={{ padding: 24, textAlign: 'center', color: C.muted, fontSize: 13 }}>
             กำลังโหลด API Tokens...
@@ -229,8 +343,8 @@ function PageAccessDevices({ setToast, embedded = false }) {
                   {d.description && <div style={{ color: C.muted, fontSize: 12, marginTop: 2 }}>{d.description}</div>}
                 </div>
                 <div style={{ color: C.muted, fontSize: 12 }}>
-                  สร้างเมื่อ {new Date(d.created_at).toLocaleDateString('th-TH')}
-                  {d.last_seen && <><br/>ใช้งานล่าสุด {new Date(d.last_seen).toLocaleString('th-TH')}</>}
+                  สร้างเมื่อ {formatAccessDeviceDate(d.created_at)}
+                  {d.last_seen && <><br/>ใช้งานล่าสุด {formatAccessDeviceDate(d.last_seen, 'datetime')}</>}
                 </div>
                 <Pill color={d.enabled ? C.success : C.muted}>{d.enabled ? 'ใช้งาน' : 'ปิด'}</Pill>
                 <Btn size="sm" variant="danger" disabled={deletingId === d.id || busy}
@@ -305,6 +419,7 @@ function PageAccessDevices({ setToast, embedded = false }) {
 // flag, same as PageAccess. When embedded as a tab it already inherits
 // PageAccess's gate, but the direct hash route rendered this raw — reachable
 // even with access control turned off, contradicting the feature flag.
+window.PageAccessDevicesInner = PageAccessDevices;
 window.PageAccessDevices = window.FeatureGate
   ? function PageAccessDevicesGated(props) {
       return React.createElement(window.FeatureGate,

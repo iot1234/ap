@@ -43,6 +43,7 @@ function PageAccess({ setToast }) {
   // resulting log entries without switching pages. Hash /admin#access-devices
   // still works as a direct deep-link via shell.jsx's render-by-page-id.
   const Tabs = window.Tabs;
+  const AccessDevicesPage = window.PageAccessDevicesInner || window.PageAccessDevices;
   const [view, setView] = useState('logs');
   const [list, setList] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -89,6 +90,18 @@ function PageAccess({ setToast }) {
     load();
     return () => { if (abortRef.current) abortRef.current.abort(); };
   }, []);
+  useEffect(() => {
+    if (view !== 'devices' || AccessDevicesPage) return;
+    if (window.emitAdminDiagnostic) {
+      window.emitAdminDiagnostic({
+        kind: 'danger',
+        code: 'ACCESS_DEVICES_MODULE_MISSING',
+        page: 'access',
+        title: 'API Tokens เปิดไม่ได้',
+        message: 'ไม่พบโมดูล API Tokens ในหน้าเว็บ กรุณารีเฟรชหรือรอ deploy ล่าสุด',
+      });
+    }
+  }, [view, AccessDevicesPage]);
 
   async function submit(e) {
     e.preventDefault();
@@ -163,8 +176,18 @@ function PageAccess({ setToast }) {
         />
       ) : null}
 
-      {view === 'devices' && window.PageAccessDevices && (
-        <window.PageAccessDevices setToast={setToast} embedded />
+      {view === 'devices' && (
+        AccessDevicesPage
+          ? <AccessDevicesPage setToast={setToast} embedded />
+          : <Card style={{
+              background: C.dangerSoft || '#fff5f4',
+              border: `1px solid ${C.danger || '#f3c2bf'}`,
+              color: C.dangerInk || C.danger || '#9f1d1d',
+              fontSize: 13,
+            }}>
+              <b>API Tokens เปิดไม่ได้</b>
+              <div style={{ marginTop: 4 }}>ไม่พบโมดูล API Tokens ในหน้าเว็บ กรุณารีเฟรชหรือรอ deploy ล่าสุด</div>
+            </Card>
       )}
 
       {view === 'logs' && (<>
