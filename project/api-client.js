@@ -168,7 +168,6 @@
           }
         }
       }
-      console.log(`[api-client] hydrated ${count}/${SYNCED_KEYS.length} keys (auth=${isAuthenticated})`);
     } catch (err) {
       console.warn('[api-client] hydrate error', err);
     } finally {

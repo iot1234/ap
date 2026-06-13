@@ -342,17 +342,19 @@ async function testGroup(group) {
     if (!id || !sec || !ep || !bucket) {
       return { ok: false, error: 'R2 credentials/endpoint/bucket ยังไม่ครบ' };
     }
-    let lib;
-    try { lib = require('@aws-sdk/client-s3'); }
-    catch { return { ok: false, error: '@aws-sdk/client-s3 ไม่ได้ติดตั้ง — `npm i @aws-sdk/client-s3`' }; }
     try {
-      const client = new lib.S3Client({
-        region: get('R2_REGION') || 'auto',
-        endpoint: ep, forcePathStyle: true,
-        credentials: { accessKeyId: id, secretAccessKey: sec },
-      });
+      // Route through the shared, SSRF-guarded client factory (assertSafeUrl +
+      // safeLookup DNS pinning). Building a raw S3Client from R2_ENDPOINT here
+      // is exactly the "test connection" hole storage.js warns about: an
+      // env/DNS-rebound internal endpoint would be probed (and SigV4 creds
+      // leaked) straight from this admin route. Lazy-require to avoid the
+      // storage→secrets→storage require cycle.
+      const client = require('./storage').getS3Client();
+      if (!client) {
+        return { ok: false, error: 'R2 endpoint ถูกปฏิเสธโดย SSRF guard หรือ @aws-sdk/client-s3 ไม่ได้ติดตั้ง (`npm i @aws-sdk/client-s3`)' };
+      }
       // HeadBucket validates credentials + bucket existence cheaply.
-      await client.send(new lib.HeadBucketCommand({ Bucket: bucket }));
+      await client.send(new client._lib.HeadBucketCommand({ Bucket: bucket }));
       return { ok: true, bucket };
     } catch (err) {
       return { ok: false, error: err.message };

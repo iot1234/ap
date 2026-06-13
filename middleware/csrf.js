@@ -41,7 +41,11 @@ function makeCsrf({ secret, secure }) {
       path: '/',
     },
     size: 32,
-    getCsrfTokenFromRequest: (req) =>
+    // NOTE: the option key csrf-csrf reads is `getTokenFromRequest`. It was
+    // previously misspelled `getCsrfTokenFromRequest`, so this function was
+    // silently dropped and the lib fell back to its header-only default —
+    // killing the intended `_csrf` body/query fallback. Keep this exact name.
+    getTokenFromRequest: (req) =>
       req.headers['x-csrf-token']
       || (req.body && req.body._csrf)
       || (req.query && req.query._csrf),

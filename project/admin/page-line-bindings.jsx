@@ -482,7 +482,7 @@ function PageLineBindings({ setToast }) {
                 คัดลอก
               </button>
               {buildIssuedLineOpenUrl(showIssueModal.issued) ? (
-                <a href={buildIssuedLineOpenUrl(showIssueModal.issued)} target="_blank" rel="noreferrer"
+                <a href={buildIssuedLineOpenUrl(showIssueModal.issued)} target="_blank" rel="noopener noreferrer"
                   style={{ ...btnLink(C), background: C.accent || '#2f8a70', color: '#fff', textDecoration: 'none' }}>
                   เปิด LINE พร้อมคีย์
                 </a>
@@ -720,7 +720,7 @@ function DetailModal({ C, Modal, Btn, Pill, detail, tenantId, oas, busy, issuedC
                 <a href={buildLineOpenUrlFor({
                   code: issuedForThisTenant.code,
                   target_oa_id: issuedForThisTenant.targetOaId,
-                })} target="_blank" rel="noreferrer"
+                })} target="_blank" rel="noopener noreferrer"
                   style={{ ...btnLink(C), background: C.accent || '#2f8a70', color: '#fff', textDecoration: 'none' }}>
                   เปิด LINE พร้อมคีย์
                 </a>
@@ -767,7 +767,7 @@ function DetailModal({ C, Modal, Btn, Pill, detail, tenantId, oas, busy, issuedC
                 </button>
               )}
               {lineOpenUrl ? (
-                <a href={lineOpenUrl} target="_blank" rel="noreferrer"
+                <a href={lineOpenUrl} target="_blank" rel="noopener noreferrer"
                   style={{ ...btnLink(C), background: C.accent || '#2f8a70', color: '#fff', textDecoration: 'none' }}>
                   {lineMessageUrl ? 'เปิด LINE พร้อมคีย์' : 'เปิด LINE OA'}
                 </a>
@@ -828,7 +828,7 @@ function DetailModal({ C, Modal, Btn, Pill, detail, tenantId, oas, busy, issuedC
                           <span style={{ color: C.muted, fontSize: 11 }}>{statusLabel(row)}</span>
                         )}
                         {openUrl ? (
-                          <a href={openUrl} target="_blank" rel="noreferrer"
+                          <a href={openUrl} target="_blank" rel="noopener noreferrer"
                             style={{ ...btnLink(C), textDecoration: 'none' }}>
                             เปิด LINE
                           </a>

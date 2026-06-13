@@ -301,13 +301,11 @@ async function saveParcelPhoto(pool, parcelId, photoDataUrl, uploadedBy) {
     );
     const previousFileId = Number(prevQ.rows[0].photo_file_id || 0);
     if (previousFileId && previousFileId !== Number(saved.id)) {
-      storage.remove(pool, previousFileId).catch((err) => {
-        console.warn('parcel old photo cleanup failed:', err.message);
-      });
+      storage.removeQuietly(pool, previousFileId, 'parcel old photo');
     }
     return { parcel: rows[0] || null, file: saved };
   } catch (err) {
-    if (saved?.id) storage.remove(pool, saved.id).catch(() => {});
+    if (saved?.id) storage.removeQuietly(pool, saved.id, 'parcel photo orphan');
     throw err;
   }
 }
@@ -854,9 +852,7 @@ module.exports = function buildParcelsRouter(ctx) {
     } finally {
       // รูปถูกเซฟผ่าน pool (นอกทรานแซกชัน) — ถ้าปิดงานไม่สำเร็จ ต้องลบไฟล์กำพร้าทิ้ง
       if (!committed && proofFile?.id) {
-        storage.remove(pool, proofFile.id).catch((e) => {
-          console.warn('parcel pickup proof orphan cleanup failed:', e.message);
-        });
+        storage.removeQuietly(pool, proofFile.id, 'parcel pickup proof orphan');
       }
       client.release();
     }

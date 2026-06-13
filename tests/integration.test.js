@@ -1815,7 +1815,9 @@ test('admin billing mark-paid slip upload validates client-side and uses inline 
   const src = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-billing.jsx'), 'utf8');
   const idx = src.indexOf('<input type="file" accept="image/jpeg,image/png,image/webp"');
   assert.ok(idx > 0, 'should find mark-paid slip upload input');
-  const block = src.slice(idx, src.indexOf('reader.readAsDataURL(f)', idx) + 120);
+  // อ่านไฟล์ผ่าน window.readImageFileAsDataUrl (helper กลางจาก shared.jsx) —
+  // ไม่มี FileReader ส่วนตัวในหน้านี้แล้ว
+  const block = src.slice(idx, src.indexOf('window.readImageFileAsDataUrl(f)', idx) + 160);
   assert.match(block, /allowed = \['image\/jpeg', 'image\/png', 'image\/webp'\]/,
     'admin mark-paid should reject unsupported slip MIME types before reading the file');
   assert.match(block, /slipError/,
@@ -2994,6 +2996,14 @@ test('SQL backup endpoints exist + restore is gated by confirm: true', () => {
   const restoreIdx = server.indexOf("app.post('/api/admin/restore'");
   assert.ok(restoreIdx > 0, 'restore handler must exist');
   const restoreBody = server.slice(restoreIdx, restoreIdx + 8000);
+  assert.match(server, /const defaultJsonParser = express\.json\(\{[\s\S]{0,300}limit: '3mb'/,
+    'global JSON parser must stay small by default');
+  assert.ok(server.includes("if (/^\\/api\\/admin\\/restore\\/?$/i.test(req.path || '')) return next();"),
+    'global 3MB parser must skip restore so the route-specific parser can handle large backups');
+  assert.match(server, /function parseRestoreBody\(req, res, next\)/,
+    'restore must use a route-specific parser wrapper');
+  assert.match(server, /app\.post\('\/api\/admin\/restore', sameOrigin, csrfGuard, requireAuth, requireRole\('owner'\), parseRestoreBody/,
+    'restore must authenticate/authorize before parsing a 100MB body');
   assert.match(restoreBody, /BEGIN[\s\S]+COMMIT/,
     'restore must run inside an explicit BEGIN/COMMIT transaction');
   assert.match(restoreBody, /ROLLBACK/, 'restore must roll back on error');
@@ -3810,6 +3820,10 @@ test('/health is a minimal public readiness probe', () => {
   assert.match(block, /SELECT 1/, 'public health should probe only DB readiness');
   assert.doesNotMatch(block, /out\.scheduler|out\.queue|out\.secrets|memory_mb|SCHEDULER_STATE_FILE|notifications_queue|COUNT\(\*\).*secrets/s,
     'public health must not expose scheduler, queue, memory, or secrets details');
+  assert.doesNotMatch(block, /error:\s*sanitizeError\(err\)/,
+    'public health must not return DB driver/host errors to unauthenticated callers');
+  assert.match(block, /console\.warn\('\[health\] DB readiness probe failed:', sanitizeError\(err\)\)/,
+    'DB readiness details should be logged server-side only');
 });
 
 test('checkin notifies the tenant about the welcome bill', () => {
@@ -6302,8 +6316,8 @@ test('locked-contract identity gap card opens a real backfill modal (no dead-end
     'backfill modal must call out partial success so admins know what already saved');
   assert.match(src, /onSaved=\{\(\) => \{ setBackfilling\(false\); reload\(\); \}\}/,
     'successful backfill must reload the contract so warnings recompute');
-  assert.match(src, /file\.size > 1_500_000/,
-    'image picker must reject oversized files client-side with a clear message');
+  assert.match(src, /window\.prepareImageForUpload\(file/,
+    'image picker must validate and auto-compress via the shared helper instead of dead-end size rejects');
   assert.match(src, /function thaiCitizenIdChecksumOk/,
     'modal must validate the citizen-ID check digit client-side before any API call');
   assert.match(src, /disabled=\{saving \|\| !row \|\| !!citizenProblem\}/,

@@ -108,72 +108,12 @@ function notifySummary(item) {
   };
 }
 
-// --- เตรียมรูปก่อนอัปโหลด ---------------------------------------------------
-// รูปจากกล้องมือถือเกือบทุกใบใหญ่เกิน 1.5 MB ถ้า reject ตรง ๆ ผู้ใช้จะติดทางตัน
-// ("รูปใหญ่เกินไป" แล้วทำอะไรต่อไม่ได้) จึงย่อรูปอัตโนมัติผ่าน canvas
-// (ลดขนาดด้านยาว + ไล่ลดคุณภาพเป็นขั้น) จนพอดีเพดานเซิร์ฟเวอร์
-const PARCEL_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
-const PARCEL_IMAGE_TARGET_BYTES = 1_400_000; // เผื่อ headroom จากเพดานเซิร์ฟเวอร์ 1.5 MB
-const PARCEL_IMAGE_MAX_INPUT_BYTES = 15_000_000;
-
-function estimateDataUrlBytes(dataUrl) {
-  const comma = dataUrl.indexOf(',');
-  return Math.floor((dataUrl.length - (comma >= 0 ? comma + 1 : 0)) * 0.75);
-}
-
-function readFileAsDataUrl(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result || ''));
-    reader.onerror = () => reject(new Error('อ่านไฟล์รูปไม่สำเร็จ กรุณาเลือกรูปใหม่'));
-    reader.readAsDataURL(file);
-  });
-}
-
-function loadImageElement(dataUrl) {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => resolve(img);
-    img.onerror = () => reject(new Error('ไฟล์รูปเสียหรือเปิดไม่ได้ กรุณาเลือกหรือถ่ายรูปใหม่'));
-    img.src = dataUrl;
-  });
-}
-
-async function prepareParcelPhoto(file) {
-  if (!file) throw new Error('ไม่พบไฟล์รูป กรุณาเลือกรูปใหม่');
-  if (!PARCEL_IMAGE_TYPES.includes(file.type)) {
-    throw new Error('รองรับเฉพาะรูป JPG, PNG หรือ WebP');
-  }
-  if (file.size > PARCEL_IMAGE_MAX_INPUT_BYTES) {
-    throw new Error('รูปใหญ่เกิน 15 MB ระบบย่อให้ไม่ไหว กรุณาเลือกรูปที่เล็กกว่านี้');
-  }
-  const original = await readFileAsDataUrl(file);
-  if (file.size <= PARCEL_IMAGE_TARGET_BYTES) return original;
-  const img = await loadImageElement(original);
-  const srcW = img.naturalWidth || img.width;
-  const srcH = img.naturalHeight || img.height;
-  if (!srcW || !srcH) throw new Error('อ่านขนาดรูปไม่ได้ กรุณาเลือกรูปใหม่');
-  for (const maxDim of [1600, 1280, 1024, 800]) {
-    const scale = Math.min(1, maxDim / Math.max(srcW, srcH));
-    const w = Math.max(1, Math.round(srcW * scale));
-    const h = Math.max(1, Math.round(srcH * scale));
-    const canvas = document.createElement('canvas');
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) break;
-    // พื้นขาวกัน PNG โปร่งใสกลายเป็นพื้นดำตอนแปลงเป็น JPEG
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, w, h);
-    ctx.drawImage(img, 0, 0, w, h);
-    for (const quality of [0.82, 0.68, 0.55]) {
-      const out = canvas.toDataURL('image/jpeg', quality);
-      if (out.startsWith('data:image/jpeg') && estimateDataUrlBytes(out) <= PARCEL_IMAGE_TARGET_BYTES) {
-        return out;
-      }
-    }
-  }
-  throw new Error('ย่อรูปอัตโนมัติแล้วยังใหญ่เกินไป กรุณาถ่ายหรือเลือกรูปความละเอียดต่ำลง');
+// เตรียมรูปก่อนอัปโหลด: ใช้ window.prepareImageForUpload จาก shared.jsx
+// (อ่านไฟล์ + ตรวจชนิด + ย่อรูปใหญ่อัตโนมัติผ่าน canvas) — ค่า default
+// ของตัวกลางตรงกับเพดานรูปพัสดุพอดี (JPG/PNG/WebP, เป้า 1.4 MB,
+// รับไฟล์ใหญ่สุด 15 MB) เลิกถือสำเนา canvas pipeline ในไฟล์นี้แล้ว
+function prepareParcelPhoto(file) {
+  return window.prepareImageForUpload(file);
 }
 
 // จำนวนวันที่พัสดุค้างรอรับ — ใช้เตือนของค้างนาน (null = ไม่รู้/ข้อมูลเพี้ยน)

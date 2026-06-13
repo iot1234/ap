@@ -162,7 +162,12 @@ async function tryClaim(pool, { code, lineUserId, oaId, secretsModule }) {
     // Per-OA: write line_oas.owner_user_id. Env-fallback (oa_id NULL):
     // write the LINE_OWNER_USER_ID secret via the standard secrets module
     // (encrypts + caches).
-    const persistTo = t.oa_id || oaId || null;
+    // Bind strictly to the token's OWN scope. A null-scoped (env) token must
+    // NOT silently rebind whichever concrete DB OA it was typed into — that
+    // misroutes owner alerts to an OA the operator never selected. Null scope
+    // falls through to the global LINE_OWNER_USER_ID secret write below, which
+    // notifyOwner reads as a universal fallback for every OA.
+    const persistTo = t.oa_id != null ? t.oa_id : null;
     if (persistTo) {
       await client.query(
         `UPDATE line_oas SET owner_user_id=$2, updated_at=NOW()

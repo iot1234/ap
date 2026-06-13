@@ -200,7 +200,10 @@ async function tryClaim(pool, { code, lineUserId, oaId } = {}) {
       await client.query('ROLLBACK');
       return { ok: false, reason: 'wrong_oa' };
     }
-    const effectiveOaId = t.oa_id || oaId || null;
+    // Bind strictly to the token's OWN scope (mirror services/ownerClaim.js):
+    // a null-scoped (env) token rides the default OA via line_oa_id NULL
+    // instead of silently latching onto whichever OA's chat it was typed into.
+    const effectiveOaId = t.oa_id != null ? t.oa_id : null;
     // Already an active recipient on this OA? Idempotent success — refresh
     // the label if the token carried one, consume the token, done.
     const existing = await client.query(

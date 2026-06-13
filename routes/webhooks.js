@@ -524,7 +524,7 @@ module.exports = function buildWebhooksRouter(ctx) {
     const bill = bills[0];
     try {
       const content = await lineSvc.getMessageContent(oa, ev.message.id, {
-        maxBytes: (flags.slipUpload && flags.slipUpload.maxBytes) || 1_500_000,
+        maxBytes: features.slipMaxBytes(flags),
       });
       const headerMime = /^image\/(jpeg|png|webp)\b/i.test(content.contentType || '')
         ? content.contentType.split(';')[0].toLowerCase()

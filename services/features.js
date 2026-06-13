@@ -455,6 +455,14 @@ function validateConfig(partial) {
   return errors;
 }
 
+// เพดานขนาดสลิป: ค่า default 1.5 MB ต้องมี "ที่เดียว" — เดิม server.js กับ
+// routes/webhooks.js ต่างคน hardcode `|| 1_500_000` เอง เสี่ยงแก้ไม่ครบคู่
+const SLIP_MAX_BYTES_DEFAULT = 1_500_000;
+function slipMaxBytes(flags) {
+  const n = Number(flags?.slipUpload?.maxBytes);
+  return Number.isFinite(n) && n > 0 ? n : SLIP_MAX_BYTES_DEFAULT;
+}
+
 module.exports = {
   DEFAULTS,
   FEATURES_KEY,
@@ -465,4 +473,5 @@ module.exports = {
   withDefaults,
   validateConfig,
   disabledPayload,
+  slipMaxBytes,
 };

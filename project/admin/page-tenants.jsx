@@ -2489,26 +2489,23 @@ function TenantIdentityBackfillModal({ tenantDbId, tenantName, missing, onClose,
   const checklist = ['address', 'emergencyContactName', 'emergencyContactPhone',
     'citizenId', 'citizenIdFront', 'citizenIdBack'];
 
-  const pickImage = (side) => (ev) => {
+  const pickImage = (side) => async (ev) => {
     const file = ev.target.files && ev.target.files[0];
     ev.target.value = '';
     if (!file) return;
-    if (!/^image\//.test(file.type || '')) {
-      setError('ไฟล์รูปบัตรต้องเป็นรูปภาพ (JPG/PNG) — ไฟล์ที่เลือกไม่ใช่รูป');
-      return;
-    }
-    if (file.size > 1_500_000) {
-      setError('รูปใหญ่เกิน 1.5MB — ย่อ/บีบอัดรูปก่อน แล้วเลือกใหม่อีกครั้ง');
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = () => {
-      const val = { dataUrl: String(reader.result || ''), name: file.name };
+    try {
+      // helper กลางจาก shared.jsx: ตรวจชนิดรูป + ย่อรูปใหญ่อัตโนมัติให้พอดี
+      // เพดาน 1.5 MB — เดิมหน้านี้ reject รูปจากกล้องมือถือทิ้ง ("รูปใหญ่เกิน
+      // 1.5MB") ทำให้ผู้ใช้ติดทางตัน
+      const dataUrl = await window.prepareImageForUpload(file, {
+        typeErrorText: 'ไฟล์รูปบัตรต้องเป็นรูปภาพ JPG, PNG หรือ WebP — ไฟล์ที่เลือกไม่ใช่รูปที่รองรับ',
+      });
+      const val = { dataUrl, name: file.name };
       if (side === 'front') setFront(val); else setBack(val);
       setError('');
-    };
-    reader.onerror = () => setError('อ่านไฟล์รูปไม่สำเร็จ — ลองเลือกรูปใหม่อีกครั้ง');
-    reader.readAsDataURL(file);
+    } catch (err) {
+      setError((err && err.message) || 'อ่านไฟล์รูปไม่สำเร็จ — ลองเลือกรูปใหม่อีกครั้ง');
+    }
   };
 
   // Server codes → actionable Thai. Raw err.message is the fallback only.

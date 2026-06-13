@@ -169,8 +169,10 @@ function splitRoomPhotoFiles(fileList, availableSlots = ROOM_PHOTO_MAX_COUNT) {
       issues.push(`${name}: รองรับเฉพาะ JPG, PNG หรือ WebP`);
       continue;
     }
-    if (file.size > ROOM_PHOTO_MAX_BYTES) {
-      issues.push(`${name}: ขนาด ${formatRoomPhotoFileSize(file)} เกิน ${formatRoomPhotoMaxSize()}`);
+    // รูปที่เกินเพดาน 1.5 MB จะถูกย่ออัตโนมัติตอนอัปโหลด (shared.jsx
+    // prepareImageForUpload) — ปฏิเสธเฉพาะไฟล์ที่ใหญ่เกินกว่าจะย่อไหว
+    if (file.size > 15_000_000) {
+      issues.push(`${name}: ขนาด ${formatRoomPhotoFileSize(file)} เกิน 15 MB — ใหญ่เกินกว่าระบบจะย่ออัตโนมัติได้`);
       continue;
     }
     if (accepted.length >= availableSlots) {
@@ -183,13 +185,9 @@ function splitRoomPhotoFiles(fileList, availableSlots = ROOM_PHOTO_MAX_COUNT) {
   return { accepted, issues };
 }
 
+// อ่าน/ย่อรูปผ่าน helper กลางใน shared.jsx — เลิกถือสำเนา FileReader ของหน้านี้
 function readRoomPhotoDataUrl(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result || ''));
-    reader.onerror = () => reject(reader.error || new Error('read failed'));
-    reader.readAsDataURL(file);
-  });
+  return window.readImageFileAsDataUrl(file);
 }
 
 async function uploadRoomPhotoFiles(apiFetch, roomId, files) {
@@ -204,10 +202,11 @@ async function uploadRoomPhotoFiles(apiFetch, roomId, files) {
     if (file.type && !ROOM_PHOTO_ALLOWED_MIMES.has(file.type)) {
       throw new Error(`${file.name || 'photo'} must be JPG, PNG or WebP`);
     }
-    if (file.size > ROOM_PHOTO_MAX_BYTES) {
-      throw new Error(`${file.name || 'photo'} is too large (${formatRoomPhotoFileSize(file)} > ${formatRoomPhotoMaxSize()})`);
-    }
-    const dataUrl = await readRoomPhotoDataUrl(file);
+    // เกินเพดาน 1.5 MB → ย่ออัตโนมัติให้พอดี แทนการโยน error ใส่ผู้ใช้
+    // (รูปจากกล้องมือถือแทบทุกใบใหญ่กว่าเพดาน) ไฟล์เล็กอ่านตรง ๆ ตามเดิม
+    const dataUrl = file.size > ROOM_PHOTO_MAX_BYTES
+      ? await window.prepareImageForUpload(file)
+      : await readRoomPhotoDataUrl(file);
     if (!/^data:image\/(jpeg|jpg|png|webp);base64,/i.test(dataUrl)) {
       throw new Error(`${file.name || 'photo'} could not be read as an image`);
     }

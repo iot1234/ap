@@ -142,6 +142,17 @@ function sanitizeError(err) {
   return msg.replace(/(\b[a-z]+:\/\/)[^@\s]+@/gi, '$1***@');
 }
 
+function safeDownloadFilename(base, fallback = 'file', ext = 'pdf') {
+  const cleanExt = String(ext || 'bin').replace(/[^A-Za-z0-9]/g, '') || 'bin';
+  const cleaned = String(base || fallback || 'file')
+    .replace(/[^A-Za-z0-9_-]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80);
+  const safeBase = cleaned || String(fallback || 'file').replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 80) || 'file';
+  return `${safeBase}.${cleanExt}`;
+}
+
 function safeAuditJson(value, maxBytes = 16_000) {
   if (value === null || value === undefined) return null;
   const seen = new WeakSet();
@@ -315,14 +326,23 @@ app.use((req, res, next) => {
 // to compute HMAC over the exact bytes the upstream service sent.
 // Re-stringifying req.body would change whitespace + key order and break
 // signature verification.
-app.use(express.json({
+const defaultJsonParser = express.json({
   limit: '3mb',
   verify: (req, _res, buf) => {
     if (req.path && req.path.startsWith('/webhook/')) {
       req.rawBody = buf.toString('utf8');
     }
   },
-}));
+});
+app.use((req, res, next) => {
+  // /api/admin/restore has its own large JSON parser mounted AFTER
+  // sameOrigin + CSRF + owner auth. Letting the global parser touch it first
+  // breaks legitimate large restores (3MB cap), while mounting the 100MB
+  // parser before auth would turn an owner-only endpoint into a public memory
+  // pressure target.
+  if (/^\/api\/admin\/restore\/?$/i.test(req.path || '')) return next();
+  return defaultJsonParser(req, res, next);
+});
 // cookie-parser must run before csrf-csrf so req.cookies is populated.
 app.use(require('cookie-parser')(_runtimeSessionSecret));
 
@@ -4377,8 +4397,13 @@ app.put('/api/admin/features', sameOrigin, csrfGuard, requireAuth, requireRole('
   if (partial.citizenIdEncryption && partial.citizenIdEncryption.enabled === false) {
     try {
       const check = await pool.query(
+        // "Encrypted" == NOT an exact 13-digit plaintext Thai ID. The old
+        // `NOT LIKE '1%'` heuristic was wrong both ways: real plaintext IDs
+        // start with 1-8 (not only '1'), and base64 ciphertext can start with
+        // '1' (~1/64 of rows). Match the display-time discriminator instead so
+        // the guard neither false-blocks plaintext nor leaks ciphertext rows.
         `SELECT 1 FROM tenants WHERE citizen_id_encrypted IS NOT NULL
-           AND citizen_id_encrypted NOT LIKE '1%'  -- length-13 plaintext starts with '1'
+           AND citizen_id_encrypted !~ '^[0-9]{13}$'  -- ciphertext = not a bare 13-digit ID
            AND deleted_at IS NULL LIMIT 1`
       );
       if (check.rows.length) {
@@ -6885,7 +6910,7 @@ app.get('/api/tenant/contract/:id/pdf', requireTenant, async (req, res) => {
 
     await acquirePdfSlot();
     acquired = true;
-    const filename = `contract-${contract.contract_no || id}.pdf`;
+    const filename = safeDownloadFilename(`contract-${contract.contract_no || id}`, `contract-${id}`, 'pdf');
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader(
@@ -7426,7 +7451,7 @@ async function tenantPaymentUploadHandler(req, res) {
       uploadedBy: req.publicPayment
         ? `public-pay:${req.tenant.tenant_id}`
         : `tenant:${req.tenant.tenant_id}`,
-      maxBytes: req.features.slipUpload.maxBytes || 1_500_000,
+      maxBytes: features.slipMaxBytes(req.features),
       allowedMimes: req.features.slipUpload.allowedMimes || ['image/jpeg', 'image/png', 'image/webp'],
     });
 
@@ -7542,7 +7567,7 @@ async function tenantPaymentUploadHandler(req, res) {
         );
         if (dupBookingRef.rows.length) {
           if (slip && slip.id) {
-            require('./services/storage').remove(pool, slip.id).catch(() => {});
+            require('./services/storage').removeQuietly(pool, slip.id, '[slip-upload] orphan file');
           }
           return res.status(409).json({
             error: 'รายการโอนนี้ถูกใช้เป็นมัดจำการจองไปแล้ว — ไม่สามารถนำมาชำระบิลซ้ำ',
@@ -7698,7 +7723,7 @@ async function tenantPaymentUploadHandler(req, res) {
       if (!lock.rows.length) {
         await client.query('ROLLBACK');
         if (slip && slip.id) {
-          require('./services/storage').remove(pool, slip.id).catch(() => {});
+          require('./services/storage').removeQuietly(pool, slip.id, '[slip-upload] orphan file');
         }
         return res.status(404).json({
           error: 'ไม่พบบิล (อาจถูกลบระหว่างการส่งสลิป)',
@@ -7713,7 +7738,7 @@ async function tenantPaymentUploadHandler(req, res) {
           && Number(lock.rows[0].tenant_id) !== Number(req.tenant.tenant_id)) {
         await client.query('ROLLBACK');
         if (slip && slip.id) {
-          require('./services/storage').remove(pool, slip.id).catch(() => {});
+          require('./services/storage').removeQuietly(pool, slip.id, '[slip-upload] orphan file');
         }
         return res.status(403).json({
           error: 'บิลนี้ถูกย้ายไปยังผู้เช่ารายอื่นระหว่างการส่งสลิป',
@@ -7724,7 +7749,7 @@ async function tenantPaymentUploadHandler(req, res) {
       if (lockedStatus !== 'pending' && lockedStatus !== 'overdue') {
         await client.query('ROLLBACK');
         if (slip && slip.id) {
-          require('./services/storage').remove(pool, slip.id).catch(() => {});
+          require('./services/storage').removeQuietly(pool, slip.id, '[slip-upload] orphan file');
         }
         return res.status(409).json({
           error: lockedStatus === 'paid'
@@ -7741,7 +7766,7 @@ async function tenantPaymentUploadHandler(req, res) {
       if (existingVerified.rows.length) {
         await client.query('ROLLBACK');
         if (slip && slip.id) {
-          require('./services/storage').remove(pool, slip.id).catch(() => {});
+          require('./services/storage').removeQuietly(pool, slip.id, '[slip-upload] orphan file');
         }
         return res.status(409).json({
           error: 'บิลนี้มีการชำระที่ยืนยันแล้ว ไม่สามารถส่งสลิปซ้ำ',
@@ -7761,7 +7786,7 @@ async function tenantPaymentUploadHandler(req, res) {
       if (attemptsUnderLock.remaining <= 0) {
         await client.query('ROLLBACK');
         if (slip && slip.id) {
-          require('./services/storage').remove(pool, slip.id).catch(() => {});
+          require('./services/storage').removeQuietly(pool, slip.id, '[slip-upload] orphan file');
         }
         return res.status(429).json({
           error: 'อัปโหลดสลิปครบ 3 ครั้งแล้ว กรุณาติดต่อแอดมิน',
@@ -7784,7 +7809,7 @@ async function tenantPaymentUploadHandler(req, res) {
       if (!finalAmountCheck.ok) {
         await client.query('ROLLBACK');
         if (slip && slip.id) {
-          require('./services/storage').remove(pool, slip.id).catch(() => {});
+          require('./services/storage').removeQuietly(pool, slip.id, '[slip-upload] orphan file');
         }
         return res.status(409).json({
           error: 'ยอดชำระไม่ตรงกับยอดบิลล่าสุด กรุณารีเฟรชบิลแล้วส่งใหม่',
@@ -7897,9 +7922,7 @@ async function tenantPaymentUploadHandler(req, res) {
           // row is now an orphan (not referenced by any payment). Best-effort
           // cleanup so we don't leak files on every dup attempt.
           if (slip && slip.id) {
-            require('./services/storage').remove(pool, slip.id).catch((e) => {
-              console.warn('[slip-upload] orphan file cleanup failed for id=' + slip.id + ':', e.message);
-            });
+            require('./services/storage').removeQuietly(pool, slip.id, '[slip-upload] orphan file');
           }
           // Differentiate the two unique-violation paths so the tenant gets
           // an actionable message rather than a generic "duplicate".
@@ -7953,7 +7976,7 @@ async function tenantPaymentUploadHandler(req, res) {
         if (!paidLedgerCheck.ok) {
           await client.query('ROLLBACK');
           if (slip && slip.id) {
-            require('./services/storage').remove(pool, slip.id).catch(() => {});
+            require('./services/storage').removeQuietly(pool, slip.id, '[slip-upload] orphan file');
           }
           return res.status(409).json({
             error: 'ยอดชำระไม่สอดคล้องกับยอดบิลหลังปรับสถานะ กรุณารีเฟรชบิลแล้วส่งใหม่',
@@ -7989,9 +8012,7 @@ async function tenantPaymentUploadHandler(req, res) {
       // forever. Belt-and-braces: if the row never got inserted, the file
       // has nothing pointing to it and must go.
       if (!committed && slip && slip.id) {
-        require('./services/storage').remove(pool, slip.id).catch((e) => {
-          console.warn('[slip-upload] orphan file cleanup (outer) failed for id=' + slip.id + ':', e.message);
-        });
+        require('./services/storage').removeQuietly(pool, slip.id, '[slip-upload] orphan file (outer)');
       }
       throw err;
     } finally {
@@ -11451,9 +11472,10 @@ app.get('/api/notifications/log', requireAuth, requireRole('owner', 'manager'), 
 });
 
 // POST /api/client-error — best-effort sink for ErrorBoundary reports.
-// Public + lightly rate-limited so bots can't flood it.
+// Same-origin + lightly rate-limited so third-party pages can't spam the
+// audit log, while frontend errors can still report before CSRF bootstraps.
 const _clientErrLimit = makeIpLimiter({ windowMs: 60_000, max: 30 });
-app.post('/api/client-error', _clientErrLimit, async (req, res) => {
+app.post('/api/client-error', sameOrigin, _clientErrLimit, async (req, res) => {
   const b = req.body || {};
   const userId = req.session?.user ? req.session.user.username : null;
   try {
@@ -15688,7 +15710,7 @@ app.get('/api/contract-fill/:token/pdf', rateLimitContractFill, async (req, res)
 
     await acquirePdfSlot();
     acquired = true;
-    const filename = `contract-${contract.contract_no || contract.id}.pdf`;
+    const filename = safeDownloadFilename(`contract-${contract.contract_no || contract.id}`, `contract-${contract.id}`, 'pdf');
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader(
@@ -16210,7 +16232,7 @@ app.get('/api/contracts/:id/pdf', requireAuth, requireRole('owner', 'manager'),
       // ============== 7. Response headers + render ==============
       await acquirePdfSlot();
       acquired = true;
-      const filename = `contract-${contract.contract_no || id}.pdf`;
+      const filename = safeDownloadFilename(`contract-${contract.contract_no || id}`, `contract-${id}`, 'pdf');
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('Cache-Control', 'no-store');
       res.setHeader(
@@ -16369,9 +16391,21 @@ app.delete('/api/admin/backup/:filename', sameOrigin, csrfGuard, requireAuth, re
 //
 // The default Express body limit is 3MB, way too small for a real dump
 // (audit_logs + meter_readings alone can exceed that). We mount a 100MB
-// JSON parser ONLY on this route so the rest of the app stays bounded.
+// JSON parser ONLY on this route, AFTER sameOrigin + CSRF + owner auth, so
+// unauthenticated callers cannot force the process to parse a huge body.
 const restoreBodyParser = express.json({ limit: '100mb' });
-app.post('/api/admin/restore', restoreBodyParser, sameOrigin, csrfGuard, requireAuth, requireRole('owner'),
+function parseRestoreBody(req, res, next) {
+  return restoreBodyParser(req, res, (err) => {
+    if (err && err.type === 'entity.parse.failed') {
+      return res.status(400).json({ error: 'invalid json body', code: 'BAD_JSON' });
+    }
+    if (err && err.type === 'entity.too.large') {
+      return res.status(413).json({ error: 'restore payload too large (max 100mb)', code: 'RESTORE_TOO_LARGE' });
+    }
+    return next(err);
+  });
+}
+app.post('/api/admin/restore', sameOrigin, csrfGuard, requireAuth, requireRole('owner'), parseRestoreBody,
   async (req, res) => {
     const b = req.body || {};
     if (b.confirm !== true) {
@@ -17022,7 +17056,8 @@ app.get('/health', async (_req, res) => {
     out.db = { status: 'ok', latency_ms: Date.now() - t0 };
   } catch (err) {
     out.status = 'degraded';
-    out.db = { status: 'down', error: sanitizeError(err) };
+    console.warn('[health] DB readiness probe failed:', sanitizeError(err));
+    out.db = { status: 'down' };
   }
 
   res.status(out.status === 'ok' ? 200 : 503).json(out);
@@ -17108,9 +17143,19 @@ app.get('/files/:id', rateLimitFileAccess, async (req, res) => {
     const isAdmin = !!(req.session && req.session.user);
     const isManagerPlus = (ROLE_RANK[sessionRole] || 0) >= ROLE_RANK.manager;
     let allowed = isPublicRoomPhoto || (isAdmin && (!sensitive || isManagerPlus));
+    // Session lookup is a DB round-trip — resolve it at most ONCE per request
+    // even when both tenant checks below run (parcel_photo + own-upload).
     let tSession = null;
+    let tSessionChecked = false;
+    const loadTenantSession = async () => {
+      if (!tSessionChecked) {
+        tSession = await tenantSessionLookup(req);
+        tSessionChecked = true;
+      }
+      return tSession;
+    };
     if (!allowed && f.category === 'parcel_photo') {
-      tSession = await tenantSessionLookup(req);
+      await loadTenantSession();
       const parcelRefId = Number(f.ref_id);
       if (tSession && Number.isInteger(parcelRefId) && parcelRefId > 0) {
         const ownParcel = await pool.query(
@@ -17127,7 +17172,7 @@ app.get('/files/:id', rateLimitFileAccess, async (req, res) => {
     }
     if (!allowed) {
       // Tenant: allow only own uploads (uploaded_by === 'tenant:<id>')
-      tSession = await tenantSessionLookup(req);
+      await loadTenantSession();
       if (tSession && f.uploaded_by === `tenant:${tSession.tenant_id}`) allowed = true;
     }
     if (!allowed) {
@@ -17422,6 +17467,35 @@ migrate()
           }
         } catch (canaryErr) {
           console.warn('[boot] encryption canary check skipped:', canaryErr.message);
+        }
+        // Citizen-ID PII canary. The check above only covers the versioned
+        // ENCRYPTION_KEY_V* registry; citizen IDs are keyed separately by
+        // services/crypto.js (CITIZEN_ID_KEY or HKDF(SESSION_SECRET)). Without
+        // this, rotating SESSION_SECRET silently makes every citizen_id_encrypted
+        // undecryptable while boot reports green. Gated on the feature flag so a
+        // deploy that never enabled it isn't forced to resolve a PII key.
+        // Deliberately NON-fatal (unlike the registry canary's process.exit):
+        // a PII-display fault must not take rent/billing offline — but it is now
+        // surfaced loudly instead of failing silently.
+        try {
+          const encFlags = await features.load(pool);
+          if (encFlags && encFlags.citizenIdEncryption && encFlags.citizenIdEncryption.enabled) {
+            const piiCanary = await enc.validateCitizenIdCanary(pool);
+            if (!piiCanary.ok) {
+              console.error('[boot] 🔴 CITIZEN-ID PII CANARY FAILED:', piiCanary.reason);
+              console.error('[boot] Remedy: if SESSION_SECRET was rotated, pin the PREVIOUS derived key as '
+                + 'CITIZEN_ID_KEY (see services/crypto.js startup warning for the exact one-liner). '
+                + 'The app will keep serving; citizen-id reveal + dedup stay broken until the key is restored.');
+            } else if (piiCanary.mode === 'created') {
+              console.log('[boot] citizen-id PII canary: created (first run)');
+            } else if (piiCanary.mode === 'verified') {
+              console.log('[boot] citizen-id PII canary: verified');
+            } else if (piiCanary.mode === 'no-key') {
+              console.warn('[boot] citizen-id PII canary skipped: no resolvable PII key —', piiCanary.reason);
+            }
+          }
+        } catch (piiErr) {
+          console.warn('[boot] citizen-id PII canary check skipped:', piiErr.message);
         }
       } catch (err) {
         console.error(err.message);

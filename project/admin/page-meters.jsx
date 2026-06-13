@@ -7,12 +7,6 @@
 const { useState, useEffect, useMemo, useRef } = React;
 
 function PageMeters({ rooms, setToast }) {
-  // Diagnostic: confirm the component mounted. See page-payments.jsx for context.
-  React.useEffect(() => {
-    console.log('[PageMeters] mounted');
-    return () => console.log('[PageMeters] unmounted');
-  }, []);
-
   // Guard every window global we depend on. If shared.jsx / ui.jsx / hooks.jsx
   // failed to load (CDN hiccup, slow mobile, blocked script), missing globals
   // would throw "Cannot read property X of undefined" inside render — which

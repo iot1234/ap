@@ -167,19 +167,19 @@ async function checkR2() {
   if (!id || !sec || !ep || !bucket) {
     return { status: 'ok', message: 'R2 not configured (uploads stay on local disk)' };
   }
-  let lib;
-  try { lib = require('@aws-sdk/client-s3'); }
-  catch { return { status: 'warn', message: '@aws-sdk/client-s3 not installed' }; }
   try {
-    const client = new lib.S3Client({
-      region: secrets.get('R2_REGION') || 'auto',
-      endpoint: ep, forcePathStyle: true,
-      credentials: { accessKeyId: id, secretAccessKey: sec },
-      requestHandler: { connectionTimeout: 4000, requestTimeout: 6000 },
-    });
+    // Use the shared SSRF-guarded client factory (assertSafeUrl + safeLookup
+    // DNS pinning). A raw S3Client here would let an internal/metadata
+    // R2_ENDPOINT be probed from the admin /api/admin/health route (SSRF).
+    // withTimeout(6000) already bounds the request, replacing the per-socket
+    // connection/request timeouts the raw handler used to set.
+    const client = require('./storage').getS3Client();
+    if (!client) {
+      return { status: 'warn', message: 'R2 client unavailable (endpoint rejected by SSRF guard, or @aws-sdk/client-s3 not installed)' };
+    }
     // Same as checkSmtp: inspect the withTimeout result or a 403/wrong-bucket/
     // DNS failure on HeadBucket would report green while uploads silently fail.
-    const r = await withTimeout(client.send(new lib.HeadBucketCommand({ Bucket: bucket })), 6000, 'r2');
+    const r = await withTimeout(client.send(new client._lib.HeadBucketCommand({ Bucket: bucket })), 6000, 'r2');
     if (r?.timedOut) return { status: 'error', message: 'R2 HeadBucket timed out (6s)' };
     if (r?.thrown)   return { status: 'error', message: `R2 unreachable: ${r.message}` };
     return { status: 'ok', message: `R2 bucket "${bucket}" reachable` };

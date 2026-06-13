@@ -864,3 +864,80 @@ Object.assign(window, {
   printPage,
   AUDIT_ACTION_TH, auditActionTH, describeAuditDetail,
 });
+
+// --- Image upload helpers (ใช้ร่วมทุกหน้าแอดมิน) ---------------------------
+// เดิมแต่ละหน้า (parcels / rooms / tenants / billing / contracts) เขียน
+// FileReader + ตรวจชนิด/ขนาดของตัวเอง และมีแค่หน้าพัสดุที่ย่อรูปใหญ่
+// อัตโนมัติ — รวมไว้ที่นี่ที่เดียว: รูปจากกล้องมือถือ (2-8 MB) ถูกย่อผ่าน
+// canvas (ลดด้านยาว + ไล่ลดคุณภาพ) จนต่ำกว่าเพดานเซิร์ฟเวอร์ แทนการ
+// reject ทิ้งให้ผู้ใช้ติดทางตัน
+const IMAGE_UPLOAD_DEFAULT_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
+const IMAGE_UPLOAD_TARGET_BYTES = 1_400_000; // เผื่อ headroom จากเพดานเซิร์ฟเวอร์ 1.5 MB
+const IMAGE_UPLOAD_MAX_INPUT_BYTES = 15_000_000;
+
+function estimateDataUrlBytes(dataUrl) {
+  const comma = dataUrl.indexOf(',');
+  return Math.floor((dataUrl.length - (comma >= 0 ? comma + 1 : 0)) * 0.75);
+}
+
+function readImageFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(new Error('อ่านไฟล์รูปไม่สำเร็จ กรุณาเลือกรูปใหม่'));
+    reader.readAsDataURL(file);
+  });
+}
+
+function loadImageElementFromDataUrl(dataUrl) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('ไฟล์รูปเสียหรือเปิดไม่ได้ กรุณาเลือกหรือถ่ายรูปใหม่'));
+    img.src = dataUrl;
+  });
+}
+
+async function prepareImageForUpload(file, opts = {}) {
+  const allowedTypes = opts.allowedTypes || IMAGE_UPLOAD_DEFAULT_TYPES;
+  const targetBytes = opts.targetBytes || IMAGE_UPLOAD_TARGET_BYTES;
+  const maxInputBytes = opts.maxInputBytes || IMAGE_UPLOAD_MAX_INPUT_BYTES;
+  const typeErrorText = opts.typeErrorText || 'รองรับเฉพาะรูป JPG, PNG หรือ WebP';
+  if (!file) throw new Error('ไม่พบไฟล์รูป กรุณาเลือกรูปใหม่');
+  if (!allowedTypes.includes(file.type)) throw new Error(typeErrorText);
+  if (file.size > maxInputBytes) {
+    throw new Error(`รูปใหญ่เกิน ${Math.round(maxInputBytes / 1_000_000)} MB ระบบย่อให้ไม่ไหว กรุณาเลือกรูปที่เล็กกว่านี้`);
+  }
+  const original = await readImageFileAsDataUrl(file);
+  if (file.size <= targetBytes) return original;
+  const img = await loadImageElementFromDataUrl(original);
+  const srcW = img.naturalWidth || img.width;
+  const srcH = img.naturalHeight || img.height;
+  if (!srcW || !srcH) throw new Error('อ่านขนาดรูปไม่ได้ กรุณาเลือกรูปใหม่');
+  for (const maxDim of [1600, 1280, 1024, 800]) {
+    const scale = Math.min(1, maxDim / Math.max(srcW, srcH));
+    const w = Math.max(1, Math.round(srcW * scale));
+    const h = Math.max(1, Math.round(srcH * scale));
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) break;
+    // พื้นขาวกัน PNG โปร่งใสกลายเป็นพื้นดำตอนแปลงเป็น JPEG
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, w, h);
+    ctx.drawImage(img, 0, 0, w, h);
+    for (const quality of [0.82, 0.68, 0.55]) {
+      const out = canvas.toDataURL('image/jpeg', quality);
+      if (out.startsWith('data:image/jpeg') && estimateDataUrlBytes(out) <= targetBytes) {
+        return out;
+      }
+    }
+  }
+  throw new Error('ย่อรูปอัตโนมัติแล้วยังใหญ่เกินไป กรุณาถ่ายหรือเลือกรูปความละเอียดต่ำลง');
+}
+
+Object.assign(window, {
+  readImageFileAsDataUrl,
+  prepareImageForUpload,
+});

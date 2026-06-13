@@ -38,7 +38,11 @@ function getS3Client() {
   // also exfiltrate uploaded slips/citizen-ID images to an attacker endpoint).
   try { ssrfGuard.assertSafeUrl(ep); }
   catch (e) { console.error('[storage] R2_ENDPOINT rejected (SSRF guard):', e.message); return null; }
-  const cacheKey = `${id}|${ep}|${region}`;
+  // Include the secret in the cache key so a rotated R2_SECRET_ACCESS_KEY
+  // busts the cached client instead of silently re-signing with the old
+  // secret (which would 403 every upload until restart — and make the admin
+  // "test connection" / health probe validate stale creds). In-memory only.
+  const cacheKey = `${id}|${ep}|${region}|${sec}`;
   if (_s3Client && _s3ClientKey === cacheKey) return _s3Client;
   let lib;
   try { lib = require('@aws-sdk/client-s3'); }
@@ -473,6 +477,19 @@ async function remove(pool, id) {
 }
 
 /**
+ * Fire-and-forget orphan-file cleanup. ทุกจุดที่เซฟไฟล์สำเร็จแล้วงานหลัก
+ * ล้มเหลว (ROLLBACK / unique violation) ต้องเก็บกวาดไฟล์ที่ไม่มีแถวอ้างถึง —
+ * เดิม pattern `remove(...).catch(console.warn)` ถูกก๊อปไว้ 6 จุดใน
+ * server.js / routes/parcels.js ข้อความ log คนละแบบ รวมไว้ที่นี่ที่เดียว
+ */
+function removeQuietly(pool, id, label) {
+  if (!id) return;
+  remove(pool, id).catch((err) => {
+    console.warn(`[storage] ${label || 'orphan file'} cleanup failed for id=${id}:`, err.message);
+  });
+}
+
+/**
  * Returns absolute path to the upload root so server can mount static.
  */
 function rootPath() { return UPLOAD_ROOT; }
@@ -480,6 +497,10 @@ function rootPath() { return UPLOAD_ROOT; }
 module.exports = {
   saveBase64,
   remove,
+  removeQuietly,
+  // S3 client กลาง (มี SSRF guard + DNS pinning + cache) — ให้ backup.js
+  // และงานอื่นใช้ตัวเดียวกัน ห้ามสร้าง S3Client ตรง ๆ จาก env เอง
+  getS3Client,
   // Every consumer gets transparently-decrypted bytes; the raw variant is
   // for diagnostics only (e.g. checking whether a stored file is encrypted).
   readFile: readFileDecrypted,

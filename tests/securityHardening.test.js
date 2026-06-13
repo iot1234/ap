@@ -13,6 +13,22 @@ test('API responses default to no-store cache control', () => {
     'API middleware must prevent browser/shared caching of sensitive JSON');
 });
 
+test('client error sink is same-origin gated', () => {
+  const src = serverSource();
+  assert.match(src, /app\.post\('\/api\/client-error', sameOrigin, _clientErrLimit,/,
+    'client-error reporting should not accept cross-site log spam');
+  assert.doesNotMatch(src, /app\.post\('\/api\/client-error', _clientErrLimit,/,
+    'client-error route must keep sameOrigin before the public rate limiter');
+});
+
+test('Docker build context excludes local logs and data', () => {
+  const dockerignore = fs.readFileSync(path.join(__dirname, '..', '.dockerignore'), 'utf8');
+  for (const pattern of ['*.log', '.env', '.env.local', 'backups/', 'uploads/', 'files/', 'tests/']) {
+    assert.match(dockerignore, new RegExp(`(^|\\n)${pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(\\n|$)`),
+      `.dockerignore must exclude ${pattern}`);
+  }
+});
+
 test('server blocks path traversal and source-file probing before routes', () => {
   const src = serverSource();
   assert.match(src, /BLOCKED_METHODS = new Set\(\['TRACE', 'TRACK', 'CONNECT'\]\)/,
@@ -142,6 +158,94 @@ test('admin log endpoints clamp negative limit query values', () => {
     assert.match(block, /Math\.min\(Math\.max\(Number\(req\.query\.limit\) \|\| 100, 1\), 500\)/,
       `${route} must clamp limit to 1..500 instead of passing negative LIMIT to SQL`);
   }
+});
+
+test('PDF download filenames are header-safe', () => {
+  const src = serverSource();
+  assert.match(src, /function safeDownloadFilename\(base, fallback = 'file', ext = 'pdf'\)/,
+    'server must centralize Content-Disposition filename sanitisation');
+  assert.match(src, /replace\(\/\[\^A-Za-z0-9_-\]\/g, '-'\)/,
+    'filename helper must strip quotes, CR/LF, and other header-unsafe characters');
+  assert.doesNotMatch(src, /const filename = `contract-\$\{contract\.contract_no \|\| id\}\.pdf`/,
+    'contract PDF routes must not put raw contract_no into Content-Disposition');
+  assert.doesNotMatch(src, /const filename = `contract-\$\{contract\.contract_no \|\| contract\.id\}\.pdf`/,
+    'public contract PDF route must not put raw contract_no into Content-Disposition');
+  assert.match(src, /safeDownloadFilename\(`contract-\$\{contract\.contract_no \|\| id\}`/,
+    'admin/tenant contract PDFs must use the filename helper');
+});
+
+test('browser CDN scripts are pinned with SRI', () => {
+  const projectDir = path.join(__dirname, '..', 'project');
+  const htmlFiles = fs.readdirSync(projectDir)
+    .filter((name) => name.toLowerCase().endsWith('.html'));
+  const unpinned = [];
+  for (const file of htmlFiles) {
+    const html = fs.readFileSync(path.join(projectDir, file), 'utf8');
+    const tags = html.match(/<script\b[^>]*\bsrc=["']https:\/\/unpkg\.com\/[^"']+["'][^>]*><\/script>/gi) || [];
+    for (const tag of tags) {
+      if (!/\bintegrity=["']sha384-[^"']+["']/i.test(tag) || !/\bcrossorigin=["']anonymous["']/i.test(tag)) {
+        unpinned.push(`${file}: ${tag.replace(/\s+/g, ' ')}`);
+      }
+    }
+  }
+  assert.deepEqual(unpinned, [], 'every unpkg script must be version-pinned with SRI + anonymous CORS');
+});
+
+test('blank-target links include noopener', () => {
+  const projectDir = path.join(__dirname, '..', 'project');
+  const files = [];
+  function walk(dir) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        if (entry.name === 'build' || entry.name === 'scraps') continue;
+        walk(path.join(dir, entry.name));
+      } else if (/\.(html|jsx|js)$/i.test(entry.name)) {
+        files.push(path.join(dir, entry.name));
+      }
+    }
+  }
+  walk(projectDir);
+  const unsafe = [];
+  for (const file of files) {
+    const rel = path.relative(projectDir, file);
+    const src = fs.readFileSync(file, 'utf8');
+    const tags = src.match(/<a\b(?=[^>]*\btarget=["']_blank["'])[^>]*>/gi) || [];
+    for (const tag of tags) {
+      if (!/\brel=["'][^"']*\bnoopener\b[^"']*["']/i.test(tag)) {
+        unsafe.push(`${rel}: ${tag.replace(/\s+/g, ' ')}`);
+      }
+    }
+  }
+  assert.deepEqual(unsafe, [], 'target="_blank" anchors must include rel="noopener ..."');
+});
+
+test('frontend avoids unconditional console.log noise', () => {
+  const projectDir = path.join(__dirname, '..', 'project');
+  const files = [];
+  function walk(dir) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        if (entry.name === 'build' || entry.name === 'scraps') continue;
+        walk(path.join(dir, entry.name));
+      } else if (/\.(html|jsx|js)$/i.test(entry.name)) {
+        files.push(path.join(dir, entry.name));
+      }
+    }
+  }
+  walk(projectDir);
+  const noisy = [];
+  for (const file of files) {
+    const rel = path.relative(projectDir, file);
+    const src = fs.readFileSync(file, 'utf8');
+    let idx = src.indexOf('console.log(');
+    while (idx !== -1) {
+      const context = src.slice(Math.max(0, idx - 400), idx + 80);
+      const debugGated = rel.replace(/\\/g, '/') === 'admin/shell.jsx' && /debug=1/.test(context);
+      if (!debugGated) noisy.push(rel);
+      idx = src.indexOf('console.log(', idx + 1);
+    }
+  }
+  assert.deepEqual([...new Set(noisy)], [], 'frontend console.log should be gated behind explicit debug mode');
 });
 
 test('admin security events UI surfaces blocked path and reason', () => {

@@ -8,65 +8,19 @@ function fmt(n) {
   });
 }
 
-// Keep this in sync with tenantRejectedReason in tenant.jsx — pay.html is
-// a minimal public bundle that doesn't share window helpers, so the map
-// is inlined here. We translate both server-side audit codes
-// (superseded_by_*) and the free-form English strings the upstream slip
-// verifiers (SlipOK / EasySlip / Slip2Go) leak ("too many requests",
-// "Please provide either a payload string, a image file, a base64
-// encoded image, or a image URL", "Unauthorized", "Duplicate slip" …)
-// so the tenant never sees raw English on the public pay page.
-function tenantRejectedReason(raw) {
-  if (!raw) return raw;
-  const s = String(raw);
-
-  // Server-side audit codes (structured, prefix-matched).
-  if (s.startsWith('superseded_by_verified_sibling')) return 'ระบบรับสลิปอีกใบสำหรับบิลนี้ไปแล้ว';
-  if (s.startsWith('superseded_by_manual_pay'))       return 'แอดมินบันทึกการชำระเงินด้วยช่องทางอื่น (เงินสด/โอน) แล้ว';
-  if (s.startsWith('superseded_by_void'))             return 'บิลนี้ถูกยกเลิกแล้ว — โปรดติดต่อแอดมิน';
-  if (s.startsWith('unmark_paid_correction'))         return 'แอดมินยกเลิกการบันทึกชำระ — โปรดติดต่อแอดมิน';
-
-  // Upstream slip-verifier strings.
-  const lower = s.toLowerCase();
-  if (/(payload string|image file|base64|image url|invalid image)/i.test(s)) {
-    return 'ไม่พบรูปสลิปหรือสลิปอ่านไม่ออก กรุณาอัปโหลดสลิปใหม่ที่ชัดเจน';
-  }
-  if (/invalid (api|signature|key|token)/i.test(s) || /unauthor/i.test(lower)) {
-    return 'ระบบตรวจสลิปเชื่อมต่อไม่สำเร็จ — โปรดติดต่อแอดมินเพื่อตรวจการตั้งค่า';
-  }
-  if (/quota|rate.?limit|too many|429/i.test(s)) {
-    return 'ระบบตรวจสลิปใช้งานเกินโควต้า — รบกวนติดต่อแอดมิน';
-  }
-  if (/duplicate|already (used|verified)/i.test(s)) {
-    return 'สลิปนี้ถูกใช้แล้ว — กรุณาอัปโหลดสลิปของรายการโอนใหม่';
-  }
-  if (/amount|number/i.test(s) && /mismatch|not match|differ|incorrect/i.test(s)) {
-    return 'ยอดในสลิปไม่ตรงกับยอดบิล กรุณาตรวจสอบและอัปโหลดสลิปใหม่';
-  }
-  if (/receiver|target|account|destination/i.test(s) && /mismatch|not match|differ|incorrect/i.test(s)) {
-    return 'บัญชีปลายทางในสลิปไม่ใช่ของหอพัก — กรุณาตรวจสอบบัญชีผู้รับ';
-  }
-  if (/network|timeout|econnreset|fetch failed|connect/i.test(lower)) {
-    return 'เชื่อมต่อระบบตรวจสลิปไม่สำเร็จ ลองอัปโหลดใหม่หรือแจ้งแอดมิน';
-  }
-
-  // English-looking free text → generic friendly fallback. Detect "looks
-  // English" via the presence of ASCII letters AND the absence of any Thai
-  // letters; anything Thai is already actionable.
-  if (/[A-Za-z]/.test(s) && !/[฀-๿]/.test(s)) {
-    return 'การตรวจสอบไม่ผ่าน ลองอัปโหลดสลิปใหม่หรือแจ้งแอดมิน';
-  }
-  return s;
-}
-
-function fileToDataUrl(file) {
+// tenantRejectedReason + fileToDataUrl มาจาก /tenant-shared.js (โหลดก่อน
+// บันเดิลนี้ใน pay.html) — เป็นชุดเดียวกับพอร์ทัลผู้เช่า เลิกถือสำเนา
+// "Keep this in sync" ในไฟล์นี้แล้ว fallback ด้านล่างมีไว้กันหน้าชำระเงิน
+// พังเฉพาะกรณีสคริปต์แชร์โหลดไม่สำเร็จ (ข้อความดิบยังแสดง แค่ไม่ได้แปลไทย)
+const tenantRejectedReason = window.tenantRejectedReason || ((raw) => raw);
+const fileToDataUrl = window.fileToDataUrl || function fileToDataUrl(file) {
   return new Promise((resolve, reject) => {
     const r = new FileReader();
     r.onload = () => resolve(r.result);
     r.onerror = reject;
     r.readAsDataURL(file);
   });
-}
+};
 
 function appendQuery(url, params) {
   const qs = new URLSearchParams(params).toString();

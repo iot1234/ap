@@ -353,17 +353,33 @@ function fmtPeriod(period, locale) {
   const monthsTh = ['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.','ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'];
   return `${monthsTh[mo - 1]} ${String(y + 543).slice(-2)}`;
 }
-function fileToDataUrl(file) {
+// fileToDataUrl มาจาก /tenant-shared.js (โหลดก่อนไฟล์นี้ใน tenant.html) —
+// สำเนาเดิมในไฟล์นี้กับ pay.jsx ถูกรวมเป็นที่เดียว fallback ตัวจิ๋วมีไว้
+// กันหน้าพังเฉพาะกรณีสคริปต์แชร์โหลดไม่สำเร็จเท่านั้น
+const fileToDataUrl = window.fileToDataUrl || function fileToDataUrl(file) {
   return new Promise((resolve, reject) => {
     const r = new FileReader();
     r.onload = () => resolve(r.result);
     r.onerror = reject;
     r.readAsDataURL(file);
   });
-}
+};
 function appendQuery(url, params) {
   const qs = new URLSearchParams(params).toString();
   return `${url}${String(url || '').includes('?') ? '&' : '?'}${qs}`;
+}
+
+// นิยามสถานะ "ค้าง/รอ" มีที่เดียว — App (badge), HomeView, BillsView,
+// MaintenanceView, ParcelsView ใช้ predicate ชุดเดียวกัน ถ้านิยามเปลี่ยน
+// (เช่น เพิ่มสถานะใหม่) แก้ตรงนี้จุดเดียวแล้วทุกหน้า/ทุก badge ตรงกันทันที
+function isUnpaidBill(b) {
+  return !!b && (b.status === 'pending' || b.status === 'overdue');
+}
+function isOpenTicket(tk) {
+  return !!tk && !['completed', 'cancelled'].includes(tk.status);
+}
+function isWaitingParcel(p) {
+  return !!p && p.status === 'waiting_pickup';
 }
 function safeStorageGet(key) {
   try { return localStorage.getItem(key); }
@@ -481,57 +497,12 @@ function lateFeeDetailFromBill(bill, locale) {
     : `Calculated from pre-penalty balance ฿${fmtMoney2(principal)} = penalty ฿${fmtMoney2(lateFee)}`;
 }
 
-// Translate server-stamped reject reasons + raw 3rd-party verifier strings
-// into tenant-friendly Thai. log.md #2 — the upstream slip provider was
-// leaking English error messages (e.g. "Please provide either a payload
-// string, a image file, a base64 encoded image, or a image URL") into the
-// payment-history list. We intercept those upstream-shaped messages here
-// and convert them to actionable Thai before they reach the tenant.
-function tenantRejectedReason(raw) {
-  if (!raw) return raw;
-  const s = String(raw);
-
-  // Server-side audit codes (structured, prefix-matched).
-  if (s.startsWith('superseded_by_verified_sibling')) return 'ระบบรับสลิปอีกใบสำหรับบิลนี้ไปแล้ว';
-  if (s.startsWith('superseded_by_manual_pay'))       return 'แอดมินบันทึกการชำระเงินด้วยช่องทางอื่น (เงินสด/โอน) แล้ว';
-  if (s.startsWith('superseded_by_void'))             return 'บิลนี้ถูกยกเลิกแล้ว — โปรดติดต่อแอดมิน';
-  if (s.startsWith('unmark_paid_correction'))         return 'แอดมินยกเลิกการบันทึกชำระ — โปรดติดต่อแอดมิน';
-
-  // Verifier upstream — EasySlip / SlipOK / Slip2Go return free-form
-  // English on validation errors. Map the families we actually see in
-  // production to a Thai message that tells the tenant what to do.
-  const lower = s.toLowerCase();
-  if (/(payload string|image file|base64|image url|invalid image)/i.test(s)) {
-    return 'ไม่พบรูปสลิปหรือสลิปอ่านไม่ออก กรุณาอัปโหลดสลิปใหม่ที่ชัดเจน';
-  }
-  if (/invalid (api|signature|key|token)/i.test(s) || /unauthor/i.test(lower)) {
-    return 'ระบบตรวจสลิปเชื่อมต่อไม่สำเร็จ — โปรดติดต่อแอดมินเพื่อตรวจการตั้งค่า';
-  }
-  if (/quota|rate.?limit|too many|429/i.test(s)) {
-    return 'ระบบตรวจสลิปใช้งานเกินโควต้า — รบกวนติดต่อแอดมิน';
-  }
-  if (/duplicate|already (used|verified)/i.test(s)) {
-    return 'สลิปนี้ถูกใช้แล้ว — กรุณาอัปโหลดสลิปของรายการโอนใหม่';
-  }
-  if (/amount|number/i.test(s) && /mismatch|not match|differ|incorrect/i.test(s)) {
-    return 'ยอดในสลิปไม่ตรงกับยอดบิล กรุณาตรวจสอบและอัปโหลดสลิปใหม่';
-  }
-  if (/receiver|target|account|destination/i.test(s) && /mismatch|not match|differ|incorrect/i.test(s)) {
-    return 'บัญชีปลายทางในสลิปไม่ใช่ของหอพัก — กรุณาตรวจสอบบัญชีผู้รับ';
-  }
-  if (/network|timeout|econnreset|fetch failed|connect/i.test(lower)) {
-    return 'เชื่อมต่อระบบตรวจสลิปไม่สำเร็จ ลองอัปโหลดใหม่หรือแจ้งแอดมิน';
-  }
-
-  // English-looking free text → generic friendly fallback. We detect
-  // "looks English" by the presence of ASCII letters AND the absence of
-  // any Thai letters; anything Thai is already actionable.
-  if (/[A-Za-z]/.test(s) && !/[฀-๿]/.test(s)) {
-    return 'การตรวจสอบไม่ผ่าน ลองอัปโหลดสลิปใหม่หรือแจ้งแอดมิน';
-  }
-  return s;
-}
-window.tenantRejectedReason = tenantRejectedReason;
+// tenantRejectedReason (แปลเหตุผลสลิปถูกปฏิเสธเป็นไทย) ย้ายไปอยู่
+// /tenant-shared.js ที่เดียว — เดิมไฟล์นี้กับ pay.jsx ถือสำเนาคนละชุด
+// พร้อมคอมเมนต์ "Keep this in sync" ซึ่งพังง่ายมากเวลาเพิ่มเหตุผลใหม่
+// fallback identity มีไว้กันหน้าพังถ้าสคริปต์แชร์โหลดไม่สำเร็จ
+// (ข้อความดิบยังถูกแสดง แค่ไม่ได้แปล)
+const tenantRejectedReason = window.tenantRejectedReason || ((raw) => raw);
 
 // --------------------------------------------------------------------- api
 let _csrf = null;
@@ -1390,9 +1361,9 @@ function LoginView({ locale, setLocale, onLoggedIn, portalEnabled, building }) {
 // ============================================================== HomeView =
 function HomeView({ tenant, locale, bills, tickets, parcels, parcelEnabled, contract, goto }) {
   const t = (k) => tr(locale, k);
-  const unpaid = bills.find((b) => b.status === 'pending' || b.status === 'overdue');
-  const openTickets = tickets.filter((x) => !['completed', 'cancelled'].includes(x.status));
-  const waitingParcels = Array.isArray(parcels) ? parcels.filter((x) => x.status === 'waiting_pickup') : [];
+  const unpaid = bills.find(isUnpaidBill);
+  const openTickets = tickets.filter(isOpenTicket);
+  const waitingParcels = Array.isArray(parcels) ? parcels.filter(isWaitingParcel) : [];
   const floor = deriveFloor(tenant.roomId);
   // Render the room + tickets summary cards regardless of whether there is
   // a current outstanding bill — keeps the dashboard useful for paid-up
@@ -1682,11 +1653,11 @@ function BillsView({ locale, bills, refresh, slipFeature, openId, setOpenId }) {
 
   const filtered = useMemo(() => {
     if (filter === 'all') return bills;
-    if (filter === 'unpaid') return bills.filter((b) => b.status === 'pending' || b.status === 'overdue');
+    if (filter === 'unpaid') return bills.filter(isUnpaidBill);
     if (filter === 'paid') return bills.filter((b) => b.status === 'paid');
     return bills;
   }, [filter, bills]);
-  const unpaidCount = bills.filter((b) => b.status === 'pending' || b.status === 'overdue').length;
+  const unpaidCount = bills.filter(isUnpaidBill).length;
   const open = bills.find((b) => b.id === openId);
   return (
     <div className="anim-in">
@@ -2577,22 +2548,26 @@ function MaintenanceView({ locale, tenant, tickets, refresh }) {
   const t = (k) => tr(locale, k);
   const [showForm, setShowForm] = useState(false);
   const [tab, setTab] = useState('all');
+  // นับครั้งเดียวต่อ render — เดิมตัวกรอง "งานค้าง" ถูกคำนวณซ้ำ 3 จุด
+  // (useMemo, subtitle, chip) ในคอมโพเนนต์เดียวกัน
+  const openCount = tickets.filter(isOpenTicket).length;
+  const doneCount = tickets.filter((x) => x.status === 'completed').length;
   const filtered = useMemo(() => {
-    if (tab === 'open') return tickets.filter((x) => !['completed', 'cancelled'].includes(x.status));
+    if (tab === 'open') return tickets.filter(isOpenTicket);
     if (tab === 'done') return tickets.filter((x) => x.status === 'completed');
     return tickets;
   }, [tab, tickets]);
   return (
     <div className="anim-in">
       <SectionHeader title={t('maintenance')}
-        subtitle={`${t('allTickets')} ${tickets.length} · ${t('ongoing')} ${tickets.filter((x) => !['completed', 'cancelled'].includes(x.status)).length}`}
+        subtitle={`${t('allTickets')} ${tickets.length} · ${t('ongoing')} ${openCount}`}
         action={<Button icon="plus" onClick={() => setShowForm(true)}>{t('submitTicket')}</Button>} />
       <PageGuide type="maintenance" title={t('guideMaintenanceTitle')} text={t('guideMaintenanceText')} />
       <div className="filter-chips" style={{ display: 'flex', gap: 8, marginBottom: 'var(--sp-4)', flexWrap: 'wrap' }}>
         {[
           { id: 'all',  label: t('allTickets'), count: tickets.length },
-          { id: 'open', label: t('ongoing'),    count: tickets.filter((x) => !['completed', 'cancelled'].includes(x.status)).length },
-          { id: 'done', label: t('done'),        count: tickets.filter((x) => x.status === 'completed').length },
+          { id: 'open', label: t('ongoing'),    count: openCount },
+          { id: 'done', label: t('done'),        count: doneCount },
         ].map((f) => (
           <button key={f.id} onClick={() => setTab(f.id)} style={{
             padding: '8px 14px', borderRadius: 999, fontFamily: 'inherit',
@@ -2839,8 +2814,8 @@ function ParcelsView({ locale, parcels }) {
   const [tab, setTab] = useState('waiting');
   // ป็อพอัพดูรูปพัสดุ/หลักฐานการรับ: { url, title, detail, broken }
   const [photoView, setPhotoView] = useState(null);
-  const waiting = parcels.filter((x) => x.status === 'waiting_pickup');
-  const closed = parcels.filter((x) => x.status !== 'waiting_pickup');
+  const waiting = parcels.filter(isWaitingParcel);
+  const closed = parcels.filter((x) => !isWaitingParcel(x));
   const filtered = tab === 'waiting' ? waiting : tab === 'closed' ? closed : parcels;
   // แยกโทนสีต่อสถานะให้ต่างกันชัดเจน: รอรับ=เหลือง รับแล้ว=เขียว
   // คืนผู้ส่ง=ฟ้า ยกเลิก=แดง — ผู้เช่าแยกได้โดยไม่ต้องอ่านข้อความ
@@ -3669,11 +3644,11 @@ function App() {
       building={effectiveBuilding} />;
   }
 
-  const unpaidCount = bills.filter((b) => b.status === 'pending' || b.status === 'overdue').length;
-  const openTickets = tickets.filter((x) => !['completed', 'cancelled'].includes(x.status)).length;
+  const unpaidCount = bills.filter(isUnpaidBill).length;
+  const openTickets = tickets.filter(isOpenTicket).length;
   const parcelEnabled = features?.parcelNotifications?.enabled === true;
   const waitingParcels = parcelEnabled
-    ? parcels.filter((x) => x.status === 'waiting_pickup').length
+    ? parcels.filter(isWaitingParcel).length
     : 0;
 
   return (

@@ -9,12 +9,6 @@ const { useState, useEffect, useRef } = React;
 const ACCESS_API_TIMEOUT_MS = 15_000;
 
 function PageAccess({ setToast }) {
-  // Diagnostic: confirm the component mounted. See page-payments.jsx for context.
-  React.useEffect(() => {
-    console.log('[PageAccess] mounted');
-    return () => console.log('[PageAccess] unmounted');
-  }, []);
-
   // Guard window globals so a partial CDN load doesn't throw a destructure
   // error on first render. See page-meters.jsx for context.
   const C = window.ADMIN_C;

@@ -256,6 +256,74 @@ function decryptBuffer(buf) {
   return Buffer.concat([decipher.update(ct), decipher.final()]);
 }
 
+/**
+ * Citizen-ID PII canary — the sibling validateCanary() above only round-trips
+ * the versioned ENCRYPTION_KEY_V* registry. Citizen IDs (and their dedup HMAC)
+ * are keyed SEPARATELY by services/crypto.js (CITIZEN_ID_KEY, or by default an
+ * HKDF derivation of the rotatable SESSION_SECRET). Without this check, an
+ * operator who rotates SESSION_SECRET without pinning CITIZEN_ID_KEY makes
+ * every stored citizen_id_encrypted permanently undecryptable and breaks dedup
+ * — while boot still reports "verified/legacy". This stores a known probe at
+ * first boot and re-decrypts it on every later boot through the SAME PII key
+ * path, so that silent loss becomes loud.
+ *
+ * Caller decides the response (we keep boot alive on mismatch — see server.js —
+ * so a PII-display fault never takes rent/billing offline; it just alarms).
+ */
+async function validateCitizenIdCanary(pool) {
+  if (!pool) return { ok: true, mode: 'skipped' };
+  const KEY = 'citizenid_canary_v1';
+  const CANARY_PLAINTEXT = 'baankarn-citizenid-canary-v1';
+  let probe;
+  try {
+    probe = legacyCrypto.encryptString(CANARY_PLAINTEXT);
+  } catch (err) {
+    // No resolvable PII key (neither CITIZEN_ID_KEY nor SESSION_SECRET). The
+    // first real citizen-id write would fail anyway; surface as info, not a
+    // key-rotation mismatch, so we don't false-alarm on an unconfigured box.
+    return { ok: true, mode: 'no-key', reason: err.message };
+  }
+  try {
+    const { rows } = await pool.query(
+      `SELECT value FROM app_data WHERE key=$1 LIMIT 1`,
+      [KEY]
+    );
+    if (!rows.length) {
+      await pool.query(
+        `INSERT INTO app_data (key, value, updated_at)
+           VALUES ($1, $2::jsonb, NOW())
+         ON CONFLICT (key) DO NOTHING`,
+        [KEY, JSON.stringify({ ciphertext: probe, createdAt: new Date().toISOString() })]
+      );
+      return { ok: true, mode: 'created' };
+    }
+    const ciphertext = rows[0].value && rows[0].value.ciphertext;
+    if (!ciphertext) return { ok: true, mode: 'no-canary' };
+    let decoded;
+    try {
+      decoded = legacyCrypto.decryptString(ciphertext);
+    } catch (err) {
+      return {
+        ok: false,
+        reason: `citizen-id canary decrypt failed: ${err.message}. The PII key changed `
+          + '(SESSION_SECRET rotated without pinning CITIZEN_ID_KEY?) — existing citizen_id_encrypted '
+          + 'is now unreadable and dedup is broken.',
+      };
+    }
+    if (decoded !== CANARY_PLAINTEXT) {
+      return {
+        ok: false,
+        reason: 'citizen-id canary plaintext mismatch — the PII key changed; existing citizen IDs are unreadable.',
+      };
+    }
+    return { ok: true, mode: 'verified' };
+  } catch (err) {
+    // A DB hiccup must not gate boot — treat as skip, like validateCanary's
+    // own outer behaviour for transient errors.
+    return { ok: true, mode: 'db-skip', reason: err.message };
+  }
+}
+
 module.exports = {
   encryptString,
   decryptString,
@@ -266,6 +334,7 @@ module.exports = {
   loadedVersions,
   validateAtBoot,
   validateCanary,
+  validateCitizenIdCanary,
   // Re-export helpers from legacy for callers that want masking/HMAC
   maskTail: legacyCrypto.maskTail,
   hmac: legacyCrypto.hmac,

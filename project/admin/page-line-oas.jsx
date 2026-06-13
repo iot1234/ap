@@ -384,7 +384,7 @@ function PageLineOas({ setToast }) {
                     {o.botBasicId && <span>Bot ID: {o.botBasicId} · </span>}
                     {o.addFriendUrl && (
                       <span>
-                        <a href={o.addFriendUrl} target="_blank" rel="noreferrer" style={{ color: C.accent, fontWeight: 600 }}>
+                        <a href={o.addFriendUrl} target="_blank" rel="noopener noreferrer" style={{ color: C.accent, fontWeight: 600 }}>
                           เปิดหน้า LINE OA
                         </a>
                         {' · '}
@@ -392,7 +392,7 @@ function PageLineOas({ setToast }) {
                     )}
                     {o.oaMessageUrl ? (
                       <span>
-                        <a href={o.oaMessageUrl} target="_blank" rel="noreferrer" style={{ color: C.accent, fontWeight: 600 }}>
+                        <a href={o.oaMessageUrl} target="_blank" rel="noopener noreferrer" style={{ color: C.accent, fontWeight: 600 }}>
                           ทดสอบเปิดแชต OA
                         </a>
                         {' · ลิงก์พร้อมคีย์: พร้อม · '}
@@ -461,7 +461,7 @@ function PageLineOas({ setToast }) {
               level={3}
             />
             <ol style={{ fontSize: 13, color: C.ink2, lineHeight: 1.8, paddingLeft: 20, margin: 0 }}>
-              <li>เข้า <a href="https://developers.line.biz/console/" target="_blank" rel="noreferrer">LINE Developer Console</a> → เลือก provider → กด Create Messaging API channel</li>
+              <li>เข้า <a href="https://developers.line.biz/console/" target="_blank" rel="noopener noreferrer">LINE Developer Console</a> → เลือก provider → กด Create Messaging API channel</li>
               <li>คัดลอก <b>Channel access token (long-lived)</b> + <b>Channel secret</b></li>
               <li>กด "เพิ่ม OA" ที่หน้านี้ → กรอก slug (ใช้สั้นๆ เช่น <code>main</code>, <code>branch2</code>) + token + secret</li>
               <li>กลับไปที่ LINE Console → Messaging API → ใส่ Webhook URL จากการ์ดด้านบน</li>

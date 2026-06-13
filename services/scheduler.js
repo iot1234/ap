@@ -35,10 +35,9 @@ const SCHEDULER_FAILURE_RE_ALERT_MIN = 60;
 // the ICT CURRENT_DATE the jobs' SQL compares against. These helpers read the
 // LOCAL (ICT) wall-clock so JS latch day == SQL business day.
 function localDateKey(now) {
-  const y = now.getFullYear();
-  const m = String(now.getMonth() + 1).padStart(2, '0');
-  const d = String(now.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;                // YYYY-MM-DD (ICT)
+  // delegate ไป billing.localTodayYmd — ตรรกะ "วันนี้ตามนาฬิกา ICT" มีที่เดียว
+  // (เดิมสองไฟล์เขียนสูตรเดียวกันคนละชุด เสี่ยงแก้ timezone ไม่ครบคู่)
+  return billing.localTodayYmd(now);      // YYYY-MM-DD (ICT)
 }
 function localHourKey(now) {
   return `${localDateKey(now)}T${String(now.getHours()).padStart(2, '0')}`; // YYYY-MM-DDTHH (ICT)
@@ -2597,7 +2596,13 @@ async function tickAutoReconcileRooms(pool, flags, now, state) {
 // Hash takes any string and folds it to int64 — good enough for cooperative
 // scheduling between replicas (we don't need cryptographic strength here).
 const SCHED_LOCK_NAMESPACE = 0x42414e4b;  // ascii "BANK"
+// ชื่องานชุดเดิมถูก hash ใหม่ทุก tick (10+ ครั้ง/ชั่วโมง) — cache ผลไว้
+// เพราะเป็น pure function ของ name (ชื่องานบางตัวมี date-suffix จึงจำกัด
+// ขนาด cache กันโตไม่หยุด)
+const _lockKeyCache = new Map();
 function _lockKeyFor(name) {
+  const cached = _lockKeyCache.get(name);
+  if (cached !== undefined) return cached;
   // FNV-1a 32-bit, sign-clamped to int32 so pg_try_advisory_lock(int4,int4)
   // accepts both args without throwing "out of range for int4".
   let h = 0x811c9dc5;
@@ -2606,7 +2611,10 @@ function _lockKeyFor(name) {
     h = Math.imul(h, 0x01000193);
   }
   // Clamp to positive int32
-  return (h >>> 0) & 0x7fffffff;
+  const key = (h >>> 0) & 0x7fffffff;
+  if (_lockKeyCache.size > 500) _lockKeyCache.clear();
+  _lockKeyCache.set(name, key);
+  return key;
 }
 async function _withAdvisoryLock(pool, name, fn, { dbLatch = false } = {}) {
   // Try-lock so a hung peer can never wedge us — scheduler ticks are idempotent

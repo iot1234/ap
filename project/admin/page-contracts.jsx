@@ -1128,16 +1128,18 @@ function SignContractModal({ contract, onClose, onSaved, onError }) {
     setHasInk(false);
   };
 
-  const onUpload = (e) => {
+  const onUpload = async (e) => {
     const f = e.target.files && e.target.files[0];
     if (!f) return;
-    if (f.size > 1_500_000) {
-      onError && onError('ไฟล์ใหญ่เกิน 1.5MB');
-      return;
+    try {
+      // helper กลางจาก shared.jsx: ตรวจชนิด + ย่อรูปลายเซ็นที่ใหญ่เกิน
+      // 1.5 MB ให้อัตโนมัติ — เดิม reject ทิ้งเฉย ๆ ("ไฟล์ใหญ่เกิน 1.5MB")
+      setUploadedDataUrl(await window.prepareImageForUpload(f, {
+        typeErrorText: 'ไฟล์ลายเซ็นต้องเป็นรูป JPG, PNG หรือ WebP',
+      }));
+    } catch (err) {
+      onError && onError((err && err.message) || 'อ่านไฟล์ไม่สำเร็จ — ลองเลือกใหม่');
     }
-    const reader = new FileReader();
-    reader.onload = (ev) => setUploadedDataUrl(ev.target.result);
-    reader.readAsDataURL(f);
   };
 
   const submit = async () => {

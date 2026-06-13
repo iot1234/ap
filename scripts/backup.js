@@ -192,45 +192,35 @@ async function main() {
   }
 
   // Optional: upload to S3-compatible storage if credentials present.
-  // Read from secrets store (admin UI) or env (legacy).
+  // ใช้ S3 client กลางจาก services/storage (secrets-store/env + SSRF guard +
+  // DNS pinning) — เดิมไฟล์นี้สร้าง S3Client ดิบจาก env เอง ซึ่ง "ไม่มี"
+  // SSRF guard: R2_ENDPOINT ที่ถูกชี้ไป URL ภายในจะพาเนื้อหาฐานข้อมูล
+  // ทั้งก้อนออกไปหา endpoint แปลกปลอมได้
   const _secrets = (() => { try { return require('../services/secrets'); } catch { return null; } })();
-  const _r2 = {
-    accessKeyId: (_secrets && _secrets.get('R2_ACCESS_KEY_ID')) || process.env.R2_ACCESS_KEY_ID,
-    secretAccessKey: (_secrets && _secrets.get('R2_SECRET_ACCESS_KEY')) || process.env.R2_SECRET_ACCESS_KEY,
-    endpoint: (_secrets && _secrets.get('R2_ENDPOINT')) || process.env.R2_ENDPOINT,
-    bucket: (_secrets && _secrets.get('R2_BUCKET')) || process.env.R2_BUCKET,
-    region: (_secrets && _secrets.get('R2_REGION')) || process.env.R2_REGION || 'auto',
-  };
-  if (_r2.accessKeyId && _r2.bucket) {
-    let S3Client, PutObjectCommand;
+  const _bucket = (_secrets && _secrets.get('R2_BUCKET')) || process.env.R2_BUCKET;
+  if (_bucket) {
+    let client = null;
     try {
-      ({ S3Client, PutObjectCommand } = require('@aws-sdk/client-s3'));
+      client = require('../services/storage').getS3Client();
     } catch (err) {
-      console.error('[backup] @aws-sdk/client-s3 is not installed.');
-      console.error('  Run: npm install @aws-sdk/client-s3');
-      console.error('  (it is intentionally not in default deps to keep the prod image small)');
-      console.error('  Skipping cloud upload; local backup file is still good.');
-      await pool.end();
-      return;
+      console.error('[backup] storage service unavailable:', err.message);
     }
-    try {
-      const client = new S3Client({
-        endpoint: _r2.endpoint,
-        region: _r2.region,
-        credentials: {
-          accessKeyId: _r2.accessKeyId,
-          secretAccessKey: _r2.secretAccessKey,
-        },
-      });
-      await client.send(new PutObjectCommand({
-        Bucket: _r2.bucket,
-        Key: `backup-${stamp}${enc.ext}`,
-        Body: fs.readFileSync(file),
-        ContentType: enc.encrypted ? 'application/octet-stream' : 'application/json',
-      }));
-      console.log(`[backup] uploaded to ${_r2.bucket}/backup-${stamp}${enc.ext}`);
-    } catch (err) {
-      console.error('[backup] upload failed:', err.message);
+    if (!client) {
+      // getS3Client คืน null เมื่อ R2_* ไม่ครบ, @aws-sdk/client-s3 ไม่ได้ติดตั้ง
+      // หรือ endpoint ไม่ผ่าน SSRF guard (เหตุผลถูก log จาก storage แล้ว)
+      console.log('[backup] R2 client not available — skipping cloud upload; local backup file is still good.');
+    } else {
+      try {
+        await client.send(new client._lib.PutObjectCommand({
+          Bucket: _bucket,
+          Key: `backup-${stamp}${enc.ext}`,
+          Body: fs.readFileSync(file),
+          ContentType: enc.encrypted ? 'application/octet-stream' : 'application/json',
+        }));
+        console.log(`[backup] uploaded to ${_bucket}/backup-${stamp}${enc.ext}`);
+      } catch (err) {
+        console.error('[backup] upload failed:', err.message);
+      }
     }
   } else {
     console.log('[backup] R2_* env not set — skipping cloud upload');

@@ -215,9 +215,12 @@ test('admin pickup flow records proof (camera or file) and guards mistakes', () 
   // แนบหลักฐานได้สองทาง: ถ่ายจากกล้อง (capture) หรือเลือกไฟล์ และไม่แนบก็ได้
   assert.match(adminPage, /capture="environment"/);
   assert.match(adminPage, /แนบหรือไม่แนบก็ได้/);
-  // รูปใหญ่ต้องถูกย่ออัตโนมัติ ไม่ reject ผู้ใช้ทิ้ง
-  assert.match(adminPage, /async function prepareParcelPhoto/);
-  assert.match(adminPage, /canvas\.toDataURL\('image\/jpeg', quality\)/);
+  // รูปใหญ่ต้องถูกย่ออัตโนมัติ ไม่ reject ผู้ใช้ทิ้ง — pipeline ย่อรูปย้ายไป
+  // shared.jsx (helper กลางของทุกหน้า) หน้านี้เหลือ wrapper ที่ delegate ไป
+  assert.match(adminPage, /window\.prepareImageForUpload\(file\)/);
+  const sharedAdmin = read('project', 'admin', 'shared.jsx');
+  assert.match(sharedAdmin, /async function prepareImageForUpload/);
+  assert.match(sharedAdmin, /canvas\.toDataURL\('image\/jpeg', quality\)/);
   // กล่องยืนยันแบบ modal แทน window.confirm ทั้งหมด (คืน/ยกเลิก/ลบ)
   assert.match(adminPage, /function ParcelActionConfirmModal/);
   assert.doesNotMatch(adminPage, /window\.confirm/);

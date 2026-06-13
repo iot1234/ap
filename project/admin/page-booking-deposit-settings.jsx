@@ -460,7 +460,7 @@ function PageBookingDepositSettings({ setToast, embedded = false, currentUser = 
             <BookingDepositSummaryRow C={C} label="มัดจำสัญญา" value={draft.applyBookingFeeToDeposit ? 'หักจากมัดจำ' : 'แยกจากมัดจำ'} good />
             <div style={{ marginTop: 12, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
               <a href="/admin#settings" style={bookingDepositLinkStyle(C)}>ตั้งค่าบัญชีรับเงิน</a>
-              <a href="/booking" target="_blank" rel="noreferrer" style={bookingDepositLinkStyle(C)}>ดูหน้าจอง</a>
+              <a href="/booking" target="_blank" rel="noopener noreferrer" style={bookingDepositLinkStyle(C)}>ดูหน้าจอง</a>
             </div>
           </Card>
 

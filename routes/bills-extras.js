@@ -3540,7 +3540,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
       if (rawSlip) {
         try {
           const flags = await features.load(pool).catch(() => ({}));
-          const maxBytes = flags?.slipUpload?.maxBytes || 1_500_000;
+          const maxBytes = features.slipMaxBytes(flags);
           const allowedMimes = flags?.slipUpload?.allowedMimes
             || ['image/jpeg', 'image/png', 'image/webp'];
           const saved = await storage.saveBase64({
@@ -3566,8 +3566,7 @@ module.exports = function buildBillsExtrasRouter(ctx) {
         if (!slipUploadId) return;
         const orphanId = slipUploadId;
         slipUploadId = null;
-        storage.remove(pool, orphanId)
-          .catch((e) => console.warn('[bill.pay] orphan slip cleanup failed:', e.message));
+        storage.removeQuietly(pool, orphanId, '[bill.pay] orphan slip');
       };
       const rollbackManualPay = async () => {
         await client.query('ROLLBACK').catch(() => {});

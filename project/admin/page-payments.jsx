@@ -235,14 +235,6 @@ function prettyVerifiedBy(verifiedBy) {
 }
 
 function PagePayments({ setToast }) {
-  // Diagnostic: prove the component actually mounted. Visible in DevTools
-  // console — useful when the user reports a "white screen with no error"
-  // because we can confirm whether render even reached this far.
-  React.useEffect(() => {
-    console.log('[PagePayments] mounted');
-    return () => console.log('[PagePayments] unmounted');
-  }, []);
-
   // Guard every window global we depend on. If shared.jsx / ui.jsx / hooks.jsx
   // failed to load (CDN hiccup, slow mobile, blocked script), missing globals
   // would throw "Element type is invalid" inside render. Render a friendly

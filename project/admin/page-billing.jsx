@@ -2609,18 +2609,17 @@ function PageBilling({ rooms, setRooms, config, addActivity, setToast }) {
                   setToast && setToast({ kind: 'warning', message: msg });
                   return;
                 }
-                const reader = new FileReader();
-                reader.onload = () => {
+                // ตัวอ่านไฟล์กลางจาก shared.jsx — ไม่บีบอัดสลิป (เป็นหลักฐาน
+                // ที่ระบบตรวจ OCR เพดาน 5 MB ตรวจไว้ด้านบนแล้ว)
+                window.readImageFileAsDataUrl(f).then((dataUrl) => {
                   setMarkPaidPrompt((prev) => prev ? {
-                    ...prev, slipFile: f, slipDataUrl: reader.result, slipError: '',
+                    ...prev, slipFile: f, slipDataUrl: dataUrl, slipError: '',
                   } : prev);
-                };
-                reader.onerror = () => {
+                }).catch(() => {
                   const msg = 'อ่านไฟล์ไม่สำเร็จ — โปรดเลือกใหม่';
                   setMarkPaidPrompt((prev) => prev ? { ...prev, slipFile: null, slipDataUrl: null, slipError: msg } : prev);
                   setToast && setToast({ kind: 'error', message: msg });
-                };
-                reader.readAsDataURL(f);
+                });
               }}
               style={{ display: 'block', marginBottom: 6 }} />
             {markPaidPrompt.slipError ? (
