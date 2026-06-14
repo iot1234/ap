@@ -19,6 +19,7 @@ const path = require('path');
 const features = require('./features');
 const secrets = require('./secrets');
 const pricing = require('./pricing');
+const email = require('./email');
 
 const SEVERITY_RANK = { ok: 0, warn: 1, error: 2 };
 
@@ -633,6 +634,13 @@ async function checkFeatureDependencies(features, pool) {
     const host = secrets.get('SMTP_HOST') || features.email.smtpHost;
     const user = secrets.get('SMTP_USER') || features.email.smtpUser;
     const pass = secrets.get('SMTP_PASS');
+    if (!email.hasNodemailer()) {
+      warnings.push({
+        flag: 'email',
+        issue: 'email เปิด แต่ dependency nodemailer ไม่ได้ติดตั้ง — ส่งอีเมล fallback ไม่ได้',
+        fix: 'ติดตั้ง dependencies ให้ครบด้วย `npm install` หรือเปิด optional dependency nodemailer ใน deployment',
+      });
+    }
     if (!host || !user || !pass) {
       warnings.push({
         flag: 'email',
@@ -776,10 +784,7 @@ async function checkFeatureDependencies(features, pool) {
     const channels = cfg?.notify?.channels || {};
     const lineAllowed = channels.line !== false;
     const emailAllowed = channels.email !== false;
-    const emailReady = !!(features?.email?.enabled
-      && (secrets.get('SMTP_HOST') || features.email.smtpHost)
-      && (secrets.get('SMTP_USER') || features.email.smtpUser)
-      && secrets.get('SMTP_PASS'));
+    const emailReady = email.isConfigured(features);
     if (!lineAllowed && (!emailAllowed || !emailReady)) {
       warnings.push({
         flag: 'paymentReminder',

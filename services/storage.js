@@ -221,7 +221,10 @@ async function saveBase64({
   if (s3Configured()) {
     const client = getS3Client();
     const bucket = secrets.get('R2_BUCKET');
-    if (client && bucket) {
+    if (!client) {
+      s3FailureMsg = 'R2/S3 client unavailable (endpoint rejected by SSRF guard, credentials invalid for client setup, or @aws-sdk/client-s3 not installed)';
+      console.error('[storage] R2 client unavailable, falling back to local');
+    } else if (client && bucket) {
       s3Key = `${safeCategory}/${filename}`;
       try {
         await client.send(new client._lib.PutObjectCommand({

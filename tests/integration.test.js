@@ -4694,6 +4694,8 @@ test('health checks guard upload storage and contract legal file references', ()
     'admin health must have an upload storage guard');
   assert.match(health, /localUploadMayBeEphemeral/,
     'health must warn when production uploads can land on ephemeral local disk');
+  assert.match(storageSrc, /if \(!client\) \{[\s\S]{0,260}s3FailureMsg = 'R2\/S3 client unavailable/,
+    'R2 configured-but-unavailable client must set a failure reason so owner alerts fire');
   assert.match(health, /locked_contracts_missing_signature/,
     'locked contracts without signatures must be surfaced');
   assert.match(health, /contract_signature_file_rows_missing/,
@@ -7183,6 +7185,18 @@ test('admin UI: contract-invitations page registered + script-loaded', () => {
   assert.match(page, /\/api\/admin\/contract-invitations\/\$\{invitation\.id\}\/approve/);
   assert.match(page, /\/api\/admin\/contract-invitations\/\$\{invitation\.id\}\/reject/);
   assert.match(page, /\/api\/admin\/contract-invitations\/\$\{invitation\.id\}\/revoke/);
+});
+
+test('admin UI: system health pages use the system tone', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const shared = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'shared.jsx'), 'utf8');
+  assert.match(shared, /health:\s+'system'/,
+    'health lives in the System nav group and should use system styling');
+  assert.match(shared, /'production-readiness':\s+'system'/,
+    'production-readiness lives in the System nav group and should use system styling');
+  assert.doesNotMatch(shared, /health:\s+'overview'|'production-readiness':\s+'overview'/,
+    'system pages must not drift back to overview styling');
 });
 
 test('admin UI: contract review shows approval consequences and disables incomplete approvals', () => {

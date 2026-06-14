@@ -1,26 +1,41 @@
 // services/sms.js
 // SMS provider abstraction. Two modes:
-//   1) features.sms.enabled === false  → send() returns false (no-op)
-//   2) enabled but no provider integration → throw a clear error so the
-//      notifications_log row carries an actionable message
+//   1) features.sms.enabled === false  -> send() returns false (no-op)
+//   2) enabled but credentials/SDK are incomplete -> isConfigured() is false,
+//      so fallback/queue paths treat SMS as unavailable
 //
 // To enable real SMS:
-//   a) install your provider SDK (e.g. `npm i twilio` or use thsms HTTPS API)
+//   a) install your provider SDK when needed (e.g. `npm i twilio`; thsms uses HTTPS)
 //   b) set features.sms.provider = 'twilio' | 'thsms'
 //   c) add credentials to the secrets table (TWILIO_ACCOUNT_SID, etc.)
-//   d) implement the provider branch below
+//   d) test from Settings -> API/Keys before relying on SMS fallback
 //
 // The fallback chain in services/notifier.js skips SMS unless
 // isConfigured(features) returns true, so an unimplemented provider can't
-// silently block delivery — LINE/email still fire normally.
+// silently block delivery -> LINE/email still fire normally.
 
 const secrets = require('./secrets');
 
-function isConfigured(features) {
+function hasTwilioSdk() {
+  try {
+    require.resolve('twilio');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isConfigured(features, opts = {}) {
   if (!features || !features.sms || !features.sms.enabled) return false;
   const provider = features.sms.provider || '';
   if (provider === 'twilio') {
-    return !!(secrets.get('TWILIO_ACCOUNT_SID') && secrets.get('TWILIO_AUTH_TOKEN') && secrets.get('TWILIO_FROM'));
+    const sdkReady = typeof opts.hasTwilioSdk === 'function'
+      ? opts.hasTwilioSdk()
+      : hasTwilioSdk();
+    return !!(sdkReady
+      && secrets.get('TWILIO_ACCOUNT_SID')
+      && secrets.get('TWILIO_AUTH_TOKEN')
+      && secrets.get('TWILIO_FROM'));
   }
   if (provider === 'thsms') {
     return !!(secrets.get('THSMS_API_KEY') && secrets.get('THSMS_API_SECRET'));
@@ -83,4 +98,4 @@ async function send(features, msg) {
   throw new Error(`SMS provider '${provider}' is not implemented. Supported: twilio, thsms.`);
 }
 
-module.exports = { send, isConfigured };
+module.exports = { send, isConfigured, hasTwilioSdk };

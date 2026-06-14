@@ -66,7 +66,7 @@ const TONES = {
 // Pages added in the future should be registered here too.
 const PAGE_TONE = {
   // Overview
-  overview: 'overview', health: 'overview', 'production-readiness': 'overview',
+  overview: 'overview',
   // Rooms & tenants
   rooms: 'rooms', tenants: 'rooms', bookings: 'rooms', 'booking-deposit-settings': 'rooms',
   contracts: 'rooms', 'contract-templates': 'rooms', 'contract-invitations': 'rooms',
@@ -79,6 +79,7 @@ const PAGE_TONE = {
   maintenance: 'service', parcels: 'service', meters: 'service',
   access: 'service', 'access-devices': 'service',
   // System
+  health: 'system', 'production-readiness': 'system',
   notifications: 'system', 'notifications-queue': 'system',
   'security-events': 'system',
   features: 'system', secrets: 'system', settings: 'system',

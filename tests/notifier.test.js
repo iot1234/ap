@@ -202,6 +202,14 @@ test('email.isConfigured requires SMTP user as well as host/pass', () => {
   try {
     assert.equal(email.isConfigured({ email: { enabled: true } }), false);
     assert.equal(email.isConfigured({ email: { enabled: true, smtpUser: 'mailer@example.test' } }), true);
+    assert.equal(
+      email.isConfigured(
+        { email: { enabled: true, smtpUser: 'mailer@example.test' } },
+        { hasNodemailer: () => false }
+      ),
+      false,
+      'SMTP credentials alone must not mark email configured when nodemailer is unavailable',
+    );
   } finally {
     if (savedHost === undefined) delete process.env.SMTP_HOST; else process.env.SMTP_HOST = savedHost;
     if (savedUser === undefined) delete process.env.SMTP_USER; else process.env.SMTP_USER = savedUser;
@@ -253,6 +261,25 @@ test('email.send uses SMTP_USER as the From fallback when SMTP_FROM is unset', a
     if (savedUser === undefined) delete process.env.SMTP_USER; else process.env.SMTP_USER = savedUser;
     if (savedPass === undefined) delete process.env.SMTP_PASS; else process.env.SMTP_PASS = savedPass;
     if (savedFrom === undefined) delete process.env.SMTP_FROM; else process.env.SMTP_FROM = savedFrom;
+  }
+});
+
+test('sms.isConfigured requires the Twilio SDK as well as credentials', () => {
+  const sms = require('../services/sms');
+  const savedSid = process.env.TWILIO_ACCOUNT_SID;
+  const savedToken = process.env.TWILIO_AUTH_TOKEN;
+  const savedFrom = process.env.TWILIO_FROM;
+  process.env.TWILIO_ACCOUNT_SID = 'AC_test';
+  process.env.TWILIO_AUTH_TOKEN = 'secret';
+  process.env.TWILIO_FROM = '+15550000000';
+  const features = { sms: { enabled: true, provider: 'twilio' } };
+  try {
+    assert.equal(sms.isConfigured(features, { hasTwilioSdk: () => false }), false);
+    assert.equal(sms.isConfigured(features, { hasTwilioSdk: () => true }), true);
+  } finally {
+    if (savedSid === undefined) delete process.env.TWILIO_ACCOUNT_SID; else process.env.TWILIO_ACCOUNT_SID = savedSid;
+    if (savedToken === undefined) delete process.env.TWILIO_AUTH_TOKEN; else process.env.TWILIO_AUTH_TOKEN = savedToken;
+    if (savedFrom === undefined) delete process.env.TWILIO_FROM; else process.env.TWILIO_FROM = savedFrom;
   }
 });
 

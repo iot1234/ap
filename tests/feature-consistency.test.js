@@ -124,6 +124,27 @@ test('checkFeatureDependencies: email warns when SMTP user is missing', async ()
   }
 });
 
+test('checkFeatureDependencies: email dependency checks SDK readiness and reminder delivery uses email.isConfigured', () => {
+  const health = read('services', 'healthCheck.js');
+  const emailBlock = health.slice(
+    health.indexOf('// email channel: flag on'),
+    health.indexOf('// SMS provider:', health.indexOf('// email channel: flag on'))
+  );
+  assert.match(emailBlock, /email\.hasNodemailer\(\)/,
+    'email dependency warning must check whether nodemailer is available');
+  assert.match(emailBlock, /nodemailer ไม่ได้ติดตั้ง/,
+    'missing SDK warning must be clear to admins');
+
+  const reminderBlock = health.slice(
+    health.indexOf('if (features?.paymentReminder?.enabled)'),
+    health.indexOf('// slipUpload.autoVerify', health.indexOf('if (features?.paymentReminder?.enabled)'))
+  );
+  assert.match(reminderBlock, /const emailReady = email\.isConfigured\(features\)/,
+    'paymentReminder must use the same runtime readiness as the dispatcher');
+  assert.doesNotMatch(reminderBlock, /SMTP_HOST[\s\S]{0,120}SMTP_PASS/,
+    'paymentReminder must not duplicate a credentials-only email readiness check');
+});
+
 test('health SMTP check accepts DB-stored host/user plus secret password', () => {
   const health = read('services', 'healthCheck.js');
   const smtpIdx = health.indexOf('async function checkSmtp');

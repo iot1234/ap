@@ -12,6 +12,15 @@ let _nodemailer = null;
 let _transport = null;
 let _transportKey = '';
 
+function hasNodemailer() {
+  try {
+    require.resolve('nodemailer');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function load() {
   if (_nodemailer) return _nodemailer;
   // eslint-disable-next-line global-require
@@ -82,11 +91,15 @@ async function send(flags, msg) {
   }
 }
 
-function isConfigured(flags) {
+function isConfigured(flags, opts = {}) {
+  const sdkReady = typeof opts.hasNodemailer === 'function'
+    ? opts.hasNodemailer()
+    : hasNodemailer();
   return !!(flags && flags.email && flags.email.enabled
+    && sdkReady
     && (secrets.get('SMTP_HOST') || flags.email.smtpHost)
     && (secrets.get('SMTP_USER') || flags.email.smtpUser)
     && secrets.get('SMTP_PASS'));
 }
 
-module.exports = { send, isConfigured };
+module.exports = { send, isConfigured, hasNodemailer };
