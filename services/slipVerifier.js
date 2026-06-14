@@ -895,10 +895,29 @@ async function verifyViaSlipOK(buffer, expected) {
             return;
           }
           const d = j.data;
+          const transRef = d.transRef || d.ref || d.transactionRef;
+          const amount = Number(d.amount);
+          if (!transRef || !Number.isFinite(amount)) {
+            // Provider answered 200 but the response is missing the transaction
+            // reference (or amount) — likely a SlipOK schema/field drift. Fail
+            // CLOSED like EasySlip/Slip2Go: a NULL transaction_ref is NOT
+            // deduped by the partial uq_payments_tx_ref index, so auto-verifying
+            // here would let a re-screenshot of one real transfer pay a second
+            // same-amount bill. Classify as PROVIDER_ERROR (transient) so the
+            // slip parks in the admin review queue rather than telling a tenant
+            // who genuinely paid that their slip is fake.
+            resolve({
+              ok: false,
+              error: 'SlipOK response missing transaction reference or amount',
+              code: 'PROVIDER_ERROR',
+              raw: j,
+            });
+            return;
+          }
           resolve({
             ok: true,
-            transRef: d.transRef || d.ref || d.transactionRef,
-            amount: Number(d.amount),
+            transRef,
+            amount,
             sender:   { name: d.sender?.displayName, bank: d.sender?.bank?.short, account: d.sender?.account?.value },
             receiver: { name: d.receiver?.displayName, bank: d.receiver?.bank?.short, account: d.receiver?.account?.value },
             transDate: d.transDate,

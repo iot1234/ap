@@ -700,7 +700,17 @@ async function tickBillGen(pool, flags, now, state) {
   // we treat it as "today is bill day" and run.
   const lastDayOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
   const effectiveDom = Math.min(dom, lastDayOfMonth);
-  if (now.getDate() !== effectiveDom) return;
+  // Catch-up window, NOT strict day-equality. With `!== effectiveDom` the gen
+  // fired only on the single calendar day it was due; if the process was down
+  // for every hourly tick that day (redeploy / OOM / crash) or first booted on
+  // day 2+, lastBillPeriod was never latched and the guard returned early for
+  // the rest of the month — the entire month's bills were silently skipped.
+  // `< effectiveDom` means "today is on or after bill day" so a late first tick
+  // still runs. Idempotency is preserved downstream: the lastBillPeriod latch
+  // (below) limits it to once per period, and the partial-unique
+  // uq_bills_room_period_tenant_active (with 23505 swallow) plus
+  // billGenDueDateFor's next-month roll keep a late run safe and correctly dated.
+  if (now.getDate() < effectiveDom) return;
   const period = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
   if (state.lastBillPeriod === period) return;
   try {

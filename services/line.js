@@ -329,7 +329,15 @@ function verifyWebhookSignature(...args) {
     [rawBody, signature] = args;
     oa = _resolveOa(null);
   }
-  const secret = (oa && oa.channelSecret) || secrets.get('LINE_CHANNEL_SECRET');
+  // SECURITY: a DB-registered OA that has no configured channel_secret must
+  // NOT fall back to the global env LINE_CHANNEL_SECRET — doing so would let a
+  // single shared/leaked global secret sign forged webhooks into every
+  // secret-less OA, breaking per-OA isolation. Only the legacy no-OA call form
+  // (oa === null, i.e. _resolveOa returned null because no env access token is
+  // configured) may use the env secret. _resolveOa() already synthesizes the
+  // env-OA with channelSecret = env secret for the legacy push path, so the
+  // truthy-oa branch covers it too.
+  const secret = oa ? oa.channelSecret : secrets.get('LINE_CHANNEL_SECRET');
   if (!secret || !signature) return false;
   const crypto = require('crypto');
   const expected = crypto.createHmac('sha256', secret).update(rawBody).digest('base64');

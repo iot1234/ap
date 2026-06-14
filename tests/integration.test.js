@@ -2243,9 +2243,14 @@ test('admin billing readiness backs bill issue and payment preflights', () => {
     'TRUEMONEY_PHONE_MISSING',
     'NO_LINE_OA',
     'BIG_VERIFY_QUEUE',
+    'MISSING_VERIFIED_PAYMENT_INDEX',
   ]) {
     assert.match(route, new RegExp(code), `billing-readiness must report ${code}`);
   }
+  assert.match(route, /duplicateBills/,
+    'missing verified-payment-index warning must include the duplicate bill count');
+  assert.match(route, /admin#payments/,
+    'missing verified-payment-index warning must point admins to the payment reconciliation screen');
 
   const billingPage = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-billing.jsx'), 'utf8');
   assert.match(billingPage, /\/api\/admin\/billing-readiness\?period=\$\{encodeURIComponent\(currentPeriod\)\}/,
@@ -8420,6 +8425,27 @@ test('maintenance.rate: phone-only match scoped to tenant_id IS NULL (IDOR fix)'
   assert.doesNotMatch(src,
     /AND \(tenant_id = \$4 OR \(tenant_phone = \$5 AND \$5 <> ''\)\)/,
     'old IDOR-prone OR clause must be replaced');
+});
+
+test('legacy public maintenance rate scopes phone-only match to tenant_id IS NULL (IDOR fix)', () => {
+  // The anonymous /api/maintenance/:id/rate path authorizes by phone alone.
+  // Without a tenant_id gate, anyone who knows a tenant's (semi-public) phone
+  // number could rate/comment on that tenant's completed ticket by enumerating
+  // ticket ids. Identified tickets carry a tenant_id and must be rated only via
+  // the session-authenticated portal endpoint; the public path is for
+  // anonymous/legacy orphan tickets (tenant_id IS NULL) whose sole identity is
+  // the submitting phone.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const idx = src.indexOf("app.post('/api/maintenance/:id/rate'");
+  assert.ok(idx > 0, 'legacy public rate route must exist');
+  const body = src.slice(idx, src.indexOf("app.get('/api/audit'", idx));
+  assert.match(body,
+    /WHERE id = \$3 AND tenant_phone = \$4 AND \$4 <> ''\s+AND tenant_id IS NULL/,
+    'legacy public rate must require tenant_id IS NULL so identified tickets are portal-only');
+  assert.match(body, /AND status = 'completed'\s+AND rating IS NULL/,
+    'legacy public rate must keep the completed + not-yet-rated guards');
 });
 
 test('tenant maintenance list scopes legacy phone fallback to current room only', () => {

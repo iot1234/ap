@@ -179,6 +179,28 @@ test('a slip with no readable transaction date parks instead of verifying', asyn
   }
 });
 
+test('SlipOK 200 with no transRef fails closed (PROVIDER_ERROR), not a silent auto-verify', async () => {
+  // Cross-bill replay-dedup defense: a NULL transaction_ref is NOT deduped by
+  // the partial uq_payments_tx_ref index, so if SlipOK answers success but
+  // omits the reference (provider schema/field drift), auto-verifying would let
+  // a re-screenshot of one real transfer pay a second same-amount bill. It must
+  // fail closed and park in the admin queue, like EasySlip/Slip2Go.
+  const sv = freshVerifier({ SLIPOK_API_KEY: 'k' });
+  const mock = mockHttps({
+    'api.slipok.com': slipokSuccess({ transRef: undefined, ref: undefined, transactionRef: undefined }),
+  });
+  try {
+    const out = await sv.verifyWithFallback(JPEG,
+      { amount: 4500, promptpayTarget: '0812345678' }, features('slipok'));
+    assert.equal(out.ok, false, 'must not auto-verify without a transaction reference');
+    assert.equal(out.code, 'PROVIDER_ERROR');
+    assert.ok(sv.TRANSIENT_CODES.has(out.code), 'must park in the admin queue, not hard-reject the tenant');
+  } finally {
+    mock.restore();
+    cleanupEnv();
+  }
+});
+
 // === 2) EasySlip operator-side errors ======================================
 
 test('EasySlip 429/401/403 classify as PROVIDER_ERROR (transient), not a fake-slip reject', async () => {

@@ -144,6 +144,17 @@ test('tickBillGen uses the roll-forward helper for the per-room due date', () =>
     'scheduler bill-gen must build due dates through the roll-forward helper');
 });
 
+test('tickBillGen uses a catch-up window, not strict day-equality', () => {
+  // A strict `getDate() !== effectiveDom` skips the entire month's bills if the
+  // process is down for every tick on the due day or first boots on day 2+.
+  // The catch-up window `getDate() < effectiveDom` still runs late; the
+  // lastBillPeriod latch + the partial-unique bills index keep it idempotent.
+  assert.match(SRC, /if \(now\.getDate\(\) < effectiveDom\) return;/,
+    'bill-gen must run on or after the due day (catch-up), not only on the exact day');
+  assert.doesNotMatch(SRC, /if \(now\.getDate\(\) !== effectiveDom\) return;/,
+    'strict day-equality silently skips a whole period after a missed tick');
+});
+
 // === 3. Cross-replica db latch ==============================================
 
 function makeLatchPool() {

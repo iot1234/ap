@@ -4228,10 +4228,20 @@ app.post('/api/maintenance/:id/rate', sameOrigin, rateLimitTicketRate, validateB
     // (e.g. start at 5★ then quietly downgrade to 1★ after a billing dispute).
     // Tenant portal endpoint /api/tenant/maintenance/:id/rate already had
     // this guard; the legacy public endpoint was missing it.
+    //
+    // IDOR fix: scope this anonymous, phone-only path to `tenant_id IS NULL`.
+    // A ticket that was submitted by an identified tenant carries a tenant_id;
+    // matching it by phone alone let anyone who knows that (semi-public) phone
+    // number rate/comment on the victim's completed ticket by enumerating ids.
+    // Identified tenants must rate through the session-authenticated portal
+    // endpoint (which binds on tenant_id). Orphan/legacy tickets have no
+    // stronger identity than the phone that submitted them, so phone-match is
+    // the correct authorization there.
     const { rows } = await pool.query(
       `UPDATE maintenance_tickets
          SET rating = $1, rating_comment = $2, updated_at = NOW()
-         WHERE id = $3 AND tenant_phone = $4
+         WHERE id = $3 AND tenant_phone = $4 AND $4 <> ''
+           AND tenant_id IS NULL
            AND status = 'completed'
            AND rating IS NULL
          RETURNING ticket_no, rating`,
@@ -5459,6 +5469,45 @@ app.get('/api/admin/billing-readiness',
           });
         }
       } catch { /* tolerate missing payments */ }
+
+      // Surface the double-credit backstop index when it is missing. The
+      // uq_payments_one_verified_per_bill unique index is skipped at migration
+      // time (with only a boot-log WARNING) when historical duplicate verified
+      // payments already exist, and the skip is sticky until those rows are
+      // reconciled AND migrate re-runs. Without it the "one verified payment per
+      // bill" guarantee is gone — a race/double-submit can double-credit a bill.
+      // Make the gap visible (med, non-blocking) instead of silent so operators
+      // can reconcile and restart. Non-blocking on purpose: the system can still
+      // record payments, just without the DB-level dedup safety net.
+      try {
+        const idxQ = await pool.query(
+          `SELECT 1 FROM pg_indexes
+            WHERE schemaname='public' AND indexname='uq_payments_one_verified_per_bill' LIMIT 1`
+        );
+        if (!idxQ.rows.length) {
+          let dupBills = 0;
+          try {
+            const dupQ = await pool.query(
+              `SELECT COUNT(*)::int AS n FROM (
+                 SELECT bill_id FROM payments
+                  WHERE bill_id IS NOT NULL AND status='verified'
+                  GROUP BY bill_id HAVING COUNT(*) > 1
+               ) d`
+            );
+            dupBills = Number(dupQ.rows[0]?.n) || 0;
+          } catch { /* tolerate older schema */ }
+          issues.push({
+            sev: 'med', code: 'MISSING_VERIFIED_PAYMENT_INDEX', area: ['payment'],
+            msg: dupBills > 0
+              ? `ดัชนีกันจ่ายซ้ำ (1 บิล = 1 การชำระที่ยืนยัน) ยังไม่ติดตั้ง เพราะมี ${dupBills} บิลที่มีการชำระยืนยันซ้ำอยู่ก่อนแล้ว — ระบบกำลังทำงานโดยไม่มีตัวกันเครดิตซ้ำระดับฐานข้อมูล`
+              : 'ดัชนีกันจ่ายซ้ำ (uq_payments_one_verified_per_bill) หายไป — ระบบไม่มีตัวกันเครดิตซ้ำระดับฐานข้อมูล',
+            fix: dupBills > 0
+              ? '/admin#payments → แก้บิลที่มีการชำระยืนยันซ้ำให้เหลือรายการเดียว แล้ว restart เพื่อให้ migration สร้างดัชนีให้อัตโนมัติ'
+              : 'restart บริการเพื่อให้ migration สร้างดัชนีใหม่ — หากยังหายให้ตรวจ log การ migrate',
+            detail: { duplicateBills: dupBills },
+          });
+        }
+      } catch { /* tolerate missing payments table / pg_indexes access */ }
 
       const blockingIssue = issues.some((i) => i.sev === 'high' && i.area.includes('issue'));
       const blockingPayment = issues.some((i) => i.sev === 'high' && i.area.includes('payment'));

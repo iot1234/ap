@@ -101,6 +101,38 @@ test('buildBill: minimum billable units floor (utilities.waterMin / elecMin)', (
   const flatBill = billing.buildBill({ room: flatRoom, config: cfgMin, features: flags });
   assert.equal(flatBill.waterAmount, 120, 'flat amount unaffected by minimum');
   assert.equal(flatBill.waterMinApplied, false);
+
+  // NO usage basis (no readings + 0 units) → the minimum floor must NOT apply.
+  // This is the move-in first bill / missed-reading month: charging the
+  // configured minimum here is a phantom over-charge against data that does
+  // not exist. waterUnits must stay 0 and waterMinApplied false.
+  const noReadingRoom = {
+    ...baseRoom,
+    waterUnits: 0, waterPrevReading: null, waterCurrentReading: null,
+    elecUnits: 0, elecPrevReading: null, elecCurrentReading: null,
+  };
+  const noReadingBill = billing.buildBill({ room: noReadingRoom, config: cfgMin, features: flags });
+  assert.equal(noReadingBill.waterUnits, 0, 'no reading + 0 units → no min floor (water)');
+  assert.equal(noReadingBill.waterAmount, 0, 'no reading → 0 water charge, not the minimum');
+  assert.equal(noReadingBill.waterMinApplied, false);
+  assert.equal(noReadingBill.elecUnits, 0, 'no reading + 0 units → no min floor (elec)');
+  assert.equal(noReadingBill.elecAmount, 0, 'no reading → 0 elec charge, not the minimum');
+  assert.equal(noReadingBill.elecMinApplied, false);
+  assert.ok(!noReadingBill.items.some((it) => /ขั้นต่ำ/.test(it.detail || '')),
+    'no "คิดขั้นต่ำ" note when the floor is suppressed for a reading-less period');
+
+  // A genuine zero-usage month WITH readings (prev===current) still floors to
+  // the minimum — the basis exists, the tenant simply used nothing.
+  const zeroUseRoom = {
+    ...baseRoom,
+    waterUnits: 0, waterPrevReading: 100, waterCurrentReading: 100,
+    elecUnits: 0, elecPrevReading: 5000, elecCurrentReading: 5000,
+  };
+  const zeroUseBill = billing.buildBill({ room: zeroUseRoom, config: cfgMin, features: flags });
+  assert.equal(zeroUseBill.waterUnits, 5, 'zero usage with readings → min floor applies (water)');
+  assert.equal(zeroUseBill.waterMinApplied, true);
+  assert.equal(zeroUseBill.elecUnits, 50, 'zero usage with readings → min floor applies (elec)');
+  assert.equal(zeroUseBill.elecMinApplied, true);
 });
 
 test('buildBill: common-area fee billed as a flat monthly item (ungated by recurringCharges)', () => {

@@ -49,6 +49,28 @@ test('rejects when secret is missing', () => {
   assert.equal(verifyWebhookSignature({ channelSecret: '' }, body, sign(body)), false);
 });
 
+test('a secret-less DB OA does NOT fall back to the global env channel secret', () => {
+  // Regression for the per-OA isolation breach: when an OA object is passed
+  // (DB OA) but has no channelSecret, verification must fail closed even if a
+  // global LINE_CHANNEL_SECRET is configured in the environment. Otherwise a
+  // single shared/leaked global secret could sign forged webhooks into every
+  // secret-less OA.
+  const prev = process.env.LINE_CHANNEL_SECRET;
+  process.env.LINE_CHANNEL_SECRET = 'global-env-secret-32-bytes-long-zzzz';
+  try {
+    const body = JSON.stringify({ events: [] });
+    // Signed with the GLOBAL secret — would verify only if the buggy env
+    // fallback were still in place.
+    const sigWithEnv = sign(body, process.env.LINE_CHANNEL_SECRET);
+    assert.equal(verifyWebhookSignature({ id: 7, channelSecret: null }, body, sigWithEnv), false);
+    assert.equal(verifyWebhookSignature({ id: 7, channelSecret: '' }, body, sigWithEnv), false);
+    assert.equal(verifyWebhookSignature({ id: 7 }, body, sigWithEnv), false);
+  } finally {
+    if (prev === undefined) delete process.env.LINE_CHANNEL_SECRET;
+    else process.env.LINE_CHANNEL_SECRET = prev;
+  }
+});
+
 test('signature length mismatch returns false (not a crash)', () => {
   // A signature of the wrong length used to crash crypto.timingSafeEqual
   // — the implementation must guard with a try/catch.

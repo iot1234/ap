@@ -234,9 +234,21 @@ async function attachBillingReadingsForPeriod(pool, room, period) {
   const next = { ...room };
   try {
     for (const meterType of ['water', 'elec']) {
-      const { current, prev } = await readingPairForPeriod(pool, safeRoom, meterType, safePeriod);
-      if (!current) continue;
       const prefix = meterType === 'elec' ? 'elec' : 'water';
+      const { current, prev } = await readingPairForPeriod(pool, safeRoom, meterType, safePeriod);
+      if (!current) {
+        // No reading for THIS period. Do NOT fall through leaving the stale
+        // room-blob `*Units`/`*CurrentReading`/`*PrevReading` from a prior
+        // unscoped record() — that would silently re-bill already-charged
+        // consumption, and because the stale *CurrentReading is non-null the
+        // NO_METER_READINGS guard (hasPeriodReading, bills-extras.js) would not
+        // fire. Explicitly zero the usage and null the readings so the bill is
+        // 0 and the missing-reading gap is detected.
+        next[`${prefix}Units`] = 0;
+        next[`${prefix}PrevReading`] = null;
+        next[`${prefix}CurrentReading`] = null;
+        continue;
+      }
       // Authoritative table values override any stale blob `*Units`/`*PrevReading`
       // (see attachLatestBillingReadings). No baseline → 0 units this period.
       next[`${prefix}CurrentReading`] = Number(current.reading);

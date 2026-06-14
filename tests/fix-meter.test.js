@@ -149,6 +149,27 @@ test('attachBillingReadingsForPeriod: baseline advances month over month (no cum
     'old ordering re-billed July consumption: 200 units instead of 60');
 });
 
+test('attachBillingReadingsForPeriod: no period reading zeroes stale room-blob units', async () => {
+  // The room blob carries stale *Units/*CurrentReading/*PrevReading from a
+  // prior unscoped record(), but there is NO reading for the queried period.
+  // The stale values must NOT leak into the bill, and *CurrentReading must
+  // become null so the NO_METER_READINGS guard (hasPeriodReading) can detect
+  // the gap instead of silently re-billing already-charged consumption.
+  const pool = fakePool([]); // no readings at all for this room/period
+  const staleRoom = {
+    id: '202',
+    elecUnits: 999, elecPrevReading: 4000, elecCurrentReading: 5000,
+    waterUnits: 50, waterPrevReading: 100, waterCurrentReading: 150,
+  };
+  const out = await meter.attachBillingReadingsForPeriod(pool, staleRoom, '2026-09');
+  assert.equal(out.elecUnits, 0, 'stale elec units must not leak into the bill');
+  assert.equal(out.elecCurrentReading, null, 'no reading → current nulled so the guard fires');
+  assert.equal(out.elecPrevReading, null);
+  assert.equal(out.waterUnits, 0, 'stale water units must not leak into the bill');
+  assert.equal(out.waterCurrentReading, null);
+  assert.equal(out.waterPrevReading, null);
+});
+
 test('evaluator sanity: the old period-first ORDER BY reproduces the bug on this fixture', () => {
   // Proves the fixture/evaluator are sensitive to the fix — under the old
   // clause the stale scoped baseline (1500) would win for August.

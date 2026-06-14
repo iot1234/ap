@@ -143,8 +143,20 @@ function buildBill({ room, contract = null, expiredContract = null, config, feat
   const elecMinUnits  = applyMinUnits ? Math.max(0, Number(u.elecMin)  || 0) : 0;
   const waterActualUnits = waterModeInfo.mode === 'flat' ? 0 : waterUsage.units;
   const elecActualUnits  = elecModeInfo.mode  === 'flat' ? 0 : elecUsage.units;
-  const waterUnits = waterModeInfo.mode === 'flat' ? 0 : Math.max(waterActualUnits, waterMinUnits);
-  const elecUnits  = elecModeInfo.mode  === 'flat' ? 0 : Math.max(elecActualUnits,  elecMinUnits);
+  // Only apply the minimum-units floor when there is a usage basis for the
+  // billed period: either a real meter reading (hasReadings) OR an explicit
+  // non-zero units value (legacy blob rooms record units without readings).
+  // Without this gate a move-in first bill (no baseline reading) or any
+  // missed-reading month — units=0 AND hasReadings=false — would charge the
+  // configured minimum against 0 actual units, a phantom over-charge that even
+  // prints "ใช้จริง 0 หน่วย". A genuine zero-usage month (prev===current) keeps
+  // hasReadings=true, so the floor still correctly applies there.
+  const waterHasBasis = waterUsage.hasReadings || waterActualUnits > 0;
+  const elecHasBasis  = elecUsage.hasReadings  || elecActualUnits  > 0;
+  const waterFloor = waterHasBasis ? waterMinUnits : 0;
+  const elecFloor  = elecHasBasis  ? elecMinUnits  : 0;
+  const waterUnits = waterModeInfo.mode === 'flat' ? 0 : Math.max(waterActualUnits, waterFloor);
+  const elecUnits  = elecModeInfo.mode  === 'flat' ? 0 : Math.max(elecActualUnits,  elecFloor);
   const waterMinApplied = waterUnits > waterActualUnits;
   const elecMinApplied  = elecUnits  > elecActualUnits;
   const waterAmount = waterModeInfo.mode === 'flat'
