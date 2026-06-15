@@ -2032,10 +2032,6 @@ async function tickBookingStale(pool, flags, now, state) {
     ownerLines.push(`  • ${c.id} ${c.name} — มีสัญญาแล้ว ปิดเป็น completed (ห้อง ${c.roomId || '-'})`);
   }
   for (const c of cancelledOut) {
-    if (lineBindingMod) {
-      try { await lineBindingMod.revokeBookingBindings(pool, { bookingId: c.id }); }
-      catch (err) { console.warn('[scheduler] booking-stale binding revoke failed:', err.message); }
-    }
     try {
       await pool.query(
         `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, detail)
@@ -2076,6 +2072,14 @@ async function tickBookingStale(pool, flags, now, state) {
       }
     } catch (err) {
       console.warn('[scheduler] booking-stale booker notify failed:', err.message);
+    }
+    // Revoke the booking's LINE bindings AFTER the auto-cancel notice above
+    // has read them (listBookingRecipients filters status='bound'). Revoking
+    // first empties that recipient set, so a LINE-only applicant would never
+    // learn the booking was auto-cancelled. The revoke is cleanup only.
+    if (lineBindingMod) {
+      try { await lineBindingMod.revokeBookingBindings(pool, { bookingId: c.id }); }
+      catch (err) { console.warn('[scheduler] booking-stale binding revoke failed:', err.message); }
     }
     ownerLines.push(`  • ${c.id} ${c.name} (${c.phone || '-'}) — ค้าง "${c.beforeStatus}" เกิน ${c.limit} วัน`
       + (c.releasedRoomId ? ` · ปล่อยห้อง ${c.releasedRoomId} แล้ว` : ''));
@@ -2173,6 +2177,17 @@ async function tickContractExpiry(pool, _flags, now, state) {
         if (!upd.rows.length) continue;
         await pool.query(`DELETE FROM tenant_sessions WHERE tenant_id=$1`, [row.tenant_id])
           .catch(() => { /* best-effort */ });
+        // Revoke the tenant's physical access cards on auto-expiry too. Every
+        // other move-out path (manual checkout / contract-close / reconcile)
+        // does this; without it an auto-expired tenancy left a live 'active'
+        // card, which a returning tenant (same id, re-rented) could later use
+        // to open a room they no longer hold. Keyed on tenant_id like the rest.
+        await pool.query(
+          `UPDATE access_cards SET status='revoked', revoked_at=NOW(),
+                  revoke_reason='auto:contract-expire'
+            WHERE tenant_id=$1 AND status='active'`,
+          [row.tenant_id]
+        ).catch(() => { /* best-effort; 42P01 on legacy deploys */ });
         if (row.room_id) {
           try {
             await require('./roomStatus').syncRoom(pool, String(row.room_id), { reason: 'contract-auto-expire' });
