@@ -9,6 +9,7 @@ const { useState, useEffect, useCallback, useMemo } = React;
 
 const BOOKING_DEPOSIT_DEFAULTS = {
   enabled: true,
+  openAt: null,
   requireDeposit: false,
   depositAmount: 500,
   minimumAmount: 0,
@@ -31,6 +32,7 @@ function bookingDepositClamp(value, min, max, fallback) {
 
 function normalizeBookingDepositFeature(raw) {
   const base = { ...BOOKING_DEPOSIT_DEFAULTS, ...(raw || {}) };
+  const openAtTs = base.openAt ? Date.parse(base.openAt) : NaN;
   const depositAmount = Math.round(bookingDepositClamp(base.depositAmount, 0, 1000000, 500));
   const rawMinimum = bookingDepositClamp(base.minimumAmount, 0, 1000000, 0);
   const minimumAmount = rawMinimum > 0 ? Math.max(1, Math.round(rawMinimum)) : 0;
@@ -38,6 +40,7 @@ function normalizeBookingDepositFeature(raw) {
   const maxBytes = Math.round(bookingDepositClamp(base.maxBytes, 100000, 5000000, 1500000));
   return {
     enabled: base.enabled !== false,
+    openAt: Number.isFinite(openAtTs) ? new Date(openAtTs).toISOString() : null,
     requireDeposit: base.requireDeposit === true,
     depositAmount,
     minimumAmount,
@@ -144,6 +147,7 @@ function PageBookingDepositSettings({ setToast, embedded = false, currentUser = 
   const paymentReady = publicConfig?.payment?.ready;
   const paymentKnown = publicConfig?.payment && typeof paymentReady === 'boolean';
   const readOnlyReason = canEdit ? '' : `บัญชี ${viewerRole || 'ปัจจุบัน'} ดูได้เท่านั้น ต้องใช้ role owner หรือ manager เพื่อบันทึก`;
+  const openState = bookingDepositOpenState(draft);
 
   function patchDraft(patch) {
     setDraft((prev) => normalizeBookingDepositFeature({ ...(prev || defaults), ...patch }));
@@ -194,9 +198,11 @@ function PageBookingDepositSettings({ setToast, embedded = false, currentUser = 
             ? 'ต้องตั้งค่า PromptPay/บัญชีธนาคาร หรือปิด "ต้องแนบสลิปค่าจอง" เพื่อให้หน้า booking จองต่อได้'
             : (!clean.enabled
                 ? 'ปิดรับจองออนไลน์แล้ว ผู้สนใจจะเห็นข้อความแจ้งชัดเจนและส่งคำขอจองไม่ได้'
-                : clean.requireDeposit
-                ? `ผู้จองต้องชำระ ${bookingDepositMoney(bookingDepositEffectiveAmount(clean))} และห้องจะถูกล็อก ${clean.holdMinutes} นาที`
-                : 'ปิดการเก็บค่าจองก่อนส่งคำขอแล้ว'),
+                : (clean.openAt && Date.parse(clean.openAt) > Date.now()
+                  ? `ตั้งเวลาเปิดรับจอง ${new Date(clean.openAt).toLocaleString('th-TH')} แล้ว หน้า booking จะแสดงนับถอยหลัง`
+                  : clean.requireDeposit
+                    ? `ผู้จองต้องชำระ ${bookingDepositMoney(bookingDepositEffectiveAmount(clean))} และห้องจะถูกล็อก ${clean.holdMinutes} นาที`
+                    : 'ปิดการเก็บค่าจองก่อนส่งคำขอแล้ว')),
         },
       });
       load();
@@ -236,6 +242,12 @@ function PageBookingDepositSettings({ setToast, embedded = false, currentUser = 
       color: 'warning',
       title: 'หน้าจองสาธารณะปิดอยู่',
       detail: 'ผู้สนใจจะส่งคำขอจองห้องไม่ได้จนกว่าจะเปิดใช้งาน',
+    });
+  } else if (openState.status === 'scheduled') {
+    warnings.push({
+      color: 'info',
+      title: 'ตั้งเวลาเปิดรับจองแล้ว',
+      detail: `${openState.label} หน้า booking จะแสดงนับถอยหลังและไม่ให้ส่งคำขอก่อนถึงเวลา`,
     });
   }
   if (bookingDepositNeedsPaymentSetup(draft, paymentKnown, paymentReady)) {
@@ -333,9 +345,7 @@ function PageBookingDepositSettings({ setToast, embedded = false, currentUser = 
               title="สถานะการใช้งาน"
               subtitle="ตั้งจากบนลงล่างได้เลย เมื่อบันทึกแล้วหน้า booking จะใช้ค่านี้ทันที"
               action={
-                draft.requireDeposit
-                  ? <Pill color="finance">เก็บค่าจอง {bookingDepositMoney(effectiveAmount)}</Pill>
-                  : <Pill color="neutral">ไม่เก็บค่าจอง</Pill>
+                <Pill color={openState.tone}>{openState.label}</Pill>
               }
               level={3}
             />
@@ -346,6 +356,64 @@ function PageBookingDepositSettings({ setToast, embedded = false, currentUser = 
               disabled={inputDisabled}
               onChange={(v) => patchDraft({ enabled: v })}
             />
+            <div style={{
+              border: `1px solid ${C.border}`,
+              borderRadius: 8,
+              padding: 12,
+              background: C.surfaceAlt,
+              margin: '10px 0 14px',
+            }}>
+              <div style={{ fontSize: 13.5, fontWeight: 700, color: C.ink, marginBottom: 4 }}>
+                เวลาเปิดรับจอง
+              </div>
+              <div style={{ fontSize: 12.5, color: C.muted, lineHeight: 1.5, marginBottom: 10 }}>
+                ถ้าตั้งเวลาในอนาคต หน้า booking จะปิดรับคำขอชั่วคราวและนับถอยหลังแบบ real-time จนถึงเวลานี้
+              </div>
+              <div style={{
+                display: 'grid',
+                gridTemplateColumns: 'minmax(0, 1fr) auto',
+                gap: 8,
+                alignItems: 'end',
+              }}>
+                <div>
+                  <label style={{ display: 'block', fontSize: 12, color: C.muted, marginBottom: 4 }}>
+                    เปิดอัตโนมัติวันที่/เวลา
+                  </label>
+                  <input
+                    type="datetime-local"
+                    value={bookingDepositToLocalDatetime(draft.openAt)}
+                    disabled={inputDisabled || !draft.enabled}
+                    onChange={(e) => patchDraft({ openAt: bookingDepositFromLocalDatetime(e.target.value) })}
+                    style={{
+                      width: '100%',
+                      height: 36,
+                      border: `1px solid ${C.border}`,
+                      borderRadius: 7,
+                      padding: '0 10px',
+                      fontFamily: 'inherit',
+                      fontSize: 13,
+                      color: C.ink,
+                      background: inputDisabled || !draft.enabled ? C.surfaceAlt : C.surface,
+                    }}
+                  />
+                </div>
+                <Btn
+                  variant="ghost"
+                  onClick={() => patchDraft({ openAt: null })}
+                  disabled={inputDisabled || !draft.openAt}
+                >
+                  ล้างเวลา
+                </Btn>
+              </div>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10 }}>
+                <Btn variant="secondary" onClick={() => patchDraft({ enabled: true, openAt: null })} disabled={inputDisabled}>
+                  เปิดรับจองทันที
+                </Btn>
+                <Btn variant="ghost" onClick={() => patchDraft({ enabled: false, openAt: null })} disabled={inputDisabled}>
+                  ปิดรับจองทันที
+                </Btn>
+              </div>
+            </div>
             <Toggle
               label="เก็บค่าจองก่อนส่งคำขอ"
               hint="เมื่อเปิด ผู้จองต้องเลือกห้องจริง ระบบจะล็อกห้องชั่วคราวระหว่างส่งคำขอ"
@@ -449,7 +517,8 @@ function PageBookingDepositSettings({ setToast, embedded = false, currentUser = 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           <Card>
             <SectionHeading title="สรุปก่อนบันทึก" level={3} />
-            <BookingDepositSummaryRow C={C} label="หน้าจอง" value={draft.enabled ? 'เปิด' : 'ปิด'} good={draft.enabled} />
+            <BookingDepositSummaryRow C={C} label="หน้าจอง" value={openState.label} good={draft.enabled} />
+            <BookingDepositSummaryRow C={C} label="เวลาเปิด" value={draft.openAt ? new Date(draft.openAt).toLocaleString('th-TH') : 'เปิดทันทีเมื่อ enabled'} good={openState.status !== 'closed'} />
             <BookingDepositSummaryRow C={C} label="ค่าจองที่ใช้จริง" value={draft.requireDeposit ? bookingDepositMoney(effectiveAmount) : 'ไม่เก็บ'} good={!draft.requireDeposit || effectiveAmount > 0} />
             <BookingDepositSummaryRow C={C} label="สลิป" value={draft.requireDeposit ? (draft.requireSlip ? 'บังคับแนบ' : 'ไม่บังคับ / manual review') : '-'} good={!draft.requireDeposit || draft.requireSlip} />
             <BookingDepositSummaryRow C={C} label="ล็อกห้อง" value={`${draft.holdMinutes} นาที`} good={draft.holdMinutes >= 1} />
@@ -484,6 +553,41 @@ function PageBookingDepositSettings({ setToast, embedded = false, currentUser = 
     </>
   );
   return embedded ? <div>{content}</div> : <PageContainer>{content}</PageContainer>;
+}
+
+function bookingDepositToLocalDatetime(value) {
+  if (!value) return '';
+  const d = new Date(value);
+  if (!Number.isFinite(d.getTime())) return '';
+  return [
+    d.getFullYear(),
+    String(d.getMonth() + 1).padStart(2, '0'),
+    String(d.getDate()).padStart(2, '0'),
+  ].join('-') + 'T' + [
+    String(d.getHours()).padStart(2, '0'),
+    String(d.getMinutes()).padStart(2, '0'),
+  ].join(':');
+}
+
+function bookingDepositFromLocalDatetime(value) {
+  if (!value) return null;
+  const d = new Date(value);
+  return Number.isFinite(d.getTime()) ? d.toISOString() : null;
+}
+
+function bookingDepositOpenState(draft) {
+  if (!draft || draft.enabled === false) {
+    return { status: 'closed', label: 'ปิดรับจองทันที', tone: 'warning' };
+  }
+  const ts = draft.openAt ? Date.parse(draft.openAt) : NaN;
+  if (Number.isFinite(ts) && ts > Date.now()) {
+    return {
+      status: 'scheduled',
+      label: `ตั้งเวลาเปิด ${new Date(ts).toLocaleString('th-TH')}`,
+      tone: 'info',
+    };
+  }
+  return { status: 'open', label: 'เปิดรับจองทันที', tone: 'success' };
 }
 
 function BookingDepositNotice({ color = 'info', title, children, C }) {

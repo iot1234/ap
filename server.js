@@ -2193,6 +2193,8 @@ function roomBookingSettings(flags) {
   const minimumRaw = Number(raw.minimumAmount);
   const holdMinutes = Number(raw.holdMinutes);
   const maxBytes = Number(raw.maxBytes);
+  const openAtTs = raw.openAt ? Date.parse(raw.openAt) : NaN;
+  const openAt = Number.isFinite(openAtTs) ? new Date(openAtTs).toISOString() : null;
   const minimumAmount = Number.isFinite(minimumRaw) && minimumRaw > 0
     ? Math.min(Math.max(minimumRaw, 1), 1_000_000)
     : 0;
@@ -2201,6 +2203,7 @@ function roomBookingSettings(flags) {
     : 500;
   return {
     enabled: raw.enabled !== false,
+    openAt,
     requireDeposit: raw.requireDeposit === true,
     requireSlip: raw.requireSlip !== false,
     depositAmount: minimumAmount > 0
@@ -2218,6 +2221,22 @@ function roomBookingSettings(flags) {
     allowedMimes: Array.isArray(raw.allowedMimes) && raw.allowedMimes.length
       ? raw.allowedMimes
       : ['image/jpeg', 'image/png', 'image/webp'],
+  };
+}
+
+function roomBookingOpenState(settings, now = new Date()) {
+  const serverNow = now.toISOString();
+  const openAtTs = settings && settings.openAt ? Date.parse(settings.openAt) : NaN;
+  const scheduled = !!(settings && settings.enabled && Number.isFinite(openAtTs) && openAtTs > now.getTime());
+  const enabled = !!(settings && settings.enabled && !scheduled);
+  return {
+    enabled,
+    status: !settings || settings.enabled === false ? 'closed' : (scheduled ? 'scheduled' : 'open'),
+    scheduled,
+    onlineEnabled: !!(settings && settings.enabled),
+    openAt: settings && settings.openAt ? settings.openAt : null,
+    serverNow,
+    opensInMs: scheduled ? Math.max(0, openAtTs - now.getTime()) : 0,
   };
 }
 
@@ -2307,6 +2326,7 @@ function bookingDepositVerificationNotice({
 
 const ROOM_BOOKING_EDITABLE_FIELDS = new Set([
   'enabled',
+  'openAt',
   'requireDeposit',
   'depositAmount',
   'minimumAmount',
@@ -2323,9 +2343,20 @@ const ROOM_BOOKING_DISABLED_NOTICE = {
   message: 'ขณะนี้ยังไม่รับคำขอจองออนไลน์ กรุณาติดต่อแอดมินหรือกลับมาตรวจสอบอีกครั้ง',
   nextAction: 'เปิดรับจองจากหน้าแอดมินเมื่อพร้อมให้ผู้สนใจส่งคำขอจอง',
 };
+const ROOM_BOOKING_SCHEDULED_NOTICE = {
+  code: 'ROOM_BOOKING_NOT_OPEN_YET',
+  error: 'ยังไม่เปิดรับจองออนไลน์',
+  message: 'ระบบจองห้องจะเปิดรับคำขอตามเวลาที่กำหนด',
+  nextAction: 'รอจนถึงเวลาที่แสดงบนหน้าเว็บ ระบบจะโหลดห้องว่างให้อัตโนมัติ',
+};
 
 function roomBookingDisabledPayload(extra = {}) {
-  return { ...ROOM_BOOKING_DISABLED_NOTICE, ...extra };
+  const scheduled = extra && (extra.scheduled || extra.status === 'scheduled');
+  return {
+    ...(scheduled ? ROOM_BOOKING_SCHEDULED_NOTICE : ROOM_BOOKING_DISABLED_NOTICE),
+    ...extra,
+    enabled: false,
+  };
 }
 
 function normalizeRoomBookingEditableSettings(raw) {
@@ -2336,6 +2367,7 @@ function normalizeRoomBookingEditableSettings(raw) {
   const effective = roomBookingSettings({ roomBooking: base });
   return {
     enabled: effective.enabled,
+    openAt: effective.openAt,
     requireDeposit: effective.requireDeposit,
     requireSlip: effective.requireSlip,
     depositAmount: effective.configuredDepositAmount,
@@ -2393,6 +2425,29 @@ function parseRoomBookingEditableSettings(input, currentRaw) {
     }
     return Math.round(n);
   };
+  const parseOpenAt = () => {
+    if (input.openAt === undefined) return current.openAt || null;
+    if (input.openAt === null || input.openAt === '') return null;
+    const ts = Date.parse(String(input.openAt));
+    if (!Number.isFinite(ts)) {
+      issues.push({
+        field: 'openAt',
+        code: 'BOOKING_OPEN_AT_INVALID',
+        message: 'เวลาเปิดจองต้องเป็นวันเวลาที่ถูกต้อง',
+      });
+      return current.openAt || null;
+    }
+    const maxFuture = Date.now() + 730 * 24 * 60 * 60 * 1000;
+    if (ts > maxFuture) {
+      issues.push({
+        field: 'openAt',
+        code: 'BOOKING_OPEN_AT_RANGE',
+        message: 'ตั้งเวลาเปิดจองล่วงหน้าได้ไม่เกิน 730 วัน',
+      });
+      return current.openAt || null;
+    }
+    return new Date(ts).toISOString();
+  };
   const depositAmount = numField(
     'depositAmount',
     0,
@@ -2418,6 +2473,7 @@ function parseRoomBookingEditableSettings(input, currentRaw) {
   }
   const next = {
     enabled: boolField('enabled'),
+    openAt: parseOpenAt(),
     requireDeposit: boolField('requireDeposit'),
     requireSlip: boolField('requireSlip'),
     depositAmount,
@@ -2723,12 +2779,19 @@ app.get('/api/bookings/public/config', async (_req, res) => {
   try {
     await releaseExpiredPublicBookingHolds(pool);
     const { settings, payment } = await publicBookingDepositInfo();
+    const openState = roomBookingOpenState(settings);
     const lineContact = await loadPublicLineContactLinks();
     res.setHeader('Cache-Control', 'no-store');
     res.json({
       ok: true,
       booking: {
-        enabled: settings.enabled,
+        enabled: openState.enabled,
+        onlineEnabled: settings.enabled,
+        bookingStatus: openState.status,
+        scheduled: openState.scheduled,
+        openAt: openState.openAt,
+        serverNow: openState.serverNow,
+        opensInMs: openState.opensInMs,
         requireDeposit: settings.requireDeposit,
         requireSlip: settings.requireSlip,
         depositAmount: settings.depositAmount,
@@ -2740,7 +2803,7 @@ app.get('/api/bookings/public/config', async (_req, res) => {
         allowedMimes: settings.allowedMimes,
         payment,
         lineContact,
-        disabledNotice: settings.enabled ? null : roomBookingDisabledPayload(),
+        disabledNotice: openState.enabled ? null : roomBookingDisabledPayload(openState),
       },
     });
   } catch (err) {
@@ -2754,14 +2817,15 @@ app.get('/api/bookings/public/rooms', async (_req, res) => {
     await releaseExpiredPublicBookingHolds(pool);
     const flags = await features.load(pool);
     const settings = roomBookingSettings(flags);
-    if (!settings.enabled) {
+    const openState = roomBookingOpenState(settings);
+    if (!openState.enabled) {
       res.setHeader('Cache-Control', 'no-store');
       return res.json({
         ok: true,
         enabled: false,
         count: 0,
         rooms: [],
-        ...roomBookingDisabledPayload(),
+        ...roomBookingDisabledPayload(openState),
       });
     }
     const { rows } = await pool.query(
@@ -2802,7 +2866,11 @@ app.post('/api/bookings/public/hold', sameOrigin, rateLimitBookingHold, async (r
     return res.status(500).json({ error: 'internal error', code: 'CONFIG_ERROR' });
   }
   if (!settings.enabled) {
-    return res.status(503).json(roomBookingDisabledPayload());
+    return res.status(503).json(roomBookingDisabledPayload(roomBookingOpenState(settings)));
+  }
+  const holdOpenState = roomBookingOpenState(settings);
+  if (!holdOpenState.enabled) {
+    return res.status(503).json(roomBookingDisabledPayload(holdOpenState));
   }
   if (!settings.requireDeposit) {
     return res.json({ ok: true, holdRequired: false, booking: { requireDeposit: false } });
@@ -2997,7 +3065,11 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBookingSubmit, validateBod
     return res.status(500).json({ error: 'internal error', code: 'CONFIG_ERROR' });
   }
   if (!bookingSettings.enabled) {
-    return res.status(503).json(roomBookingDisabledPayload());
+    return res.status(503).json(roomBookingDisabledPayload(roomBookingOpenState(bookingSettings)));
+  }
+  const submitOpenState = roomBookingOpenState(bookingSettings);
+  if (!submitOpenState.enabled) {
+    return res.status(503).json(roomBookingDisabledPayload(submitOpenState));
   }
   if (bookingSettings.requireDeposit) {
     if (!cleaned.roomId) {
@@ -4352,11 +4424,12 @@ app.get('/api/admin/booking-deposit-settings', requireAuth, requireRole('owner',
     const f = await features.load(pool);
     const role = req.session.user.role;
     const effectiveSettings = roomBookingSettings(f);
+    const openState = roomBookingOpenState(effectiveSettings);
     const payment = await bookingDepositAdminPaymentReadiness(effectiveSettings.depositAmount);
     res.json({
       ok: true,
       settings: normalizeRoomBookingEditableSettings(f.roomBooking),
-      effectiveSettings,
+      effectiveSettings: { ...effectiveSettings, openState },
       defaults: normalizeRoomBookingEditableSettings(features.DEFAULTS.roomBooking),
       payment,
       role,
@@ -4390,17 +4463,19 @@ app.put('/api/admin/booking-deposit-settings',
       audit(req, 'booking_deposit_settings.update', 'config', 'roomBooking', {
         keys: Object.keys(input || {}),
         enabled: parsed.settings.enabled,
+        openAt: parsed.settings.openAt || null,
         requireDeposit: parsed.settings.requireDeposit,
         depositAmount: parsed.settings.depositAmount,
         minimumAmount: parsed.settings.minimumAmount,
         holdMinutes: parsed.settings.holdMinutes,
       });
       const effectiveSettings = roomBookingSettings(next);
+      const openState = roomBookingOpenState(effectiveSettings);
       const payment = await bookingDepositAdminPaymentReadiness(effectiveSettings.depositAmount);
       res.json({
         ok: true,
         settings: normalizeRoomBookingEditableSettings(next.roomBooking),
-        effectiveSettings,
+        effectiveSettings: { ...effectiveSettings, openState },
         payment,
         role: req.session.user.role,
         canEdit: true,
@@ -10362,6 +10437,26 @@ app.put('/api/bookings/:id', sameOrigin, csrfGuard, requireAuth, requireRole('ow
           },
         });
       }
+      // Cancelling is terminal and can free a reserved room, so require a
+      // human-readable reason just like rejection/reopen. It becomes the
+      // applicant-facing message, the owner notification note, and the audit
+      // trail answer for "why was this room released?"
+      if (b.status === 'cancelled') {
+        const cancelReason = String(b.cancelReason || b.adminNotes || '').trim();
+        if (cancelReason.length < 5) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({
+            error: 'ต้องระบุเหตุผลยกเลิกการจองอย่างน้อย 5 ตัวอักษร',
+            code: 'CANCEL_REASON_REQUIRED',
+            hint: 'กดยกเลิกจากหน้า booking แล้วใส่เหตุผล เช่น ผู้จองขอยกเลิก หรือไม่สะดวกเข้าพัก เพื่อให้ระบบแจ้งผู้จองและบันทึก audit ได้ชัดเจน',
+            nextActions: {
+              bookingsUrl: `/admin#bookings?booking=${encodeURIComponent(id)}`,
+            },
+          });
+        }
+        b.cancelReason = cancelReason.slice(0, 500);
+        b.adminNotes = cancelReason.slice(0, 1000);
+      }
       // Reverse transition rejected → reviewing is a legitimate admin
       // override (reconsider a previously-rejected booking) but it bypasses
       // the audit trail rationale carried by the original reject reason.
@@ -10390,6 +10485,7 @@ app.put('/api/bookings/:id', sameOrigin, csrfGuard, requireAuth, requireRole('ow
       // Preserve reopenReason from the rejected→reviewing reverse transition so
       // it shows up on the booking detail panel + survives subsequent edits.
       reopenReason: b.reopenReason !== undefined ? b.reopenReason : before.reopenReason,
+      cancelReason: b.cancelReason !== undefined ? b.cancelReason : before.cancelReason,
       updatedAt: new Date().toISOString(),
       updatedBy: req.session.user.username,
     };
@@ -10637,6 +10733,7 @@ app.put('/api/bookings/:id', sameOrigin, csrfGuard, requireAuth, requireRole('ow
     }
     audit(req, 'booking.update', 'booking', id, {
       from: before.status, to: updated.status, fields: Object.keys(b), releasedRoomId,
+      terminalReason: ['cancelled', 'rejected'].includes(updated.status) ? (updated.adminNotes || null) : null,
       releasedTenantId: releasedTenant ? releasedTenant.id : null,
       lineBindingRevoke: bookingBindingRevoke ? {
         revoked: bookingBindingRevoke.revoked || 0,
@@ -10665,6 +10762,7 @@ app.put('/api/bookings/:id', sameOrigin, csrfGuard, requireAuth, requireRole('ow
             + (updated.adminNotes ? `เหตุผล: ${updated.adminNotes}\n` : '')
             + `หากมีข้อสงสัย หรือต้องการเลือกห้องอื่น กรุณาติดต่อสำนักงาน`,
           cancelled: `🚫 การจองห้อง${roomLabel}ถูกยกเลิกแล้ว\n`
+            + (updated.adminNotes ? `เหตุผล: ${updated.adminNotes}\n` : '')
             + `หากต้องการจองใหม่ สามารถทำรายการได้ที่หน้าจองห้องอีกครั้ง`,
         })[updated.status];
         if (tenantText) {

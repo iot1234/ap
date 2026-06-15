@@ -9,6 +9,7 @@ const read = (p) => fs.readFileSync(path.join(root, p), 'utf8');
 test('roomBooking feature defaults define deposit and 15-minute hold policy', () => {
   const { DEFAULTS } = require('../services/features');
   assert.equal(DEFAULTS.roomBooking.enabled, true);
+  assert.equal(DEFAULTS.roomBooking.openAt, null);
   assert.equal(DEFAULTS.roomBooking.requireDeposit, false);
   assert.equal(DEFAULTS.roomBooking.depositAmount, 500);
   assert.equal(DEFAULTS.roomBooking.minimumAmount, 0);
@@ -88,11 +89,13 @@ test('public booking supports expiring room holds before deposit submission', ()
     'rate-limited booking responses must tell the UI how long to wait before retrying');
   assert.match(server, /app\.get\('\/api\/bookings\/public\/rooms'/,
     'public booking page must have a safe vacant-room feed');
-  assert.match(server, /disabledNotice: settings\.enabled \? null : roomBookingDisabledPayload\(\)/,
+  assert.match(server, /disabledNotice: openState\.enabled \? null : roomBookingDisabledPayload\(openState\)/,
     'public booking config must expose a clear disabled notice when online booking is closed');
-  assert.match(server, /app\.get\('\/api\/bookings\/public\/rooms'[\s\S]{0,750}enabled: false[\s\S]{0,120}rooms: \[\][\s\S]{0,120}\.\.\.roomBookingDisabledPayload\(\)/,
+  assert.match(server, /app\.get\('\/api\/bookings\/public\/rooms'[\s\S]{0,900}enabled: false[\s\S]{0,120}rooms: \[\][\s\S]{0,160}\.\.\.roomBookingDisabledPayload\(openState\)/,
     'public room feed must hide inventory and return a stable disabled code when booking is closed');
-  assert.match(server, /return res\.status\(503\)\.json\(roomBookingDisabledPayload\(\)\);/,
+  assert.match(server, /ROOM_BOOKING_NOT_OPEN_YET/,
+    'public booking schedule must return a stable not-open-yet code before opening time');
+  assert.match(server, /return res\.status\(503\)\.json\(roomBookingDisabledPayload\([^)]*OpenState[^)]*\)\);/,
     'public hold and submit endpoints must block writes with the same disabled-booking response');
   assert.match(server, /function publicBookableRooms/,
     'public vacant-room feed must be centralized and testable');
@@ -170,6 +173,10 @@ test('public booking deposit requires a room, a slip, and deduplicates slips', (
     'server must guard the room hold duration range');
   assert.match(server, /BOOKING_DEPOSIT_MAX_BYTES_RANGE/,
     'server must guard the slip upload size range');
+  assert.match(server, /BOOKING_OPEN_AT_INVALID/,
+    'server must reject invalid scheduled booking open timestamps');
+  assert.match(server, /BOOKING_OPEN_AT_RANGE/,
+    'server must reject booking open timestamps too far in the future');
 });
 
 test('rejected public booking reservations release their room lock', () => {
@@ -180,6 +187,21 @@ test('rejected public booking reservations release their room lock', () => {
     'the release path must document the public booking reservation case');
   assert.match(server, /room\.reservedBy === id/,
     'room release must still be guarded by reservedBy=booking id');
+});
+
+test('cancelled bookings require a reason and notify with it', () => {
+  const server = read('server.js');
+  const hooks = read('project/admin/hooks.jsx');
+  assert.match(server, /code: 'CANCEL_REASON_REQUIRED'/,
+    'server must reject cancellation without a visible reason');
+  assert.match(server, /b\.adminNotes = cancelReason\.slice\(0, 1000\)/,
+    'cancel reason must be reused as the applicant-facing status note');
+  assert.match(server, /cancelled: `[\s\S]{0,160}\+ \(updated\.adminNotes \? `เหตุผล: \$\{updated\.adminNotes\}\\n` : ''\)/,
+    'cancel notification must include the admin-provided reason');
+  assert.match(server, /terminalReason: \['cancelled', 'rejected'\]\.includes\(updated\.status\)/,
+    'terminal booking audit must carry the cancellation/rejection reason');
+  assert.match(hooks, /CANCEL_REASON_REQUIRED/,
+    'admin UI must render a clear reason-required error from the backend');
 });
 
 test('booking approval and contract handoff understand preclaimed deposit bookings', () => {
@@ -244,11 +266,15 @@ test('public booking page and admin features expose deposit controls', () => {
     'public page must normalize disabled-booking notices from config, room feed, hold, and submit responses');
   assert.match(booking, /function setBookingDisabled/,
     'public page must centralize the disabled-booking UI lockout');
-  assert.match(booking, /out && \(out\.enabled === false \|\| out\.code === 'ROOM_BOOKING_DISABLED'\)/,
+  assert.match(booking, /function isBookingClosedResponse/,
+    'public page must centralize closed/scheduled booking responses');
+  assert.match(booking, /out\.code === 'ROOM_BOOKING_NOT_OPEN_YET'/,
+    'public page must treat scheduled-not-open responses as a temporary closed state');
+  assert.match(booking, /out\.enabled === false/,
     'public room feed loader must stop and render a closed-booking notice when inventory is disabled');
   assert.match(booking, /bookingDisabledReason = d\.booking\.enabled === false \? bookingDisabledMessage\(d\.booking\) : ''/,
     'public page must use the server disabled notice before loading rooms');
-  assert.match(booking, /setBookingDisabled\(bookingDisabledMessage\(result\)\)/,
+  assert.match(booking, /setBookingDisabled\(bookingDisabledMessage\(result\), result\)/,
     'public submit flow must lock the UI if booking is disabled during submission');
   assert.match(booking, /rateLimitMessage/,
     'public page must turn 429 responses into actionable wait-and-retry guidance');
@@ -282,6 +308,14 @@ test('public booking page and admin features expose deposit controls', () => {
     'public page must explain whether the booking slip will be auto-verified or admin-reviewed');
   assert.match(booking, /data\.holdToken = holdToken/,
     'public page must submit the hold token with the booking');
+  assert.match(booking, /id="bookingCountdown"/,
+    'public page must render a countdown container before scheduled booking opens');
+  assert.match(booking, /function startBookingCountdown/,
+    'public page must start a realtime countdown for scheduled booking openings');
+  assert.match(booking, /syncServerClock\(d\.booking\.serverNow\)/,
+    'public countdown must use the server clock from config');
+  assert.match(booking, /loadBookingConfig\(\{ afterCountdown: true \}\)/,
+    'public countdown must reload config automatically when it reaches zero');
   assert.match(features, /<Row id="roomBooking"/,
     'admin features page must expose room booking settings');
   assert.match(features, /field="depositAmount"/,
@@ -318,6 +352,14 @@ test('public booking page and admin features expose deposit controls', () => {
     'dedicated admin page must not bypass booking-deposit validation by saving directly to generic features');
   assert.match(depositSettings, /minimumAmount/,
     'dedicated admin page must expose the no-minimum or minimum booking-fee rule');
+  assert.match(depositSettings, /openAt/,
+    'dedicated admin page must expose the scheduled public booking open time');
+  assert.match(depositSettings, /type="datetime-local"/,
+    'dedicated admin page must let admins choose the exact open date and time');
+  assert.match(depositSettings, /เปิดรับจองทันที/,
+    'dedicated admin page must provide a one-click open-now action');
+  assert.match(depositSettings, /ปิดรับจองทันที/,
+    'dedicated admin page must provide a one-click close-now action');
   assert.match(depositSettings, /applyBookingFeeToDeposit/,
     'dedicated admin page must expose the booking-fee-to-contract-deposit policy');
   assert.match(depositSettings, /bookingDepositEffectiveAmount/,

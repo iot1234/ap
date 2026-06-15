@@ -209,6 +209,81 @@
   .hold-note {
     color: #8a5a22; font-size: 12.5px; margin-top: 8px;
   }
+  .booking-countdown {
+    display: none;
+    margin: 0 0 16px;
+    border: 1px solid #c7d8cf;
+    border-radius: 14px;
+    background: #ffffff;
+    padding: 18px;
+    box-shadow: 0 12px 30px rgba(31, 95, 77, 0.08);
+  }
+  .booking-countdown-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 14px;
+    margin-bottom: 14px;
+  }
+  .booking-countdown-kicker {
+    font-family: 'Sora', "IBM Plex Sans Thai", system-ui, sans-serif;
+    font-size: 11px;
+    letter-spacing: 0;
+    color: #2f8a70;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  .booking-countdown-title {
+    margin: 3px 0 0;
+    color: #102019;
+    font-size: 18px;
+    font-weight: 700;
+    line-height: 1.35;
+  }
+  .booking-countdown-open {
+    color: #506156;
+    font-size: 12.5px;
+    line-height: 1.45;
+    text-align: right;
+  }
+  .booking-countdown-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px;
+  }
+  .booking-countdown-cell {
+    min-height: 76px;
+    border: 1px solid #dfe9e2;
+    border-radius: 10px;
+    background: #f7faf8;
+    display: grid;
+    place-items: center;
+    padding: 9px 6px;
+  }
+  .booking-countdown-cell strong {
+    font-family: 'Sora', "IBM Plex Sans Thai", system-ui, sans-serif;
+    color: #0e3a25;
+    font-size: 24px;
+    line-height: 1;
+    font-weight: 700;
+  }
+  .booking-countdown-cell span {
+    color: #506156;
+    font-size: 11.5px;
+    margin-top: 5px;
+  }
+  .booking-countdown-note {
+    margin: 12px 0 0;
+    color: #506156;
+    font-size: 12.5px;
+    line-height: 1.5;
+  }
+  @media (max-width: 560px) {
+    .booking-countdown { padding: 15px; }
+    .booking-countdown-head { display: block; }
+    .booking-countdown-open { text-align: left; margin-top: 8px; }
+    .booking-countdown-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
   .hold-actions {
     display: flex;
     align-items: center;
@@ -525,6 +600,24 @@
       </div>
       <p id="lineRecoverHint"></p>
     </div>
+    <section class="booking-countdown" id="bookingCountdown" aria-live="polite">
+      <div class="booking-countdown-head">
+        <div>
+          <div class="booking-countdown-kicker">เปิดจองเร็ว ๆ นี้</div>
+          <div class="booking-countdown-title">ระบบจองห้องจะเปิดในอีก</div>
+        </div>
+        <div class="booking-countdown-open">
+          เปิดรับจอง: <time id="bookingCountdownOpenAt">-</time>
+        </div>
+      </div>
+      <div class="booking-countdown-grid" aria-label="เวลานับถอยหลังเปิดจอง">
+        <div class="booking-countdown-cell"><div><strong id="bookingCountdownDays">0</strong><span>วัน</span></div></div>
+        <div class="booking-countdown-cell"><div><strong id="bookingCountdownHours">00</strong><span>ชั่วโมง</span></div></div>
+        <div class="booking-countdown-cell"><div><strong id="bookingCountdownMinutes">00</strong><span>นาที</span></div></div>
+        <div class="booking-countdown-cell"><div><strong id="bookingCountdownSeconds">00</strong><span>วินาที</span></div></div>
+      </div>
+      <p class="booking-countdown-note" id="bookingCountdownNote">เมื่อถึงเวลา ระบบจะโหลดห้องว่างและเปิดปุ่มส่งคำขอให้อัตโนมัติ</p>
+    </section>
     <form id="bookingForm" class="card" novalidate>
       <div class="booking-payment-notice" id="bookingPaymentNotice" style="display:none"></div>
       <div class="row cols-2">
@@ -739,6 +832,13 @@
   const lineRecoverOpen = document.getElementById('lineRecoverOpenBtn');
   const lineRecoverMeta = document.getElementById('lineRecoverMeta');
   const lineRecoverHint = document.getElementById('lineRecoverHint');
+  const bookingCountdown = document.getElementById('bookingCountdown');
+  const bookingCountdownOpenAt = document.getElementById('bookingCountdownOpenAt');
+  const bookingCountdownDays = document.getElementById('bookingCountdownDays');
+  const bookingCountdownHours = document.getElementById('bookingCountdownHours');
+  const bookingCountdownMinutes = document.getElementById('bookingCountdownMinutes');
+  const bookingCountdownSeconds = document.getElementById('bookingCountdownSeconds');
+  const bookingCountdownNote = document.getElementById('bookingCountdownNote');
   const bookingPaymentNotice = document.getElementById('bookingPaymentNotice');
   const depositPanel = document.getElementById('depositPanel');
   const depositSlipInput = document.getElementById('depositSlip');
@@ -768,6 +868,9 @@
   let roomsLoadSeq = 0;
   let roomsLoading = false;
   let bookingDisabledReason = '';
+  let bookingCountdownTimerId = null;
+  let bookingCountdownDeadlineMs = 0;
+  let serverClockOffsetMs = 0;
   let submitting = false;
   let depositSlipDataUrl = '';
   let depositSlipReading = false;
@@ -814,6 +917,70 @@
     return Number.isFinite(d.getTime()) ? d.toLocaleDateString('th-TH') : raw;
   }
 
+  function dateTimeLabel(value) {
+    if (!value) return '-';
+    const d = new Date(value);
+    return Number.isFinite(d.getTime())
+      ? d.toLocaleString('th-TH', { dateStyle: 'medium', timeStyle: 'short' })
+      : String(value);
+  }
+
+  function syncServerClock(serverNow) {
+    const ts = Date.parse(serverNow || '');
+    if (Number.isFinite(ts)) serverClockOffsetMs = ts - Date.now();
+  }
+
+  function serverNowMs() {
+    return Date.now() + serverClockOffsetMs;
+  }
+
+  function clearBookingCountdown() {
+    if (bookingCountdownTimerId) clearInterval(bookingCountdownTimerId);
+    bookingCountdownTimerId = null;
+    bookingCountdownDeadlineMs = 0;
+    if (bookingCountdown) bookingCountdown.style.display = 'none';
+  }
+
+  function renderBookingCountdownTick() {
+    if (!bookingCountdownDeadlineMs) return;
+    const remaining = bookingCountdownDeadlineMs - serverNowMs();
+    if (remaining <= 0) {
+      clearBookingCountdown();
+      showInfo('เปิดรับจองแล้ว กำลังโหลดห้องว่างล่าสุด...');
+      loadBookingConfig({ afterCountdown: true });
+      return;
+    }
+    const totalSeconds = Math.ceil(remaining / 1000);
+    const days = Math.floor(totalSeconds / 86400);
+    const hours = Math.floor((totalSeconds % 86400) / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    if (bookingCountdownDays) bookingCountdownDays.textContent = String(days);
+    if (bookingCountdownHours) bookingCountdownHours.textContent = String(hours).padStart(2, '0');
+    if (bookingCountdownMinutes) bookingCountdownMinutes.textContent = String(minutes).padStart(2, '0');
+    if (bookingCountdownSeconds) bookingCountdownSeconds.textContent = String(seconds).padStart(2, '0');
+  }
+
+  function startBookingCountdown(cfg) {
+    const openAt = cfg && cfg.openAt;
+    const deadline = Date.parse(openAt || '');
+    if (!Number.isFinite(deadline) || deadline <= serverNowMs()) {
+      clearBookingCountdown();
+      return;
+    }
+    bookingCountdownDeadlineMs = deadline;
+    if (bookingCountdownOpenAt) bookingCountdownOpenAt.textContent = dateTimeLabel(openAt);
+    if (bookingCountdownNote) {
+      bookingCountdownNote.textContent = cfg.disabledNotice && cfg.disabledNotice.nextAction
+        ? cfg.disabledNotice.nextAction
+        : 'เมื่อถึงเวลา ระบบจะโหลดห้องว่างและเปิดปุ่มส่งคำขอให้อัตโนมัติ';
+    }
+    if (bookingCountdown) bookingCountdown.style.display = 'block';
+    renderBookingCountdownTick();
+    if (bookingCountdownTimerId) clearInterval(bookingCountdownTimerId);
+    bookingCountdownTimerId = setInterval(renderBookingCountdownTick, 1000);
+  }
+
   function depositStatusLabel(status) {
     return ({
       pending_review: 'รอแอดมินตรวจสลิป',
@@ -846,6 +1013,14 @@
     const notice = data && (data.disabledNotice || data.notice || data);
     return (notice && (notice.message || notice.error || notice.hint || notice.nextAction))
       || BOOKING_DISABLED_FALLBACK;
+  }
+
+  function isBookingClosedResponse(out) {
+    return !!(out && (
+      out.enabled === false ||
+      out.code === 'ROOM_BOOKING_DISABLED' ||
+      out.code === 'ROOM_BOOKING_NOT_OPEN_YET'
+    ));
   }
 
   function renderBookingPaymentNotice(cfg) {
@@ -1266,7 +1441,7 @@
     updateSubmitState();
   }
 
-  function setBookingDisabled(reason) {
+  function setBookingDisabled(reason, notice = null) {
     bookingDisabledReason = reason || BOOKING_DISABLED_FALLBACK;
     roomsLoadSeq += 1;
     roomsLoading = false;
@@ -1279,7 +1454,7 @@
       renderBookingPaymentNotice({
         ...bookingConfig,
         enabled: false,
-        disabledNotice: { message: bookingDisabledReason },
+        disabledNotice: notice || { message: bookingDisabledReason },
       });
     }
     renderRoomPicker();
@@ -1460,8 +1635,10 @@
       clearTimeout(timeout);
       if (seq !== roomsLoadSeq) return;
       const out = await res.json().catch(() => ({}));
-      if (out && (out.enabled === false || out.code === 'ROOM_BOOKING_DISABLED')) {
-        setBookingDisabled(bookingDisabledMessage(out));
+      if (isBookingClosedResponse(out)) {
+        syncServerClock(out.serverNow);
+        if (out.scheduled && out.openAt) startBookingCountdown(out);
+        setBookingDisabled(bookingDisabledMessage(out), out);
         return;
       }
       if (!res.ok || !out.ok || !Array.isArray(out.rooms)) {
@@ -1606,8 +1783,10 @@
       });
       if (seq !== holdRequestSeq || selectedRoomId() !== roomId) return;
       if (!res.ok || !out.ok) {
-        if (out && out.code === 'ROOM_BOOKING_DISABLED') {
-          setBookingDisabled(bookingDisabledMessage(out));
+        if (isBookingClosedResponse(out)) {
+          syncServerClock(out.serverNow);
+          if (out.scheduled && out.openAt) startBookingCountdown(out);
+          setBookingDisabled(bookingDisabledMessage(out), out);
           return;
         }
         holdError = res.status === 429
@@ -1646,34 +1825,48 @@
     }
   }
 
-  fetch('/api/bookings/public/config')
-    .then((r) => r.json())
-    .then((d) => {
-      if (!d || !d.ok || !d.booking) {
-        loadAvailableRooms({ autoHold: false });
-        return;
-      }
-      renderBookingConfig(d.booking);
-      bookingDisabledReason = d.booking.enabled === false ? bookingDisabledMessage(d.booking) : '';
-      if (bookingDisabledReason) {
-        setBookingDisabled(bookingDisabledReason);
-        return;
-      }
-      if (bookingDepositNeedsPaymentSetup(d.booking)) {
-        showError('ยังไม่ได้ตั้งค่าบัญชีรับเงินค่าจอง กรุณาติดต่อเจ้าหน้าที่ หรือให้แอดมินปิดบังคับสลิปเพื่อรับจองแบบ manual review');
+  function loadBookingConfig(options = {}) {
+    return fetch('/api/bookings/public/config', { cache: 'no-store' })
+      .then((r) => r.json())
+      .then((d) => {
+        if (!d || !d.ok || !d.booking) {
+          clearBookingCountdown();
+          loadAvailableRooms({ autoHold: false });
+          return;
+        }
+        syncServerClock(d.booking.serverNow);
+        renderBookingConfig(d.booking);
+        bookingDisabledReason = d.booking.enabled === false ? bookingDisabledMessage(d.booking) : '';
+        if (bookingDisabledReason) {
+          if (d.booking.scheduled && d.booking.openAt) {
+            startBookingCountdown(d.booking);
+          } else {
+            clearBookingCountdown();
+          }
+          setBookingDisabled(bookingDisabledReason, d.booking.disabledNotice || d.booking);
+          return;
+        }
+        clearBookingCountdown();
+        if (bookingDepositNeedsPaymentSetup(d.booking)) {
+          showError('ยังไม่ได้ตั้งค่าบัญชีรับเงินค่าจอง กรุณาติดต่อเจ้าหน้าที่ หรือให้แอดมินปิดบังคับสลิปเพื่อรับจองแบบ manual review');
+          updateSubmitState();
+          loadAvailableRooms({ autoHold: false });
+          return;
+        }
+        if (d.booking.requireDeposit && !selectedRoomId()) {
+          roomPickerStatus.textContent = 'เลือกห้องว่างก่อน แล้วกดล็อกห้องและไปชำระค่าจองเมื่อพร้อม';
+        }
+        if (options.afterCountdown) clearAlert();
         updateSubmitState();
+        loadAvailableRooms();
+      })
+      .catch(() => {
+        clearBookingCountdown();
         loadAvailableRooms({ autoHold: false });
-        return;
-      }
-      if (d.booking.requireDeposit && !selectedRoomId()) {
-        roomPickerStatus.textContent = 'เลือกห้องว่างก่อน แล้วกดล็อกห้องและไปชำระค่าจองเมื่อพร้อม';
-      }
-      updateSubmitState();
-      loadAvailableRooms();
-    })
-    .catch(() => {
-      loadAvailableRooms({ autoHold: false });
-    });
+      });
+  }
+
+  loadBookingConfig();
 
   if (roomPickerRetryBtn) {
     roomPickerRetryBtn.addEventListener('click', () => {
@@ -1863,10 +2056,12 @@
         return;
       }
       if (!res.ok || !result.ok) {
-        if (result && result.code === 'ROOM_BOOKING_DISABLED') {
+        if (isBookingClosedResponse(result)) {
           submitting = false;
           btn.textContent = 'ส่งคำขอจอง';
-          setBookingDisabled(bookingDisabledMessage(result));
+          syncServerClock(result.serverNow);
+          if (result.scheduled && result.openAt) startBookingCountdown(result);
+          setBookingDisabled(bookingDisabledMessage(result), result);
           return;
         }
         showError(bookingServerError(result, 'ส่งคำขอไม่สำเร็จ กรุณาลองใหม่'));

@@ -5701,8 +5701,14 @@ test('bookings admin UI handles terminal statuses and uses valid reopen/cancel t
     'cancelled must have a status pill');
   assert.match(src, /const meta = statusMap\[b\.status\] \|\|/,
     'unknown/legacy booking statuses must not crash the table or drawer');
-  assert.match(src, /active\.status === 'approved'[\s\S]{0,900}updateStatus\(active\.id, 'cancelled'\)/,
-    'approved booking button must cancel/release, not return to pending');
+  assert.match(src, /active\.status === 'approved'[\s\S]{0,900}type: 'cancel'/,
+    'approved booking button must open the reason-confirmation cancel/release flow, not return to pending');
+  assert.match(src, /const handleCancel = async \(id\) => \{[\s\S]{0,520}updateStatus\(id, 'cancelled', \{ adminNotes: cancelReason, cancelReason \}\)/,
+    'cancel action must send the visible reason to the backend notification text');
+  assert.match(src, /เหตุผลยกเลิกที่แจ้งผู้จอง/,
+    'cancel modal must collect the reason shown to the applicant');
+  assert.match(src, /disabled=\{actionReason\.trim\(\)\.length < 5\}>ยกเลิกการจอง/,
+    'cancel action must block empty reasons so applicant notices are clear');
   assert.match(src, /releasedTenant[\s\S]{0,180}เคลียร์ผู้เช่าที่ผูกจาก booking แล้ว/,
     'cancel/reject toast must make tenant cleanup visible to admins');
   assert.match(src, /const bookingNotifyText[\s\S]{0,900}ยังแจ้งอัตโนมัติไม่ได้ กรุณาโทรแจ้งผู้จอง/,

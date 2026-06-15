@@ -247,6 +247,25 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
     setActiveId(null); setConfirmAction(null);
   };
 
+  const handleCancel = async (id) => {
+    const cancelReason = actionReason.trim();
+    if (cancelReason.length < 5) {
+      setToast && setToast({ kind: 'danger', message: 'กรุณาระบุเหตุผลยกเลิกอย่างน้อย 5 ตัวอักษร เพื่อใช้แจ้งผู้จองและบันทึก audit' });
+      return;
+    }
+    const out = await updateStatus(id, 'cancelled', { adminNotes: cancelReason, cancelReason });
+    if (!out) return;
+    addActivity && addActivity({ icon: '🚫', text: `ยกเลิกการจอง ${id}: ${cancelReason.slice(0, 60)}`, type: 'booking' });
+    setToast && setToast({
+      kind: 'info',
+      message: out.releasedRoomId
+        ? `ยกเลิกการจองและปล่อยห้อง ${out.releasedRoomId} แล้ว${out.releasedTenant ? ' — เคลียร์ผู้เช่าที่ผูกจาก booking แล้ว' : ''}${bookingNotifyText(out)}`
+        : `ยกเลิกการจองแล้ว${bookingNotifyText(out)}`,
+    });
+    setActionReason('');
+    setActiveId(null); setConfirmAction(null);
+  };
+
   const handleReopen = async (id) => {
     const reopenReason = actionReason.trim();
     if (reopenReason.length < 5) {
@@ -455,6 +474,12 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
                 }}>
                   ปฏิเสธ
                 </Btn>
+                <Btn variant="ghost" icon="🚫" onClick={() => {
+                  setActionReason('');
+                  setConfirmAction({ id: active.id, type: 'cancel' });
+                }}>
+                  ยกเลิก
+                </Btn>
                 <Btn variant="success" icon="✓" onClick={() => setConfirmAction({ id: active.id, type: 'approve' })}>
                   อนุมัติ
                 </Btn>
@@ -472,17 +497,9 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
                     สร้างสัญญา
                   </Btn>
                 )}
-                <Btn variant="ghost" onClick={async () => {
-                  const out = await updateStatus(active.id, 'cancelled');
-                  if (!out) return;
-                  addActivity && addActivity({ icon: '↺', text: `ยกเลิกอนุมัติการจอง ${active.id}`, type: 'booking' });
-                  setToast && setToast({
-                    kind: 'info',
-                    message: out.releasedRoomId
-                      ? `ยกเลิกการจองและปล่อยห้อง ${out.releasedRoomId} แล้ว${out.releasedTenant ? ' — เคลียร์ผู้เช่าที่ผูกจาก booking แล้ว' : ''}${bookingNotifyText(out)}`
-                      : `ยกเลิกการจองแล้ว${bookingNotifyText(out)}`,
-                  });
-                  setActiveId(null);
+                <Btn variant="ghost" onClick={() => {
+                  setActionReason('');
+                  setConfirmAction({ id: active.id, type: 'cancel' });
                 }}>ยกเลิก/ปล่อยห้อง</Btn>
               </>
             )}
@@ -505,7 +522,9 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
           ? 'ยืนยันการอนุมัติ'
           : confirmAction?.type === 'reopen'
             ? 'ยืนยันการทบทวนใหม่'
-            : 'ยืนยันการปฏิเสธ'}
+            : confirmAction?.type === 'cancel'
+              ? 'ยืนยันการยกเลิก'
+              : 'ยืนยันการปฏิเสธ'}
         footer={
           <>
             <Btn variant="ghost" onClick={() => { setConfirmAction(null); setActionReason(''); }}>ยกเลิก</Btn>
@@ -514,6 +533,9 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
               : confirmAction?.type === 'reopen'
                 ? <Btn variant="secondary" onClick={() => handleReopen(confirmAction.id)}
                     disabled={actionReason.trim().length < 5}>ส่งกลับไปตรวจสอบ</Btn>
+                : confirmAction?.type === 'cancel'
+                  ? <Btn variant="danger" onClick={() => handleCancel(confirmAction.id)}
+                      disabled={actionReason.trim().length < 5}>ยกเลิกการจอง</Btn>
                 : <Btn variant="danger" onClick={() => handleReject(confirmAction.id)}
                     disabled={actionReason.trim().length < 5}>ปฏิเสธการจอง</Btn>}
           </>
@@ -527,11 +549,12 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
           const b = confirmAction ? bookings.find((x) => x.id === confirmAction.id) : null;
           const isApprove = confirmAction?.type === 'approve';
           const isReopen = confirmAction?.type === 'reopen';
+          const isCancel = confirmAction?.type === 'cancel';
           const isReject = confirmAction?.type === 'reject';
           return (
             <div style={{ fontSize: 14, color: C.ink2, lineHeight: 1.7 }}>
               <div style={{ marginBottom: 12 }}>
-                {isApprove ? 'อนุมัติการจอง:' : isReopen ? 'ทบทวนการจองใหม่:' : 'ปฏิเสธการจอง:'}
+                {isApprove ? 'อนุมัติการจอง:' : isReopen ? 'ทบทวนการจองใหม่:' : isCancel ? 'ยกเลิกการจอง:' : 'ปฏิเสธการจอง:'}
                 <div style={{ marginTop: 6, padding: '8px 12px',
                               background: C.surfaceAlt || C.surfaceAlt,
                               borderRadius: 8, fontSize: 13.5 }}>
@@ -547,17 +570,19 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
                 </div>
               </div>
 
-              {(isReopen || isReject) ? (
+              {(isReopen || isReject || isCancel) ? (
                 <div style={{ marginBottom: 12 }}>
                   <label style={{ display: 'block', fontSize: 12, color: C.muted, marginBottom: 4 }}>
-                    {isReject ? 'เหตุผลที่แจ้งผู้จอง' : 'เหตุผลที่นำกลับมาตรวจใหม่'}
+                    {isReject ? 'เหตุผลที่แจ้งผู้จอง' : isCancel ? 'เหตุผลยกเลิกที่แจ้งผู้จอง' : 'เหตุผลที่นำกลับมาตรวจใหม่'}
                   </label>
                   <textarea rows={3} maxLength={500}
                     value={actionReason}
                     onChange={(e) => setActionReason(e.target.value)}
                     placeholder={isReject
                       ? 'เช่น ห้องที่เลือกไม่ว่างแล้ว, เอกสาร/สลิปไม่ครบ, ข้อมูลไม่ตรงเงื่อนไข'
-                      : 'เช่น ผู้จองส่งเอกสารเพิ่มแล้ว, ตรวจข้อมูลซ้ำพบว่าถูกต้อง'}
+                      : isCancel
+                        ? 'เช่น ผู้จองขอยกเลิก, ไม่สะดวกเข้าพัก, ยกเลิกเพื่อปล่อยห้องให้จองใหม่'
+                        : 'เช่น ผู้จองส่งเอกสารเพิ่มแล้ว, ตรวจข้อมูลซ้ำพบว่าถูกต้อง'}
                     style={{
                       width: '100%', padding: '8px 10px', border: `1px solid ${C.border}`,
                       borderRadius: 6, fontSize: 13, fontFamily: 'inherit',
@@ -566,6 +591,8 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
                   <div style={{ fontSize: 11, color: C.muted, marginTop: 4 }}>
                     {isReject
                       ? 'เหตุผลนี้จะถูกส่งให้ผู้จองถ้ามีช่องทางแจ้งอัตโนมัติ และใช้เป็นข้อความอ้างอิงตอนโทรแจ้ง'
+                      : isCancel
+                        ? 'เหตุผลนี้จะถูกส่งให้ผู้จองถ้ามีช่องทางแจ้งอัตโนมัติ และบันทึกว่าเหตุใดระบบจึงปล่อยห้องกลับมาว่าง'
                       : 'ระบบจะบันทึกเหตุผลนี้ในรายการจองและ audit log'}
                   </div>
                 </div>
@@ -588,6 +615,12 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
                   <>
                     1) สถานะการจองจะกลับเป็น "กำลังตรวจ" เพื่อให้ตรวจเอกสารและตัดสินใจใหม่<br/>
                     2) เหตุผลจะถูกเก็บไว้ในรายการจองและ audit log เพื่อย้อนตรวจสอบภายหลัง
+                  </>
+                ) : isCancel ? (
+                  <>
+                    1) สถานะการจองจะเปลี่ยนเป็น "ยกเลิก" และถ้าห้องนี้ถูกจองโดย booking นี้จริง ระบบจะปล่อยห้องกลับมาว่าง<br/>
+                    2) ผู้จองจะได้รับ LINE/อีเมล/SMS แจ้ง "การจองถูกยกเลิก" พร้อมเหตุผลด้านบนถ้าส่งอัตโนมัติได้; ถ้าไม่ได้ toast จะแจ้งให้โทรเอง<br/>
+                    3) ระบบจะไม่ปล่อยห้องที่ถูกถือโดย booking/contract อื่น จึงแยก "ตัวจริงที่ถือห้อง" จากรายการเก่าได้
                   </>
                 ) : (
                   <>

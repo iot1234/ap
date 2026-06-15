@@ -70,6 +70,7 @@ const DEFAULTS = Object.freeze({
   },
   roomBooking: {
     enabled: true,
+    openAt: null,                  // ISO timestamp; null = open immediately when enabled
     // Public booking deposit. When requireDeposit=true, the public form
     // must hold a specific room, collect exactly this booking fee, and
     // attach a slip before the booking becomes pending for admin review.
