@@ -83,6 +83,10 @@ async function send(flags, msg) {
       subject: msg.subject,
       text: msg.text || undefined,
       html: msg.html || undefined,
+      // Stable Message-ID (when the caller supplies one) lets receiving servers
+      // dedupe a re-sent message — used by the notification queue so a reaper-
+      // induced re-dispatch carries the same id instead of looking like a new mail.
+      messageId: msg.messageId || undefined,
     });
     return true;
   } catch (err) {

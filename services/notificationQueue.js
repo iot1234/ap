@@ -404,6 +404,13 @@ async function dispatch(pool, features, row, gate) {
       to: row.recipient,
       subject: guarded.subject || '(no subject)',
       text: guarded.body || '',
+      // Stable per-row Message-ID so a reaper-induced re-dispatch (the row flips
+      // back to 'pending' while a slow SMTP send is still in flight) carries the
+      // SAME id — receiving servers dedupe on Message-ID and duplicates stay
+      // identifiable. This is email's equivalent of LINE's X-Line-Retry-Key.
+      // (The SMS providers here expose no idempotency hook, so SMS remains
+      // at-least-once by provider limitation — documented in processOne.)
+      messageId: `<baankarn-notif-${row.id}@baankarn.local>`,
     });
     if (!ok) throw new Error('email send returned false');
     return;
