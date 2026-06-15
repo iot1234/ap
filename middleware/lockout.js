@@ -89,7 +89,7 @@ function makeLockout(pool) {
        RETURNING locked_until`,
       [key, kind, FAIL_WINDOW_MS, FAIL_THRESHOLD, LOCKOUT_DURATION_MS]
     );
-    return rows.length ? rows[0].locked_until : null;
+    return (rows && rows.length) ? rows[0].locked_until : null;
   }
 
   async function reset(principal) {
