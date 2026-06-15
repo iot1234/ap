@@ -887,7 +887,7 @@ app.get('/api/auth/me', (req, res) => {
   res.json({ user: req.session && req.session.user ? req.session.user : null });
 });
 
-app.post('/api/auth/change-password', sameOrigin, csrfGuard, requireAuth, async (req, res) => {
+app.post('/api/auth/change-password', sameOrigin, csrfGuard, requireAuth, rateLimitChangePassword, async (req, res) => {
   const r = schemas.changePassword.safeParse(req.body || {});
   if (!r.success) return res.status(400).json(require('./middleware/validate').formatZodError(r.error));
   const { currentPassword, newPassword } = r.data;
@@ -2237,6 +2237,21 @@ const rateLimitPublicPaymentUpload = makeIpLimiter({
   windowMs: 60_000,
   max: 20,
   message: 'ส่งสลิปถี่เกินไป กรุณารอสักครู่แล้วลองใหม่',
+});
+// Authenticated tenant slip upload calls the same paid external verify
+// providers as the public sibling, but had no limiter — a compromised tenant
+// session could spam provider calls. Match the public cap (defence-in-depth).
+const rateLimitTenantPaymentUpload = makeIpLimiter({
+  windowMs: 60_000,
+  max: 20,
+  message: 'ส่งสลิปถี่เกินไป กรุณารอสักครู่แล้วลองใหม่',
+});
+// Cap authenticated password-change attempts so a hijacked session can't spam
+// bcrypt (CPU) or brute the current password under the per-account lockout.
+const rateLimitChangePassword = makeIpLimiter({
+  windowMs: 60_000,
+  max: 6,
+  message: 'เปลี่ยนรหัสผ่านถี่เกินไป กรุณารอสักครู่แล้วลองใหม่',
 });
 const rateLimitFileAccess = makeIpLimiter({
   windowMs: 60_000,
@@ -8783,7 +8798,7 @@ async function tenantPaymentUploadHandler(req, res) {
   }
 }
 
-app.post('/api/tenant/payments', sameOrigin, csrfGuard, requireTenant, ensureSlipUpload, tenantPaymentUploadHandler);
+app.post('/api/tenant/payments', sameOrigin, csrfGuard, requireTenant, rateLimitTenantPaymentUpload, ensureSlipUpload, tenantPaymentUploadHandler);
 
 async function processTenantSlipUpload({ tenant, billId, amount, slip, features: featureFlags, source = 'internal', skipTenantAck = false } = {}) {
   if (!tenant) throw new Error('tenant required');
@@ -11605,6 +11620,19 @@ app.post('/api/access/log', deviceOrSameOrigin, requireDeviceOrAdmin, features.r
   // card row is the only trusted identity). Admin UI test posts are exempt.
   if (req.device && !cardId) {
     return res.status(400).json({ error: 'cardId required for device access events', code: 'CARD_REQUIRED' });
+  }
+  // Non-device (admin SESSION) callers must be manager+ to write access events.
+  // The read path (GET /api/access/logs) is already manager+, but the write
+  // path fell back to ANY authenticated admin (requireDeviceOrAdmin -> any
+  // role) and a session caller skips the card-required guard above — so a
+  // low-privilege/hijacked staff session could forge "tenant X entered room Y /
+  // granted" rows into the access-log system-of-record. Devices (Bearer + a
+  // real card) remain the normal writers and are unaffected.
+  if (!req.device) {
+    const role = req.session && req.session.user ? req.session.user.role : null;
+    if (role !== 'owner' && role !== 'manager') {
+      return res.status(403).json({ error: 'insufficient role', code: 'FORBIDDEN' });
+    }
   }
   try {
     // Card-driven access decision. When a physical card is presented, the

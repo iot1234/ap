@@ -324,6 +324,23 @@ async function testGroup(group) {
   if (group === 'smtp') {
     const host = get('SMTP_HOST'), user = get('SMTP_USER'), pass = get('SMTP_PASS');
     if (!host || !user || !pass) return { ok: false, error: 'SMTP host/user/pass ยังไม่ครบ' };
+    // SSRF guard: this test opens a live TCP connection to SMTP_HOST. Refuse a
+    // host that resolves to an internal/reserved/loopback address so this
+    // owner-only test can't be turned into an internal port-scanner or a
+    // cloud metadata-endpoint probe (defence-in-depth even behind owner auth).
+    try {
+      const ssrfGuard = require('./ssrfGuard');
+      const net = require('net');
+      const dns = require('dns').promises;
+      const addrs = net.isIP(host)
+        ? [host]
+        : (await dns.lookup(host, { all: true })).map((a) => a.address);
+      if (!addrs.length || addrs.some((a) => ssrfGuard.isBlockedIp(a))) {
+        return { ok: false, error: 'SMTP host ชี้ไปยังที่อยู่ภายใน/สงวน — ไม่อนุญาตให้ทดสอบ' };
+      }
+    } catch (err) {
+      return { ok: false, error: 'ตรวจสอบ SMTP host ไม่สำเร็จ: ' + err.message };
+    }
     try {
       const nm = require('nodemailer');
       const t = nm.createTransport({

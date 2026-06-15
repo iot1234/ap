@@ -21,6 +21,36 @@ test('client error sink is same-origin gated', () => {
     'client-error route must keep sameOrigin before the public rate limiter');
 });
 
+test('access-log write requires manager+ for non-device (session) callers', () => {
+  const src = serverSource();
+  const start = src.indexOf("app.post('/api/access/log'");
+  assert.ok(start > 0, 'access-log write route must exist');
+  const block = src.slice(start, src.indexOf('res.json({ ok: true, log', start));
+  // A session caller (no device token) must be owner/manager — the read path
+  // is already manager+, and the write must not be forgeable by a low-priv role.
+  assert.match(block, /if \(!req\.device\)[\s\S]{0,260}role !== 'owner' && role !== 'manager'[\s\S]{0,120}FORBIDDEN/,
+    'non-device access-log writes must be gated to owner/manager');
+});
+
+test('expensive authenticated upload + change-password endpoints are rate limited', () => {
+  const src = serverSource();
+  assert.match(src, /app\.post\('\/api\/tenant\/payments', sameOrigin, csrfGuard, requireTenant, rateLimitTenantPaymentUpload/,
+    'authenticated tenant slip upload must be rate limited like its public sibling');
+  assert.match(src, /app\.post\('\/api\/auth\/change-password', sameOrigin, csrfGuard, requireAuth, rateLimitChangePassword/,
+    'change-password must be rate limited to blunt bcrypt/credential spamming');
+});
+
+test('SMTP connectivity test is SSRF-guarded against internal hosts', () => {
+  const secrets = fs.readFileSync(path.join(__dirname, '..', 'services', 'secrets.js'), 'utf8');
+  const start = secrets.indexOf("if (group === 'smtp')");
+  assert.ok(start > 0, 'smtp test group must exist');
+  const block = secrets.slice(start, secrets.indexOf("if (group === 'r2')", start));
+  assert.match(block, /ssrfGuard\.isBlockedIp/,
+    'SMTP test must reject hosts resolving to internal/reserved addresses');
+  assert.match(block, /ssrfGuard[\s\S]{0,400}nodemailer/,
+    'the SSRF check must run BEFORE the nodemailer connection');
+});
+
 test('Docker build context excludes local logs and data', () => {
   const dockerignore = fs.readFileSync(path.join(__dirname, '..', '.dockerignore'), 'utf8');
   for (const pattern of ['*.log', '.env', '.env.local', 'backups/', 'uploads/', 'files/', 'tests/']) {
