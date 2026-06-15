@@ -36,6 +36,11 @@ function buildingInitials(name) {
   return (chars || 'ที').toUpperCase();
 }
 
+function buildingLogoUrl(building) {
+  const logo = String(building?.logo || '').trim();
+  return /^\/files\/\d+$/.test(logo) ? logo : '';
+}
+
 function readStoredConfig() {
   try {
     const raw = localStorage.getItem('baankarn_config_v1');
@@ -817,6 +822,7 @@ function DetailPanel({ room, onClose }) {
 function TopBar({ search, setSearch, isMobile, onMenu, roomCount, vacantCount, building }) {
   const buildingName = normalizeBuildingName(building);
   const initials = buildingInitials(buildingName);
+  const logoUrl = buildingLogoUrl(building);
   return (
     <div style={{
       padding: isMobile ? '10px 14px' : '14px 24px',
@@ -836,11 +842,17 @@ function TopBar({ search, setSearch, isMobile, onMenu, roomCount, vacantCount, b
         flex: isMobile ? '1 1 auto' : '0 1 360px', minWidth: 0,
       }}>
         <div style={{
-          width: 34, height: 34, borderRadius: 8, background: C.dark,
+          width: 34, height: 34, borderRadius: 8, background: logoUrl ? C.surface : C.dark,
           color: C.surfaceAlt, display: 'flex', alignItems: 'center', justifyContent: 'center',
           fontFamily: 'Sora', fontWeight: 700, fontSize: 14, letterSpacing: 0,
+          border: logoUrl ? `1px solid ${C.border}` : '0',
+          overflow: 'hidden',
+          padding: logoUrl ? 4 : 0,
+          boxSizing: 'border-box',
           flex: 'none',
-        }}>{initials}</div>
+        }}>{logoUrl
+          ? <img src={logoUrl} alt={`${buildingName} logo`} style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block' }} />
+          : initials}</div>
         <div style={{ minWidth: 0 }}>
           <div style={{
             fontFamily: 'Sora', fontSize: isMobile ? 14 : 15,

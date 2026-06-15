@@ -190,7 +190,13 @@ const useSSL = !/\.railway\.internal/i.test(DATABASE_URL);
 const pool = new Pool({
   connectionString: DATABASE_URL,
   ssl: useSSL ? { rejectUnauthorized: false } : false,
-  max: 10,
+  // The daily scheduler fires ~14 advisory-locked jobs near-synchronously,
+  // each grabbing a pool connection for its whole run (and bill-gen opens a
+  // 2nd per-room connection). At max:10 the extras queued past
+  // connectionTimeoutMillis and could fail money jobs (bill-gen / reminders)
+  // for the cycle. Default the pool above that peak; PG_POOL_MAX lets a small
+  // DB plan dial it back.
+  max: Number(process.env.PG_POOL_MAX) || 20,
   // Without these, a stalled DB causes requests to hang indefinitely instead
   // of returning 503 quickly (so client retries can succeed).
   connectionTimeoutMillis: 5000,
@@ -831,10 +837,19 @@ app.post('/api/auth/login', sameOrigin, loginLimiter, lookupJitter, validateBody
     // Always run bcrypt.compare so timing is roughly constant.
     const ok = await bcrypt.compare(password, hash);
     if (!user || !ok) {
-      // Fire and forget: lockout counter + audit failed attempt.
-      lockout.recordFailure(principal, 'admin').catch(() => {});
+      // Record the failure AUTHORITATIVELY (awaited) so concurrent attempts
+      // that cross the threshold lock the account atomically instead of all
+      // racing past a stale check(). Audit stays fire-and-forget.
+      const lockedUntil = await lockout.recordFailure(principal, 'admin').catch(() => null);
       audit(req, 'auth.login_failed', 'user', username,
         { reason: !user ? 'unknown_user' : 'wrong_password' }, username).catch(() => {});
+      if (lockedUntil && new Date(lockedUntil).getTime() > Date.now()) {
+        const minutes = Math.ceil((new Date(lockedUntil).getTime() - Date.now()) / 60_000);
+        return res.status(429).json({
+          error: `บัญชีถูกล็อกชั่วคราว — ลองใหม่ใน ${minutes} นาที`,
+          code: 'LOCKED_OUT',
+        });
+      }
       return res.status(401).json({ error: 'invalid credentials' });
     }
     // Successful login → clear lockout counter for this principal.
@@ -1117,7 +1132,7 @@ function maskConfigPublic(cfg) {
   if (cfg.building && typeof cfg.building === 'object') {
     out.building = {
       name: cfg.building.name,
-      logo: cfg.building.logo,
+      logo: normalizeBuildingLogoUrl(cfg.building.logo),
       address: cfg.building.address,
       phone: cfg.building.phone,
     };
@@ -1135,6 +1150,50 @@ function maskConfigPublic(cfg) {
     };
   }
   return out;
+}
+
+function normalizeBuildingLogoUrl(value) {
+  const logo = String(value || '').trim();
+  if (!logo) return '';
+  return /^\/files\/\d+$/.test(logo) ? logo : null;
+}
+
+function fileIdFromPublicFileUrl(value) {
+  const m = String(value || '').trim().match(/^\/files\/(\d+)$/);
+  if (!m) return null;
+  const id = Number(m[1]);
+  return Number.isInteger(id) && id > 0 ? id : null;
+}
+
+async function fileUrlHasCategory(value, category) {
+  const id = fileIdFromPublicFileUrl(value);
+  if (!id) return false;
+  try {
+    const { rows } = await pool.query(
+      `SELECT category FROM file_uploads WHERE id=$1`,
+      [id]
+    );
+    return rows.length > 0 && rows[0].category === category;
+  } catch (err) {
+    console.warn('[config] file category check failed:', err.message);
+    return false;
+  }
+}
+
+async function removeFileUrlIfCategory(value, category, label) {
+  const id = fileIdFromPublicFileUrl(value);
+  if (!id) return;
+  try {
+    const { rows } = await pool.query(
+      `SELECT category FROM file_uploads WHERE id=$1`,
+      [id]
+    );
+    if (rows.length && rows[0].category === category) {
+      storage.removeQuietly(pool, id, label);
+    }
+  } catch (err) {
+    console.warn(`[storage] ${label || category} category check failed for id=${id}:`, err.message);
+  }
 }
 
 const PRICING_CONTRACT_UPDATE_CONFIRM = 'UPDATE_ACTIVE_CONTRACTS';
@@ -1590,6 +1649,17 @@ app.put('/api/data/:key', sameOrigin, csrfGuard, requireAuth, requireRole('owner
     const MIN_SENSIBLE_UTILITY = 1;
     const hardIssues = [];
     const warnings = [];
+    const building = value.building && typeof value.building === 'object' ? value.building : null;
+    if (building && building.logo !== undefined) {
+      const logo = normalizeBuildingLogoUrl(building.logo);
+      if (logo === null) {
+        hardIssues.push('building.logo ต้องเป็นไฟล์โลโก้ที่อัปโหลดผ่านระบบเท่านั้น');
+      } else if (logo && !(await fileUrlHasCategory(logo, 'building_logo'))) {
+        hardIssues.push('building.logo ต้องอ้างอิงไฟล์หมวด building_logo ที่อัปโหลดผ่านระบบเท่านั้น');
+      } else {
+        building.logo = logo;
+      }
+    }
     const rates = value.rates && typeof value.rates === 'object' ? value.rates : {};
     for (const [type, r] of Object.entries(rates)) {
       if (!r || typeof r !== 'object') continue;
@@ -1699,7 +1769,6 @@ app.put('/api/data/:key', sameOrigin, csrfGuard, requireAuth, requireRole('owner
         payment[field] = trimmed;
       }
     }
-    const building = value.building && typeof value.building === 'object' ? value.building : null;
     if (building) {
       if (typeof building.line === 'string') {
         building.line = building.line.trim().replace(/^@+/, '');
@@ -4876,8 +4945,17 @@ app.post('/api/tenant/login', sameOrigin, rateLimitTenantLogin, lookupJitter, fe
       [phone]
     );
     if (!rows.length) {
-      lockout.recordFailure(principal, 'tenant').catch(() => {});
+      // Authoritative await + gate (see admin login) so the phone-only portal's
+      // main brute-force defence can't be bypassed by concurrent attempts.
+      const lockedUntil = await lockout.recordFailure(principal, 'tenant').catch(() => null);
       audit(req, 'tenant.login_failed', 'tenant', phone, { reason: 'no_active_current_tenant' }, phone).catch(() => {});
+      if (lockedUntil && new Date(lockedUntil).getTime() > Date.now()) {
+        const minutes = Math.ceil((new Date(lockedUntil).getTime() - Date.now()) / 60_000);
+        return res.status(429).json({
+          error: `บัญชีถูกล็อกชั่วคราว — ลองใหม่ใน ${minutes} นาที`,
+          code: 'LOCKED_OUT',
+        });
+      }
       return res.status(401).json({ error: 'invalid credentials' });
     }
     if (rows.length > 1) {
@@ -11163,6 +11241,119 @@ async function notifyRoomPhotoUploadRejected(req, refId, classification) {
     ].join('\n'),
   }).catch(() => {});
 }
+
+async function loadConfigForLogoUpdate(client) {
+  const { rows } = await client.query(
+    `SELECT value FROM app_data WHERE key='baankarn_config_v1' FOR UPDATE`
+  );
+  const cfg = rows.length && rows[0].value && typeof rows[0].value === 'object' && !Array.isArray(rows[0].value)
+    ? rows[0].value
+    : {};
+  if (!cfg.building || typeof cfg.building !== 'object' || Array.isArray(cfg.building)) {
+    cfg.building = {};
+  }
+  return cfg;
+}
+
+app.post('/api/admin/building-logo', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'), async (req, res) => {
+  const dataUrl = req.body && req.body.dataUrl;
+  if (!dataUrl) {
+    return res.status(400).json({
+      error: 'dataUrl required',
+      code: 'BUILDING_LOGO_REQUIRED',
+    });
+  }
+  let saved = null;
+  const client = await pool.connect();
+  try {
+    saved = await storage.saveBase64({
+      pool,
+      category: 'building_logo',
+      dataUrl,
+      refId: 'building',
+      uploadedBy: req.session.user.username,
+      maxBytes: 750_000,
+    });
+    const logo = `/files/${saved.id}`;
+    await client.query('BEGIN');
+    const cfg = await loadConfigForLogoUpdate(client);
+    const oldLogo = normalizeBuildingLogoUrl(cfg.building.logo) || '';
+    cfg.building.logo = logo;
+    const { rows } = await client.query(
+      `INSERT INTO app_data (key, value, updated_by)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (key) DO UPDATE
+         SET value=EXCLUDED.value, updated_at=NOW(), updated_by=EXCLUDED.updated_by
+       RETURNING updated_at`,
+      ['baankarn_config_v1', JSON.stringify(cfg), req.session.user.username]
+    );
+    await client.query('COMMIT');
+    const oldFileId = fileIdFromPublicFileUrl(oldLogo);
+    if (oldFileId && oldFileId !== saved.id) {
+      removeFileUrlIfCategory(oldLogo, 'building_logo', 'old building logo').catch(() => {});
+    }
+    audit(req, 'building.logo.update', 'config', 'baankarn_config_v1', {
+      logo,
+      oldLogo: oldLogo || null,
+    });
+    const { buffer, ...file } = saved;
+    res.json({
+      ok: true,
+      logo,
+      file,
+      config: cfg,
+      updatedAt: rows[0] && rows[0].updated_at ? rows[0].updated_at.toISOString() : null,
+    });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    if (saved && saved.id) storage.removeQuietly(pool, saved.id, 'failed building logo upload');
+    const classification = classifyUploadError(err);
+    audit(req, 'building.logo.rejected', 'config', 'baankarn_config_v1', {
+      code: classification.code,
+      reason: classification.raw,
+    }).catch(() => {});
+    res.status(classification.status || 500).json({
+      error: classification.message || 'อัปโหลดโลโก้ไม่สำเร็จ',
+      code: classification.code || 'BUILDING_LOGO_UPLOAD_FAILED',
+    });
+  } finally {
+    client.release();
+  }
+});
+
+app.delete('/api/admin/building-logo', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'), async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const cfg = await loadConfigForLogoUpdate(client);
+    const oldLogo = normalizeBuildingLogoUrl(cfg.building.logo) || '';
+    cfg.building.logo = '';
+    const { rows } = await client.query(
+      `INSERT INTO app_data (key, value, updated_by)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (key) DO UPDATE
+         SET value=EXCLUDED.value, updated_at=NOW(), updated_by=EXCLUDED.updated_by
+       RETURNING updated_at`,
+      ['baankarn_config_v1', JSON.stringify(cfg), req.session.user.username]
+    );
+    await client.query('COMMIT');
+    const oldFileId = fileIdFromPublicFileUrl(oldLogo);
+    if (oldFileId) removeFileUrlIfCategory(oldLogo, 'building_logo', 'removed building logo').catch(() => {});
+    audit(req, 'building.logo.delete', 'config', 'baankarn_config_v1', { oldLogo: oldLogo || null });
+    res.json({
+      ok: true,
+      logo: '',
+      config: cfg,
+      updatedAt: rows[0] && rows[0].updated_at ? rows[0].updated_at.toISOString() : null,
+    });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('building logo delete error:', err);
+    res.status(500).json({ error: 'internal error', code: 'BUILDING_LOGO_DELETE_FAILED' });
+  } finally {
+    client.release();
+  }
+});
 
 app.post('/api/uploads', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager', 'staff'), features.requireFeature('photoUpload'), async (req, res) => {
   const b = req.body || {};
@@ -17642,9 +17833,8 @@ app.use((req, res, next) => {
 });
 app.use(express.static(path.join(__dirname, 'project'), { redirect: false }));
 
-// Files proxy. Sensitive uploads stay auth-gated; room_photo is deliberately
-// public because the public room board/booking page needs to render the room
-// gallery that admins upload. Keep every category behind this proxy instead
+// Files proxy. Sensitive uploads stay auth-gated; room_photo/building_logo are
+// deliberately public because public pages need to render them. Keep every category behind this proxy instead
 // of mounting uploads/ directly so scanning, MIME headers, and caching remain
 // centralized.
 storage.ensureDir(storage.rootPath());
@@ -17675,14 +17865,18 @@ app.get('/files/:id', rateLimitFileAccess, async (req, res) => {
     // owns the file). A readonly/staff admin may browse tenants but must not pull
     // the raw ID-card images / slips. File IDs are sequential & enumerable, so
     // this role gate is the only thing between a low-privilege admin and bulk PII
-    // download. Non-sensitive files (room photos) stay broadly readable.
+    // download. Non-sensitive files (room photos + building logo) stay broadly readable.
     const SENSITIVE_CATEGORIES = new Set(['slip', 'citizen_id_image', 'contract_signature']);
     const sensitive = SENSITIVE_CATEGORIES.has(f.category);
+    const PUBLIC_FILE_CATEGORIES = new Set(['room_photo', 'building_logo']);
+    const isPublicAsset = PUBLIC_FILE_CATEGORIES.has(f.category);
     const isPublicRoomPhoto = f.category === 'room_photo';
+    const isPublicBuildingLogo = isPublicAsset && f.category === 'building_logo';
     const sessionRole = req.session && req.session.user && req.session.user.role;
     const isAdmin = !!(req.session && req.session.user);
     const isManagerPlus = (ROLE_RANK[sessionRole] || 0) >= ROLE_RANK.manager;
     let allowed = isPublicRoomPhoto || (isAdmin && (!sensitive || isManagerPlus));
+    if (!allowed && isPublicBuildingLogo) allowed = true;
     // Session lookup is a DB round-trip — resolve it at most ONCE per request
     // even when both tenant checks below run (parcel_photo + own-upload).
     let tSession = null;

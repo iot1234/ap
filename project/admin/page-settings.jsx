@@ -4,6 +4,35 @@
 
 const { useState } = React;
 
+function normalizeBuildingLogoInput(value) {
+  const logo = String(value || '').trim();
+  if (!logo) return '';
+  return /^\/files\/\d+$/.test(logo) ? logo : null;
+}
+
+function buildingInitialsForLogo(name) {
+  const fallback = 'ที่';
+  const parts = String(name || fallback).trim().split(/\s+/).filter(Boolean);
+  const chars = parts.length >= 2
+    ? parts.slice(0, 2).map((p) => Array.from(p)[0] || '').join('')
+    : Array.from(parts[0] || fallback).slice(0, 2).join('');
+  return (chars || fallback).toUpperCase();
+}
+
+function resolveApiFetch() {
+  try { return window.requireApiFetch ? window.requireApiFetch() : window.apiFetch; }
+  catch { return window.apiFetch; }
+}
+
+async function readAdminJsonResponse(res) {
+  const body = await res.json().catch(() => ({}));
+  if (res && res.ok) return body;
+  const err = new Error(body.error || body.message || `HTTP ${res && res.status ? res.status : 500}`);
+  err.status = res && res.status;
+  err.body = body;
+  throw err;
+}
+
 function PageSettings({ rooms, setRooms, config, setConfig, bookings, setBookings, activities, setActivities, addActivity, setToast, currentUser }) {
   const C = window.ADMIN_C;
   const { Card, Btn, Input, Select, Toggle, Textarea, Tabs, Pill, Avatar, Modal,
@@ -17,7 +46,9 @@ function PageSettings({ rooms, setRooms, config, setConfig, bookings, setBooking
   const [draft, setDraft] = useState(() => safeClone(config));
   const [confirmReset, setConfirmReset] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [logoUploading, setLogoUploading] = useState(false);
   const lastConfigJsonRef = React.useRef(safeFingerprint(config));
+  const canManageBrand = ['owner', 'manager'].includes(String(currentUser?.role || ''));
 
   React.useEffect(() => {
     const nextJson = safeFingerprint(config);
@@ -91,6 +122,105 @@ function PageSettings({ rooms, setRooms, config, setConfig, bookings, setBooking
     }
   }
 
+  function configWithLogo(base, logo, serverConfig) {
+    const next = safeClone(serverConfig && typeof serverConfig === 'object' ? serverConfig : (base || DEFAULT_CONFIG || {}));
+    if (!next.building || typeof next.building !== 'object') next.building = {};
+    next.building.logo = normalizeBuildingLogoInput(logo) || '';
+    return next;
+  }
+
+  const patchLogoState = React.useCallback((logo, serverConfig, updatedAt) => {
+    setConfig(prev => configWithLogo(prev, logo, serverConfig));
+    setDraft(prev => configWithLogo(prev, logo, serverConfig));
+    if (updatedAt && window.AP && window.AP.setBaseVersion) {
+      window.AP.setBaseVersion('baankarn_config_v1', updatedAt);
+    }
+  }, [setConfig]);
+
+  const handleLogoUpload = async (file) => {
+    if (!canManageBrand) {
+      setToast && setToast({ kind: 'error', message: 'เฉพาะเจ้าของหรือผู้จัดการเท่านั้นที่ตั้งค่าโลโก้ได้' });
+      return;
+    }
+    const allowedTypes = ['image/jpeg', 'image/png', 'image/webp'];
+    if (!file) return;
+    if (!allowedTypes.includes(file.type)) {
+      setToast && setToast({ kind: 'error', message: 'รองรับเฉพาะรูป JPG, PNG หรือ WebP' });
+      return;
+    }
+    if (file.size > 15_000_000) {
+      setToast && setToast({ kind: 'error', message: 'รูปใหญ่เกิน 15 MB กรุณาเลือกรูปที่เล็กลง' });
+      return;
+    }
+    const apiFetch = resolveApiFetch();
+    if (!apiFetch) {
+      setToast && setToast({ kind: 'error', message: 'ระบบ API ยังไม่พร้อม กรุณารีเฟรชหน้าแล้วลองอีกครั้ง' });
+      return;
+    }
+    setLogoUploading(true);
+    try {
+      const dataUrl = window.prepareImageForUpload
+        ? await window.prepareImageForUpload(file, {
+            allowedTypes,
+            targetBytes: 700_000,
+            maxInputBytes: 15_000_000,
+            typeErrorText: 'รองรับเฉพาะรูป JPG, PNG หรือ WebP',
+          })
+        : await window.readImageFileAsDataUrl(file);
+      const res = await apiFetch('/api/admin/building-logo', {
+        method: 'POST',
+        body: JSON.stringify({ dataUrl }),
+        timeoutMs: 60_000,
+      });
+      const out = await readAdminJsonResponse(res);
+      patchLogoState(out.logo, out.config, out.updatedAt);
+      setToast && setToast({ kind: 'success', message: 'อัปเดตโลโก้หอพักเรียบร้อย' });
+      addActivity && addActivity({ icon: '🏢', text: 'อัปเดตโลโก้หอพัก', type: 'system' });
+    } catch (err) {
+      setToast && setToast({
+        kind: 'error',
+        message: err && err.message ? err.message : 'อัปโหลดโลโก้ไม่สำเร็จ',
+      });
+    } finally {
+      setLogoUploading(false);
+    }
+  };
+
+  const handleLogoDelete = async () => {
+    if (!canManageBrand) {
+      setToast && setToast({ kind: 'error', message: 'เฉพาะเจ้าของหรือผู้จัดการเท่านั้นที่ลบโลโก้ได้' });
+      return;
+    }
+    const logo = normalizeBuildingLogoInput(draft?.building?.logo);
+    if (!logo) return;
+    if (typeof window !== 'undefined' && window.confirm && !window.confirm('ลบโลโก้หอพักออกจากทุกหน้าหรือไม่?')) {
+      return;
+    }
+    const apiFetch = resolveApiFetch();
+    if (!apiFetch) {
+      setToast && setToast({ kind: 'error', message: 'ระบบ API ยังไม่พร้อม กรุณารีเฟรชหน้าแล้วลองอีกครั้ง' });
+      return;
+    }
+    setLogoUploading(true);
+    try {
+      const res = await apiFetch('/api/admin/building-logo', {
+        method: 'DELETE',
+        timeoutMs: 30_000,
+      });
+      const out = await readAdminJsonResponse(res);
+      patchLogoState('', out.config, out.updatedAt);
+      setToast && setToast({ kind: 'success', message: 'ลบโลโก้หอพักเรียบร้อย' });
+      addActivity && addActivity({ icon: '🏢', text: 'ลบโลโก้หอพัก', type: 'system' });
+    } catch (err) {
+      setToast && setToast({
+        kind: 'error',
+        message: err && err.message ? err.message : 'ลบโลโก้ไม่สำเร็จ',
+      });
+    } finally {
+      setLogoUploading(false);
+    }
+  };
+
   const handleSave = async () => {
     const next = safeClone(draft);
     const payment = next.payment && typeof next.payment === 'object' ? next.payment : null;
@@ -111,6 +241,16 @@ function PageSettings({ rooms, setRooms, config, setConfig, bookings, setBooking
     }
     const building = next.building && typeof next.building === 'object' ? next.building : null;
     if (building) {
+      const logo = normalizeBuildingLogoInput(building.logo);
+      if (logo === null) {
+        setTab('branding');
+        setToast && setToast({
+          kind: 'error',
+          message: 'โลโก้หอพักต้องเป็นไฟล์ที่อัปโหลดผ่านระบบเท่านั้น',
+        });
+        return;
+      }
+      building.logo = logo;
       if (typeof building.line === 'string') building.line = building.line.trim().replace(/^@+/, '');
       const rawLineAddFriendUrl = String(building.lineAddFriendUrl || '').trim();
       if (rawLineAddFriendUrl) {
@@ -194,9 +334,9 @@ function PageSettings({ rooms, setRooms, config, setConfig, bookings, setBooking
     <Pill color="rooms">บันทึกจากกล่องจอง/มัดจำด้านล่าง</Pill>
   ) : (
     <>
-      <Btn variant="secondary" onClick={() => setDraft(config)} disabled={saving || !dirty}>ยกเลิก</Btn>
-      <Btn variant="primary" icon="✓" onClick={handleSave} disabled={saving || !dirty}>
-        {saving ? 'กำลังบันทึก...' : dirty ? 'บันทึก' : 'บันทึกแล้ว'}
+      <Btn variant="secondary" onClick={() => setDraft(config)} disabled={saving || logoUploading || !dirty}>ยกเลิก</Btn>
+      <Btn variant="primary" icon="✓" onClick={handleSave} disabled={saving || logoUploading || !dirty}>
+        {logoUploading ? 'กำลังอัปโหลดโลโก้...' : (saving ? 'กำลังบันทึก...' : dirty ? 'บันทึก' : 'บันทึกแล้ว')}
       </Btn>
     </>
   );
@@ -212,6 +352,7 @@ function PageSettings({ rooms, setRooms, config, setConfig, bookings, setBooking
       <Tabs
         items={[
           { value: 'building', label: 'ข้อมูลตึก',     icon: '🏢' },
+          { value: 'branding', label: 'โลโก้',          icon: '🖼️' },
           { value: 'payment',  label: 'การชำระเงิน', icon: '💳' },
           { value: 'pricing',  label: 'ตั้งราคา',     icon: '💰' },
           { value: 'bookingDeposit', label: 'จอง/มัดจำ', icon: '🧾' },
@@ -229,7 +370,17 @@ function PageSettings({ rooms, setRooms, config, setConfig, bookings, setBooking
         style={{ marginBottom: 20 }}
       />
 
-      {tab === 'building' && <TabBuilding draft={draft} updatePath={updatePath} />}
+      {tab === 'building' && <TabBuilding
+        draft={draft}
+        updatePath={updatePath}
+      />}
+      {tab === 'branding' && <TabBranding
+        draft={draft}
+        logoUploading={logoUploading}
+        onLogoUpload={handleLogoUpload}
+        onLogoDelete={handleLogoDelete}
+        canManageBrand={canManageBrand}
+      />}
       {tab === 'payment'  && <TabPayment  draft={draft} updatePath={updatePath} />}
       {/* Pricing tab — embeds the full PagePricing flow (rates, premiums,
           discounts, fees, utilities). Consolidated here so admin has ONE
@@ -293,6 +444,120 @@ function PageSettings({ rooms, setRooms, config, setConfig, bookings, setBooking
 }
 
 // ============================================================
+function TabBranding({ draft, logoUploading, onLogoUpload, onLogoDelete, canManageBrand }) {
+  const { Card, SectionHeading } = window;
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 800 }}>
+      <Card>
+        <SectionHeading
+          title="โลโก้หอพัก"
+          subtitle="โลโก้ชุดเดียวถูกใช้ร่วมกันทั้งหน้าเว็บจอง, หน้าเข้าสู่ระบบผู้เช่า, tenant portal และหลังบ้านแอดมิน"
+          level={3}
+        />
+        <LogoSettingsPanel
+          draft={draft}
+          logoUploading={logoUploading}
+          onLogoUpload={onLogoUpload}
+          onLogoDelete={onLogoDelete}
+          canManageBrand={canManageBrand}
+        />
+      </Card>
+    </div>
+  );
+}
+
+function LogoSettingsPanel({ draft, logoUploading, onLogoUpload, onLogoDelete, canManageBrand }) {
+  const C = window.ADMIN_C;
+  const { Btn, Pill } = window;
+  const building = draft.building || {};
+  const logo = normalizeBuildingLogoInput(building.logo) || '';
+  const buildingName = String(building.name || '').trim() || 'ที่พักของคุณ';
+  const buildingMark = buildingInitialsForLogo(buildingName);
+  return (
+    <div style={{
+      padding: 12,
+      border: `1px solid ${C.border}`,
+      borderRadius: 8,
+      display: 'grid',
+      gridTemplateColumns: '64px minmax(0, 1fr)',
+      gap: '10px 12px',
+      alignItems: 'start',
+      background: C.surfaceAlt || '#f8fafc',
+    }}>
+      <div style={{
+        width: 64,
+        height: 64,
+        borderRadius: 12,
+        border: `1px solid ${C.border}`,
+        background: logo ? '#fff' : `linear-gradient(135deg, ${C.accent} 0%, ${C.accentDark || C.accent} 100%)`,
+        color: '#fff',
+        display: 'grid',
+        placeItems: 'center',
+        overflow: 'hidden',
+        padding: logo ? 6 : 0,
+        fontFamily: 'IBM Plex Sans Thai, sans-serif',
+        fontWeight: 700,
+        fontSize: 24,
+        letterSpacing: 0,
+        boxSizing: 'border-box',
+      }}>
+        {logo
+          ? <img src={logo} alt={`${buildingName} logo`} style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block' }} />
+          : buildingMark}
+      </div>
+      <div style={{ minWidth: 0 }}>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <div style={{ fontWeight: 700, color: C.ink, fontSize: 14 }}>โลโก้หอพัก</div>
+          {!canManageBrand && <Pill color="warning">เฉพาะ owner/manager</Pill>}
+        </div>
+        <div style={{ marginTop: 4, color: C.muted, fontSize: 12.5, lineHeight: 1.55 }}>
+          รองรับ JPG, PNG, WebP ระบบจะย่อรูปอัตโนมัติและใช้กับหน้า login, booking, tenant และ admin
+        </div>
+      </div>
+      <div style={{ gridColumn: '2 / -1', display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-start' }}>
+        <label style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          minHeight: 34,
+          padding: '7px 12px',
+          borderRadius: 8,
+          border: `1px solid ${C.border}`,
+          background: canManageBrand && !logoUploading ? '#fff' : C.surfaceAlt,
+          color: canManageBrand && !logoUploading ? C.ink : C.muted,
+          fontSize: 12.5,
+          fontWeight: 700,
+          cursor: canManageBrand && !logoUploading ? 'pointer' : 'not-allowed',
+          whiteSpace: 'nowrap',
+          maxWidth: '100%',
+          boxSizing: 'border-box',
+        }}>
+          {logoUploading ? 'กำลังอัปโหลด...' : (logo ? 'เปลี่ยนโลโก้' : 'อัปโหลดโลโก้')}
+          <input
+            type="file"
+            accept="image/jpeg,image/png,image/webp"
+            disabled={!canManageBrand || logoUploading}
+            style={{ display: 'none' }}
+            onChange={(e) => {
+              const file = e.target.files && e.target.files[0];
+              e.target.value = '';
+              if (file && onLogoUpload) onLogoUpload(file);
+            }}
+          />
+        </label>
+        {logo && (
+          <Btn
+            variant="secondary"
+            size="sm"
+            onClick={onLogoDelete}
+            disabled={!canManageBrand || logoUploading}
+          >ลบโลโก้</Btn>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function TabBuilding({ draft, updatePath }) {
   const C = window.ADMIN_C;
   const { Card, Input, Textarea, SectionHeading } = window;

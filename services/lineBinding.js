@@ -641,7 +641,12 @@ async function tryBind(pool, { code, lineUserId, oaId } = {}) {
     // If admin issued the code with a specific target OA, enforce it: the
     // tenant must have sent the code to that OA's webhook. This prevents
     // accidental cross-OA binding and lets admin segregate buildings.
-    if (row.target_oa_id != null && row.target_oa_id !== oaIdNum) {
+    // target_oa_id is BIGINT — pg returns it as a STRING (no int8 type parser
+    // is registered), while oaIdNum is a JS number. Coerce both with Number()
+    // so a correct-OA bind ('7' vs 7) isn't always rejected as wrong_oa.
+    // For the env/legacy OA, oaIdNum is null and Number(target) !== null stays
+    // true, so a targeted code is still correctly refused there.
+    if (row.target_oa_id != null && Number(row.target_oa_id) !== oaIdNum) {
       await client.query('ROLLBACK');
       return { ok: false, reason: 'wrong_oa', expectedOaId: row.target_oa_id };
     }

@@ -54,7 +54,14 @@ function makeLockout(pool) {
     // Atomic upsert: if first_fail_at is older than FAIL_WINDOW we restart
     // the counter; otherwise increment. When we hit threshold, set
     // locked_until and reset the counter.
-    await pool.query(
+    //
+    // RETURNING locked_until makes the increment AUTHORITATIVE: the upsert is
+    // serialised on the principal row, so the call that crosses the threshold
+    // is the one that gets a future locked_until back. Callers MUST await this
+    // and gate their response on it — otherwise N concurrent login attempts all
+    // read a pre-failure state in check() and race past the lock (TOCTOU). The
+    // post-increment value closes that race.
+    const { rows } = await pool.query(
       `INSERT INTO login_lockouts (principal, kind, fail_count, first_fail_at, last_fail_at)
        VALUES ($1, $2, 1, NOW(), NOW())
        ON CONFLICT (principal) DO UPDATE SET
@@ -78,9 +85,11 @@ function makeLockout(pool) {
                  END) >= $4
              THEN NOW() + ($5::int || ' milliseconds')::interval
            ELSE login_lockouts.locked_until
-         END`,
+         END
+       RETURNING locked_until`,
       [key, kind, FAIL_WINDOW_MS, FAIL_THRESHOLD, LOCKOUT_DURATION_MS]
     );
+    return rows.length ? rows[0].locked_until : null;
   }
 
   async function reset(principal) {

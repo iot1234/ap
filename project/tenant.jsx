@@ -401,6 +401,10 @@ function buildingInitialsOf(name) {
     : Array.from(parts[0] || DEFAULT_BUILDING_NAME).slice(0, 2).join('');
   return (chars || 'ที').toUpperCase();
 }
+function buildingLogoOf(building) {
+  const logo = String(building?.logo || '').trim();
+  return /^\/files\/\d+$/.test(logo) ? logo : '';
+}
 function storedPublicBuilding() {
   try {
     const raw = localStorage.getItem('baankarn_config_v1');
@@ -805,17 +809,23 @@ function SectionHeader({ title, subtitle, action, style }) {
   );
 }
 
-function LogoMark({ size = 36, square = true, label }) {
+function LogoMark({ size = 36, square = true, label, logo }) {
   const mark = label ? buildingInitialsOf(label) : 'ที';
+  const logoUrl = /^\/files\/\d+$/.test(String(logo || '').trim()) ? String(logo).trim() : '';
   return (
     <div style={{
       width: size, height: size, borderRadius: square ? 10 : 999,
-      background: 'linear-gradient(140deg, #d97a4a 0%, #a4542d 100%)',
+      background: logoUrl ? '#fff' : 'linear-gradient(140deg, #d97a4a 0%, #a4542d 100%)',
       color: '#fff', fontFamily: 'var(--font-display)', fontWeight: 700,
       fontSize: size * 0.42, display: 'grid', placeItems: 'center',
       boxShadow: '0 6px 14px -8px rgba(196,106,62,0.7)',
-      letterSpacing: '-.02em', flex: '0 0 auto',
-    }}>{mark}</div>
+      letterSpacing: 0, flex: '0 0 auto',
+      overflow: 'hidden', padding: logoUrl ? Math.max(4, Math.round(size * 0.12)) : 0,
+      border: logoUrl ? '1px solid var(--line)' : '0',
+      boxSizing: 'border-box',
+    }}>{logoUrl
+      ? <img src={logoUrl} alt={`${label || 'Building'} logo`} style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block' }} />
+      : mark}</div>
   );
 }
 
@@ -1223,6 +1233,7 @@ function LoginView({ locale, setLocale, onLoggedIn, portalEnabled, building }) {
   const [err, setErr] = useState('');
   const t = (k) => tr(locale, k);
   const buildingName = buildingNameOf(building);
+  const buildingLogo = buildingLogoOf(building);
   async function submit(e) {
     e.preventDefault();
     setErr(''); setBusy(true);
@@ -1272,7 +1283,7 @@ function LoginView({ locale, setLocale, onLoggedIn, portalEnabled, building }) {
             backgroundImage: 'radial-gradient(circle at 20% 0%, #d97a4a 0%, transparent 40%), radial-gradient(circle at 100% 100%, #e0a374 0%, transparent 50%)',
           }} />
           <div style={{ position: 'relative', display: 'flex', alignItems: 'center', gap: 12 }}>
-            <LogoMark size={44} label={buildingName} />
+            <LogoMark size={44} label={buildingName} logo={buildingLogo} />
             <div>
               <div style={{ fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 16 }}>{buildingName}</div>
               <div style={{ opacity: 0.65, fontSize: 12.5 }}>Tenant Portal</div>
@@ -3145,6 +3156,7 @@ function tenantNavItems(features) {
 function Sidebar({ page, setPage, locale, unpaidCount, parcelCount, tenant, onLogout, building, features }) {
   const t = (k) => tr(locale, k);
   const buildingName = buildingNameOf(building);
+  const buildingLogo = buildingLogoOf(building);
   return (
     <aside className="portal-sidebar" style={{
       width: 264, background: 'var(--surface)', borderRight: '1px solid var(--line)',
@@ -3157,7 +3169,7 @@ function Sidebar({ page, setPage, locale, unpaidCount, parcelCount, tenant, onLo
       height: '100%', overflowY: 'auto',
     }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '4px 8px 22px' }}>
-        <LogoMark size={40} label={buildingName} />
+        <LogoMark size={40} label={buildingName} logo={buildingLogo} />
         <div style={{ minWidth: 0 }}>
           <div style={{
             fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 14.5, lineHeight: 1.1,
@@ -3352,6 +3364,7 @@ function DrawerNav({ open, onClose, page, setPage, locale, onLogout, unpaidCount
   }, [open, onClose]);
   if (!open) return null;
   const buildingName = buildingNameOf(building);
+  const buildingLogo = buildingLogoOf(building);
   const ui = (
     <div onClick={onClose} style={{
       position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(28,18,8,0.42)',
@@ -3377,7 +3390,7 @@ function DrawerNav({ open, onClose, page, setPage, locale, onLogout, unpaidCount
           boxShadow: 'var(--shadow-lg)', outline: 'none',
         }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '6px 6px 18px', flex: '0 0 auto' }}>
-          <LogoMark size={36} label={buildingName} />
+          <LogoMark size={36} label={buildingName} logo={buildingLogo} />
           <div style={{ minWidth: 0 }}>
             <div style={{
               fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 'var(--fs-base)',

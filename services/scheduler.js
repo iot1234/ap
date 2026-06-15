@@ -856,6 +856,9 @@ async function tickBillGen(pool, flags, now, state) {
       relationalTenantsInUse = probe.rows.length > 0;
     } catch { /* table absent on legacy deploys → blob-only mode */ }
     const tenantlessSkipped = [];
+    // Rooms whose bill hit a TRANSIENT (non-23505) error this run. If any, we
+    // leave the period unlatched so the next tick retries them (see below).
+    const failedRooms = [];
     for (const room of rooms) {
       if (!room.tenant || (room.status !== 'occupied' && room.status !== 'overdue')) continue;
       // Resolve the active tenant for this room so generated bills appear
@@ -1088,14 +1091,31 @@ async function tickBillGen(pool, flags, now, state) {
         await billClient.query('ROLLBACK').catch(() => {});
         // Partial-unique on (room_id, period, COALESCE(tenant_id,0)) blocks
         // duplicates even when bill_no differs across paths; treat as silent skip.
-        if (e.code !== '23505') console.error('[scheduler] bill insert failed:', e.message);
+        if (e.code !== '23505') {
+          console.error('[scheduler] bill insert failed:', e.message);
+          // Transient failure (lock/statement timeout, deadlock, conn drop):
+          // record the room so we DON'T latch the period and the next tick
+          // retries it. Use room.id (always in scope) — `bill` may be undefined
+          // if the throw happened before it was built.
+          failedRooms.push({ roomId: room.id, error: String(e.message || e).slice(0, 200) });
+        }
       } finally {
         billClient.release();
       }
     }
-    state.lastBillPeriod = period;
-    writeState(state);
-    console.log(`[scheduler] auto-generated ${made} bills for ${period}`);
+    // Only latch the period when EVERY room either billed or was a real
+    // duplicate. If any room hit a TRANSIENT error (not 23505), leave the
+    // period unlatched so the next tick retries the whole period. Re-runs are
+    // idempotent: already-billed rooms hit uq_bills_room_period_tenant_active
+    // (23505 swallow, made++ skipped, no tenant re-notify), so there's no
+    // double-billing. Without this a single transient blip permanently skipped
+    // that room's monthly bill with no invoice and no trace.
+    if (failedRooms.length === 0) {
+      state.lastBillPeriod = period;
+      writeState(state);
+    }
+    console.log(`[scheduler] auto-generated ${made} bills for ${period}`
+      + (failedRooms.length ? ` (${failedRooms.length} room(s) deferred — will retry next tick)` : ''));
 
     // R5 — owner alert for flat-mode silent fallbacks. We do this BEFORE
     // the success notification so the operator's inbox shows the WARNING
@@ -1171,6 +1191,30 @@ async function tickBillGen(pool, flags, now, state) {
             `👉 วิธีแก้: เปิดหน้าผู้เช่า (/admin#tenants) ดูว่าผู้เช่าห้องนี้ย้ายออกไปแล้วหรือยัง`,
             `  • ถ้าย้ายออกแล้ว → เปิดหน้าห้องพัก เอาชื่อออกจากห้อง (หรือกดปุ่มซิงก์สถานะห้อง)`,
             `  • ถ้ายังอยู่จริง → ตั้งสถานะผู้เช่าเป็น "ใช้งาน" และผูกห้องให้ถูกต้อง แล้วกดออกบิลรอบนี้เองอีกครั้ง`,
+          ].filter(Boolean).join('\n'),
+        }).catch(() => {});
+        state[alertKey] = true;
+        writeState(state);
+      }
+    }
+
+    if (failedRooms.length > 0) {
+      // Once-per-period owner alert (own latch, independent of lastBillPeriod
+      // which stays unlatched for retry). Mirrors the tenantlessSkipped alert.
+      const alertKey = `billGenFailed_${period}`;
+      if (!state[alertKey]) {
+        const lines = failedRooms.slice(0, 20).map((r) => `  • ห้อง ${r.roomId}: ${r.error}`);
+        notifier.notifyOwner({ pool, features: flags }, {
+          category: 'billing',
+          subject: `⚠️ ออกบิลไม่สำเร็จ ${failedRooms.length} ห้อง — ระบบจะลองใหม่ให้อัตโนมัติ`,
+          text: [
+            `รอบบิล ${period} — ${failedRooms.length} ห้องออกบิลไม่สำเร็จจากข้อผิดพลาดชั่วคราว (เช่น ฐานข้อมูลติด lock/timeout)`,
+            `ระบบยังไม่ปิดรอบนี้ และจะลองออกบิลห้องที่เหลือให้อัตโนมัติในรอบถัดไป (ไม่ออกซ้ำห้องที่ออกแล้ว)`,
+            ``,
+            ...lines,
+            failedRooms.length > 20 ? `  ...รวม ${failedRooms.length} ห้อง` : null,
+            ``,
+            `ถ้ายังไม่หายในไม่กี่ชั่วโมง ให้ตรวจสถานะฐานข้อมูล หรือออกบิลห้องเหล่านี้เองที่ /admin#billing`,
           ].filter(Boolean).join('\n'),
         }).catch(() => {});
         state[alertKey] = true;

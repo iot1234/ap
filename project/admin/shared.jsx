@@ -155,6 +155,7 @@ const DEFAULT_CONFIG = {
     phone:   '',
     email:   '',
     line:    '',
+    logo:    '',
     lineAddFriendUrl: '',
     floors:  5,
     roomsPerFloor: 8,
@@ -343,6 +344,7 @@ function buildActivities() { return []; }
 //   Domain                     UI route                Storage
 //   ----------------------     ------------------      ------------------
 //   ข้อมูลตึก                  /admin#settings (tab)   app_data.baankarn_config_v1.building
+//   โลโก้หอพัก                 /admin#settings (tab)   app_data.baankarn_config_v1.building.logo + file_uploads(building_logo)
 //   ลิงก์แอด LINE ผู้จอง       /admin#settings (tab)   app_data.baankarn_config_v1.building.lineAddFriendUrl
 //   วิธีรับเงิน (PromptPay/bank) /admin#settings (tab) app_data.baankarn_config_v1.payment
 //   อัตราค่าเช่า + ส่วนเพิ่ม   /admin#settings (tab)   app_data.baankarn_config_v1.rates+premium+...

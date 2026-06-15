@@ -57,6 +57,19 @@ body.tenant-public-page .brand-logo {
   box-shadow: 0 10px 22px -16px rgba(31, 122, 122, 0.65);
 }
 
+body.tenant-public-page .brand-logo[data-building-logo-active="1"] {
+  background: #fff;
+  padding: 4px;
+  overflow: hidden;
+}
+
+body.tenant-public-page .brand-logo[data-building-logo-active="1"] img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
 body.tenant-public-page .topbar a,
 body.tenant-public-page .tenant-public-topbar a {
   border-color: var(--tp-line);

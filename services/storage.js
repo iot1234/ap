@@ -156,7 +156,7 @@ function detectMime(buf) {
  * Save a base64 file to local disk and record in DB.
  * @param {object} opts
  * @param {import('pg').Pool} opts.pool
- * @param {string} opts.category - room_photo | slip | contract_signature | citizen_id_image
+ * @param {string} opts.category - room_photo | building_logo | slip | contract_signature | citizen_id_image
  * @param {string} opts.dataUrl - data URL or raw base64
  * @param {string} [opts.refId] - foreign id (room_id, bill_id, etc.)
  * @param {string} [opts.uploadedBy]

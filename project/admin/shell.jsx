@@ -218,6 +218,11 @@ function filterNavByRole(groups, role) {
     .filter((g) => g.items.length > 0);
 }
 
+function normalizeAdminLogoUrl(value) {
+  const logo = String(value || '').trim();
+  return /^\/files\/\d+$/.test(logo) ? logo : '';
+}
+
 const PAGE_TITLES = {
   overview:    'แดชบอร์ด',
   rooms:       'ห้องพัก',
@@ -393,10 +398,11 @@ function SelfPasswordModal({ open, onClose, currentUser, setToast }) {
 //   - mobile drawer — always 260px expanded, slides in from left
 // User's choice persists in localStorage so a wide-monitor user who collapsed
 // once doesn't have to re-collapse every reload.
-function Sidebar({ page, setPage, mobileOpen, setMobileOpen, isMobile, pendingBookings, overdueRooms, buildingName, currentUser, collapsed, setCollapsed, setToast }) {
+function Sidebar({ page, setPage, mobileOpen, setMobileOpen, isMobile, pendingBookings, overdueRooms, buildingName, buildingLogo, currentUser, collapsed, setCollapsed, setToast }) {
   const C = window.ADMIN_C;
   const [passwordOpen, setPasswordOpen] = useState(false);
   const shortName = String(buildingName || '').trim() || 'ที่พักของคุณ';
+  const logoUrl = normalizeAdminLogoUrl(buildingLogo);
   // Collapse only applies to non-mobile. Mobile drawer is always full width.
   const isCollapsed = !isMobile && collapsed;
   const railWidth = isCollapsed ? 64 : 260;
@@ -482,11 +488,16 @@ function Sidebar({ page, setPage, mobileOpen, setMobileOpen, isMobile, pendingBo
               title={isCollapsed ? shortName : null}
               style={{
                 width: 38, height: 38, borderRadius: 9,
-                background: `linear-gradient(135deg, ${C.accent} 0%, ${C.accentDark} 100%)`,
+                background: logoUrl ? '#fff' : `linear-gradient(135deg, ${C.accent} 0%, ${C.accentDark} 100%)`,
                 display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
                 color: '#fff', fontFamily: 'IBM Plex Sans Thai, sans-serif', fontWeight: 700, fontSize: 18,
+                overflow: 'hidden',
+                padding: logoUrl ? 4 : 0,
+                boxSizing: 'border-box',
                 flexShrink: 0,
-              }}>{(shortName[0] || 'ท').toUpperCase()}</div>
+              }}>{logoUrl
+                ? <img src={logoUrl} alt={`${shortName} logo`} style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block' }} />
+                : (shortName[0] || 'ท').toUpperCase()}</div>
             {!isCollapsed && (
               <div style={{ minWidth: 0, flex: 1 }}>
                 <div style={{ fontFamily: 'IBM Plex Sans Thai, sans-serif', fontWeight: 700, fontSize: 14.5, color: '#fff', lineHeight: 1.2,
@@ -1612,6 +1623,7 @@ function App() {
         pendingBookings={pendingBookings}
         overdueRooms={overdueRoomCount}
         buildingName={buildingName}
+        buildingLogo={config?.building?.logo}
         currentUser={currentUser}
         collapsed={collapsed}
         setCollapsed={setCollapsed}
