@@ -2777,7 +2777,11 @@ async function bookingDepositAdminPaymentReadiness(amount) {
 
 app.get('/api/bookings/public/config', async (_req, res) => {
   try {
-    await releaseExpiredPublicBookingHolds(pool);
+    // skipOversized: on a property whose rooms blob has bloated past the
+    // response cap, don't take a FOR UPDATE rewrite of the whole blob on
+    // every anonymous page load — the 60s in-process sweeper still expires
+    // holds. Mirrors the authenticated /api/data paths.
+    await releaseExpiredPublicBookingHolds(pool, { skipOversized: true });
     const { settings, payment } = await publicBookingDepositInfo();
     const openState = roomBookingOpenState(settings);
     const lineContact = await loadPublicLineContactLinks();
@@ -2814,7 +2818,9 @@ app.get('/api/bookings/public/config', async (_req, res) => {
 
 app.get('/api/bookings/public/rooms', async (_req, res) => {
   try {
-    await releaseExpiredPublicBookingHolds(pool);
+    // skipOversized: see /config above — keep anonymous reads off the
+    // exclusive blob-rewrite path; the background sweeper covers expiry.
+    await releaseExpiredPublicBookingHolds(pool, { skipOversized: true });
     const flags = await features.load(pool);
     const settings = roomBookingSettings(flags);
     const openState = roomBookingOpenState(settings);
@@ -3064,11 +3070,17 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBookingSubmit, validateBod
     console.error('public booking config load error:', err);
     return res.status(500).json({ error: 'internal error', code: 'CONFIG_ERROR' });
   }
-  if (!bookingSettings.enabled) {
-    return res.status(503).json(roomBookingDisabledPayload(roomBookingOpenState(bookingSettings)));
-  }
+  // Booking open/closed state. Closing booking must STOP new attempts but must
+  // not abandon in-flight ones: a user who already locked a room (a valid hold
+  // token) before the admin closed booking — and may already have transferred
+  // the deposit — is allowed to DRAIN (finish their submission). The hold is
+  // re-validated under the row lock (sameHold) inside the transaction below; a
+  // closed-window submit WITHOUT a valid owning hold is refused there. Up front
+  // we only hard-reject when nothing is in flight to drain (no room+hold pair).
   const submitOpenState = roomBookingOpenState(bookingSettings);
-  if (!submitOpenState.enabled) {
+  const bookingOpen = !!bookingSettings.enabled && submitOpenState.enabled;
+  const hasHoldAttempt = !!(cleaned.roomId && cleaned.holdToken);
+  if (!bookingOpen && !hasHoldAttempt) {
     return res.status(503).json(roomBookingDisabledPayload(submitOpenState));
   }
   if (bookingSettings.requireDeposit) {
@@ -3119,9 +3131,35 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBookingSubmit, validateBod
       });
     }
   }
+  const normalisedApplicantPhone = normaliseBookingPhone(cleaned.phone);
+  // Blacklist refusal on the PUBLIC path: reject before storing identity
+  // images or touching deposit slips. The message stays vague so we do not
+  // disclose blacklist status to the applicant.
+  if (normalisedApplicantPhone) {
+    try {
+      const black = await pool.query(
+        `SELECT id FROM tenants
+           WHERE deleted_at IS NULL AND status='blacklist'
+             AND REPLACE(REPLACE(COALESCE(phone, ''), ' ', ''), '-', '')=$1
+           LIMIT 1`,
+        [normalisedApplicantPhone]
+      );
+      if (black.rows.length) {
+        return res.status(403).json({
+          error: 'ไม่สามารถรับจองด้วยเบอร์นี้ได้ กรุณาติดต่อสำนักงานโดยตรง',
+          code: 'TENANT_BLACKLISTED',
+        });
+      }
+    } catch (err) {
+      if (err.code !== '42P01' && err.code !== '42703') {
+        console.warn('[public-booking] blacklist check skipped:', err.message);
+      }
+    }
+  }
   // Optional citizen ID front photo: store via the same storage pipeline.
   // Failure here doesn't fail the booking — admin can request it later.
   let frontFileId = null;
+  let idImageWarning = null;
   if (b.citizenIdImageFront) {
     try {
       const out = await storage.saveBase64({
@@ -3135,6 +3173,13 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBookingSubmit, validateBod
       frontFileId = out.id;
     } catch (err) {
       console.warn('[public-booking] id-image upload failed:', err.message);
+      // The booking still succeeds (admin can request the ID photo later), but
+      // don't drop it SILENTLY — the schema allows a ~3 MB string while save is
+      // capped at 1.5 MB, so an oversized photo would otherwise vanish with no
+      // feedback. Surface a warning the applicant/admin can act on.
+      idImageWarning = /file too large/i.test(String(err.message || ''))
+        ? 'รูปบัตรประชาชนมีขนาดใหญ่เกินกำหนด ระบบรับจองแล้วแต่ยังไม่ได้แนบรูป กรุณาส่งรูปที่เล็กลงให้เจ้าหน้าที่ภายหลัง'
+        : 'อัปโหลดรูปบัตรประชาชนไม่สำเร็จ ระบบรับจองแล้วแต่ยังไม่ได้แนบรูป เจ้าหน้าที่อาจขอใหม่ภายหลัง';
     }
   }
   // Build the new booking object outside the transaction.
@@ -3144,7 +3189,6 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBookingSubmit, validateBod
   const bookingId = 'BK-PUB-' + require('crypto').randomBytes(6).toString('hex');
   const holdTokenHash = bookingHoldHash(cleaned.holdToken);
   let applicantRisk = null;
-  const normalisedApplicantPhone = normaliseBookingPhone(cleaned.phone);
   if (normalisedApplicantPhone) {
     try {
       const existingTenant = await pool.query(
@@ -3191,6 +3235,17 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBookingSubmit, validateBod
       const rawBuf = Buffer.from(String(cleaned.depositSlip).replace(/^data:[^;]+;base64,/, ''), 'base64');
       if (!rawBuf.length) {
         return res.status(400).json({ error: 'สลิปค่าจองไม่ถูกต้อง', code: 'INVALID_BOOKING_DEPOSIT_SLIP' });
+      }
+      // Enforce the operator's byte ceiling BEFORE the paid verify round-trip.
+      // The zod schema caps the base64 string at ~3 MB, but the operator's
+      // maxBytes (default 1.5 MB) was previously checked only at the final
+      // storage.saveBase64 — i.e. AFTER the slip was decoded and shipped to the
+      // external verify provider, wasting the provider call on an over-cap blob.
+      if (Number(bookingSettings.maxBytes) > 0 && rawBuf.length > Number(bookingSettings.maxBytes)) {
+        return res.status(400).json({
+          error: `ไฟล์สลิปใหญ่เกินกำหนด (สูงสุด ${Math.floor(Number(bookingSettings.maxBytes) / 1024)} KB)`,
+          code: 'BOOKING_DEPOSIT_SLIP_TOO_LARGE',
+        });
       }
       depositSlipHash = cryptoSvc.hmac(rawBuf);
       const dupPayment = await pool.query(
@@ -3388,6 +3443,7 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBookingSubmit, validateBod
     roomId: cleaned.roomId,
     citizenIdTail: cleaned.citizenIdTail || null,
     citizenIdImageFrontId: frontFileId,
+    citizenIdImageWarning: idImageWarning,
     agreedTermsVersion: cleaned.agreedTermsVersion || null,
     agreedTermsAt: cleaned.agreedTermsVersion ? new Date().toISOString() : null,
   };
@@ -3396,6 +3452,54 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBookingSubmit, validateBod
     if (depositSlipFile && depositSlipFile.id) {
       try { await storage.remove(pool, depositSlipFile.id); } catch { /* best effort */ }
     }
+  };
+  // When a deposit slip was uploaded (and possibly auto-verified — i.e. real
+  // money captured) but the booking then can't be created because the room was
+  // lost in the race between verify+save and the room-lock transaction, do NOT
+  // delete the slip. Park a reconciliation record (keeping the slip file) and
+  // alert the owner so the payment can be refunded or re-applied. Returns a ref
+  // string when parked, or null (no slip / table missing). Used in place of
+  // cleanupDepositSlip() on the "paid but couldn't book" conflict paths.
+  const handleLostDeposit = async (reasonCode, lostRoomId) => {
+    if (!depositSlipFile || !depositSlipFile.id) return null;
+    let ref = null;
+    try {
+      ref = 'ORPH-' + require('crypto').randomBytes(6).toString('hex');
+      await pool.query(
+        `INSERT INTO booking_deposit_orphans
+           (ref, booking_external_id, room_id, applicant_name, applicant_phone,
+            amount, slip_hash, transaction_ref, slip_file_id, verify_provider,
+            verify_code, reason)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+        [ref, bookingId, lostRoomId || cleaned.roomId || null,
+         cleaned.tenantName || null, cleaned.phone || null,
+         Number(bookingSettings.depositAmount) || null,
+         depositSlipHash || null, depositVerifyResult?.transRef || null,
+         depositSlipFile.id, depositVerifyResult?.provider || null,
+         depositVerifyResult?.code || null, reasonCode]
+      );
+    } catch (err) {
+      // Table missing/legacy or insert failed — still DO NOT delete the slip.
+      // An orphaned file is recoverable; a deleted paid slip is not. Just warn.
+      console.warn('[public-booking] orphan deposit park failed (slip kept):', err.message);
+      return null;
+    }
+    try {
+      const flags = await features.load(pool);
+      notifier.notifyOwner({ pool, features: flags }, {
+        category: 'booking',
+        subject: '⚠️ ค่าจองค้างคืน (จ่ายแล้วแต่จองห้องไม่สำเร็จ)',
+        text: [
+          `ผู้จอง ${cleaned.tenantName || '-'} (${cleaned.phone || '-'}) ชำระค่าจองแล้ว แต่ระบบจองห้องไม่สำเร็จ (${reasonCode})`,
+          `ห้องที่พยายามจอง: ${lostRoomId || cleaned.roomId || '-'}`,
+          `ยอด: ฿${Number(bookingSettings.depositAmount || 0).toLocaleString('th-TH')}`,
+          `อ้างอิงการโอน: ${depositVerifyResult?.transRef || depositSlipHash || '-'}`,
+          `รหัสรายการค้างคืน: ${ref}`,
+          '— ขั้นต่อไป: ตรวจสอบแล้วคืนเงิน หรือจัดห้องให้ผู้จอง (สลิปถูกเก็บไว้แล้ว ไม่ได้ลบทิ้ง)',
+        ].join('\n'),
+      }).catch(() => {});
+    } catch { /* owner alert is best-effort */ }
+    return ref;
   };
   try {
     // Read-modify-write inside a transaction with SELECT FOR UPDATE so two
@@ -3435,21 +3539,38 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBookingSubmit, validateBod
       }
       if (!room) {
         await client.query('ROLLBACK');
-        await cleanupDepositSlip();
-        return res.status(404).json({ error: 'ไม่พบห้องนี้', code: 'ROOM_NOT_FOUND' });
+        const parkedRef = await handleLostDeposit('ROOM_NOT_FOUND', cleaned.roomId);
+        return res.status(404).json({
+          error: 'ไม่พบห้องนี้', code: 'ROOM_NOT_FOUND',
+          ...(parkedRef ? { depositParked: true, depositReconcileRef: parkedRef } : {}),
+        });
       }
       const sameHold = bookingSettings.requireDeposit
         && holdTokenHash
         && room.reservedBy === `hold:${holdTokenHash}`
         && !isExpiredHold(room);
       const vacant = isVacantStatus(room.status) && (!v2Room || isVacantStatus(v2Room.status));
+      // Drain guard: booking was CLOSED while this user was mid-flight. Only a
+      // still-valid OWNING hold (sameHold) may complete — they committed before
+      // close, possibly already paid. An expired/foreign hold on a closed
+      // booking is refused with BOOKING_DISABLED (clearer than ROOM_HELD), and
+      // any deposit already captured is PARKED, never silently dropped.
+      if (!bookingOpen && !sameHold) {
+        await client.query('ROLLBACK');
+        const parkedRef = await handleLostDeposit('BOOKING_DISABLED_MIDFLIGHT', cleaned.roomId);
+        return res.status(503).json({
+          ...roomBookingDisabledPayload(submitOpenState),
+          ...(parkedRef ? { depositParked: true, depositReconcileRef: parkedRef } : {}),
+        });
+      }
       if (!sameHold && !vacant) {
         await client.query('ROLLBACK');
-        await cleanupDepositSlip();
+        const parkedRef = await handleLostDeposit(isPublicHoldRoom(room) ? 'ROOM_HELD' : 'ROOM_NOT_VACANT', cleaned.roomId);
         return res.status(409).json({
           error: isPublicHoldRoom(room) ? 'ห้องนี้ถูกล็อกโดยผู้จองก่อนหน้าอยู่' : 'ห้องนี้ไม่ว่างสำหรับจอง',
           code: isPublicHoldRoom(room) ? 'ROOM_HELD' : 'ROOM_NOT_VACANT',
           expiresAt: isPublicHoldRoom(room) ? (room.reservationExpiresAt || null) : null,
+          ...(parkedRef ? { depositParked: true, depositReconcileRef: parkedRef } : {}),
         });
       }
       if (bookingSettings.requireDeposit && !sameHold && holdTokenHash) {
@@ -3457,10 +3578,11 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBookingSubmit, validateBod
         // Surface a clean conflict instead of silently creating a booking
         // on a room another person may now be paying for.
         await client.query('ROLLBACK');
-        await cleanupDepositSlip();
+        const parkedRef = await handleLostDeposit('BOOKING_HOLD_EXPIRED', cleaned.roomId);
         return res.status(409).json({
           error: 'เวลาล็อกห้องหมดแล้ว กรุณาเลือกห้องอีกครั้ง',
           code: 'BOOKING_HOLD_EXPIRED',
+          ...(parkedRef ? { depositParked: true, depositReconcileRef: parkedRef } : {}),
         });
       }
       let pricingConfig = {};
@@ -3535,11 +3657,36 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBookingSubmit, validateBod
           // legacy deploy without rooms_v2: the JSONB reservation above is enough
         } else if (err.code === 'ROOM_NOT_VACANT') {
           await client.query('ROLLBACK');
-          await cleanupDepositSlip();
-          return res.status(409).json({ error: 'ห้องนี้ไม่ว่างสำหรับจอง', code: 'ROOM_NOT_VACANT' });
+          const parkedRef = await handleLostDeposit('ROOM_NOT_VACANT', cleaned.roomId);
+          return res.status(409).json({
+            error: 'ห้องนี้ไม่ว่างสำหรับจอง', code: 'ROOM_NOT_VACANT',
+            ...(parkedRef ? { depositParked: true, depositReconcileRef: parkedRef } : {}),
+          });
         } else {
           throw err;
         }
+      }
+    }
+    if (!cleaned.roomId) {
+      // Idempotency for roomless/inquiry bookings: a double-tap, or a client
+      // retry after a slow/timed-out response, would otherwise mint a second
+      // random bookingId and unshift a duplicate (the relational ON CONFLICT
+      // keys on external_id, which differs each submission, so it can't dedupe
+      // two distinct submissions). Re-use a still-open booking from the same
+      // phone + wanted type created in the last 3 minutes instead. Mirrors the
+      // admin-create DUPLICATE_BOOKING guard, but returns the existing booking
+      // so a retry looks successful rather than erroring.
+      const dupWindowMs = 3 * 60_000;
+      const existingOpen = normalisedApplicantPhone ? list.find((x) => x
+        && ['pending', 'reviewing'].includes(String(x.status || 'pending'))
+        && !x.roomId
+        && normaliseBookingPhone(x.phone) === normalisedApplicantPhone
+        && String(x.wantType || '') === String(wantType)
+        && x.createdAt && (Date.now() - Date.parse(x.createdAt)) < dupWindowMs) : null;
+      if (existingOpen) {
+        await client.query('ROLLBACK');
+        await cleanupDepositSlip();
+        return res.json({ ok: true, booking: existingOpen, duplicate: true });
       }
     }
     list.unshift(newBooking);
@@ -3671,6 +3818,10 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBookingSubmit, validateBod
         depositTransactionRef: newBooking.depositTransactionRef,
         applicantRisk: applicantRisk ? applicantRisk.code : null,
         lineBindingError: newBooking.lineBinding && newBooking.lineBinding.error ? newBooking.lineBinding.error : null,
+        // True when this booking DRAINED through after the admin had already
+        // closed booking (valid in-flight hold completed). Lets the owner see
+        // that a post-close booking was an intentional grace, not a leak.
+        drainedWhileClosed: !bookingOpen,
       },
       `public:${cleaned.phone || 'anon'}`).catch(() => {});
 
@@ -3688,7 +3839,9 @@ app.post('/api/bookings/public', sameOrigin, rateLimitBookingSubmit, validateBod
     res.json({ ok: true, booking: newBooking });
   } catch (err) {
     try { await client.query('ROLLBACK'); } catch { /* already rolled back */ }
-    await cleanupDepositSlip();
+    // Park (don't delete) any captured deposit slip on an unexpected failure —
+    // money safety over file tidiness. No-op when no slip was uploaded.
+    await handleLostDeposit('INTERNAL_ERROR', cleaned.roomId);
     console.error('public booking error:', err);
     res.status(500).json({ error: 'internal error' });
   } finally {
@@ -9723,6 +9876,25 @@ async function ensureApprovedBookingTenant(client, { booking, roomId }) {
   const currentRoomId = String(roomId || '').slice(0, 32).trim();
   if (!fullName || !phone || !currentRoomId) return null;
 
+  // Blacklist is PHONE-keyed: a blacklisted person who books under a slightly
+  // different name spelling ("Somchai S." vs "Somchai Suk") must not slip past
+  // the exact name+phone match below. This phone-only pre-check matches the
+  // public/admin risk computation and closes that name-variant evasion.
+  const blacklisted = await client.query(
+    `SELECT id FROM tenants
+       WHERE deleted_at IS NULL AND status='blacklist'
+         AND REPLACE(REPLACE(COALESCE(phone, ''), ' ', ''), '-', '')=$1
+       LIMIT 1`,
+    [phone]
+  );
+  if (blacklisted.rows.length) {
+    const err = new Error('ผู้จองรายนี้อยู่ใน blacklist ไม่สามารถอนุมัติและสร้าง tenant อัตโนมัติได้');
+    err.httpStatus = 409;
+    err.publicCode = 'TENANT_BLACKLISTED';
+    err.hint = 'ตรวจสอบประวัติผู้เช่าก่อนอนุมัติ booking หรือปลด blacklist อย่างตั้งใจก่อนดำเนินการต่อ';
+    throw err;
+  }
+
   const existing = await client.query(
     `SELECT id, status FROM tenants
        WHERE phone=$1 AND lower(full_name)=lower($2)
@@ -10410,6 +10582,23 @@ app.put('/api/bookings/:id', sameOrigin, csrfGuard, requireAuth, requireRole('ow
       });
     }
     const before = list[idx];
+    // Room assignment/reassignment must go through approve-and-assign (which
+    // locks the room blob + booking together). PUT only carries status/notes,
+    // so accepting a roomId here would (a) desync booking.roomId from the real
+    // reservation with no rooms_v1/rooms_v2 coordination, and (b) let a
+    // terminal (cancelled/completed) record keep being mutated. Refuse any
+    // actual roomId change — the legitimate admin UI never sends one.
+    if (b.roomId !== undefined && String(b.roomId).slice(0, 32) !== String(before.roomId || '')) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        error: 'การมอบหมาย/เปลี่ยนห้องของ booking ต้องทำผ่านปุ่มอนุมัติที่จองห้องพร้อมกันเท่านั้น',
+        code: 'ASSIGNMENT_REQUIRES_ASSIGNMENT_FLOW',
+        hint: 'ใช้ POST /api/bookings/:id/approve-and-assign เพื่อให้สถานะ booking และสถานะห้องถูกล็อกพร้อมกัน',
+        nextActions: {
+          bookingsUrl: `/admin#bookings?booking=${encodeURIComponent(id)}`,
+        },
+      });
+    }
     if (b.status && b.status !== before.status) {
       if (b.status === 'approved') {
         await client.query('ROLLBACK');
@@ -10489,6 +10678,21 @@ app.put('/api/bookings/:id', sameOrigin, csrfGuard, requireAuth, requireRole('ow
       updatedAt: new Date().toISOString(),
       updatedBy: req.session.user.username,
     };
+    // Refund obligation: when a booking that COLLECTED money goes terminal
+    // (cancelled/rejected), record a one-way refund obligation on the booking
+    // itself. Previously the deposit just stayed depositStatus='verified' with
+    // no per-booking trace — only an aggregate report count — so a refund
+    // could be paid twice or never. depositStatus='refund_due' is cleared only
+    // by POST /api/bookings/:id/refund (idempotent). Skip if already resolved.
+    if (['cancelled', 'rejected'].includes(updated.status)
+        && before.status !== updated.status
+        && Number(before.bookingFee) > 0
+        && ['verified', 'pending_review', 'manual_review', 'submitted'].includes(String(before.depositStatus || ''))) {
+      updated.refundDue = Number(before.bookingFee);
+      updated.depositStatus = 'refund_due';
+      updated.refundResolvedAt = null;
+      updated.refundResolvedBy = null;
+    }
     let releasedRoomId = null;
     let roomsAfterRelease = null;
     let releasedTenant = null;
@@ -10705,45 +10909,14 @@ app.put('/api/bookings/:id', sameOrigin, csrfGuard, requireAuth, requireRole('ow
     }
     await client.query('COMMIT');
     txCommitted = true;
-    // R-followup booking audit: revoke any LINE binding codes that were
-    // issued for this booking when it transitions to a terminal status.
-    // tryBind() already refuses to bind on a cancelled/rejected booking
-    // (the JOIN on bookings.status), so this is NOT a security fix — it's
-    // a cleanup so stale 'bound' rows (bound BEFORE cancel but never
-    // transferred via quick-invite) don't keep occupying the per-OA
-    // active-user slot.
-    //
-    // Scope (in revokeBookingBindings): only bindings still anchored at
-    // booking_id with tenant_id IS NULL — bindings already transferred to
-    // a tenant (via transferBookingBindings during quick-invite) represent
-    // a live tenant relationship that must NOT be touched.
-    //
-    // Runs AFTER commit in its own short transaction so a slow LINE/OA
-    // refresh can't block the status-change durability. Errors are caught
-    // + surfaced in the audit log so admin can inspect at /admin#audit.
-    let bookingBindingRevoke = null;
-    if (['cancelled', 'rejected'].includes(updated.status) && before.status !== updated.status) {
-      try {
-        const lineBinding = require('./services/lineBinding');
-        bookingBindingRevoke = await lineBinding.revokeBookingBindings(pool, { bookingId: id });
-      } catch (err) {
-        console.warn('[booking.update] revokeBookingBindings failed:', err.message);
-        bookingBindingRevoke = { error: err.message };
-      }
-    }
-    audit(req, 'booking.update', 'booking', id, {
-      from: before.status, to: updated.status, fields: Object.keys(b), releasedRoomId,
-      terminalReason: ['cancelled', 'rejected'].includes(updated.status) ? (updated.adminNotes || null) : null,
-      releasedTenantId: releasedTenant ? releasedTenant.id : null,
-      lineBindingRevoke: bookingBindingRevoke ? {
-        revoked: bookingBindingRevoke.revoked || 0,
-        error: bookingBindingRevoke.error || null,
-      } : null,
-    });
 
-    // Notify on status change so the applicant knows if the booking moved to
-    // reviewing/rejected/cancelled. Notification failures do not roll back the
-    // already-committed status change; they are returned to the admin UI as
+    // Notify the applicant on status change FIRST — BEFORE revoking the
+    // booking's LINE bindings below. The cancel/reject notice is resolved
+    // through this booking's BOUND LINE recipients; revoking the bindings
+    // first empties that set, so a LINE-only public applicant (the common
+    // case) would silently receive nothing. Order: notify → revoke (revoke
+    // is cleanup, see below). Notification failures never roll back the
+    // already-committed status change; they surface to the admin UI as
     // manual follow-up work.
     if (b.status && b.status !== before.status) {
       try {
@@ -10755,15 +10928,22 @@ app.put('/api/bookings/:id', sameOrigin, csrfGuard, requireAuth, requireRole('ow
         // approve-and-assign with its own room-assignment message.
         const roomLabel = (updated.assignedRoomId || updated.roomId)
           ? ` ห้อง ${updated.assignedRoomId || updated.roomId}` : '';
+        // When the booking had collected money, tell the applicant the
+        // deposit/booking fee will be refunded — silence here reads as
+        // "the dorm kept my money". Driven by the refund_due stamp applied
+        // above on terminal transitions of a paid booking.
+        const refundLine = (updated.depositStatus === 'refund_due' && Number(updated.refundDue) > 0)
+          ? `\n💸 ค่าจองที่ชำระไว้ ฿${Number(updated.refundDue).toLocaleString('th-TH')} เจ้าหน้าที่จะติดต่อคืนเงินให้`
+          : '';
         const tenantText = ({
           reviewing: `🔍 การจองห้อง${roomLabel}ของคุณกำลังถูกตรวจสอบโดยเจ้าหน้าที่\n`
             + `ขั้นต่อไป: เราจะแจ้งผลให้คุณทราบทาง LINE นี้เมื่อตรวจสอบเสร็จ — ยังไม่ต้องดำเนินการใดเพิ่ม`,
           rejected: `❌ ขออภัย การจองห้อง${roomLabel}ไม่ได้รับการอนุมัติ\n`
             + (updated.adminNotes ? `เหตุผล: ${updated.adminNotes}\n` : '')
-            + `หากมีข้อสงสัย หรือต้องการเลือกห้องอื่น กรุณาติดต่อสำนักงาน`,
+            + `หากมีข้อสงสัย หรือต้องการเลือกห้องอื่น กรุณาติดต่อสำนักงาน${refundLine}`,
           cancelled: `🚫 การจองห้อง${roomLabel}ถูกยกเลิกแล้ว\n`
             + (updated.adminNotes ? `เหตุผล: ${updated.adminNotes}\n` : '')
-            + `หากต้องการจองใหม่ สามารถทำรายการได้ที่หน้าจองห้องอีกครั้ง`,
+            + `หากต้องการจองใหม่ สามารถทำรายการได้ที่หน้าจองห้องอีกครั้ง${refundLine}`,
         })[updated.status];
         if (tenantText) {
           tenantNotify = await notifyBookingApplicantStatus({
@@ -10786,12 +10966,52 @@ app.put('/api/bookings/:id', sameOrigin, csrfGuard, requireAuth, requireRole('ow
             `ห้องที่ต้องการ: ${updated.roomId || updated.wantType || '-'}`,
             releasedRoomId ? `ปล่อยห้องแล้ว: ${releasedRoomId}` : null,
             releasedTenant ? `เคลียร์ผู้เช่าที่ mirror จาก booking แล้ว: ${releasedTenant.fullName || releasedTenant.id}` : null,
+            (updated.depositStatus === 'refund_due' && Number(updated.refundDue) > 0)
+              ? `💸 ต้องคืนค่าจอง ฿${Number(updated.refundDue).toLocaleString('th-TH')} — ทำเครื่องหมายคืนแล้วที่หน้า booking` : null,
             bookingNotifyOwnerLine(tenantNotify),
             updated.adminNotes ? `หมายเหตุ: ${updated.adminNotes}` : null,
           ].filter(Boolean).join('\n'),
         }).catch(() => {});
       } catch { /* ignore */ }
     }
+
+    // R-followup booking audit: revoke any LINE binding codes that were
+    // issued for this booking when it transitions to a terminal status.
+    // tryBind() already refuses to bind on a cancelled/rejected booking
+    // (the JOIN on bookings.status), so this is NOT a security fix — it's
+    // a cleanup so stale 'bound' rows (bound BEFORE cancel but never
+    // transferred via quick-invite) don't keep occupying the per-OA
+    // active-user slot.
+    //
+    // Scope (in revokeBookingBindings): only bindings still anchored at
+    // booking_id with tenant_id IS NULL — bindings already transferred to
+    // a tenant (via transferBookingBindings during quick-invite) represent
+    // a live tenant relationship that must NOT be touched.
+    //
+    // Runs AFTER the applicant notify above (which reads these same bound
+    // recipients) so the cancel/reject notice still reaches LINE, then in
+    // its own short transaction so a slow LINE/OA refresh can't block the
+    // status-change durability. Errors are caught + surfaced in the audit log.
+    let bookingBindingRevoke = null;
+    if (['cancelled', 'rejected'].includes(updated.status) && before.status !== updated.status) {
+      try {
+        const lineBinding = require('./services/lineBinding');
+        bookingBindingRevoke = await lineBinding.revokeBookingBindings(pool, { bookingId: id });
+      } catch (err) {
+        console.warn('[booking.update] revokeBookingBindings failed:', err.message);
+        bookingBindingRevoke = { error: err.message };
+      }
+    }
+    audit(req, 'booking.update', 'booking', id, {
+      from: before.status, to: updated.status, fields: Object.keys(b), releasedRoomId,
+      terminalReason: ['cancelled', 'rejected'].includes(updated.status) ? (updated.adminNotes || null) : null,
+      releasedTenantId: releasedTenant ? releasedTenant.id : null,
+      refundDue: (updated.depositStatus === 'refund_due' && Number(updated.refundDue) > 0) ? Number(updated.refundDue) : null,
+      lineBindingRevoke: bookingBindingRevoke ? {
+        revoked: bookingBindingRevoke.revoked || 0,
+        error: bookingBindingRevoke.error || null,
+      } : null,
+    });
     res.json({
       ok: true,
       booking: updated,
@@ -10805,6 +11025,85 @@ app.put('/api/bookings/:id', sameOrigin, csrfGuard, requireAuth, requireRole('ow
       await client.query('ROLLBACK').catch(() => {});
     }
     console.error('booking update error:', err);
+    res.status(500).json({ error: 'internal error' });
+  } finally {
+    client.release();
+  }
+});
+
+// POST /api/bookings/:id/refund — settle the refund obligation on a booking
+// that collected money and was later cancelled/rejected. Idempotent / one-way:
+// only 'refund_due' → 'refunded'. The refund_due stamp is written by the PUT
+// cancel/reject path; this records WHO settled it + WHEN so the same booking
+// can never be refunded twice (re-call → ALREADY_REFUNDED) or silently missed.
+app.post('/api/bookings/:id/refund', sameOrigin, csrfGuard, requireAuth, requireRole('owner', 'manager'), async (req, res) => {
+  const id = String(req.params.id).slice(0, 64);
+  const note = req.body?.note !== undefined ? String(req.body.note).slice(0, 500) : null;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows: cur } = await client.query(
+      `SELECT value FROM app_data WHERE key='baankarn_bookings_v1' FOR UPDATE`
+    );
+    const list = cur.length && Array.isArray(cur[0].value) ? cur[0].value : [];
+    const idx = list.findIndex((x) => x && x.id === id);
+    if (idx < 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: `ไม่พบ booking ${id}`, code: 'BOOKING_NOT_FOUND' });
+    }
+    const before = list[idx];
+    if (String(before.depositStatus || '') === 'refunded') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        error: 'การจองนี้ทำเครื่องหมายคืนค่าจองไปแล้ว',
+        code: 'BOOKING_ALREADY_REFUNDED',
+        refundedAt: before.refundResolvedAt || null,
+        refundedBy: before.refundResolvedBy || null,
+      });
+    }
+    if (String(before.depositStatus || '') !== 'refund_due') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        error: 'การจองนี้ไม่มีค่าจองที่ต้องคืน',
+        code: 'BOOKING_NOT_REFUND_DUE',
+        hint: 'ปุ่มคืนค่าจองใช้ได้เฉพาะ booking ที่เก็บค่าจองแล้วและถูกยกเลิก/ปฏิเสธ (สถานะ refund_due)',
+      });
+    }
+    const refundedAmount = Number(before.refundDue) || Number(before.bookingFee) || 0;
+    const resolvedAt = new Date().toISOString();
+    const updated = {
+      ...before,
+      depositStatus: 'refunded',
+      refundDue: refundedAmount,
+      refundResolvedAt: resolvedAt,
+      refundResolvedBy: req.session.user.username,
+      refundNote: note,
+      updatedAt: resolvedAt,
+      updatedBy: req.session.user.username,
+    };
+    list[idx] = updated;
+    await client.query(
+      `INSERT INTO app_data (key, value, updated_by) VALUES ($1, $2, 'booking-refund')
+         ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW(), updated_by='booking-refund'`,
+      ['baankarn_bookings_v1', JSON.stringify(list)]
+    );
+    // Best-effort relational mirror so SQL-backed views agree with the blob.
+    try {
+      await client.query(
+        `UPDATE bookings SET deposit_status='refunded' WHERE external_id=$1`,
+        [id]
+      );
+    } catch (err) {
+      if (err.code !== '42P01' && err.code !== '42703') {
+        console.warn('[booking.refund] relational mirror skipped:', err.message);
+      }
+    }
+    await client.query('COMMIT');
+    audit(req, 'booking.refund', 'booking', id, { amount: refundedAmount, note });
+    res.json({ ok: true, booking: updated });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('booking refund error:', err);
     res.status(500).json({ error: 'internal error' });
   } finally {
     client.release();
@@ -11160,13 +11459,22 @@ app.post('/api/access/log', deviceOrSameOrigin, requireDeviceOrAdmin, features.r
     // status is re-checked here at decision time.
     if (result === 'granted' && tenantId != null) {
       const { rows: tRows } = await pool.query(
-        `SELECT status, deleted_at FROM tenants WHERE id=$1 LIMIT 1`,
+        `SELECT status, deleted_at, current_room_id FROM tenants WHERE id=$1 LIMIT 1`,
         [tenantId]
       );
       const holder = tRows[0];
       if (!holder || holder.deleted_at || holder.status !== 'active') {
         result = 'denied';
         reason = reason || 'tenant_inactive';
+      } else if (roomId && String(holder.current_room_id || '') !== String(roomId)) {
+        // The card is bound to a room, but the holder no longer occupies it.
+        // A returning tenant keeps the same tenant id (re-rented elsewhere),
+        // and an auto-expired contract can leave a stale 'active' card on the
+        // OLD room — both pass the active-tenant check above. Bind the grant
+        // to the tenant's CURRENT room so an old card can't open a room they
+        // no longer rent.
+        result = 'denied';
+        reason = reason || 'room_mismatch';
       }
     }
     const { rows } = await pool.query(

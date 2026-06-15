@@ -115,6 +115,22 @@ test('public booking supports expiring room holds before deposit submission', ()
     'sweeper should run about once per minute');
 });
 
+test('closing booking drains valid in-flight holds instead of abandoning them', () => {
+  const server = read('server.js');
+  // A single bookingOpen flag + an in-flight detector drive the drain decision.
+  assert.match(server, /const bookingOpen = !!bookingSettings\.enabled && submitOpenState\.enabled/,
+    'submit must compute one bookingOpen flag for the drain decision');
+  assert.match(server, /const hasHoldAttempt = !!\(cleaned\.roomId && cleaned\.holdToken\)/,
+    'submit must detect an in-flight hold attempt (room + hold token present)');
+  // Up front: a closed booking with nothing in flight is rejected immediately.
+  assert.match(server, /if \(!bookingOpen && !hasHoldAttempt\) \{[\s\S]{0,160}roomBookingDisabledPayload\(submitOpenState\)/,
+    'a closed booking with nothing to drain is rejected up front');
+  // Inside the tx: only a still-valid owning hold may complete a closed-window
+  // submit; an expired/foreign hold is refused AND any captured deposit parked.
+  assert.match(server, /if \(!bookingOpen && !sameHold\) \{[\s\S]{0,260}handleLostDeposit\('BOOKING_DISABLED_MIDFLIGHT'/,
+    'a closed-window submit without a valid owning hold must be refused and park any captured deposit');
+});
+
 test('public booking deposit requires a room, a slip, and deduplicates slips', () => {
   const server = read('server.js');
   assert.match(server, /ROOM_REQUIRED_FOR_BOOKING_DEPOSIT/,
@@ -127,6 +143,11 @@ test('public booking deposit requires a room, a slip, and deduplicates slips', (
     'room holds should only block on missing payment setup when slip upload is required');
   assert.match(server, /bookingSettings\.requireSlip && bookingPayment && bookingPayment\.ready === false/,
     'manual-review booking deposits must not be blocked by missing payment setup');
+  const blacklistIdx = server.indexOf("code: 'TENANT_BLACKLISTED'");
+  const idUploadIdx = server.indexOf("category: 'citizen_id_image'");
+  const depositDecodeIdx = server.indexOf("if (bookingSettings.requireDeposit && cleaned.depositSlip)");
+  assert.ok(blacklistIdx > 0 && blacklistIdx < idUploadIdx && blacklistIdx < depositDecodeIdx,
+    'public blacklist refusal must happen before storing ID images or processing deposit slips');
   assert.match(server, /SELECT id FROM payments WHERE slip_hash=\$1 LIMIT 1/,
     'booking deposit slip must be checked against payment slips');
   assert.match(server, /SELECT external_id FROM bookings WHERE deposit_slip_hash=\$1 LIMIT 1/,

@@ -2400,8 +2400,11 @@ test('access cards/log are hardened: role gate, device card-required, inactive-t
   assert.match(server, /if \(req\.device && !cardId\)[\s\S]{0,200}CARD_REQUIRED/,
     'device-authenticated access events must require a real cardId');
   // TL-3: deny when the cardholder tenant is no longer active.
-  assert.match(server, /SELECT status, deleted_at FROM tenants WHERE id=\$1[\s\S]{0,320}tenant_inactive/,
+  assert.match(server, /SELECT status, deleted_at, current_room_id FROM tenants WHERE id=\$1[\s\S]{0,320}tenant_inactive/,
     'access decision must deny cards whose tenant is not active');
+  // TL-3b: deny when the card's room no longer matches the tenant's current room.
+  assert.match(server, /current_room_id \|\| ''\) !== String\(roomId\)[\s\S]{0,600}room_mismatch/,
+    'access decision must deny a card whose room no longer matches the holder\'s current room');
   // TL-3: card issue must target an active tenant.
   assert.match(server, /SELECT 1 FROM tenants WHERE id=\$1 AND deleted_at IS NULL AND status='active'/,
     'card issue must require an active tenant');
