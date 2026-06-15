@@ -977,6 +977,31 @@ async function migrate(pool, opts = {}) {
       ON bookings(deposit_transaction_ref)
       WHERE deposit_transaction_ref IS NOT NULL;
 
+    -- Booking deposit orphans: money captured on a public booking slip that
+    -- then FAILED to create a booking (room lost in a race between verify and
+    -- the room-lock transaction). Parked here — with the slip file kept, not
+    -- deleted — so an admin can refund / re-apply instead of the payment
+    -- vanishing without a trace. Written by handleLostDeposit() in the public
+    -- booking handler. Best-effort: a missing table never blocks the response.
+    CREATE TABLE IF NOT EXISTS booking_deposit_orphans (
+      id BIGSERIAL PRIMARY KEY,
+      ref TEXT UNIQUE NOT NULL,
+      booking_external_id TEXT,
+      room_id TEXT,
+      applicant_name TEXT,
+      applicant_phone TEXT,
+      amount NUMERIC(10,2),
+      slip_hash TEXT,
+      transaction_ref TEXT,
+      slip_file_id BIGINT REFERENCES file_uploads(id) ON DELETE SET NULL,
+      verify_provider TEXT,
+      verify_code TEXT,
+      reason TEXT,
+      resolved_at TIMESTAMPTZ,
+      resolved_by TEXT,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+
     ALTER TABLE contracts ADD COLUMN IF NOT EXISTS booking_fee_credit NUMERIC(10,2) DEFAULT 0;
     ALTER TABLE contracts ADD COLUMN IF NOT EXISTS deposit_balance_due NUMERIC(10,2);
     -- Legal trail: the timestamp at which the applicant clicked through the

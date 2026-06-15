@@ -295,6 +295,8 @@ function PageBookings({ rooms, setRooms, bookings, setBookings, addActivity, set
     awaiting_slip: 'รอสลิป',
     manual_review: 'ตรวจด้วยมือ',
     not_required: 'ไม่ต้องมัดจำ',
+    refund_due: 'ค้างคืนค่าจอง',
+    refunded: 'คืนค่าจองแล้ว',
   })[s] || s || '—';
 
   const columns = [
@@ -659,12 +661,33 @@ function BookingDetail({ b }) {
     awaiting_slip: 'รอสลิป',
     manual_review: 'ตรวจด้วยมือ',
     not_required: 'ไม่ต้องมัดจำ',
+    refund_due: 'ค้างคืนค่าจอง',
+    refunded: 'คืนค่าจองแล้ว',
   })[s] || s || '—';
   const applicantRisk = b.applicantRisk || (
     Array.isArray(b.riskFlags) && b.riskFlags.includes('APPLICANT_PHONE_ALREADY_ACTIVE_TENANT')
       ? { message: 'เบอร์นี้มีผู้เช่า active อยู่แล้ว', nextAction: 'โทรยืนยันตัวตนก่อนอนุมัติ' }
       : null
   );
+
+  // Refund obligation: a booking that collected a deposit then went terminal
+  // is stamped depositStatus='refund_due'. Let the admin settle it (idempotent
+  // POST /api/bookings/:id/refund) so the money isn't tracked only in a report.
+  const [refundState, setRefundState] = useState(null); // null | 'doing' | 'done' | { error }
+  const depositStatus = String(b.depositStatus || '');
+  const showRefund = depositStatus === 'refund_due' || depositStatus === 'refunded' || refundState === 'done';
+  const refundSettled = depositStatus === 'refunded' || refundState === 'done';
+  const markRefunded = async () => {
+    setRefundState('doing');
+    try {
+      const apiCall = window.requireApiCall ? window.requireApiCall() : window.apiCall;
+      if (!apiCall) throw new Error('Admin API helper is not loaded. Refresh the page.');
+      await apiCall(`/api/bookings/${encodeURIComponent(b.id)}/refund`, { method: 'POST', body: JSON.stringify({}) });
+      setRefundState('done');
+    } catch (e) {
+      setRefundState({ error: e.message || 'ทำเครื่องหมายคืนค่าจองไม่สำเร็จ' });
+    }
+  };
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
@@ -697,6 +720,41 @@ function BookingDetail({ b }) {
           <div style={{ marginTop: 2, color: C.muted }}>
             {applicantRisk.nextAction || 'ถ้าจองให้เพื่อน ให้เพื่อนใช้ LINE/เบอร์ของตัวเอง; ถ้าจองอีกห้อง ให้แอดมินตรวจสอบก่อนสร้างสัญญา'}
           </div>
+        </div>
+      )}
+
+      {showRefund && (
+        <div style={{
+          padding: '10px 12px',
+          border: `1px solid ${(C.danger || '#dc2626')}55`,
+          borderLeft: `3px solid ${refundSettled ? (C.success || '#16a34a') : (C.danger || '#dc2626')}`,
+          borderRadius: 8,
+          background: refundSettled ? (C.successSoft || '#f0fdf4') : (C.dangerSoft || '#fef2f2'),
+          color: C.ink2,
+          fontSize: 12.5,
+          lineHeight: 1.6,
+        }}>
+          <div style={{ fontWeight: 700, color: C.ink, marginBottom: 4 }}>
+            {refundSettled ? '✅ คืนค่าจองแล้ว' : '💸 ต้องคืนค่าจองให้ผู้จอง'}
+          </div>
+          <div>ยอดค่าจองที่ชำระไว้: {fmtCurrency(b.refundDue ?? b.bookingFee ?? 0)}</div>
+          {!refundSettled && (
+            <button
+              onClick={markRefunded}
+              disabled={refundState === 'doing'}
+              style={{
+                marginTop: 8, padding: '6px 12px', borderRadius: 8, border: 'none',
+                cursor: refundState === 'doing' ? 'default' : 'pointer',
+                background: C.danger || '#dc2626', color: '#fff', fontSize: 12.5, fontWeight: 600,
+                opacity: refundState === 'doing' ? 0.6 : 1,
+              }}
+            >
+              {refundState === 'doing' ? 'กำลังบันทึก…' : 'ทำเครื่องหมายว่าคืนเงินแล้ว'}
+            </button>
+          )}
+          {refundState && refundState.error && (
+            <div style={{ marginTop: 6, color: C.danger || '#dc2626' }}>{refundState.error}</div>
+          )}
         </div>
       )}
 

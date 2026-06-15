@@ -102,10 +102,18 @@ function aggregateBookingFees(bookingsList, year) {
       verified_count: 0, verified_amount: 0,
       pending_count: 0, pending_amount: 0,
       cancelled_collected_count: 0, cancelled_collected_amount: 0,
+      stuck_paid_count: 0, stuck_paid_amount: 0,
+      refund_due_count: 0, refund_due_amount: 0,
+      refunded_count: 0, refunded_amount: 0,
     };
   }
   const byMethod = {};
   const PENDING = new Set(['pending_review', 'manual_review', 'submitted']);
+  // Money was received then the booking went terminal: the deposit is now a
+  // refund obligation (refund_due) or already settled (refunded). It is still
+  // REAL money received, so it stays in the verified totals + the cancelled-
+  // collected reconciliation bucket, and is additionally split by refund stage.
+  const REFUND = new Set(['refund_due', 'refunded']);
   for (const b of list) {
     if (!b || typeof b !== 'object') continue;
     const fee = Math.round((Number(b.bookingFee) || 0) * 100) / 100;
@@ -113,19 +121,38 @@ function aggregateBookingFees(bookingsList, year) {
     const depositStatus = String(b.depositStatus || '');
     const isVerified = depositStatus === 'verified';
     const isPending = PENDING.has(depositStatus);
-    if (!isVerified && !isPending) continue;
+    const isRefund = REFUND.has(depositStatus);
+    if (!isVerified && !isPending && !isRefund) continue;
     const when = b.depositVerifiedAt || b.reservedAt || b.createdAt || null;
     const period = typeof when === 'string' && /^\d{4}-\d{2}/.test(when) ? when.slice(0, 7) : null;
     if (!period || !months[period]) continue;
     const slot = months[period];
-    if (isVerified) {
+    if (isVerified || isRefund) {
       slot.verified_count += 1;
       slot.verified_amount = Math.round((slot.verified_amount + fee) * 100) / 100;
       const method = String(b.depositPaymentMethod || 'ไม่ระบุ');
       byMethod[method] = Math.round(((byMethod[method] || 0) + fee) * 100) / 100;
-      if (['cancelled', 'rejected'].includes(String(b.status || ''))) {
+      if (isRefund) {
+        // refund_due/refunded only arise from a terminal (cancelled/rejected)
+        // booking, so they are always a reconciliation item.
         slot.cancelled_collected_count += 1;
         slot.cancelled_collected_amount = Math.round((slot.cancelled_collected_amount + fee) * 100) / 100;
+        if (depositStatus === 'refund_due') {
+          slot.refund_due_count += 1;
+          slot.refund_due_amount = Math.round((slot.refund_due_amount + fee) * 100) / 100;
+        } else {
+          slot.refunded_count += 1;
+          slot.refunded_amount = Math.round((slot.refunded_amount + fee) * 100) / 100;
+        }
+      } else if (['cancelled', 'rejected'].includes(String(b.status || ''))) {
+        slot.cancelled_collected_count += 1;
+        slot.cancelled_collected_amount = Math.round((slot.cancelled_collected_amount + fee) * 100) / 100;
+      } else if (['pending', 'reviewing'].includes(String(b.status || ''))) {
+        // Paid but never converted to a contract — money received yet the
+        // booking is stuck in the queue (the "paid-but-unassignable" case).
+        // Surfaced so it can't silently fall through the cracks.
+        slot.stuck_paid_count += 1;
+        slot.stuck_paid_amount = Math.round((slot.stuck_paid_amount + fee) * 100) / 100;
       }
     } else {
       slot.pending_count += 1;
