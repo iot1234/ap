@@ -605,6 +605,29 @@ test('tryBind: enforces target_oa_id when set on the binding', async () => {
   assert.equal(r.expectedOaId, 7);
 });
 
+test('tryBind: target_oa_id returned as a BIGINT string still binds on the matching OA', async () => {
+  // pg returns BIGINT columns as STRINGS (no int8 type parser is registered),
+  // so target_oa_id arrives as '7' while oaId is the number 7. A strict !==
+  // wrongly rejected every correct-OA bind as wrong_oa; this pins the Number()
+  // coercion so multi-OA binding actually works.
+  const pool = buildFakePool({
+    'FROM line_bindings b': () => ({
+      rows: [{
+        id: 1, tenant_id: 5, status: 'pending',
+        target_oa_id: '7',    // BIGINT comes back as a string from pg
+        expires_at: new Date(Date.now() + 86400000),
+        full_name: 'X', current_room_id: '101', tenant_status: 'active',
+        line_binding_blocked: false,
+      }],
+    }),
+    'WHERE line_user_id=$1': () => ({ rows: [] }),
+  });
+  // Tenant sent the code to the CORRECT OA #7
+  const r = await lb.tryBind(pool, { code: 'BIND-DEADBEEF', lineUserId: 'U1', oaId: 7 });
+  assert.equal(r.ok, true);
+  assert.equal(r.oaId, 7);
+});
+
 test('tryBind: dedup is per-OA (same userId on different OAs is OK)', async () => {
   // Scenario: tenant 5 has pending code; SAME LINE userId already bound to
   // tenant 99 — but that bind is on a different OA (oa_id=2 vs current oa=5).
