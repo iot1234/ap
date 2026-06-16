@@ -60,8 +60,22 @@ async function rowsToXlsx(rows, sheetName) {
   return wb.xlsx.writeBuffer();
 }
 
+const EXPORT_MAX_ROWS = 100_000;
 function send(req, res, rows, sheetName) {
   const format = String(req.query.format || 'json').toLowerCase();
+  // Fail LOUD (never silently truncate — exports must stay COMPLETE) when the
+  // result set is large enough that building a full CSV string / XLSX buffer
+  // (a 2nd and 3rd in-memory copy on top of the query result) could exhaust the
+  // process heap and take down unrelated traffic. Far above any real dorm
+  // export; the operator narrows the period/filter and re-exports.
+  if ((format === 'csv' || format === 'xlsx') && Array.isArray(rows) && rows.length > EXPORT_MAX_ROWS) {
+    return res.status(413).json({
+      error: `ชุดข้อมูลใหญ่เกินกำหนดสำหรับการส่งออก (${rows.length.toLocaleString()} แถว > ${EXPORT_MAX_ROWS.toLocaleString()}) — กรุณาแคบช่วงเวลา/ตัวกรองแล้วลองใหม่`,
+      code: 'EXPORT_TOO_LARGE',
+      rows: rows.length,
+      maxRows: EXPORT_MAX_ROWS,
+    });
+  }
   if (format === 'csv') {
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${sheetName || 'report'}.csv"`);

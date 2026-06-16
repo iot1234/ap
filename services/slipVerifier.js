@@ -59,6 +59,11 @@ const secrets = require('./secrets');
 const ssrfGuard = require('./ssrfGuard');
 
 const TIMEOUT_MS = 10_000;
+// Hard cap on a slip-verify provider's response body. Legit responses are tiny
+// JSON (<10 KB); without a cap a malicious/compromised/buggy provider (or a
+// proxy error page) returning a huge body would accumulate unbounded in memory
+// and OOM the process mid slip-upload. Abort the stream past this size.
+const MAX_PROVIDER_RESPONSE_BYTES = 1_000_000;
 
 // Provider catalog — central registry so the rest of the codebase
 // can iterate, list, and probe individual providers without
@@ -868,7 +873,15 @@ async function verifyViaSlipOK(buffer, expected) {
       timeout: TIMEOUT_MS,
     }, (res) => {
       let buf = '';
-      res.on('data', (c) => { buf += c; });
+      let respBytes = 0;
+      res.on('data', (c) => {
+        respBytes += c.length;
+        if (respBytes > MAX_PROVIDER_RESPONSE_BYTES) {
+          req.destroy(new Error('provider response too large'));
+          return;
+        }
+        buf += c;
+      });
       res.on('end', () => {
         try {
           const j = JSON.parse(buf);
@@ -985,7 +998,15 @@ async function verifyViaEasySlip(buffer, expected) {
       timeout: TIMEOUT_MS,
     }, (res) => {
       let buf = '';
-      res.on('data', (c) => { buf += c; });
+      let respBytes = 0;
+      res.on('data', (c) => {
+        respBytes += c.length;
+        if (respBytes > MAX_PROVIDER_RESPONSE_BYTES) {
+          req.destroy(new Error('provider response too large'));
+          return;
+        }
+        buf += c;
+      });
       res.on('end', () => {
         try {
           const j = JSON.parse(buf);
@@ -1138,7 +1159,15 @@ async function verifyViaSlip2Go(buffer, expected) {
       timeout: TIMEOUT_MS,
     }, (res) => {
       let buf = '';
-      res.on('data', (c) => { buf += c; });
+      let respBytes = 0;
+      res.on('data', (c) => {
+        respBytes += c.length;
+        if (respBytes > MAX_PROVIDER_RESPONSE_BYTES) {
+          req.destroy(new Error('provider response too large'));
+          return;
+        }
+        buf += c;
+      });
       res.on('end', () => {
         try {
           const j = JSON.parse(buf);
