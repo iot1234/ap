@@ -8,6 +8,7 @@ const path = require('path');
 const os = require('os');
 
 process.env.DATABASE_URL = 'postgres://fake/fake';
+process.env.UPLOAD_DIR = path.join(os.tmpdir(), `bk-upload-root-${process.pid}`);
 const backup = require('../scripts/backup');
 
 function tmpFile(content) {
@@ -57,4 +58,50 @@ test('verify: handles invalid JSON', () => {
   const r = backup.verify(f);
   fs.unlinkSync(f);
   assert.equal(r.ok, false);
+});
+
+test('materializeFileBlobs restores uploaded file bytes and marks rows local', async () => {
+  const content = Buffer.from('stored bytes');
+  const calls = [];
+  const pool = {
+    query: async (sql, params) => {
+      calls.push({ sql: String(sql), params });
+      return { rowCount: 1, rows: [] };
+    },
+  };
+  const out = await backup.materializeFileBlobs(pool, {
+    fileBlobs: [{
+      id: 12,
+      category: 'slip',
+      filename: 'restore-test.bin',
+      contentBase64: content.toString('base64'),
+    }],
+  });
+  const restored = path.join(require('../services/storage').rootPath(), 'slip', 'restore-test.bin');
+  assert.equal(out.restored, 1);
+  assert.equal(fs.readFileSync(restored).toString(), 'stored bytes');
+  assert.ok(calls.some((c) => /UPDATE file_uploads/i.test(c.sql)
+    && c.params[0] === 12
+    && c.params[1] === 'slip'
+    && c.params[2] === 'restore-test.bin'));
+  fs.rmSync(restored, { force: true });
+});
+
+test('materializeFileBlobs reports bad file blobs without throwing', async () => {
+  const pool = {
+    query: async () => {
+      throw new Error('query should not run for invalid file path');
+    },
+  };
+  const out = await backup.materializeFileBlobs(pool, {
+    fileBlobs: [{
+      id: 99,
+      category: '../bad',
+      filename: 'escape.bin',
+      contentBase64: Buffer.from('x').toString('base64'),
+    }],
+  });
+  assert.equal(out.restored, 0);
+  assert.equal(out.failed, 1);
+  assert.match(out.errors[0], /invalid file blob path/);
 });

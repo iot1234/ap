@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // scripts/backup.js
-// Dump all PostgreSQL tables managed by this app (app_data, auth_users,
-// maintenance_tickets, audit_logs) as JSON. Designed to run from cron or
-// manually. By default writes to ./backups/<timestamp>.json. If R2_*
+// Dump all PostgreSQL operational tables managed by this app as JSON.
+// Designed to run from cron or manually. By default writes to
+// ./backups/<timestamp>.json.enc when backup encryption is available. If R2_*
 // credentials are set, also uploads via S3-compatible API.
 //
 // Usage:
@@ -50,12 +50,16 @@ function encodeBackup(backupObj) {
 
 // Decrypt-aware reader — works for both plaintext .json and encrypted
 // .json.enc files, so verify/restore handle either format.
-function readBackupFile(filePath) {
-  let raw = fs.readFileSync(filePath);
+function readBackupBuffer(buffer) {
+  let raw = Buffer.from(buffer);
   if (_encryption && _encryption.isEncryptedBuffer(raw)) {
     raw = _encryption.decryptBuffer(raw);
   }
   return JSON.parse(raw.toString('utf8'));
+}
+
+function readBackupFile(filePath) {
+  return readBackupBuffer(fs.readFileSync(filePath));
 }
 
 const _isBackupName = (f) => f.startsWith('backup-')
@@ -82,11 +86,13 @@ const TABLES = [
   // v2 — financial / tenancy
   'tenants', 'contracts', 'bills', 'payments',
   'recurring_charges', 'parcels',
+  // v2 — relational rooms + booking-deposit reconciliation
+  'rooms_v2', 'booking_deposit_orphans',
   // v2 — IoT / hardware / access
   'meter_readings', 'access_logs', 'access_cards', 'access_devices',
   // v2 — notifications + LINE multi-OA + bindings
   'notifications_log', 'notifications_queue',
-  'line_oas', 'line_bindings',
+  'line_oas', 'line_bindings', 'admin_line_recipients',
   // v2 — files / sessions / lockouts / settings / bookings
   'file_uploads', 'tenant_sessions', 'login_lockouts',
   'system_settings', 'bookings',
@@ -112,6 +118,7 @@ const PAGINATABLE_BY_ID = new Set([
   'audit_logs', 'meter_readings', 'access_logs',
   'notifications_log', 'notifications_queue',
   'bills', 'payments', 'maintenance_tickets', 'parcels', 'file_uploads',
+  'bookings', 'rooms_v2', 'booking_deposit_orphans',
 ]);
 
 const PAGE_SIZE = 5000;
@@ -154,6 +161,106 @@ async function dumpTable(client, name) {
   }
 }
 
+function fileBlobName(row) {
+  const category = String(row && row.category || '');
+  const filename = String(row && row.filename || '');
+  if (!/^[a-z_][a-z0-9_]*$/i.test(category)) return null;
+  if (!/^[A-Za-z0-9._-]+$/.test(filename)) return null;
+  return { category, filename };
+}
+
+async function dumpFileBlobs(fileRows) {
+  const rows = Array.isArray(fileRows) ? fileRows : [];
+  const out = [];
+  const errors = [];
+  if (!rows.length) return { files: out, errors };
+  let storage;
+  try { storage = require('../services/storage'); }
+  catch (err) {
+    return { files: out, errors: [`storage service unavailable: ${err.message}`] };
+  }
+  for (const row of rows) {
+    const safe = fileBlobName(row);
+    if (!safe) {
+      errors.push(`file_uploads:${row && row.id ? row.id : '?'} invalid category/filename`);
+      continue;
+    }
+    try {
+      const buf = await storage.readFileRaw(row);
+      if (!buf || !Buffer.isBuffer(buf)) {
+        errors.push(`file_uploads:${row.id} missing stored bytes`);
+        continue;
+      }
+      out.push({
+        id: row.id,
+        category: safe.category,
+        filename: safe.filename,
+        storage: row.storage || 'local',
+        size: buf.length,
+        contentBase64: buf.toString('base64'),
+      });
+    } catch (err) {
+      errors.push(`file_uploads:${row.id} ${String(err.message || err).slice(0, 160)}`);
+    }
+  }
+  return { files: out, errors };
+}
+
+function materializeLocalFileBlob(blob) {
+  const safe = fileBlobName(blob);
+  if (!safe) throw new Error('invalid file blob path');
+  if (!blob.contentBase64 || typeof blob.contentBase64 !== 'string') {
+    throw new Error('missing file content');
+  }
+  const storage = require('../services/storage');
+  const root = storage.rootPath();
+  const dir = path.join(root, safe.category);
+  storage.ensureDir(dir);
+  const target = path.resolve(path.join(dir, safe.filename));
+  const rootWithSep = root.endsWith(path.sep) ? root : root + path.sep;
+  if (!target.startsWith(rootWithSep)) throw new Error('file blob path escapes upload root');
+  fs.writeFileSync(target, Buffer.from(blob.contentBase64, 'base64'));
+  return safe;
+}
+
+async function materializeFileBlobs(poolLike, backup) {
+  const blobs = Array.isArray(backup && backup.fileBlobs) ? backup.fileBlobs : [];
+  const stats = { incoming: blobs.length, restored: 0, skipped: 0, failed: 0, errors: [] };
+  if (!blobs.length) return stats;
+  for (const blob of blobs) {
+    try {
+      const safe = materializeLocalFileBlob(blob);
+      const id = Number(blob.id);
+      let updated = 0;
+      if (Number.isFinite(id) && id > 0) {
+        const r = await poolLike.query(
+          `UPDATE file_uploads
+              SET storage='local',
+                  url=CASE WHEN COALESCE(url,'')='' THEN '/files/' || id::text ELSE url END
+            WHERE id=$1 AND category=$2 AND filename=$3`,
+          [id, safe.category, safe.filename]
+        );
+        updated = r.rowCount || 0;
+      }
+      if (!updated) {
+        await poolLike.query(
+          `UPDATE file_uploads
+              SET storage='local',
+                  url=CASE WHEN COALESCE(url,'')='' THEN '/files/' || id::text ELSE url END
+            WHERE category=$1 AND filename=$2`,
+          [safe.category, safe.filename]
+        );
+      }
+      stats.restored++;
+    } catch (err) {
+      stats.failed++;
+      stats.errors.push(String(err.message || err).slice(0, 180));
+    }
+  }
+  stats.errors = stats.errors.slice(0, 30);
+  return stats;
+}
+
 async function main() {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const backup = {
@@ -172,6 +279,12 @@ async function main() {
       console.warn(`[backup] ${t} failed: ${err.message}`);
       backup.tables[t] = { __error: err.message };
     }
+  }
+  const dumpedFiles = await dumpFileBlobs(backup.tables.file_uploads);
+  backup.fileBlobs = dumpedFiles.files;
+  backup.fileBlobErrors = dumpedFiles.errors;
+  if (dumpedFiles.files.length || dumpedFiles.errors.length) {
+    console.log(`[backup] file blobs: ${dumpedFiles.files.length} included, ${dumpedFiles.errors.length} failed`);
   }
 
   const outDir = path.join(__dirname, '..', 'backups');
@@ -250,6 +363,12 @@ async function run({ pool: externalPool, retainDays }) {
       }
     }
   }
+  const dumpedFiles = await dumpFileBlobs(backup.tables.file_uploads);
+  backup.fileBlobs = dumpedFiles.files;
+  backup.fileBlobErrors = dumpedFiles.errors;
+  counts.fileBlobs = dumpedFiles.files.length;
+  counts.fileBlobErrors = dumpedFiles.errors.length;
+
   // Integrity hash — admin can verify a backup file hasn't been tampered
   // with (or corrupted in transit) before restoring. SHA-256 of the
   // serialized payload BEFORE the hash field is added, so the hash is
@@ -280,6 +399,7 @@ async function run({ pool: externalPool, retainDays }) {
     size: fs.statSync(file).size,
     digest: backup.integrity.digest,
     rowCounts: counts,
+    fileBlobErrors: dumpedFiles.errors,
   };
 }
 
@@ -307,7 +427,15 @@ function verify(filePath) {
   }
 }
 
-module.exports = { run, verify, readBackupFile };
+module.exports = {
+  run,
+  verify,
+  readBackupFile,
+  readBackupBuffer,
+  dumpFileBlobs,
+  materializeFileBlobs,
+  TABLES,
+};
 
 // CLI mode: only execute when invoked directly (node scripts/backup.js)
 if (require.main === module) {

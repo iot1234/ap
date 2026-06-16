@@ -1417,6 +1417,7 @@ function SqlBackupSection({ setToast, addActivity }) {
   const [busy, setBusy] = React.useState(false);
   const [list, setList] = React.useState([]);
   const [confirmRestore, setConfirmRestore] = React.useState(null);
+  const [confirmCloneImport, setConfirmCloneImport] = React.useState(null);
 
   const refresh = React.useCallback(async () => {
     try {
@@ -1429,13 +1430,25 @@ function SqlBackupSection({ setToast, addActivity }) {
   }, []);
   React.useEffect(() => { refresh(); }, [refresh]);
 
+  const fileBlobErrorCount = (d) => Number(d?.fileBlobErrorCount ?? d?.fileBlobErrors?.length ?? 0);
+  const fileRestoreText = (fileRestore) => {
+    if (!fileRestore) return '';
+    const failed = Number(fileRestore.failed || 0);
+    return ` · ไฟล์แนบ ${fileRestore.restored || 0}/${fileRestore.incoming || 0}${failed ? ` (พลาด ${failed})` : ''}`;
+  };
+  const fileBlobWarningText = (d) => {
+    const count = fileBlobErrorCount(d);
+    return count ? ` · backup ขาดไฟล์แนบ ${count} รายการ` : '';
+  };
+
   const create = async () => {
     setBusy(true);
     try {
       const d = await apiCall('/api/admin/backup/create', { method: 'POST' });
+      const missingFiles = fileBlobErrorCount(d);
       setToast && setToast({
-        kind: 'success',
-        message: `สำรองข้อมูลเรียบร้อย (${(d.size / 1024).toFixed(1)} KB)`,
+        kind: missingFiles ? 'warning' : 'success',
+        message: `สำรองข้อมูลเรียบร้อย (${(d.size / 1024).toFixed(1)} KB)${fileBlobWarningText(d)}`,
       });
       addActivity && addActivity({
         icon: '💾',
@@ -1477,9 +1490,12 @@ function SqlBackupSection({ setToast, addActivity }) {
         .filter(([, v]) => v && (v.inserted || 0) > 0)
         .map(([t, v]) => `${t}: ${v.inserted}`)
         .join(', ');
+      const fileText = fileRestoreText(d.fileRestore);
+      const fileWarning = fileBlobWarningText(d);
+      const restoreKind = Number(d.fileRestore?.failed || 0) > 0 || fileBlobErrorCount(d) > 0 ? 'warning' : 'success';
       setToast && setToast({
-        kind: 'success',
-        message: `กู้คืนสำเร็จ — ${counts || 'no rows'}${d.errorCount ? ` (มี ${d.errorCount} แถวที่ข้าม)` : ''}`,
+        kind: restoreKind,
+        message: `กู้คืนสำเร็จ — ${counts || 'no rows'}${fileText}${fileWarning}${d.errorCount ? ` (มี ${d.errorCount} แถวที่ข้าม)` : ''}`,
       });
       addActivity && addActivity({
         icon: '📥', text: `กู้คืนฐานข้อมูลจาก ${filename}`, type: 'system',
@@ -1496,49 +1512,46 @@ function SqlBackupSection({ setToast, addActivity }) {
     } finally { setBusy(false); }
   };
 
+  const readBackupFileAsPayload = (file) => new Promise((resolve, reject) => {
+    if (!file) return reject(new Error('ไม่ได้เลือกไฟล์'));
+    if (!/\.json(\.enc)?$/i.test(file.name || '')) {
+      return reject(new Error('รองรับเฉพาะไฟล์ .json หรือ .json.enc'));
+    }
+    if (file.size > 70 * 1024 * 1024) {
+      return reject(new Error(`ไฟล์ใหญ่เกินไป (${fmtSize(file.size)}) — อัปโหลดผ่านหน้านี้ได้ไม่เกิน 70 MB`));
+    }
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('อ่านไฟล์ไม่สำเร็จ'));
+    reader.onload = () => {
+      const s = String(reader.result || '');
+      const contentBase64 = s.includes(',') ? s.slice(s.indexOf(',') + 1) : s;
+      if (!contentBase64) return reject(new Error('ไฟล์ว่างหรืออ่านไม่ได้'));
+      resolve({ filename: file.name, contentBase64, size: file.size });
+    };
+    reader.readAsDataURL(file);
+  });
+
   // Upload-and-restore: lets admin pick a JSON file from disk (e.g. backup
   // they downloaded last week) and POST it directly. Server validates the
   // integrity hash + schemaVersion before touching the DB.
   const uploadRestore = () => {
     const input = document.createElement('input');
     input.type = 'file';
-    input.accept = 'application/json';
+    input.accept = '.json,.json.enc,application/json,application/octet-stream';
     input.onchange = async () => {
       const file = input.files?.[0];
       if (!file) return;
-      // Cap at 50MB to match server-side body limit. Bigger dumps need to
-      // come via the server-side filename path (uploaded out-of-band).
-      if (file.size > 50 * 1024 * 1024) {
-        setToast && setToast({
-          kind: 'danger',
-          message: `ไฟล์ใหญ่เกินไป (${(file.size / 1024 / 1024).toFixed(1)} MB) — ต้องไม่เกิน 50 MB`,
-        });
-        return;
-      }
-      let backup;
       try {
-        backup = JSON.parse(await file.text());
+        const backupFile = await readBackupFileAsPayload(file);
+        setConfirmRestore({
+          kind: 'upload',
+          backupFile,
+          filename: file.name,
+          size: file.size,
+        });
       } catch (err) {
-        setToast && setToast({ kind: 'danger', message: 'ไฟล์ไม่ใช่ JSON ที่ถูกต้อง' });
-        return;
+        setToast && setToast({ kind: 'danger', message: err.message || 'อ่านไฟล์ backup ไม่สำเร็จ' });
       }
-      if (!backup || backup.schemaVersion !== 1) {
-        setToast && setToast({ kind: 'danger', message: 'รูปแบบ backup ไม่ถูกต้อง (ต้อง schemaVersion=1)' });
-        return;
-      }
-      const counts = backup.integrity?.rowCounts || {};
-      const summary = Object.entries(counts)
-        .filter(([, n]) => Number(n) > 0)
-        .map(([t, n]) => `${t}: ${n}`)
-        .join('\n');
-      setConfirmRestore({
-        kind: 'upload',
-        backup,
-        filename: file.name,
-        createdAt: backup.createdAt,
-        summary,
-        size: file.size,
-      });
     };
     input.click();
   };
@@ -1549,15 +1562,18 @@ function SqlBackupSection({ setToast, addActivity }) {
     try {
       const d = await apiCall('/api/admin/restore', {
         method: 'POST',
-        body: JSON.stringify({ backup: confirmRestore.backup, confirm: true }),
+        body: JSON.stringify({ backupFile: confirmRestore.backupFile, confirm: true }),
       });
       const counts = Object.entries(d.restored || {})
         .filter(([, v]) => v && (v.inserted || 0) > 0)
         .map(([t, v]) => `${t}: ${v.inserted}`)
         .join(', ');
+      const fileText = fileRestoreText(d.fileRestore);
+      const fileWarning = fileBlobWarningText(d);
+      const restoreKind = Number(d.fileRestore?.failed || 0) > 0 || fileBlobErrorCount(d) > 0 ? 'warning' : 'success';
       setToast && setToast({
-        kind: 'success',
-        message: `กู้คืนจาก ${confirmRestore.filename} สำเร็จ — ${counts || 'no rows'}`,
+        kind: restoreKind,
+        message: `กู้คืนจาก ${confirmRestore.filename} สำเร็จ — ${counts || 'no rows'}${fileText}${fileWarning}`,
       });
       addActivity && addActivity({
         icon: '📥',
@@ -1574,6 +1590,101 @@ function SqlBackupSection({ setToast, addActivity }) {
     } finally { setBusy(false); }
   };
 
+  const previewCloneImportFromPayload = async (payload, meta = {}) => {
+    setBusy(true);
+    try {
+      const d = await apiCall('/api/admin/clone-import', {
+        method: 'POST',
+        body: JSON.stringify({ backupFile: payload, dryRun: true }),
+      });
+      setConfirmCloneImport({
+        kind: 'upload',
+        backupFile: payload,
+        filename: meta.filename || payload.filename,
+        size: meta.size || payload.size,
+        report: d,
+      });
+      const missingFiles = fileBlobErrorCount(d);
+      setToast && setToast({
+        kind: missingFiles ? 'warning' : 'success',
+        message: `ตรวจไฟล์นำเข้าแล้ว — โปรดดู preview ก่อนยืนยัน${fileBlobWarningText(d)}`,
+      });
+    } catch (e) {
+      setToast && setToast({ kind: 'danger', message: 'ตรวจไฟล์นำเข้าไม่สำเร็จ: ' + (e.message || 'unknown') });
+    } finally { setBusy(false); }
+  };
+
+  const previewCloneImportFromFile = async (filename) => {
+    setBusy(true);
+    try {
+      const d = await apiCall('/api/admin/clone-import', {
+        method: 'POST',
+        body: JSON.stringify({ filename, dryRun: true }),
+      });
+      setConfirmCloneImport({ kind: 'server', filename, report: d });
+      const missingFiles = fileBlobErrorCount(d);
+      setToast && setToast({
+        kind: missingFiles ? 'warning' : 'success',
+        message: `ตรวจไฟล์นำเข้าแล้ว — โปรดดู preview ก่อนยืนยัน${fileBlobWarningText(d)}`,
+      });
+    } catch (e) {
+      setToast && setToast({ kind: 'danger', message: 'ตรวจไฟล์นำเข้าไม่สำเร็จ: ' + (e.message || 'unknown') });
+    } finally { setBusy(false); }
+  };
+
+  const uploadCloneImport = () => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.json,.json.enc,application/json,application/octet-stream';
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      try {
+        const payload = await readBackupFileAsPayload(file);
+        await previewCloneImportFromPayload(payload, { filename: file.name, size: file.size });
+      } catch (err) {
+        setToast && setToast({ kind: 'danger', message: err.message || 'อ่านไฟล์ backup ไม่สำเร็จ' });
+      }
+    };
+    input.click();
+  };
+
+  const applyCloneImport = async () => {
+    if (!confirmCloneImport) return;
+    setBusy(true);
+    try {
+      const body = confirmCloneImport.kind === 'upload'
+        ? { backupFile: confirmCloneImport.backupFile, dryRun: false, confirm: true }
+        : { filename: confirmCloneImport.filename, dryRun: false, confirm: true };
+      const d = await apiCall('/api/admin/clone-import', {
+        method: 'POST',
+        body: JSON.stringify(body),
+      });
+      const t = d.totals || {};
+      const fileText = d.fileRestore
+        ? `,${fileRestoreText(d.fileRestore).replace(/^ ·/, '')}`
+        : '';
+      const fileWarning = fileBlobWarningText(d);
+      const importKind = Number(d.fileRestore?.failed || 0) > 0 || fileBlobErrorCount(d) > 0 ? 'warning' : 'success';
+      setToast && setToast({
+        kind: importKind,
+        message: `นำเข้าเพิ่มสำเร็จ — เพิ่ม ${t.inserted || 0}, ข้ามซ้ำ ${t.duplicates || 0}, ชน ${t.conflicts || 0}${fileText}${fileWarning}`,
+      });
+      addActivity && addActivity({
+        icon: '📥',
+        text: `นำเข้าเพิ่มจาก backup: ${confirmCloneImport.filename}`,
+        type: 'system',
+      });
+      setConfirmCloneImport(null);
+      setTimeout(() => window.location.reload(), 1500);
+    } catch (e) {
+      setToast && setToast({
+        kind: 'danger',
+        message: 'นำเข้าเพิ่มล้มเหลว: ' + (e.message || 'unknown'),
+      });
+    } finally { setBusy(false); }
+  };
+
   const fmtSize = (n) => n >= 1024 * 1024
     ? (n / 1024 / 1024).toFixed(2) + ' MB'
     : (n / 1024).toFixed(1) + ' KB';
@@ -1581,6 +1692,11 @@ function SqlBackupSection({ setToast, addActivity }) {
     try { return new Date(s).toLocaleString('th-TH', { dateStyle: 'short', timeStyle: 'short' }); }
     catch { return s; }
   };
+  const cloneRows = (report) => Object.entries(report?.stats || {})
+    .filter(([, v]) => ['wouldInsert', 'inserted', 'duplicates', 'conflicts', 'remappedIds', 'skipped', 'failed']
+      .some((k) => Number(v?.[k] || 0) > 0))
+    .slice(0, 18);
+  const cloneTotals = confirmCloneImport?.report?.totals || {};
 
   return (
     <Card>
@@ -1595,6 +1711,9 @@ function SqlBackupSection({ setToast, addActivity }) {
         </Btn>
         <Btn variant="secondary" icon="📤" onClick={uploadRestore} disabled={busy}>
           กู้คืนจากไฟล์ที่อัปโหลด
+        </Btn>
+        <Btn variant="success" icon="➕" onClick={uploadCloneImport} disabled={busy}>
+          นำเข้าเพิ่ม/กันซ้ำจากไฟล์
         </Btn>
       </div>
       {list.length > 0 ? (
@@ -1617,6 +1736,9 @@ function SqlBackupSection({ setToast, addActivity }) {
                 </div>
                 <div style={{ display: 'flex', gap: 6 }}>
                   <Btn size="sm" variant="ghost" onClick={() => downloadFile(b.filename)}>ดาวน์โหลด</Btn>
+                  <Btn size="sm" variant="success" onClick={() => previewCloneImportFromFile(b.filename)} disabled={busy}>
+                    นำเข้าเพิ่ม
+                  </Btn>
                   <Btn size="sm" variant="warning" onClick={() => setConfirmRestore({ kind: 'server', filename: b.filename })}>
                     กู้คืน
                   </Btn>
@@ -1630,9 +1752,10 @@ function SqlBackupSection({ setToast, addActivity }) {
       <div style={{ marginTop: 10, padding: 10, background: C.surfaceAlt, borderRadius: 8, fontSize: 12, color: C.muted }}>
         ✅ Backup นี้ครอบคลุม: rooms, tenants, bills, payments, contracts,
         recurring_charges, maintenance_tickets, access_cards/logs, line_oas,
-        line_bindings, audit_logs, notifications_log, meter_readings, bookings
+        line_bindings, audit_logs, notifications_log, meter_readings, bookings,
+        rooms_v2, booking_deposit_orphans, admin_line_recipients
         · ❌ ไม่รวม secrets (เข้ารหัสไว้ — ตั้งใหม่หลังกู้คืน), tenant_sessions
-        (ผู้เช่า login ใหม่), notifications_queue (transient)
+        (ผู้เช่า login ใหม่), notifications_queue และ token ผูก LINE ชั่วคราว
       </div>
 
       <Modal
@@ -1680,6 +1803,104 @@ function SqlBackupSection({ setToast, addActivity }) {
             <div style={{ padding: 10, background: C.dangerSoft, borderRadius: 8, color: C.dangerInk, fontSize: 12.5 }}>
               ⚠️ การกู้คืนจะ <b>ลบและทับ</b> ข้อมูลปัจจุบันทั้งหมด · session ผู้เช่าจะถูกล้าง
               ผู้เช่าต้อง login ใหม่ · หน้านี้จะ reload หลังกู้คืน
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      <Modal
+        open={!!confirmCloneImport}
+        onClose={() => setConfirmCloneImport(null)}
+        title="Preview นำเข้าเพิ่ม/กันซ้ำ"
+        footer={
+          <>
+            <Btn variant="ghost" onClick={() => setConfirmCloneImport(null)} disabled={busy}>ยกเลิก</Btn>
+            <Btn
+              variant="success"
+              disabled={busy || Number(cloneTotals.conflicts || 0) > 0 || Number(cloneTotals.failed || 0) > 0}
+              onClick={applyCloneImport}
+            >
+              {busy ? 'กำลังนำเข้า…' : 'ยืนยันนำเข้าเพิ่ม'}
+            </Btn>
+          </>
+        }
+      >
+        {confirmCloneImport && (
+          <div style={{ fontSize: 14, color: C.ink2, lineHeight: 1.6 }}>
+            <div style={{ marginBottom: 8 }}>
+              ไฟล์: <b>{confirmCloneImport.filename}</b>
+              {confirmCloneImport.size ? ` · ${fmtSize(confirmCloneImport.size)}` : ''}
+              {Number(confirmCloneImport.report?.fileBlobCount || 0) > 0
+                ? ` · ไฟล์แนบ ${confirmCloneImport.report.fileBlobCount} ไฟล์`
+                : ''}
+            </div>
+            {fileBlobErrorCount(confirmCloneImport.report) > 0 && (
+              <div style={{ padding: 10, background: C.warningSoft || '#fff7e0', borderRadius: 8, color: C.warningInk || '#7a5a00', fontSize: 12.5, marginBottom: 10 }}>
+                backup นี้มีไฟล์แนบที่ส่งออกไม่สำเร็จ {fileBlobErrorCount(confirmCloneImport.report)} รายการ ข้อมูลตารางยังนำเข้าได้ แต่ไฟล์แนบส่วนนั้นจะไม่ถูกกู้กลับ
+              </div>
+            )}
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(5, minmax(0, 1fr))',
+              gap: 8,
+              marginBottom: 12,
+            }}>
+              {[
+                ['จะเพิ่ม', cloneTotals.wouldInsert || cloneTotals.inserted || 0],
+                ['ซ้ำ/ข้าม', cloneTotals.duplicates || 0],
+                ['ข้อมูลชน', cloneTotals.conflicts || 0],
+                ['remap id', cloneTotals.remappedIds || 0],
+                ['ผิดพลาด', cloneTotals.failed || 0],
+              ].map(([label, value]) => (
+                <div key={label} style={{ padding: 10, border: `1px solid ${C.border}`, borderRadius: 8, background: C.surfaceAlt }}>
+                  <div style={{ fontSize: 11.5, color: C.muted }}>{label}</div>
+                  <div style={{ fontSize: 20, fontWeight: 700, color: C.ink }}>{value}</div>
+                </div>
+              ))}
+            </div>
+            {cloneRows(confirmCloneImport.report).length ? (
+              <div style={{ border: `1px solid ${C.border}`, borderRadius: 8, overflow: 'hidden', marginBottom: 10 }}>
+                <div style={{
+                  display: 'grid',
+                  gridTemplateColumns: '1.4fr repeat(6, .7fr)',
+                  gap: 0,
+                  padding: '7px 10px',
+                  background: C.surfaceAlt,
+                  fontSize: 11.5,
+                  fontWeight: 700,
+                  color: C.muted,
+                }}>
+                  <div>ตาราง</div><div>เพิ่ม</div><div>ซ้ำ</div><div>ชน</div><div>remap</div><div>ข้าม</div><div>พลาด</div>
+                </div>
+                {cloneRows(confirmCloneImport.report).map(([table, st]) => (
+                  <div key={table} style={{
+                    display: 'grid',
+                    gridTemplateColumns: '1.4fr repeat(6, .7fr)',
+                    padding: '7px 10px',
+                    borderTop: `1px solid ${C.border}`,
+                    fontSize: 12,
+                  }}>
+                    <div style={{ fontFamily: 'JetBrains Mono, monospace', overflow: 'hidden', textOverflow: 'ellipsis' }}>{table}</div>
+                    <div>{st.wouldInsert || st.inserted || 0}</div>
+                    <div>{st.duplicates || 0}</div>
+                    <div>{st.conflicts || 0}</div>
+                    <div>{st.remappedIds || 0}</div>
+                    <div>{st.skipped || 0}</div>
+                    <div>{st.failed || 0}</div>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            {Array.isArray(confirmCloneImport.report?.errors) && confirmCloneImport.report.errors.length ? (
+              <div style={{ padding: 10, background: C.warningSoft || '#fff7e0', borderRadius: 8, fontSize: 12, marginBottom: 10 }}>
+                {confirmCloneImport.report.errors.slice(0, 8).map((line, i) => <div key={i}>• {line}</div>)}
+              </div>
+            ) : null}
+            <div style={{ padding: 10, background: C.successSoft || C.surfaceAlt, borderRadius: 8, fontSize: 12.5 }}>
+              โหมดนี้ <b>ไม่ลบข้อมูลเดิม</b> · รายการซ้ำจะถูกข้าม · รายการที่ชนกับข้อมูลเดิมจะไม่ถูกเขียนทับ
+              {Number(cloneTotals.conflicts || 0) > 0 || Number(cloneTotals.failed || 0) > 0
+                ? ' · ต้องแก้ข้อมูลที่ชนก่อนจึงจะนำเข้าได้'
+                : ' · พร้อมนำเข้า'}
             </div>
           </div>
         )}

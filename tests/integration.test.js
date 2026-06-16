@@ -2985,6 +2985,7 @@ test('SQL backup endpoints exist + restore is gated by confirm: true', () => {
     "app\\.get\\('/api/admin/backup/download/:filename'",
     "app\\.delete\\('/api/admin/backup/:filename'",
     "app\\.post\\('/api/admin/restore'",
+    "app\\.post\\('/api/admin/clone-import'",
   ]) {
     assert.match(server, new RegExp(m), `missing endpoint: ${m}`);
   }
@@ -3006,12 +3007,24 @@ test('SQL backup endpoints exist + restore is gated by confirm: true', () => {
   const restoreBody = server.slice(restoreIdx, restoreIdx + 8000);
   assert.match(server, /const defaultJsonParser = express\.json\(\{[\s\S]{0,300}limit: '3mb'/,
     'global JSON parser must stay small by default');
-  assert.ok(server.includes("if (/^\\/api\\/admin\\/restore\\/?$/i.test(req.path || '')) return next();"),
-    'global 3MB parser must skip restore so the route-specific parser can handle large backups');
+  assert.ok(server.includes("if (/^\\/api\\/admin\\/(?:restore|clone-import)\\/?$/i.test(req.path || '')) return next();"),
+    'global 3MB parser must skip restore and clone-import so the route-specific parser can handle large backups');
   assert.match(server, /function parseRestoreBody\(req, res, next\)/,
     'restore must use a route-specific parser wrapper');
   assert.match(server, /app\.post\('\/api\/admin\/restore', sameOrigin, csrfGuard, requireAuth, requireRole\('owner'\), parseRestoreBody/,
     'restore must authenticate/authorize before parsing a 100MB body');
+  assert.match(server, /app\.post\('\/api\/admin\/clone-import', sameOrigin, csrfGuard, requireAuth, requireRole\('owner'\), parseRestoreBody/,
+    'clone import must authenticate/authorize before parsing a 100MB body');
+  assert.match(server, /clone import requires explicit confirm: true/,
+    'clone import apply must require confirm:true');
+  assert.match(server, /materializeFileBlobs\(client, backup\)/,
+    'restore must materialize uploaded file bytes from the backup');
+  assert.match(server, /materializeFileBlobs\(pool, backup\)/,
+    'clone import must materialize uploaded file bytes from the backup');
+  assert.match(server, /fileRestore/,
+    'restore/import responses must report uploaded-file restore status');
+  assert.match(server, /fileBlobErrorCount/,
+    'backup/restore/import responses must report file blobs that could not be exported');
   assert.match(restoreBody, /BEGIN[\s\S]+COMMIT/,
     'restore must run inside an explicit BEGIN/COMMIT transaction');
   assert.match(restoreBody, /ROLLBACK/, 'restore must roll back on error');
@@ -3313,6 +3326,7 @@ test('backup TABLES + restore RESTORABLE_TABLES stay in sync', () => {
   const path = require('node:path');
   const backup = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'backup.js'), 'utf8');
   const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const cloneImport = fs.readFileSync(path.join(__dirname, '..', 'services', 'cloneImport.js'), 'utf8');
   const extract = (text, anchor) => {
     const idx = text.indexOf(anchor);
     if (idx < 0) return null;
@@ -3327,7 +3341,8 @@ test('backup TABLES + restore RESTORABLE_TABLES stay in sync', () => {
   };
   const dumped   = extract(backup, 'const TABLES = [');
   const restored = extract(server, 'const RESTORABLE_TABLES = [');
-  assert.ok(dumped && restored, 'both lists must be locatable');
+  const merged = extract(cloneImport, 'const CLONE_IMPORT_TABLES = [');
+  assert.ok(dumped && restored && merged, 'backup/restore/clone table lists must be locatable');
   // Tables dumped but intentionally NOT restored (transient state).
   const TRANSIENT_OK = new Set([
     'tenant_sessions', 'login_lockouts', 'notifications_queue',
@@ -3341,12 +3356,58 @@ test('backup TABLES + restore RESTORABLE_TABLES stay in sync', () => {
   const restoredButNotDumped = [...restored].filter((t) => !dumped.has(t));
   assert.deepEqual(restoredButNotDumped, [],
     `tables in restore list but never dumped: ${restoredButNotDumped.join(', ')}`);
+  const mergeButNotDumped = [...merged].filter((t) => !dumped.has(t));
+  assert.deepEqual(mergeButNotDumped, [],
+    `tables in clone-import list but never dumped: ${mergeButNotDumped.join(', ')}`);
+  const dumpedButNotMerged = [...dumped].filter(
+    (t) => !merged.has(t) && !TRANSIENT_OK.has(t)
+  );
+  assert.deepEqual(dumpedButNotMerged, [],
+    `tables in backup but missing from clone-import: ${dumpedButNotMerged.join(', ')}`);
   // Critical-data tables that must always be in BOTH lists.
   for (const t of ['line_oas', 'line_bindings', 'recurring_charges',
-                   'contracts', 'bills', 'payments', 'tenants']) {
+                   'contracts', 'bills', 'payments', 'tenants',
+                   'rooms_v2', 'booking_deposit_orphans', 'admin_line_recipients']) {
     assert.ok(dumped.has(t),   `backup must dump ${t}`);
     assert.ok(restored.has(t), `restore must rehydrate ${t}`);
   }
+});
+
+test('clone import provides a non-destructive backup merge path with dedupe preview', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const service = fs.readFileSync(path.join(__dirname, '..', 'services', 'cloneImport.js'), 'utf8');
+  const ui = fs.readFileSync(path.join(__dirname, '..', 'project', 'admin', 'page-settings.jsx'), 'utf8');
+
+  assert.match(server, /app\.post\('\/api\/admin\/clone-import'/,
+    'admin must have a clone-import endpoint');
+  assert.match(server, /const dryRun = b\.dryRun !== false/,
+    'clone import should preview by default');
+  assert.match(server, /clone import requires explicit confirm: true/,
+    'applying clone import must require explicit confirmation');
+  assert.match(server, /loadBackupFromBody\(b\)/,
+    'restore and clone import must share backup loading + integrity validation');
+  assert.match(service, /const CLONE_IMPORT_TABLES = \[/,
+    'clone import must pin its table allowlist');
+  assert.match(service, /NATURAL_KEYS[\s\S]*room_code[\s\S]*contract_no[\s\S]*bill_no/,
+    'clone import must dedupe by business keys, not raw ids only');
+  assert.match(service, /ON CONFLICT DO NOTHING RETURNING \*/,
+    'clone import must never overwrite existing rows on apply');
+  assert.match(service, /remappedIds/,
+    'clone import must report id remaps when raw ids collide on merge');
+  assert.match(ui, /นำเข้าเพิ่ม\/กันซ้ำจากไฟล์/,
+    'settings UI must expose the non-destructive import action');
+  assert.match(ui, /Preview นำเข้าเพิ่ม\/กันซ้ำ/,
+    'settings UI must show a preview before applying');
+  assert.match(ui, /\/api\/admin\/clone-import/,
+    'settings UI must call the guarded clone-import API');
+  assert.match(ui, /\.json,\.json\.enc/,
+    'settings UI must accept encrypted backup files as well as JSON');
+  assert.match(ui, /ไฟล์แนบ/,
+    'settings UI must show backup attachment counts in the import preview');
+  assert.match(ui, /backup ขาดไฟล์แนบ/,
+    'settings UI must warn when a backup did not include every uploaded file blob');
 });
 
 test('end-to-end pipeline: discount + first-month + quarterly compose correctly', () => {
@@ -6906,6 +6967,22 @@ test('backup TABLES include contract_templates + contract_invitations', () => {
   const ctrIdx = restoredBlock.indexOf("'contracts'");
   assert.ok(tplIdx > 0 && ctrIdx > 0 && tplIdx < ctrIdx,
     'contract_templates must restore BEFORE contracts (FK)');
+});
+
+test('backup includes uploaded file blobs so restored systems keep documents readable', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const backup = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'backup.js'), 'utf8');
+  assert.match(backup, /async function dumpFileBlobs/,
+    'backup script must collect file bytes, not only file_uploads metadata');
+  assert.match(backup, /backup\.fileBlobs = dumpedFiles\.files/,
+    'backup payload must include uploaded file blobs');
+  assert.match(backup, /backup\.fileBlobErrors = dumpedFiles\.errors/,
+    'backup payload must record uploaded file export failures explicitly');
+  assert.match(backup, /function materializeLocalFileBlob/,
+    'restore path must be able to write uploaded file bytes back to storage');
+  assert.match(backup, /UPDATE file_uploads[\s\S]{0,220}SET storage='local'/,
+    'materialized files must be marked local so /files/:id can read them');
 });
 
 test('contract_invitations table + state machine columns', () => {

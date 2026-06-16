@@ -341,12 +341,13 @@ const defaultJsonParser = express.json({
   },
 });
 app.use((req, res, next) => {
-  // /api/admin/restore has its own large JSON parser mounted AFTER
+  // /api/admin/restore and /api/admin/clone-import have their own large
+  // JSON parser mounted AFTER
   // sameOrigin + CSRF + owner auth. Letting the global parser touch it first
-  // breaks legitimate large restores (3MB cap), while mounting the 100MB
+  // breaks legitimate large backup payloads (3MB cap), while mounting the 100MB
   // parser before auth would turn an owner-only endpoint into a public memory
   // pressure target.
-  if (/^\/api\/admin\/restore\/?$/i.test(req.path || '')) return next();
+  if (/^\/api\/admin\/(?:restore|clone-import)\/?$/i.test(req.path || '')) return next();
   return defaultJsonParser(req, res, next);
 });
 // cookie-parser must run before csrf-csrf so req.cookies is populated.
@@ -17066,8 +17067,10 @@ app.post('/api/admin/backup/create', sameOrigin, csrfGuard, requireAuth, require
       const backup = require('./scripts/backup');
       const result = await backup.run({ pool, retainDays: 30 });
       const filename = require('path').basename(result.file);
+      const fileBlobErrors = Array.isArray(result.fileBlobErrors) ? result.fileBlobErrors : [];
       audit(req, 'backup.create', 'backup', filename, {
         size: result.size, digest: result.digest, rowCounts: result.rowCounts,
+        fileBlobErrorCount: fileBlobErrors.length,
       });
       res.json({
         ok: true,
@@ -17075,6 +17078,8 @@ app.post('/api/admin/backup/create', sameOrigin, csrfGuard, requireAuth, require
         size: result.size,
         digest: result.digest,
         rowCounts: result.rowCounts,
+        fileBlobErrors: fileBlobErrors.slice(0, 50),
+        fileBlobErrorCount: fileBlobErrors.length,
         downloadUrl: `/api/admin/backup/download/${encodeURIComponent(filename)}`,
       });
     } catch (err) {
@@ -17164,6 +17169,105 @@ function parseRestoreBody(req, res, next) {
     return next(err);
   });
 }
+
+function backupUploadFilename(name) {
+  const path = require('path');
+  const raw = String(name || 'backup-upload.json');
+  const safe = path.basename(raw);
+  if (safe !== raw) return null;
+  if (!/^[A-Za-z0-9._ -]+\.json(\.enc)?$/i.test(safe)) return null;
+  return safe.slice(0, 180);
+}
+
+function verifyBackupIntegrityOrThrow(backup) {
+  if (!backup || !backup.tables || backup.schemaVersion !== 1) {
+    const err = new Error('invalid backup format (schemaVersion=1 expected)');
+    err.status = 400;
+    err.code = 'BAD_FORMAT';
+    throw err;
+  }
+  if (backup.integrity?.algorithm === 'sha256') {
+    const expected = backup.integrity.digest;
+    const stored = { ...backup };
+    delete stored.integrity;
+    const actual = require('crypto').createHash('sha256')
+      .update(JSON.stringify(stored)).digest('hex');
+    if (actual !== expected) {
+      const err = new Error('integrity hash mismatch — backup may be corrupt or tampered');
+      err.status = 400;
+      err.code = 'INTEGRITY_FAILED';
+      throw err;
+    }
+  }
+  return backup;
+}
+
+function loadBackupFromBody(body) {
+  const b = body || {};
+  let backup;
+  let source = 'inline-body';
+  if (b.filename) {
+    const fp = backupFile(b.filename);
+    if (!fp) {
+      const err = new Error('invalid filename');
+      err.status = 400;
+      throw err;
+    }
+    const fs = require('fs');
+    if (!fs.existsSync(fp)) {
+      const err = new Error('backup file not found');
+      err.status = 404;
+      throw err;
+    }
+    try {
+      backup = require('./scripts/backup').readBackupFile(fp);
+      source = b.filename;
+    } catch (err) {
+      const out = new Error(/key|decrypt|auth/i.test(String(err.message))
+        ? `backup file is encrypted but cannot be decrypted: ${err.message}`
+        : 'backup file is not valid JSON');
+      out.status = 400;
+      throw out;
+    }
+  } else if (b.backup && typeof b.backup === 'object') {
+    backup = b.backup;
+  } else if (b.backupFile && typeof b.backupFile === 'object') {
+    const filename = backupUploadFilename(b.backupFile.filename || 'backup-upload.json');
+    if (!filename) {
+      const err = new Error('invalid upload filename (.json or .json.enc expected)');
+      err.status = 400;
+      err.code = 'BAD_UPLOAD_FILENAME';
+      throw err;
+    }
+    const raw = String(b.backupFile.contentBase64 || '');
+    if (!raw || raw.length > 140 * 1024 * 1024) {
+      const err = new Error('backup upload payload is empty or too large');
+      err.status = 413;
+      err.code = 'RESTORE_TOO_LARGE';
+      throw err;
+    }
+    try {
+      const buf = Buffer.from(raw, 'base64');
+      if (!buf.length) throw new Error('empty upload');
+      backup = require('./scripts/backup').readBackupBuffer(buf);
+      source = filename;
+    } catch (err) {
+      const out = new Error(/key|decrypt|auth/i.test(String(err.message))
+        ? `backup upload is encrypted but cannot be decrypted: ${err.message}`
+        : 'backup upload is not valid JSON');
+      out.status = 400;
+      out.code = 'BAD_BACKUP_UPLOAD';
+      throw out;
+    }
+  } else {
+    const err = new Error('either filename, backup body, or backupFile upload required');
+    err.status = 400;
+    err.code = 'MISSING_PAYLOAD';
+    throw err;
+  }
+  return { backup: verifyBackupIntegrityOrThrow(backup), source };
+}
+
 app.post('/api/admin/restore', sameOrigin, csrfGuard, requireAuth, requireRole('owner'), parseRestoreBody,
   async (req, res) => {
     const b = req.body || {};
@@ -17174,52 +17278,14 @@ app.post('/api/admin/restore', sameOrigin, csrfGuard, requireAuth, requireRole('
       });
     }
     let backup;
-    if (b.filename) {
-      const fp = backupFile(b.filename);
-      if (!fp) return res.status(400).json({ error: 'invalid filename' });
-      const fs = require('fs');
-      if (!fs.existsSync(fp)) return res.status(404).json({ error: 'backup file not found' });
-      try {
-        // Decrypt-aware: encrypted backups (.json.enc, APENC1 format) are
-        // unwrapped with the same key registry that wrote them; plaintext
-        // .json files parse as before.
-        backup = require('./scripts/backup').readBackupFile(fp);
-      } catch (err) {
-        return res.status(400).json({
-          error: /key|decrypt|auth/i.test(String(err.message))
-            ? `backup file is encrypted but cannot be decrypted: ${err.message}`
-            : 'backup file is not valid JSON',
-        });
-      }
-    } else if (b.backup && typeof b.backup === 'object') {
-      backup = b.backup;
-    } else {
-      return res.status(400).json({
-        error: 'either filename or backup body required',
-        code: 'MISSING_PAYLOAD',
+    let source;
+    try {
+      ({ backup, source } = loadBackupFromBody(b));
+    } catch (err) {
+      return res.status(err.status || 400).json({
+        error: err.message,
+        code: err.code || 'BAD_BACKUP',
       });
-    }
-
-    if (!backup.tables || backup.schemaVersion !== 1) {
-      return res.status(400).json({
-        error: 'invalid backup format (schemaVersion=1 expected)',
-        code: 'BAD_FORMAT',
-      });
-    }
-    // Integrity check (skip if backup predates the integrity field — older
-    // local-only dumps from scripts/backup.js's main() path don't include it).
-    if (backup.integrity?.algorithm === 'sha256') {
-      const expected = backup.integrity.digest;
-      const stored = { ...backup };
-      delete stored.integrity;
-      const actual = require('crypto').createHash('sha256')
-        .update(JSON.stringify(stored)).digest('hex');
-      if (actual !== expected) {
-        return res.status(400).json({
-          error: 'integrity hash mismatch — backup may be corrupt or tampered',
-          code: 'INTEGRITY_FAILED',
-        });
-      }
     }
 
     // Tables to restore, in PARENT-FIRST order so per-row INSERT inside the
@@ -17227,7 +17293,10 @@ app.post('/api/admin/restore', sameOrigin, csrfGuard, requireAuth, requireRole('
     // come after parents. Non-restorable tables are listed in SKIP_TABLES.
     const RESTORABLE_TABLES = [
       'app_data', 'auth_users', 'system_settings',
+      'rooms_v2',
+      'file_uploads',
       'line_oas',
+      'admin_line_recipients',
       'tenants',
       'access_devices',
       // contract_templates BEFORE contracts so the contracts.template_id
@@ -17240,8 +17309,8 @@ app.post('/api/admin/restore', sameOrigin, csrfGuard, requireAuth, requireRole('
       'access_logs',
       'audit_logs',
       'notifications_log',
-      'file_uploads',
       'bookings',
+      'booking_deposit_orphans',
       // Restored last; FK on contracts means parent must be in place first.
       'contract_invitations',
     ];
@@ -17250,12 +17319,15 @@ app.post('/api/admin/restore', sameOrigin, csrfGuard, requireAuth, requireRole('
       login_lockouts: 'ephemeral',
       notifications_queue: 'transient — would replay outbound on restore',
       secrets: 'not in backup (encrypted; admin restores secrets separately)',
-      rooms_v2: 'optional table; not in backup TABLES list',
+      owner_claim_tokens: 'transient claim code',
+      admin_recipient_tokens: 'transient claim code',
     };
 
     const client = await pool.connect();
     const stats = {};
     const errors = [];
+    let fileRestore = null;
+    const fileBlobErrors = Array.isArray(backup.fileBlobErrors) ? backup.fileBlobErrors : [];
     try {
       await client.query('BEGIN');
       // Defer FK so insert order within tx is forgiving (most FKs in this
@@ -17326,13 +17398,18 @@ app.post('/api/admin/restore', sameOrigin, csrfGuard, requireAuth, requireRole('
         } catch { /* table has no `id` SERIAL column */ }
       }
 
+      fileRestore = await require('./scripts/backup').materializeFileBlobs(client, backup);
       await client.query('COMMIT');
-      audit(req, 'backup.restore', 'backup', b.filename || 'inline-body', {
-        stats, errorCount: errors.length,
+      audit(req, 'backup.restore', 'backup', source || b.filename || 'inline-body', {
+        stats, errorCount: errors.length, fileRestore, fileBlobErrorCount: fileBlobErrors.length,
       });
       res.json({
         ok: true,
         restored: stats,
+        fileRestore,
+        fileBlobCount: Array.isArray(backup.fileBlobs) ? backup.fileBlobs.length : 0,
+        fileBlobErrors: fileBlobErrors.slice(0, 50),
+        fileBlobErrorCount: fileBlobErrors.length,
         skipped: SKIP_NOTE,
         errors: errors.slice(0, 50), // cap response size
         errorCount: errors.length,
@@ -17348,6 +17425,66 @@ app.post('/api/admin/restore', sameOrigin, csrfGuard, requireAuth, requireRole('
       });
     } finally {
       client.release();
+    }
+  });
+
+app.post('/api/admin/clone-import', sameOrigin, csrfGuard, requireAuth, requireRole('owner'), parseRestoreBody,
+  async (req, res) => {
+    const b = req.body || {};
+    const dryRun = b.dryRun !== false;
+    if (!dryRun && b.confirm !== true) {
+      return res.status(400).json({
+        error: 'clone import requires explicit confirm: true',
+        code: 'CONFIRM_REQUIRED',
+      });
+    }
+
+    let backup;
+    let source;
+    try {
+      ({ backup, source } = loadBackupFromBody(b));
+    } catch (err) {
+      return res.status(err.status || 400).json({
+        error: err.message,
+        code: err.code || 'BAD_BACKUP',
+      });
+    }
+
+    try {
+      const cloneImport = require('./services/cloneImport');
+      const report = await cloneImport.cloneImportBackup(pool, backup, { dryRun });
+      let fileRestore = null;
+      const fileBlobErrors = Array.isArray(backup.fileBlobErrors) ? backup.fileBlobErrors : [];
+      if (!dryRun) {
+        fileRestore = await require('./scripts/backup').materializeFileBlobs(pool, backup);
+      }
+      if (!dryRun) {
+        audit(req, 'backup.clone_import', 'backup', source || 'inline-body', {
+          totals: report.totals,
+          errorCount: report.errorCount,
+          fileRestore,
+          fileBlobErrorCount: fileBlobErrors.length,
+        });
+      }
+      res.json({
+        ok: true,
+        source,
+        ...report,
+        fileRestore,
+        fileBlobCount: Array.isArray(backup.fileBlobs) ? backup.fileBlobs.length : 0,
+        fileBlobErrors: fileBlobErrors.slice(0, 50),
+        fileBlobErrorCount: fileBlobErrors.length,
+        warning: dryRun
+          ? 'preview only — no data was changed'
+          : 'นำเข้าเพิ่มเสร็จแล้ว ข้อมูลซ้ำถูกข้ามและ sequences ถูก reset แล้ว',
+      });
+    } catch (err) {
+      console.error('clone import error:', err);
+      res.status(500).json({
+        error: 'นำเข้าแบบเพิ่มไม่สำเร็จ ระบบไม่ลบข้อมูลเดิม',
+        detail: String(err.message || '').slice(0, 300),
+        code: err.code || 'CLONE_IMPORT_FAILED',
+      });
     }
   });
 
